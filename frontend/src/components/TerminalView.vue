@@ -1,0 +1,265 @@
+<template>
+  <div class="terminal-container">
+    <iframe
+      v-if="tabId"
+      :key="tabId"
+      :ref="(el) => registerIframe(el, tabId)"
+      :src="`/api/terminal/proxy/${tabId}/`"
+      class="terminal-iframe"
+      frameborder="0"
+      allowfullscreen
+      scrolling="yes"
+      @load="onIframeLoad($event, tabId)"
+    ></iframe>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { onMounted } from 'vue'
+
+const props = defineProps<{
+  tabId: string
+}>()
+
+let iframeRefs: Record<string, HTMLIFrameElement | null> = {}
+
+function registerIframe(el: any, tabId: string) {
+  if (el) {
+    iframeRefs[tabId] = el as HTMLIFrameElement
+  }
+}
+
+function onIframeLoad(event: Event, tabId: string) {
+  const iframe = event.target as HTMLIFrameElement
+  if (!iframe || !iframe.contentDocument) return
+
+  registerIframe(iframe, tabId)
+
+  try {
+    const script = iframe.contentDocument.createElement('script')
+    script.textContent = `
+      console.log('=== Terminal key handler and scroll fix injected ===');
+
+      // Notify parent when terminal is clicked
+      document.addEventListener('mousedown', function() {
+        window.parent.postMessage({ type: 'terminal-click', tabId: window.location.pathname.split('/').filter(Boolean).pop() }, '*');
+      }, true);
+
+      function fixTerminalScrolling() {
+        console.log('Trying to fix terminal scrolling...');
+        let terminal = null;
+        if (window.terminal) terminal = window.terminal;
+        if (window.ttyd && window.ttyd.terminal) terminal = window.ttyd.terminal;
+        if (window.ttyd && window.ttyd.term) terminal = window.ttyd.term;
+        if (window.term) terminal = window.term;
+
+        if (terminal) {
+          console.log('Found terminal, attempting to configure for mobile scrolling');
+          try {
+            if (terminal.options) {
+              terminal.options.convertEol = true;
+              terminal.options.scrollOnUserInput = true;
+            }
+
+            const textarea = document.querySelector('textarea');
+            const viewport = document.querySelector('.xterm-viewport');
+
+            if (viewport) {
+              console.log('Found xterm viewport, enabling scrolling');
+              viewport.style.overflowY = 'scroll';
+              viewport.style.webkitOverflowScrolling = 'touch';
+              viewport.style.touchAction = 'pan-y';
+
+              const screen = document.querySelector('.xterm-screen');
+              if (screen) {
+                screen.style.touchAction = 'pan-y';
+              }
+
+              const canvas = viewport.querySelector('canvas');
+              if (canvas) {
+                canvas.style.touchAction = 'pan-y';
+              }
+            }
+
+            if (textarea) {
+              textarea.style.touchAction = 'none';
+              textarea.style.position = 'absolute';
+              textarea.style.top = '0';
+              textarea.style.left = '0';
+              textarea.style.opacity = '0';
+            }
+          } catch (e) {
+            console.error('Error configuring terminal:', e);
+          }
+        }
+      }
+
+      const style = document.createElement('style');
+      style.textContent = \`
+        html, body {
+          overflow: hidden !important;
+          height: 100% !important;
+          width: 100% !important;
+          position: fixed !important;
+          touch-action: none !important;
+        }
+        .xterm-viewport {
+          overflow-y: scroll !important;
+          overflow-x: hidden !important;
+          -webkit-overflow-scrolling: touch !important;
+          touch-action: pan-y !important;
+          scrollbar-width: none !important;
+          -ms-overflow-style: none !important;
+        }
+        .xterm-viewport::-webkit-scrollbar {
+          display: none !important;
+        }
+        .xterm-screen {
+          touch-action: pan-y !important;
+          pointer-events: auto !important;
+        }
+        .xterm-screen canvas {
+          touch-action: pan-y !important;
+        }
+        .xterm-accessibility,
+        .xterm-helper-textarea,
+        textarea.xterm-helper-textarea {
+          touch-action: none !important;
+        }
+      \`;
+      document.head.appendChild(style);
+
+      setTimeout(fixTerminalScrolling, 100);
+      setTimeout(fixTerminalScrolling, 500);
+      setTimeout(fixTerminalScrolling, 1000);
+      setTimeout(fixTerminalScrolling, 2000);
+
+      window.addEventListener('message', function(event) {
+        console.log('Iframe received message:', event.data);
+        if (!event.data || event.data.type !== 'terminal-key') return;
+
+        const { key, ctrl, shift } = event.data;
+        console.log('Processing key in iframe:', { key, ctrl, shift });
+
+        let terminal = null;
+        if (window.terminal) terminal = window.terminal;
+        if (window.ttyd && window.ttyd.terminal) terminal = window.ttyd.terminal;
+        if (window.ttyd && window.ttyd.term) terminal = window.ttyd.term;
+        if (window.term) terminal = window.term;
+
+        function sendText(text) {
+          console.log('Trying to send text:', JSON.stringify(text));
+          if (terminal && typeof terminal.send === 'function') {
+            terminal.send(text);
+            console.log('✓ Sent via terminal.send()');
+            return true;
+          }
+
+          const textarea = document.querySelector('textarea');
+          if (textarea) {
+            console.log('Found textarea, sending events');
+            textarea.focus();
+
+            const keyCodeMap = {
+              'Escape': 27, 'Tab': 9, 'Enter': 13,
+              'ArrowUp': 38, 'ArrowDown': 40,
+              'ArrowLeft': 37, 'ArrowRight': 39,
+              'PageUp': 33, 'PageDown': 34,
+            };
+            const keyCode = keyCodeMap[key] || 0;
+
+            const eventInit = {
+              key,
+              code: key,
+              keyCode,
+              which: keyCode,
+              bubbles: true,
+              cancelable: true,
+              shiftKey: shift,
+              ctrlKey: ctrl,
+            };
+
+            textarea.dispatchEvent(new KeyboardEvent('keydown', eventInit));
+            textarea.dispatchEvent(new KeyboardEvent('keypress', eventInit));
+            setTimeout(() => {
+              textarea.dispatchEvent(new KeyboardEvent('keyup', eventInit));
+            }, 10);
+            return true;
+          }
+
+          console.log('✗ No method found to send key');
+          return false;
+        }
+
+        let sent = false;
+        if (key === 'Enter') sent = sendText('\\r');
+        else if (key === 'Tab') sent = sendText('\\t');
+        else if (key === 'Escape') sent = sendText('\\x1b');
+        else if (key === 'ArrowUp') sent = sendText('\\x1b[A');
+        else if (key === 'ArrowDown') sent = sendText('\\x1b[B');
+        else if (key === 'ArrowRight') sent = sendText('\\x1b[C');
+        else if (key === 'ArrowLeft') sent = sendText('\\x1b[D');
+        else if (key === 'PageUp') sent = sendText('\\x1b[5~');
+        else if (key === 'PageDown') sent = sendText('\\x1b[6~');
+
+        if (sent) {
+          console.log('✓ Key processing complete');
+        } else {
+          console.log('✗ Key not sent');
+        }
+      });
+
+      console.log('=== Terminal key handler and scroll fix ready ===');
+    `
+    iframe.contentDocument.head.appendChild(script)
+  } catch (e) {
+    console.error('Error injecting script into iframe:', e)
+  }
+}
+
+onMounted(() => {
+  // Expose functions for MobileControls - use activePane's tabId
+  if (typeof window !== 'undefined') {
+    ;(window as any).__registerTerminalIframe = registerIframe
+    ;(window as any).__sendTerminalKey = function(key: string, ctrl: boolean, shift: boolean) {
+      console.log('Parent sending terminal key:', { key, ctrl, shift })
+
+      // Try to get the active pane from the store via window
+      const activePaneTabId = (window as any).__activePaneTabId
+      const targetTabId = activePaneTabId || props.tabId
+
+      const iframe = iframeRefs[targetTabId]
+      if (iframe && iframe.contentWindow) {
+        iframe.contentWindow.postMessage({
+          type: 'terminal-key',
+          key,
+          ctrl,
+          shift
+        }, '*')
+      } else {
+        console.warn('No iframe found for tab:', targetTabId)
+      }
+    }
+  }
+})
+</script>
+
+<style scoped>
+.terminal-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+  min-height: 0;
+}
+
+.terminal-iframe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  border: none;
+}
+</style>

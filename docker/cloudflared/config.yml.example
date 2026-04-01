@@ -1,0 +1,18 @@
+# Cloudflare Tunnel Configuration Example
+# Copy this file to config.yml and fill in your values
+# For more information: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
+
+# Tunnel ID - get this from `cloudflared tunnel create claude-hub`
+tunnel: your-tunnel-id-here
+
+# Credentials file path - this is generated when you create the tunnel
+credentials-file: /Users/your-user/.cloudflared/your-tunnel-id-here.json
+
+# Ingress rules - route traffic to your local services
+ingress:
+  # Route your public domain to Claude Hub frontend
+  - hostname: claude.your-domain.com
+    service: http://localhost:5173
+
+  # Catch-all rule - return 404 for anything else
+  - service: http_status:404

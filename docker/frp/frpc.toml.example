@@ -1,0 +1,31 @@
+# frp Client Configuration Example
+# Copy this file to frpc.toml and fill in your server details
+
+# frp Server Configuration
+serverAddr = "your-frp-server.com"
+serverPort = 7000
+
+# Authentication (optional but recommended)
+auth.token = "your-frps-auth-token"
+
+[[proxies]]
+name = "claude-hub-http"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 5173
+remotePort = 5173
+
+[[proxies]]
+name = "claude-hub-backend"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8000
+remotePort = 8000
+
+# If using HTTP vhost with custom domain:
+# [[proxies]]
+# name = "claude-hub-web"
+# type = "http"
+# localIP = "127.0.0.1"
+# localPort = 5173
+# customDomains = ["claude.your-domain.com"]
