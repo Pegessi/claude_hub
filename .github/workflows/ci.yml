@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.x"
+      - name: Cache uv packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            .venv
+            ~/.cache/uv
+          key: ${{ runner.os }}-uv-${{ hashFiles('backend/uv.lock', 'backend/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-uv-
+      - name: Install dependencies
+        run: uv sync --dev
+      - name: Run black (formatting check)
+        run: uv run black --check .
+      - name: Run isort (import order check)
+        run: uv run isort --check .
+      - name: Run mypy (type check)
+        run: uv run mypy .
+      - name: Run pytest (tests)
+        run: uv run pytest -xvs
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - name: Cache pnpm packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            ~/.pnpm-store
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('frontend/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+      - name: Install dependencies
+        run: pnpm install
+      - name: Run ESLint (linting)
+        run: pnpm run lint:check
+      - name: Run Type check and build
+        run: pnpm run build
+
+  ttyd:
+    name: Verify ttyd & tmux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Install ttyd
+        run: |
+          wget -qO ttyd https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.x86_64
+          chmod +x ttyd
+          sudo mv ttyd /usr/local/bin/
+      - name: Verify tmux installation
+        run: tmux -V
+      - name: Verify ttyd installation
+        run: ttyd --version
+      - name: Test tmux session creation
+        run: |
+          # Test creating a detached tmux session
+          tmux new-session -d -s test-session "echo 'tmux works'"
+          # Verify the session exists
+          tmux has-session -t test-session
+          # Clean up
+          tmux kill-session -t test-session
+          echo "✓ tmux session test passed"
+      - name: Test ttyd can start (dry run)
+        run: |
+          # Test that ttyd can start without errors (with --help)
+          ttyd --help > /dev/null
+          echo "✓ ttyd basic functionality test passed"
+
