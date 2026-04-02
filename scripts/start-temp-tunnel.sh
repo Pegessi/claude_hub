@@ -121,15 +121,15 @@ update_env_file() {
         return
     fi
 
-    # 更新 FRONTEND_URL
-    if grep -q "^FRONTEND_URL=" "$env_file"; then
-        sed -i.bak "s|^FRONTEND_URL=.*|FRONTEND_URL=$TUNNEL_URL|" "$env_file"
+    # 更新 FRONTEND_URL（支持注释和非注释两种情况）
+    if grep -q "^#\?FRONTEND_URL=" "$env_file"; then
+        sed -i.bak "s|^#\?FRONTEND_URL=.*|FRONTEND_URL=$TUNNEL_URL|" "$env_file"
         rm -f "$env_file.bak"
     fi
 
-    # 更新 FEISHU_REDIRECT_URI（如果配置了飞书）
-    if grep -q "^FEISHU_REDIRECT_URI=" "$env_file"; then
-        sed -i.bak "s|^FEISHU_REDIRECT_URI=.*|FEISHU_REDIRECT_URI=$TUNNEL_URL/api/auth/callback|" "$env_file"
+    # 更新 FEISHU_REDIRECT_URI（支持注释和非注释两种情况）
+    if grep -q "^#\?FEISHU_REDIRECT_URI=" "$env_file"; then
+        sed -i.bak "s|^#\?FEISHU_REDIRECT_URI=.*|FEISHU_REDIRECT_URI=$TUNNEL_URL/api/auth/callback|" "$env_file"
         rm -f "$env_file.bak"
     fi
 
