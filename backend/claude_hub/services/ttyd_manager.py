@@ -177,7 +177,7 @@ class TTYDProcess:
 
             # Set tmux options - these will apply to all sessions
             tmux_commands = [
-                ["set", "-g", "mouse", "on"],
+                ["set", "-g", "mouse", "off"],
                 ["set", "-g", "history-limit", "10000"],
                 ["set", "-g", "terminal-overrides", "xterm*:smcup@:rmcup@"],
                 # Allow scrolling without entering copy mode explicitly

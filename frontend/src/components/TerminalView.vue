@@ -40,8 +40,12 @@ function onIframeLoad(event: Event, tabId: string) {
     script.textContent = `
       console.log('=== Minimal terminal handler injected ===');
 
-      // Only prevent browser context menu, let everything else work normally
+      // Prevent browser context menu unless text is selected (allow copy via right-click)
       document.addEventListener('contextmenu', function(e) {
+        var selection = window.getSelection();
+        if (selection && selection.toString().length > 0) {
+          return; // Allow native context menu when text is selected
+        }
         e.preventDefault();
         e.stopPropagation();
         return false;

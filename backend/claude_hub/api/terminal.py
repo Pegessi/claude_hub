@@ -206,7 +206,7 @@ async def proxy_terminal_request(
                 # Add custom styles and scripts before </head>
                 custom_code = """
     <style>
-      /* Improve touch scrolling behavior - enable text selection */
+      /* Improve layout and touch scrolling behavior */
       html, body {
         overscroll-behavior: none;
         -webkit-overflow-scrolling: touch;
@@ -216,49 +216,11 @@ async def proxy_terminal_request(
         padding: 0;
         overflow: hidden;
       }
+      .xterm-viewport {
+        touch-action: pan-y !important;
+        -webkit-overflow-scrolling: touch !important;
+      }
     </style>
-    <script>
-      // Improve touch scrolling for xterm.js
-      (function() {
-        let isScrolling = false;
-        let startY = 0;
-        let terminal = null;
-
-        function init() {
-          terminal = document.querySelector('#terminal');
-          if (!terminal) {
-            setTimeout(init, 100);
-            return;
-          }
-
-          // Disable default touch behaviors to prevent history navigation
-          document.addEventListener('touchstart', function(e) {
-            startY = e.touches[0].clientY;
-            isScrolling = false;
-          }, { passive: false });
-
-          document.addEventListener('touchmove', function(e) {
-            // Only prevent default if we're actually scrolling
-            const deltaY = e.touches[0].clientY - startY;
-            if (Math.abs(deltaY) > 10) {
-              isScrolling = true;
-            }
-          }, { passive: true });
-
-          // Make sure terminal container can scroll properly
-          const style = document.createElement('style');
-          style.textContent = `
-            .xterm-viewport {
-              touch-action: pan-y !important;
-              -webkit-overflow-scrolling: touch !important;
-            }
-          `;
-          document.head.appendChild(style);
-        }
-
-        init();
-      })();
-    </script>
 """
                 # Insert before </head>
                 if "</head>" in html:
