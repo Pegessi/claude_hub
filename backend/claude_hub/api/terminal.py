@@ -206,19 +206,15 @@ async def proxy_terminal_request(
                 # Add custom styles and scripts before </head>
                 custom_code = """
     <style>
-      /* Improve touch scrolling behavior */
+      /* Improve touch scrolling behavior - enable text selection */
       html, body {
         overscroll-behavior: none;
         -webkit-overflow-scrolling: touch;
-        touch-action: none;
       }
       body {
         margin: 0;
         padding: 0;
         overflow: hidden;
-      }
-      #terminal {
-        touch-action: pan-y;
       }
     </style>
     <script>
