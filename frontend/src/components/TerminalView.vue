@@ -52,6 +52,26 @@ function onIframeLoad(event: Event, tabId: string) {
         return false;
       }, true);
 
+      // Just configure terminal to allow selection, don't override xterm.js behavior
+      let terminalConfigured = false;
+      function configureTerminalSelection() {
+        if (terminalConfigured) return;
+        let terminal = null;
+        if (window.terminal) terminal = window.terminal;
+        if (window.ttyd && window.ttyd.terminal) terminal = window.ttyd.terminal;
+        if (window.ttyd && window.ttyd.term) terminal = window.ttyd.term;
+        if (window.term) terminal = window.term;
+
+        if (terminal) {
+          console.log('Configuring terminal for better selection');
+          terminalConfigured = true;
+          // Let xterm.js handle selection and copy normally
+        }
+      }
+      setTimeout(configureTerminalSelection, 100);
+      setTimeout(configureTerminalSelection, 500);
+      setTimeout(configureTerminalSelection, 1000);
+
       function fixTerminalScrolling() {
         console.log('Trying to fix terminal scrolling...');
         let terminal = null;
@@ -113,40 +133,11 @@ function onIframeLoad(event: Event, tabId: string) {
           overflow-y: scroll !important;
           overflow-x: hidden !important;
           -webkit-overflow-scrolling: touch !important;
-          touch-action: pan-y !important;
           scrollbar-width: none !important;
           -ms-overflow-style: none !important;
-          user-select: text !important;
-          -webkit-user-select: text !important;
         }
         .xterm-viewport::-webkit-scrollbar {
           display: none !important;
-        }
-        .xterm-screen {
-          touch-action: pan-y !important;
-          pointer-events: auto !important;
-          user-select: text !important;
-          -webkit-user-select: text !important;
-        }
-        .xterm-screen canvas {
-          touch-action: pan-y !important;
-        }
-        .xterm-accessibility,
-        .xterm-helper-textarea,
-        textarea.xterm-helper-textarea {
-          touch-action: none !important;
-        }
-        .xterm-selection {
-          user-select: text !important;
-          -webkit-user-select: text !important;
-        }
-        .xterm-text-layer {
-          user-select: text !important;
-          -webkit-user-select: text !important;
-        }
-        * {
-          user-select: text !important;
-          -webkit-user-select: text !important;
         }
       \`;
       document.head.appendChild(style);
