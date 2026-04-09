@@ -168,6 +168,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         name: `${tab.name} (copy)`,
         cwd: tab.cwd,
         solo_mode: false,
+        agent_type: tab.agent_type || 'claude',
       }
       const newTab = await createTab(data)
       return newTab

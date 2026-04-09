@@ -7,6 +7,7 @@ from .schemas import (
     LoginSession,
     DirectoryListing,
     FileInfo,
+    AgentType,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "LoginSession",
     "DirectoryListing",
     "FileInfo",
+    "AgentType",
 ]

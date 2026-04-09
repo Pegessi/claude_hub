@@ -9,7 +9,7 @@ from pathlib import Path
 import logging
 
 from ..config import settings
-from ..models import TerminalTab
+from ..models import TerminalTab, AgentType
 
 logger = logging.getLogger(__name__)
 
@@ -69,17 +69,24 @@ def get_default_command() -> str:
 class TTYDProcess:
     """Manages a single ttyd process backed by a tmux session for persistence."""
 
-    def __init__(self, tab_id: str, port: int, name: str, shell: Optional[str] = None, cwd: Optional[str] = None, created_at: Optional[datetime] = None, solo_mode: bool = False):
+    def __init__(self, tab_id: str, port: int, name: str, shell: Optional[str] = None, cwd: Optional[str] = None, created_at: Optional[datetime] = None, solo_mode: bool = False, agent_type: AgentType = AgentType.CLAUDE):
         self.tab_id = tab_id
         self.port = port
         self.name = name
         self.cwd = cwd
         self.solo_mode = solo_mode
+        self.agent_type = agent_type
         self.process: Optional[asyncio.subprocess.Process] = None
         self.created_at = created_at or datetime.now()
         self.is_active = False
         self.tmux_session = _tmux_session_name(tab_id)
-        self.shell = shell or get_default_command()
+        # For Cursor agent, use user's shell instead of claude
+        if shell:
+            self.shell = shell
+        elif agent_type == AgentType.CURSOR:
+            self.shell = os.environ.get("SHELL", "/bin/bash")
+        else:
+            self.shell = get_default_command()
 
     async def start(self):
         """Start the ttyd process with tmux for session persistence."""
@@ -113,8 +120,8 @@ class TTYDProcess:
         if self.cwd:
             cmd.extend(["-c", self.cwd])
 
-        # For solo mode: directly run the command with env var
-        if self.solo_mode and not session_exists:
+        # For solo mode: directly run the command with env var (only for Claude)
+        if self.agent_type == AgentType.CLAUDE and self.solo_mode and not session_exists:
             # Use bash -c to set IS_SANDBOX=1, run claude, then keep shell alive
             user_shell = os.environ.get("SHELL", "/bin/bash")
             cmd.extend([
@@ -122,6 +129,7 @@ class TTYDProcess:
                 "IS_SANDBOX=1 claude --dangerously-skip-permissions; exec " + user_shell
             ])
         else:
+            # For Claude (non-solo) and Terminal (cursor) types, just use the shell
             cmd.append(self.shell)
 
         logger.info(f"Starting ttyd for tab {self.tab_id} on port {self.port}: {' '.join(cmd)}")
@@ -236,6 +244,7 @@ class TTYDProcess:
             "shell": self.shell,
             "cwd": self.cwd,
             "solo_mode": self.solo_mode,
+            "agent_type": self.agent_type.value if isinstance(self.agent_type, AgentType) else self.agent_type,
             "port": self.port,
             "created_at": self.created_at.isoformat(),
         }
@@ -247,6 +256,7 @@ class TTYDProcess:
             shell=self.shell,
             cwd=self.cwd,
             solo_mode=self.solo_mode,
+            agent_type=self.agent_type,
             port=self.port,
             created_at=self.created_at,
             is_active=self.is_active,
@@ -277,6 +287,8 @@ class TTYDManager:
                     data = json.load(f)
                     max_port = self._next_port
                     for tab_data in data:
+                        agent_type_str = tab_data.get("agent_type", "claude")
+                        agent_type = AgentType(agent_type_str) if agent_type_str in [e.value for e in AgentType] else AgentType.CLAUDE
                         process = TTYDProcess(
                             tab_id=tab_data["id"],
                             port=tab_data["port"],
@@ -285,6 +297,7 @@ class TTYDManager:
                             cwd=tab_data.get("cwd"),
                             created_at=datetime.fromisoformat(tab_data["created_at"]),
                             solo_mode=tab_data.get("solo_mode", False),
+                            agent_type=agent_type,
                         )
                         self.processes[process.tab_id] = process
                         if process.port > max_port:
@@ -292,7 +305,7 @@ class TTYDManager:
                     self._next_port = max_port + 1
                 logger.info(f"Loaded {len(self.processes)} tabs from {STATE_FILE}")
                 for tab_id, process in self.processes.items():
-                    logger.info(f"  - Tab: {process.name} (tmux: {process.tmux_session})")
+                    logger.info(f"  - Tab: {process.name} (tmux: {process.tmux_session}, agent: {process.agent_type.value})")
             except Exception as e:
                 logger.error(f"Failed to load state: {e}")
         else:
@@ -376,13 +389,13 @@ class TTYDManager:
         self._next_port += 1
         return port
 
-    async def create_tab(self, name: str, shell: Optional[str] = None, cwd: Optional[str] = None, solo_mode: bool = False) -> TerminalTab:
-        logger.info(f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}")
+    async def create_tab(self, name: str, shell: Optional[str] = None, cwd: Optional[str] = None, solo_mode: bool = False, agent_type: AgentType = AgentType.CLAUDE) -> TerminalTab:
+        logger.info(f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}")
         tab_id = str(uuid.uuid4())
         port = self._get_next_port()
 
-        process = TTYDProcess(tab_id, port, name, shell, cwd, solo_mode=solo_mode)
-        logger.info(f"Created TTYDProcess with solo_mode={process.solo_mode}")
+        process = TTYDProcess(tab_id, port, name, shell, cwd, solo_mode=solo_mode, agent_type=agent_type)
+        logger.info(f"Created TTYDProcess with solo_mode={process.solo_mode}, agent_type={process.agent_type}")
         await process.start()
 
         self.processes[tab_id] = process
@@ -424,8 +437,8 @@ class TTYDManager:
         logger.info(f"list_tabs returning: {[t.name for t in ordered_tabs]}")
         return ordered_tabs
 
-    async def update_tab(self, tab_id: str, name: Optional[str] = None, shell: Optional[str] = None, cwd: Optional[str] = None, solo_mode: Optional[bool] = None) -> Optional[TerminalTab]:
-        """Update tab settings. Note: Changing shell/cwd/solo_mode requires restarting
+    async def update_tab(self, tab_id: str, name: Optional[str] = None, shell: Optional[str] = None, cwd: Optional[str] = None, solo_mode: Optional[bool] = None, agent_type: Optional[AgentType] = None) -> Optional[TerminalTab]:
+        """Update tab settings. Note: Changing shell/cwd/solo_mode/agent_type requires restarting
         the ttyd process, but the tmux session will be PRESERVED.
         """
         if tab_id not in self.processes:
@@ -444,6 +457,9 @@ class TTYDManager:
             needs_restart = True
         if solo_mode is not None:
             process.solo_mode = solo_mode
+            needs_restart = True
+        if agent_type is not None:
+            process.agent_type = agent_type
             needs_restart = True
 
         if needs_restart:

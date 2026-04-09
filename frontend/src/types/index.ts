@@ -1,9 +1,12 @@
+export type AgentType = 'claude' | 'cursor'
+
 export interface TerminalTab {
   id: string
   name: string
   shell?: string
   cwd?: string
   solo_mode?: boolean
+  agent_type?: AgentType
   port: number
   created_at: string
   is_active: boolean
@@ -14,6 +17,7 @@ export interface TerminalTabCreate {
   shell?: string
   cwd?: string
   solo_mode?: boolean
+  agent_type?: AgentType
 }
 
 export interface TerminalTabUpdate {
@@ -21,6 +25,7 @@ export interface TerminalTabUpdate {
   shell?: string
   cwd?: string
   solo_mode?: boolean
+  agent_type?: AgentType
 }
 
 export type LayoutType = '1x1' | '2x1' | '1x2' | '3x1' | '1x3' | '2x2' | '3x3'

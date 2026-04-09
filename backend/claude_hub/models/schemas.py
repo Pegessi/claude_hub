@@ -1,6 +1,13 @@
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime
+from enum import Enum
+
+
+class AgentType(str, Enum):
+    """Type of agent to run in the terminal."""
+    CLAUDE = "claude"
+    CURSOR = "cursor"
 
 
 class TerminalTabBase(BaseModel):
@@ -9,6 +16,7 @@ class TerminalTabBase(BaseModel):
     shell: Optional[str] = Field(None, description="Shell to use (default: $SHELL)")
     cwd: Optional[str] = Field(None, description="Working directory to start the terminal in")
     solo_mode: bool = Field(False, description="Whether to start in Claude solo mode")
+    agent_type: AgentType = Field(AgentType.CLAUDE, description="Type of agent to run")
 
 
 class TerminalTabCreate(TerminalTabBase):
@@ -22,6 +30,7 @@ class TerminalTabUpdate(BaseModel):
     shell: Optional[str] = None
     cwd: Optional[str] = None
     solo_mode: Optional[bool] = None
+    agent_type: Optional[AgentType] = None
 
 
 class TerminalTab(TerminalTabBase):
