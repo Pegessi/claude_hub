@@ -38,114 +38,14 @@ function onIframeLoad(event: Event, tabId: string) {
   try {
     const script = iframe.contentDocument.createElement('script')
     script.textContent = `
-      console.log('=== Terminal key handler and scroll fix injected ===');
+      console.log('=== Minimal terminal handler injected ===');
 
-      // Notify parent when terminal is clicked
-      document.addEventListener('mousedown', function() {
-        window.parent.postMessage({ type: 'terminal-click', tabId: window.location.pathname.split('/').filter(Boolean).pop() }, '*');
-      }, true);
-
-      // Prevent browser context menu on right click
+      // Only prevent browser context menu, let everything else work normally
       document.addEventListener('contextmenu', function(e) {
         e.preventDefault();
         e.stopPropagation();
         return false;
       }, true);
-
-      // Just configure terminal to allow selection, don't override xterm.js behavior
-      let terminalConfigured = false;
-      function configureTerminalSelection() {
-        if (terminalConfigured) return;
-        let terminal = null;
-        if (window.terminal) terminal = window.terminal;
-        if (window.ttyd && window.ttyd.terminal) terminal = window.ttyd.terminal;
-        if (window.ttyd && window.ttyd.term) terminal = window.ttyd.term;
-        if (window.term) terminal = window.term;
-
-        if (terminal) {
-          console.log('Configuring terminal for better selection');
-          terminalConfigured = true;
-          // Let xterm.js handle selection and copy normally
-        }
-      }
-      setTimeout(configureTerminalSelection, 100);
-      setTimeout(configureTerminalSelection, 500);
-      setTimeout(configureTerminalSelection, 1000);
-
-      function fixTerminalScrolling() {
-        console.log('Trying to fix terminal scrolling...');
-        let terminal = null;
-        if (window.terminal) terminal = window.terminal;
-        if (window.ttyd && window.ttyd.terminal) terminal = window.ttyd.terminal;
-        if (window.ttyd && window.ttyd.term) terminal = window.ttyd.term;
-        if (window.term) terminal = window.term;
-
-        if (terminal) {
-          console.log('Found terminal, attempting to configure for mobile scrolling');
-          try {
-            if (terminal.options) {
-              terminal.options.convertEol = true;
-              terminal.options.scrollOnUserInput = true;
-            }
-
-            const textarea = document.querySelector('textarea');
-            const viewport = document.querySelector('.xterm-viewport');
-
-            if (viewport) {
-              console.log('Found xterm viewport, enabling scrolling');
-              viewport.style.overflowY = 'scroll';
-              viewport.style.webkitOverflowScrolling = 'touch';
-              viewport.style.touchAction = 'pan-y';
-
-              const screen = document.querySelector('.xterm-screen');
-              if (screen) {
-                screen.style.touchAction = 'pan-y';
-              }
-
-              const canvas = viewport.querySelector('canvas');
-              if (canvas) {
-                canvas.style.touchAction = 'pan-y';
-              }
-            }
-
-            if (textarea) {
-              textarea.style.touchAction = 'none';
-              textarea.style.position = 'absolute';
-              textarea.style.top = '0';
-              textarea.style.left = '0';
-              textarea.style.opacity = '0';
-            }
-          } catch (e) {
-            console.error('Error configuring terminal:', e);
-          }
-        }
-      }
-
-      const style = document.createElement('style');
-      style.textContent = \`
-        html, body {
-          overflow: hidden !important;
-          height: 100% !important;
-          width: 100% !important;
-          position: fixed !important;
-        }
-        .xterm-viewport {
-          overflow-y: scroll !important;
-          overflow-x: hidden !important;
-          -webkit-overflow-scrolling: touch !important;
-          scrollbar-width: none !important;
-          -ms-overflow-style: none !important;
-        }
-        .xterm-viewport::-webkit-scrollbar {
-          display: none !important;
-        }
-      \`;
-      document.head.appendChild(style);
-
-      setTimeout(fixTerminalScrolling, 100);
-      setTimeout(fixTerminalScrolling, 500);
-      setTimeout(fixTerminalScrolling, 1000);
-      setTimeout(fixTerminalScrolling, 2000);
 
       window.addEventListener('message', function(event) {
         console.log('Iframe received message:', event.data);
@@ -222,7 +122,7 @@ function onIframeLoad(event: Event, tabId: string) {
         }
       });
 
-      console.log('=== Terminal key handler and scroll fix ready ===');
+      console.log('=== Minimal terminal handler ready ===');
     `
     iframe.contentDocument.head.appendChild(script)
   } catch (e) {
