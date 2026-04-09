@@ -45,6 +45,13 @@ function onIframeLoad(event: Event, tabId: string) {
         window.parent.postMessage({ type: 'terminal-click', tabId: window.location.pathname.split('/').filter(Boolean).pop() }, '*');
       }, true);
 
+      // Prevent browser context menu on right click
+      document.addEventListener('contextmenu', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        return false;
+      }, true);
+
       function fixTerminalScrolling() {
         console.log('Trying to fix terminal scrolling...');
         let terminal = null;
@@ -101,7 +108,6 @@ function onIframeLoad(event: Event, tabId: string) {
           height: 100% !important;
           width: 100% !important;
           position: fixed !important;
-          touch-action: none !important;
         }
         .xterm-viewport {
           overflow-y: scroll !important;
@@ -110,6 +116,8 @@ function onIframeLoad(event: Event, tabId: string) {
           touch-action: pan-y !important;
           scrollbar-width: none !important;
           -ms-overflow-style: none !important;
+          user-select: text !important;
+          -webkit-user-select: text !important;
         }
         .xterm-viewport::-webkit-scrollbar {
           display: none !important;
@@ -117,6 +125,8 @@ function onIframeLoad(event: Event, tabId: string) {
         .xterm-screen {
           touch-action: pan-y !important;
           pointer-events: auto !important;
+          user-select: text !important;
+          -webkit-user-select: text !important;
         }
         .xterm-screen canvas {
           touch-action: pan-y !important;
@@ -125,6 +135,18 @@ function onIframeLoad(event: Event, tabId: string) {
         .xterm-helper-textarea,
         textarea.xterm-helper-textarea {
           touch-action: none !important;
+        }
+        .xterm-selection {
+          user-select: text !important;
+          -webkit-user-select: text !important;
+        }
+        .xterm-text-layer {
+          user-select: text !important;
+          -webkit-user-select: text !important;
+        }
+        * {
+          user-select: text !important;
+          -webkit-user-select: text !important;
         }
       \`;
       document.head.appendChild(style);
