@@ -103,9 +103,9 @@ trap cleanup SIGINT SIGTERM
 # Start backend
 echo -e "${YELLOW}Starting backend server...${NC}"
 cd "$PROJECT_ROOT/backend"
-uv run uvicorn claude_hub.main:app --reload &
+uv run uvicorn claude_hub.main:app --reload --host 0.0.0.0 --port 8173 &
 BACKEND_PID=$!
-echo -e "${GREEN}✓ Backend started on http://localhost:8000 (PID: $BACKEND_PID)${NC}"
+echo -e "${GREEN}✓ Backend started on http://localhost:8173 (PID: $BACKEND_PID)${NC}"
 
 # Wait a bit for backend to start
 sleep 2
@@ -113,7 +113,7 @@ sleep 2
 # Start frontend
 echo -e "${YELLOW}Starting frontend server...${NC}"
 cd "$PROJECT_ROOT/frontend"
-pnpm dev &
+pnpm dev --host 0.0.0.0 &
 FRONTEND_PID=$!
 echo -e "${GREEN}✓ Frontend started on http://localhost:5173 (PID: $FRONTEND_PID)${NC}"
 
@@ -121,8 +121,8 @@ echo ""
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}  Claude Hub is now running!${NC}"
 echo -e "${GREEN}  Frontend: http://localhost:5173${NC}"
-echo -e "${GREEN}  Backend:  http://localhost:8000${NC}"
-echo -e "${GREEN}  API Docs: http://localhost:8000/docs${NC}"
+echo -e "${GREEN}  Backend:  http://localhost:8173${NC}"
+echo -e "${GREEN}  API Docs: http://localhost:8173/docs${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
 echo -e "${YELLOW}Press Ctrl+C to stop all services${NC}"

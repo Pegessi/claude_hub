@@ -71,6 +71,17 @@
             </div>
           </div>
           <div class="form-group">
+            <label for="agentType">Agent Type</label>
+            <select
+              id="agentType"
+              v-model="form.agent_type"
+              class="select-input"
+            >
+              <option value="claude">Claude</option>
+              <option value="cursor">Terminal</option>
+            </select>
+          </div>
+          <div v-if="form.agent_type === 'claude'" class="form-group">
             <label class="checkbox-label">
               <div class="checkbox-row">
                 <input
@@ -190,6 +201,7 @@ const form = reactive({
   name: '',
   cwd: '',
   solo_mode: false,
+  agent_type: 'claude' as 'claude' | 'cursor',
 })
 
 // File browser state
@@ -356,6 +368,7 @@ async function handleTabDuplicate(tabId: string) {
     name: `${tab.name} (copy)`,
     cwd: tab.cwd,
     solo_mode: false,
+    agent_type: tab.agent_type || 'claude',
   }
   await store.createTab(data)
 }
@@ -382,6 +395,7 @@ watch(showModal, (newVal) => {
     form.name = ''
     form.cwd = ''
     form.solo_mode = false
+    form.agent_type = 'claude'
     showFileBrowser.value = false
   }
 })
@@ -390,13 +404,15 @@ async function handleCreateTab() {
   const defaultName = `Tab ${tabs.value.length + 1}`
   const name = form.name.trim() || defaultName
   const cwd = form.cwd.trim() || undefined
-  const solo_mode = form.solo_mode
+  const solo_mode = form.agent_type === 'claude' ? form.solo_mode : false
+  const agent_type = form.agent_type
 
-  await store.createTab({ name, cwd, solo_mode })
+  await store.createTab({ name, cwd, solo_mode, agent_type })
 
   form.name = ''
   form.cwd = ''
   form.solo_mode = false
+  form.agent_type = 'claude'
   showFileBrowser.value = false
   showModal.value = false
 }
@@ -723,9 +739,26 @@ async function handleCreateTab() {
   box-sizing: border-box;
 }
 
-.form-group input:focus {
+.form-group input:focus,
+.form-group select:focus {
   outline: none;
   border-color: #60a5fa;
+}
+
+.select-input {
+  width: 100%;
+  padding: 10px 12px;
+  background-color: #2d2d2d;
+  border: 1px solid #444;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 14px;
+  box-sizing: border-box;
+  cursor: pointer;
+}
+
+.select-input:hover {
+  border-color: #555;
 }
 
 .cwd-input-wrapper {

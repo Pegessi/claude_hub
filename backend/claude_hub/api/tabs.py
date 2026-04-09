@@ -28,8 +28,8 @@ async def create_tab(
     current_user: User = Depends(get_current_user),
 ):
     """Create a new terminal tab."""
-    logger.info(f"Received create_tab request: name={tab.name}, solo_mode={tab.solo_mode}, shell={tab.shell}, cwd={tab.cwd}, user={current_user.email}")
-    return await ttyd_manager.create_tab(tab.name, tab.shell, tab.cwd, tab.solo_mode)
+    logger.info(f"Received create_tab request: name={tab.name}, solo_mode={tab.solo_mode}, shell={tab.shell}, cwd={tab.cwd}, agent_type={tab.agent_type}, user={current_user.email}")
+    return await ttyd_manager.create_tab(tab.name, tab.shell, tab.cwd, tab.solo_mode, tab.agent_type)
 
 
 @router.get("/{tab_id}", response_model=TerminalTab)
@@ -51,7 +51,7 @@ async def update_tab(
     current_user: User = Depends(get_current_user),
 ):
     """Update a terminal tab."""
-    tab = await ttyd_manager.update_tab(tab_id, tab_update.name, tab_update.shell, tab_update.cwd, tab_update.solo_mode)
+    tab = await ttyd_manager.update_tab(tab_id, tab_update.name, tab_update.shell, tab_update.cwd, tab_update.solo_mode, tab_update.agent_type)
     if not tab:
         raise HTTPException(status_code=404, detail="Tab not found")
     return tab
