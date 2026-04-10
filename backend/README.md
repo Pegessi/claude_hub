@@ -8,16 +8,16 @@ FastAPI backend for Claude Terminal Hub.
 
 ```bash
 cd backend
-poetry install
+uv sync --dev
 ```
 
 ### Running
 
 ```bash
-poetry run uvicorn claude_hub.main:app --reload
+uv run uvicorn claude_hub.main:app --reload --host 0.0.0.0 --port 8173
 ```
 
 ### API Docs
 
-- Swagger UI: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
+- Swagger UI: http://localhost:8173/docs
+- ReDoc: http://localhost:8173/redoc

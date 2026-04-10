@@ -6,7 +6,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     ports:
-      - "8000:8000"
+      - "8173:8173"
     environment:
       - FRONTEND_URL=http://localhost:5173
     restart: unless-stopped

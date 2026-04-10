@@ -70,7 +70,7 @@
 
 ## Bug #5: Vite Dev Proxy Doesn't Forward WebSocket
 
-**Symptom**: WebSocket works when tested directly against backend (port 8000), but fails through Vite dev server (port 5173).
+**Symptom**: WebSocket works when tested directly against backend (port 8173), but fails through Vite dev server (port 5173).
 
 **Root Cause**: Vite proxy config for `/api` lacked `ws: true`. WebSocket upgrade requests starting with `/api/` were not being proxied to the backend.
 

@@ -30,8 +30,8 @@ if lsof -ti:5173 &> /dev/null; then
     exit 1
 fi
 
-if lsof -ti:8000 &> /dev/null; then
-    echo "⚠️  端口 8000 已被占用，请先停止后端服务"
+if lsof -ti:8173 &> /dev/null; then
+    echo "⚠️  端口 8173 已被占用，请先停止后端服务"
     exit 1
 fi
 
@@ -47,7 +47,7 @@ rm -f "$BACKEND_LOG" "$FRONTEND_LOG" "$TUNNEL_LOG"
 echo "🚀 启动后端..."
 cd "$PROJECT_ROOT/backend"
 if command -v uv &> /dev/null; then
-    uv run uvicorn claude_hub.main:app --reload > "$BACKEND_LOG" 2>&1 &
+    uv run uvicorn claude_hub.main:app --reload --host 0.0.0.0 --port 8173 > "$BACKEND_LOG" 2>&1 &
     BACKEND_PID=$!
 else
     echo "❌ uv 未安装，请先安装 uv"
@@ -151,7 +151,7 @@ echo "🌐 公网访问地址: $TUNNEL_URL"
 echo ""
 echo "📝 本地访问:"
 echo "   前端: http://localhost:5173"
-echo "   后端: http://localhost:8000"
+echo "   后端: http://localhost:8173"
 echo ""
 echo "📋 进程信息:"
 echo "   后端 PID: $BACKEND_PID"

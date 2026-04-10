@@ -1,12 +1,14 @@
-from pydantic_settings import BaseSettings
-from typing import Optional, List
 import ipaddress
+from typing import List, Optional
+
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
     """Application settings."""
+
     host: str = "127.0.0.1"
-    port: int = 8000
+    port: int = 8173
     frontend_url: str = "http://localhost:5173"
     ttyd_path: str = "ttyd"
     ttyd_base_port: int = 10000
@@ -38,7 +40,9 @@ class Settings(BaseSettings):
         """Get allowed open_ids as a list."""
         if not self.auth_allowed_open_ids:
             return []
-        return [open_id.strip() for open_id in self.auth_allowed_open_ids.split(",") if open_id.strip()]
+        return [
+            open_id.strip() for open_id in self.auth_allowed_open_ids.split(",") if open_id.strip()
+        ]
 
     @property
     def auth_enabled(self) -> bool:
@@ -51,15 +55,33 @@ class Settings(BaseSettings):
             ip = ipaddress.ip_address(ip_str)
             # Check if it's a private/local IP
             return (
-                ip.is_private or
-                ip.is_loopback or
-                ip.is_link_local or
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or
                 # 10.0.0.0/8
-                (ip.version == 4 and ipaddress.IPv4Address('10.0.0.0') <= ip <= ipaddress.IPv4Address('10.255.255.255')) or
+                (
+                    ip.version == 4
+                    and ipaddress.IPv4Address("10.0.0.0")
+                    <= ip
+                    <= ipaddress.IPv4Address("10.255.255.255")
+                )
+                or
                 # 172.16.0.0/12
-                (ip.version == 4 and ipaddress.IPv4Address('172.16.0.0') <= ip <= ipaddress.IPv4Address('172.31.255.255')) or
+                (
+                    ip.version == 4
+                    and ipaddress.IPv4Address("172.16.0.0")
+                    <= ip
+                    <= ipaddress.IPv4Address("172.31.255.255")
+                )
+                or
                 # 192.168.0.0/16
-                (ip.version == 4 and ipaddress.IPv4Address('192.168.0.0') <= ip <= ipaddress.IPv4Address('192.168.255.255'))
+                (
+                    ip.version == 4
+                    and ipaddress.IPv4Address("192.168.0.0")
+                    <= ip
+                    <= ipaddress.IPv4Address("192.168.255.255")
+                )
             )
         except ValueError:
             # Invalid IP, default to False

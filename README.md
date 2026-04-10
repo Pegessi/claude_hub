@@ -136,12 +136,12 @@ See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for:
 ```bash
 cd backend
 uv sync --dev  # First time only
-uv run uvicorn claude_hub.main:app --reload
+uv run uvicorn claude_hub.main:app --reload --host 0.0.0.0 --port 8173
 ```
 
-The backend will be available at http://localhost:8000
+The backend will be available at http://localhost:8173
 
-API docs: http://localhost:8000/docs
+API docs: http://localhost:8173/docs
 
 ##### Frontend
 
