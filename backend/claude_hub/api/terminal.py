@@ -10,16 +10,27 @@ os.environ.pop("https_proxy", None)
 os.environ.pop("ALL_PROXY", None)
 os.environ.pop("all_proxy", None)
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Request, Depends, Query
-from fastapi.responses import StreamingResponse, RedirectResponse
-import httpx
-import websockets
 import logging
+from collections.abc import Sequence
 from typing import Optional
 
-from ..services import ttyd_manager
-from ..models import User
+import httpx
+import websockets
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import RedirectResponse, StreamingResponse
+from websockets.typing import Subprotocol
+
 from ..auth.dependencies import get_current_user, get_current_user_ws
+from ..models import User
+from ..services import ttyd_manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/terminal", tags=["terminal"])
@@ -38,13 +49,13 @@ client = httpx.AsyncClient(
 async def proxy_websocket(
     client_ws: WebSocket,
     server_uri: str,
-    subprotocols: Optional[list[str]] = None,
-):
+    subprotocols: Optional[Sequence[Subprotocol]] = None,
+) -> None:
     """Proxy WebSocket messages between client and ttyd."""
     try:
         async with websockets.connect(server_uri, subprotocols=subprotocols) as server_ws:
             # Forward messages from client to server
-            async def client_to_server():
+            async def client_to_server() -> None:
                 try:
                     while True:
                         data = await client_ws.receive()
@@ -59,7 +70,7 @@ async def proxy_websocket(
                     logger.debug(f"Client to server error: {e}")
 
             # Forward messages from server to client
-            async def server_to_client():
+            async def server_to_client() -> None:
                 try:
                     async for message in server_ws:
                         if isinstance(message, str):
@@ -71,12 +82,12 @@ async def proxy_websocket(
 
             # Run both forwarding tasks
             import asyncio
+
             client_task = asyncio.create_task(client_to_server())
             server_task = asyncio.create_task(server_to_client())
 
             done, pending = await asyncio.wait(
-                [client_task, server_task],
-                return_when=asyncio.FIRST_COMPLETED
+                [client_task, server_task], return_when=asyncio.FIRST_COMPLETED
             )
 
             for task in pending:
@@ -87,7 +98,9 @@ async def proxy_websocket(
 
 
 @router.websocket("/ws/{tab_id}")
-async def websocket_endpoint(websocket: WebSocket, tab_id: str, session_id: Optional[str] = Query(None)):
+async def websocket_endpoint(
+    websocket: WebSocket, tab_id: str, session_id: Optional[str] = Query(None)
+) -> None:
     """WebSocket endpoint for terminal connections (proxies to ttyd)."""
     # Authenticate user
     user = await get_current_user_ws(websocket, session_id)
@@ -105,7 +118,7 @@ async def websocket_endpoint(websocket: WebSocket, tab_id: str, session_id: Opti
     ttyd_ws_uri = f"ws://127.0.0.1:{tab.port}/ws"
 
     try:
-        await proxy_websocket(websocket, ttyd_ws_uri, subprotocols=["tty"])
+        await proxy_websocket(websocket, ttyd_ws_uri, subprotocols=[Subprotocol("tty")])
     except WebSocketDisconnect:
         pass
     except Exception as e:
@@ -113,7 +126,9 @@ async def websocket_endpoint(websocket: WebSocket, tab_id: str, session_id: Opti
 
 
 @router.websocket("/proxy/{tab_id}/ws")
-async def proxy_ttyd_websocket(websocket: WebSocket, tab_id: str, session_id: Optional[str] = Query(None)):
+async def proxy_ttyd_websocket(
+    websocket: WebSocket, tab_id: str, session_id: Optional[str] = Query(None)
+) -> None:
     """Proxy WebSocket connections directly to ttyd's /ws endpoint."""
     # Authenticate user
     user = await get_current_user_ws(websocket, session_id)
@@ -131,7 +146,7 @@ async def proxy_ttyd_websocket(websocket: WebSocket, tab_id: str, session_id: Op
     ttyd_ws_uri = f"ws://127.0.0.1:{tab.port}/ws"
 
     try:
-        await proxy_websocket(websocket, ttyd_ws_uri, subprotocols=["tty"])
+        await proxy_websocket(websocket, ttyd_ws_uri, subprotocols=[Subprotocol("tty")])
     except WebSocketDisconnect:
         pass
     except Exception as e:
@@ -142,7 +157,7 @@ async def proxy_ttyd_websocket(websocket: WebSocket, tab_id: str, session_id: Op
 async def get_terminal_proxy_root(
     tab_id: str,
     current_user: User = Depends(get_current_user),
-):
+) -> RedirectResponse:
     """Redirect to the proxied ttyd page (with trailing slash for correct relative URL resolution)."""
     tab = ttyd_manager.get_tab(tab_id)
     if not tab:
@@ -150,13 +165,15 @@ async def get_terminal_proxy_root(
     return RedirectResponse(url=f"/api/terminal/proxy/{tab_id}/")
 
 
-@router.api_route("/proxy/{tab_id}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
+@router.api_route(
+    "/proxy/{tab_id}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
+)
 async def proxy_terminal_request(
     tab_id: str,
     path: str,
     request: Request,
     current_user: User = Depends(get_current_user),
-):
+) -> StreamingResponse:
     """Proxy HTTP requests to ttyd."""
     tab = ttyd_manager.get_tab(tab_id)
     if not tab:
@@ -190,8 +207,7 @@ async def proxy_terminal_request(
         # headers that become invalid after httpx auto-decompression.
         hop_by_hop = {"transfer-encoding", "content-encoding", "content-length", "connection"}
         response_headers = {
-            k: v for k, v in response.headers.items()
-            if k.lower() not in hop_by_hop
+            k: v for k, v in response.headers.items() if k.lower() not in hop_by_hop
         }
 
         # ttyd constructs WebSocket URLs dynamically from window.location,
@@ -244,7 +260,7 @@ async def proxy_terminal_request(
 async def proxy_terminal_iframe(
     tab_id: str,
     current_user: User = Depends(get_current_user),
-):
+) -> RedirectResponse:
     """Redirect to ttyd's web interface via our proxy."""
     tab = ttyd_manager.get_tab(tab_id)
     if not tab:
