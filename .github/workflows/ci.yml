@@ -92,7 +92,7 @@ jobs:
       - name: Test tmux session creation
         run: |
           # Test creating a detached tmux session
-          tmux new-session -d -s test-session "echo 'tmux works'"
+          tmux new-session -d -s test-session "sleep 30"
           # Verify the session exists
           tmux has-session -t test-session
           # Clean up
