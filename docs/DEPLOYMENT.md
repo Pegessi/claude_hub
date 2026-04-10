@@ -37,7 +37,7 @@
                            │                  │
                ┌───────────▼──┐          ┌──▼───────────┐
                │  Frontend    │          │   Backend     │
-               │  (Vue 5173)  │          │  (FastAPI 8000)│
+               │  (Vue 5173)  │          │  (FastAPI 8173)│
                └──────────────┘          └───────────────┘
 ```
 
@@ -186,7 +186,7 @@ Cloudflare Tunnel 是最简单、最安全的公网访问方案，无需公网�
 ./scripts/cloudflared-setup.sh
 
 # 2. 启动 Claude Hub 后端和前端（在两个不同的终端中）
-cd backend && uv run uvicorn claude_hub.main:app --reload
+cd backend && uv run uvicorn claude_hub.main:app --reload --host 0.0.0.0 --port 8173
 cd frontend && pnpm dev
 
 # 3. 启动 Cloudflare Tunnel
@@ -284,7 +284,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     ports:
-      - "8000:8000"
+      - "8173:8173"
     environment:
       - FRONTEND_URL=https://your-domain.com
     env_file:
@@ -352,7 +352,7 @@ cp /etc/letsencrypt/live/your-domain.com/privkey.pem docker/nginx/ssl/
 ```bash
 # 终端 1 - 启动后端
 cd backend
-uv run uvicorn claude_hub.main:app --reload
+uv run uvicorn claude_hub.main:app --reload --host 0.0.0.0 --port 8173
 
 # 终端 2 - 启动前端
 cd frontend
@@ -367,7 +367,7 @@ pnpm dev
 ```bash
 # 后端
 cd backend
-uv run uvicorn claude_hub.main:app --reload
+uv run uvicorn claude_hub.main:app --reload --host 0.0.0.0 --port 8173
 
 # 前端（新终端）
 cd frontend

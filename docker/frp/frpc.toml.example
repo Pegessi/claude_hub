@@ -19,8 +19,8 @@ remotePort = 5173
 name = "claude-hub-backend"
 type = "tcp"
 localIP = "127.0.0.1"
-localPort = 8000
-remotePort = 8000
+localPort = 8173
+remotePort = 8173
 
 # If using HTTP vhost with custom domain:
 # [[proxies]]

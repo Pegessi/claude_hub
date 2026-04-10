@@ -35,7 +35,7 @@ if [ -f "$PROJECT_ROOT/tmp/tunnel.pid" ]; then
 fi
 
 # 强制停止占用端口的进程
-for PORT in 5173 8000; do
+for PORT in 5173 8173; do
     PIDS=$(lsof -ti:$PORT 2>/dev/null)
     if [ -n "$PIDS" ]; then
         echo "⚠️  强制停止端口 $PORT 上的进程: $PIDS"

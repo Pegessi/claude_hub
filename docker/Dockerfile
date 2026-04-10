@@ -26,7 +26,7 @@ COPY backend/claude_hub ./claude_hub
 RUN uv sync --no-dev --frozen
 
 # Expose ports
-EXPOSE 8000
+EXPOSE 8173
 
 # Run the application
-CMD ["uv", "run", "uvicorn", "claude_hub.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uv", "run", "uvicorn", "claude_hub.main:app", "--host", "0.0.0.0", "--port", "8173"]
