@@ -1,15 +1,15 @@
 import asyncio
 import json
+import logging
 import os
 import shutil
 import uuid
-from typing import Dict, Optional, List
 from datetime import datetime
 from pathlib import Path
-import logging
+from typing import Dict, List, Optional
 
 from ..config import settings
-from ..models import TerminalTab, AgentType
+from ..models import AgentType, TerminalTab
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,10 @@ def _tmux_session_exists(session_name: str) -> bool:
 async def _tmux_kill_session(session_name: str) -> None:
     """Kill a tmux session."""
     proc = await asyncio.create_subprocess_exec(
-        "tmux", "kill-session", "-t", session_name,
+        "tmux",
+        "kill-session",
+        "-t",
+        session_name,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
@@ -69,7 +72,17 @@ def get_default_command() -> str:
 class TTYDProcess:
     """Manages a single ttyd process backed by a tmux session for persistence."""
 
-    def __init__(self, tab_id: str, port: int, name: str, shell: Optional[str] = None, cwd: Optional[str] = None, created_at: Optional[datetime] = None, solo_mode: bool = False, agent_type: AgentType = AgentType.CLAUDE):
+    def __init__(
+        self,
+        tab_id: str,
+        port: int,
+        name: str,
+        shell: Optional[str] = None,
+        cwd: Optional[str] = None,
+        created_at: Optional[datetime] = None,
+        solo_mode: bool = False,
+        agent_type: AgentType = AgentType.CLAUDE,
+    ):
         self.tab_id = tab_id
         self.port = port
         self.name = name
@@ -88,7 +101,7 @@ class TTYDProcess:
         else:
             self.shell = get_default_command()
 
-    async def start(self):
+    async def start(self) -> None:
         """Start the ttyd process with tmux for session persistence."""
         if self.process and self.process.returncode is None:
             logger.warning(f"Process for tab {self.tab_id} already running")
@@ -108,14 +121,23 @@ class TTYDProcess:
         # This is the key to persistence across page refreshes.
         cmd = [
             settings.ttyd_path,
-            "--port", str(self.port),
-            "--interface", "127.0.0.1",
+            "--port",
+            str(self.port),
+            "--interface",
+            "127.0.0.1",
             "--writable",
             # Improve scrolling behavior with xterm.js options
-            "-t", "scrollback=10000",
-            "-t", "fastScrollModifier=alt",
-            "-t", "macOptionIsMeta=false",
-            "tmux", "new-session", "-A", "-s", self.tmux_session,
+            "-t",
+            "scrollback=10000",
+            "-t",
+            "fastScrollModifier=alt",
+            "-t",
+            "macOptionIsMeta=false",
+            "tmux",
+            "new-session",
+            "-A",
+            "-s",
+            self.tmux_session,
         ]
         if self.cwd:
             cmd.extend(["-c", self.cwd])
@@ -124,10 +146,13 @@ class TTYDProcess:
         if self.agent_type == AgentType.CLAUDE and self.solo_mode and not session_exists:
             # Use bash -c to set IS_SANDBOX=1, run claude, then keep shell alive
             user_shell = os.environ.get("SHELL", "/bin/bash")
-            cmd.extend([
-                user_shell, "-c",
-                "IS_SANDBOX=1 claude --dangerously-skip-permissions; exec " + user_shell
-            ])
+            cmd.extend(
+                [
+                    user_shell,
+                    "-c",
+                    "IS_SANDBOX=1 claude --dangerously-skip-permissions; exec " + user_shell,
+                ]
+            )
         else:
             # For Claude (non-solo) and Terminal (cursor) types, just use the shell
             cmd.append(self.shell)
@@ -141,7 +166,9 @@ class TTYDProcess:
                 stderr=asyncio.subprocess.PIPE,
             )
             self.is_active = True
-            logger.info(f"ttyd started for tab {self.tab_id} with PID {self.process.pid}, tmux session: {self.tmux_session}")
+            logger.info(
+                f"ttyd started for tab {self.tab_id} with PID {self.process.pid}, tmux session: {self.tmux_session}"
+            )
 
             # Enable tmux mouse mode and other options
             await self._configure_tmux()
@@ -152,7 +179,9 @@ class TTYDProcess:
 
             if self.process.returncode is not None:
                 stderr = await self.process.stderr.read() if self.process.stderr else b""
-                logger.error(f"ttyd exited immediately with code {self.process.returncode}. Stderr: {stderr.decode()}")
+                logger.error(
+                    f"ttyd exited immediately with code {self.process.returncode}. Stderr: {stderr.decode()}"
+                )
                 raise Exception(f"ttyd failed to start: {stderr.decode()}")
 
         except Exception as e:
@@ -160,7 +189,7 @@ class TTYDProcess:
             self.is_active = False
             raise
 
-    async def _log_stderr(self):
+    async def _log_stderr(self) -> None:
         if not self.process or not self.process.stderr:
             return
         try:
@@ -169,7 +198,7 @@ class TTYDProcess:
         except Exception as e:
             logger.debug(f"Error reading stderr for tab {self.tab_id}: {e}")
 
-    async def _configure_tmux(self):
+    async def _configure_tmux(self) -> None:
         """Configure tmux options for better mouse scrolling and user experience."""
         try:
             # Wait a bit for tmux session to be ready
@@ -188,7 +217,8 @@ class TTYDProcess:
             for cmd in tmux_commands:
                 try:
                     proc = await asyncio.create_subprocess_exec(
-                        "tmux", *cmd,
+                        "tmux",
+                        *cmd,
                         stdout=asyncio.subprocess.DEVNULL,
                         stderr=asyncio.subprocess.DEVNULL,
                     )
@@ -200,7 +230,10 @@ class TTYDProcess:
             for cmd in tmux_commands:
                 try:
                     proc = await asyncio.create_subprocess_exec(
-                        "tmux", "-t", self.tmux_session, *cmd,
+                        "tmux",
+                        "-t",
+                        self.tmux_session,
+                        *cmd,
                         stdout=asyncio.subprocess.DEVNULL,
                         stderr=asyncio.subprocess.DEVNULL,
                     )
@@ -212,7 +245,7 @@ class TTYDProcess:
         except Exception as e:
             logger.warning(f"Failed to configure tmux for tab {self.tab_id}: {e}")
 
-    async def stop(self, kill_tmux: bool = False):
+    async def stop(self, kill_tmux: bool = False) -> None:
         """Stop the ttyd process. By default, KEEP tmux session alive for persistence.
 
         Args:
@@ -244,7 +277,9 @@ class TTYDProcess:
             "shell": self.shell,
             "cwd": self.cwd,
             "solo_mode": self.solo_mode,
-            "agent_type": self.agent_type.value if isinstance(self.agent_type, AgentType) else self.agent_type,
+            "agent_type": (
+                self.agent_type.value if isinstance(self.agent_type, AgentType) else self.agent_type
+            ),
             "port": self.port,
             "created_at": self.created_at.isoformat(),
         }
@@ -266,7 +301,7 @@ class TTYDProcess:
 class TTYDManager:
     """Manages multiple ttyd processes with tmux-backed persistence."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.processes: Dict[str, TTYDProcess] = {}
         self._next_port = settings.ttyd_base_port
         self._tab_order: List[str] = []
@@ -280,7 +315,7 @@ class TTYDManager:
         # Ensure all loaded tabs are in the order list
         self._sync_order_with_processes()
 
-    def _load_state(self):
+    def _load_state(self) -> None:
         if STATE_FILE.exists():
             try:
                 with open(STATE_FILE, "r") as f:
@@ -288,7 +323,11 @@ class TTYDManager:
                     max_port = self._next_port
                     for tab_data in data:
                         agent_type_str = tab_data.get("agent_type", "claude")
-                        agent_type = AgentType(agent_type_str) if agent_type_str in [e.value for e in AgentType] else AgentType.CLAUDE
+                        agent_type = (
+                            AgentType(agent_type_str)
+                            if agent_type_str in [e.value for e in AgentType]
+                            else AgentType.CLAUDE
+                        )
                         process = TTYDProcess(
                             tab_id=tab_data["id"],
                             port=tab_data["port"],
@@ -305,13 +344,15 @@ class TTYDManager:
                     self._next_port = max_port + 1
                 logger.info(f"Loaded {len(self.processes)} tabs from {STATE_FILE}")
                 for tab_id, process in self.processes.items():
-                    logger.info(f"  - Tab: {process.name} (tmux: {process.tmux_session}, agent: {process.agent_type.value})")
+                    logger.info(
+                        f"  - Tab: {process.name} (tmux: {process.tmux_session}, agent: {process.agent_type.value})"
+                    )
             except Exception as e:
                 logger.error(f"Failed to load state: {e}")
         else:
             logger.info(f"No state file at {STATE_FILE}, starting fresh")
 
-    def _save_state(self):
+    def _save_state(self) -> None:
         try:
             STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(STATE_FILE, "w") as f:
@@ -320,7 +361,7 @@ class TTYDManager:
         except Exception as e:
             logger.error(f"Failed to save state: {e}")
 
-    def _load_order(self):
+    def _load_order(self) -> None:
         """Load tab order from file."""
         if ORDER_FILE.exists():
             try:
@@ -333,7 +374,7 @@ class TTYDManager:
         else:
             logger.info(f"Order file {ORDER_FILE} does not exist, starting with empty order")
 
-    def _save_order(self):
+    def _save_order(self) -> None:
         """Save tab order to file."""
         try:
             ORDER_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -389,13 +430,26 @@ class TTYDManager:
         self._next_port += 1
         return port
 
-    async def create_tab(self, name: str, shell: Optional[str] = None, cwd: Optional[str] = None, solo_mode: bool = False, agent_type: AgentType = AgentType.CLAUDE) -> TerminalTab:
-        logger.info(f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}")
+    async def create_tab(
+        self,
+        name: str,
+        shell: Optional[str] = None,
+        cwd: Optional[str] = None,
+        solo_mode: bool = False,
+        agent_type: AgentType = AgentType.CLAUDE,
+    ) -> TerminalTab:
+        logger.info(
+            f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}"
+        )
         tab_id = str(uuid.uuid4())
         port = self._get_next_port()
 
-        process = TTYDProcess(tab_id, port, name, shell, cwd, solo_mode=solo_mode, agent_type=agent_type)
-        logger.info(f"Created TTYDProcess with solo_mode={process.solo_mode}, agent_type={process.agent_type}")
+        process = TTYDProcess(
+            tab_id, port, name, shell, cwd, solo_mode=solo_mode, agent_type=agent_type
+        )
+        logger.info(
+            f"Created TTYDProcess with solo_mode={process.solo_mode}, agent_type={process.agent_type}"
+        )
         await process.start()
 
         self.processes[tab_id] = process
@@ -409,7 +463,9 @@ class TTYDManager:
             return False
 
         process = self.processes.pop(tab_id)
-        logger.warning(f"User requested deletion of tab {tab_id}, killing tmux session {process.tmux_session}")
+        logger.warning(
+            f"User requested deletion of tab {tab_id}, killing tmux session {process.tmux_session}"
+        )
         await process.stop(kill_tmux=True)
         if tab_id in self._tab_order:
             self._tab_order.remove(tab_id)
@@ -424,7 +480,9 @@ class TTYDManager:
 
     def list_tabs(self) -> list[TerminalTab]:
         # Return tabs in saved order
-        logger.info(f"list_tabs called, _tab_order={self._tab_order}, processes={list(self.processes.keys())}")
+        logger.info(
+            f"list_tabs called, _tab_order={self._tab_order}, processes={list(self.processes.keys())}"
+        )
         ordered_tabs: list[TerminalTab] = []
         # First add tabs in the saved order
         for tab_id in self._tab_order:
@@ -437,7 +495,15 @@ class TTYDManager:
         logger.info(f"list_tabs returning: {[t.name for t in ordered_tabs]}")
         return ordered_tabs
 
-    async def update_tab(self, tab_id: str, name: Optional[str] = None, shell: Optional[str] = None, cwd: Optional[str] = None, solo_mode: Optional[bool] = None, agent_type: Optional[AgentType] = None) -> Optional[TerminalTab]:
+    async def update_tab(
+        self,
+        tab_id: str,
+        name: Optional[str] = None,
+        shell: Optional[str] = None,
+        cwd: Optional[str] = None,
+        solo_mode: Optional[bool] = None,
+        agent_type: Optional[AgentType] = None,
+    ) -> Optional[TerminalTab]:
         """Update tab settings. Note: Changing shell/cwd/solo_mode/agent_type requires restarting
         the ttyd process, but the tmux session will be PRESERVED.
         """
@@ -463,14 +529,16 @@ class TTYDManager:
             needs_restart = True
 
         if needs_restart:
-            logger.info(f"Updating tab {tab_id}, restarting ttyd but preserving tmux session {process.tmux_session}")
+            logger.info(
+                f"Updating tab {tab_id}, restarting ttyd but preserving tmux session {process.tmux_session}"
+            )
             await process.stop(kill_tmux=False)
             await process.start()
 
         self._save_state()
         return process.to_schema()
 
-    async def start_all_tabs(self):
+    async def start_all_tabs(self) -> None:
         """Start all saved tabs on startup. Tmux sessions survive backend restarts."""
         # Ensure tmux server is running before starting any tabs
         logger.info("Ensuring tmux server is running...")
@@ -487,18 +555,24 @@ class TTYDManager:
         for process in self.processes.values():
             try:
                 await process.start()
-                session_status = "reattached" if _tmux_session_exists(process.tmux_session) else "created"
-                logger.info(f"Tab {process.tab_id} started (tmux session {process.tmux_session} {session_status})")
+                session_status = (
+                    "reattached" if _tmux_session_exists(process.tmux_session) else "created"
+                )
+                logger.info(
+                    f"Tab {process.tab_id} started (tmux session {process.tmux_session} {session_status})"
+                )
             except Exception as e:
                 logger.error(f"Failed to start tab {process.tab_id}: {e}")
 
-    async def cleanup(self):
+    async def cleanup(self) -> None:
         """Stop ttyd processes but keep tmux sessions alive for next startup."""
         logger.info("=" * 60)
         logger.info("CLEANING UP - tmux sessions WILL BE PRESERVED")
         logger.info("=" * 60)
         for process in list(self.processes.values()):
-            logger.info(f"Will preserve tmux session: {process.tmux_session} for tab: {process.name}")
+            logger.info(
+                f"Will preserve tmux session: {process.tmux_session} for tab: {process.name}"
+            )
             await process.stop(kill_tmux=False)
         logger.info("Cleanup complete - all tmux sessions preserved")
 

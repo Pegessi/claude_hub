@@ -1,11 +1,12 @@
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
-from typing import List, Optional
 import os
 from pathlib import Path
+from typing import List, Optional
 
-from ..models import User
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+
 from ..auth.dependencies import get_current_user
+from ..models import User
 
 router = APIRouter(prefix="/api/filesystem", tags=["filesystem"])
 
@@ -82,7 +83,7 @@ def safe_list_dir(path: str) -> DirectoryListing:
 async def list_directory(
     path: Optional[str] = None,
     current_user: User = Depends(get_current_user),
-):
+) -> DirectoryListing:
     """List contents of a directory. Defaults to user's home."""
     if path is None:
         path = "~"

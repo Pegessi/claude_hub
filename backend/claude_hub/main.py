@@ -1,12 +1,14 @@
-from contextlib import asynccontextmanager
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 import logging
 import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-from .config import settings
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
 from .api import api_router
+from .config import settings
 from .services import ttyd_manager
 
 # Create logs directory if it doesn't exist
@@ -40,7 +42,7 @@ logger.info(f"Logging to file: {log_file}")
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan - manage startup and shutdown."""
     # Startup
     logger.info("Starting Claude Hub Backend")
@@ -73,13 +75,13 @@ app.include_router(api_router)
 
 
 @app.get("/health")
-async def health_check():
+async def health_check() -> dict[str, str]:
     """Health check endpoint."""
     return {"status": "healthy"}
 
 
 @app.get("/")
-async def root():
+async def root() -> dict[str, str]:
     """Root endpoint."""
     return {
         "message": "Claude Hub API",
