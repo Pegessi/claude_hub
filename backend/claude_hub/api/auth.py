@@ -1,19 +1,20 @@
 """Authentication API routes."""
 
-from fastapi import APIRouter, Request, Response, HTTPException, status, Depends
-from fastapi.responses import RedirectResponse
 import logging
 
-from ..config import settings
-from ..models.schemas import User
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import RedirectResponse
+
 from ..auth import (
+    create_session,
+    delete_session,
     get_feishu_auth_url,
     get_user_access_token,
     get_user_info,
-    create_session,
-    delete_session,
 )
 from ..auth.dependencies import get_current_user, optional_user
+from ..config import settings
+from ..models.schemas import User
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +67,9 @@ async def callback(request: Request, code: str, state: str = "") -> RedirectResp
     # Check whitelist: open_id first, then email
     allowed_open_ids = settings.allowed_open_ids_list
     allowed_emails = [email.lower() for email in settings.allowed_emails_list]
-    
+
     access_granted = False
-    
+
     # Check open_id whitelist if configured
     if allowed_open_ids:
         if user.open_id in allowed_open_ids:
@@ -85,7 +86,7 @@ async def callback(request: Request, code: str, state: str = "") -> RedirectResp
     # No whitelist configured: allow all authenticated users
     else:
         access_granted = True
-    
+
     if not access_granted:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
