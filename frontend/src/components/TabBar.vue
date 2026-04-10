@@ -1,36 +1,47 @@
 <template>
   <div class="tab-bar">
-    <div class="tabs">
-      <div
-        v-for="(tab, index) in tabs"
-        :key="tab.id"
-        :class="['tab', { active: tab.id === activeTabId, dragging: draggedTabId === tab.id, 'drag-over-left': dragOverIndex === index && draggedTabId !== tab.id && fromIndex !== null && fromIndex > index, 'drag-over-right': dragOverIndex === index && draggedTabId !== tab.id && fromIndex !== null && fromIndex < index }]"
-        draggable="true"
-        @dragstart="handleDragStart($event, tab.id, index)"
-        @dragover="handleDragOver($event, index)"
-        @dragenter="handleDragEnter($event, index)"
-        @dragleave="handleDragLeave($event)"
-        @drop="handleDrop($event, index)"
-        @dragend="handleDragEnd"
-        @click="handleTabClick(tab.id)"
-      >
-        <input
-          v-if="editingTabId === tab.id"
-          v-model="editingTabName"
-          type="text"
-          class="tab-name-input"
-          @blur="handleRenameTab"
-          @keyup.enter="handleRenameTab"
-          @keyup.escape="cancelRename"
-          ref="renameInputRef"
-        />
-        <span v-else class="tab-name" @dblclick.stop="startRename(tab)">{{ tab.name }}</span>
-        <span v-if="tab.is_active" class="tab-indicator"></span>
-        <span v-if="getPaneCountForTab(tab.id) > 0" class="pane-indicator">
-          {{ getPaneCountForTab(tab.id) }}
-        </span>
-        <button class="tab-duplicate" @click.stop="handleTabDuplicate(tab.id)" title="Duplicate tab">📋</button>
-        <button class="tab-close" @click.stop="handleTabClose(tab.id)">×</button>
+    <div
+      :class="[
+        'tabs-shell',
+        {
+          'show-left-fade': showLeftFade,
+          'show-right-fade': showRightFade,
+        },
+      ]"
+    >
+      <div ref="tabsContainerRef" class="tabs" @scroll="handleTabsScroll">
+        <div
+          v-for="(tab, index) in tabs"
+          :key="tab.id"
+          :data-tab-id="tab.id"
+          :class="['tab', { active: tab.id === activeTabId, dragging: draggedTabId === tab.id, 'drag-over-left': dragOverIndex === index && draggedTabId !== tab.id && fromIndex !== null && fromIndex > index, 'drag-over-right': dragOverIndex === index && draggedTabId !== tab.id && fromIndex !== null && fromIndex < index }]"
+          draggable="true"
+          @dragstart="handleDragStart($event, tab.id, index)"
+          @dragover="handleDragOver($event, index)"
+          @dragenter="handleDragEnter($event, index)"
+          @dragleave="handleDragLeave($event)"
+          @drop="handleDrop($event, index)"
+          @dragend="handleDragEnd"
+          @click="handleTabClick(tab.id)"
+        >
+          <input
+            v-if="editingTabId === tab.id"
+            v-model="editingTabName"
+            type="text"
+            class="tab-name-input"
+            @blur="handleRenameTab"
+            @keyup.enter="handleRenameTab"
+            @keyup.escape="cancelRename"
+            ref="renameInputRef"
+          />
+          <span v-else class="tab-name" @dblclick.stop="startRename(tab)">{{ tab.name }}</span>
+          <span v-if="tab.is_active" class="tab-indicator"></span>
+          <span v-if="getPaneCountForTab(tab.id) > 0" class="pane-indicator">
+            {{ getPaneCountForTab(tab.id) }}
+          </span>
+          <button class="tab-duplicate" @click.stop="handleTabDuplicate(tab.id)" title="Duplicate tab">📋</button>
+          <button class="tab-close" @click.stop="handleTabClose(tab.id)">×</button>
+        </div>
       </div>
     </div>
     <button
@@ -164,7 +175,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, watch } from 'vue'
+import { nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useTerminalStore } from '@/stores/terminalStore'
 import type { TerminalTab } from '@/types'
@@ -197,6 +208,9 @@ const tabToClose = ref<TerminalTab | null>(null)
 const editingTabId = ref<string | null>(null)
 const editingTabName = ref('')
 const renameInputRef = ref<HTMLInputElement | null>(null)
+const tabsContainerRef = ref<HTMLDivElement | null>(null)
+const showLeftFade = ref(false)
+const showRightFade = ref(false)
 const form = reactive({
   name: '',
   cwd: '',
@@ -243,6 +257,32 @@ async function loadDirectory(path?: string) {
 
 function handleTabClick(tabId: string) {
   store.setActiveTab(tabId)
+}
+
+function scrollActiveTabIntoView(tabId: string) {
+  const container = tabsContainerRef.value
+  if (!container) return
+
+  const tabElement = container.querySelector<HTMLElement>(`[data-tab-id="${tabId}"]`)
+  tabElement?.scrollIntoView({
+    behavior: 'smooth',
+    inline: 'nearest',
+    block: 'nearest',
+  })
+}
+
+function updateScrollFadeState() {
+  const container = tabsContainerRef.value
+  if (!container) return
+
+  const maxScrollLeft = Math.max(0, container.scrollWidth - container.clientWidth)
+  const hasOverflow = maxScrollLeft > 2
+  showLeftFade.value = hasOverflow && container.scrollLeft > 2
+  showRightFade.value = hasOverflow && container.scrollLeft < maxScrollLeft - 2
+}
+
+function handleTabsScroll() {
+  updateScrollFadeState()
 }
 
 function handleDragStart(event: DragEvent, tabId: string, index: number) {
@@ -400,6 +440,34 @@ watch(showModal, (newVal) => {
   }
 })
 
+watch(activeTabId, (tabId) => {
+  if (!tabId) return
+  nextTick(() => {
+    scrollActiveTabIntoView(tabId)
+    updateScrollFadeState()
+  })
+})
+
+watch(
+  () => tabs.value.length,
+  () => {
+    nextTick(() => {
+      updateScrollFadeState()
+    })
+  }
+)
+
+onMounted(() => {
+  nextTick(() => {
+    updateScrollFadeState()
+  })
+  window.addEventListener('resize', updateScrollFadeState)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', updateScrollFadeState)
+})
+
 async function handleCreateTab() {
   const defaultName = `Tab ${tabs.value.length + 1}`
   const name = form.name.trim() || defaultName
@@ -428,10 +496,57 @@ async function handleCreateTab() {
   gap: 4px;
 }
 
+.tabs-shell {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.tabs-shell::before,
+.tabs-shell::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 14px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s;
+  z-index: 2;
+}
+
+.tabs-shell::before {
+  left: 0;
+  background: linear-gradient(to right, #1e1e1e, rgba(30, 30, 30, 0));
+}
+
+.tabs-shell::after {
+  right: 0;
+  background: linear-gradient(to left, #1e1e1e, rgba(30, 30, 30, 0));
+}
+
+.tabs-shell.show-left-fade::before {
+  opacity: 1;
+}
+
+.tabs-shell.show-right-fade::after {
+  opacity: 1;
+}
+
 .tabs {
   display: flex;
   gap: 4px;
-  flex: 1;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  scroll-behavior: smooth;
+  touch-action: pan-x;
+}
+
+.tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .tab {
@@ -443,6 +558,8 @@ async function handleCreateTab() {
   border-radius: 4px 4px 0 0;
   cursor: pointer;
   user-select: none;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .tab.active {
@@ -553,6 +670,7 @@ async function handleCreateTab() {
   display: flex;
   align-items: center;
   justify-content: center;
+  flex: 0 0 auto;
 }
 
 .add-tab:hover:not(:disabled) {
