@@ -32,7 +32,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-uv-
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --extra dev
       - name: Run black (formatting check)
         run: uv run black --check .
       - name: Run isort (import order check)

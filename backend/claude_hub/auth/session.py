@@ -1,14 +1,14 @@
 """Session management for Claude Hub."""
 
 import json
+import logging
 import secrets
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Dict
-import logging
+from typing import Any, Dict, Optional
 
 from ..config import settings
-from ..models.schemas import User, LoginSession
+from ..models.schemas import LoginSession, User
 
 logger = logging.getLogger(__name__)
 
@@ -21,20 +21,21 @@ def _ensure_sessions_dir() -> None:
     SESSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 
-def _load_sessions() -> Dict[str, dict]:
+def _load_sessions() -> Dict[str, Any]:
     """Load sessions from file."""
     _ensure_sessions_dir()
     if not SESSIONS_FILE.exists():
         return {}
     try:
         with open(SESSIONS_FILE, "r") as f:
-            return json.load(f)
+            result: Dict[str, Any] = json.load(f)
+            return result
     except (json.JSONDecodeError, IOError) as e:
         logger.warning(f"Failed to load sessions: {e}")
         return {}
 
 
-def _save_sessions(sessions: Dict[str, dict]) -> None:
+def _save_sessions(sessions: Dict[str, Any]) -> None:
     """Save sessions to file."""
     _ensure_sessions_dir()
     try:
@@ -44,7 +45,7 @@ def _save_sessions(sessions: Dict[str, dict]) -> None:
         logger.error(f"Failed to save sessions: {e}")
 
 
-def _session_to_dict(session: LoginSession) -> dict:
+def _session_to_dict(session: LoginSession) -> Dict[str, Any]:
     """Convert LoginSession to dict for storage."""
     return {
         "session_id": session.session_id,
@@ -61,7 +62,7 @@ def _session_to_dict(session: LoginSession) -> dict:
     }
 
 
-def _dict_to_session(data: dict) -> Optional[LoginSession]:
+def _dict_to_session(data: Dict[str, Any]) -> Optional[LoginSession]:
     """Convert dict to LoginSession."""
     try:
         return LoginSession(

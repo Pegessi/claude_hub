@@ -1,7 +1,8 @@
 """FastAPI dependencies for authentication."""
 
-from fastapi import Depends, HTTPException, status, WebSocket, Query, Cookie, Request
 from typing import Optional
+
+from fastapi import Cookie, Depends, HTTPException, Query, Request, WebSocket, status
 
 from ..config import settings
 from ..models.schemas import User
@@ -149,8 +150,9 @@ async def get_current_user_ws(
     Returns None if not authenticated. Does NOT close the WebSocket -
     that should be handled by the caller.
     """
-    import logging
     import http.cookies
+    import logging
+
     logger = logging.getLogger(__name__)
 
     # Skip auth for local network requests
@@ -172,7 +174,9 @@ async def get_current_user_ws(
             if settings.session_cookie_name in cookies:
                 effective_session_id = cookies[settings.session_cookie_name].value
 
-    logger.info(f"WebSocket auth attempt: session_id(query)={session_id}, session_id(cookie)={effective_session_id}, effective={effective_session_id}")
+    logger.info(
+        f"WebSocket auth attempt: session_id(query)={session_id}, session_id(cookie)={effective_session_id}, effective={effective_session_id}"
+    )
 
     if not settings.auth_enabled:
         return User(

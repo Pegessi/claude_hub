@@ -1,17 +1,20 @@
-from pydantic import BaseModel, Field
-from typing import Optional, List
 from datetime import datetime
 from enum import Enum
+from typing import List, Optional
+
+from pydantic import BaseModel, Field
 
 
 class AgentType(str, Enum):
     """Type of agent to run in the terminal."""
+
     CLAUDE = "claude"
     CURSOR = "cursor"
 
 
 class TerminalTabBase(BaseModel):
     """Base schema for TerminalTab."""
+
     name: str = Field(..., description="Name of the terminal tab")
     shell: Optional[str] = Field(None, description="Shell to use (default: $SHELL)")
     cwd: Optional[str] = Field(None, description="Working directory to start the terminal in")
@@ -21,11 +24,13 @@ class TerminalTabBase(BaseModel):
 
 class TerminalTabCreate(TerminalTabBase):
     """Schema for creating a TerminalTab."""
+
     pass
 
 
 class TerminalTabUpdate(BaseModel):
     """Schema for updating a TerminalTab."""
+
     name: Optional[str] = None
     shell: Optional[str] = None
     cwd: Optional[str] = None
@@ -35,6 +40,7 @@ class TerminalTabUpdate(BaseModel):
 
 class TerminalTab(TerminalTabBase):
     """Schema for returning a TerminalTab."""
+
     id: str
     port: int
     created_at: datetime
@@ -46,6 +52,7 @@ class TerminalTab(TerminalTabBase):
 
 class User(BaseModel):
     """Schema for a user."""
+
     open_id: str
     name: str
     email: str
@@ -54,6 +61,7 @@ class User(BaseModel):
 
 class LoginSession(BaseModel):
     """Schema for a login session."""
+
     session_id: str
     user: User
     created_at: datetime
@@ -64,12 +72,14 @@ class LoginSession(BaseModel):
 
 class DirectoryListing(BaseModel):
     """Schema for directory listing."""
+
     path: str
     files: List["FileInfo"]
 
 
 class FileInfo(BaseModel):
     """Schema for file information."""
+
     name: str
     path: str
     type: str  # "file" or "directory"

@@ -1,9 +1,10 @@
 """Feishu OAuth integration."""
 
-import httpx
 import logging
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlencode
+
+import httpx
 
 from ..config import settings
 
@@ -46,7 +47,8 @@ async def get_app_access_token() -> Optional[str]:
         )
         data = response.json()
         if data.get("code") == 0:
-            return data.get("app_access_token")
+            token: Optional[str] = data.get("app_access_token")
+            return token
         logger.error(f"Failed to get app access token: {data}")
         return None
 
@@ -101,7 +103,7 @@ async def refresh_user_access_token(refresh_token: str) -> Tuple[Optional[str], 
         return None, None
 
 
-async def get_user_info(access_token: str) -> Optional[dict]:
+async def get_user_info(access_token: str) -> Optional[Dict[str, Any]]:
     """Get user information from Feishu."""
     async with httpx.AsyncClient() as client:
         response = await client.get(
@@ -110,6 +112,7 @@ async def get_user_info(access_token: str) -> Optional[dict]:
         )
         data = response.json()
         if data.get("code") == 0:
-            return data.get("data")
+            result: Optional[Dict[str, Any]] = data.get("data")
+            return result
         logger.error(f"Failed to get user info: {data}")
         return None
