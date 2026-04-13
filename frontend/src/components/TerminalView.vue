@@ -1,31 +1,50 @@
 <template>
   <div class="terminal-container">
     <iframe
-      v-if="tabId"
-      :key="tabId"
-      :ref="(el) => registerIframe(el, tabId)"
-      :src="`/api/terminal/proxy/${tabId}/`"
+      v-for="cachedTabId in cachedTabIds"
+      :key="cachedTabId"
+      :ref="(el) => registerIframe(el, cachedTabId)"
+      :src="`/api/terminal/proxy/${cachedTabId}/`"
       class="terminal-iframe"
+      :class="{ active: cachedTabId === tabId }"
       frameborder="0"
       allowfullscreen
       scrolling="yes"
-      @load="onIframeLoad($event, tabId)"
-    ></iframe>
+      @load="onIframeLoad($event, cachedTabId)"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 
 const props = defineProps<{
   tabId: string
 }>()
 
 let iframeRefs: Record<string, HTMLIFrameElement | null> = {}
+const cachedTabIds = ref<string[]>([])
+
+function cacheTabId(tabId: string) {
+  if (!tabId) return
+  if (!cachedTabIds.value.includes(tabId)) {
+    cachedTabIds.value.push(tabId)
+  }
+}
+
+watch(
+  () => props.tabId,
+  (newTabId) => {
+    cacheTabId(newTabId)
+  },
+  { immediate: true }
+)
 
 function registerIframe(el: any, tabId: string) {
-  if (el) {
+  if (el instanceof HTMLIFrameElement) {
     iframeRefs[tabId] = el as HTMLIFrameElement
+  } else {
+    delete iframeRefs[tabId]
   }
 }
 
@@ -178,5 +197,14 @@ onMounted(() => {
   width: 100%;
   height: 100%;
   border: none;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.terminal-iframe.active {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
 }
 </style>
