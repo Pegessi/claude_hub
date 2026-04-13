@@ -1,3 +1,4 @@
+import json
 import os
 
 # Disable all proxies for localhost connections
@@ -26,6 +27,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import RedirectResponse, StreamingResponse
+from pydantic import BaseModel
 from websockets.typing import Subprotocol
 
 from ..auth.dependencies import get_current_user, get_current_user_ws
@@ -44,6 +46,12 @@ client = httpx.AsyncClient(
     transport=transport,
     trust_env=False,
 )
+
+
+class TerminalHistoryResponse(BaseModel):
+    tab_id: str
+    lines: int
+    history: str
 
 
 async def proxy_websocket(
@@ -153,6 +161,29 @@ async def proxy_ttyd_websocket(
         logger.error(f"WebSocket proxy error for tab {tab_id}: {e}")
 
 
+@router.get("/history/{tab_id}", response_model=TerminalHistoryResponse)
+async def get_terminal_history(
+    tab_id: str,
+    lines: int = Query(100000, ge=100, le=100000),
+    current_user: User = Depends(get_current_user),
+) -> TerminalHistoryResponse:
+    """Get captured tmux history for replaying terminal scrollback."""
+    tab = ttyd_manager.get_tab(tab_id)
+    if not tab:
+        raise HTTPException(status_code=404, detail="Tab not found")
+
+    try:
+        history = await ttyd_manager.get_tab_history(tab_id, lines)
+    except Exception as e:
+        logger.error(f"Failed to capture history for tab {tab_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to capture terminal history") from e
+
+    if history is None:
+        raise HTTPException(status_code=404, detail="Tab not found")
+
+    return TerminalHistoryResponse(tab_id=tab_id, lines=lines, history=history)
+
+
 @router.get("/proxy/{tab_id}")
 async def get_terminal_proxy_root(
     tab_id: str,
@@ -238,9 +269,73 @@ async def proxy_terminal_request(
       }
     </style>
 """
+                history_replay_code = f"""
+    <script>
+      (function () {{
+        const TAB_ID = {json.dumps(tab_id)};
+        const HISTORY_LINES = 100000;
+        let historyText = '';
+
+        try {{
+          // Sync request ensures history is ready before ttyd assigns window.term.
+          const xhr = new XMLHttpRequest();
+          xhr.open('GET', `/api/terminal/history/${{TAB_ID}}?lines=${{HISTORY_LINES}}`, false);
+          xhr.send(null);
+          if (xhr.status >= 200 && xhr.status < 300) {{
+            const payload = JSON.parse(xhr.responseText || '{{}}');
+            if (payload && typeof payload.history === 'string') {{
+              historyText = payload.history;
+            }}
+          }}
+        }} catch (error) {{
+          console.debug('claude-hub history preload failed', error);
+        }}
+
+        if (!historyText) return;
+
+        const normalizedHistory = historyText.replace(/\\r?\\n/g, '\\r\\n');
+        let currentTerm = undefined;
+        let replayed = false;
+
+        function replayHistory(term) {{
+          if (!term || replayed || typeof term.write !== 'function') return;
+          const rows = Number(term.rows) || 24;
+          const lines = normalizedHistory.replace(/\\r/g, '').split('\\n');
+          if (lines.length <= rows) return;
+          const replayText = lines.slice(0, lines.length - rows).join('\\r\\n');
+          if (!replayText) return;
+          replayed = true;
+          term.write(replayText + '\\r\\n');
+        }}
+
+        function hookTerm(term) {{
+          if (!term || term.__claudeHubHistoryHooked || typeof term.open !== 'function') return;
+          term.__claudeHubHistoryHooked = true;
+          const originalOpen = term.open.bind(term);
+          term.open = function(...args) {{
+            const result = originalOpen(...args);
+            replayHistory(term);
+            return result;
+          }};
+        }}
+
+        Object.defineProperty(window, 'term', {{
+          configurable: true,
+          enumerable: true,
+          get() {{
+            return currentTerm;
+          }},
+          set(value) {{
+            currentTerm = value;
+            hookTerm(value);
+          }},
+        }});
+      }})();
+    </script>
+"""
                 # Insert before </head>
                 if "</head>" in html:
-                    html = html.replace("</head>", custom_code + "</head>")
+                    html = html.replace("</head>", custom_code + history_replay_code + "</head>")
                 raw = html.encode("utf-8")
                 response_headers["content-length"] = str(len(raw))
             except Exception as e:

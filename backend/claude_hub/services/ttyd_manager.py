@@ -128,7 +128,7 @@ class TTYDProcess:
             "--writable",
             # Improve scrolling behavior with xterm.js options
             "-t",
-            "scrollback=10000",
+            "scrollback=100000",
             "-t",
             "fastScrollModifier=alt",
             "-t",
@@ -207,7 +207,7 @@ class TTYDProcess:
             # Set tmux options - these will apply to all sessions
             tmux_commands = [
                 ["set", "-g", "mouse", "off"],
-                ["set", "-g", "history-limit", "10000"],
+                ["set", "-g", "history-limit", "100000"],
                 ["set", "-g", "terminal-overrides", "xterm*:smcup@:rmcup@"],
                 # Allow scrolling without entering copy mode explicitly
                 ["set", "-g", "mode-keys", "vi"],
@@ -244,6 +244,31 @@ class TTYDProcess:
             logger.info(f"Configured tmux options for tab {self.tab_id}")
         except Exception as e:
             logger.warning(f"Failed to configure tmux for tab {self.tab_id}: {e}")
+
+    async def capture_history(self, lines: int = 100000) -> str:
+        """Capture scrollback history from tmux for replay on reconnect."""
+        safe_lines = max(100, min(lines, 100000))
+        start = f"-{safe_lines}"
+
+        proc = await asyncio.create_subprocess_exec(
+            "tmux",
+            "capture-pane",
+            "-p",
+            "-e",
+            "-J",
+            "-S",
+            start,
+            "-t",
+            self.tmux_session,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            error = stderr.decode("utf-8", errors="ignore").strip()
+            raise RuntimeError(error or f"tmux capture-pane failed with code {proc.returncode}")
+
+        return stdout.decode("utf-8", errors="ignore")
 
     async def stop(self, kill_tmux: bool = False) -> None:
         """Stop the ttyd process. By default, KEEP tmux session alive for persistence.
@@ -494,6 +519,13 @@ class TTYDManager:
                 ordered_tabs.append(process.to_schema())
         logger.info(f"list_tabs returning: {[t.name for t in ordered_tabs]}")
         return ordered_tabs
+
+    async def get_tab_history(self, tab_id: str, lines: int = 100000) -> Optional[str]:
+        """Get tmux scrollback history for a tab."""
+        process = self.processes.get(tab_id)
+        if not process:
+            return None
+        return await process.capture_history(lines)
 
     async def update_tab(
         self,
