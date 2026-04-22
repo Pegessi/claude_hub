@@ -302,6 +302,23 @@ async def proxy_terminal_request(
           if (!term || replayed || typeof term.write !== 'function') return;
           replayed = true;
 
+          // Strip the last `rows` lines (visible screen) from history.
+          // tmux capture-pane output (without -J) has one line per
+          // visual row, so `rows` matches exactly. The visible screen
+          // will be delivered by ttyd's WebSocket connection to tmux,
+          // so we must not duplicate it here or the xterm scrollback
+          // buffer overflows and discards middle history.
+          const rows = Number(term.rows) || 24;
+          const lines = normalizedHistory.replace(/\\r/g, '').split('\\n');
+          // Trim trailing empty lines (tmux may pad the visible area)
+          while (lines.length > 0 && lines[lines.length - 1] === '') {{
+            lines.pop();
+          }}
+          if (lines.length <= rows) return;
+          const scrollbackLines = lines.slice(0, lines.length - rows);
+          if (scrollbackLines.length === 0) return;
+          const replayText = scrollbackLines.join('\\r\\n');
+
           // Buffer live writes until history replay completes to prevent
           // history and real-time data from interleaving in the xterm buffer.
           const buffer = [];
@@ -329,10 +346,8 @@ async def proxy_terminal_request(
           // Safety timeout: release buffer if callback never fires
           const safetyTimer = setTimeout(flushBuffer, 5000);
 
-          // Write full history with completion callback.
-          // tmux will send screen redraw sequences that correctly overlay
-          // the visible area, so writing the entire capture is safe.
-          originalWrite(normalizedHistory, function() {{
+          // Write scrollback history with completion callback.
+          originalWrite(replayText + '\\r\\n', function() {{
             clearTimeout(safetyTimer);
             flushBuffer();
           }});

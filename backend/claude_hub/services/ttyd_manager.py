@@ -255,7 +255,6 @@ class TTYDProcess:
             "capture-pane",
             "-p",
             "-e",
-            "-J",
             "-S",
             start,
             "-t",
