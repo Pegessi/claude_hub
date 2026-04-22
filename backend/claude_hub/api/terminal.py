@@ -257,6 +257,8 @@ async def proxy_terminal_request(
       html, body {
         overscroll-behavior: none;
         -webkit-overflow-scrolling: touch;
+        /* Use full viewport height so keyboard doesn't shrink the layout */
+        height: 100lvh;
       }
       body {
         margin: 0;
@@ -343,8 +345,74 @@ async def proxy_terminal_request(
           term.open = function(...args) {{
             const result = originalOpen(...args);
             replayHistory(term);
+            setupResizeGuard(term);
             return result;
           }};
+        }}
+
+        // ---- Mobile keyboard resize debounce ----
+        // When the virtual keyboard appears/disappears on mobile,
+        // the viewport shrinks/expands, causing xterm.js to resize
+        // repeatedly. With large scrollback this triggers a feedback
+        // loop: resize -> tmux redraw -> xterm re-render -> layout shift
+        // -> another resize. We break this loop by debouncing resize
+        // events and using visualViewport API to detect genuine
+        // keyboard state changes vs transient layout jank.
+        const DEBOUNCE_MS = 150;
+
+        function setupResizeGuard(term) {{
+          if (!term || term.__claudeHubResizeGuarded) return;
+          term.__claudeHubResizeGuarded = true;
+
+          // Debounce ttyd's resize-to-tmux path: xterm.js onResize
+          // callback is intercepted so only the final stable dimension
+          // is forwarded to tmux, preventing intermediate resizes from
+          // triggering expensive redraws on large scrollback buffers.
+          if (typeof term.onResize === 'function') {{
+            const origOnResize = term.onResize;
+            let lastArgs = null;
+            let pending = false;
+            let timer = null;
+
+            term.onResize = function(cols, rows) {{
+              lastArgs = [cols, rows];
+              if (pending) return;
+              pending = true;
+              timer = setTimeout(function() {{
+                pending = false;
+                if (lastArgs) origOnResize.apply(term, lastArgs);
+                lastArgs = null;
+              }}, DEBOUNCE_MS);
+            }};
+          }}
+
+          // On mobile, visualViewport.resize fires many times as the
+          // keyboard animates in/out. We only act when the keyboard
+          // reaches a stable state (visible or hidden), and ignore
+          // all intermediate transitions.
+          if (window.visualViewport) {{
+            let keyboardVisible = false;
+            let vvTimer = null;
+
+            window.visualViewport.addEventListener('resize', function() {{
+              clearTimeout(vvTimer);
+              vvTimer = setTimeout(function() {{
+                const vv = window.visualViewport;
+                const nowKeyboard = (vv.height < window.innerHeight * 0.8);
+
+                if (nowKeyboard !== keyboardVisible) {{
+                  keyboardVisible = nowKeyboard;
+                  // Trigger a single, stable fit after keyboard
+                  // animation is complete
+                  try {{
+                    if (term.fitAddon) term.fitAddon.fit();
+                    else if (typeof term.fit === 'function') term.fit();
+                  }} catch(e) {{}}
+                }}
+                // Keyboard state unchanged = transient jank, ignore
+              }}, DEBOUNCE_MS);
+            }});
+          }}
         }}
 
         Object.defineProperty(window, 'term', {{
