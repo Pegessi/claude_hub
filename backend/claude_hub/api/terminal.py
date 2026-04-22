@@ -277,7 +277,6 @@ async def proxy_terminal_request(
         let historyText = '';
 
         try {{
-          // Sync request ensures history is ready before ttyd assigns window.term.
           const xhr = new XMLHttpRequest();
           xhr.open('GET', `/api/terminal/history/${{TAB_ID}}?lines=${{HISTORY_LINES}}`, false);
           xhr.send(null);
@@ -299,13 +298,42 @@ async def proxy_terminal_request(
 
         function replayHistory(term) {{
           if (!term || replayed || typeof term.write !== 'function') return;
-          const rows = Number(term.rows) || 24;
-          const lines = normalizedHistory.replace(/\\r/g, '').split('\\n');
-          if (lines.length <= rows) return;
-          const replayText = lines.slice(0, lines.length - rows).join('\\r\\n');
-          if (!replayText) return;
           replayed = true;
-          term.write(replayText + '\\r\\n');
+
+          // Buffer live writes until history replay completes to prevent
+          // history and real-time data from interleaving in the xterm buffer.
+          const buffer = [];
+          let historyDone = false;
+          const originalWrite = term.write.bind(term);
+
+          term.write = function(data, cb) {{
+            if (historyDone) {{
+              return originalWrite(data, cb);
+            }}
+            buffer.push({{ data, cb }});
+            return undefined;
+          }};
+
+          function flushBuffer() {{
+            if (historyDone) return;
+            historyDone = true;
+            term.write = originalWrite;
+            for (const item of buffer) {{
+              originalWrite(item.data, item.cb);
+            }}
+            buffer.length = 0;
+          }}
+
+          // Safety timeout: release buffer if callback never fires
+          const safetyTimer = setTimeout(flushBuffer, 5000);
+
+          // Write full history with completion callback.
+          // tmux will send screen redraw sequences that correctly overlay
+          // the visible area, so writing the entire capture is safe.
+          originalWrite(normalizedHistory, function() {{
+            clearTimeout(safetyTimer);
+            flushBuffer();
+          }});
         }}
 
         function hookTerm(term) {{
