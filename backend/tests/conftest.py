@@ -1,8 +1,9 @@
 from difflib import unified_diff
-from typing import Generator
+from typing import AsyncGenerator, Generator
 
 import pytest
 import requests
+from httpx import ASGITransport, AsyncClient
 from playwright.sync_api import Page
 
 BACKEND_URL = "http://127.0.0.1:8173"
@@ -128,7 +129,17 @@ def backend_server() -> Generator[None, None, None]:
 
 
 @pytest.fixture
-def terminal_tab(backend_server) -> Generator[dict, None, None]:
+async def client() -> AsyncGenerator[AsyncClient, None]:
+    """Provide an httpx AsyncClient pointing at the FastAPI app."""
+    from claude_hub.main import app
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+@pytest.fixture
+def terminal_tab(backend_server: None) -> Generator[dict, None, None]:
     """Create a terminal tab for testing, with guaranteed cleanup.
 
     Also ensures the tmux session exists by making an initial connection

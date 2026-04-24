@@ -65,7 +65,7 @@ def produce_scrollback(session_name: str, count: int = 200) -> None:
 
 def read_xterm_buffer(page: Page) -> list[str]:
     """Read the full xterm.js buffer (scrollback + visible screen) via JS."""
-    return page.evaluate("""
+    result: list[str] = page.evaluate("""
         () => {
             const term = window.term;
             if (!term) return null;
@@ -80,6 +80,7 @@ def read_xterm_buffer(page: Page) -> list[str]:
             return lines;
         }
     """)
+    return result
 
 
 def wait_for_replay_done(page: Page, timeout: float = 15.0) -> None:
