@@ -1,54 +1,153 @@
-from collections.abc import AsyncIterator
+from difflib import unified_diff
+from typing import Generator
 
-import pytest_asyncio
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from httpx import ASGITransport, AsyncClient
+import pytest
+import requests
+from playwright.sync_api import Page
 
-from claude_hub.config import settings
+BACKEND_URL = "http://127.0.0.1:8173"
 
-# Create a simple test app just for basic endpoint testing
-test_app = FastAPI(
-    title="Claude Hub API",
-    description="Test API",
-    version="0.1.0",
-)
-
-# Add CORS middleware
-test_app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[settings.frontend_url],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# ── helpers ──────────────────────────────────────────────────────────────
 
 
-# Add test endpoints
-@test_app.get("/health")
-async def health_check() -> dict[str, str]:
-    return {"status": "healthy"}
+def normalize_terminal_output(text: str) -> list[str]:
+    """Normalize terminal output for comparison.
+
+    Strip CR, trim trailing whitespace per line, remove trailing blank lines.
+    """
+    lines = text.replace("\r", "").split("\n")
+    lines = [l.rstrip() for l in lines]
+    while lines and lines[-1] == "":
+        lines.pop()
+    return lines
 
 
-@test_app.get("/")
-async def root() -> dict[str, str]:
-    return {
-        "message": "Claude Hub API",
-        "version": "0.1.0",
-        "docs": "/docs",
-    }
+def diff_summary(actual: list[str], expected: list[str]) -> str:
+    """Produce readable diff for assertion failure."""
+    diff = unified_diff(expected, actual, lineterm="", fromfile="tmux", tofile="xterm")
+    return "\n".join(diff)
 
 
-@test_app.get("/api/tabs")
-async def list_tabs() -> list[dict[str, str]]:
-    return []
+def capture_pane_sync(session_name: str, start: str = "-100000", end: str = "") -> str:
+    """Run tmux capture-pane synchronously and return stdout."""
+    import subprocess
+
+    args = ["tmux", "capture-pane", "-p", "-e", "-S", start, "-t", session_name]
+    if end:
+        args.extend(["-E", end])
+    result = subprocess.run(args, capture_output=True, text=True)
+    return result.stdout
 
 
-@pytest_asyncio.fixture
-async def client() -> AsyncIterator[AsyncClient]:
-    """Test client for the FastAPI app."""
-    async with AsyncClient(
-        transport=ASGITransport(app=test_app),
-        base_url="http://testserver",
-    ) as test_client:
-        yield test_client
+def send_keys_sync(session_name: str, *keys: str) -> None:
+    """Send keys to a tmux session synchronously."""
+    import subprocess
+
+    subprocess.run(
+        ["tmux", "send-keys", "-t", session_name, *keys],
+        capture_output=True,
+    )
+
+
+def tmux_session_exists(session_name: str) -> bool:
+    """Check if a tmux session exists."""
+    import subprocess
+
+    result = subprocess.run(
+        ["tmux", "has-session", "-t", session_name],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+# ── fixtures ─────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(scope="session")
+def backend_server() -> Generator[None, None, None]:
+    """Start the real FastAPI backend on port 8173 in a background process."""
+    import pathlib
+    import subprocess
+    import time
+
+    # Check if backend is already running
+    try:
+        resp = requests.get(f"{BACKEND_URL}/health", timeout=1)
+        if resp.status_code == 200:
+            yield  # Backend already running, nothing to start/stop
+            return
+    except requests.ConnectionError:
+        pass
+
+    backend_dir = pathlib.Path(__file__).parent.parent
+    venv_python = backend_dir / ".venv" / "bin" / "python"
+
+    # Fallback: use sys.executable if venv not found
+    if not venv_python.exists():
+        import sys
+
+        venv_python = pathlib.Path(sys.executable)
+
+    proc = subprocess.Popen(
+        [
+            str(venv_python),
+            "-m",
+            "uvicorn",
+            "claude_hub.main:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8173",
+            "--log-level",
+            "error",
+        ],
+        cwd=str(backend_dir),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    # Wait for server to be ready
+    for _ in range(50):
+        try:
+            resp = requests.get(f"{BACKEND_URL}/health", timeout=1)
+            if resp.status_code == 200:
+                break
+        except requests.ConnectionError:
+            time.sleep(0.2)
+    else:
+        proc.terminate()
+        raise RuntimeError("Backend server failed to start")
+
+    yield
+
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+@pytest.fixture
+def terminal_tab(backend_server) -> Generator[dict, None, None]:
+    """Create a terminal tab for testing, with guaranteed cleanup.
+
+    Also ensures the tmux session exists by making an initial connection
+    via Playwright (ttyd creates the tmux session lazily on first WS connect).
+    """
+    import time
+
+    # Create tab via API
+    resp = requests.post(
+        f"{BACKEND_URL}/api/tabs",
+        json={"name": "test-replay", "agent_type": "cursor"},
+    )
+    assert resp.status_code == 201, f"Failed to create tab: {resp.text}"
+    tab = resp.json()
+
+    yield tab
+
+    # Cleanup: delete tab (kills tmux session too)
+    try:
+        requests.delete(f"{BACKEND_URL}/api/tabs/{tab['id']}", timeout=5)
+    except Exception:
+        pass

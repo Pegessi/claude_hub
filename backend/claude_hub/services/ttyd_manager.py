@@ -246,7 +246,18 @@ class TTYDProcess:
             logger.warning(f"Failed to configure tmux for tab {self.tab_id}: {e}")
 
     async def capture_history(self, lines: int = 100000) -> str:
-        """Capture scrollback history from tmux for replay on reconnect."""
+        """Capture full terminal history from tmux for replay on reconnect.
+
+        Captures the entire terminal content (scrollback + visible screen)
+        because the client-side replay must clear and rewrite the full
+        buffer when ttyd has already rendered the visible screen before
+        our script can intercept.
+
+        Returns an empty string if the tmux session does not exist yet
+        (ttyd creates sessions lazily on first WebSocket connection).
+        """
+        if not _tmux_session_exists(self.tmux_session):
+            return ""
         safe_lines = max(100, min(lines, 100000))
         start = f"-{safe_lines}"
 
@@ -520,7 +531,7 @@ class TTYDManager:
         return ordered_tabs
 
     async def get_tab_history(self, tab_id: str, lines: int = 100000) -> Optional[str]:
-        """Get tmux scrollback history for a tab."""
+        """Get tmux terminal history for a tab (scrollback + visible screen)."""
         process = self.processes.get(tab_id)
         if not process:
             return None
