@@ -292,32 +292,29 @@ async def proxy_terminal_request(
           console.debug('claude-hub history preload failed', error);
         }}
 
-        if (!historyText) return;
+        // NOTE: Do NOT early-return when historyText is empty.  The
+        // hook and resize-guard logic below must run regardless of
+        // whether there is history to replay.
 
         const normalizedHistory = historyText.replace(/\\r?\\n/g, '\\r\\n');
         let currentTerm = undefined;
         let replayed = false;
 
-        function replayHistory(term) {{
+        function replayHistory(term, fullReplay) {{
           if (!term || replayed || typeof term.write !== 'function') return;
           replayed = true;
 
-          // Strip the last `rows` lines (visible screen) from history.
-          // tmux capture-pane output (without -J) has one line per
-          // visual row, so `rows` matches exactly. The visible screen
-          // will be delivered by ttyd's WebSocket connection to tmux,
-          // so we must not duplicate it here or the xterm scrollback
-          // buffer overflows and discards middle history.
-          const rows = Number(term.rows) || 24;
+          // The history API now returns the FULL terminal content
+          // (scrollback + visible screen) from tmux capture-pane.
           const lines = normalizedHistory.replace(/\\r/g, '').split('\\n');
-          // Trim trailing empty lines (tmux may pad the visible area)
-          while (lines.length > 0 && lines[lines.length - 1] === '') {{
+          // Drop the trailing empty string from split('foo\\n') → ['foo','']
+          if (lines.length > 0 && lines[lines.length - 1] === '') {{
             lines.pop();
           }}
-          if (lines.length <= rows) return;
-          const scrollbackLines = lines.slice(0, lines.length - rows);
-          if (scrollbackLines.length === 0) return;
-          const replayText = scrollbackLines.join('\\r\\n');
+          if (lines.length === 0) {{
+            term.__claudeHubReplayDone = true;
+            return;
+          }}
 
           // Buffer live writes until history replay completes to prevent
           // history and real-time data from interleaving in the xterm buffer.
@@ -336,9 +333,18 @@ async def proxy_terminal_request(
           function flushBuffer() {{
             if (historyDone) return;
             historyDone = true;
+            term.__claudeHubReplayDone = true;
             term.write = originalWrite;
-            for (const item of buffer) {{
-              originalWrite(item.data, item.cb);
+            // Phase B (fullReplay): ttyd already rendered the visible screen
+            // and buffered WS data contains duplicate visible-screen content
+            // that would overwrite our replay.  Discard the entire buffer —
+            // our replay already wrote the complete terminal state.
+            // New real-time output will arrive after flush and be written
+            // normally through the restored term.write.
+            if (!fullReplay) {{
+              for (const item of buffer) {{
+                originalWrite(item.data, item.cb);
+              }}
             }}
             buffer.length = 0;
           }}
@@ -346,23 +352,53 @@ async def proxy_terminal_request(
           // Safety timeout: release buffer if callback never fires
           const safetyTimer = setTimeout(flushBuffer, 5000);
 
-          // Write scrollback history with completion callback.
-          originalWrite(replayText + '\\r\\n', function() {{
-            clearTimeout(safetyTimer);
-            flushBuffer();
-          }});
+          if (fullReplay) {{
+            // Phase B: term.open() was already called by ttyd and the
+            // visible screen is already rendered.  Clear the entire buffer
+            // (screen + scrollback) and write the full terminal content
+            // from scratch.  The last `rows` lines will land on the
+            // visible screen; the rest becomes scrollback.
+            // The \\x1b[3J clears scrollback, \\x1b[H\\x1b[2J clears screen.
+            originalWrite('\\x1b[H\\x1b[2J\\x1b[3J' + lines.join('\\r\\n'), function() {{
+              clearTimeout(safetyTimer);
+              flushBuffer();
+            }});
+          }} else {{
+            // Phase A: term.open() has NOT been called yet (our hook will
+            // fire it).  Only scrollback lines need to be written; the
+            // visible screen will be delivered by ttyd's WebSocket.
+            // After writing scrollback, use Scroll Up (SU) to push the
+            // bottom `rows` lines (which land on the visible screen) into
+            // scrollback so the visible screen is left blank for ttyd.
+            var scrollUpSeq = '\\x1b[' + (term.rows || 24) + 'S';
+            originalWrite(lines.join('\\r\\n') + '\\r\\n' + scrollUpSeq, function() {{
+              clearTimeout(safetyTimer);
+              flushBuffer();
+            }});
+          }}
         }}
 
         function hookTerm(term) {{
           if (!term || term.__claudeHubHistoryHooked || typeof term.open !== 'function') return;
           term.__claudeHubHistoryHooked = true;
-          const originalOpen = term.open.bind(term);
-          term.open = function(...args) {{
-            const result = originalOpen(...args);
-            replayHistory(term);
+          // If term.open() was already called (element is attached to DOM),
+          // ttyd has already written the visible screen content.  We must
+          // do a full replay (clear + rewrite everything) and discard ttyd's
+          // buffered WS data (which would duplicate the visible screen).
+          // Otherwise, hook term.open so replay runs right after ttyd
+          // calls it — only scrollback is written, ttyd WS fills the screen.
+          if (term.element) {{
+            replayHistory(term, true);
             setupResizeGuard(term);
-            return result;
-          }};
+          }} else {{
+            const originalOpen = term.open.bind(term);
+            term.open = function(...args) {{
+              const result = originalOpen(...args);
+              replayHistory(term, false);
+              setupResizeGuard(term);
+              return result;
+            }};
+          }}
         }}
 
         // ---- Mobile keyboard resize debounce ----
@@ -430,17 +466,32 @@ async def proxy_terminal_request(
           }}
         }}
 
-        Object.defineProperty(window, 'term', {{
-          configurable: true,
-          enumerable: true,
-          get() {{
-            return currentTerm;
-          }},
-          set(value) {{
-            currentTerm = value;
-            hookTerm(value);
-          }},
-        }});
+        // ttyd uses Object.defineProperty(window, 'term', ...) internally,
+        // and its bundled copy of Object.defineProperty was captured
+        // before our script ran.  So we cannot intercept it via the
+        // global.  Instead, poll for window.term being set and hook it
+        // once it appears.  We also check immediately in case it was
+        // already set.
+        function tryHookTerm() {{
+          if (window.term && typeof window.term === 'object' && !window.term.__claudeHubHistoryHooked) {{
+            currentTerm = window.term;
+            hookTerm(window.term);
+            return true;
+          }}
+          return false;
+        }}
+
+        // Try immediately (ttyd may have already set it)
+        if (!tryHookTerm()) {{
+          // Not set yet — poll until it appears (ttyd sets it during init)
+          const pollTimer = setInterval(function() {{
+            if (tryHookTerm()) {{
+              clearInterval(pollTimer);
+            }}
+          }}, 50);
+          // Safety: stop polling after 10 seconds
+          setTimeout(function() {{ clearInterval(pollTimer); }}, 10000);
+        }}
       }})();
     </script>
 """

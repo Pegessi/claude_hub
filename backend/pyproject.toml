@@ -24,6 +24,8 @@ dev = [
     "black>=24.8.0",
     "isort>=5.13.0",
     "mypy>=1.11.0",
+    "playwright>=1.40.0",
+    "pytest-playwright>=0.4.0",
 ]
 
 [build-system]
