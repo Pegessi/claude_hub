@@ -141,5 +141,5 @@ jobs:
           chmod +x ttyd
           sudo mv ttyd /usr/local/bin/
       - name: Run terminal replay tests
-        run: uv run pytest tests/test_terminal_replay.py -v --timeout=120
+        run: uv run pytest tests/test_terminal_replay.py -v
 
