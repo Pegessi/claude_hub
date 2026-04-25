@@ -104,3 +104,42 @@ jobs:
           ttyd --help > /dev/null
           echo "✓ ttyd basic functionality test passed"
 
+  terminal-e2e:
+    name: Terminal E2E (Playwright)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.x"
+      - name: Cache uv packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            .venv
+            ~/.cache/uv
+          key: ${{ runner.os }}-uv-${{ hashFiles('backend/uv.lock', 'backend/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-uv-
+      - name: Install dependencies
+        run: uv sync --extra dev
+      - name: Install Playwright browsers
+        run: uv run playwright install chromium --with-deps
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Install ttyd
+        run: |
+          wget -qO ttyd https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.x86_64
+          chmod +x ttyd
+          sudo mv ttyd /usr/local/bin/
+      - name: Run terminal replay tests
+        run: uv run pytest tests/test_terminal_replay.py -v
+

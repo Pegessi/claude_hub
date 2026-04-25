@@ -24,6 +24,8 @@ dev = [
     "black>=24.8.0",
     "isort>=5.13.0",
     "mypy>=1.11.0",
+    "playwright>=1.40.0",
+    "pytest-playwright>=0.4.0",
 ]
 
 [build-system]
@@ -46,3 +48,8 @@ disallow_untyped_defs = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+[dependency-groups]
+dev = [
+    "types-requests>=2.33.0.20260408",
+]
