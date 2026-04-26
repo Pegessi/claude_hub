@@ -99,6 +99,54 @@ When modifying `terminal.py` or `ttyd_manager.py`, understand the Phase A/B mode
 - **WS cookie**: FastAPI `Cookie` decorator doesn't work reliably on WebSocket. Parse `websocket.headers["cookie"]` manually.
 - **tmux mouse off**: Must keep `tmux set -g mouse off` — mouse mode intercepts all drag events, breaking xterm.js text selection.
 
+## Debugging with Playwright
+Playwright is installed in the backend venv and can simulate mobile touch events for debugging terminal UI issues (injected JS/CSS, scroll behavior, touch handling). Usage patterns:
+
+```python
+from playwright.sync_api import sync_playwright
+
+p = sync_playwright().start()
+browser = p.chromium.launch(headless=True)
+page = browser.new_page(
+    viewport={'width': 390, 'height': 844},
+    is_mobile=True,
+    has_touch=True
+)
+
+# Listen for JS errors
+errors = []
+page.on('pageerror', lambda err: errors.append(str(err)))
+
+page.goto('http://localhost:8173/api/terminal/proxy/<tab_id>/', timeout=10000)
+page.wait_for_timeout(5000)  # wait for ttyd to load
+
+# Check DOM state and CSS properties
+result = page.evaluate('''() => {
+  var vp = document.querySelector('.xterm-viewport');
+  var vpObj = window.term._core.viewport;  // NOT window.term.viewport
+  return { scrollTop: vp.scrollTop, overflowY: getComputedStyle(vp).overflowY };
+}''')
+
+# Simulate touch swipe via CDP (Playwright touchscreen.tap is full touch+release only)
+cdp = page.context.new_cdp_session(page)
+cdp.send('Input.dispatchTouchEvent', {
+    'type': 'touchStart',
+    'touchPoints': [{'x': cx, 'y': cy, 'id': 0}]
+})
+for i in range(1, 11):
+    cdp.send('Input.dispatchTouchEvent', {
+        'type': 'touchMove',
+        'touchPoints': [{'x': cx, 'y': cy - 20*i, 'id': 0}]
+    })
+cdp.send('Input.dispatchTouchEvent', {'type': 'touchEnd', 'touchPoints': []})
+```
+
+Key notes:
+- xterm viewport object is at `term._core.viewport`, not `term.viewport`
+- CDP `Input.dispatchTouchEvent` simulates real touch events (unlike `dispatchEvent`)
+- `document.body` is null when injected scripts run — use `document.documentElement`
+- Playwright headless doesn't simulate browser inertial scroll — real device testing still needed for inertia verification
+
 ## gstack
 Use /browse from gstack for all web browsing. Never use mcp__claude-in-chrome__* tools.
 Available skills: /office-hours, /plan-ceo-review, /plan-eng-review, /plan-design-review,
