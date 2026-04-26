@@ -28,7 +28,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, watch } from 'vue'
+import { onMounted, onUnmounted, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import TabBar from '@/components/TabBar.vue'
 import LayoutSelector from '@/components/LayoutSelector.vue'
@@ -53,12 +53,75 @@ watch(activePane, (pane) => {
   }
 }, { immediate: true })
 
+// ---- Mobile viewport sync with visualViewport API ----
+// When the virtual keyboard appears/disappears on mobile, the visual
+// viewport shrinks/expands. We track this and set a CSS variable so
+// the terminal area and mobile controls adjust properly.
+let vvResizeHandler: EventListener | null = null
+let vvScrollHandler: EventListener | null = null
+
+function setupMobileViewportSync() {
+  const vv = window.visualViewport
+  if (!vv) {
+    // Fallback for browsers without visualViewport: listen to window resize
+    window.addEventListener('resize', handleFallbackResize)
+    return
+  }
+
+  vvResizeHandler = () => {
+    updateKeyboardHeight(vv)
+  }
+  vvScrollHandler = () => {
+    // On iOS, visualViewport scrolls when keyboard is open.
+    // The offsetTop tells us how far the page scrolled.
+    updateKeyboardHeight(vv)
+  }
+
+  vv.addEventListener('resize', vvResizeHandler)
+  vv.addEventListener('scroll', vvScrollHandler)
+}
+
+function handleFallbackResize() {
+  // Rough fallback: if innerHeight dropped significantly, keyboard is likely open
+  const app = document.documentElement
+  app.style.setProperty('--keyboard-height', '0px')
+}
+
+function updateKeyboardHeight(vv: VisualViewport) {
+  const fullHeight = window.innerHeight
+  const viewportHeight = vv.height
+  const keyboardHeight = Math.max(0, fullHeight - viewportHeight - vv.offsetTop)
+
+  const app = document.documentElement
+  if (keyboardHeight > 50) {
+    // Keyboard is open (threshold to avoid false positives from URL bar)
+    app.style.setProperty('--keyboard-height', `${keyboardHeight}px`)
+  } else {
+    app.style.setProperty('--keyboard-height', '0px')
+  }
+}
+
+function cleanupMobileViewportSync() {
+  const vv = window.visualViewport
+  if (vv) {
+    if (vvResizeHandler) vv.removeEventListener('resize', vvResizeHandler)
+    if (vvScrollHandler) vv.removeEventListener('scroll', vvScrollHandler)
+  }
+  window.removeEventListener('resize', handleFallbackResize)
+}
+
 onMounted(async () => {
   // Always check auth first - it will handle the case when auth is not enabled
   await authStore.checkAuth()
   if (!authStore.authEnabled || !authStore.authRequired || authStore.isAuthenticated) {
     await store.fetchTabs()
   }
+  // Set up mobile viewport sync
+  setupMobileViewportSync()
+})
+
+onUnmounted(() => {
+  cleanupMobileViewportSync()
 })
 </script>
 
@@ -79,6 +142,8 @@ html, body, #app {
   display: flex;
   flex-direction: column;
   background-color: #1a1a1a;
+  /* Adjust for mobile keyboard — set by visualViewport sync */
+  padding-bottom: var(--keyboard-height, 0px);
 }
 
 .error-banner {
