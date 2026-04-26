@@ -265,8 +265,19 @@ async def proxy_terminal_request(
         padding: 0;
         overflow: hidden;
       }
+      /* Mobile touch scrolling with native inertia.
+         xterm.js layers (bottom to top): .xterm-viewport (scrollable),
+         .xterm-screen, canvas (render), canvas.xterm-link-layer.
+         Touch events land on the topmost canvas, never reaching
+         .xterm-viewport, so browser-native inertial scroll never fires.
+         Fix: let touches pass through .xterm-screen to .xterm-viewport.
+         On mobile, users scroll more than they select text/click links,
+         so this is the right trade-off. Text selection via long-press
+         still works because the textarea helper captures it. */
+      .xterm-screen {
+        pointer-events: none !important;
+      }
       .xterm-viewport {
-        touch-action: pan-y !important;
         -webkit-overflow-scrolling: touch !important;
       }
     </style>
@@ -466,6 +477,94 @@ async def proxy_terminal_request(
           }}
         }}
 
+        // ---- Mobile scrolling: native inertia ----
+        // xterm.js registers touchstart/touchmove on the .xterm element (parent).
+        // Its handleTouchMove does scrollTop += delta manually — no inertia.
+        // Its _innerRefresh snaps scrollTop = ydisp * rowHeight each frame.
+        //
+        // Strategy:
+        // 1. Override viewport.handleTouchMove/handleTouchStart to no-ops so
+        //    xterm's listener callback does nothing useful even if it fires
+        // 2. Intercept _innerRefresh to skip scrollTop reset during touch + fling
+        // 3. Let browser-native scroll on .xterm-viewport (overflow-y:scroll) work
+        var _isTouchScrolling = false;
+        var _touchScrollTimer = null;
+
+        function _getViewportObj() {{
+          var term = window.ttyd && window.ttyd.terminal ? window.ttyd.terminal : window.term;
+          if (!term) return null;
+          return term.viewport || (term._core && term._core.viewport) || null;
+        }}
+
+        function enableNativeTouchScroll() {{
+          var vpObj = _getViewportObj();
+          var viewportEl = document.querySelector('.xterm-viewport');
+          if (!vpObj || !viewportEl) return false;
+          if (vpObj.__claudeHubNativeTouch) return true;
+          vpObj.__claudeHubNativeTouch = true;
+
+          // 1. Neutralize xterm's touch handlers on the viewport object.
+          //    xterm's touchmove listener on .xterm calls viewport.handleTouchMove()
+          //    which does scrollTop += delta. Replace with no-op.
+          vpObj.handleTouchStart = function() {{}};
+          vpObj.handleTouchMove = function() {{ return true; }};
+
+          // 2. Track touch state on the viewport element
+          viewportEl.addEventListener('touchstart', function() {{
+            _isTouchScrolling = true;
+            if (_touchScrollTimer) {{
+              clearTimeout(_touchScrollTimer);
+              _touchScrollTimer = null;
+            }}
+          }}, {{ passive: true }});
+
+          viewportEl.addEventListener('touchend', function() {{
+            _touchScrollTimer = setTimeout(function() {{
+              _isTouchScrolling = false;
+              _touchScrollTimer = null;
+              // Re-align scrollTop to line boundary
+              if (vpObj._innerRefresh) {{
+                vpObj._innerRefresh();
+              }}
+            }}, 500);
+          }}, {{ passive: true }});
+
+          // 3. Intercept _innerRefresh to skip scrollTop reset during touch + fling.
+          //    _innerRefresh does: scrollTop = ydisp * rowHeight (line-snap).
+          //    During touch scroll, browser owns scrollTop with inertia.
+          var origInnerRefresh = vpObj._innerRefresh;
+          if (typeof origInnerRefresh === 'function') {{
+            vpObj._innerRefresh = function() {{
+              if (_isTouchScrolling) {{
+                this._refreshAnimationFrame = null;
+                return;
+              }}
+              return origInnerRefresh.apply(this, arguments);
+            }};
+          }}
+
+          // 4. Also intercept the scroll event on .xterm-viewport.
+          //    Even with handleTouchMove neutralized, xterm's _handleScroll
+          //    fires on every scrollTop change and updates ydisp, which
+          //    triggers _innerRefresh via queueSync. Our _innerRefresh hook
+          //    already blocks the scrollTop reset during touch, but we also
+          //    need to prevent queueSync from scheduling _innerRefresh too aggressively.
+          //    The _isTouchScrolling check in _innerRefresh handles this.
+
+          return true;
+        }}
+
+        // Poll until both viewport object and DOM element are ready
+        function tryEnable() {{
+          if (enableNativeTouchScroll()) return;
+          var tries = 0;
+          var iv = setInterval(function() {{
+            tries++;
+            if (enableNativeTouchScroll() || tries > 100) clearInterval(iv);
+          }}, 100);
+        }}
+        tryEnable();
+
         // ttyd uses Object.defineProperty(window, 'term', ...) internally,
         // and its bundled copy of Object.defineProperty was captured
         // before our script ran.  So we cannot intercept it via the
@@ -476,6 +575,13 @@ async def proxy_terminal_request(
           if (window.term && typeof window.term === 'object' && !window.term.__claudeHubHistoryHooked) {{
             currentTerm = window.term;
             hookTerm(window.term);
+            // Notify parent that terminal is ready for key input
+            if (window.parent && window.parent !== window) {{
+              window.parent.postMessage({{
+                type: 'terminal-ready',
+                tabId: TAB_ID
+              }}, '*');
+            }}
             return true;
           }}
           return false;
