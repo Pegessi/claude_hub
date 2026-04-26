@@ -476,9 +476,151 @@ async def proxy_terminal_request(
           if (window.term && typeof window.term === 'object' && !window.term.__claudeHubHistoryHooked) {{
             currentTerm = window.term;
             hookTerm(window.term);
+            // Notify parent that terminal is ready for key input
+            if (window.parent && window.parent !== window) {{
+              window.parent.postMessage({{
+                type: 'terminal-ready',
+                tabId: TAB_ID
+              }}, '*');
+            }}
             return true;
           }}
           return false;
+        }}
+
+        // ---- Inertial scrolling on xterm viewport ----
+        // xterm.js uses programmatic scroll (scrollTop) on .xterm-viewport
+        // which bypasses the browser's native inertial scroll. We attach
+        // touch handlers to re-implement fling scrolling.
+        function setupInertialScroll() {{
+          var viewport = document.querySelector('.xterm-viewport');
+          if (!viewport) return;
+          if (viewport.__claudeHubInertialScroll) return;
+          viewport.__claudeHubInertialScroll = true;
+
+          var isTouching = false;
+          var isUserScrolling = false;
+          var flingAnimation = null;
+          var lastY = 0;
+          var lastTime = 0;
+          var velocitySamples = [];
+          var FRICTION = 0.95;
+          var MIN_VELOCITY = 0.5;
+          var AUTO_SCROLL_RESUME_MS = 300;
+          var autoScrollTimer = null;
+
+          // Override xterm's scrollToBottom while user is scrolling
+          var term = currentTerm;
+          if (term && typeof term.scrollToBottom === 'function') {{
+            var origScrollToBottom = term.scrollToBottom.bind(term);
+            term.scrollToBottom = function() {{
+              if (isUserScrolling) return; // Suppress during user scroll
+              origScrollToBottom();
+            }};
+          }}
+
+          viewport.addEventListener('touchstart', function(e) {{
+            if (e.touches.length !== 1) return;
+            isTouching = true;
+            isUserScrolling = true;
+            lastY = e.touches[0].clientY;
+            lastTime = Date.now();
+            velocitySamples = [];
+            // Cancel any active fling
+            if (flingAnimation) {{
+              cancelAnimationFrame(flingAnimation);
+              flingAnimation = null;
+            }}
+            clearTimeout(autoScrollTimer);
+          }}, {{ passive: true }});
+
+          viewport.addEventListener('touchmove', function(e) {{
+            if (!isTouching || e.touches.length !== 1) return;
+            var y = e.touches[0].clientY;
+            var deltaY = lastY - y;
+            var now = Date.now();
+            var dt = now - lastTime;
+
+            // Apply scroll immediately for responsiveness
+            var maxScroll = viewport.scrollHeight - viewport.clientHeight;
+            viewport.scrollTop = Math.max(0, Math.min(maxScroll, viewport.scrollTop + deltaY));
+
+            // Track velocity (keep last 3 samples)
+            if (dt > 0) {{
+              velocitySamples.push(deltaY / dt);
+              if (velocitySamples.length > 3) velocitySamples.shift();
+            }}
+
+            lastY = y;
+            lastTime = now;
+          }}, {{ passive: true }});
+
+          viewport.addEventListener('touchend', function() {{
+            if (!isTouching) return;
+            isTouching = false;
+
+            // Calculate fling velocity from samples
+            if (velocitySamples.length === 0) {{
+              scheduleAutoScrollResume();
+              return;
+            }}
+
+            var avgVelocity = 0;
+            for (var i = 0; i < velocitySamples.length; i++) {{
+              avgVelocity += velocitySamples[i];
+            }}
+            avgVelocity /= velocitySamples.length;
+
+            // Scale velocity to pixels-per-frame (~16ms)
+            var velocity = avgVelocity * 16;
+
+            if (Math.abs(velocity) < MIN_VELOCITY) {{
+              scheduleAutoScrollResume();
+              return;
+            }}
+
+            // Deceleration loop
+            function fling() {{
+              velocity *= FRICTION;
+              if (Math.abs(velocity) < MIN_VELOCITY) {{
+                flingAnimation = null;
+                scheduleAutoScrollResume();
+                return;
+              }}
+              var maxScroll = viewport.scrollHeight - viewport.clientHeight;
+              viewport.scrollTop = Math.max(0, Math.min(maxScroll, viewport.scrollTop + velocity));
+              flingAnimation = requestAnimationFrame(fling);
+            }}
+            flingAnimation = requestAnimationFrame(fling);
+          }}, {{ passive: true }});
+
+          function scheduleAutoScrollResume() {{
+            clearTimeout(autoScrollTimer);
+            autoScrollTimer = setTimeout(function() {{
+              isUserScrolling = false;
+            }}, AUTO_SCROLL_RESUME_MS);
+          }}
+        }}
+
+        // Watch for .xterm-viewport to appear (may not exist yet when term hooks)
+        function trySetupInertialScroll() {{
+          if (document.querySelector('.xterm-viewport')) {{
+            setupInertialScroll();
+            return true;
+          }}
+          return false;
+        }}
+
+        // Try immediately, then watch for DOM changes
+        if (!trySetupInertialScroll()) {{
+          var scrollObserver = new MutationObserver(function() {{
+            if (trySetupInertialScroll()) {{
+              scrollObserver.disconnect();
+            }}
+          }});
+          scrollObserver.observe(document.body, {{ childList: true, subtree: true }});
+          // Safety: stop observing after 10 seconds
+          setTimeout(function() {{ scrollObserver.disconnect(); }}, 10000);
         }}
 
         // Try immediately (ttyd may have already set it)
