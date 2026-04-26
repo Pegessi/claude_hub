@@ -265,14 +265,12 @@ async def proxy_terminal_request(
         padding: 0;
         overflow: hidden;
       }
-      /* Enable native touch scrolling with inertia on mobile.
-         xterm.js sets touch-action: none on .xterm-viewport which
-         blocks browser scroll. We override to pan-y so vertical
-         swipe triggers native inertial scroll. overflow-y: auto
-         ensures the scrollbar/scroll area is active. */
+      /* Mobile touch scrolling: set touch-action: none so the browser
+         does NOT try to handle touch scroll. Our JS touch handlers
+         below take full control with inertial scrolling. This avoids
+         conflicts between browser scroll and xterm.js internals. */
       .xterm-viewport {
-        touch-action: pan-y !important;
-        -webkit-overflow-scrolling: touch !important;
+        touch-action: none !important;
         overflow-y: auto !important;
       }
     </style>
@@ -470,6 +468,94 @@ async def proxy_terminal_request(
               }}, DEBOUNCE_MS);
             }});
           }}
+        }}
+
+        // ---- Inertial scrolling on xterm viewport ----
+        // xterm.js intercepts touch events for its own programmatic scroll,
+        // which has no inertia. We fully take over touch handling:
+        // CSS touch-action: none disables browser scroll, then we use
+        // passive:false + preventDefault() to own all touch events and
+        // implement momentum-based fling scrolling ourselves.
+        function setupInertialScroll() {{
+          var viewport = document.querySelector('.xterm-viewport');
+          if (!viewport) return false;
+          if (viewport.__claudeHubInertialScroll) return true;
+          viewport.__claudeHubInertialScroll = true;
+
+          var lastY = 0;
+          var lastTime = 0;
+          var velocitySamples = [];
+          var flingRaf = null;
+          var FRICTION = 0.95;
+          var MIN_VELOCITY = 0.5;
+
+          viewport.addEventListener('touchstart', function(e) {{
+            if (e.touches.length !== 1) return;
+            // Cancel any active fling
+            if (flingRaf) {{
+              cancelAnimationFrame(flingRaf);
+              flingRaf = null;
+            }}
+            lastY = e.touches[0].clientY;
+            lastTime = Date.now();
+            velocitySamples = [];
+          }}, {{ passive: true }});
+
+          viewport.addEventListener('touchmove', function(e) {{
+            if (e.touches.length !== 1) return;
+            e.preventDefault(); // Block browser from scrolling — we handle it
+
+            var y = e.touches[0].clientY;
+            var delta = lastY - y; // positive = scroll down
+            var now = Date.now();
+            var dt = now - lastTime;
+
+            var maxScroll = viewport.scrollHeight - viewport.clientHeight;
+            viewport.scrollTop = Math.max(0, Math.min(maxScroll, viewport.scrollTop + delta));
+
+            if (dt > 0) {{
+              velocitySamples.push(delta / dt);
+              if (velocitySamples.length > 3) velocitySamples.shift();
+            }}
+
+            lastY = y;
+            lastTime = now;
+          }}, {{ passive: false }});
+
+          viewport.addEventListener('touchend', function() {{
+            if (velocitySamples.length === 0) return;
+
+            var avg = 0;
+            for (var i = 0; i < velocitySamples.length; i++) avg += velocitySamples[i];
+            avg /= velocitySamples.length;
+
+            // pixels per frame (~16ms)
+            var velocity = avg * 16;
+            if (Math.abs(velocity) < MIN_VELOCITY) return;
+
+            function fling() {{
+              velocity *= FRICTION;
+              if (Math.abs(velocity) < MIN_VELOCITY) {{
+                flingRaf = null;
+                return;
+              }}
+              var maxScroll = viewport.scrollHeight - viewport.clientHeight;
+              viewport.scrollTop = Math.max(0, Math.min(maxScroll, viewport.scrollTop + velocity));
+              flingRaf = requestAnimationFrame(fling);
+            }}
+            flingRaf = requestAnimationFrame(fling);
+          }}, {{ passive: true }});
+
+          return true;
+        }}
+
+        // Try to set up inertial scroll once .xterm-viewport exists
+        if (!setupInertialScroll()) {{
+          var scrollObserver = new MutationObserver(function() {{
+            if (setupInertialScroll()) scrollObserver.disconnect();
+          }});
+          scrollObserver.observe(document.body, {{ childList: true, subtree: true }});
+          setTimeout(function() {{ scrollObserver.disconnect(); }}, 10000);
         }}
 
         // ttyd uses Object.defineProperty(window, 'term', ...) internally,
