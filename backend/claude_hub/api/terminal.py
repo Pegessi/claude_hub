@@ -472,93 +472,92 @@ async def proxy_terminal_request(
         }}
 
         // ---- Mobile scrolling: native inertia ----
-        // xterm.js registers touchstart/touchmove on the .xterm element.
+        // xterm.js registers touchstart/touchmove on the .xterm element (parent).
         // Its handleTouchMove does scrollTop += delta manually — no inertia.
         // Its _innerRefresh snaps scrollTop = ydisp * rowHeight each frame.
-        // Both kill browser-native inertial/fling scrolling.
         //
-        // Fix: on .xterm-viewport, capture-phase touch listeners call
-        // stopPropagation() to prevent events from reaching xterm's handlers
-        // on the parent .xterm element. Browser-native scroll (overflow-y:scroll)
-        // still works because it's handled internally by the browser, not via
-        // JS event propagation. Then intercept _innerRefresh to skip scrollTop
-        // reset during touch + fling, so the browser's inertia survives.
+        // Strategy:
+        // 1. Override viewport.handleTouchMove/handleTouchStart to no-ops so
+        //    xterm's listener callback does nothing useful even if it fires
+        // 2. Intercept _innerRefresh to skip scrollTop reset during touch + fling
+        // 3. Let browser-native scroll on .xterm-viewport (overflow-y:scroll) work
         var _isTouchScrolling = false;
         var _touchScrollTimer = null;
 
-        function setupNativeTouchScroll(viewport) {{
-          if (viewport.__claudeHubNativeTouch) return;
-          viewport.__claudeHubNativeTouch = true;
+        function _getViewportObj() {{
+          var term = window.ttyd && window.ttyd.terminal ? window.ttyd.terminal : window.term;
+          if (!term) return null;
+          return term.viewport || (term._core && term._core.viewport) || null;
+        }}
 
-          // Capture phase: stop touch events from bubbling to .xterm where
-          // xterm's handlers sit. Browser native scroll is NOT affected by
-          // stopPropagation — it processes touch gestures before JS dispatch.
-          viewport.addEventListener('touchstart', function() {{
+        function enableNativeTouchScroll() {{
+          var vpObj = _getViewportObj();
+          var viewportEl = document.querySelector('.xterm-viewport');
+          if (!vpObj || !viewportEl) return false;
+          if (vpObj.__claudeHubNativeTouch) return true;
+          vpObj.__claudeHubNativeTouch = true;
+
+          // 1. Neutralize xterm's touch handlers on the viewport object.
+          //    xterm's touchmove listener on .xterm calls viewport.handleTouchMove()
+          //    which does scrollTop += delta. Replace with no-op.
+          vpObj.handleTouchStart = function() {{}};
+          vpObj.handleTouchMove = function() {{ return true; }};
+
+          // 2. Track touch state on the viewport element
+          viewportEl.addEventListener('touchstart', function() {{
             _isTouchScrolling = true;
             if (_touchScrollTimer) {{
               clearTimeout(_touchScrollTimer);
               _touchScrollTimer = null;
             }}
-          }}, {{ capture: true, passive: true }});
+          }}, {{ passive: true }});
 
-          viewport.addEventListener('touchmove', function(e) {{
-            e.stopPropagation();
-          }}, {{ capture: true, passive: true }});
-
-          viewport.addEventListener('touchend', function() {{
-            // After finger lifts, wait for fling to settle before letting
-            // _innerRefresh snap scrollTop back to line boundaries.
+          viewportEl.addEventListener('touchend', function() {{
             _touchScrollTimer = setTimeout(function() {{
               _isTouchScrolling = false;
               _touchScrollTimer = null;
               // Re-align scrollTop to line boundary
-              var term = window.ttyd && window.ttyd.terminal ? window.ttyd.terminal : window.term;
-              if (term && term.viewport && term.viewport._innerRefresh) {{
-                term.viewport._innerRefresh();
+              if (vpObj._innerRefresh) {{
+                vpObj._innerRefresh();
               }}
             }}, 500);
-          }}, {{ capture: true, passive: true }});
-        }}
+          }}, {{ passive: true }});
 
-        // Intercept _innerRefresh once terminal is available
-        function hookInnerRefresh() {{
-          var term = window.ttyd && window.ttyd.terminal ? window.ttyd.terminal : window.term;
-          if (!term || !term.viewport) return false;
-          if (term.viewport.__claudeHubRefreshHooked) return true;
-          term.viewport.__claudeHubRefreshHooked = true;
-
-          var origInnerRefresh = term.viewport._innerRefresh;
+          // 3. Intercept _innerRefresh to skip scrollTop reset during touch + fling.
+          //    _innerRefresh does: scrollTop = ydisp * rowHeight (line-snap).
+          //    During touch scroll, browser owns scrollTop with inertia.
+          var origInnerRefresh = vpObj._innerRefresh;
           if (typeof origInnerRefresh === 'function') {{
-            term.viewport._innerRefresh = function() {{
+            vpObj._innerRefresh = function() {{
               if (_isTouchScrolling) {{
-                // Don't reset scrollTop — browser owns it during touch + fling
                 this._refreshAnimationFrame = null;
                 return;
               }}
               return origInnerRefresh.apply(this, arguments);
             }};
           }}
+
+          // 4. Also intercept the scroll event on .xterm-viewport.
+          //    Even with handleTouchMove neutralized, xterm's _handleScroll
+          //    fires on every scrollTop change and updates ydisp, which
+          //    triggers _innerRefresh via queueSync. Our _innerRefresh hook
+          //    already blocks the scrollTop reset during touch, but we also
+          //    need to prevent queueSync from scheduling _innerRefresh too aggressively.
+          //    The _isTouchScrolling check in _innerRefresh handles this.
+
           return true;
         }}
 
-        // Wait for .xterm-viewport to exist, then set up everything
-        function trySetup() {{
-          var viewport = document.querySelector('.xterm-viewport');
-          if (viewport) {{
-            setupNativeTouchScroll(viewport);
-            hookInnerRefresh();
-            return true;
-          }}
-          return false;
+        // Poll until both viewport object and DOM element are ready
+        function tryEnable() {{
+          if (enableNativeTouchScroll()) return;
+          var tries = 0;
+          var iv = setInterval(function() {{
+            tries++;
+            if (enableNativeTouchScroll() || tries > 100) clearInterval(iv);
+          }}, 100);
         }}
-
-        if (!trySetup()) {{
-          var obs = new MutationObserver(function() {{
-            if (trySetup()) obs.disconnect();
-          }});
-          obs.observe(document.body, {{ childList: true, subtree: true }});
-          setTimeout(function() {{ obs.disconnect(); }}, 15000);
-        }}
+        tryEnable();
 
         // ttyd uses Object.defineProperty(window, 'term', ...) internally,
         // and its bundled copy of Object.defineProperty was captured
