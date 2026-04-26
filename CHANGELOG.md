@@ -3,6 +3,37 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-04-26
+
+### feat: mobile UX improvements — viewport sync, key reliability, combo keys, inertial scroll
+
+**4 个移动端体验问题修复：**
+
+1. **键盘弹出时视口错乱** — 添加 `visualViewport` API 监听，键盘弹出时设置 `--keyboard-height` CSS 变量，App 容器和 MobileControls 自动适配
+2. **虚拟按键切换 Tab 后失效** — 添加 terminal-ready 信号（iframe→parent postMessage）+ 按 key 队列缓存，Tab 切换后自动 flush
+3. **缺少组合键** — 重组虚拟键盘布局：移除 PgUp/PgDn，加入方向键到主行，新增 Ctrl+C/D/L/A/E 和 Shift+Tab 快捷按钮，Ctrl/Shift 粘滞修饰键支持 Ctrl+任意字母
+4. **终端历史滚动无惯性** — 通过阅读 xterm.js 源码定位根因并修复（详见下方）
+
+**惯性滚动修复（6 次迭代）：**
+
+迭代过程中发现三个杀死惯性滚动的机制：
+- xterm 的 `handleTouchMove` 手动设 `scrollTop += delta`（替换浏览器原生滚动，无惯性）
+- xterm 的 `_innerRefresh` 每帧重置 `scrollTop = ydisp * rowHeight`（行对齐，打断惯性）
+- xterm 的 `.xterm-screen` 层遮住 `.xterm-viewport`，触摸事件到不了 viewport 元素
+
+最终修复（3 层方案）：
+- CSS: `.xterm-screen { pointer-events: none }` 让触摸穿透到 `.xterm-viewport`
+- JS: `term._core.viewport.handleTouchMove` → no-op，阻止 xterm 手动设 scrollTop
+- JS: 拦截 `_innerRefresh`，触摸+fling 期间跳过 scrollTop 重置
+
+关键发现：viewport 对象在 `term._core.viewport`（非 `term.viewport`），`document.body` 在脚本执行时为 null（需用 `document.documentElement`）
+
+**改动文件：**
+- `backend/claude_hub/api/terminal.py` — 注入 CSS（pointer-events, -webkit-overflow-scrolling）+ JS（触摸穿透、handleTouchMove no-op、_innerRefresh hook、terminal-ready postMessage、Ctrl+字母/Shift+Tab 编码）
+- `frontend/src/App.vue` — visualViewport 同步 + `--keyboard-height` CSS 变量
+- `frontend/src/components/MobileControls.vue` — 重组键盘布局 + 快捷按钮 + Ctrl/Shift 粘滞修饰 + 自动释放
+- `frontend/src/components/TerminalView.vue` — terminal-ready 信号 + key 队列 + Ctrl+字母/Shift+Tab 处理
+
 ## 2026-04-25
 
 ### 75f9d1c fix: terminal history replay misalignment with Playwright E2E tests
