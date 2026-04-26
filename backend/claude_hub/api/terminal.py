@@ -265,12 +265,18 @@ async def proxy_terminal_request(
         padding: 0;
         overflow: hidden;
       }
-      /* Mobile touch scrolling: xterm.js sets overflow-y:scroll on
-         .xterm-viewport and listens to the 'scroll' event. The browser's
-         native touch scroll provides inertial/fling scrolling for free.
-         We only add -webkit-overflow-scrolling:touch for iOS Safari
-         (momentum scroll). Do NOT set touch-action:none — that kills
-         native inertia. Do NOT override overflow-y — xterm manages it. */
+      /* Mobile touch scrolling with native inertia.
+         xterm.js layers (bottom to top): .xterm-viewport (scrollable),
+         .xterm-screen, canvas (render), canvas.xterm-link-layer.
+         Touch events land on the topmost canvas, never reaching
+         .xterm-viewport, so browser-native inertial scroll never fires.
+         Fix: let touches pass through .xterm-screen to .xterm-viewport.
+         On mobile, users scroll more than they select text/click links,
+         so this is the right trade-off. Text selection via long-press
+         still works because the textarea helper captures it. */
+      .xterm-screen {
+        pointer-events: none !important;
+      }
       .xterm-viewport {
         -webkit-overflow-scrolling: touch !important;
       }
