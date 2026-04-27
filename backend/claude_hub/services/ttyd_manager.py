@@ -69,6 +69,12 @@ def get_default_command() -> str:
     return settings.default_command
 
 
+def get_agent_command(agent_type: AgentType) -> str:
+    if agent_type == AgentType.CODEX:
+        return "codex"
+    return get_default_command()
+
+
 class TTYDProcess:
     """Manages a single ttyd process backed by a tmux session for persistence."""
 
@@ -93,13 +99,13 @@ class TTYDProcess:
         self.created_at = created_at or datetime.now()
         self.is_active = False
         self.tmux_session = _tmux_session_name(tab_id)
-        # For Cursor agent, use user's shell instead of claude
+        # For terminal tabs, use the user's shell instead of an agent command.
         if shell:
             self.shell = shell
         elif agent_type == AgentType.CURSOR:
             self.shell = os.environ.get("SHELL", "/bin/bash")
         else:
-            self.shell = get_default_command()
+            self.shell = get_agent_command(agent_type)
 
     async def start(self) -> None:
         """Start the ttyd process with tmux for session persistence."""
@@ -117,46 +123,7 @@ class TTYDProcess:
         else:
             logger.info(f"tmux session {self.tmux_session} does not exist, will create new")
 
-        # tmux new-session -A: attach if exists, create if not.
-        # This is the key to persistence across page refreshes.
-        cmd = [
-            settings.ttyd_path,
-            "--port",
-            str(self.port),
-            "--interface",
-            "127.0.0.1",
-            "--writable",
-            # Improve scrolling behavior with xterm.js options
-            "-t",
-            "scrollback=100000",
-            "-t",
-            "fastScrollModifier=alt",
-            "-t",
-            "macOptionIsMeta=false",
-            "tmux",
-            "new-session",
-            "-A",
-            "-s",
-            self.tmux_session,
-        ]
-        if self.cwd:
-            cmd.extend(["-c", self.cwd])
-
-        # For solo mode: directly run the command with env var (only for Claude)
-        if self.agent_type == AgentType.CLAUDE and self.solo_mode and not session_exists:
-            # Use bash -c to set IS_SANDBOX=1, run claude, then keep shell alive
-            user_shell = os.environ.get("SHELL", "/bin/bash")
-            cmd.extend(
-                [
-                    user_shell,
-                    "-c",
-                    "IS_SANDBOX=1 claude --dangerously-skip-permissions; exec " + user_shell,
-                ]
-            )
-        else:
-            # For Claude (non-solo) and Terminal (cursor) types, just use the shell
-            cmd.append(self.shell)
-
+        cmd = self._build_ttyd_command(session_exists=session_exists)
         logger.info(f"Starting ttyd for tab {self.tab_id} on port {self.port}: {' '.join(cmd)}")
 
         try:
@@ -188,6 +155,53 @@ class TTYDProcess:
             logger.error(f"Failed to start ttyd for tab {self.tab_id}: {e}")
             self.is_active = False
             raise
+
+    def _build_ttyd_command(self, session_exists: bool) -> list[str]:
+        # tmux new-session -A: attach if exists, create if not.
+        # This is the key to persistence across page refreshes.
+        cmd = [
+            settings.ttyd_path,
+            "--port",
+            str(self.port),
+            "--interface",
+            "127.0.0.1",
+            "--writable",
+            # Improve scrolling behavior with xterm.js options
+            "-t",
+            "scrollback=100000",
+            "-t",
+            "fastScrollModifier=alt",
+            "-t",
+            "macOptionIsMeta=false",
+            "tmux",
+            "new-session",
+            "-A",
+            "-s",
+            self.tmux_session,
+        ]
+        if self.cwd:
+            cmd.extend(["-c", self.cwd])
+
+        if self.solo_mode and not session_exists and self.agent_type in {
+            AgentType.CLAUDE,
+            AgentType.CODEX,
+        }:
+            user_shell = os.environ.get("SHELL", "/bin/bash")
+            if self.agent_type == AgentType.CODEX:
+                solo_command = "codex --ask-for-approval never --sandbox workspace-write"
+            else:
+                solo_command = "IS_SANDBOX=1 claude --dangerously-skip-permissions"
+            cmd.extend(
+                [
+                    user_shell,
+                    "-c",
+                    f"{solo_command}; exec {user_shell}",
+                ]
+            )
+        else:
+            cmd.append(self.shell)
+
+        return cmd
 
     async def _log_stderr(self) -> None:
         if not self.process or not self.process.stderr:

@@ -3,6 +3,15 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-04-27
+
+### c379b9f feat: add codex backend solo mode
+- Add `AgentType.CODEX` and launch Codex tabs with the `codex` CLI by default
+- Add Codex solo mode using `codex --ask-for-approval never --sandbox workspace-write`
+- Extend the new-tab modal to choose Claude, Codex, or Terminal backends, with solo mode available for Claude and Codex
+- Add backend tests for Codex command construction and tmux reattach behavior
+- **Files**: schemas.py, ttyd_manager.py, test_ttyd_manager.py, TabBar.vue, types/index.ts
+
 ## 2026-04-26
 
 ### feat: mobile UX improvements — viewport sync, key reliability, combo keys, inertial scroll
