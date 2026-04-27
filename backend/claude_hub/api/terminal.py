@@ -401,6 +401,7 @@ async def proxy_terminal_request(
           if (term.element) {{
             replayHistory(term, true);
             setupResizeGuard(term);
+            setupHistoryResyncAfterReplay(term);
           }} else {{
             const originalOpen = term.open.bind(term);
             term.open = function(...args) {{
@@ -414,6 +415,7 @@ async def proxy_terminal_request(
               // payload while replay is in progress.
               replayHistory(term, true);
               setupResizeGuard(term);
+              setupHistoryResyncAfterReplay(term);
               return result;
             }};
           }}
@@ -484,6 +486,147 @@ async def proxy_terminal_request(
           }}
         }}
 
+        // ---- History resync after live-output bursts ----
+        // ttyd is attached to tmux as a terminal client, so under fast
+        // wrapped output tmux can optimize what it sends to the client and
+        // skip scrollback that is still present in tmux history. After live
+        // output goes idle and the user is at the bottom, reconcile xterm
+        // with tmux history so newly produced long/wrapped output is complete.
+        const RESYNC_IDLE_MS = 700;
+
+        function setupHistoryResync(term) {{
+          if (!term || term.__claudeHubHistoryResyncHooked || typeof term.write !== 'function') return;
+          term.__claudeHubHistoryResyncHooked = true;
+
+          const writeThrough = term.write.bind(term);
+          let writeGeneration = 0;
+          let timer = null;
+          let resyncing = false;
+          let pendingWhenBottom = false;
+          const resyncBuffer = [];
+
+          function bufferService() {{
+            return term._core && term._core._bufferService;
+          }}
+
+          function isAtBottom() {{
+            const buffer = term.buffer && term.buffer.active;
+            const service = bufferService();
+            if (!buffer) return true;
+            const viewportEl = document.querySelector('.xterm-viewport');
+            const domAtBottom = !viewportEl ||
+              viewportEl.scrollTop >= viewportEl.scrollHeight - viewportEl.clientHeight - 1;
+            return !(service && service.isUserScrolling) &&
+              buffer.viewportY === buffer.baseY &&
+              domAtBottom;
+          }}
+
+          function scheduleResync() {{
+            if (resyncing) return;
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(runResync, RESYNC_IDLE_MS);
+          }}
+
+          function noteLiveWrite() {{
+            writeGeneration++;
+            if (isAtBottom()) {{
+              pendingWhenBottom = false;
+              scheduleResync();
+            }} else {{
+              pendingWhenBottom = true;
+            }}
+          }}
+
+          term.write = function(data, cb) {{
+            if (resyncing) {{
+              resyncBuffer.push({{ data, cb }});
+              return undefined;
+            }}
+            const result = writeThrough(data, cb);
+            noteLiveWrite();
+            return result;
+          }};
+
+          const viewportEl = document.querySelector('.xterm-viewport');
+          if (viewportEl) {{
+            viewportEl.addEventListener('scroll', function() {{
+              if (pendingWhenBottom && isAtBottom()) {{
+                pendingWhenBottom = false;
+                scheduleResync();
+              }}
+            }}, {{ passive: true }});
+          }}
+
+          async function fetchHistoryText() {{
+            const response = await fetch(`/api/terminal/history/${{TAB_ID}}?lines=${{HISTORY_LINES}}`);
+            if (!response.ok) throw new Error('history resync failed: ' + response.status);
+            const payload = await response.json();
+            return payload && typeof payload.history === 'string' ? payload.history : '';
+          }}
+
+          async function runResync() {{
+            timer = null;
+            if (!isAtBottom() || resyncing) {{
+              pendingWhenBottom = true;
+              return;
+            }}
+
+            const generationAtStart = writeGeneration;
+            let text = '';
+            try {{
+              text = await fetchHistoryText();
+            }} catch (error) {{
+              console.debug('claude-hub history resync failed', error);
+              return;
+            }}
+
+            if (generationAtStart !== writeGeneration || !isAtBottom()) {{
+              pendingWhenBottom = !isAtBottom();
+              if (isAtBottom()) scheduleResync();
+              return;
+            }}
+
+            const lines = text.replace(/\\r?\\n/g, '\\r\\n').replace(/\\r/g, '').split('\\n');
+            if (lines.length > 0 && lines[lines.length - 1] === '') {{
+              lines.pop();
+            }}
+            if (lines.length === 0) return;
+
+            resyncing = true;
+            writeThrough('\\x1b[H\\x1b[2J\\x1b[3J' + lines.join('\\r\\n'), function() {{
+              resyncing = false;
+              while (resyncBuffer.length > 0) {{
+                const item = resyncBuffer.shift();
+                writeThrough(item.data, item.cb);
+              }}
+              try {{
+                if (typeof term.scrollToBottom === 'function') {{
+                  term.scrollToBottom();
+                }}
+              }} catch (error) {{}}
+              if (resyncBuffer.length > 0 || generationAtStart !== writeGeneration) {{
+                scheduleResync();
+              }}
+            }});
+          }}
+        }}
+
+        function setupHistoryResyncAfterReplay(term) {{
+          if (!term) return;
+          if (term.__claudeHubReplayDone) {{
+            setupHistoryResync(term);
+            return;
+          }}
+          var tries = 0;
+          var iv = setInterval(function() {{
+            tries++;
+            if (term.__claudeHubReplayDone || tries > 200) {{
+              clearInterval(iv);
+              setupHistoryResync(term);
+            }}
+          }}, 50);
+        }}
+
         // ---- Mobile scrolling: native inertia ----
         // xterm.js registers touchstart/touchmove on the .xterm element (parent).
         // Its handleTouchMove does scrollTop += delta manually — no inertia.
@@ -492,20 +635,55 @@ async def proxy_terminal_request(
         // Strategy:
         // 1. Override viewport.handleTouchMove/handleTouchStart to no-ops so
         //    xterm's listener callback does nothing useful even if it fires
-        // 2. Intercept _innerRefresh to skip scrollTop reset during touch + fling
-        // 3. Let browser-native scroll on .xterm-viewport (overflow-y:scroll) work
+        // 2. Let browser-native scroll on .xterm-viewport (overflow-y:scroll) work
+        // 3. Keep xterm's _innerRefresh intact. Live output can advance
+        //    viewportY/baseY while the user is touching history; blocking
+        //    _innerRefresh lets scrollTop go stale and makes rendered
+        //    history appear mixed with new output until touchend.
         var _isTouchScrolling = false;
         var _touchScrollTimer = null;
 
-        function _getViewportObj() {{
+        function _getTerm() {{
           var term = window.ttyd && window.ttyd.terminal ? window.ttyd.terminal : window.term;
-          if (!term) return null;
-          return term.viewport || (term._core && term._core.viewport) || null;
+          return term || null;
+        }}
+
+        function _getViewportObj() {{
+          var term = _getTerm();
+          return term ? (term.viewport || (term._core && term._core.viewport) || null) : null;
+        }}
+
+        function _markUserScrolling() {{
+          var term = _getTerm();
+          var bufferService = term && term._core && term._core._bufferService;
+          if (bufferService) {{
+            bufferService.isUserScrolling = true;
+          }}
+        }}
+
+        function _scrollAwayFromBottom(deltaY) {{
+          var term = _getTerm();
+          var buffer = term && term.buffer && term.buffer.active;
+          if (!term || !buffer || buffer.viewportY < buffer.baseY - 1) return;
+
+          var vpObj = _getViewportObj();
+          var rowHeight = (vpObj && vpObj._currentRowHeight) || 15;
+          var lines = Math.max(1, Math.ceil(Math.abs(deltaY) / rowHeight));
+          if (typeof term.scrollLines === 'function') {{
+            term.scrollLines(-lines);
+            return;
+          }}
+
+          var viewportEl = document.querySelector('.xterm-viewport');
+          if (viewportEl) {{
+            viewportEl.scrollTop = Math.max(0, viewportEl.scrollTop - lines * rowHeight);
+          }}
         }}
 
         function enableNativeTouchScroll() {{
           var vpObj = _getViewportObj();
           var viewportEl = document.querySelector('.xterm-viewport');
+          var xtermEl = document.querySelector('.xterm');
           if (!vpObj || !viewportEl) return false;
           if (vpObj.__claudeHubNativeTouch) return true;
           vpObj.__claudeHubNativeTouch = true;
@@ -516,12 +694,44 @@ async def proxy_terminal_request(
           vpObj.handleTouchStart = function() {{}};
           vpObj.handleTouchMove = function() {{ return true; }};
 
+          // Desktop wheel/trackpad scrolls can race with fast live output
+          // while the viewport is still at the bottom. Mark user scrolling
+          // in the capture phase so xterm stops following new output before
+          // its normal wheel handler processes the scroll delta.
+          function handleWheelStart(event) {{
+            const target = event.target;
+            const insideTerminal = !target || target === window || target === document ||
+              (target.closest && target.closest('.xterm'));
+            if (insideTerminal && event.deltaY < 0) {{
+              _markUserScrolling();
+              _scrollAwayFromBottom(event.deltaY);
+            }}
+          }}
+          viewportEl.addEventListener('wheel', handleWheelStart, {{ capture: true, passive: true }});
+          if (xtermEl) {{
+            xtermEl.addEventListener('wheel', handleWheelStart, {{ capture: true, passive: true }});
+          }}
+          window.addEventListener('wheel', handleWheelStart, {{ capture: true, passive: true }});
+
           // 2. Track touch state on the viewport element
-          viewportEl.addEventListener('touchstart', function() {{
+          var touchStartY = null;
+          viewportEl.addEventListener('touchstart', function(event) {{
             _isTouchScrolling = true;
+            touchStartY = null;
+            if (event.touches && event.touches.length > 0) {{
+              touchStartY = event.touches[0].clientY;
+            }}
             if (_touchScrollTimer) {{
               clearTimeout(_touchScrollTimer);
               _touchScrollTimer = null;
+            }}
+          }}, {{ passive: true }});
+
+          viewportEl.addEventListener('touchmove', function(event) {{
+            if (touchStartY !== null && event.touches && event.touches.length > 0) {{
+              if (event.touches[0].clientY - touchStartY > 8) {{
+                _markUserScrolling();
+              }}
             }}
           }}, {{ passive: true }});
 
@@ -529,34 +739,8 @@ async def proxy_terminal_request(
             _touchScrollTimer = setTimeout(function() {{
               _isTouchScrolling = false;
               _touchScrollTimer = null;
-              // Re-align scrollTop to line boundary
-              if (vpObj._innerRefresh) {{
-                vpObj._innerRefresh();
-              }}
             }}, 500);
           }}, {{ passive: true }});
-
-          // 3. Intercept _innerRefresh to skip scrollTop reset during touch + fling.
-          //    _innerRefresh does: scrollTop = ydisp * rowHeight (line-snap).
-          //    During touch scroll, browser owns scrollTop with inertia.
-          var origInnerRefresh = vpObj._innerRefresh;
-          if (typeof origInnerRefresh === 'function') {{
-            vpObj._innerRefresh = function() {{
-              if (_isTouchScrolling) {{
-                this._refreshAnimationFrame = null;
-                return;
-              }}
-              return origInnerRefresh.apply(this, arguments);
-            }};
-          }}
-
-          // 4. Also intercept the scroll event on .xterm-viewport.
-          //    Even with handleTouchMove neutralized, xterm's _handleScroll
-          //    fires on every scrollTop change and updates ydisp, which
-          //    triggers _innerRefresh via queueSync. Our _innerRefresh hook
-          //    already blocks the scrollTop reset during touch, but we also
-          //    need to prevent queueSync from scheduling _innerRefresh too aggressively.
-          //    The _isTouchScrolling check in _innerRefresh handles this.
 
           return true;
         }}
