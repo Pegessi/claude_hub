@@ -3,6 +3,27 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-04-28
+
+### de5c9b8 fix: restore terminal cursor position after history replay
+- Add tmux cursor coordinates (`cursor_x`, `cursor_y`) to the terminal history API response
+- Restore xterm's cursor after initial history replay and idle history resync so the prompt cursor appears in the input line instead of the bottom row
+- Add a Playwright regression test that compares xterm cursor coordinates against tmux pane coordinates
+- **Files**: terminal.py, ttyd_manager.py, test_terminal_replay.py
+
+### 7b93181 fix: stabilize terminal history while live output is streaming
+- Reconcile xterm with tmux history after live output bursts go idle, restoring complete wrapped output that ttyd may skip in the live stream
+- Tighten bottom-position detection so idle resync only rewrites the buffer when the user is truly at the bottom
+- Preserve user history views while scrolling, including near-bottom views that show both older history and new output
+- Add Playwright coverage for touch/wheel scroll alignment, wrapped live output continuity, and near-bottom resync protection
+- **Files**: terminal.py, test_terminal_replay.py
+
+### 81cb44c fix: persist tab order updates
+- Persist drag-and-drop tab ordering so refreshing the web UI keeps the user's custom tab order
+- Add backend coverage for saving and returning ordered tab lists
+- Add `.agent_office/` to `.gitignore` for local workflow artifacts
+- **Files**: .gitignore, tabs.py, test_tabs.py
+
 ## 2026-04-27
 
 ### c379b9f feat: add codex backend solo mode
