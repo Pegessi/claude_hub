@@ -127,6 +127,34 @@ def load_terminal_page(page: Page, tab_id: str) -> None:
     wait_for_visible_screen(page)
 
 
+def wait_for_cursor_matches_tmux(page: Page, tab_id: str) -> None:
+    """Wait until xterm's cursor position matches tmux's pane cursor."""
+    page.wait_for_function(
+        """async (tabId) => {
+            const term = window.term;
+            if (!term) return false;
+
+            const response = await fetch(`/api/terminal/history/${tabId}?lines=100000`);
+            if (!response.ok) return false;
+            const payload = await response.json();
+            if (!Number.isInteger(payload.cursor_x) || !Number.isInteger(payload.cursor_y)) {
+                return false;
+            }
+
+            const buffer = term.buffer.active;
+            window.__claudeHubLastCursorMatch = {
+                xtermX: buffer.cursorX,
+                xtermY: buffer.cursorY,
+                tmuxX: payload.cursor_x,
+                tmuxY: payload.cursor_y,
+            };
+            return buffer.cursorX === payload.cursor_x && buffer.cursorY === payload.cursor_y;
+        }""",
+        arg=tab_id,
+        timeout=10000,
+    )
+
+
 def read_scroll_alignment(page: Page) -> dict[str, Any] | None:
     """Read viewport scroll alignment state from xterm."""
     return page.evaluate("""() => {
@@ -295,6 +323,14 @@ def test_empty_scrollback(terminal_tab: dict, page: Page) -> None:
     page.on("pageerror", lambda err: errors.append(str(err)))
     time.sleep(0.5)
     assert not errors, f"JS errors during empty scrollback load: {errors}"
+
+
+def test_initial_prompt_cursor_matches_tmux_position(terminal_tab: dict, page: Page) -> None:
+    """Initial prompt replay restores the cursor to tmux's pane position."""
+    tab = terminal_tab
+
+    load_terminal_page(page, tab["id"])
+    wait_for_cursor_matches_tmux(page, tab["id"])
 
 
 def test_replay_with_active_output(terminal_tab: dict, page: Page) -> None:
