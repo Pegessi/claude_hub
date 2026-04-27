@@ -12,6 +12,7 @@ Run with: uv run pytest tests/test_terminal_replay.py -v
 import re
 import subprocess
 import time
+from typing import Any
 
 import pytest
 from playwright.sync_api import Page
@@ -124,6 +125,45 @@ def load_terminal_page(page: Page, tab_id: str) -> None:
     page.wait_for_selector(".xterm", timeout=15000)
     wait_for_replay_done(page)
     wait_for_visible_screen(page)
+
+
+def read_scroll_alignment(page: Page) -> dict[str, Any] | None:
+    """Read viewport scroll alignment state from xterm."""
+    return page.evaluate("""() => {
+            const term = window.term;
+            const viewportEl = document.querySelector('.xterm-viewport');
+            if (!term || !viewportEl) return null;
+            const vpObj = term._core && term._core.viewport;
+            const rowHeight = (vpObj && vpObj._currentRowHeight) || 15;
+            const buffer = term.buffer.active;
+            return {
+                scrollTop: viewportEl.scrollTop,
+                viewportY: buffer.viewportY,
+                baseY: buffer.baseY,
+                isUserScrolling: term._core._bufferService.isUserScrolling,
+                rowHeight,
+                delta: Math.abs(viewportEl.scrollTop - buffer.viewportY * rowHeight),
+            };
+        }""")
+
+
+def read_xterm_text(page: Page) -> str:
+    """Read the full xterm buffer as newline-delimited text."""
+    lines: list[str] = page.evaluate("""() => {
+            const buffer = window.term.buffer.active;
+            const lines = [];
+            for (let i = 0; i < buffer.length; i++) {
+                const line = buffer.getLine(i);
+                if (line) lines.push(line.translateToString(true));
+            }
+            return lines;
+        }""")
+    return "\n".join(lines)
+
+
+def live_line_numbers(text: str) -> set[int]:
+    """Extract LIVE_XXXX markers from terminal text."""
+    return {int(match.group(1)) for match in re.finditer(r"LIVE_(\d{4})", text)}
 
 
 # ── tests ────────────────────────────────────────────────────────────────
@@ -310,3 +350,217 @@ def test_replay_with_active_output(terminal_tab: dict, page: Page) -> None:
             f"LINE_ lines (indices {line_min}-{line_max}). "
             f"This indicates history/realtime data interleaving."
         )
+
+
+def test_touch_scroll_alignment_during_live_output(terminal_tab: dict, page: Page) -> None:
+    """Touch scrolling stays aligned while new terminal output is arriving.
+
+    Regression guard for the mobile native-scroll hook: it must not suppress
+    xterm's viewport refresh while live output advances the buffer, otherwise
+    scrollTop and viewportY diverge and the rendered history appears mixed with
+    new output until touchend.
+    """
+    tab = terminal_tab
+    session_name = f"claude-hub-{tab['id'][:8]}"
+
+    ensure_tmux_session(page, tab["id"], session_name)
+    produce_scrollback(session_name, count=260)
+    load_terminal_page(page, tab["id"])
+
+    send_keys_sync(
+        session_name,
+        "for i in $(seq 0 99); do echo LIVE_$(printf '%04d' $i); sleep 0.03; done",
+        "Enter",
+    )
+    time.sleep(0.2)
+
+    box = page.locator(".xterm-viewport").bounding_box()
+    assert box is not None, "xterm viewport not found"
+    cx = box["x"] + box["width"] / 2
+    cy = box["y"] + box["height"] * 0.65
+    cdp = page.context.new_cdp_session(page)
+
+    samples: list[dict[str, Any]] = []
+    cdp.send(
+        "Input.dispatchTouchEvent",
+        {"type": "touchStart", "touchPoints": [{"x": cx, "y": cy, "id": 1}]},
+    )
+    for i in range(1, 12):
+        cdp.send(
+            "Input.dispatchTouchEvent",
+            {
+                "type": "touchMove",
+                "touchPoints": [{"x": cx, "y": cy + 24 * i, "id": 1}],
+            },
+        )
+        time.sleep(0.06)
+        state = read_scroll_alignment(page)
+        if state:
+            samples.append(state)
+    cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+
+    assert samples, "no scroll alignment samples captured"
+    max_delta = max(sample["delta"] for sample in samples)
+    max_row_height = max(sample["rowHeight"] for sample in samples)
+
+    assert max_delta <= max_row_height * 2, (
+        f"xterm viewport lost scroll alignment during live output; "
+        f"max delta={max_delta}, row height={max_row_height}, samples={samples}"
+    )
+
+
+def test_desktop_wheel_enters_user_scroll_during_live_output(
+    terminal_tab: dict, page: Page
+) -> None:
+    """Desktop wheel-up should stop following live output immediately.
+
+    Without the capture-phase user-scroll marker, fast output can keep the
+    viewport pinned to the bottom for the first wheel events, mixing newly
+    appended output into the history the user is trying to inspect.
+    """
+    tab = terminal_tab
+    session_name = f"claude-hub-{tab['id'][:8]}"
+
+    ensure_tmux_session(page, tab["id"], session_name)
+    produce_scrollback(session_name, count=500)
+    load_terminal_page(page, tab["id"])
+
+    send_keys_sync(
+        session_name,
+        (
+            "for i in $(seq 0 300); do "
+            "printf '\\rSTATUS_%04d' $i; "
+            "echo LIVE_$(printf '%04d' $i); "
+            "sleep 0.005; "
+            "done"
+        ),
+        "Enter",
+    )
+    before = read_scroll_alignment(page)
+    assert before is not None
+    page.wait_for_function(
+        f"() => window.term.buffer.active.baseY > {before['baseY']}", timeout=10000
+    )
+
+    box = page.locator(".xterm-viewport").bounding_box()
+    assert box is not None, "xterm viewport not found"
+    page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    page.mouse.wheel(0, -120)
+    time.sleep(0.02)
+
+    after = read_scroll_alignment(page)
+    assert after is not None
+    assert after["viewportY"] < after["baseY"], (
+        f"wheel-up did not leave the live-output bottom after first event: "
+        f"before={before}, after={after}"
+    )
+
+
+def test_wrapped_live_output_resyncs_complete_history(terminal_tab: dict, page: Page) -> None:
+    """Fast wrapped output is reconciled from tmux history after it goes idle.
+
+    tmux can optimize the terminal-client update stream for very long wrapped
+    lines, so xterm may only receive the final screen worth of live output.
+    The idle history resync should restore the complete LIVE_XXXX sequence.
+    """
+    tab = terminal_tab
+    session_name = f"claude-hub-{tab['id'][:8]}"
+    line_count = 120
+
+    ensure_tmux_session(page, tab["id"], session_name)
+    produce_scrollback(session_name, count=260)
+    load_terminal_page(page, tab["id"])
+
+    send_keys_sync(
+        session_name,
+        (
+            f"for i in $(seq 0 {line_count - 1}); do "
+            "echo LIVE_$(printf '%04d' $i)_$(printf 'x%.0s' $(seq 1 220)); "
+            "sleep 0.01; "
+            "done"
+        ),
+        "Enter",
+    )
+
+    for _ in range(120):
+        if f"LIVE_{line_count - 1:04d}" in capture_pane_sync(session_name):
+            break
+        time.sleep(0.2)
+    else:
+        pytest.fail("wrapped live output did not finish in tmux")
+
+    page.wait_for_function(
+        f"""() => {{
+            const buffer = window.term.buffer.active;
+            const text = [];
+            for (let i = 0; i < buffer.length; i++) {{
+                const line = buffer.getLine(i);
+                if (line) text.push(line.translateToString(true));
+            }}
+            const joined = text.join('\\n');
+            return joined.includes('LIVE_0000') && joined.includes('LIVE_{line_count - 1:04d}');
+        }}""",
+        timeout=10000,
+    )
+
+    xterm_numbers = live_line_numbers(read_xterm_text(page))
+    expected = set(range(line_count))
+
+    assert xterm_numbers == expected, (
+        f"xterm live output markers are discontinuous after idle resync; "
+        f"missing={sorted(expected - xterm_numbers)[:30]}, "
+        f"extra={sorted(xterm_numbers - expected)[:30]}"
+    )
+
+
+def test_history_resync_does_not_replace_near_bottom_view(terminal_tab: dict, page: Page) -> None:
+    """Idle history resync must not rewrite while the user is near bottom.
+
+    A near-bottom view can show both older history and the newest output. It is
+    still a user-selected historical viewport, so resync should wait until the
+    user actually reaches the bottom instead of clearing and replaying over it.
+    """
+    tab = terminal_tab
+    session_name = f"claude-hub-{tab['id'][:8]}"
+    line_count = 80
+
+    ensure_tmux_session(page, tab["id"], session_name)
+    produce_scrollback(session_name, count=260)
+    load_terminal_page(page, tab["id"])
+
+    send_keys_sync(
+        session_name,
+        (
+            f"for i in $(seq 0 {line_count - 1}); do "
+            "echo LIVE_$(printf '%04d' $i)_$(printf 'x%.0s' $(seq 1 220)); "
+            "sleep 0.01; "
+            "done"
+        ),
+        "Enter",
+    )
+
+    for _ in range(120):
+        if f"LIVE_{line_count - 1:04d}" in capture_pane_sync(session_name):
+            break
+        time.sleep(0.2)
+    else:
+        pytest.fail("wrapped live output did not finish in tmux")
+
+    page.evaluate("""() => {
+            const vp = document.querySelector('.xterm-viewport');
+            vp.scrollTop = Math.max(0, vp.scrollHeight - vp.clientHeight - 240);
+            vp.dispatchEvent(new Event('scroll'));
+        }""")
+    time.sleep(0.2)
+    before = read_scroll_alignment(page)
+    assert before is not None
+    assert before["viewportY"] < before["baseY"]
+
+    time.sleep(1.5)
+    after = read_scroll_alignment(page)
+    assert after is not None
+
+    assert after["viewportY"] < after["baseY"], (
+        f"near-bottom historical view was replaced by idle resync: "
+        f"before={before}, after={after}"
+    )
