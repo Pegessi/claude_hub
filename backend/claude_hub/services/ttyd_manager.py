@@ -193,7 +193,7 @@ class TTYDProcess:
         ):
             user_shell = os.environ.get("SHELL", "/bin/bash")
             if self.agent_type == AgentType.CODEX:
-                solo_command = "codex --ask-for-approval never --sandbox workspace-write"
+                solo_command = "codex --ask-for-approval never --sandbox danger-full-access"
             else:
                 solo_command = "IS_SANDBOX=1 claude --dangerously-skip-permissions"
             cmd.extend(

@@ -222,7 +222,7 @@ const form = reactive({
 const supportsSoloMode = computed(() => form.agent_type === 'claude' || form.agent_type === 'codex')
 const soloModeDescription = computed(() => {
   if (form.agent_type === 'codex') {
-    return 'Start Codex with --ask-for-approval never and --sandbox workspace-write'
+    return 'Start Codex with --ask-for-approval never and --sandbox danger-full-access'
   }
   return 'Start Claude with IS_SANDBOX=1 and --dangerously-skip-permissions'
 })
