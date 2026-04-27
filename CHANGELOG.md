@@ -12,6 +12,12 @@
 - Add backend tests for Codex command construction and tmux reattach behavior
 - **Files**: schemas.py, ttyd_manager.py, test_ttyd_manager.py, TabBar.vue, types/index.ts
 
+### 31af616 fix: restore ci checks after codex backend merge
+- Apply black formatting to `ttyd_manager.py`
+- Add the missing `MonkeyPatch` type annotation for backend mypy
+- Avoid the frontend ESLint `no-undef` error from the browser `EventListener` type alias
+- **Files**: ttyd_manager.py, test_ttyd_manager.py, App.vue
+
 ## 2026-04-26
 
 ### feat: mobile UX improvements — viewport sync, key reliability, combo keys, inertial scroll
