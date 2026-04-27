@@ -6,7 +6,7 @@ import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TypedDict
 
 from ..config import settings
 from ..models import AgentType, TerminalTab
@@ -16,6 +16,11 @@ logger = logging.getLogger(__name__)
 STATE_FILE = Path.home() / ".claude_hub" / "tabs.json"
 ORDER_FILE = Path.home() / ".claude_hub" / "tab_order.json"
 TMUX_SESSION_PREFIX = "claude-hub-"
+
+
+class CursorPosition(TypedDict):
+    cursor_x: int
+    cursor_y: int
 
 
 def _tmux_session_name(tab_id: str) -> str:
@@ -299,6 +304,35 @@ class TTYDProcess:
 
         return stdout.decode("utf-8", errors="ignore")
 
+    async def capture_cursor_position(self) -> Optional[CursorPosition]:
+        """Capture tmux pane cursor position as zero-based x/y coordinates."""
+        if not _tmux_session_exists(self.tmux_session):
+            return None
+
+        proc = await asyncio.create_subprocess_exec(
+            "tmux",
+            "display-message",
+            "-p",
+            "-t",
+            self.tmux_session,
+            "#{cursor_x} #{cursor_y}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            error = stderr.decode("utf-8", errors="ignore").strip()
+            raise RuntimeError(error or f"tmux display-message failed with code {proc.returncode}")
+
+        parts = stdout.decode("utf-8", errors="ignore").strip().split()
+        if len(parts) != 2:
+            return None
+
+        try:
+            return {"cursor_x": int(parts[0]), "cursor_y": int(parts[1])}
+        except ValueError:
+            return None
+
     async def stop(self, kill_tmux: bool = False) -> None:
         """Stop the ttyd process. By default, KEEP tmux session alive for persistence.
 
@@ -555,6 +589,13 @@ class TTYDManager:
         if not process:
             return None
         return await process.capture_history(lines)
+
+    async def get_tab_cursor_position(self, tab_id: str) -> Optional[CursorPosition]:
+        """Get tmux cursor position for a tab."""
+        process = self.processes.get(tab_id)
+        if not process:
+            return None
+        return await process.capture_cursor_position()
 
     async def update_tab(
         self,
