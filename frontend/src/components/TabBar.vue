@@ -89,10 +89,11 @@
               class="select-input"
             >
               <option value="claude">Claude</option>
+              <option value="codex">Codex</option>
               <option value="cursor">Terminal</option>
             </select>
           </div>
-          <div v-if="form.agent_type === 'claude'" class="form-group">
+          <div v-if="supportsSoloMode" class="form-group">
             <label class="checkbox-label">
               <div class="checkbox-row">
                 <input
@@ -102,7 +103,7 @@
                 />
                 <span class="checkbox-text">Solo Mode</span>
               </div>
-              <span class="checkbox-desc">Start Claude with IS_SANDBOX=1 and --dangerously-skip-permissions</span>
+              <span class="checkbox-desc">{{ soloModeDescription }}</span>
             </label>
           </div>
           <div class="modal-actions">
@@ -175,7 +176,7 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useTerminalStore } from '@/stores/terminalStore'
 import type { TerminalTab } from '@/types'
@@ -215,7 +216,15 @@ const form = reactive({
   name: '',
   cwd: '',
   solo_mode: false,
-  agent_type: 'claude' as 'claude' | 'cursor',
+  agent_type: 'claude' as 'claude' | 'codex' | 'cursor',
+})
+
+const supportsSoloMode = computed(() => form.agent_type === 'claude' || form.agent_type === 'codex')
+const soloModeDescription = computed(() => {
+  if (form.agent_type === 'codex') {
+    return 'Start Codex with --ask-for-approval never and --sandbox workspace-write'
+  }
+  return 'Start Claude with IS_SANDBOX=1 and --dangerously-skip-permissions'
 })
 
 // File browser state
@@ -440,6 +449,15 @@ watch(showModal, (newVal) => {
   }
 })
 
+watch(
+  () => form.agent_type,
+  (agentType) => {
+    if (agentType === 'cursor') {
+      form.solo_mode = false
+    }
+  }
+)
+
 watch(activeTabId, (tabId) => {
   if (!tabId) return
   nextTick(() => {
@@ -472,7 +490,7 @@ async function handleCreateTab() {
   const defaultName = `Tab ${tabs.value.length + 1}`
   const name = form.name.trim() || defaultName
   const cwd = form.cwd.trim() || undefined
-  const solo_mode = form.agent_type === 'claude' ? form.solo_mode : false
+  const solo_mode = supportsSoloMode.value ? form.solo_mode : false
   const agent_type = form.agent_type
 
   await store.createTab({ name, cwd, solo_mode, agent_type })
