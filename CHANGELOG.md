@@ -18,6 +18,11 @@
 - Avoid the frontend ESLint `no-undef` error from the browser `EventListener` type alias
 - **Files**: ttyd_manager.py, test_ttyd_manager.py, App.vue
 
+### 5609dbf ci: update uv setup and split replay tests
+- Update GitHub Actions to use `astral-sh/setup-uv@v7` instead of the stale `0.5.x` version selector
+- Keep terminal replay tests in the dedicated Playwright job and exclude them from the generic backend pytest job
+- **Files**: ci.yml
+
 ## 2026-04-26
 
 ### feat: mobile UX improvements — viewport sync, key reliability, combo keys, inertial scroll
