@@ -9,6 +9,7 @@ class AgentType(str, Enum):
     """Type of agent to run in the terminal."""
 
     CLAUDE = "claude"
+    CODEX = "codex"
     CURSOR = "cursor"
 
 
@@ -18,7 +19,7 @@ class TerminalTabBase(BaseModel):
     name: str = Field(..., description="Name of the terminal tab")
     shell: Optional[str] = Field(None, description="Shell to use (default: $SHELL)")
     cwd: Optional[str] = Field(None, description="Working directory to start the terminal in")
-    solo_mode: bool = Field(False, description="Whether to start in Claude solo mode")
+    solo_mode: bool = Field(False, description="Whether to start in agent solo mode")
     agent_type: AgentType = Field(AgentType.CLAUDE, description="Type of agent to run")
 
 

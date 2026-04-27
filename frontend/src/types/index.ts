@@ -1,4 +1,4 @@
-export type AgentType = 'claude' | 'cursor'
+export type AgentType = 'claude' | 'codex' | 'cursor'
 
 export interface TerminalTab {
   id: string
