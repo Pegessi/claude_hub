@@ -27,6 +27,11 @@
 - Use full terminal replay after `term.open()` to avoid Ubuntu headless xterm scrollback loss during CI
 - **Files**: terminal.py
 
+### 40702ad fix: run codex solo mode without sandbox limits
+- Change Codex solo mode to launch with `codex --ask-for-approval never --sandbox danger-full-access`
+- Update the Codex solo mode UI description and command construction test
+- **Files**: ttyd_manager.py, test_ttyd_manager.py, TabBar.vue
+
 ## 2026-04-26
 
 ### feat: mobile UX improvements — viewport sync, key reliability, combo keys, inertial scroll
