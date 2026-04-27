@@ -37,6 +37,17 @@ async def create_tab(
     )
 
 
+@router.put("/order")
+async def update_tab_order(
+    order: TabOrderUpdate,
+    current_user: User = Depends(get_current_user),
+) -> dict[str, bool]:
+    """Update the order of tabs."""
+    logger.info(f"Updating tab order: {order.tab_ids}, user={current_user.email}")
+    ttyd_manager.set_tab_order(order.tab_ids)
+    return {"success": True}
+
+
 @router.get("/{tab_id}", response_model=TerminalTab)
 async def get_tab(
     tab_id: str,
@@ -78,14 +89,3 @@ async def delete_tab(
     success = await ttyd_manager.delete_tab(tab_id)
     if not success:
         raise HTTPException(status_code=404, detail="Tab not found")
-
-
-@router.put("/order")
-async def update_tab_order(
-    order: TabOrderUpdate,
-    current_user: User = Depends(get_current_user),
-) -> dict[str, bool]:
-    """Update the order of tabs."""
-    logger.info(f"Updating tab order: {order.tab_ids}, user={current_user.email}")
-    ttyd_manager.set_tab_order(order.tab_ids)
-    return {"success": True}
