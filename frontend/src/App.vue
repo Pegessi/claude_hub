@@ -57,8 +57,8 @@ watch(activePane, (pane) => {
 // When the virtual keyboard appears/disappears on mobile, the visual
 // viewport shrinks/expands. We track this and set a CSS variable so
 // the terminal area and mobile controls adjust properly.
-let vvResizeHandler: EventListener | null = null
-let vvScrollHandler: EventListener | null = null
+let vvResizeHandler: (() => void) | null = null
+let vvScrollHandler: (() => void) | null = null
 
 function setupMobileViewportSync() {
   const vv = window.visualViewport

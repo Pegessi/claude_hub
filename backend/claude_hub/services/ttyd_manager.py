@@ -182,10 +182,15 @@ class TTYDProcess:
         if self.cwd:
             cmd.extend(["-c", self.cwd])
 
-        if self.solo_mode and not session_exists and self.agent_type in {
-            AgentType.CLAUDE,
-            AgentType.CODEX,
-        }:
+        if (
+            self.solo_mode
+            and not session_exists
+            and self.agent_type
+            in {
+                AgentType.CLAUDE,
+                AgentType.CODEX,
+            }
+        ):
             user_shell = os.environ.get("SHELL", "/bin/bash")
             if self.agent_type == AgentType.CODEX:
                 solo_command = "codex --ask-for-approval never --sandbox workspace-write"
