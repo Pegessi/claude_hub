@@ -23,6 +23,10 @@
 - Keep terminal replay tests in the dedicated Playwright job and exclude them from the generic backend pytest job
 - **Files**: ci.yml
 
+### be03355 fix: stabilize terminal replay in ci
+- Use full terminal replay after `term.open()` to avoid Ubuntu headless xterm scrollback loss during CI
+- **Files**: terminal.py
+
 ## 2026-04-26
 
 ### feat: mobile UX improvements — viewport sync, key reliability, combo keys, inertial scroll
