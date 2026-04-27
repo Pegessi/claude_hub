@@ -31,7 +31,7 @@ def test_codex_solo_mode_command(monkeypatch: MonkeyPatch) -> None:
     assert cmd[-3:] == [
         "/bin/zsh",
         "-c",
-        "codex --ask-for-approval never --sandbox workspace-write; exec /bin/zsh",
+        "codex --ask-for-approval never --sandbox danger-full-access; exec /bin/zsh",
     ]
 
 
