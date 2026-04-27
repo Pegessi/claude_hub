@@ -52,6 +52,8 @@ class TerminalHistoryResponse(BaseModel):
     tab_id: str
     lines: int
     history: str
+    cursor_x: Optional[int] = None
+    cursor_y: Optional[int] = None
 
 
 async def proxy_websocket(
@@ -174,6 +176,7 @@ async def get_terminal_history(
 
     try:
         history = await ttyd_manager.get_tab_history(tab_id, lines)
+        cursor = await ttyd_manager.get_tab_cursor_position(tab_id)
     except Exception as e:
         logger.error(f"Failed to capture history for tab {tab_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to capture terminal history") from e
@@ -181,7 +184,13 @@ async def get_terminal_history(
     if history is None:
         raise HTTPException(status_code=404, detail="Tab not found")
 
-    return TerminalHistoryResponse(tab_id=tab_id, lines=lines, history=history)
+    return TerminalHistoryResponse(
+        tab_id=tab_id,
+        lines=lines,
+        history=history,
+        cursor_x=cursor["cursor_x"] if cursor else None,
+        cursor_y=cursor["cursor_y"] if cursor else None,
+    )
 
 
 @router.get("/proxy/{tab_id}")
@@ -288,6 +297,8 @@ async def proxy_terminal_request(
         const TAB_ID = {json.dumps(tab_id)};
         const HISTORY_LINES = 100000;
         let historyText = '';
+        let historyCursorX = null;
+        let historyCursorY = null;
 
         try {{
           const xhr = new XMLHttpRequest();
@@ -297,6 +308,10 @@ async def proxy_terminal_request(
             const payload = JSON.parse(xhr.responseText || '{{}}');
             if (payload && typeof payload.history === 'string') {{
               historyText = payload.history;
+            }}
+            if (payload && Number.isInteger(payload.cursor_x) && Number.isInteger(payload.cursor_y)) {{
+              historyCursorX = payload.cursor_x;
+              historyCursorY = payload.cursor_y;
             }}
           }}
         }} catch (error) {{
@@ -310,6 +325,11 @@ async def proxy_terminal_request(
         const normalizedHistory = historyText.replace(/\\r?\\n/g, '\\r\\n');
         let currentTerm = undefined;
         let replayed = false;
+
+        function cursorSeq(cursorX, cursorY) {{
+          if (!Number.isInteger(cursorX) || !Number.isInteger(cursorY)) return '';
+          return '\\x1b[' + (cursorY + 1) + ';' + (cursorX + 1) + 'H';
+        }}
 
         function replayHistory(term, fullReplay) {{
           if (!term || replayed || typeof term.write !== 'function') return;
@@ -370,7 +390,7 @@ async def proxy_terminal_request(
             // from scratch.  The last `rows` lines will land on the
             // visible screen; the rest becomes scrollback.
             // The \\x1b[3J clears scrollback, \\x1b[H\\x1b[2J clears screen.
-            originalWrite('\\x1b[H\\x1b[2J\\x1b[3J' + lines.join('\\r\\n'), function() {{
+            originalWrite('\\x1b[H\\x1b[2J\\x1b[3J' + lines.join('\\r\\n') + cursorSeq(historyCursorX, historyCursorY), function() {{
               clearTimeout(safetyTimer);
               flushBuffer();
             }});
@@ -557,11 +577,21 @@ async def proxy_terminal_request(
             }}, {{ passive: true }});
           }}
 
-          async function fetchHistoryText() {{
+          // Run one idle reconciliation after setup. On a brand-new tab the
+          // initial history preload can be empty because tmux creates the
+          // session lazily after ttyd connects; this brings the prompt and
+          // cursor back into the same xterm buffer once tmux history exists.
+          scheduleResync();
+
+          async function fetchHistorySnapshot() {{
             const response = await fetch(`/api/terminal/history/${{TAB_ID}}?lines=${{HISTORY_LINES}}`);
             if (!response.ok) throw new Error('history resync failed: ' + response.status);
             const payload = await response.json();
-            return payload && typeof payload.history === 'string' ? payload.history : '';
+            return {{
+              history: payload && typeof payload.history === 'string' ? payload.history : '',
+              cursorX: payload && Number.isInteger(payload.cursor_x) ? payload.cursor_x : null,
+              cursorY: payload && Number.isInteger(payload.cursor_y) ? payload.cursor_y : null,
+            }};
           }}
 
           async function runResync() {{
@@ -572,9 +602,9 @@ async def proxy_terminal_request(
             }}
 
             const generationAtStart = writeGeneration;
-            let text = '';
+            let snapshot = null;
             try {{
-              text = await fetchHistoryText();
+              snapshot = await fetchHistorySnapshot();
             }} catch (error) {{
               console.debug('claude-hub history resync failed', error);
               return;
@@ -586,14 +616,14 @@ async def proxy_terminal_request(
               return;
             }}
 
-            const lines = text.replace(/\\r?\\n/g, '\\r\\n').replace(/\\r/g, '').split('\\n');
+            const lines = snapshot.history.replace(/\\r?\\n/g, '\\r\\n').replace(/\\r/g, '').split('\\n');
             if (lines.length > 0 && lines[lines.length - 1] === '') {{
               lines.pop();
             }}
             if (lines.length === 0) return;
 
             resyncing = true;
-            writeThrough('\\x1b[H\\x1b[2J\\x1b[3J' + lines.join('\\r\\n'), function() {{
+            writeThrough('\\x1b[H\\x1b[2J\\x1b[3J' + lines.join('\\r\\n') + cursorSeq(snapshot.cursorX, snapshot.cursorY), function() {{
               resyncing = false;
               while (resyncBuffer.length > 0) {{
                 const item = resyncBuffer.shift();
