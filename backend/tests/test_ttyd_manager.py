@@ -1,3 +1,5 @@
+from pytest import MonkeyPatch
+
 from claude_hub.models import AgentType
 from claude_hub.services.ttyd_manager import TTYDProcess
 
@@ -14,7 +16,7 @@ def test_codex_tab_uses_codex_command() -> None:
     assert process._build_ttyd_command(session_exists=False)[-1] == "codex"
 
 
-def test_codex_solo_mode_command(monkeypatch) -> None:
+def test_codex_solo_mode_command(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv("SHELL", "/bin/zsh")
     process = TTYDProcess(
         tab_id="tab-codex-solo",
