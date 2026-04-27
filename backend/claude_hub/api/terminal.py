@@ -405,7 +405,14 @@ async def proxy_terminal_request(
             const originalOpen = term.open.bind(term);
             term.open = function(...args) {{
               const result = originalOpen(...args);
-              replayHistory(term, false);
+              // xterm.js behavior differs across browser/platform versions
+              // when large writes happen immediately after open(): in
+              // Ubuntu CI, the Phase A scroll-up strategy can leave only
+              // the visible screen in the buffer. Full replay is more
+              // deterministic: clear after open(), write tmux's complete
+              // captured content, and discard ttyd's duplicate initial WS
+              // payload while replay is in progress.
+              replayHistory(term, true);
               setupResizeGuard(term);
               return result;
             }};
