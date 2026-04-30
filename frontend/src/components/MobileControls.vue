@@ -4,134 +4,134 @@
       <!-- Main row: Esc, Tab, arrows, Enter -->
       <div class="controls-row">
         <button
+          type="button"
           class="control-btn"
           :class="{ pressed: pressedKeys.has('Escape') }"
-          @mousedown="handlePress('Escape')"
-          @mouseup="handleRelease('Escape')"
-          @mouseleave="handleRelease('Escape')"
-          @touchstart.prevent="handlePress('Escape')"
-          @touchend.prevent="handleRelease('Escape')"
+          @pointerdown.prevent="handlePress('Escape')"
+          @pointerup.prevent="handleRelease('Escape')"
+          @pointercancel.prevent="handleRelease('Escape')"
+          @pointerleave="handleRelease('Escape')"
         >Esc</button>
         <button
+          type="button"
           class="control-btn"
           :class="{ pressed: pressedKeys.has('Tab') }"
-          @mousedown="handlePress('Tab')"
-          @mouseup="handleRelease('Tab')"
-          @mouseleave="handleRelease('Tab')"
-          @touchstart.prevent="handlePress('Tab')"
-          @touchend.prevent="handleRelease('Tab')"
+          @pointerdown.prevent="handlePress('Tab')"
+          @pointerup.prevent="handleRelease('Tab')"
+          @pointercancel.prevent="handleRelease('Tab')"
+          @pointerleave="handleRelease('Tab')"
         >Tab</button>
         <button
+          type="button"
           class="control-btn control-btn-arrow"
           :class="{ pressed: pressedKeys.has('ArrowUp') }"
-          @mousedown="handlePress('ArrowUp')"
-          @mouseup="handleRelease('ArrowUp')"
-          @mouseleave="handleRelease('ArrowUp')"
-          @touchstart.prevent="handlePress('ArrowUp')"
-          @touchend.prevent="handleRelease('ArrowUp')"
+          @pointerdown.prevent="handlePress('ArrowUp')"
+          @pointerup.prevent="handleRelease('ArrowUp')"
+          @pointercancel.prevent="handleRelease('ArrowUp')"
+          @pointerleave="handleRelease('ArrowUp')"
         >&#x2191;</button>
         <button
+          type="button"
           class="control-btn control-btn-arrow"
           :class="{ pressed: pressedKeys.has('ArrowDown') }"
-          @mousedown="handlePress('ArrowDown')"
-          @mouseup="handleRelease('ArrowDown')"
-          @mouseleave="handleRelease('ArrowDown')"
-          @touchstart.prevent="handlePress('ArrowDown')"
-          @touchend.prevent="handleRelease('ArrowDown')"
+          @pointerdown.prevent="handlePress('ArrowDown')"
+          @pointerup.prevent="handleRelease('ArrowDown')"
+          @pointercancel.prevent="handleRelease('ArrowDown')"
+          @pointerleave="handleRelease('ArrowDown')"
         >&#x2193;</button>
         <button
+          type="button"
           class="control-btn control-btn-arrow"
           :class="{ pressed: pressedKeys.has('ArrowLeft') }"
-          @mousedown="handlePress('ArrowLeft')"
-          @mouseup="handleRelease('ArrowLeft')"
-          @mouseleave="handleRelease('ArrowLeft')"
-          @touchstart.prevent="handlePress('ArrowLeft')"
-          @touchend.prevent="handleRelease('ArrowLeft')"
+          @pointerdown.prevent="handlePress('ArrowLeft')"
+          @pointerup.prevent="handleRelease('ArrowLeft')"
+          @pointercancel.prevent="handleRelease('ArrowLeft')"
+          @pointerleave="handleRelease('ArrowLeft')"
         >&#x2190;</button>
         <button
+          type="button"
           class="control-btn control-btn-arrow"
           :class="{ pressed: pressedKeys.has('ArrowRight') }"
-          @mousedown="handlePress('ArrowRight')"
-          @mouseup="handleRelease('ArrowRight')"
-          @mouseleave="handleRelease('ArrowRight')"
-          @touchstart.prevent="handlePress('ArrowRight')"
-          @touchend.prevent="handleRelease('ArrowRight')"
+          @pointerdown.prevent="handlePress('ArrowRight')"
+          @pointerup.prevent="handleRelease('ArrowRight')"
+          @pointercancel.prevent="handleRelease('ArrowRight')"
+          @pointerleave="handleRelease('ArrowRight')"
         >&#x2192;</button>
         <button
+          type="button"
           class="control-btn control-btn-enter"
           :class="{ pressed: pressedKeys.has('Enter') }"
-          @mousedown="handlePress('Enter')"
-          @mouseup="handleRelease('Enter')"
-          @mouseleave="handleRelease('Enter')"
-          @touchstart.prevent="handlePress('Enter')"
-          @touchend.prevent="handleRelease('Enter')"
+          @pointerdown.prevent="handlePress('Enter')"
+          @pointerup.prevent="handleRelease('Enter')"
+          @pointercancel.prevent="handleRelease('Enter')"
+          @pointerleave="handleRelease('Enter')"
         >Enter</button>
       </div>
 
       <!-- Modifier row: Ctrl, Shift -->
       <div class="controls-row controls-row-modifiers">
         <button
+          type="button"
           class="control-btn control-btn-wide"
           :class="{ active: ctrlHeld, pressed: pressedKeys.has('ctrl') }"
-          @mousedown="toggleCtrl()"
-          @touchstart.prevent="toggleCtrl()"
+          @pointerdown.prevent="toggleCtrl()"
         >Ctrl{{ ctrlHeld ? ' ON' : '' }}</button>
         <button
+          type="button"
           class="control-btn control-btn-wide"
           :class="{ active: shiftHeld, pressed: pressedKeys.has('shift') }"
-          @mousedown="toggleShift()"
-          @touchstart.prevent="toggleShift()"
+          @pointerdown.prevent="toggleShift()"
         >Shift{{ shiftHeld ? ' ON' : '' }}</button>
       </div>
 
       <!-- Shortcut row: common combos -->
       <div class="controls-row controls-row-shortcuts">
         <button
+          type="button"
           class="control-btn control-btn-shortcut"
           :class="{ pressed: pressedKeys.has('ctrl-c') }"
-          @mousedown="handleShortcut('c')"
-          @touchstart.prevent="handleShortcut('c')"
+          @pointerdown.prevent="handleShortcut('c')"
         >Ctrl+C</button>
         <button
+          type="button"
           class="control-btn control-btn-shortcut"
           :class="{ pressed: pressedKeys.has('ctrl-d') }"
-          @mousedown="handleShortcut('d')"
-          @touchstart.prevent="handleShortcut('d')"
+          @pointerdown.prevent="handleShortcut('d')"
         >Ctrl+D</button>
         <button
+          type="button"
           class="control-btn control-btn-shortcut"
           :class="{ pressed: pressedKeys.has('ctrl-l') }"
-          @mousedown="handleShortcut('l')"
-          @touchstart.prevent="handleShortcut('l')"
+          @pointerdown.prevent="handleShortcut('l')"
         >Ctrl+L</button>
         <button
+          type="button"
           class="control-btn control-btn-shortcut"
           :class="{ pressed: pressedKeys.has('ctrl-a') }"
-          @mousedown="handleShortcut('a')"
-          @touchstart.prevent="handleShortcut('a')"
+          @pointerdown.prevent="handleShortcut('a')"
         >Ctrl+A</button>
         <button
+          type="button"
           class="control-btn control-btn-shortcut"
           :class="{ pressed: pressedKeys.has('ctrl-e') }"
-          @mousedown="handleShortcut('e')"
-          @touchstart.prevent="handleShortcut('e')"
+          @pointerdown.prevent="handleShortcut('e')"
         >Ctrl+E</button>
         <button
+          type="button"
           class="control-btn control-btn-shortcut"
           :class="{ pressed: pressedKeys.has('shift-tab') }"
-          @mousedown="handleShiftTab()"
-          @touchstart.prevent="handleShiftTab()"
+          @pointerdown.prevent="handleShiftTab()"
         >S-Tab</button>
       </div>
     </div>
     <button
+      type="button"
       class="toggle-btn"
       :class="{ expanded: isExpanded, pressed: pressedKeys.has('toggle') }"
-      @mousedown="pressedKeys.add('toggle')"
-      @mouseup="pressedKeys.delete('toggle'); isExpanded = !isExpanded"
-      @mouseleave="pressedKeys.delete('toggle')"
-      @touchstart.prevent="pressedKeys.add('toggle')"
-      @touchend.prevent="pressedKeys.delete('toggle'); isExpanded = !isExpanded"
+      @pointerdown.prevent="pressedKeys.add('toggle')"
+      @pointerup.prevent="pressedKeys.delete('toggle'); isExpanded = !isExpanded"
+      @pointercancel.prevent="pressedKeys.delete('toggle')"
+      @pointerleave="pressedKeys.delete('toggle')"
     >
       {{ isExpanded ? '&#x2715;' : '&#x2328;' }}
     </button>
