@@ -410,16 +410,7 @@ async function handleRenameTab() {
 }
 
 async function handleTabDuplicate(tabId: string) {
-  const tab = tabs.value.find(t => t.id === tabId)
-  if (!tab) return
-
-  const data = {
-    name: `${tab.name} (copy)`,
-    cwd: tab.cwd,
-    solo_mode: false,
-    agent_type: tab.agent_type || 'claude',
-  }
-  await store.createTab(data)
+  await store.duplicateTab(tabId)
 }
 
 async function confirmCloseTab() {

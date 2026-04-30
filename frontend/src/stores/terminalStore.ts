@@ -158,19 +158,19 @@ export const useTerminalStore = defineStore('terminal', () => {
   }
 
   async function duplicateTab(tabId: string) {
-    const tab = tabs.value.find(t => t.id === tabId)
-    if (!tab) return
-
     isLoading.value = true
     error.value = null
     try {
-      const data: TerminalTabCreate = {
-        name: `${tab.name} (copy)`,
-        cwd: tab.cwd,
-        solo_mode: false,
-        agent_type: tab.agent_type || 'claude',
+      const response = await fetch(`${API_BASE}/tabs/${tabId}/duplicate`, {
+        method: 'POST',
+      })
+      if (!response.ok) throw new Error('Failed to duplicate tab')
+      const newTab = await response.json()
+      tabs.value.push(newTab)
+      activeTabId.value = newTab.id
+      if (activePaneId.value) {
+        assignTabToPane(newTab.id, activePaneId.value)
       }
-      const newTab = await createTab(data)
       return newTab
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Unknown error'
