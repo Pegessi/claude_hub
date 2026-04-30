@@ -17,19 +17,47 @@
 
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from 'vue'
+import type { AgentType } from '@/types'
 
 const props = defineProps<{
   tabId: string
+  agentType?: AgentType
 }>()
 
-let iframeRefs: Record<string, HTMLIFrameElement | null> = {}
+type TerminalKeyItem = {
+  key: string
+  ctrl: boolean
+  shift: boolean
+}
+
+type TerminalKeyState = {
+  iframes: Record<string, HTMLIFrameElement | null>
+  ready: Record<string, boolean>
+  queues: Record<string, TerminalKeyItem[]>
+}
+
+declare global {
+  interface Window {
+    __activePaneTabId?: string | null
+    __claudeHubTerminalState?: TerminalKeyState
+    __registerTerminalIframe?: (el: HTMLIFrameElement | null, tabId: string) => void
+    __sendTerminalKey?: (key: string, ctrl?: boolean, shift?: boolean) => void
+  }
+}
+
+const iframeRefs: Record<string, HTMLIFrameElement | null> = {}
 const cachedTabIds = ref<string[]>([])
 
-// Track which terminals are ready (have a valid terminal.send())
-const terminalReady: Record<string, boolean> = {}
-
-// Key queue per tab — holds keys that were pressed before terminal was ready
-const keyQueues: Record<string, Array<{ key: string; ctrl: boolean; shift: boolean }>> = {}
+function getTerminalState(): TerminalKeyState {
+  if (!window.__claudeHubTerminalState) {
+    window.__claudeHubTerminalState = {
+      iframes: {},
+      ready: {},
+      queues: {},
+    }
+  }
+  return window.__claudeHubTerminalState
+}
 
 function cacheTabId(tabId: string) {
   if (!tabId) return
@@ -47,29 +75,57 @@ watch(
 )
 
 function registerIframe(el: any, tabId: string) {
+  const previous = iframeRefs[tabId]
+  const state = getTerminalState()
+
   if (el instanceof HTMLIFrameElement) {
     iframeRefs[tabId] = el as HTMLIFrameElement
+    state.iframes[tabId] = el as HTMLIFrameElement
+    if (state.ready[tabId]) {
+      flushKeyQueue(tabId)
+    }
   } else {
+    if (state.iframes[tabId] === previous) {
+      delete state.iframes[tabId]
+      delete state.ready[tabId]
+    }
     delete iframeRefs[tabId]
   }
 }
 
+function postTerminalKey(tabId: string, item: TerminalKeyItem): boolean {
+  const state = getTerminalState()
+  const iframe = state.iframes[tabId]
+  if (!iframe || !iframe.contentWindow) return false
+
+  iframe.contentWindow.postMessage({
+    type: 'terminal-key',
+    key: item.key,
+    ctrl: item.ctrl,
+    shift: item.shift,
+    tabId,
+  }, '*')
+  return true
+}
+
+function queueTerminalKey(tabId: string, item: TerminalKeyItem) {
+  const state = getTerminalState()
+  if (!state.queues[tabId]) {
+    state.queues[tabId] = []
+  }
+  state.queues[tabId].push(item)
+}
+
 function flushKeyQueue(tabId: string) {
-  const queue = keyQueues[tabId]
+  const state = getTerminalState()
+  const queue = state.queues[tabId]
   if (!queue || queue.length === 0) return
 
-  const iframe = iframeRefs[tabId]
-  if (!iframe || !iframe.contentWindow) return
-
-  for (const item of queue) {
-    iframe.contentWindow.postMessage({
-      type: 'terminal-key',
-      key: item.key,
-      ctrl: item.ctrl,
-      shift: item.shift
-    }, '*')
+  while (queue.length > 0) {
+    const item = queue[0]
+    if (!postTerminalKey(tabId, item)) return
+    queue.shift()
   }
-  queue.length = 0
 }
 
 function onIframeLoad(event: Event, tabId: string) {
@@ -82,6 +138,8 @@ function onIframeLoad(event: Event, tabId: string) {
     const script = iframe.contentDocument.createElement('script')
     script.textContent = `
       console.log('=== Claude Hub terminal handler injected ===');
+
+      var CLAUDE_HUB_AGENT_TYPE = ${JSON.stringify(props.agentType || null)};
 
       // Prevent browser context menu unless text is selected (allow copy via right-click)
       document.addEventListener('contextmenu', function(e) {
@@ -103,7 +161,8 @@ function onIframeLoad(event: Event, tabId: string) {
         return null;
       }
 
-      // Send text to terminal via terminal.send() — the reliable path
+      // Send text to terminal through ttyd/xterm. ttyd versions expose
+      // different private helpers, so keep a short fallback chain.
       function sendText(text) {
         var term = findTerminal();
         if (term && typeof term.send === 'function') {
@@ -112,12 +171,148 @@ function onIframeLoad(event: Event, tabId: string) {
             return true;
           } catch(e) {
             console.warn('terminal.send() failed:', e);
-            return false;
           }
         }
-        console.warn('No terminal.send() available');
+        if (term && typeof term.input === 'function') {
+          try {
+            term.input(text);
+            return true;
+          } catch(e) {
+            console.warn('terminal.input() failed:', e);
+          }
+        }
+        if (term && term._core && term._core.coreService && typeof term._core.coreService.triggerDataEvent === 'function') {
+          try {
+            term._core.coreService.triggerDataEvent(text, true);
+            return true;
+          } catch(e) {
+            console.warn('terminal triggerDataEvent() failed:', e);
+          }
+        }
+        if (term && typeof term.paste === 'function') {
+          try {
+            term.paste(text);
+            return true;
+          } catch(e) {
+            console.warn('terminal.paste() failed:', e);
+          }
+        }
+        console.warn('No terminal input API available');
         return false;
       }
+
+      function hasTerminalInputApi() {
+        var term = findTerminal();
+        return !!(term && (
+          typeof term.send === 'function' ||
+          typeof term.input === 'function' ||
+          (term._core && term._core.coreService && typeof term._core.coreService.triggerDataEvent === 'function') ||
+          typeof term.paste === 'function'
+        ));
+      }
+
+      function getClipboardImageFile(event) {
+        var clipboard = event.clipboardData;
+        if (!clipboard) return null;
+        var items = clipboard.items || [];
+        for (var i = 0; i < items.length; i++) {
+          var item = items[i];
+          if (
+            item &&
+            item.kind === 'file' &&
+            typeof item.type === 'string' &&
+            item.type.indexOf('image/') === 0 &&
+            typeof item.getAsFile === 'function'
+          ) {
+            var itemFile = item.getAsFile();
+            if (itemFile) return itemFile;
+          }
+        }
+        var files = clipboard.files || [];
+        for (var j = 0; j < files.length; j++) {
+          if (files[j] && typeof files[j].type === 'string' && files[j].type.indexOf('image/') === 0) {
+            return files[j];
+          }
+        }
+        return null;
+      }
+
+      function createClipboardPngBlob(file) {
+        if (!file || file.type === 'image/png' || typeof createImageBitmap !== 'function') {
+          return Promise.resolve(file);
+        }
+
+        return createImageBitmap(file).then(function(bitmap) {
+          var canvas = document.createElement('canvas');
+          canvas.width = bitmap.width;
+          canvas.height = bitmap.height;
+
+          var context = canvas.getContext('2d');
+          if (!context) {
+            if (typeof bitmap.close === 'function') bitmap.close();
+            return file;
+          }
+
+          context.drawImage(bitmap, 0, 0);
+          if (typeof bitmap.close === 'function') bitmap.close();
+
+          return new Promise(function(resolve) {
+            canvas.toBlob(function(blob) {
+              resolve(blob || file);
+            }, 'image/png');
+          });
+        }).catch(function(error) {
+          console.warn('Unable to normalize clipboard image to PNG:', error);
+          return file;
+        });
+      }
+
+      function clipboardFilename(file) {
+        if (file && file.name) return file.name;
+        if (file && file.type === 'image/jpeg') return 'clipboard.jpg';
+        if (file && file.type === 'image/gif') return 'clipboard.gif';
+        if (file && file.type === 'image/tiff') return 'clipboard.tiff';
+        return 'clipboard.png';
+      }
+
+      function syncClipboardImageToBackend(file) {
+        return createClipboardPngBlob(file).then(function(uploadFile) {
+          var formData = new FormData();
+          formData.append('image', uploadFile, clipboardFilename(uploadFile));
+
+          return fetch('/api/clipboard/image', {
+            method: 'POST',
+            body: formData,
+            credentials: 'same-origin'
+          }).then(function(response) {
+            if (response.ok) return response.json().catch(function() { return null; });
+
+            return response.text().then(function(body) {
+              throw new Error('Clipboard image upload failed: ' + response.status + ' ' + body);
+            });
+          });
+        });
+      }
+
+      // Browser terminals do not forward image clipboard data to the TUI.
+      // Codex handles Ctrl+V by reading the macOS clipboard, so first sync the
+      // browser image data to the backend pasteboard and then trigger that key.
+      document.addEventListener('paste', function(event) {
+        if (CLAUDE_HUB_AGENT_TYPE !== 'codex') return;
+
+        var imageFile = getClipboardImageFile(event);
+        if (!imageFile) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        syncClipboardImageToBackend(imageFile).then(function() {
+          sendText('\\x16');
+        }).catch(function(error) {
+          console.warn('Unable to sync clipboard image before paste:', error);
+          sendText('\\x16');
+        });
+      }, true);
 
       // Signal parent when terminal is ready
       function notifyReady() {
@@ -135,8 +330,7 @@ function onIframeLoad(event: Event, tabId: string) {
 
       // Watch for terminal becoming available (ttyd sets it asynchronously)
       var termCheckInterval = setInterval(function() {
-        var term = findTerminal();
-        if (term && typeof term.send === 'function') {
+        if (hasTerminalInputApi()) {
           clearInterval(termCheckInterval);
           console.log('=== Terminal ready, notifying parent ===');
           notifyReady();
@@ -208,7 +402,7 @@ function handleMessage(event: MessageEvent) {
   if (event.data.type === 'terminal-ready') {
     const tabId = event.data.tabId
     if (tabId) {
-      terminalReady[tabId] = true
+      getTerminalState().ready[tabId] = true
       // Flush any queued keys for this tab
       flushKeyQueue(tabId)
     }
@@ -217,7 +411,7 @@ function handleMessage(event: MessageEvent) {
   if (event.data.type === 'terminal-not-ready') {
     const tabId = event.data.tabId
     if (tabId) {
-      terminalReady[tabId] = false
+      getTerminalState().ready[tabId] = false
     }
   }
 
@@ -229,38 +423,27 @@ function handleMessage(event: MessageEvent) {
 
 onMounted(() => {
   if (typeof window !== 'undefined') {
-    ;(window as any).__registerTerminalIframe = registerIframe
+    window.__registerTerminalIframe = registerIframe
 
     // Key sending function with queue support
-    ;(window as any).__sendTerminalKey = function(key: string, ctrl: boolean, shift: boolean) {
-      const activePaneTabId = (window as any).__activePaneTabId
+    window.__sendTerminalKey = function(key: string, ctrl = false, shift = false) {
+      const activePaneTabId = window.__activePaneTabId
       const targetTabId = activePaneTabId || props.tabId
+      if (!targetTabId) return
 
-      const iframe = iframeRefs[targetTabId]
-      if (iframe && iframe.contentWindow) {
-        if (terminalReady[targetTabId]) {
-          // Terminal is ready — send directly
-          iframe.contentWindow.postMessage({
-            type: 'terminal-key',
-            key,
-            ctrl,
-            shift,
-            tabId: targetTabId
-          }, '*')
-        } else {
-          // Terminal not ready — queue the key
-          if (!keyQueues[targetTabId]) {
-            keyQueues[targetTabId] = []
-          }
-          keyQueues[targetTabId].push({ key, ctrl, shift })
-        }
+      const item = { key, ctrl, shift }
+      const state = getTerminalState()
+      if (state.ready[targetTabId] && postTerminalKey(targetTabId, item)) {
+        return
+      }
+
+      if (state.iframes[targetTabId]) {
+        // Terminal exists but is not ready yet.
+        queueTerminalKey(targetTabId, item)
       } else {
         console.warn('No iframe found for tab:', targetTabId)
         // Queue for when iframe appears
-        if (!keyQueues[targetTabId]) {
-          keyQueues[targetTabId] = []
-        }
-        keyQueues[targetTabId].push({ key, ctrl, shift })
+        queueTerminalKey(targetTabId, item)
       }
     }
 
