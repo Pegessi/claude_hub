@@ -22,7 +22,8 @@
     <!-- 终端视图 -->
     <TerminalView
       v-if="pane.tabId"
-      :tabId="pane.tabId"
+      :tab-id="pane.tabId"
+      :agent-type="getAgentType()"
       class="pane-terminal"
     />
   </div>
@@ -52,6 +53,12 @@ function getTabName(): string {
   if (!props.pane.tabId) return ''
   const tab = tabs.value.find((t: TerminalTab) => t.id === props.pane.tabId)
   return tab?.name || ''
+}
+
+function getAgentType() {
+  if (!props.pane.tabId) return undefined
+  const tab = tabs.value.find((t: TerminalTab) => t.id === props.pane.tabId)
+  return tab?.agent_type
 }
 
 function handleClick() {

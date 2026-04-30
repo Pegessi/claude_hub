@@ -46,10 +46,10 @@ function clearError() {
   error.value = null
 }
 
-// Expose active pane tab ID for mobile controls
-watch(activePane, (pane) => {
+// Expose active pane tab ID for mobile controls.
+watch(() => activePane.value?.tabId || null, (tabId) => {
   if (typeof window !== 'undefined') {
-    ;(window as any).__activePaneTabId = pane?.tabId || null
+    (window as Window & { __activePaneTabId?: string | null }).__activePaneTabId = tabId
   }
 }, { immediate: true })
 
