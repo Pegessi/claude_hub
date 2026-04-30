@@ -1,4 +1,5 @@
 from difflib import unified_diff
+from pathlib import Path
 from typing import AsyncGenerator, Generator
 
 import pytest
@@ -61,33 +62,53 @@ def tmux_session_exists(session_name: str) -> bool:
     return result.returncode == 0
 
 
+def local_requests_session() -> requests.Session:
+    """Create a session for loopback requests that ignores proxy env vars."""
+    session = requests.Session()
+    session.trust_env = False
+    return session
+
+
+def backend_health_ok(session: requests.Session) -> bool:
+    try:
+        resp = session.get(f"{BACKEND_URL}/health", timeout=1)
+    except requests.RequestException:
+        return False
+    return resp.status_code == 200
+
+
+def read_tail(path: Path, max_chars: int = 4000) -> str:
+    try:
+        return path.read_text(errors="ignore")[-max_chars:].strip()
+    except OSError:
+        return ""
+
+
 # ── fixtures ─────────────────────────────────────────────────────────────
 
 
 @pytest.fixture(scope="session")
 def backend_server() -> Generator[None, None, None]:
     """Start the real FastAPI backend on port 8173 in a background process."""
-    import pathlib
     import subprocess
     import time
 
-    # Check if backend is already running
-    try:
-        resp = requests.get(f"{BACKEND_URL}/health", timeout=1)
-        if resp.status_code == 200:
-            yield  # Backend already running, nothing to start/stop
-            return
-    except requests.ConnectionError:
-        pass
+    session = local_requests_session()
+    if backend_health_ok(session):
+        yield
+        return
 
-    backend_dir = pathlib.Path(__file__).parent.parent
+    backend_dir = Path(__file__).parent.parent
     venv_python = backend_dir / ".venv" / "bin" / "python"
 
     # Fallback: use sys.executable if venv not found
     if not venv_python.exists():
         import sys
 
-        venv_python = pathlib.Path(sys.executable)
+        venv_python = Path(sys.executable)
+
+    log_path = backend_dir / ".pytest-backend.log"
+    log_file = log_path.open("wb")
 
     proc = subprocess.Popen(
         [
@@ -103,29 +124,38 @@ def backend_server() -> Generator[None, None, None]:
             "error",
         ],
         cwd=str(backend_dir),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
     )
 
     # Wait for server to be ready
     for _ in range(50):
-        try:
-            resp = requests.get(f"{BACKEND_URL}/health", timeout=1)
-            if resp.status_code == 200:
-                break
-        except requests.ConnectionError:
-            time.sleep(0.2)
+        if backend_health_ok(session):
+            break
+        time.sleep(0.2)
     else:
         proc.terminate()
-        raise RuntimeError("Backend server failed to start")
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        finally:
+            log_file.close()
+        log_tail = read_tail(log_path)
+        raise RuntimeError(
+            f"Backend server failed to start on {BACKEND_URL}."
+            f"{chr(10) + log_tail if log_tail else ''}"
+        )
 
-    yield
-
-    proc.terminate()
     try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+        yield
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        log_file.close()
 
 
 @pytest.fixture
@@ -145,10 +175,10 @@ def terminal_tab(backend_server: None) -> Generator[dict, None, None]:
     Also ensures the tmux session exists by making an initial connection
     via Playwright (ttyd creates the tmux session lazily on first WS connect).
     """
-    import time
+    session = local_requests_session()
 
     # Create tab via API
-    resp = requests.post(
+    resp = session.post(
         f"{BACKEND_URL}/api/tabs",
         json={"name": "test-replay", "agent_type": "cursor"},
     )
@@ -159,6 +189,6 @@ def terminal_tab(backend_server: None) -> Generator[dict, None, None]:
 
     # Cleanup: delete tab (kills tmux session too)
     try:
-        requests.delete(f"{BACKEND_URL}/api/tabs/{tab['id']}", timeout=5)
-    except Exception:
+        session.delete(f"{BACKEND_URL}/api/tabs/{tab['id']}", timeout=5)
+    except requests.RequestException:
         pass

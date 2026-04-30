@@ -55,8 +55,7 @@ async def _set_macos_clipboard_image(path: Path, applescript_type: str) -> None:
         )
 
     script = (
-        "set the clipboard to "
-        f"(read (POSIX file {json.dumps(str(path))}) as {applescript_type})"
+        "set the clipboard to " f"(read (POSIX file {json.dumps(str(path))}) as {applescript_type})"
     )
     proc = await asyncio.create_subprocess_exec(
         "osascript",

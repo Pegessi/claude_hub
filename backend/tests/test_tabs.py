@@ -26,9 +26,7 @@ async def test_update_tab_order_route_not_shadowed(
     def fake_set_tab_order(tab_ids: list[str]) -> None:
         captured_order.extend(tab_ids)
 
-    monkeypatch.setattr(
-        "claude_hub.api.tabs.ttyd_manager.set_tab_order", fake_set_tab_order
-    )
+    monkeypatch.setattr("claude_hub.api.tabs.ttyd_manager.set_tab_order", fake_set_tab_order)
 
     response = await client.put("/api/tabs/order", json={"tab_ids": []})
 

@@ -1,9 +1,10 @@
 import base64
+from pathlib import Path
+from typing import Any
 
 import pytest
 from httpx import AsyncClient
 from pytest import MonkeyPatch
-
 
 PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
@@ -19,13 +20,15 @@ class FakeProcess:
 
 @pytest.mark.asyncio
 async def test_upload_clipboard_image_sets_macos_clipboard(
-    client: AsyncClient, monkeypatch: MonkeyPatch, tmp_path
+    client: AsyncClient, monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
-    captured: dict[str, object] = {}
+    captured_args: tuple[Any, ...] = ()
+    captured_kwargs: dict[str, Any] = {}
 
-    async def fake_create_subprocess_exec(*args, **kwargs) -> FakeProcess:
-        captured["args"] = args
-        captured["kwargs"] = kwargs
+    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+        nonlocal captured_args, captured_kwargs
+        captured_args = args
+        captured_kwargs = kwargs
         return FakeProcess()
 
     monkeypatch.setattr("claude_hub.api.clipboard.CLIPBOARD_IMAGE_DIR", tmp_path)
@@ -46,11 +49,13 @@ async def test_upload_clipboard_image_sets_macos_clipboard(
     assert data["size"] == len(PNG_BYTES)
     assert (tmp_path / data["path"].split("/")[-1]).read_bytes() == PNG_BYTES
 
-    assert captured["args"][0:2] == ("osascript", "-e")
-    script = captured["args"][2]
+    assert captured_args[0:2] == ("osascript", "-e")
+    script = captured_args[2]
+    assert isinstance(script, str)
     assert "set the clipboard to" in script
     assert "«class PNGf»" in script
     assert data["path"] in script
+    assert captured_kwargs
 
 
 @pytest.mark.asyncio
