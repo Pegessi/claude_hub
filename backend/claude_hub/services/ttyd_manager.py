@@ -545,6 +545,20 @@ class TTYDManager:
         self._save_state()
         return process.to_schema()
 
+    async def duplicate_tab(self, tab_id: str) -> Optional[TerminalTab]:
+        """Create a new tab by copying the source tab's launch configuration."""
+        source = self.processes.get(tab_id)
+        if not source:
+            return None
+
+        return await self.create_tab(
+            name=f"{source.name} (copy)",
+            shell=source.shell,
+            cwd=source.cwd,
+            solo_mode=source.solo_mode,
+            agent_type=source.agent_type,
+        )
+
     async def delete_tab(self, tab_id: str) -> bool:
         """Delete a tab and explicitly kill its tmux session (user requested deletion)."""
         if tab_id not in self.processes:
