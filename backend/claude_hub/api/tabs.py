@@ -48,6 +48,19 @@ async def update_tab_order(
     return {"success": True}
 
 
+@router.post("/{tab_id}/duplicate", response_model=TerminalTab, status_code=201)
+async def duplicate_tab(
+    tab_id: str,
+    current_user: User = Depends(get_current_user),
+) -> TerminalTab:
+    """Duplicate a terminal tab, preserving launch configuration like solo mode."""
+    logger.info(f"Duplicating tab {tab_id}, user={current_user.email}")
+    tab = await ttyd_manager.duplicate_tab(tab_id)
+    if not tab:
+        raise HTTPException(status_code=404, detail="Tab not found")
+    return tab
+
+
 @router.get("/{tab_id}", response_model=TerminalTab)
 async def get_tab(
     tab_id: str,
