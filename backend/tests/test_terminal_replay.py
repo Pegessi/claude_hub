@@ -157,7 +157,7 @@ def wait_for_cursor_matches_tmux(page: Page, tab_id: str) -> None:
 
 def read_scroll_alignment(page: Page) -> dict[str, Any] | None:
     """Read viewport scroll alignment state from xterm."""
-    return page.evaluate("""() => {
+    result: Any = page.evaluate("""() => {
             const term = window.term;
             const viewportEl = document.querySelector('.xterm-viewport');
             if (!term || !viewportEl) return null;
@@ -173,6 +173,7 @@ def read_scroll_alignment(page: Page) -> dict[str, Any] | None:
                 delta: Math.abs(viewportEl.scrollTop - buffer.viewportY * rowHeight),
             };
         }""")
+    return result if isinstance(result, dict) else None
 
 
 def read_xterm_text(page: Page) -> str:
