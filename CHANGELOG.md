@@ -5,6 +5,12 @@
 
 ## 2026-05-12
 
+### c3e0c64 feat: color tab indicator dot by agent runtime status
+- Bind the per-tab indicator dot to agent status from the store: idle green, working yellow, attention purple, offline gray
+- Add a soft glow on working and attention so active or waiting tabs are easier to spot
+- Reuse the palette from AgentStatusFloatingPanel for consistency
+- **Files**: TabBar.vue
+
 ### 3a48945 fix: stop agent status panel from flickering between working and attention
 - Replace broad substring scans over the last 18 lines with anchored checks on the bottom 5 lines so historical scrollback no longer drives classification
 - Strip ANSI escapes before matching and hashing so cursor blinks stop churning the activity hash; remove the "hash changed → working" heuristic that was the main flicker source
