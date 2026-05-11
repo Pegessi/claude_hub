@@ -141,21 +141,67 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, reactive } from 'vue'
 
+type TerminalKeySender = (key: string, ctrl?: boolean, shift?: boolean) => void
+type WindowWithTerminalKey = Window & { __sendTerminalKey?: TerminalKeySender }
+
+const ARROW_KEYS = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'])
+const REPEAT_START_DELAY_MS = 320
+const REPEAT_INTERVAL_MS = 75
+
 const isMobile = ref(false)
 const isExpanded = ref(false)
 const ctrlHeld = ref(false)
 const shiftHeld = ref(false)
 const pressedKeys = reactive(new Set<string>())
+let repeatStartTimer: number | null = null
+let repeatIntervalTimer: number | null = null
+let repeatKey: string | null = null
 
 function checkIsMobile() {
   isMobile.value = window.innerWidth <= 768 || /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
 }
 
-function handlePress(key: string) {
-  pressedKeys.add(key)
-  if ((window as any).__sendTerminalKey && !['ctrl', 'shift', 'toggle'].includes(key)) {
-    (window as any).__sendTerminalKey(key, ctrlHeld.value, shiftHeld.value)
+function sendTerminalKey(key: string) {
+  const sender = (window as WindowWithTerminalKey).__sendTerminalKey
+  if (sender && !['ctrl', 'shift', 'toggle'].includes(key)) {
+    sender(key, ctrlHeld.value, shiftHeld.value)
   }
+}
+
+function clearArrowRepeat() {
+  if (repeatStartTimer !== null) {
+    window.clearTimeout(repeatStartTimer)
+    repeatStartTimer = null
+  }
+  if (repeatIntervalTimer !== null) {
+    window.clearInterval(repeatIntervalTimer)
+    repeatIntervalTimer = null
+  }
+  repeatKey = null
+}
+
+function startArrowRepeat(key: string) {
+  if (!ARROW_KEYS.has(key)) return
+  clearArrowRepeat()
+  repeatKey = key
+  repeatStartTimer = window.setTimeout(() => {
+    if (repeatKey !== key || !pressedKeys.has(key)) return
+    sendTerminalKey(key)
+    repeatIntervalTimer = window.setInterval(() => {
+      if (repeatKey !== key || !pressedKeys.has(key)) {
+        clearArrowRepeat()
+        return
+      }
+      sendTerminalKey(key)
+    }, REPEAT_INTERVAL_MS)
+  }, REPEAT_START_DELAY_MS)
+}
+
+function handlePress(key: string) {
+  if (pressedKeys.has(key)) return
+  pressedKeys.add(key)
+  sendTerminalKey(key)
+  startArrowRepeat(key)
   // Auto-release Ctrl/Shift after sending a key with modifier
   if (ctrlHeld.value && !['ctrl', 'shift', 'toggle'].includes(key)) {
     ctrlHeld.value = false
@@ -167,6 +213,9 @@ function handlePress(key: string) {
 
 function handleRelease(key: string) {
   pressedKeys.delete(key)
+  if (repeatKey === key) {
+    clearArrowRepeat()
+  }
 }
 
 // Shortcut button: send Ctrl+letter directly
@@ -208,6 +257,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('resize', checkIsMobile)
+  clearArrowRepeat()
 })
 </script>
 
