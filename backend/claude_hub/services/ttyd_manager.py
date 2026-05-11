@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import uuid
 from datetime import datetime
@@ -17,12 +18,53 @@ logger = logging.getLogger(__name__)
 STATE_FILE = Path.home() / ".claude_hub" / "tabs.json"
 ORDER_FILE = Path.home() / ".claude_hub" / "tab_order.json"
 TMUX_SESSION_PREFIX = "claude-hub-"
-AGENT_STATUS_ACTIVITY_WINDOW_SECONDS = 4
+
+# ANSI escape sequences (CSI, OSC, charset selection) — stripped before
+# pattern matching so cursor blinks and color codes don't churn the hash
+# or break substring checks.
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][AB012]")
+
+# Bare shell prompt (zsh/bash/fish/powerlevel) at end of last line → idle.
+_BARE_SHELL_PROMPT_RE = re.compile(r"[❯>$#%»→λ]\s*$")
+
+# Strict tail anchors used for classification. Each tuple is matched against
+# the lowercased last 5 non-empty lines of the captured pane. Order of checks
+# in `_classify_agent_status` is: ATTENTION → WORKING → IDLE hints.
+_ATTENTION_TAIL_PATTERNS = (
+    "do you want to proceed",
+    "do you want to continue",
+    "(y/n)",
+    "(y/n/a)",
+    "[y/n]",
+    "[y/n/a]",
+    "press enter to continue",
+    "press any key to continue",
+)
+
+_WORKING_TAIL_PATTERNS = (
+    "esc to interrupt",
+    "ctrl+c to interrupt",
+    "ctrl-c to interrupt",
+    "esc to cancel",
+)
+
+# Bottom-of-UI hints emitted by Claude Code / Codex when idle and waiting for
+# user input. Presence of any of these means the agent UI is showing but no
+# work is in flight.
+_IDLE_TAIL_HINTS = (
+    "? for shortcuts",
+    "/ for commands",
+)
 
 
 class CursorPosition(TypedDict):
     cursor_x: int
     cursor_y: int
+
+
+class _AgentStatusSnapshot(TypedDict):
+    hash: str
+    last_changed_at: Optional[datetime]
 
 
 def _tmux_session_name(tab_id: str) -> str:
@@ -416,7 +458,7 @@ class TTYDManager:
         self.processes: Dict[str, TTYDProcess] = {}
         self._next_port = settings.ttyd_base_port
         self._tab_order: List[str] = []
-        self._status_snapshots: Dict[str, dict[str, object]] = {}
+        self._status_snapshots: Dict[str, _AgentStatusSnapshot] = {}
         logger.info("=" * 60)
         logger.info("Initializing TTYDManager - tmux session persistence enabled")
         logger.info("=" * 60)
@@ -662,64 +704,48 @@ class TTYDManager:
         if not _tmux_session_exists(process.tmux_session):
             return AgentRuntimeStatus.OFFLINE, "Offline", "tmux session is not available", None
 
-        recent_lines = [line.strip() for line in output.splitlines() if line.strip()]
-        recent_output = "\n".join(recent_lines[-18:]).lower()
-        recently_changed = (
-            isinstance(last_changed_at, datetime)
-            and (now - last_changed_at).total_seconds() < AGENT_STATUS_ACTIVITY_WINDOW_SECONDS
-        )
+        # Only inspect the bottom of the visible screen — the current prompt
+        # area. Historical scrollback is ignored so that words like
+        # "Reading"/"editing" from past activity can't drive classification.
+        non_empty = [line.strip() for line in output.splitlines() if line.strip()]
+        tail_lines = non_empty[-5:]
+        tail = "\n".join(tail_lines).lower()
+        last_line = tail_lines[-1] if tail_lines else ""
 
-        working_patterns = [
-            "thinking",
-            "working",
-            "running",
-            "executing",
-            "reading",
-            "editing",
-            "writing",
-            "searching",
-            "esc to interrupt",
-            "ctrl+c to interrupt",
-        ]
-        if any(pattern in recent_output for pattern in working_patterns):
+        for pattern in _ATTENTION_TAIL_PATTERNS:
+            if pattern in tail:
+                return (
+                    AgentRuntimeStatus.ATTENTION,
+                    "Agent waiting for input",
+                    "needs your response",
+                    last_changed_at,
+                )
+
+        for pattern in _WORKING_TAIL_PATTERNS:
+            if pattern in tail:
+                return (
+                    AgentRuntimeStatus.WORKING,
+                    "Working",
+                    "agent is processing",
+                    last_changed_at,
+                )
+
+        if _BARE_SHELL_PROMPT_RE.search(last_line):
             return (
-                AgentRuntimeStatus.WORKING,
-                "Working",
-                "recent output indicates activity",
+                AgentRuntimeStatus.IDLE,
+                "Idle",
+                "shell prompt visible",
                 last_changed_at,
             )
 
-        if recently_changed:
-            return (
-                AgentRuntimeStatus.WORKING,
-                "Working",
-                "terminal output changed recently",
-                last_changed_at,
-            )
-
-        attention_patterns = [
-            "permission",
-            "approval",
-            "approve",
-            "allow",
-            "press enter",
-            "press y",
-            "continue?",
-            "confirm",
-            "do you want",
-            "waiting for user",
-            "need your",
-            "needs input",
-            "blocked",
-            "rate limit",
-        ]
-        if any(pattern in recent_output for pattern in attention_patterns):
-            return (
-                AgentRuntimeStatus.ATTENTION,
-                "Attention",
-                "agent may need input",
-                last_changed_at,
-            )
+        for hint in _IDLE_TAIL_HINTS:
+            if hint in tail:
+                return (
+                    AgentRuntimeStatus.IDLE,
+                    "Idle",
+                    "agent prompt visible",
+                    last_changed_at,
+                )
 
         if foreground_command and foreground_command in {"claude", "codex"}:
             return (
@@ -729,7 +755,12 @@ class TTYDManager:
                 last_changed_at,
             )
 
-        return AgentRuntimeStatus.IDLE, "Idle", "no recent activity detected", last_changed_at
+        return (
+            AgentRuntimeStatus.IDLE,
+            "Idle",
+            "no activity indicators",
+            last_changed_at,
+        )
 
     async def get_tab_agent_status(self, tab_id: str) -> Optional[TerminalAgentStatus]:
         """Get a best-effort terminal agent status for one tab."""
@@ -752,12 +783,13 @@ class TTYDManager:
             )
 
         try:
-            output = await process.capture_history(lines=120)
+            raw_output = await process.capture_history(lines=120)
         except Exception as e:
             logger.debug(f"Unable to capture status output for tab {tab_id}: {e}")
-            output = ""
+            raw_output = ""
 
         foreground_command = await process.capture_foreground_command()
+        output = _ANSI_ESCAPE_RE.sub("", raw_output)
         output_hash = hashlib.sha256(output.encode("utf-8", errors="ignore")).hexdigest()
         status, status_text, detail, last_changed_at = self._classify_agent_status(
             process,
