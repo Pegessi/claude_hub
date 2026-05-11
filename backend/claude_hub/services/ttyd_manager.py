@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -9,13 +10,14 @@ from pathlib import Path
 from typing import Dict, List, Optional, TypedDict
 
 from ..config import settings
-from ..models import AgentType, TerminalTab
+from ..models import AgentRuntimeStatus, AgentType, TerminalAgentStatus, TerminalTab
 
 logger = logging.getLogger(__name__)
 
 STATE_FILE = Path.home() / ".claude_hub" / "tabs.json"
 ORDER_FILE = Path.home() / ".claude_hub" / "tab_order.json"
 TMUX_SESSION_PREFIX = "claude-hub-"
+AGENT_STATUS_ACTIVITY_WINDOW_SECONDS = 4
 
 
 class CursorPosition(TypedDict):
@@ -333,6 +335,27 @@ class TTYDProcess:
         except ValueError:
             return None
 
+    async def capture_foreground_command(self) -> Optional[str]:
+        """Capture the foreground command currently running in the tmux pane."""
+        if not _tmux_session_exists(self.tmux_session):
+            return None
+
+        proc = await asyncio.create_subprocess_exec(
+            "tmux",
+            "display-message",
+            "-p",
+            "-t",
+            self.tmux_session,
+            "#{pane_current_command}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode != 0:
+            return None
+        command = stdout.decode("utf-8", errors="ignore").strip()
+        return command or None
+
     async def stop(self, kill_tmux: bool = False) -> None:
         """Stop the ttyd process. By default, KEEP tmux session alive for persistence.
 
@@ -393,6 +416,7 @@ class TTYDManager:
         self.processes: Dict[str, TTYDProcess] = {}
         self._next_port = settings.ttyd_base_port
         self._tab_order: List[str] = []
+        self._status_snapshots: Dict[str, dict[str, object]] = {}
         logger.info("=" * 60)
         logger.info("Initializing TTYDManager - tmux session persistence enabled")
         logger.info("=" * 60)
@@ -610,6 +634,161 @@ class TTYDManager:
         if not process:
             return None
         return await process.capture_cursor_position()
+
+    def _classify_agent_status(
+        self,
+        process: TTYDProcess,
+        output: str,
+        output_hash: str,
+        foreground_command: Optional[str],
+    ) -> tuple[AgentRuntimeStatus, str, Optional[str], Optional[datetime]]:
+        now = datetime.now()
+        snapshot = self._status_snapshots.get(process.tab_id)
+        last_hash = snapshot.get("hash") if snapshot else None
+        last_changed_at = snapshot.get("last_changed_at") if snapshot else None
+
+        if snapshot is None:
+            self._status_snapshots[process.tab_id] = {
+                "hash": output_hash,
+                "last_changed_at": None,
+            }
+        elif last_hash != output_hash:
+            last_changed_at = now
+            self._status_snapshots[process.tab_id] = {
+                "hash": output_hash,
+                "last_changed_at": last_changed_at,
+            }
+
+        if not _tmux_session_exists(process.tmux_session):
+            return AgentRuntimeStatus.OFFLINE, "Offline", "tmux session is not available", None
+
+        recent_lines = [line.strip() for line in output.splitlines() if line.strip()]
+        recent_output = "\n".join(recent_lines[-18:]).lower()
+        recently_changed = (
+            isinstance(last_changed_at, datetime)
+            and (now - last_changed_at).total_seconds() < AGENT_STATUS_ACTIVITY_WINDOW_SECONDS
+        )
+
+        working_patterns = [
+            "thinking",
+            "working",
+            "running",
+            "executing",
+            "reading",
+            "editing",
+            "writing",
+            "searching",
+            "esc to interrupt",
+            "ctrl+c to interrupt",
+        ]
+        if any(pattern in recent_output for pattern in working_patterns):
+            return (
+                AgentRuntimeStatus.WORKING,
+                "Working",
+                "recent output indicates activity",
+                last_changed_at,
+            )
+
+        if recently_changed:
+            return (
+                AgentRuntimeStatus.WORKING,
+                "Working",
+                "terminal output changed recently",
+                last_changed_at,
+            )
+
+        attention_patterns = [
+            "permission",
+            "approval",
+            "approve",
+            "allow",
+            "press enter",
+            "press y",
+            "continue?",
+            "confirm",
+            "do you want",
+            "waiting for user",
+            "need your",
+            "needs input",
+            "blocked",
+            "rate limit",
+        ]
+        if any(pattern in recent_output for pattern in attention_patterns):
+            return (
+                AgentRuntimeStatus.ATTENTION,
+                "Attention",
+                "agent may need input",
+                last_changed_at,
+            )
+
+        if foreground_command and foreground_command in {"claude", "codex"}:
+            return (
+                AgentRuntimeStatus.IDLE,
+                "Idle",
+                f"{foreground_command} is waiting",
+                last_changed_at,
+            )
+
+        return AgentRuntimeStatus.IDLE, "Idle", "no recent activity detected", last_changed_at
+
+    async def get_tab_agent_status(self, tab_id: str) -> Optional[TerminalAgentStatus]:
+        """Get a best-effort terminal agent status for one tab."""
+        process = self.processes.get(tab_id)
+        if not process:
+            return None
+
+        sampled_at = datetime.now()
+        if not _tmux_session_exists(process.tmux_session):
+            return TerminalAgentStatus(
+                tab_id=process.tab_id,
+                tab_name=process.name,
+                agent_type=process.agent_type,
+                status=AgentRuntimeStatus.OFFLINE,
+                status_text="Offline",
+                detail="tmux session is not available",
+                tmux_session=process.tmux_session,
+                last_changed_at=None,
+                sampled_at=sampled_at,
+            )
+
+        try:
+            output = await process.capture_history(lines=120)
+        except Exception as e:
+            logger.debug(f"Unable to capture status output for tab {tab_id}: {e}")
+            output = ""
+
+        foreground_command = await process.capture_foreground_command()
+        output_hash = hashlib.sha256(output.encode("utf-8", errors="ignore")).hexdigest()
+        status, status_text, detail, last_changed_at = self._classify_agent_status(
+            process,
+            output,
+            output_hash,
+            foreground_command,
+        )
+
+        return TerminalAgentStatus(
+            tab_id=process.tab_id,
+            tab_name=process.name,
+            agent_type=process.agent_type,
+            status=status,
+            status_text=status_text,
+            detail=detail,
+            tmux_session=process.tmux_session,
+            last_changed_at=last_changed_at,
+            sampled_at=sampled_at,
+        )
+
+    async def list_tab_agent_statuses(self) -> list[TerminalAgentStatus]:
+        """List best-effort terminal agent statuses in tab order."""
+        statuses: list[TerminalAgentStatus] = []
+        ordered_ids = [tab_id for tab_id in self._tab_order if tab_id in self.processes]
+        ordered_ids.extend(tab_id for tab_id in self.processes if tab_id not in ordered_ids)
+
+        for tab_id in ordered_ids:
+            status = await self.get_tab_agent_status(tab_id)
+            if status:
+                statuses.append(status)
+        return statuses
 
     async def update_tab(
         self,

@@ -1,4 +1,5 @@
 export type AgentType = 'claude' | 'codex' | 'cursor'
+export type AgentRuntimeStatus = 'idle' | 'working' | 'attention' | 'offline'
 
 export interface TerminalTab {
   id: string
@@ -26,6 +27,18 @@ export interface TerminalTabUpdate {
   cwd?: string
   solo_mode?: boolean
   agent_type?: AgentType
+}
+
+export interface TerminalAgentStatus {
+  tab_id: string
+  tab_name: string
+  agent_type: AgentType
+  status: AgentRuntimeStatus
+  status_text: string
+  detail?: string | null
+  tmux_session: string
+  last_changed_at?: string | null
+  sampled_at: string
 }
 
 export type LayoutType = '1x1' | '2x1' | '1x2' | '3x1' | '1x3' | '2x2' | '3x3'

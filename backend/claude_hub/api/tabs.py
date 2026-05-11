@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ..auth.dependencies import get_current_user
-from ..models import TerminalTab, TerminalTabCreate, TerminalTabUpdate, User
+from ..models import TerminalAgentStatus, TerminalTab, TerminalTabCreate, TerminalTabUpdate, User
 from ..services import ttyd_manager
 
 logger = logging.getLogger(__name__)
@@ -21,6 +21,14 @@ class TabOrderUpdate(BaseModel):
 async def list_tabs(current_user: User = Depends(get_current_user)) -> List[TerminalTab]:
     """List all terminal tabs."""
     return ttyd_manager.list_tabs()
+
+
+@router.get("/status", response_model=List[TerminalAgentStatus])
+async def list_tab_statuses(
+    current_user: User = Depends(get_current_user),
+) -> List[TerminalAgentStatus]:
+    """List best-effort runtime statuses for terminal agents."""
+    return await ttyd_manager.list_tab_agent_statuses()
 
 
 @router.post("", response_model=TerminalTab, status_code=201)

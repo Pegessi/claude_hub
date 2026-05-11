@@ -1,9 +1,17 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { TerminalTab, TerminalTabCreate, TerminalTabUpdate, LayoutType, Pane } from '@/types'
+import type {
+  TerminalAgentStatus,
+  TerminalTab,
+  TerminalTabCreate,
+  TerminalTabUpdate,
+  LayoutType,
+  Pane,
+} from '@/types'
 
 const API_BASE = '/api'
 const STORAGE_KEY_LAYOUT = 'claude_hub_layout_type'
+const STATUS_POLL_INTERVAL_MS = 1000
 
 function generatePaneId(): string {
   return 'pane-' + Math.random().toString(36).substr(2, 9)
@@ -21,9 +29,12 @@ const LAYOUT_CONFIGS: Record<LayoutType, { rows: number; cols: number }> = {
 
 export const useTerminalStore = defineStore('terminal', () => {
   const tabs = ref<TerminalTab[]>([])
+  const agentStatuses = ref<TerminalAgentStatus[]>([])
   const activeTabId = ref<string | null>(null)
   const isLoading = ref(false)
+  const isStatusLoading = ref(false)
   const error = ref<string | null>(null)
+  let statusPollTimer: number | null = null
 
   // Layout and panes
   const layoutType = ref<LayoutType>(
@@ -130,6 +141,32 @@ export const useTerminalStore = defineStore('terminal', () => {
     } finally {
       isLoading.value = false
     }
+  }
+
+  async function fetchAgentStatuses() {
+    if (isStatusLoading.value) return
+    isStatusLoading.value = true
+    try {
+      const response = await fetch(`${API_BASE}/tabs/status`)
+      if (!response.ok) throw new Error('Failed to fetch agent statuses')
+      agentStatuses.value = await response.json()
+    } catch (e) {
+      console.error('Error fetching agent statuses:', e)
+    } finally {
+      isStatusLoading.value = false
+    }
+  }
+
+  function startAgentStatusPolling() {
+    if (statusPollTimer !== null) return
+    fetchAgentStatuses()
+    statusPollTimer = window.setInterval(fetchAgentStatuses, STATUS_POLL_INTERVAL_MS)
+  }
+
+  function stopAgentStatusPolling() {
+    if (statusPollTimer === null) return
+    window.clearInterval(statusPollTimer)
+    statusPollTimer = null
   }
 
   async function createTab(data: TerminalTabCreate) {
@@ -274,15 +311,20 @@ export const useTerminalStore = defineStore('terminal', () => {
 
   return {
     tabs,
+    agentStatuses,
     activeTabId,
     activeTab,
     isLoading,
+    isStatusLoading,
     error,
     layoutType,
     panes,
     activePaneId,
     activePane,
     fetchTabs,
+    fetchAgentStatuses,
+    startAgentStatusPolling,
+    stopAgentStatusPolling,
     createTab,
     duplicateTab,
     updateTab,
