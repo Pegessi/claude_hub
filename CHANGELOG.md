@@ -3,6 +3,16 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-05-12
+
+### 3a48945 fix: stop agent status panel from flickering between working and attention
+- Replace broad substring scans over the last 18 lines with anchored checks on the bottom 5 lines so historical scrollback no longer drives classification
+- Strip ANSI escapes before matching and hashing so cursor blinks stop churning the activity hash; remove the "hash changed → working" heuristic that was the main flicker source
+- Drop the `bypass permissions` attention pattern — Claude Code shows it as a permanent footer in bypass mode and was forcing every idle tab into Attention
+- Tighten ATTENTION to explicit prompts (`do you want to proceed`, `(y/n)`, `[y/n]`, `press enter to continue`); WORKING keys off `esc to interrupt` / `ctrl+c to interrupt` / `esc to cancel`
+- Rename ATTENTION display text to "Agent waiting for input"; IDLE remains "Idle" and is the default fallback
+- **Files**: ttyd_manager.py
+
 ## 2026-04-28
 
 ### de5c9b8 fix: restore terminal cursor position after history replay
