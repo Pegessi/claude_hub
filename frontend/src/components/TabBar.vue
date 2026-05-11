@@ -51,6 +51,7 @@
     >
       {{ isLoading ? '...' : '+' }}
     </button>
+    <AgentStatusFloatingPanel v-if="tabs.length > 0" />
 
     <!-- Create Tab Modal -->
     <div v-if="showModal" class="modal-overlay" @click.self="closeCreateModal">
@@ -178,6 +179,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
+import AgentStatusFloatingPanel from '@/components/AgentStatusFloatingPanel.vue'
 import { useTerminalStore } from '@/stores/terminalStore'
 import type { TerminalTab } from '@/types'
 
@@ -498,7 +500,7 @@ async function handleCreateTab() {
 <style scoped>
 .tab-bar {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   background-color: #1e1e1e;
   border-bottom: 1px solid #333;
   padding: 4px 8px;
@@ -544,6 +546,7 @@ async function handleCreateTab() {
 
 .tabs {
   display: flex;
+  align-items: flex-end;
   gap: 4px;
   overflow-x: auto;
   overflow-y: hidden;
@@ -562,9 +565,12 @@ async function handleCreateTab() {
   display: flex;
   align-items: center;
   gap: 6px;
+  height: 28px;
+  box-sizing: border-box;
   background-color: #2d2d2d;
-  padding: 6px 12px;
-  border-radius: 4px 4px 0 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 0 10px;
   cursor: pointer;
   user-select: none;
   flex: 0 0 auto;
@@ -668,8 +674,10 @@ async function handleCreateTab() {
 }
 
 .add-tab {
+  align-self: flex-end;
   background-color: #2d2d2d;
-  border: none;
+  border: 1px solid transparent;
+  box-sizing: border-box;
   color: #ccc;
   font-size: 20px;
   width: 28px;

@@ -121,6 +121,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  store.stopAgentStatusPolling()
   cleanupMobileViewportSync()
 })
 </script>

@@ -13,6 +13,15 @@ class AgentType(str, Enum):
     CURSOR = "cursor"
 
 
+class AgentRuntimeStatus(str, Enum):
+    """Best-effort runtime status for a terminal agent."""
+
+    IDLE = "idle"
+    WORKING = "working"
+    ATTENTION = "attention"
+    OFFLINE = "offline"
+
+
 class TerminalTabBase(BaseModel):
     """Base schema for TerminalTab."""
 
@@ -49,6 +58,20 @@ class TerminalTab(TerminalTabBase):
 
     class Config:
         from_attributes = True
+
+
+class TerminalAgentStatus(BaseModel):
+    """Status summary for the floating terminal agent panel."""
+
+    tab_id: str
+    tab_name: str
+    agent_type: AgentType
+    status: AgentRuntimeStatus
+    status_text: str
+    detail: Optional[str] = None
+    tmux_session: str
+    last_changed_at: Optional[datetime] = None
+    sampled_at: datetime
 
 
 class User(BaseModel):

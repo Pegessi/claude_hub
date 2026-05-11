@@ -1,8 +1,10 @@
 from .schemas import (
+    AgentRuntimeStatus,
     AgentType,
     DirectoryListing,
     FileInfo,
     LoginSession,
+    TerminalAgentStatus,
     TerminalTab,
     TerminalTabBase,
     TerminalTabCreate,
@@ -20,4 +22,6 @@ __all__ = [
     "DirectoryListing",
     "FileInfo",
     "AgentType",
+    "AgentRuntimeStatus",
+    "TerminalAgentStatus",
 ]
