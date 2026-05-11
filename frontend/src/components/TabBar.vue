@@ -9,7 +9,11 @@
         },
       ]"
     >
-      <div ref="tabsContainerRef" class="tabs" @scroll="handleTabsScroll">
+      <div
+        ref="tabsContainerRef"
+        class="tabs"
+        @scroll="handleTabsScroll"
+      >
         <div
           v-for="(tab, index) in tabs"
           :key="tab.id"
@@ -26,35 +30,61 @@
         >
           <input
             v-if="editingTabId === tab.id"
+            ref="renameInputRef"
             v-model="editingTabName"
             type="text"
             class="tab-name-input"
             @blur="handleRenameTab"
             @keyup.enter="handleRenameTab"
             @keyup.escape="cancelRename"
-            ref="renameInputRef"
+          >
+          <span
+            v-else
+            class="tab-name"
+            @dblclick.stop="startRename(tab)"
+          >{{ tab.name }}</span>
+          <span
+            v-if="tab.is_active"
+            class="tab-indicator"
+            :data-status="getTabStatus(tab)"
           />
-          <span v-else class="tab-name" @dblclick.stop="startRename(tab)">{{ tab.name }}</span>
-          <span v-if="tab.is_active" class="tab-indicator"></span>
-          <span v-if="getPaneCountForTab(tab.id) > 0" class="pane-indicator">
+          <span
+            v-if="getPaneCountForTab(tab.id) > 0"
+            class="pane-indicator"
+          >
             {{ getPaneCountForTab(tab.id) }}
           </span>
-          <button class="tab-duplicate" @click.stop="handleTabDuplicate(tab.id)" title="Duplicate tab">📋</button>
-          <button class="tab-close" @click.stop="handleTabClose(tab.id)">×</button>
+          <button
+            class="tab-duplicate"
+            title="Duplicate tab"
+            @click.stop="handleTabDuplicate(tab.id)"
+          >
+            📋
+          </button>
+          <button
+            class="tab-close"
+            @click.stop="handleTabClose(tab.id)"
+          >
+            ×
+          </button>
         </div>
       </div>
     </div>
     <button
       class="add-tab"
-      @click="openCreateModal"
       :disabled="isLoading"
+      @click="openCreateModal"
     >
       {{ isLoading ? '...' : '+' }}
     </button>
     <AgentStatusFloatingPanel v-if="tabs.length > 0" />
 
     <!-- Create Tab Modal -->
-    <div v-if="showModal" class="modal-overlay" @click.self="closeCreateModal">
+    <div
+      v-if="showModal"
+      class="modal-overlay"
+      @click.self="closeCreateModal"
+    >
       <div class="modal">
         <h3>Create New Terminal</h3>
         <form @submit.prevent="handleCreateTab">
@@ -66,7 +96,7 @@
               type="text"
               placeholder="Enter tab name"
               autofocus
-            />
+            >
           </div>
           <div class="form-group">
             <label for="tabCwd">Working Directory (optional)</label>
@@ -76,8 +106,12 @@
                 v-model="form.cwd"
                 type="text"
                 placeholder="e.g., ~/Project/my-app"
-              />
-              <button type="button" class="cwd-dropdown-btn" @click="toggleFileBrowser">
+              >
+              <button
+                type="button"
+                class="cwd-dropdown-btn"
+                @click="toggleFileBrowser"
+              >
                 📁
               </button>
             </div>
@@ -89,27 +123,46 @@
               v-model="form.agent_type"
               class="select-input"
             >
-              <option value="claude">Claude</option>
-              <option value="codex">Codex</option>
-              <option value="cursor">Terminal</option>
+              <option value="claude">
+                Claude
+              </option>
+              <option value="codex">
+                Codex
+              </option>
+              <option value="cursor">
+                Terminal
+              </option>
             </select>
           </div>
-          <div v-if="supportsSoloMode" class="form-group">
+          <div
+            v-if="supportsSoloMode"
+            class="form-group"
+          >
             <label class="checkbox-label">
               <div class="checkbox-row">
                 <input
-                  type="checkbox"
                   v-model="form.solo_mode"
+                  type="checkbox"
                   class="checkbox-input"
-                />
+                >
                 <span class="checkbox-text">Solo Mode</span>
               </div>
               <span class="checkbox-desc">{{ soloModeDescription }}</span>
             </label>
           </div>
           <div class="modal-actions">
-            <button type="button" class="btn btn-secondary" @click="closeCreateModal">Cancel</button>
-            <button type="submit" class="btn btn-primary" :disabled="isLoading">
+            <button
+              type="button"
+              class="btn btn-secondary"
+              @click="closeCreateModal"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              class="btn btn-primary"
+              :disabled="isLoading"
+            >
               {{ isLoading ? 'Creating...' : 'Create' }}
             </button>
           </div>
@@ -118,14 +171,31 @@
     </div>
 
     <!-- File Browser Modal -->
-    <div v-if="showFileBrowser" class="modal-overlay file-browser-overlay" @click.self="showFileBrowser = false">
+    <div
+      v-if="showFileBrowser"
+      class="modal-overlay file-browser-overlay"
+      @click.self="showFileBrowser = false"
+    >
       <div class="modal file-browser-modal">
         <div class="file-browser-header">
           <h3>Select Working Directory</h3>
-          <button type="button" class="btn btn-secondary btn-small" @click="showFileBrowser = false">Close</button>
+          <button
+            type="button"
+            class="btn btn-secondary btn-small"
+            @click="showFileBrowser = false"
+          >
+            Close
+          </button>
         </div>
         <div class="file-browser-path">
-          <button type="button" class="path-nav-btn" @click="navigateToHome" title="Home">🏠</button>
+          <button
+            type="button"
+            class="path-nav-btn"
+            title="Home"
+            @click="navigateToHome"
+          >
+            🏠
+          </button>
           <span class="current-path">{{ browserCurrentPath }}</span>
         </div>
         <div class="file-browser-list">
@@ -146,28 +216,63 @@
             <span class="file-icon">{{ item.is_dir ? '📁' : '📄' }}</span>
             <span class="file-name">{{ item.name }}</span>
           </div>
-          <div v-if="browserLoading" class="file-loading">
+          <div
+            v-if="browserLoading"
+            class="file-loading"
+          >
             Loading...
           </div>
-          <div v-if="browserError" class="file-error">
+          <div
+            v-if="browserError"
+            class="file-error"
+          >
             {{ browserError }}
           </div>
         </div>
         <div class="file-browser-footer">
-          <button type="button" class="btn btn-secondary" @click="showFileBrowser = false">Cancel</button>
-          <button type="button" class="btn btn-primary" @click="selectCurrentDirectory">Select This Directory</button>
+          <button
+            type="button"
+            class="btn btn-secondary"
+            @click="showFileBrowser = false"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            class="btn btn-primary"
+            @click="selectCurrentDirectory"
+          >
+            Select This Directory
+          </button>
         </div>
       </div>
     </div>
 
     <!-- Close Tab Confirmation Modal -->
-    <div v-if="showCloseConfirm" class="modal-overlay" @click.self="showCloseConfirm = false">
+    <div
+      v-if="showCloseConfirm"
+      class="modal-overlay"
+      @click.self="showCloseConfirm = false"
+    >
       <div class="modal">
         <h3>Close Terminal</h3>
-        <p class="confirm-message">Are you sure you want to close "{{ tabToClose?.name }}"?</p>
+        <p class="confirm-message">
+          Are you sure you want to close "{{ tabToClose?.name }}"?
+        </p>
         <div class="modal-actions">
-          <button type="button" class="btn btn-secondary" @click="showCloseConfirm = false">Cancel</button>
-          <button type="button" class="btn btn-danger" :disabled="isLoading" @click="confirmCloseTab">
+          <button
+            type="button"
+            class="btn btn-secondary"
+            @click="showCloseConfirm = false"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            class="btn btn-danger"
+            :disabled="isLoading"
+            @click="confirmCloseTab"
+          >
             {{ isLoading ? 'Closing...' : 'Close' }}
           </button>
         </div>
@@ -182,6 +287,7 @@ import { storeToRefs } from 'pinia'
 import AgentStatusFloatingPanel from '@/components/AgentStatusFloatingPanel.vue'
 import { useTerminalStore } from '@/stores/terminalStore'
 import type { TerminalTab } from '@/types'
+import type { AgentRuntimeStatus } from '@/types'
 
 interface FileInfo {
   name: string
@@ -197,7 +303,19 @@ interface DirectoryListing {
 }
 
 const store = useTerminalStore()
-const { tabs, activeTabId, isLoading } = storeToRefs(store)
+const { tabs, activeTabId, isLoading, agentStatuses } = storeToRefs(store)
+
+const tabStatusById = computed<Record<string, AgentRuntimeStatus>>(() => {
+  const map: Record<string, AgentRuntimeStatus> = {}
+  for (const s of agentStatuses.value) {
+    map[s.tab_id] = s.status
+  }
+  return map
+})
+
+function getTabStatus(tab: TerminalTab): AgentRuntimeStatus {
+  return tabStatusById.value[tab.id] ?? (tab.is_active ? 'idle' : 'offline')
+}
 
 // Drag and drop state for tab reordering
 const draggedTabId = ref<string | null>(null)
@@ -624,7 +742,26 @@ async function handleCreateTab() {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background-color: #22c55e;
+  background-color: #4ade80;
+  transition: background-color 120ms ease, box-shadow 120ms ease;
+}
+
+.tab-indicator[data-status='idle'] {
+  background-color: #4ade80;
+}
+
+.tab-indicator[data-status='working'] {
+  background-color: #facc15;
+  box-shadow: 0 0 6px rgba(250, 204, 21, 0.6);
+}
+
+.tab-indicator[data-status='attention'] {
+  background-color: #c084fc;
+  box-shadow: 0 0 6px rgba(192, 132, 252, 0.7);
+}
+
+.tab-indicator[data-status='offline'] {
+  background-color: #71717a;
 }
 
 .pane-indicator {
