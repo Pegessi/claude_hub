@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import uuid
 from datetime import datetime
@@ -11,7 +12,14 @@ from pathlib import Path
 from typing import Dict, List, Optional, TypedDict
 
 from ..config import settings
-from ..models import AgentRuntimeStatus, AgentType, TerminalAgentStatus, TerminalTab
+from ..models import (
+    AgentRuntimeStatus,
+    AgentType,
+    ExecutionTarget,
+    TerminalAgentStatus,
+    TerminalTab,
+)
+from .remote_profiles import remote_profile_manager
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +145,10 @@ class TTYDProcess:
         created_at: Optional[datetime] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        target: ExecutionTarget = ExecutionTarget.LOCAL,
+        remote_profile_id: Optional[str] = None,
+        remote_cwd: Optional[str] = None,
+        remote_reconnect: bool = True,
     ):
         self.tab_id = tab_id
         self.port = port
@@ -144,6 +156,10 @@ class TTYDProcess:
         self.cwd = cwd
         self.solo_mode = solo_mode
         self.agent_type = agent_type
+        self.target = target
+        self.remote_profile_id = remote_profile_id
+        self.remote_cwd = remote_cwd
+        self.remote_reconnect = remote_reconnect
         self.process: Optional[asyncio.subprocess.Process] = None
         self.created_at = created_at or datetime.now()
         self.is_active = False
@@ -228,10 +244,12 @@ class TTYDProcess:
             "-s",
             self.tmux_session,
         ]
-        if self.cwd:
+        if self.cwd and self.target == ExecutionTarget.LOCAL:
             cmd.extend(["-c", self.cwd])
 
-        if (
+        if self.target == ExecutionTarget.REMOTE:
+            cmd.extend(self._build_remote_launcher())
+        elif (
             self.solo_mode
             and not session_exists
             and self.agent_type
@@ -241,21 +259,104 @@ class TTYDProcess:
             }
         ):
             user_shell = os.environ.get("SHELL", "/bin/bash")
-            if self.agent_type == AgentType.CODEX:
-                solo_command = "codex --ask-for-approval never --sandbox danger-full-access"
-            else:
-                solo_command = "IS_SANDBOX=1 claude --dangerously-skip-permissions"
-            cmd.extend(
-                [
-                    user_shell,
-                    "-c",
-                    f"{solo_command}; exec {user_shell}",
-                ]
-            )
+            cmd.extend([user_shell, "-c", f"{self._agent_start_command()}; exec {user_shell}"])
         else:
             cmd.append(self.shell)
 
         return cmd
+
+    def _agent_start_command(self) -> str:
+        if self.agent_type == AgentType.CODEX:
+            if self.solo_mode:
+                return "codex --ask-for-approval never --sandbox danger-full-access"
+            return "codex"
+        if self.agent_type == AgentType.CURSOR:
+            return "${SHELL:-/bin/bash} -l"
+        if self.solo_mode:
+            return "IS_SANDBOX=1 claude --dangerously-skip-permissions"
+        return get_default_command()
+
+    def _remote_ssh_target(self) -> tuple[str, int]:
+        if not self.remote_profile_id:
+            raise ValueError("Remote tab requires remote_profile_id")
+        profile = remote_profile_manager.get_profile(self.remote_profile_id)
+        if not profile:
+            raise ValueError(f"Remote profile not found: {self.remote_profile_id}")
+        host = f"{profile.user}@{profile.ssh_host}" if profile.user else profile.ssh_host
+        return host, profile.port
+
+    def _build_remote_attach_command(self) -> str:
+        remote_session = f"claude-hub-{self.tab_id[:8]}"
+        cwd = self.remote_cwd or self.cwd or "~"
+        start_command = self._agent_start_command()
+        quoted_cwd = self._quote_remote_cwd(cwd)
+        quoted_session = shlex.quote(remote_session)
+        quoted_start = shlex.quote(start_command)
+        shell = "${SHELL:-/bin/bash}"
+        bootstrap_path = (
+            'if [ -d "$HOME/.nvm/versions/node" ]; then '
+            'for dir in "$HOME"/.nvm/versions/node/*/bin; do '
+            '[ -d "$dir" ] && PATH="$dir:$PATH"; '
+            "done; "
+            "export PATH; "
+            "fi"
+        )
+        checks = []
+
+        direct_start_script = "; ".join(
+            [
+                "printf 'Remote tmux not found in PATH; starting without remote tmux persistence.\\n'",
+                start_command,
+                "status=$?",
+                "printf '\\nRemote agent exited with code %s. Dropping to shell.\\n' \"$status\"",
+                f"exec {shell} -l",
+            ]
+        )
+
+        script = "; ".join(
+            [
+                bootstrap_path,
+                *checks,
+                f"cd {quoted_cwd} || {{ printf 'Remote cwd not found: {cwd}\\n'; exec {shell} -l; }}",
+                "if command -v tmux >/dev/null 2>&1; then "
+                f"exec tmux new-session -A -s {quoted_session} {quoted_start}; "
+                "fi",
+                direct_start_script,
+            ]
+        )
+        return f"exec {shell} -lc {shlex.quote(script)}"
+
+    @staticmethod
+    def _quote_remote_cwd(cwd: str) -> str:
+        if cwd == "~":
+            return "~"
+        if cwd.startswith("~/"):
+            return "~/" + shlex.quote(cwd[2:])
+        return shlex.quote(cwd)
+
+    def _build_remote_launcher(self) -> list[str]:
+        host, port = self._remote_ssh_target()
+        user_shell = os.environ.get("SHELL", "/bin/bash")
+        ssh_parts = ["ssh", "-tt"]
+        if port != 22:
+            ssh_parts.extend(["-p", str(port)])
+        ssh_parts.extend([host, self._build_remote_attach_command()])
+        ssh_command = " ".join(shlex.quote(part) for part in ssh_parts)
+
+        if self.remote_reconnect:
+            launcher = (
+                "while true; do "
+                f"{ssh_command}; "
+                "status=$?; "
+                "printf '\\nRemote connection closed with code %s. "
+                'Reconnecting in 3 seconds. Press Ctrl-C to stop.\\n\' "$status"; '
+                "sleep 3; "
+                "done"
+            )
+        else:
+            launcher = f"exec {ssh_command}"
+
+        return [user_shell, "-lc", launcher]
 
     async def _log_stderr(self) -> None:
         if not self.process or not self.process.stderr:
@@ -433,6 +534,12 @@ class TTYDProcess:
             "agent_type": (
                 self.agent_type.value if isinstance(self.agent_type, AgentType) else self.agent_type
             ),
+            "target": (
+                self.target.value if isinstance(self.target, ExecutionTarget) else self.target
+            ),
+            "remote_profile_id": self.remote_profile_id,
+            "remote_cwd": self.remote_cwd,
+            "remote_reconnect": self.remote_reconnect,
             "port": self.port,
             "created_at": self.created_at.isoformat(),
         }
@@ -445,6 +552,10 @@ class TTYDProcess:
             cwd=self.cwd,
             solo_mode=self.solo_mode,
             agent_type=self.agent_type,
+            target=self.target,
+            remote_profile_id=self.remote_profile_id,
+            remote_cwd=self.remote_cwd,
+            remote_reconnect=self.remote_reconnect,
             port=self.port,
             created_at=self.created_at,
             is_active=self.is_active,
@@ -482,6 +593,12 @@ class TTYDManager:
                             if agent_type_str in [e.value for e in AgentType]
                             else AgentType.CLAUDE
                         )
+                        target_str = tab_data.get("target", "local")
+                        target = (
+                            ExecutionTarget(target_str)
+                            if target_str in [e.value for e in ExecutionTarget]
+                            else ExecutionTarget.LOCAL
+                        )
                         process = TTYDProcess(
                             tab_id=tab_data["id"],
                             port=tab_data["port"],
@@ -491,6 +608,10 @@ class TTYDManager:
                             created_at=datetime.fromisoformat(tab_data["created_at"]),
                             solo_mode=tab_data.get("solo_mode", False),
                             agent_type=agent_type,
+                            target=target,
+                            remote_profile_id=tab_data.get("remote_profile_id"),
+                            remote_cwd=tab_data.get("remote_cwd"),
+                            remote_reconnect=tab_data.get("remote_reconnect", True),
                         )
                         self.processes[process.tab_id] = process
                         if process.port > max_port:
@@ -591,15 +712,29 @@ class TTYDManager:
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        target: ExecutionTarget = ExecutionTarget.LOCAL,
+        remote_profile_id: Optional[str] = None,
+        remote_cwd: Optional[str] = None,
+        remote_reconnect: bool = True,
     ) -> TerminalTab:
         logger.info(
-            f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}"
+            f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}, target={target}, remote_profile_id={remote_profile_id}"
         )
         tab_id = str(uuid.uuid4())
         port = self._get_next_port()
 
         process = TTYDProcess(
-            tab_id, port, name, shell, cwd, solo_mode=solo_mode, agent_type=agent_type
+            tab_id,
+            port,
+            name,
+            shell,
+            cwd,
+            solo_mode=solo_mode,
+            agent_type=agent_type,
+            target=target,
+            remote_profile_id=remote_profile_id,
+            remote_cwd=remote_cwd,
+            remote_reconnect=remote_reconnect,
         )
         logger.info(
             f"Created TTYDProcess with solo_mode={process.solo_mode}, agent_type={process.agent_type}"
@@ -623,6 +758,10 @@ class TTYDManager:
             cwd=source.cwd,
             solo_mode=source.solo_mode,
             agent_type=source.agent_type,
+            target=source.target,
+            remote_profile_id=source.remote_profile_id,
+            remote_cwd=source.remote_cwd,
+            remote_reconnect=source.remote_reconnect,
         )
 
     async def delete_tab(self, tab_id: str) -> bool:
@@ -830,6 +969,10 @@ class TTYDManager:
         cwd: Optional[str] = None,
         solo_mode: Optional[bool] = None,
         agent_type: Optional[AgentType] = None,
+        target: Optional[ExecutionTarget] = None,
+        remote_profile_id: Optional[str] = None,
+        remote_cwd: Optional[str] = None,
+        remote_reconnect: Optional[bool] = None,
     ) -> Optional[TerminalTab]:
         """Update tab settings. Note: Changing shell/cwd/solo_mode/agent_type requires restarting
         the ttyd process, but the tmux session will be PRESERVED.
@@ -853,6 +996,18 @@ class TTYDManager:
             needs_restart = True
         if agent_type is not None:
             process.agent_type = agent_type
+            needs_restart = True
+        if target is not None:
+            process.target = target
+            needs_restart = True
+        if remote_profile_id is not None:
+            process.remote_profile_id = remote_profile_id
+            needs_restart = True
+        if remote_cwd is not None:
+            process.remote_cwd = remote_cwd
+            needs_restart = True
+        if remote_reconnect is not None:
+            process.remote_reconnect = remote_reconnect
             needs_restart = True
 
         if needs_restart:

@@ -1,7 +1,11 @@
+import importlib
+
 from pytest import MonkeyPatch
 
-from claude_hub.models import AgentType
+from claude_hub.models import AgentType, ExecutionTarget, RemoteProfile
 from claude_hub.services.ttyd_manager import TTYDProcess
+
+ttyd_manager_module = importlib.import_module("claude_hub.services.ttyd_manager")
 
 
 def test_codex_tab_uses_codex_command() -> None:
@@ -45,3 +49,72 @@ def test_codex_solo_mode_reattaches_existing_tmux_session() -> None:
     )
 
     assert process._build_ttyd_command(session_exists=True)[-1] == "codex"
+
+
+def test_remote_codex_solo_mode_uses_reconnect_launcher(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    monkeypatch.setattr(
+        ttyd_manager_module.remote_profile_manager,
+        "get_profile",
+        lambda profile_id: RemoteProfile(
+            id=profile_id,
+            name="DevBox",
+            ssh_host="devbox",
+            default_cwd="~/workspace",
+        ),
+    )
+    process = TTYDProcess(
+        tab_id="tab-remote-codex",
+        port=12348,
+        name="Remote Codex",
+        solo_mode=True,
+        agent_type=AgentType.CODEX,
+        target=ExecutionTarget.REMOTE,
+        remote_profile_id="devbox",
+        remote_cwd="~/repo",
+        remote_reconnect=True,
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+
+    assert cmd[-3] == "/bin/zsh"
+    assert cmd[-2] == "-lc"
+    launcher = cmd[-1]
+    assert "while true; do" in launcher
+    assert "ssh -tt devbox" in launcher
+    assert "$HOME/.nvm/versions/node" in launcher
+    assert "cd ~/repo" in launcher
+    assert "tmux new-session -A -s claude-hub-tab-remo" in launcher
+    assert "Remote tmux not found in PATH; starting without remote tmux persistence" in launcher
+    assert "codex --ask-for-approval never --sandbox danger-full-access" in launcher
+
+
+def test_remote_terminal_can_disable_reconnect(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ttyd_manager_module.remote_profile_manager,
+        "get_profile",
+        lambda profile_id: RemoteProfile(
+            id=profile_id,
+            name="DevBox",
+            ssh_host="devbox",
+            user="tiger",
+            port=2222,
+        ),
+    )
+    process = TTYDProcess(
+        tab_id="tab-remote-terminal",
+        port=12349,
+        name="Remote Terminal",
+        agent_type=AgentType.CURSOR,
+        target=ExecutionTarget.REMOTE,
+        remote_profile_id="devbox",
+        remote_cwd="/opt/tiger/app",
+        remote_reconnect=False,
+    )
+
+    launcher = process._build_ttyd_command(session_exists=False)[-1]
+
+    assert launcher.startswith("exec ")
+    assert "ssh -tt -p 2222 tiger@devbox" in launcher
+    assert "cd /opt/tiger/app" in launcher
+    assert "${SHELL:-/bin/bash} -l" in launcher
