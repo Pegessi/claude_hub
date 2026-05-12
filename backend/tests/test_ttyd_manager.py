@@ -2,8 +2,8 @@ import importlib
 
 from pytest import MonkeyPatch
 
-from claude_hub.models import AgentType, ExecutionTarget, RemoteProfile
-from claude_hub.services.ttyd_manager import TTYDProcess
+from claude_hub.models import AgentRuntimeStatus, AgentType, ExecutionTarget, RemoteProfile
+from claude_hub.services.ttyd_manager import TTYDManager, TTYDProcess
 
 ttyd_manager_module = importlib.import_module("claude_hub.services.ttyd_manager")
 
@@ -118,3 +118,38 @@ def test_remote_terminal_can_disable_reconnect(monkeypatch: MonkeyPatch) -> None
     assert "ssh -tt -p 2222 tiger@devbox" in launcher
     assert "cd /opt/tiger/app" in launcher
     assert "${SHELL:-/bin/bash} -l" in launcher
+
+
+def test_claude_spinner_status_classifies_as_working(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._status_snapshots = {}
+    process = TTYDProcess(
+        tab_id="tab-claude-spinner",
+        port=12350,
+        name="Claude Spinner",
+        agent_type=AgentType.CLAUDE,
+    )
+
+    status, status_text, detail, _last_changed_at = manager._classify_agent_status(
+        process,
+        "\n".join(
+            [
+                '⏺ Bash(ssh merlin_dev_ff45d_16 "grep -rn forward ...")',
+                "  ⎿  ... +44 lines (ctrl+o to expand)",
+                "✢ Gusting… (52s · ↑ 1.5k tokens · thought for 2s)",
+                "  ⎿  Tip: Use /btw to ask a quick side question",
+                "     without interrupting Claude's current work",
+                "────────────────────────────────────────────────────",
+                "❯ ",
+                "────────────────────────────────────────────────────",
+                "  ⏵⏵ bypass permissions on (shift+tab to cycle) ·",
+            ]
+        ),
+        "hash",
+        "zsh",
+    )
+
+    assert status == AgentRuntimeStatus.WORKING
+    assert status_text == "Working"
+    assert detail == "agent is processing"
