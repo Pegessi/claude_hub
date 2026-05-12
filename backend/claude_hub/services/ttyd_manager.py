@@ -56,6 +56,10 @@ _WORKING_TAIL_PATTERNS = (
     "esc to cancel",
 )
 
+# Claude Code also reports active work with spinner-style status lines such
+# as "✢ Gusting… (52s · ↑ 1.5k tokens · thought for 2s)".
+_CLAUDE_WORKING_STATUS_RE = re.compile(r"^[✻✢✶✳✷✸✹✺✽✦✧]\s+\S+…\s+\(", re.MULTILINE)
+
 # Bottom-of-UI hints emitted by Claude Code / Codex when idle and waiting for
 # user input. Presence of any of these means the agent UI is showing but no
 # work is in flight.
@@ -848,6 +852,7 @@ class TTYDManager:
         # "Reading"/"editing" from past activity can't drive classification.
         non_empty = [line.strip() for line in output.splitlines() if line.strip()]
         tail_lines = non_empty[-5:]
+        status_tail_lines = non_empty[-10:]
         tail = "\n".join(tail_lines).lower()
         last_line = tail_lines[-1] if tail_lines else ""
 
@@ -868,6 +873,14 @@ class TTYDManager:
                     "agent is processing",
                     last_changed_at,
                 )
+
+        if _CLAUDE_WORKING_STATUS_RE.search("\n".join(status_tail_lines)):
+            return (
+                AgentRuntimeStatus.WORKING,
+                "Working",
+                "agent is processing",
+                last_changed_at,
+            )
 
         if _BARE_SHELL_PROMPT_RE.search(last_line):
             return (
