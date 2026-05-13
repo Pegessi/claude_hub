@@ -11,18 +11,37 @@
 
     <!-- 主应用 -->
     <template v-else>
-      <TabBar />
-      <LayoutSelector />
+      <div class="app-mode-bar">
+        <button
+          type="button"
+          :class="['mode-button', { active: mode === 'terminal' }]"
+          @click="appStore.setMode('terminal')"
+        >
+          Terminal
+        </button>
+        <button
+          type="button"
+          :class="['mode-button', { active: mode === 'workspace' }]"
+          @click="appStore.setMode('workspace')"
+        >
+          Agent Workspace
+        </button>
+      </div>
       <div v-if="error" class="error-banner">
         <span>{{ error }}</span>
         <button class="error-close" @click="clearError">×</button>
       </div>
-      <div v-if="tabs.length === 0" class="empty-state">
-        <h2>No Terminal Tabs</h2>
-        <p>Click the + button to create a new terminal tab</p>
-      </div>
-      <TerminalGridView v-else />
-      <MobileControls />
+      <template v-if="mode === 'terminal'">
+        <TabBar />
+        <LayoutSelector />
+        <div v-if="tabs.length === 0" class="empty-state">
+          <h2>No Terminal Tabs</h2>
+          <p>Click the + button to create a new terminal tab</p>
+        </div>
+        <TerminalGridView v-else />
+        <MobileControls />
+      </template>
+      <AgentWorkspaceView v-else />
     </template>
   </div>
 </template>
@@ -34,13 +53,17 @@ import TabBar from '@/components/TabBar.vue'
 import LayoutSelector from '@/components/LayoutSelector.vue'
 import TerminalGridView from '@/components/TerminalGridView.vue'
 import MobileControls from '@/components/MobileControls.vue'
+import AgentWorkspaceView from '@/components/AgentWorkspaceView.vue'
 import LoginView from '@/views/LoginView.vue'
+import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useAuthStore } from '@/stores/authStore'
 
+const appStore = useAppStore()
 const store = useTerminalStore()
 const authStore = useAuthStore()
 const { tabs, error, activePane } = storeToRefs(store)
+const { mode } = storeToRefs(appStore)
 
 function clearError() {
   error.value = null
@@ -154,6 +177,33 @@ html, body, #app {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+.app-mode-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid #333;
+  background: #181818;
+}
+
+.mode-button {
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: #252525;
+  color: #a1a1aa;
+  cursor: pointer;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.mode-button:hover,
+.mode-button.active {
+  background: #343434;
+  color: #f4f4f5;
 }
 
 .error-close {

@@ -53,6 +53,9 @@ async def test_duplicate_tab_route_preserves_solo_mode(
             port=12345,
             created_at=datetime.now(),
             is_active=True,
+            workspace_id=None,
+            workspace_name=None,
+            workspace_role=None,
         )
 
     monkeypatch.setattr(

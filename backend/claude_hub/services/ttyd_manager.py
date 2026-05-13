@@ -11,7 +11,13 @@ from pathlib import Path
 from typing import Dict, List, Optional, TypedDict
 
 from ..config import settings
-from ..models import AgentRuntimeStatus, AgentType, TerminalAgentStatus, TerminalTab
+from ..models import (
+    AgentRuntimeStatus,
+    AgentType,
+    TerminalAgentStatus,
+    TerminalTab,
+    WorkspaceSessionRole,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +143,9 @@ class TTYDProcess:
         created_at: Optional[datetime] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        workspace_id: Optional[str] = None,
+        workspace_name: Optional[str] = None,
+        workspace_role: Optional[WorkspaceSessionRole] = None,
     ):
         self.tab_id = tab_id
         self.port = port
@@ -144,6 +153,9 @@ class TTYDProcess:
         self.cwd = cwd
         self.solo_mode = solo_mode
         self.agent_type = agent_type
+        self.workspace_id = workspace_id
+        self.workspace_name = workspace_name
+        self.workspace_role = workspace_role
         self.process: Optional[asyncio.subprocess.Process] = None
         self.created_at = created_at or datetime.now()
         self.is_active = False
@@ -433,6 +445,13 @@ class TTYDProcess:
             "agent_type": (
                 self.agent_type.value if isinstance(self.agent_type, AgentType) else self.agent_type
             ),
+            "workspace_id": self.workspace_id,
+            "workspace_name": self.workspace_name,
+            "workspace_role": (
+                self.workspace_role.value
+                if isinstance(self.workspace_role, WorkspaceSessionRole)
+                else self.workspace_role
+            ),
             "port": self.port,
             "created_at": self.created_at.isoformat(),
         }
@@ -448,6 +467,9 @@ class TTYDProcess:
             port=self.port,
             created_at=self.created_at,
             is_active=self.is_active,
+            workspace_id=self.workspace_id,
+            workspace_name=self.workspace_name,
+            workspace_role=self.workspace_role,
         )
 
 
@@ -482,6 +504,12 @@ class TTYDManager:
                             if agent_type_str in [e.value for e in AgentType]
                             else AgentType.CLAUDE
                         )
+                        workspace_role_str = tab_data.get("workspace_role")
+                        workspace_role = (
+                            WorkspaceSessionRole(workspace_role_str)
+                            if workspace_role_str in [e.value for e in WorkspaceSessionRole]
+                            else None
+                        )
                         process = TTYDProcess(
                             tab_id=tab_data["id"],
                             port=tab_data["port"],
@@ -491,6 +519,9 @@ class TTYDManager:
                             created_at=datetime.fromisoformat(tab_data["created_at"]),
                             solo_mode=tab_data.get("solo_mode", False),
                             agent_type=agent_type,
+                            workspace_id=tab_data.get("workspace_id"),
+                            workspace_name=tab_data.get("workspace_name"),
+                            workspace_role=workspace_role,
                         )
                         self.processes[process.tab_id] = process
                         if process.port > max_port:
@@ -558,6 +589,31 @@ class TTYDManager:
             self._tab_order.append(tab_id)
             self._save_order()
 
+    def set_tab_workspace_metadata(
+        self,
+        tab_id: str,
+        workspace_id: Optional[str],
+        workspace_name: Optional[str],
+        workspace_role: Optional[WorkspaceSessionRole],
+    ) -> bool:
+        """Attach workspace ownership metadata to an existing tab."""
+        process = self.processes.get(tab_id)
+        if not process:
+            return False
+
+        if (
+            process.workspace_id == workspace_id
+            and process.workspace_name == workspace_name
+            and process.workspace_role == workspace_role
+        ):
+            return True
+
+        process.workspace_id = workspace_id
+        process.workspace_name = workspace_name
+        process.workspace_role = workspace_role
+        self._save_state()
+        return True
+
     def _sync_order_with_processes(self) -> None:
         """Sync order list with current processes - add any missing tabs."""
         # Add any tabs that are in processes but not in order
@@ -591,15 +647,27 @@ class TTYDManager:
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        workspace_id: Optional[str] = None,
+        workspace_name: Optional[str] = None,
+        workspace_role: Optional[WorkspaceSessionRole] = None,
     ) -> TerminalTab:
         logger.info(
-            f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}"
+            f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}, workspace_id={workspace_id}, workspace_role={workspace_role}"
         )
         tab_id = str(uuid.uuid4())
         port = self._get_next_port()
 
         process = TTYDProcess(
-            tab_id, port, name, shell, cwd, solo_mode=solo_mode, agent_type=agent_type
+            tab_id,
+            port,
+            name,
+            shell,
+            cwd,
+            solo_mode=solo_mode,
+            agent_type=agent_type,
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+            workspace_role=workspace_role,
         )
         logger.info(
             f"Created TTYDProcess with solo_mode={process.solo_mode}, agent_type={process.agent_type}"

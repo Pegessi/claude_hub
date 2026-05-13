@@ -44,6 +44,8 @@ export const useTerminalStore = defineStore('terminal', () => {
   const activePaneId = ref<string | null>(null)
 
   const activeTab = computed(() => tabs.value.find(tab => tab.id === activeTabId.value) || null)
+  const manualTabs = computed(() => tabs.value.filter(tab => !tab.workspace_id))
+  const managedTabs = computed(() => tabs.value.filter(tab => Boolean(tab.workspace_id)))
 
   function initializePanes() {
     const config = LAYOUT_CONFIGS[layoutType.value]
@@ -122,18 +124,18 @@ export const useTerminalStore = defineStore('terminal', () => {
       const response = await fetch(`${API_BASE}/tabs`)
       if (!response.ok) throw new Error('Failed to fetch tabs')
       tabs.value = await response.json()
-      if (tabs.value.length && !activeTabId.value) {
-        activeTabId.value = tabs.value[0].id
+      if (manualTabs.value.length && !activeTabId.value) {
+        activeTabId.value = manualTabs.value[0].id
       }
       // Initialize panes after fetching tabs
       if (panes.value.length === 0) {
         initializePanes()
       }
       // Auto-assign first tab to first pane if available
-      if (tabs.value.length > 0 && panes.value.length > 0) {
+      if (manualTabs.value.length > 0 && panes.value.length > 0) {
         const firstPane = panes.value[0]
         if (!firstPane.tabId) {
-          firstPane.tabId = tabs.value[0].id
+          firstPane.tabId = manualTabs.value[0].id
         }
       }
     } catch (e) {
@@ -255,7 +257,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         }
       })
       if (activeTabId.value === tabId) {
-        activeTabId.value = tabs.value.length ? tabs.value[0].id : null
+        activeTabId.value = manualTabs.value.length ? manualTabs.value[0].id : null
       }
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Unknown error'
@@ -296,21 +298,23 @@ export const useTerminalStore = defineStore('terminal', () => {
   }
 
   function reorderTabs(fromIndex: number, toIndex: number) {
-    if (fromIndex < 0 || fromIndex >= tabs.value.length) return
-    if (toIndex < 0 || toIndex >= tabs.value.length) return
+    const visibleTabs = manualTabs.value
+    if (fromIndex < 0 || fromIndex >= visibleTabs.length) return
+    if (toIndex < 0 || toIndex >= visibleTabs.length) return
     if (fromIndex === toIndex) return
 
-    // Create a new array to ensure reactivity
-    const newTabs = [...tabs.value]
-    const [removed] = newTabs.splice(fromIndex, 1)
-    newTabs.splice(toIndex, 0, removed)
-    tabs.value = newTabs
+    const reorderedManualTabs = [...visibleTabs]
+    const [removed] = reorderedManualTabs.splice(fromIndex, 1)
+    reorderedManualTabs.splice(toIndex, 0, removed)
+    tabs.value = [...reorderedManualTabs, ...managedTabs.value]
     // Save the new order to backend
     saveTabOrder()
   }
 
   return {
     tabs,
+    manualTabs,
+    managedTabs,
     agentStatuses,
     activeTabId,
     activeTab,
