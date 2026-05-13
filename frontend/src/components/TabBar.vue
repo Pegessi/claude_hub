@@ -15,7 +15,7 @@
         @scroll="handleTabsScroll"
       >
         <div
-          v-for="(tab, index) in tabs"
+          v-for="(tab, index) in manualTabs"
           :key="tab.id"
           :data-tab-id="tab.id"
           :class="['tab', { active: tab.id === activeTabId, dragging: draggedTabId === tab.id, 'drag-over-left': dragOverIndex === index && draggedTabId !== tab.id && fromIndex !== null && fromIndex > index, 'drag-over-right': dragOverIndex === index && draggedTabId !== tab.id && fromIndex !== null && fromIndex < index }]"
@@ -77,7 +77,18 @@
     >
       {{ isLoading ? '...' : '+' }}
     </button>
-    <AgentStatusFloatingPanel v-if="tabs.length > 0" />
+    <AgentStatusFloatingPanel
+      v-if="manualTabs.length > 0"
+      source="manual"
+      label="Status"
+      panel-title="Terminal Status"
+    />
+    <AgentStatusFloatingPanel
+      v-if="managedTabs.length > 0"
+      source="managed"
+      label="Agents"
+      panel-title="Workspace Agents"
+    />
 
     <!-- Create Tab Modal -->
     <div
@@ -303,7 +314,7 @@ interface DirectoryListing {
 }
 
 const store = useTerminalStore()
-const { tabs, activeTabId, isLoading, agentStatuses } = storeToRefs(store)
+const { tabs, manualTabs, managedTabs, activeTabId, isLoading, agentStatuses } = storeToRefs(store)
 
 const tabStatusById = computed<Record<string, AgentRuntimeStatus>>(() => {
   const map: Record<string, AgentRuntimeStatus> = {}
@@ -598,7 +609,7 @@ onUnmounted(() => {
 })
 
 async function handleCreateTab() {
-  const defaultName = `Tab ${tabs.value.length + 1}`
+  const defaultName = `Tab ${manualTabs.value.length + 1}`
   const name = form.name.trim() || defaultName
   const cwd = form.cwd.trim() || undefined
   const solo_mode = supportsSoloMode.value ? form.solo_mode : false
@@ -725,6 +736,9 @@ async function handleCreateTab() {
 .tab-name {
   color: #ccc;
   font-size: 14px;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .tab-name-input {

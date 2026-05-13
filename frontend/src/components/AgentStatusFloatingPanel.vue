@@ -1,6 +1,6 @@
 <template>
   <div
-    v-if="tabs.length > 0"
+    v-if="rows.length > 0"
     class="agent-status"
     :data-expanded="expanded"
   >
@@ -9,11 +9,11 @@
       class="status-trigger"
       :data-status="summaryStatus"
       :aria-expanded="expanded"
-      title="Agent status"
+      :title="triggerTitle"
       @click="toggleExpanded"
     >
       <span class="trigger-dot" />
-      <span class="trigger-label">Agents</span>
+      <span class="trigger-label">{{ label }}</span>
       <span class="trigger-count">{{ rows.length }}</span>
     </button>
 
@@ -21,10 +21,10 @@
       v-if="expanded"
       class="status-panel"
       :style="panelStyle"
-      aria-label="Terminal agent statuses"
+      :aria-label="panelTitle"
     >
       <div class="panel-header">
-        <span class="panel-title">Agents</span>
+        <span class="panel-title">{{ panelTitle }}</span>
         <button
           type="button"
           class="panel-refresh"
@@ -48,30 +48,30 @@
       >
         <button
           v-for="row in rows"
-          :key="row.status.tab_id"
+          :key="row.tab.id"
           type="button"
           class="agent-row"
-          :class="{ active: row.status.tab_id === activeTabId }"
-          @click="selectTab(row.status.tab_id)"
+          :class="{ active: row.tab.id === activeTabId }"
+          @click="selectTab(row.tab.id)"
         >
           <span
             class="status-dot"
-            :data-status="row.status.status"
+            :data-status="getRowStatus(row)"
           />
           <span class="agent-main">
             <span class="agent-line">
-              <span class="agent-name">{{ row.status.tab_name }}</span>
-              <span class="agent-type">{{ row.status.agent_type }}</span>
+              <span class="agent-name">{{ row.tab.name }}</span>
+              <span class="agent-type">{{ getTabKindLabel(row.tab) }}</span>
             </span>
             <span class="agent-detail">
-              {{ row.status.detail || row.status.status_text }}
+              {{ getRowDetail(row) }}
             </span>
           </span>
           <span
             class="status-pill"
-            :data-status="row.status.status"
+            :data-status="getRowStatus(row)"
           >
-            {{ row.status.status_text }}
+            {{ getRowStatusText(row) }}
           </span>
         </button>
       </div>
@@ -90,24 +90,36 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useTerminalStore } from '@/stores/terminalStore'
-import type { AgentRuntimeStatus, TerminalAgentStatus } from '@/types'
+import type { AgentRuntimeStatus, TerminalAgentStatus, TerminalTab } from '@/types'
 
-const STORAGE_KEY_EXPANDED = 'claude_hub_agent_status_expanded'
-const STORAGE_KEY_SIZE = 'claude_hub_agent_status_size'
 const STATUS_PRIORITY: AgentRuntimeStatus[] = ['attention', 'working', 'idle', 'offline']
 const MIN_PANEL_WIDTH = 280
 const MAX_PANEL_WIDTH = 640
 const MIN_PANEL_HEIGHT = 160
 const MAX_PANEL_HEIGHT_RATIO = 0.72
+const PANEL_OPEN_EVENT = 'claude-hub-status-panel-open'
 
 interface PanelSize {
   width: number
   height: number
 }
 
+const props = withDefaults(defineProps<{
+  source?: 'manual' | 'managed'
+  label?: string
+  panelTitle?: string
+}>(), {
+  source: 'managed',
+  label: 'Agents',
+  panelTitle: 'Workspace Agents',
+})
+
 const store = useTerminalStore()
-const { tabs, agentStatuses, activeTabId } = storeToRefs(store)
-const expanded = ref(localStorage.getItem(STORAGE_KEY_EXPANDED) === 'true')
+const { manualTabs, managedTabs, agentStatuses, activeTabId } = storeToRefs(store)
+const storageKeyExpanded = `claude_hub_${props.source}_status_expanded`
+const storageKeySize = `claude_hub_${props.source}_status_size`
+const panelInstanceKey = props.source
+const expanded = ref(localStorage.getItem(storageKeyExpanded) === 'true')
 const panelSize = ref<PanelSize | null>(loadPanelSize())
 let resizeState: {
   startX: number
@@ -117,13 +129,39 @@ let resizeState: {
   pointerId: number
 } | null = null
 
-const rows = computed<{ status: TerminalAgentStatus }[]>(() =>
-  agentStatuses.value.map(status => ({ status }))
+interface AgentRow {
+  tab: TerminalTab
+  status?: TerminalAgentStatus
+}
+
+const statusByTabId = computed<Record<string, TerminalAgentStatus>>(() => {
+  const map: Record<string, TerminalAgentStatus> = {}
+  for (const status of agentStatuses.value) {
+    map[status.tab_id] = status
+  }
+  return map
+})
+
+const targetTabs = computed<TerminalTab[]>(() =>
+  props.source === 'manual' ? manualTabs.value : managedTabs.value
+)
+
+const rows = computed<AgentRow[]>(() =>
+  targetTabs.value.map(tab => ({
+    tab,
+    status: statusByTabId.value[tab.id],
+  }))
+)
+
+const label = computed(() => props.label)
+const panelTitle = computed(() => props.panelTitle)
+const triggerTitle = computed(() =>
+  props.source === 'manual' ? 'Manual terminal statuses' : 'Workspace agent terminals'
 )
 
 const summaryStatus = computed<AgentRuntimeStatus>(() => {
   for (const status of STATUS_PRIORITY) {
-    if (rows.value.some(row => row.status.status === status)) {
+    if (rows.value.some(row => getRowStatus(row) === status)) {
       return status
     }
   }
@@ -140,7 +178,7 @@ const panelStyle = computed(() => {
 
 function loadPanelSize(): PanelSize | null {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_SIZE)
+    const raw = localStorage.getItem(storageKeySize)
     if (!raw) return null
     const parsed = JSON.parse(raw) as Partial<PanelSize>
     if (typeof parsed.width !== 'number' || typeof parsed.height !== 'number') {
@@ -163,10 +201,42 @@ function clampPanelSize(width: number, height: number): PanelSize {
 
 function toggleExpanded() {
   expanded.value = !expanded.value
+  if (expanded.value) {
+    window.dispatchEvent(new CustomEvent(PANEL_OPEN_EVENT, { detail: panelInstanceKey }))
+  }
+}
+
+function handlePeerPanelOpen(event: Event) {
+  const openedPanel = event instanceof CustomEvent ? event.detail : null
+  if (openedPanel !== panelInstanceKey) {
+    expanded.value = false
+  }
 }
 
 function selectTab(tabId: string) {
   store.setActiveTab(tabId)
+}
+
+function getRowStatus(row: AgentRow): AgentRuntimeStatus {
+  return row.status?.status ?? (row.tab.is_active ? 'idle' : 'offline')
+}
+
+function getRowStatusText(row: AgentRow): string {
+  return row.status?.status_text ?? (row.tab.is_active ? 'Idle' : 'Offline')
+}
+
+function getTabKindLabel(tab: TerminalTab): string {
+  if (props.source === 'managed') {
+    return tab.workspace_role === 'worker' ? 'Worker' : 'Agent'
+  }
+  return tab.agent_type || 'terminal'
+}
+
+function getRowDetail(row: AgentRow): string {
+  if (row.status?.detail) return row.status.detail
+  if (row.tab.workspace_name) return row.tab.workspace_name
+  if (row.tab.cwd) return row.tab.cwd
+  return row.status?.status_text ?? getRowStatusText(row)
 }
 
 function startResize(event: PointerEvent) {
@@ -202,22 +272,26 @@ function stopResize() {
 }
 
 watch(expanded, value => {
-  localStorage.setItem(STORAGE_KEY_EXPANDED, String(value))
+  localStorage.setItem(storageKeyExpanded, String(value))
 })
 
 watch(panelSize, value => {
   if (value) {
-    localStorage.setItem(STORAGE_KEY_SIZE, JSON.stringify(value))
+    localStorage.setItem(storageKeySize, JSON.stringify(value))
   }
 })
 
 onMounted(() => {
   store.startAgentStatusPolling()
+  window.addEventListener(PANEL_OPEN_EVENT, handlePeerPanelOpen)
+  if (expanded.value) {
+    window.dispatchEvent(new CustomEvent(PANEL_OPEN_EVENT, { detail: panelInstanceKey }))
+  }
 })
 
 onUnmounted(() => {
   stopResize()
-  store.stopAgentStatusPolling()
+  window.removeEventListener(PANEL_OPEN_EVENT, handlePeerPanelOpen)
 })
 </script>
 
@@ -478,8 +552,23 @@ onUnmounted(() => {
 }
 
 @media (max-width: 768px), (pointer: coarse) {
-  .agent-status {
+  .status-trigger {
+    min-width: 60px;
+    padding: 0 7px;
+  }
+
+  .trigger-label {
     display: none;
+  }
+
+  .status-panel {
+    position: fixed;
+    top: 96px;
+    right: 8px;
+    left: 8px;
+    width: auto !important;
+    max-width: none;
+    max-height: min(60vh, calc(100vh - 112px));
   }
 }
 </style>
