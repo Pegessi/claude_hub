@@ -89,6 +89,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
+import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import type { AgentRuntimeStatus, TerminalAgentStatus, TerminalTab } from '@/types'
 
@@ -115,12 +116,15 @@ const props = withDefaults(defineProps<{
 })
 
 const store = useTerminalStore()
+const appStore = useAppStore()
 const { manualTabs, managedTabs, agentStatuses, activeTabId } = storeToRefs(store)
+const { mode } = storeToRefs(appStore)
 const storageKeyExpanded = `claude_hub_${props.source}_status_expanded`
 const storageKeySize = `claude_hub_${props.source}_status_size`
 const panelInstanceKey = props.source
 const expanded = ref(localStorage.getItem(storageKeyExpanded) === 'true')
 const panelSize = ref<PanelSize | null>(loadPanelSize())
+let statusPollingActive = false
 let resizeState: {
   startX: number
   startY: number
@@ -281,8 +285,19 @@ watch(panelSize, value => {
   }
 })
 
+function setStatusPolling(active: boolean) {
+  if (active === statusPollingActive) return
+  statusPollingActive = active
+  if (active) {
+    store.startAgentStatusPolling()
+  } else {
+    store.stopAgentStatusPolling()
+  }
+}
+
+watch(() => mode.value === 'terminal', setStatusPolling, { immediate: true })
+
 onMounted(() => {
-  store.startAgentStatusPolling()
   window.addEventListener(PANEL_OPEN_EVENT, handlePeerPanelOpen)
   if (expanded.value) {
     window.dispatchEvent(new CustomEvent(PANEL_OPEN_EVENT, { detail: panelInstanceKey }))
@@ -290,6 +305,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  setStatusPolling(false)
   stopResize()
   window.removeEventListener(PANEL_OPEN_EVENT, handlePeerPanelOpen)
 })

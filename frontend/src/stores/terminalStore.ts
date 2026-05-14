@@ -35,6 +35,7 @@ export const useTerminalStore = defineStore('terminal', () => {
   const isStatusLoading = ref(false)
   const error = ref<string | null>(null)
   let statusPollTimer: number | null = null
+  let statusPollConsumers = 0
 
   // Layout and panes
   const layoutType = ref<LayoutType>(
@@ -160,12 +161,17 @@ export const useTerminalStore = defineStore('terminal', () => {
   }
 
   function startAgentStatusPolling() {
+    statusPollConsumers += 1
     if (statusPollTimer !== null) return
     fetchAgentStatuses()
     statusPollTimer = window.setInterval(fetchAgentStatuses, STATUS_POLL_INTERVAL_MS)
   }
 
   function stopAgentStatusPolling() {
+    if (statusPollConsumers > 0) {
+      statusPollConsumers -= 1
+    }
+    if (statusPollConsumers > 0) return
     if (statusPollTimer === null) return
     window.clearInterval(statusPollTimer)
     statusPollTimer = null
