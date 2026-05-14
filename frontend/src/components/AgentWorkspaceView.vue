@@ -1469,8 +1469,13 @@ async function openSession(session: ManagedSession) {
 }
 
 async function sendDetailMessage() {
-  if (!selectedSession.value || !detailMessage.value.trim()) return
-  await workspaceStore.sendMessage(selectedSession.value.id, detailMessage.value.trim())
+  if (!selectedTask.value || !selectedSession.value || !detailMessage.value.trim()) return
+  const message = detailMessage.value.trim()
+  if (selectedTask.value.status === 'review') {
+    await workspaceStore.continueTask(selectedTask.value.id, { message })
+  } else {
+    await workspaceStore.sendMessage(selectedSession.value.id, message)
+  }
   detailMessage.value = ''
 }
 
