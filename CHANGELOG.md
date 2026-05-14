@@ -5,6 +5,11 @@
 
 ## 2026-05-14
 
+### fix: reopen review tasks from follow-up send
+- Route follow-up sends on review tasks through the task continue API so the board moves the task back to Working immediately
+- Preserve generic session sends for non-review tasks
+- **Files**: AgentWorkspaceView.vue
+
 ### feat: show workspace agent runtime cards
 - Add a visible current-workspace agent status strip to Agent Workspace, matching the terminal status panel's dot and pill language
 - Show each agent's role/type, runtime text, detail, current task, queued count, target, and quick-open action
