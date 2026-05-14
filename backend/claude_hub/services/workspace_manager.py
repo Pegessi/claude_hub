@@ -47,27 +47,6 @@ AUTO_CONTINUE_MAX_ATTEMPTS = 10
 AUTO_CONTINUE_MIN_INTERVAL_SECONDS = 15
 WORKSPACE_MONITOR_INTERVAL_SECONDS = 5
 AUTO_CONTINUE_MESSAGE = "please continue"
-API_ERROR_INTERRUPTION_PATTERNS = (
-    "api error",
-    "api_error",
-    "api request failed",
-    "api returned",
-    "failed to call api",
-    "provider returned error",
-    "rate limit",
-    "429",
-    "500 internal server error",
-    "502 bad gateway",
-    "503 service unavailable",
-    "504 gateway timeout",
-    "connection reset",
-    "connection aborted",
-    "stream error",
-    "network error",
-    "temporarily unavailable",
-    "overloaded",
-)
-
 
 def _now() -> datetime:
     return datetime.now()
@@ -982,11 +961,6 @@ class WorkspaceManager:
             raise RuntimeError("Review task has no original agent")
 
         session = self.sessions[task.session_id]
-        await self.send_session_message(
-            session.id,
-            self._build_continue_prompt(task, payload),
-        )
-
         now = _now()
         self.tasks[task.id] = task.model_copy(
             update={
@@ -1010,6 +984,11 @@ class WorkspaceManager:
             }
         )
         self._save_state()
+
+        await self.send_session_message(
+            session.id,
+            self._build_continue_prompt(self.tasks[task.id], payload),
+        )
         return self.tasks[task.id]
 
     async def dispatch_workspace(self, workspace_id: str) -> None:
@@ -1648,7 +1627,7 @@ class WorkspaceManager:
                     and task
                     and task.status == WorkspaceTaskStatus.WORKING
                 ):
-                    auto_continue_update = await self._auto_continue_api_interruption(
+                    auto_continue_update = await self._auto_continue_stopped_task(
                         session,
                         task,
                         status.sampled_at,
@@ -1658,6 +1637,23 @@ class WorkspaceManager:
                         next_status = update["status"]
                         runtime_status = update["runtime_status"]
                         changed = True
+                if (
+                    runtime_status == AgentRuntimeStatus.WORKING
+                    and task
+                    and task.status == WorkspaceTaskStatus.REVIEW
+                    and status.last_changed_at
+                    and task.reviewed_at
+                    and status.last_changed_at > task.reviewed_at
+                ):
+                    self.tasks[current_task_id] = task.model_copy(
+                        update={
+                            "status": WorkspaceTaskStatus.WORKING,
+                            "started_at": task.started_at or status.last_changed_at,
+                            "updated_at": status.last_changed_at,
+                        }
+                    )
+                    update["task_id"] = current_task_id
+                    changed = True
                 if (
                     runtime_status == AgentRuntimeStatus.ATTENTION
                     and task
@@ -1678,25 +1674,12 @@ class WorkspaceManager:
         if changed:
             self._save_state()
 
-    async def _auto_continue_api_interruption(
+    async def _auto_continue_stopped_task(
         self,
         session: ManagedSession,
         task: WorkspaceTask,
         sampled_at: datetime,
     ) -> dict[str, Any] | None:
-        try:
-            output = await self._capture_tmux_output(session.tmux_session)
-        except RuntimeError as exc:
-            logger.warning(
-                "Could not inspect workspace agent output for auto-continue session_id=%s: %s",
-                session.id,
-                exc,
-            )
-            return None
-
-        if not self._looks_like_api_error_interruption(output):
-            return None
-
         attempts = (
             session.auto_continue_attempts
             if session.auto_continue_task_id == task.id
@@ -1740,7 +1723,7 @@ class WorkspaceManager:
         await self._send_tmux_message(session.tmux_session, AUTO_CONTINUE_MESSAGE)
         attempts += 1
         logger.info(
-            "Auto-continued workspace agent after API interruption session_id=%s task_id=%s attempt=%s/%s",
+            "Auto-continued stopped workspace agent session_id=%s task_id=%s attempt=%s/%s",
             session.id,
             task.id,
             attempts,
@@ -1755,10 +1738,6 @@ class WorkspaceManager:
             "last_activity_at": sampled_at,
             "updated_at": sampled_at,
         }
-
-    def _looks_like_api_error_interruption(self, output: str) -> bool:
-        tail = "\n".join(output.lower().splitlines()[-40:])
-        return any(pattern in tail for pattern in API_ERROR_INTERRUPTION_PATTERNS)
 
     def _reconcile_task_report_statuses(self, workspace_id: str) -> None:
         changed = False
@@ -1776,6 +1755,8 @@ class WorkspaceManager:
             if task.status == WorkspaceTaskStatus.REVIEW:
                 continue
             if task.reviewed_at != report.created_at:
+                continue
+            if task.updated_at > report.created_at:
                 continue
 
             self.tasks[task_id] = task.model_copy(
