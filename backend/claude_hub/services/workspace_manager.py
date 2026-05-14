@@ -1667,11 +1667,13 @@ class WorkspaceManager:
                     and status.last_changed_at
                     and task.reviewed_at
                     and status.last_changed_at > task.reviewed_at
+                    and self._latest_report_state(current_task_id)
+                    == AgentReportState.READY_FOR_REVIEW
                 ):
                     self.tasks[current_task_id] = task.model_copy(
                         update={
                             "status": WorkspaceTaskStatus.WORKING,
-                            "started_at": task.started_at or status.last_changed_at,
+                            "started_at": status.last_changed_at,
                             "updated_at": status.last_changed_at,
                         }
                     )
@@ -1802,7 +1804,11 @@ class WorkspaceManager:
                 continue
             if task.reviewed_at != report.created_at:
                 continue
-            if task.updated_at > report.created_at:
+            if (
+                task.updated_at > report.created_at
+                and task.started_at
+                and task.started_at > report.created_at
+            ):
                 continue
 
             self.tasks[task_id] = task.model_copy(
@@ -1815,6 +1821,13 @@ class WorkspaceManager:
 
         if changed:
             self._save_state()
+
+    def _latest_report_state(self, task_id: str) -> AgentReportState | None:
+        reports = sorted(
+            [report for report in self.reports.values() if report.task_id == task_id],
+            key=lambda report: report.created_at,
+        )
+        return reports[-1].state if reports else None
 
     def _map_runtime_status(self, status: TerminalAgentStatus) -> ManagedSessionStatus:
         if status.status == AgentRuntimeStatus.ATTENTION:
