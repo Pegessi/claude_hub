@@ -34,6 +34,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const board = ref<WorkspaceBoard | null>(null)
   const isLoading = ref(false)
   const error = ref<string | null>(null)
+  const boardFetches = new Map<string, Promise<void>>()
 
   const activeWorkspace = computed(() =>
     workspaces.value.find(workspace => workspace.id === activeWorkspaceId.value) || null
@@ -99,14 +100,24 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function fetchBoard(workspaceId = activeWorkspaceId.value) {
     if (!workspaceId) return
-    try {
+    const existing = boardFetches.get(workspaceId)
+    if (existing) return existing
+
+    const request = (async () => {
       const response = await fetch(`${API_BASE}/workspaces/${workspaceId}/board`)
       if (!response.ok) throw new Error(await readError(response))
       board.value = await response.json()
       error.value = null
+    })()
+
+    boardFetches.set(workspaceId, request)
+    try {
+      await request
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Failed to fetch workspace board'
       throw e
+    } finally {
+      boardFetches.delete(workspaceId)
     }
   }
 

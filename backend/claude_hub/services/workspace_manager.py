@@ -577,7 +577,7 @@ class WorkspaceManager:
         if task.status == WorkspaceTaskStatus.DONE:
             raise RuntimeError("Done tasks cannot be started")
 
-        await self._refresh_session_statuses()
+        await self._refresh_session_statuses(workspace.id)
 
         if not self._workspace_agents(workspace.id, include_stopped=True):
             await self.ensure_workspace_agent(
@@ -812,7 +812,7 @@ class WorkspaceManager:
         if workspace_id not in self.workspaces:
             raise KeyError(workspace_id)
 
-        await self._refresh_session_statuses()
+        await self._refresh_session_statuses(workspace_id)
         for session in self._workspace_agents(workspace_id, include_stopped=True):
             if not self._can_dispatch_to(session):
                 continue
@@ -1289,7 +1289,8 @@ class WorkspaceManager:
         if not workspace:
             raise KeyError(workspace_id)
 
-        await self._refresh_session_statuses()
+        await self._refresh_session_statuses(workspace_id)
+        self._reconcile_task_report_statuses(workspace_id)
         self._sync_workspace_tab_metadata(workspace_id)
         tasks = [task for task in self.tasks.values() if task.workspace_id == workspace_id]
         sessions = self.sessions_for_workspace(workspace_id)
@@ -1317,12 +1318,20 @@ class WorkspaceManager:
             workspace_role=session.role,
         )
 
-    async def _refresh_session_statuses(self) -> None:
+    async def _refresh_session_statuses(self, workspace_id: Optional[str] = None) -> None:
+        sessions = [
+            session
+            for session in self.sessions.values()
+            if workspace_id is None or session.workspace_id == workspace_id
+        ]
+        tab_ids = [session.tab_id for session in sessions]
         statuses = {
-            status.tab_id: status for status in await ttyd_manager.list_tab_agent_statuses()
+            status.tab_id: status
+            for status in await ttyd_manager.list_tab_agent_statuses(tab_ids=tab_ids)
         }
         changed = False
-        for session_id, session in list(self.sessions.items()):
+        for session in sessions:
+            session_id = session.id
             if session.status in {ManagedSessionStatus.DONE, ManagedSessionStatus.ERROR}:
                 continue
             status = statuses.get(session.tab_id)
@@ -1359,23 +1368,38 @@ class WorkspaceManager:
                     )
                     update["task_id"] = current_task_id
                     changed = True
-                elif (
-                    runtime_status == AgentRuntimeStatus.WORKING
-                    and task
-                    and task.status == WorkspaceTaskStatus.REVIEW
-                ):
-                    self.tasks[current_task_id] = task.model_copy(
-                        update={
-                            "status": WorkspaceTaskStatus.WORKING,
-                            "started_at": task.started_at or status.sampled_at,
-                            "updated_at": status.sampled_at,
-                        }
-                    )
-                    update["task_id"] = current_task_id
-                    changed = True
 
             self.sessions[session_id] = session.model_copy(update=update)
             changed = True
+        if changed:
+            self._save_state()
+
+    def _reconcile_task_report_statuses(self, workspace_id: str) -> None:
+        changed = False
+        reports_by_task: dict[str, AgentReport] = {}
+        for report in self.reports_for_workspace(workspace_id):
+            if report.task_id:
+                reports_by_task[report.task_id] = report
+
+        for task_id, report in reports_by_task.items():
+            task = self.tasks.get(task_id)
+            if not task or task.workspace_id != workspace_id or task.status == WorkspaceTaskStatus.DONE:
+                continue
+            if report.state not in {AgentReportState.READY_FOR_REVIEW, AgentReportState.COMPLETED}:
+                continue
+            if task.status == WorkspaceTaskStatus.REVIEW:
+                continue
+            if task.reviewed_at != report.created_at:
+                continue
+
+            self.tasks[task_id] = task.model_copy(
+                update={
+                    "status": WorkspaceTaskStatus.REVIEW,
+                    "updated_at": report.created_at,
+                }
+            )
+            changed = True
+
         if changed:
             self._save_state()
 

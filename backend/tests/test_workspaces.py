@@ -19,6 +19,7 @@ from claude_hub.models import (
     TerminalTab,
     User,
     WorkspaceSessionRole,
+    WorkspaceTaskStatus,
 )
 from claude_hub.services.workspace_manager import workspace_manager
 
@@ -257,7 +258,7 @@ def test_start_task_dispatches_to_resident_agent(
     assert board_response.json()["tasks"][0]["status"] == "working"
 
 
-def test_review_task_returns_to_working_when_agent_runtime_is_working(
+def test_review_task_stays_in_review_when_agent_runtime_is_working(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -305,7 +306,7 @@ def test_review_task_returns_to_working_when_agent_runtime_is_working(
     async def fake_ensure_session_ready(_session) -> None:
         return None
 
-    async def fake_list_statuses() -> list[TerminalAgentStatus]:
+    async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
         return status_samples
 
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
@@ -353,6 +354,14 @@ def test_review_task_returns_to_working_when_agent_runtime_is_working(
     assert client.get(f"/api/workspaces/{workspace['id']}/board").json()["tasks"][0][
         "status"
     ] == "review"
+    reviewed_at = workspace_manager.tasks[task["id"]].reviewed_at
+    assert reviewed_at is not None
+    workspace_manager.tasks[task["id"]] = workspace_manager.tasks[task["id"]].model_copy(
+        update={
+            "status": WorkspaceTaskStatus.WORKING,
+            "updated_at": datetime.now(),
+        }
+    )
 
     status_samples[:] = [
         TerminalAgentStatus(
@@ -363,13 +372,14 @@ def test_review_task_returns_to_working_when_agent_runtime_is_working(
             status_text="Working",
             detail="agent is processing",
             tmux_session="claude-hub-tab-revi",
+            last_changed_at=datetime.now(),
             sampled_at=datetime.now(),
         )
     ]
 
     board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
 
-    assert board["tasks"][0]["status"] == "working"
+    assert board["tasks"][0]["status"] == "review"
     assert board["tasks"][0]["session_id"] == session_id
     assert board["sessions"][0]["runtime_status"] == "working"
     assert board["sessions"][0]["current_task_id"] == task["id"]
