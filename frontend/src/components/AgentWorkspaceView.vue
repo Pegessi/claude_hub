@@ -71,6 +71,67 @@
       </div>
     </div>
 
+    <section
+      v-if="activeWorkspaceId"
+      class="workspace-agent-status"
+      aria-label="Current workspace agent statuses"
+    >
+      <div class="agent-status-header">
+        <div>
+          <span class="agent-status-eyebrow">Workspace agents</span>
+          <strong>{{ visibleWorkspaceSessions.length }}</strong>
+        </div>
+        <button
+          type="button"
+          class="agent-status-refresh"
+          title="Refresh statuses"
+          @click="refreshAgentStatuses"
+        >
+          ↻
+        </button>
+      </div>
+      <div class="agent-status-grid">
+        <button
+          v-for="agent in visibleWorkspaceSessions"
+          :key="agent.id"
+          type="button"
+          class="agent-status-card"
+          @click="openSession(agent)"
+        >
+          <span
+            class="agent-status-dot"
+            :data-status="agentRuntimeStatus(agent)"
+          />
+          <span class="agent-status-main">
+            <span class="agent-status-line">
+              <span class="agent-status-name">{{ agent.title }}</span>
+              <span class="agent-status-kind">{{ agent.role === 'dispatcher' ? 'Dispatcher' : agent.agent_type }}</span>
+            </span>
+            <span class="agent-status-detail">
+              {{ agentRuntimeDetail(agent) }}
+            </span>
+            <span class="agent-status-meta">
+              <span>{{ agent.target }}</span>
+              <span>{{ agentTaskLabel(agent) }}</span>
+              <span>queued {{ agent.queued_count }}</span>
+            </span>
+          </span>
+          <span
+            class="agent-status-pill"
+            :data-status="agentRuntimeStatus(agent)"
+          >
+            {{ agentRuntimeText(agent) }}
+          </span>
+        </button>
+        <div
+          v-if="visibleWorkspaceSessions.length === 0"
+          class="agent-status-empty"
+        >
+          No agents in this workspace.
+        </div>
+      </div>
+    </section>
+
     <div class="workspace-layout">
       <main class="board">
         <div
@@ -917,10 +978,12 @@ import { useTerminalStore } from '@/stores/terminalStore'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
 import type {
   AgentReport,
+  AgentRuntimeStatus,
   AgentType,
   ExecutionTarget,
   ManagedSession,
   RemoteProfile,
+  TerminalAgentStatus,
   WorkspaceTask,
   WorkspaceTaskStatus,
 } from '@/types'
@@ -1034,6 +1097,19 @@ const selectedReports = computed<AgentReport[]>(() =>
   selectedTask.value ? workspaceStore.reportsForTask(selectedTask.value) : []
 )
 
+const visibleWorkspaceSessions = computed<ManagedSession[]>(() => [
+  ...workspaceAgents.value,
+  ...(dispatcherAgent.value ? [dispatcherAgent.value] : []),
+])
+
+const terminalStatusByTabId = computed<Record<string, TerminalAgentStatus>>(() => {
+  const map: Record<string, TerminalAgentStatus> = {}
+  for (const status of terminalStore.agentStatuses) {
+    map[status.tab_id] = status
+  }
+  return map
+})
+
 const selectedRemoteProfile = computed(() =>
   remoteProfiles.value.find(profile => profile.id === workspaceForm.remote_profile_id) || null
 )
@@ -1090,6 +1166,30 @@ function agentTitle(sessionId?: string | null) {
 function taskTitle(taskId?: string | null) {
   if (!taskId) return 'none'
   return tasks.value.find(task => task.id === taskId)?.title || taskId
+}
+
+function terminalStatusForAgent(agent: ManagedSession) {
+  return terminalStatusByTabId.value[agent.tab_id] || null
+}
+
+function agentRuntimeStatus(agent: ManagedSession): AgentRuntimeStatus {
+  return terminalStatusForAgent(agent)?.status || agent.runtime_status
+}
+
+function agentRuntimeText(agent: ManagedSession) {
+  return terminalStatusForAgent(agent)?.status_text || agent.runtime_status
+}
+
+function agentRuntimeDetail(agent: ManagedSession) {
+  const status = terminalStatusForAgent(agent)
+  if (status?.detail) return status.detail
+  if (agent.current_task_id) return `Current task: ${taskTitle(agent.current_task_id)}`
+  return agent.workspace_path
+}
+
+function agentTaskLabel(agent: ManagedSession) {
+  if (!agent.current_task_id) return 'no task'
+  return taskTitle(agent.current_task_id)
 }
 
 function isInteractiveElement(target: EventTarget | null) {
@@ -1345,6 +1445,13 @@ async function refreshBoard() {
   }
 }
 
+async function refreshAgentStatuses() {
+  await Promise.all([
+    workspaceStore.fetchBoard(),
+    terminalStore.fetchAgentStatuses(),
+  ])
+}
+
 async function startTask(task: WorkspaceTask) {
   const options = startOptionsFor(task)
   await workspaceStore.startTask(task.id, {
@@ -1459,6 +1566,7 @@ watch(
 onMounted(async () => {
   await fetchRemoteProfiles()
   await workspaceStore.fetchWorkspaces()
+  terminalStore.startAgentStatusPolling()
   boardPollTimer = window.setInterval(refreshBoard, 2500)
 })
 
@@ -1467,6 +1575,7 @@ onUnmounted(() => {
     window.clearInterval(boardPollTimer)
     boardPollTimer = null
   }
+  terminalStore.stopAgentStatusPolling()
 })
 </script>
 
@@ -1557,6 +1666,198 @@ onUnmounted(() => {
   color: #d4d4d8;
   font-size: 11px;
   padding: 4px 8px;
+}
+
+.workspace-agent-status {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  border-bottom: 1px solid #303030;
+  background: #18181b;
+  padding: 10px 16px;
+}
+
+.agent-status-header {
+  min-width: 122px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.agent-status-header strong {
+  display: block;
+  margin-top: 2px;
+  color: #f4f4f5;
+  font-size: 18px;
+}
+
+.agent-status-eyebrow {
+  color: #a1a1aa;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.agent-status-refresh {
+  width: 28px;
+  height: 28px;
+  border: 1px solid #3f3f46;
+  border-radius: 4px;
+  background: #27272a;
+  color: #d4d4d8;
+  cursor: pointer;
+}
+
+.agent-status-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 8px;
+}
+
+.agent-status-card {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 6px;
+  background: #242427;
+  color: inherit;
+  cursor: pointer;
+  padding: 9px 10px;
+  text-align: left;
+  transition: background 0.12s ease, border-color 0.12s ease, transform 0.08s ease;
+}
+
+.agent-status-card:hover {
+  border-color: rgba(96, 165, 250, 0.44);
+  background: #2b2b31;
+}
+
+.agent-status-card:active,
+.agent-status-refresh:active {
+  transform: translateY(1px);
+}
+
+.agent-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.agent-status-main {
+  min-width: 0;
+}
+
+.agent-status-line,
+.agent-status-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.agent-status-name {
+  min-width: 0;
+  color: #f4f4f5;
+  font-size: 13px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-status-kind {
+  flex: 0 0 auto;
+  color: #a1a1aa;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.agent-status-detail {
+  display: block;
+  margin-top: 3px;
+  color: #a1a1aa;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-status-meta {
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
+.agent-status-meta span {
+  max-width: 100%;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: #d4d4d8;
+  font-size: 10px;
+  padding: 3px 7px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-status-pill {
+  min-width: 74px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: currentColor;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 5px 8px;
+}
+
+.agent-status-dot[data-status='idle'],
+.agent-status-pill[data-status='idle'] {
+  color: #4ade80;
+}
+
+.agent-status-dot[data-status='working'],
+.agent-status-pill[data-status='working'] {
+  color: #facc15;
+}
+
+.agent-status-dot[data-status='attention'],
+.agent-status-pill[data-status='attention'] {
+  color: #c084fc;
+}
+
+.agent-status-dot[data-status='offline'],
+.agent-status-pill[data-status='offline'] {
+  color: #a1a1aa;
+}
+
+.agent-status-pill[data-status='idle'] {
+  background: rgba(74, 222, 128, 0.13);
+}
+
+.agent-status-pill[data-status='working'] {
+  background: rgba(250, 204, 21, 0.14);
+}
+
+.agent-status-pill[data-status='attention'] {
+  background: rgba(192, 132, 252, 0.15);
+}
+
+.agent-status-pill[data-status='offline'] {
+  background: rgba(161, 161, 170, 0.13);
+}
+
+.agent-status-empty {
+  color: #71717a;
+  font-size: 12px;
+  padding: 8px 0;
 }
 
 .workspace-select,
@@ -2594,6 +2895,30 @@ onUnmounted(() => {
     padding-bottom: 2px;
   }
 
+  .workspace-agent-status {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px 12px;
+  }
+
+  .agent-status-header {
+    min-width: 0;
+  }
+
+  .agent-status-grid {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+    scroll-snap-type: x proximity;
+  }
+
+  .agent-status-card {
+    flex: 0 0 min(92vw, 360px);
+    scroll-snap-align: start;
+  }
+
   .workspace-layout {
     display: block;
     min-height: auto;
@@ -2843,6 +3168,16 @@ onUnmounted(() => {
 
   .task-actions {
     grid-template-columns: 1fr;
+  }
+
+  .agent-status-card {
+    grid-template-columns: 10px minmax(0, 1fr);
+  }
+
+  .agent-status-pill {
+    grid-column: 2;
+    width: fit-content;
+    margin-top: 2px;
   }
 }
 </style>

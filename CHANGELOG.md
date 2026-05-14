@@ -3,6 +3,15 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-05-14
+
+### feat: show workspace agent runtime cards
+- Add a visible current-workspace agent status strip to Agent Workspace, matching the terminal status panel's dot and pill language
+- Show each agent's role/type, runtime text, detail, current task, queued count, target, and quick-open action
+- Poll terminal agent status while the workspace view is mounted so the cards reflect live terminal state
+- Keep the agent status strip horizontally scrollable on mobile
+- **Files**: AgentWorkspaceView.vue
+
 ## 2026-05-13
 
 ### feat: add remote tab launch support
