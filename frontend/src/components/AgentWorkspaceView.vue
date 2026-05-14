@@ -239,7 +239,7 @@
         @click.self="closeTaskDetail"
       >
         <aside
-          class="task-detail-panel"
+          :class="['task-detail-panel', { 'mobile-actions-expanded': isDetailActionsExpanded }]"
           role="dialog"
           aria-modal="true"
           :aria-label="selectedTask.title"
@@ -370,64 +370,77 @@
           </div>
 
           <div class="detail-footer">
-            <div class="detail-actions">
-              <button
-                v-if="selectedTask.status === 'todo'"
-                type="button"
-                class="primary-button"
-                @click="startTask(selectedTask)"
-              >
-                Start
-              </button>
-              <button
-                v-if="selectedTask.status === 'review'"
-                type="button"
-                class="primary-button"
-                @click="continueTask(selectedTask)"
-              >
-                Continue
-              </button>
-              <button
-                v-if="selectedTask.status === 'review'"
-                type="button"
-                class="tool-button"
-                @click="markTask(selectedTask.id, 'done')"
-              >
-                Done
-              </button>
-              <button
-                v-if="selectedSession"
-                type="button"
-                class="tool-button"
-                @click="openSession(selectedSession)"
-              >
-                Open terminal
-              </button>
-              <button
-                type="button"
-                class="danger-button"
-                @click="deleteTask(selectedTask)"
-              >
-                Delete
-              </button>
-            </div>
-            <form
-              v-if="selectedSession"
-              class="send-form"
-              @submit.prevent="sendDetailMessage"
+            <button
+              type="button"
+              class="detail-footer-toggle"
+              :aria-expanded="isDetailActionsExpanded"
+              @click="toggleDetailActions"
             >
-              <textarea
-                v-model="detailMessage"
-                placeholder="Follow-up instructions..."
-              />
-              <button
-                type="submit"
-                class="primary-button"
-                :disabled="!detailMessage.trim()"
+              <span>{{ isDetailActionsExpanded ? 'Hide actions' : 'Actions' }}</span>
+              <span class="detail-footer-chevron">
+                {{ isDetailActionsExpanded ? 'v' : '^' }}
+              </span>
+            </button>
+            <div class="detail-action-drawer">
+              <div class="detail-actions">
+                <button
+                  v-if="selectedTask.status === 'todo'"
+                  type="button"
+                  class="primary-button"
+                  @click="startTask(selectedTask)"
+                >
+                  Start
+                </button>
+                <button
+                  v-if="selectedTask.status === 'review'"
+                  type="button"
+                  class="primary-button"
+                  @click="continueTask(selectedTask)"
+                >
+                  Continue
+                </button>
+                <button
+                  v-if="selectedTask.status === 'review'"
+                  type="button"
+                  class="tool-button"
+                  @click="markTask(selectedTask.id, 'done')"
+                >
+                  Done
+                </button>
+                <button
+                  v-if="selectedSession"
+                  type="button"
+                  class="tool-button"
+                  @click="openSession(selectedSession)"
+                >
+                  Open terminal
+                </button>
+                <button
+                  type="button"
+                  class="danger-button"
+                  @click="deleteTask(selectedTask)"
+                >
+                  Delete
+                </button>
+              </div>
+              <form
+                v-if="selectedSession"
+                class="send-form"
+                @submit.prevent="sendDetailMessage"
               >
-                Send
-              </button>
-            </form>
+                <textarea
+                  v-model="detailMessage"
+                  placeholder="Follow-up instructions..."
+                />
+                <button
+                  type="submit"
+                  class="primary-button"
+                  :disabled="!detailMessage.trim()"
+                >
+                  Send
+                </button>
+              </form>
+            </div>
           </div>
         </aside>
       </div>
@@ -955,6 +968,7 @@ const {
 const selectedWorkspaceId = ref(activeWorkspaceId.value || '')
 const selectedTaskId = ref<string | null>(null)
 const detailMessage = ref('')
+const isDetailActionsExpanded = ref(false)
 const showWorkspaceModal = ref(false)
 const showAgentOptionsModal = ref(false)
 const showAgentFileBrowser = ref(false)
@@ -1094,6 +1108,10 @@ function isInteractiveElement(target: EventTarget | null) {
 
 function selectTask(event: MouseEvent, taskId: string) {
   if (isInteractiveElement(event.target)) return
+  if (selectedTaskId.value !== taskId) {
+    detailMessage.value = ''
+    isDetailActionsExpanded.value = false
+  }
   selectedTaskId.value = taskId
 }
 
@@ -1105,9 +1123,14 @@ function toggleMobileColumn(status: WorkspaceTaskStatus) {
   mobileCollapsedColumns[status] = !mobileCollapsedColumns[status]
 }
 
+function toggleDetailActions() {
+  isDetailActionsExpanded.value = !isDetailActionsExpanded.value
+}
+
 function closeTaskDetail() {
   selectedTaskId.value = null
   detailMessage.value = ''
+  isDetailActionsExpanded.value = false
 }
 
 function formatTime(value: string) {
@@ -2076,6 +2099,14 @@ onUnmounted(() => {
   gap: 8px;
 }
 
+.detail-footer-toggle {
+  display: none;
+}
+
+.detail-action-drawer {
+  display: block;
+}
+
 .send-form {
   margin-top: 10px;
   display: flex;
@@ -2699,15 +2730,17 @@ onUnmounted(() => {
 
   .task-detail-overlay {
     align-items: stretch;
-    overflow-y: hidden;
-    padding: 8px;
+    overflow: hidden;
+    padding: 0;
   }
 
   .task-detail-panel {
     width: 100%;
-    height: calc(100dvh - 16px);
-    max-height: calc(100dvh - 16px);
-    border-radius: 6px;
+    height: 100dvh;
+    max-height: 100dvh;
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
     -webkit-overflow-scrolling: touch;
   }
 
@@ -2725,16 +2758,23 @@ onUnmounted(() => {
   }
 
   .icon-button {
-    width: 36px;
-    height: 36px;
+    width: 34px;
+    height: 34px;
   }
 
   .detail-body {
+    flex: 1;
+    min-height: 0;
+    max-height: none;
     padding: 12px;
   }
 
+  .task-detail-panel.mobile-actions-expanded .detail-body {
+    max-height: none;
+  }
+
   .fact-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .detail-actions {
@@ -2743,23 +2783,62 @@ onUnmounted(() => {
     gap: 8px;
   }
 
+  .detail-actions .primary-button {
+    grid-column: 1 / -1;
+  }
+
   .detail-footer {
-    padding: 10px 12px;
+    position: sticky;
+    bottom: 0;
+    padding: 8px 12px max(10px, env(safe-area-inset-bottom));
+    box-shadow: 0 -12px 24px rgba(0, 0, 0, 0.24);
+  }
+
+  .detail-footer-toggle {
+    width: 100%;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    border: 1px solid #3f3f46;
+    border-radius: 6px;
+    background: #2b2b2b;
+    color: #f4f4f5;
+    font-size: 14px;
+    font-weight: 700;
+  }
+
+  .detail-footer-chevron {
+    color: #93c5fd;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+
+  .detail-action-drawer {
+    display: none;
+    margin-top: 8px;
+  }
+
+  .task-detail-panel.mobile-actions-expanded .detail-action-drawer {
+    display: block;
   }
 
   .send-form {
-    flex-direction: column;
-    align-items: stretch;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 88px;
+    align-items: end;
   }
 
   .detail-actions button,
   .send-form button {
-    width: 100%;
-    height: 38px;
+    width: auto;
+    min-width: 0;
+    height: 36px;
   }
 
   .send-form textarea {
-    min-height: 96px;
+    min-height: 44px;
+    max-height: 92px;
     font-size: 16px;
   }
 }
@@ -2778,8 +2857,7 @@ onUnmounted(() => {
     align-items: stretch;
   }
 
-  .task-actions,
-  .detail-actions {
+  .task-actions {
     grid-template-columns: 1fr;
   }
 }
