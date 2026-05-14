@@ -40,6 +40,9 @@ STATE_ROOT = Path.home() / ".claude_hub" / "workspaces"
 INDEX_FILE = STATE_ROOT / "index.json"
 LEGACY_STATE_FILE = Path.home() / ".claude_hub" / "workspaces.json"
 REMOTE_FORWARD_PORT_BASE = 18173
+TMUX_SUBMIT_ATTEMPTS = 3
+TMUX_PASTE_SETTLE_SECONDS = 0.35
+TMUX_SUBMIT_SETTLE_SECONDS = 0.7
 
 
 def _now() -> datetime:
@@ -331,6 +334,14 @@ class WorkspaceManager:
         )
         self.tasks[task_id] = task
         self._save_state()
+        logger.info(
+            "Created workspace task id=%s workspace_id=%s title=%r related_task_id=%s agent_type=%s",
+            task.id,
+            workspace_id,
+            task.title,
+            task.related_task_id,
+            task.agent_type,
+        )
         return task
 
     async def update_task_status(
@@ -577,9 +588,26 @@ class WorkspaceManager:
         if task.status == WorkspaceTaskStatus.DONE:
             raise RuntimeError("Done tasks cannot be started")
 
+        logger.info(
+            "Starting workspace task id=%s workspace_id=%s title=%r payload_target_session_id=%s "
+            "payload_related_task_id=%s stored_related_task_id=%s current_session_id=%s status=%s",
+            task.id,
+            workspace.id,
+            task.title,
+            payload.target_session_id,
+            payload.related_task_id,
+            task.related_task_id,
+            task.session_id,
+            task.status,
+        )
         await self._refresh_session_statuses(workspace.id)
 
         if not self._workspace_agents(workspace.id, include_stopped=True):
+            logger.info(
+                "No workspace agents found for workspace_id=%s; creating default agent for task id=%s",
+                workspace.id,
+                task.id,
+            )
             await self.ensure_workspace_agent(
                 workspace.id,
                 EnsureWorkspaceAgentRequest(
@@ -615,6 +643,11 @@ class WorkspaceManager:
             )
             self.tasks[task.id] = task
             self._save_state()
+            logger.info(
+                "Workspace task id=%s is waiting for dispatcher decision related_task_id=%s",
+                task.id,
+                task.related_task_id,
+            )
             await self._request_dispatch_decision(workspace, task)
             return self.tasks[task.id]
 
@@ -630,6 +663,16 @@ class WorkspaceManager:
         )
         self.tasks[task.id] = task
         self._save_state()
+        logger.info(
+            "Workspace task id=%s queued for session_id=%s session_title=%r related_task_id=%s "
+            "clear_context=%s reason=%r",
+            task.id,
+            target.id,
+            target.title,
+            task.related_task_id,
+            clear_context,
+            reason,
+        )
         await self.dispatch_workspace(workspace.id)
         return self.tasks[task.id]
 
@@ -658,11 +701,27 @@ class WorkspaceManager:
             if related and related.session_id:
                 target = self.sessions.get(related.session_id)
                 if target and target.role == WorkspaceSessionRole.ORCHESTRATOR:
+                    logger.info(
+                        "Dispatch target selected from related task: task_id=%s related_task_id=%s "
+                        "target_session_id=%s related_status=%s",
+                        task.id,
+                        related_task_id,
+                        target.id,
+                        related.status,
+                    )
                     return (
                         target,
                         False,
                         f"Related to task {related_task_id}",
                     )
+            logger.info(
+                "Related task did not provide a dispatch target: task_id=%s related_task_id=%s "
+                "related_exists=%s related_session_id=%s",
+                task.id,
+                related_task_id,
+                bool(related),
+                related.session_id if related else None,
+            )
 
         if task.session_id:
             existing = self.sessions.get(task.session_id)
@@ -815,6 +874,15 @@ class WorkspaceManager:
         await self._refresh_session_statuses(workspace_id)
         for session in self._workspace_agents(workspace_id, include_stopped=True):
             if not self._can_dispatch_to(session):
+                logger.info(
+                    "Skipping workspace session dispatch workspace_id=%s session_id=%s "
+                    "runtime_status=%s task_id=%s current_task_id=%s",
+                    workspace_id,
+                    session.id,
+                    session.runtime_status,
+                    session.task_id,
+                    session.current_task_id,
+                )
                 continue
             next_task = self._next_queued_task(session.id)
             if not next_task:
@@ -861,6 +929,16 @@ class WorkspaceManager:
             await self.send_session_message(session.id, "/clear")
             await asyncio.sleep(0.5)
 
+        logger.info(
+            "Dispatching workspace task id=%s title=%r to session_id=%s session_title=%r "
+            "related_task_id=%s dispatch_reason=%r",
+            task.id,
+            task.title,
+            session.id,
+            session.title,
+            task.related_task_id,
+            task.dispatch_reason,
+        )
         await self.send_session_message(
             session.id,
             self._build_task_assignment_prompt(workspace, task, session),
@@ -885,6 +963,11 @@ class WorkspaceManager:
             }
         )
         self._save_state()
+        logger.info(
+            "Workspace task id=%s dispatched to session_id=%s and marked working",
+            task.id,
+            session.id,
+        )
 
     async def spawn_worker(
         self,
@@ -1198,6 +1281,11 @@ class WorkspaceManager:
         )
 
     async def _send_tmux_message(self, tmux_session: str, message: str) -> None:
+        logger.info(
+            "Sending workspace message to tmux_session=%s message_length=%s",
+            tmux_session,
+            len(message),
+        )
         await self._run_tmux("send-keys", "-t", tmux_session, "C-u")
         await asyncio.sleep(0.2)
 
@@ -1207,10 +1295,63 @@ class WorkspaceManager:
         try:
             await self._run_tmux("load-buffer", tmp_path)
             await self._run_tmux("paste-buffer", "-t", tmux_session)
-            await asyncio.sleep(0.1)
-            await self._run_tmux("send-keys", "-t", tmux_session, "Enter")
+            await asyncio.sleep(TMUX_PASTE_SETTLE_SECONDS)
+            await self._submit_tmux_message(tmux_session, message)
         finally:
             Path(tmp_path).unlink(missing_ok=True)
+
+    async def _submit_tmux_message(self, tmux_session: str, message: str) -> None:
+        for attempt in range(1, TMUX_SUBMIT_ATTEMPTS + 1):
+            await self._run_tmux("send-keys", "-t", tmux_session, "C-m")
+            await asyncio.sleep(TMUX_SUBMIT_SETTLE_SECONDS)
+            try:
+                output = await self._capture_tmux_output(tmux_session)
+            except RuntimeError as exc:
+                logger.warning(
+                    "Could not verify workspace message submit for tmux_session=%s: %s",
+                    tmux_session,
+                    exc,
+                )
+                return
+            if not self._message_still_in_input(output, message):
+                if attempt > 1:
+                    logger.info(
+                        "Workspace message submit succeeded after retry tmux_session=%s attempts=%s",
+                        tmux_session,
+                        attempt,
+                    )
+                return
+            logger.warning(
+                "Workspace message still appears pending after submit attempt %s/%s "
+                "tmux_session=%s output_tail=%r",
+                attempt,
+                TMUX_SUBMIT_ATTEMPTS,
+                tmux_session,
+                output[-240:],
+            )
+
+        raise RuntimeError(
+            "Failed to submit workspace agent message; input still appears pending"
+        )
+
+    def _message_still_in_input(self, output: str, message: str) -> bool:
+        lines = [line.rstrip() for line in output.splitlines()]
+        first_line = message.strip().splitlines()[0][:80] if message.strip() else ""
+        tail_start = max(0, len(lines) - 16)
+        tail = lines[tail_start:]
+        for index, line in enumerate(tail):
+            stripped = line.strip()
+            if not stripped.startswith(("›", ">", "❯")):
+                continue
+            has_pasted_placeholder = "[Pasted Content" in stripped
+            has_message_prefix = bool(first_line and first_line in stripped)
+            if not has_pasted_placeholder and not has_message_prefix:
+                continue
+            following = "\n".join(tail[index + 1 : index + 6]).lstrip()
+            if following.startswith(("•", "⏺", "●")):
+                return False
+            return True
+        return False
 
     async def _run_tmux(self, *args: str) -> None:
         proc = await asyncio.create_subprocess_exec(
