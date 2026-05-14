@@ -1,4 +1,5 @@
 export type AgentType = 'claude' | 'codex' | 'cursor'
+export type ExecutionTarget = 'local' | 'remote'
 export type AgentRuntimeStatus = 'idle' | 'working' | 'attention' | 'offline'
 export type AppMode = 'terminal' | 'workspace'
 export type WorkspaceTaskStatus = 'todo' | 'queued' | 'working' | 'review' | 'done'
@@ -26,6 +27,10 @@ export interface TerminalTab {
   cwd?: string
   solo_mode?: boolean
   agent_type?: AgentType
+  target?: ExecutionTarget
+  remote_profile_id?: string | null
+  remote_cwd?: string | null
+  remote_reconnect?: boolean
   port: number
   created_at: string
   is_active: boolean
@@ -40,6 +45,10 @@ export interface TerminalTabCreate {
   cwd?: string
   solo_mode?: boolean
   agent_type?: AgentType
+  target?: ExecutionTarget
+  remote_profile_id?: string | null
+  remote_cwd?: string | null
+  remote_reconnect?: boolean
 }
 
 export interface TerminalTabUpdate {
@@ -48,6 +57,19 @@ export interface TerminalTabUpdate {
   cwd?: string
   solo_mode?: boolean
   agent_type?: AgentType
+  target?: ExecutionTarget
+  remote_profile_id?: string | null
+  remote_cwd?: string | null
+  remote_reconnect?: boolean
+}
+
+export interface RemoteProfile {
+  id: string
+  name: string
+  ssh_host: string
+  user?: string | null
+  port: number
+  default_cwd?: string | null
 }
 
 export interface TerminalAgentStatus {

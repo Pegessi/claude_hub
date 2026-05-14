@@ -110,20 +110,78 @@
             >
           </div>
           <div class="form-group">
+            <label>Run On</label>
+            <div class="segmented-control">
+              <button
+                type="button"
+                :class="['segment-button', { active: form.target === 'local' }]"
+                @click="form.target = 'local'"
+              >
+                Local
+              </button>
+              <button
+                type="button"
+                :class="['segment-button', { active: form.target === 'remote' }]"
+                @click="form.target = 'remote'"
+              >
+                Remote
+              </button>
+            </div>
+          </div>
+          <div
+            v-if="form.target === 'remote'"
+            class="form-group"
+          >
+            <label for="remoteProfile">Remote Server</label>
+            <select
+              id="remoteProfile"
+              v-model="form.remote_profile_id"
+              class="select-input"
+              :disabled="remoteProfilesLoading"
+            >
+              <option
+                v-if="remoteProfiles.length === 0"
+                value=""
+              >
+                No remote servers configured
+              </option>
+              <option
+                v-for="profile in remoteProfiles"
+                :key="profile.id"
+                :value="profile.id"
+              >
+                {{ profile.name }}
+              </option>
+            </select>
+            <p
+              v-if="remoteProfilesError"
+              class="form-error"
+            >
+              {{ remoteProfilesError }}
+            </p>
+            <p
+              v-else-if="remoteProfiles.length === 0"
+              class="form-hint"
+            >
+              Add profiles in ~/.claude_hub/remote_profiles.json or ~/.ssh/config
+            </p>
+          </div>
+          <div class="form-group">
             <label for="tabCwd">Working Directory (optional)</label>
             <div class="cwd-input-wrapper">
               <input
                 id="tabCwd"
                 v-model="form.cwd"
                 type="text"
-                placeholder="e.g., ~/Project/my-app"
+                :placeholder="form.target === 'remote' ? '~/workspace/project' : 'e.g., ~/Project/my-app'"
               >
               <button
                 type="button"
                 class="cwd-dropdown-btn"
+                :disabled="form.target === 'remote' && !form.remote_profile_id"
                 @click="toggleFileBrowser"
               >
-                📁
+                Browse
               </button>
             </div>
           </div>
@@ -161,6 +219,22 @@
               <span class="checkbox-desc">{{ soloModeDescription }}</span>
             </label>
           </div>
+          <div
+            v-if="form.target === 'remote'"
+            class="form-group"
+          >
+            <label class="checkbox-label">
+              <div class="checkbox-row">
+                <input
+                  v-model="form.remote_reconnect"
+                  type="checkbox"
+                  class="checkbox-input"
+                >
+                <span class="checkbox-text">Auto Reconnect</span>
+              </div>
+              <span class="checkbox-desc">Reconnect SSH automatically if the network drops</span>
+            </label>
+          </div>
           <div class="modal-actions">
             <button
               type="button"
@@ -172,7 +246,7 @@
             <button
               type="submit"
               class="btn btn-primary"
-              :disabled="isLoading"
+              :disabled="isCreateDisabled"
             >
               {{ isLoading ? 'Creating...' : 'Create' }}
             </button>
@@ -189,7 +263,7 @@
     >
       <div class="modal file-browser-modal">
         <div class="file-browser-header">
-          <h3>Select Working Directory</h3>
+          <h3>{{ form.target === 'remote' ? 'Select Remote Directory' : 'Select Working Directory' }}</h3>
           <button
             type="button"
             class="btn btn-secondary btn-small"
@@ -207,7 +281,29 @@
           >
             🏠
           </button>
-          <span class="current-path">{{ browserCurrentPath }}</span>
+          <button
+            v-if="browserParentPath"
+            type="button"
+            class="path-nav-btn"
+            title="Parent"
+            @click="navigateToPath(browserParentPath)"
+          >
+            ↑
+          </button>
+          <input
+            v-model="browserPathInput"
+            type="text"
+            class="current-path-input"
+            @keyup.enter="navigateToPath(browserPathInput)"
+          >
+          <button
+            type="button"
+            class="path-nav-btn"
+            title="Refresh"
+            @click="navigateToPath(browserCurrentPath || browserPathInput || '~')"
+          >
+            ↻
+          </button>
         </div>
         <div class="file-browser-list">
           <div
@@ -297,7 +393,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { storeToRefs } from 'pinia'
 import AgentStatusFloatingPanel from '@/components/AgentStatusFloatingPanel.vue'
 import { useTerminalStore } from '@/stores/terminalStore'
-import type { TerminalTab } from '@/types'
+import type { RemoteProfile, TerminalTab } from '@/types'
 import type { AgentRuntimeStatus } from '@/types'
 
 interface FileInfo {
@@ -348,6 +444,9 @@ const form = reactive({
   cwd: '',
   solo_mode: false,
   agent_type: 'claude' as 'claude' | 'codex' | 'cursor',
+  target: 'local' as 'local' | 'remote',
+  remote_profile_id: '',
+  remote_reconnect: true,
 })
 
 const supportsSoloMode = computed(() => form.agent_type === 'claude' || form.agent_type === 'codex')
@@ -360,18 +459,36 @@ const soloModeDescription = computed(() => {
 
 // File browser state
 const browserCurrentPath = ref('')
+const browserPathInput = ref('')
 const browserParentPath = ref<string | null>(null)
 const browserItems = ref<FileInfo[]>([])
 const browserLoading = ref(false)
 const browserError = ref<string | null>(null)
+const remoteProfiles = ref<RemoteProfile[]>([])
+const remoteProfilesLoading = ref(false)
+const remoteProfilesError = ref<string | null>(null)
+
+const selectedRemoteProfile = computed(() =>
+  remoteProfiles.value.find(profile => profile.id === form.remote_profile_id) || null
+)
+const isCreateDisabled = computed(
+  () => isLoading.value || (form.target === 'remote' && !form.remote_profile_id)
+)
 
 async function listDirectory(path?: string): Promise<DirectoryListing> {
   const params = new URLSearchParams()
   if (path) {
     params.append('path', path)
   }
+  if (form.target === 'remote') {
+    if (!form.remote_profile_id) {
+      throw new Error('Select a remote server first')
+    }
+    params.append('profile_id', form.remote_profile_id)
+  }
   const queryString = params.toString()
-  const url = `/api/filesystem/list${queryString ? '?' + queryString : ''}`
+  const endpoint = form.target === 'remote' ? '/api/remote/filesystem/list' : '/api/filesystem/list'
+  const url = `${endpoint}${queryString ? '?' + queryString : ''}`
   const response = await fetch(url)
   if (!response.ok) {
     const error = await response.text()
@@ -386,12 +503,30 @@ async function loadDirectory(path?: string) {
   try {
     const listing = await listDirectory(path)
     browserCurrentPath.value = listing.current_path
+    browserPathInput.value = listing.current_path
     browserParentPath.value = listing.parent_path
     browserItems.value = listing.items
   } catch (e) {
     browserError.value = e instanceof Error ? e.message : 'Failed to load directory'
   } finally {
     browserLoading.value = false
+  }
+}
+
+async function fetchRemoteProfiles() {
+  remoteProfilesLoading.value = true
+  remoteProfilesError.value = null
+  try {
+    const response = await fetch('/api/remote/profiles')
+    if (!response.ok) throw new Error('Failed to load remote servers')
+    remoteProfiles.value = await response.json()
+    if (!form.remote_profile_id && remoteProfiles.value.length > 0) {
+      form.remote_profile_id = remoteProfiles.value[0].id
+    }
+  } catch (e) {
+    remoteProfilesError.value = e instanceof Error ? e.message : 'Failed to load remote servers'
+  } finally {
+    remoteProfilesLoading.value = false
   }
 }
 
@@ -488,7 +623,11 @@ function navigateToPath(path: string) {
 }
 
 function navigateToHome() {
-  loadDirectory('~')
+  if (form.target === 'remote') {
+    loadDirectory(selectedRemoteProfile.value?.default_cwd || '~')
+  } else {
+    loadDirectory('~')
+  }
 }
 
 function selectCurrentDirectory() {
@@ -503,6 +642,8 @@ function toggleFileBrowser() {
     showFileBrowser.value = true
     if (form.cwd) {
       loadDirectory(form.cwd)
+    } else if (form.target === 'remote') {
+      loadDirectory(selectedRemoteProfile.value?.default_cwd || '~')
     } else {
       loadDirectory('~')
     }
@@ -554,6 +695,7 @@ async function confirmCloseTab() {
 
 function openCreateModal() {
   showModal.value = true
+  fetchRemoteProfiles()
 }
 
 function closeCreateModal() {
@@ -567,6 +709,9 @@ watch(showModal, (newVal) => {
     form.cwd = ''
     form.solo_mode = false
     form.agent_type = 'claude'
+    form.target = 'local'
+    form.remote_profile_id = remoteProfiles.value[0]?.id || ''
+    form.remote_reconnect = true
     showFileBrowser.value = false
   }
 })
@@ -576,6 +721,29 @@ watch(
   (agentType) => {
     if (agentType === 'cursor') {
       form.solo_mode = false
+    }
+  }
+)
+
+watch(
+  () => form.target,
+  (target) => {
+    if (target === 'remote') {
+      fetchRemoteProfiles()
+      if (!form.cwd && selectedRemoteProfile.value?.default_cwd) {
+        form.cwd = selectedRemoteProfile.value.default_cwd
+      }
+    } else {
+      form.remote_reconnect = true
+    }
+  }
+)
+
+watch(
+  () => form.remote_profile_id,
+  () => {
+    if (form.target === 'remote' && !form.cwd && selectedRemoteProfile.value?.default_cwd) {
+      form.cwd = selectedRemoteProfile.value.default_cwd
     }
   }
 )
@@ -614,13 +782,41 @@ async function handleCreateTab() {
   const cwd = form.cwd.trim() || undefined
   const solo_mode = supportsSoloMode.value ? form.solo_mode : false
   const agent_type = form.agent_type
+  const target = form.target
+  const selectedProfile = selectedRemoteProfile.value
+  const remote_profile_id = target === 'remote' ? form.remote_profile_id : undefined
+  const remote_cwd = target === 'remote' ? cwd : undefined
+  const remote_reconnect = target === 'remote' ? form.remote_reconnect : undefined
 
-  await store.createTab({ name, cwd, solo_mode, agent_type })
+  if (target === 'remote' && !selectedProfile) {
+    remoteProfilesError.value = 'Select a remote server first'
+    return
+  }
+
+  const tabName = form.name.trim()
+    ? name
+    : target === 'remote' && selectedProfile
+      ? `${selectedProfile.name} · ${agent_type === 'cursor' ? 'Terminal' : agent_type === 'codex' ? 'Codex' : 'Claude'}`
+      : name
+
+  await store.createTab({
+    name: tabName,
+    cwd: target === 'local' ? cwd : undefined,
+    solo_mode,
+    agent_type,
+    target,
+    remote_profile_id,
+    remote_cwd,
+    remote_reconnect,
+  })
 
   form.name = ''
   form.cwd = ''
   form.solo_mode = false
   form.agent_type = 'claude'
+  form.target = 'local'
+  form.remote_profile_id = remoteProfiles.value[0]?.id || ''
+  form.remote_reconnect = true
   showFileBrowser.value = false
   showModal.value = false
 }
@@ -862,6 +1058,10 @@ async function handleCreateTab() {
   display: flex;
   align-items: center;
   justify-content: center;
+  box-sizing: border-box;
+  padding: 16px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   z-index: 1000;
 }
 
@@ -875,9 +1075,12 @@ async function handleCreateTab() {
   border-radius: 8px;
   padding: 24px;
   min-width: 400px;
-  max-width: 90%;
-  max-height: 90vh;
-  overflow: hidden;
+  width: min(520px, 100%);
+  max-width: 100%;
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   display: flex;
   flex-direction: column;
 }
@@ -889,6 +1092,7 @@ async function handleCreateTab() {
   height: 70vh;
   max-height: 600px;
   padding: 16px;
+  overflow: hidden;
 }
 
 .file-browser-header {
@@ -925,6 +1129,23 @@ async function handleCreateTab() {
 
 .path-nav-btn:hover {
   background-color: #3c3c3c;
+}
+
+.current-path-input {
+  min-width: 0;
+  flex: 1;
+  background-color: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 4px;
+  color: #ccc;
+  font-size: 13px;
+  font-family: monospace;
+  padding: 6px 8px;
+}
+
+.current-path-input:focus {
+  outline: none;
+  border-color: #60a5fa;
 }
 
 .current-path {
@@ -1031,6 +1252,48 @@ async function handleCreateTab() {
   border-color: #60a5fa;
 }
 
+.form-error {
+  color: #ef4444;
+  font-size: 12px;
+  margin: 6px 0 0 0;
+}
+
+.form-hint {
+  color: #888;
+  font-size: 12px;
+  margin: 6px 0 0 0;
+}
+
+.segmented-control {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  background-color: #171717;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 4px;
+}
+
+.segment-button {
+  background-color: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: #aaa;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 8px 10px;
+}
+
+.segment-button.active {
+  background-color: #2d2d2d;
+  border-color: #555;
+  color: #fff;
+}
+
+.segment-button:hover {
+  color: #fff;
+}
+
 .select-input {
   width: 100%;
   padding: 10px 12px;
@@ -1073,6 +1336,11 @@ async function handleCreateTab() {
 .cwd-dropdown-btn:hover {
   background-color: #4a4a4a;
   color: #fff;
+}
+
+.cwd-dropdown-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .checkbox-label {
@@ -1158,5 +1426,45 @@ async function handleCreateTab() {
 
 .btn-danger:hover:not(:disabled) {
   background-color: #b91c1c;
+}
+
+@media (max-width: 640px) {
+  .modal-overlay {
+    align-items: flex-start;
+    justify-content: flex-start;
+    padding: 10px;
+  }
+
+  .modal {
+    min-width: 0;
+    width: 100%;
+    max-height: calc(100dvh - 20px);
+    padding: 16px;
+    border-radius: 6px;
+  }
+
+  .file-browser-modal {
+    min-width: 0;
+    width: 100%;
+    height: calc(100dvh - 20px);
+    max-height: calc(100dvh - 20px);
+  }
+
+  .file-browser-path {
+    padding: 8px;
+  }
+
+  .modal-actions,
+  .file-browser-footer {
+    position: sticky;
+    bottom: -1px;
+    background-color: #1e1e1e;
+    padding-top: 12px;
+  }
+
+  .modal-actions .btn,
+  .file-browser-footer .btn {
+    flex: 1;
+  }
 }
 </style>
