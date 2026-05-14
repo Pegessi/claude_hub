@@ -110,11 +110,26 @@ export interface WorkspaceCreate {
   remote_reconnect?: boolean
 }
 
+export interface WorkspaceAttachment {
+  id: string
+  filename: string
+  mime_type: string
+  path: string
+  size_bytes: number
+}
+
+export interface WorkspaceAttachmentCreate {
+  filename: string
+  mime_type: string
+  data_url: string
+}
+
 export interface WorkspaceTask {
   id: string
   workspace_id: string
   title: string
   prompt: string
+  attachments: WorkspaceAttachment[]
   agent_type: AgentType
   status: WorkspaceTaskStatus
   session_id?: string | null
@@ -135,6 +150,7 @@ export interface WorkspaceTaskCreate {
   prompt: string
   agent_type?: AgentType
   related_task_id?: string | null
+  attachments?: WorkspaceAttachmentCreate[]
 }
 
 export interface StartTaskRequest {
@@ -146,6 +162,7 @@ export interface StartTaskRequest {
 
 export interface ContinueTaskRequest {
   message?: string | null
+  attachments?: WorkspaceAttachmentCreate[]
 }
 
 export interface EnsureWorkspaceAgentRequest {

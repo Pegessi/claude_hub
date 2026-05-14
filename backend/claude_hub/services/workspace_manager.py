@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import re
@@ -24,6 +26,8 @@ from ..models import (
     StartTaskRequest,
     TerminalAgentStatus,
     Workspace,
+    WorkspaceAttachment,
+    WorkspaceAttachmentCreate,
     WorkspaceBoard,
     WorkspaceCreate,
     WorkspaceSessionRole,
@@ -70,6 +74,13 @@ AUTO_CONTINUE_INTERRUPTION_PATTERNS = (
     "temporarily unavailable",
     "overloaded",
 )
+ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024
+IMAGE_ATTACHMENT_TYPES = {
+    "image/gif": ".gif",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
 
 
 def _now() -> datetime:
@@ -83,6 +94,12 @@ def _slug(value: str) -> str:
 
 def _sort_time(task: WorkspaceTask) -> datetime:
     return task.queued_at or task.created_at
+
+
+def _safe_attachment_filename(value: str, suffix: str) -> str:
+    stem = Path(value or "attachment").stem
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", stem).strip(".-")
+    return f"{slug or 'attachment'}{suffix}"
 
 
 class WorkspaceManager:
@@ -104,6 +121,9 @@ class WorkspaceManager:
 
     def _workspace_task_records_dir(self, workspace_id: str) -> Path:
         return self._workspace_dir(workspace_id) / "task_records"
+
+    def _workspace_attachments_dir(self, workspace_id: str) -> Path:
+        return self._workspace_dir(workspace_id) / "attachments"
 
     def snapshot_path(self, workspace_id: str) -> Path:
         return self._workspace_dir(workspace_id) / "snapshot.md"
@@ -180,6 +200,7 @@ class WorkspaceManager:
             normalized["status"] = WorkspaceTaskStatus.QUEUED.value
             normalized.setdefault("queued_at", normalized.get("updated_at"))
         normalized.setdefault("related_task_id", None)
+        normalized.setdefault("attachments", [])
         normalized.setdefault("clear_context", None)
         normalized.setdefault("dispatch_reason", None)
         normalized.setdefault("dispatch_pending", False)
@@ -383,11 +404,13 @@ class WorkspaceManager:
 
         task_id = str(uuid.uuid4())
         now = _now()
+        attachments = self._persist_attachments(workspace_id, task_id, payload.attachments)
         task = WorkspaceTask(
             id=task_id,
             workspace_id=workspace_id,
             title=payload.title,
             prompt=payload.prompt,
+            attachments=attachments,
             agent_type=payload.agent_type,
             status=WorkspaceTaskStatus.TODO,
             related_task_id=payload.related_task_id,
@@ -405,6 +428,76 @@ class WorkspaceManager:
             task.agent_type,
         )
         return task
+
+    def _persist_attachments(
+        self,
+        workspace_id: str,
+        owner_id: str,
+        attachments: list[WorkspaceAttachmentCreate],
+    ) -> list[WorkspaceAttachment]:
+        persisted: list[WorkspaceAttachment] = []
+        if not attachments:
+            return persisted
+
+        owner_dir = self._workspace_attachments_dir(workspace_id) / owner_id
+        owner_dir.mkdir(parents=True, exist_ok=True)
+        for item in attachments:
+            mime_type = item.mime_type.strip().lower()
+            suffix = IMAGE_ATTACHMENT_TYPES.get(mime_type)
+            if not suffix:
+                raise ValueError(f"Unsupported attachment type: {item.mime_type}")
+            header = f"data:{mime_type};base64,"
+            if not item.data_url.startswith(header):
+                raise ValueError("Attachment data must be a matching base64 data URL")
+            try:
+                content = base64.b64decode(item.data_url[len(header) :], validate=True)
+            except binascii.Error as exc:
+                raise ValueError("Invalid attachment data") from exc
+            if not content:
+                raise ValueError("Attachment data is empty")
+            if len(content) > ATTACHMENT_MAX_BYTES:
+                raise ValueError("Attachment exceeds the 8 MB limit")
+
+            attachment_id = uuid.uuid4().hex
+            filename = _safe_attachment_filename(item.filename, suffix)
+            path = owner_dir / f"{attachment_id}-{filename}"
+            path.write_bytes(content)
+            persisted.append(
+                WorkspaceAttachment(
+                    id=attachment_id,
+                    filename=filename,
+                    mime_type=mime_type,
+                    path=str(path),
+                    size_bytes=len(content),
+                )
+            )
+        return persisted
+
+    def _attachment_prompt_block(self, attachments: list[WorkspaceAttachment]) -> str:
+        if not attachments:
+            return ""
+        lines = ["Attachments:"]
+        for attachment in attachments:
+            lines.append(
+                f"- {attachment.filename} ({attachment.mime_type}, {attachment.size_bytes} bytes): "
+                f"{attachment.path}"
+            )
+        return "\n".join(lines)
+
+    def _append_attachment_block(self, message: str, attachments: list[WorkspaceAttachment]) -> str:
+        block = self._attachment_prompt_block(attachments)
+        if not block:
+            return message
+        if not message.strip():
+            return block
+        return f"{message.rstrip()}\n\n{block}"
+
+    def get_attachment(self, attachment_id: str) -> WorkspaceAttachment:
+        for task in self.tasks.values():
+            for attachment in task.attachments:
+                if attachment.id == attachment_id:
+                    return attachment
+        raise KeyError(attachment_id)
 
     async def update_task_status(
         self,
@@ -1317,6 +1410,9 @@ class WorkspaceManager:
             if task.clear_context
             else ""
         )
+        attachment_note = (
+            f"{self._attachment_prompt_block(task.attachments)}\n\n" if task.attachments else ""
+        )
         return (
             "New workspace task assigned.\n\n"
             f"Workspace: {workspace.name}\n"
@@ -1327,6 +1423,7 @@ class WorkspaceManager:
             f"Dispatch reason: {task.dispatch_reason or 'not specified'}\n\n"
             f"{clear_note}"
             f"Task description:\n{task.prompt}\n\n"
+            f"{attachment_note}"
             "Start by reading the state snapshot. This workspace may contain many projects; "
             "use the task description to choose the correct directory before editing. "
             "Check for uncommitted file changes. "
@@ -1343,20 +1440,42 @@ class WorkspaceManager:
 
     def _build_continue_prompt(self, task: WorkspaceTask, payload: ContinueTaskRequest) -> str:
         message = payload.message.strip() if payload.message else ""
+        attachments = self._persist_attachments(
+            task.workspace_id,
+            f"{task.id}-continue-{uuid.uuid4().hex[:8]}",
+            payload.attachments,
+        )
+        follow_up = self._append_attachment_block(
+            message or "Continue addressing the review feedback.",
+            attachments,
+        )
         return (
             "Continue workspace task from review.\n\n"
             f"Task ID: {task.id}\n"
             f"Task title: {task.title}\n"
-            f"Follow-up instructions:\n{message or 'Continue addressing the review feedback.'}\n\n"
+            f"Follow-up instructions:\n{follow_up}\n\n"
             "The task is back in working state. Report progress with the same task_id."
         )
 
-    async def send_session_message(self, session_id: str, message: str) -> None:
+    async def send_session_message(
+        self,
+        session_id: str,
+        message: str,
+        attachments: list[WorkspaceAttachmentCreate] | None = None,
+    ) -> None:
         session = self.sessions.get(session_id)
         if not session:
             raise KeyError(session_id)
+        persisted = self._persist_attachments(
+            session.workspace_id,
+            f"{session.id}-message-{uuid.uuid4().hex[:8]}",
+            attachments or [],
+        )
         await self._ensure_session_ready_for_send(session)
-        await self._send_tmux_message(session.tmux_session, message)
+        await self._send_tmux_message(
+            session.tmux_session,
+            self._append_attachment_block(message, persisted),
+        )
 
     async def _ensure_session_ready_for_send(self, session: ManagedSession) -> None:
         created = await ttyd_manager.ensure_tab_tmux_session(session.tab_id)
