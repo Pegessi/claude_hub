@@ -15,6 +15,7 @@ from claude_hub.models import (
     ExecutionTarget,
     ManagedSessionStatus,
     RemoteProfile,
+    TerminalAgentStatus,
     TerminalTab,
     User,
     WorkspaceSessionRole,
@@ -254,6 +255,124 @@ def test_start_task_dispatches_to_resident_agent(
     assert report_response.status_code == 201
     board_response = client.get(f"/api/workspaces/{workspace_response.json()['id']}/board")
     assert board_response.json()["tasks"][0]["status"] == "working"
+
+
+def test_review_task_returns_to_working_when_agent_runtime_is_working(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    status_samples: list[TerminalAgentStatus] = []
+
+    async def fake_create_tab(
+        name: str,
+        shell: Optional[str] = None,
+        cwd: Optional[str] = None,
+        solo_mode: bool = False,
+        agent_type: AgentType = AgentType.CLAUDE,
+        target: ExecutionTarget = ExecutionTarget.LOCAL,
+        remote_profile_id: Optional[str] = None,
+        remote_cwd: Optional[str] = None,
+        remote_reconnect: bool = True,
+        remote_forward_port: Optional[int] = None,
+        workspace_id: Optional[str] = None,
+        workspace_name: Optional[str] = None,
+        workspace_role: WorkspaceSessionRole | None = None,
+    ) -> TerminalTab:
+        return TerminalTab(
+            id="tab-review-agent",
+            name=name,
+            shell=shell,
+            cwd=cwd,
+            solo_mode=solo_mode,
+            agent_type=agent_type,
+            target=target,
+            remote_profile_id=remote_profile_id,
+            remote_cwd=remote_cwd,
+            remote_reconnect=remote_reconnect,
+            port=12357,
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+            workspace_role=workspace_role,
+        )
+
+    async def fake_send_tmux_message(_tmux_session: str, _message: str) -> None:
+        return None
+
+    async def fake_ensure_session_ready(_session) -> None:
+        return None
+
+    async def fake_list_statuses() -> list[TerminalAgentStatus]:
+        return status_samples
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
+    monkeypatch.setattr(
+        workspace_module.ttyd_manager,
+        "list_tab_agent_statuses",
+        fake_list_statuses,
+    )
+    monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+    monkeypatch.setattr(
+        workspace_manager,
+        "_ensure_session_ready_for_send",
+        fake_ensure_session_ready,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Review Repo",
+            "path": str(repo),
+            "session_prefix": "review",
+        },
+    ).json()
+    client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={
+            "title": "Review task",
+            "prompt": "Do work then wait for review",
+        },
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    session_id = started["session_id"]
+
+    review_response = client.post(
+        f"/api/workspaces/sessions/{session_id}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "ready_for_review",
+            "message": "Ready for review",
+        },
+    )
+    assert review_response.status_code == 201
+    assert client.get(f"/api/workspaces/{workspace['id']}/board").json()["tasks"][0][
+        "status"
+    ] == "review"
+
+    status_samples[:] = [
+        TerminalAgentStatus(
+            tab_id="tab-review-agent",
+            tab_name="Review Repo Agent 1",
+            agent_type=AgentType.CODEX,
+            status=AgentRuntimeStatus.WORKING,
+            status_text="Working",
+            detail="agent is processing",
+            tmux_session="claude-hub-tab-revi",
+            sampled_at=datetime.now(),
+        )
+    ]
+
+    board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
+
+    assert board["tasks"][0]["status"] == "working"
+    assert board["tasks"][0]["session_id"] == session_id
+    assert board["sessions"][0]["runtime_status"] == "working"
+    assert board["sessions"][0]["current_task_id"] == task["id"]
 
 
 def test_remote_workspace_default_agent_uses_local_tab(

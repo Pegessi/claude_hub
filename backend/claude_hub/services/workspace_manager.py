@@ -1343,13 +1343,31 @@ class WorkspaceManager:
             if status.last_changed_at:
                 update["last_activity_at"] = status.last_changed_at
 
-            if runtime_status == AgentRuntimeStatus.ATTENTION and current_task_id:
+            if current_task_id:
                 task = self.tasks.get(current_task_id)
-                if task and task.status == WorkspaceTaskStatus.WORKING:
+                if (
+                    runtime_status == AgentRuntimeStatus.ATTENTION
+                    and task
+                    and task.status == WorkspaceTaskStatus.WORKING
+                ):
                     self.tasks[current_task_id] = task.model_copy(
                         update={
                             "status": WorkspaceTaskStatus.REVIEW,
                             "reviewed_at": status.sampled_at,
+                            "updated_at": status.sampled_at,
+                        }
+                    )
+                    update["task_id"] = current_task_id
+                    changed = True
+                elif (
+                    runtime_status == AgentRuntimeStatus.WORKING
+                    and task
+                    and task.status == WorkspaceTaskStatus.REVIEW
+                ):
+                    self.tasks[current_task_id] = task.model_copy(
+                        update={
+                            "status": WorkspaceTaskStatus.WORKING,
+                            "started_at": task.started_at or status.sampled_at,
                             "updated_at": status.sampled_at,
                         }
                     )
