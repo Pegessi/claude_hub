@@ -27,13 +27,14 @@ class WorkspaceSessionRole(str, Enum):
 
     WORKER = "worker"
     ORCHESTRATOR = "orchestrator"
+    DISPATCHER = "dispatcher"
 
 
 class WorkspaceTaskStatus(str, Enum):
     """Status of a human-orchestrated workspace task."""
 
     TODO = "todo"
-    ASSIGNED = "assigned"
+    QUEUED = "queued"
     WORKING = "working"
     REVIEW = "review"
     DONE = "done"
@@ -137,7 +138,7 @@ class Workspace(BaseModel):
     path: str
     default_branch: str
     session_prefix: str
-    agent_session_id: Optional[str] = None
+    dispatcher_session_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -148,6 +149,7 @@ class WorkspaceTaskCreate(BaseModel):
     title: str
     prompt: str
     agent_type: AgentType = AgentType.CODEX
+    related_task_id: Optional[str] = None
 
 
 class WorkspaceTaskUpdate(BaseModel):
@@ -166,6 +168,14 @@ class WorkspaceTask(BaseModel):
     agent_type: AgentType
     status: WorkspaceTaskStatus
     session_id: Optional[str] = None
+    related_task_id: Optional[str] = None
+    clear_context: Optional[bool] = None
+    dispatch_reason: Optional[str] = None
+    dispatch_pending: bool = False
+    queued_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    reviewed_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 
@@ -180,6 +190,9 @@ class ManagedSession(BaseModel):
     role: WorkspaceSessionRole
     agent_type: AgentType
     status: ManagedSessionStatus
+    runtime_status: AgentRuntimeStatus = AgentRuntimeStatus.IDLE
+    current_task_id: Optional[str] = None
+    queued_count: int = 0
     title: str
     branch: Optional[str] = None
     workspace_path: str
@@ -222,6 +235,7 @@ class WorkspaceBoard(BaseModel):
     tasks: List[WorkspaceTask]
     sessions: List[ManagedSession]
     reports: List[AgentReport]
+    snapshot_path: Optional[str] = None
 
 
 class SpawnWorkerRequest(BaseModel):
@@ -234,6 +248,32 @@ class EnsureWorkspaceAgentRequest(BaseModel):
     """Payload for ensuring a resident workspace agent session."""
 
     agent_type: AgentType = AgentType.CODEX
+    title: Optional[str] = None
+    role: WorkspaceSessionRole = WorkspaceSessionRole.ORCHESTRATOR
+    reuse_existing: bool = False
+
+
+class StartTaskRequest(BaseModel):
+    """Payload for queueing a task and optionally overriding dispatch."""
+
+    agent_type: Optional[AgentType] = None
+    target_session_id: Optional[str] = None
+    clear_context: Optional[bool] = None
+    related_task_id: Optional[str] = None
+
+
+class ContinueTaskRequest(BaseModel):
+    """Payload for continuing a task from review with its original agent."""
+
+    message: Optional[str] = None
+
+
+class DispatchDecisionRequest(BaseModel):
+    """Structured dispatch decision produced by a dispatcher agent."""
+
+    target_session_id: str
+    clear_context: bool = False
+    reason: Optional[str] = None
 
 
 class SendSessionMessageRequest(BaseModel):

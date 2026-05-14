@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import uuid
 from datetime import datetime
@@ -168,6 +169,56 @@ class TTYDProcess:
         else:
             self.shell = get_agent_command(agent_type)
 
+    def _solo_command(self) -> Optional[str]:
+        if self.agent_type == AgentType.CODEX:
+            return "codex --ask-for-approval never --sandbox danger-full-access"
+        if self.agent_type == AgentType.CLAUDE:
+            return "IS_SANDBOX=1 claude --dangerously-skip-permissions"
+        return None
+
+    def _tmux_shell_command(self, session_exists: bool) -> str:
+        if (
+            self.solo_mode
+            and not session_exists
+            and self.agent_type
+            in {
+                AgentType.CLAUDE,
+                AgentType.CODEX,
+            }
+        ):
+            user_shell = os.environ.get("SHELL", "/bin/bash")
+            solo_command = self._solo_command()
+            if solo_command:
+                return f"{shlex.quote(user_shell)} -c {shlex.quote(f'{solo_command}; exec {user_shell}')}"
+        return self.shell
+
+    async def ensure_tmux_session(self) -> bool:
+        """Create the backing tmux session before ttyd gets a browser client.
+
+        ttyd starts the tmux command lazily when the WebSocket connects. Workspace
+        orchestration needs to send prompts before the user opens the tab, so it
+        must ensure the tmux session exists independently.
+        """
+        if _tmux_session_exists(self.tmux_session):
+            return False
+
+        _ensure_tmux_server()
+        cmd = ["tmux", "new-session", "-d", "-s", self.tmux_session]
+        if self.cwd:
+            cmd.extend(["-c", self.cwd])
+        cmd.append(self._tmux_shell_command(session_exists=False))
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            error = stderr.decode("utf-8", errors="ignore").strip()
+            raise RuntimeError(error or f"tmux new-session failed with code {proc.returncode}")
+        return True
+
     async def start(self) -> None:
         """Start the ttyd process with tmux for session persistence."""
         if self.process and self.process.returncode is None:
@@ -243,29 +294,7 @@ class TTYDProcess:
         if self.cwd:
             cmd.extend(["-c", self.cwd])
 
-        if (
-            self.solo_mode
-            and not session_exists
-            and self.agent_type
-            in {
-                AgentType.CLAUDE,
-                AgentType.CODEX,
-            }
-        ):
-            user_shell = os.environ.get("SHELL", "/bin/bash")
-            if self.agent_type == AgentType.CODEX:
-                solo_command = "codex --ask-for-approval never --sandbox danger-full-access"
-            else:
-                solo_command = "IS_SANDBOX=1 claude --dangerously-skip-permissions"
-            cmd.extend(
-                [
-                    user_shell,
-                    "-c",
-                    f"{solo_command}; exec {user_shell}",
-                ]
-            )
-        else:
-            cmd.append(self.shell)
+        cmd.append(self._tmux_shell_command(session_exists=session_exists))
 
         return cmd
 
@@ -678,6 +707,12 @@ class TTYDManager:
         self._ensure_tab_in_order(tab_id)
         self._save_state()
         return process.to_schema()
+
+    async def ensure_tab_tmux_session(self, tab_id: str) -> bool:
+        process = self.processes.get(tab_id)
+        if not process:
+            raise KeyError(tab_id)
+        return await process.ensure_tmux_session()
 
     async def duplicate_tab(self, tab_id: str) -> Optional[TerminalTab]:
         """Create a new tab by copying the source tab's launch configuration."""
