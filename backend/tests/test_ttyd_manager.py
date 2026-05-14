@@ -212,3 +212,39 @@ def test_claude_spinner_status_classifies_as_working(monkeypatch: MonkeyPatch) -
     assert status == AgentRuntimeStatus.WORKING
     assert status_text == "Working"
     assert detail == "agent is processing"
+
+
+def test_codex_selection_prompt_classifies_as_attention(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._status_snapshots = {}
+    process = TTYDProcess(
+        tab_id="tab-codex-selection",
+        port=12352,
+        name="Codex Selection",
+        agent_type=AgentType.CODEX,
+    )
+
+    status, status_text, detail, _last_changed_at = manager._classify_agent_status(
+        process,
+        "\n".join(
+            [
+                "待你决定:",
+                "- 这是 feature branch, 要不要我 git push?",
+                "› please continue",
+                "Push 合并 commit a8f4909e 到 origin/feat/vidpool_adapter?",
+                "❯ 1. Push",
+                "2. 不 push, 留本地",
+                "3. Type something.",
+                "4. Chat about this",
+                "",
+                "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+            ]
+        ),
+        "hash",
+        "codex",
+    )
+
+    assert status == AgentRuntimeStatus.ATTENTION
+    assert status_text == "Agent waiting for input"
+    assert detail == "needs your response"
