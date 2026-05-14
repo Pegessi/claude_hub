@@ -91,6 +91,10 @@ export interface Workspace {
   default_branch: string
   session_prefix: string
   dispatcher_session_id?: string | null
+  target: ExecutionTarget
+  remote_profile_id?: string | null
+  remote_cwd?: string | null
+  remote_reconnect: boolean
   created_at: string
   updated_at: string
 }
@@ -100,6 +104,10 @@ export interface WorkspaceCreate {
   path: string
   default_branch?: string
   session_prefix?: string
+  target?: ExecutionTarget
+  remote_profile_id?: string | null
+  remote_cwd?: string | null
+  remote_reconnect?: boolean
 }
 
 export interface WorkspaceTask {
@@ -125,7 +133,7 @@ export interface WorkspaceTask {
 export interface WorkspaceTaskCreate {
   title: string
   prompt: string
-  agent_type: AgentType
+  agent_type?: AgentType
   related_task_id?: string | null
 }
 
@@ -145,6 +153,12 @@ export interface EnsureWorkspaceAgentRequest {
   title?: string | null
   role?: WorkspaceSessionRole
   reuse_existing?: boolean
+  cwd?: string | null
+  solo_mode?: boolean
+  target?: ExecutionTarget | null
+  remote_profile_id?: string | null
+  remote_cwd?: string | null
+  remote_reconnect?: boolean | null
 }
 
 export interface ManagedSession {
@@ -162,6 +176,12 @@ export interface ManagedSession {
   branch?: string | null
   workspace_path: string
   tmux_session: string
+  target: ExecutionTarget
+  remote_profile_id?: string | null
+  remote_cwd?: string | null
+  remote_reconnect: boolean
+  solo_mode: boolean
+  remote_forward_port?: number | null
   created_at: string
   updated_at: string
   last_activity_at?: string | null

@@ -21,10 +21,26 @@
         </select>
         <button
           type="button"
-          class="tool-button mobile-setup-button"
-          @click="mobileSetupOpen = !mobileSetupOpen"
+          class="tool-button"
+          @click="openWorkspaceModal"
         >
-          {{ mobileSetupOpen ? 'Board' : 'Setup' }}
+          New Workspace
+        </button>
+        <button
+          type="button"
+          class="tool-button"
+          :disabled="!activeWorkspaceId"
+          @click="openAgentOptionsModal"
+        >
+          Add Agent
+        </button>
+        <button
+          type="button"
+          class="primary-button"
+          :disabled="!activeWorkspaceId"
+          @click="openTaskModal"
+        >
+          Add Task
         </button>
         <button
           type="button"
@@ -54,13 +70,14 @@
 
     <div
       v-if="activeWorkspaceId"
-      class="mobile-status-strip"
+      class="workspace-summary-strip"
     >
-      <div class="mobile-agent-summary">
+      <div class="workspace-summary-primary">
         <span>{{ workspaceAgents.length }} agents</span>
         <strong>{{ workspaceAgents.filter(agent => agent.runtime_status === 'working').length }} working</strong>
+        <span>{{ tasksByStatus('queued').length }} queued</span>
       </div>
-      <div class="mobile-column-tabs">
+      <div class="workspace-column-tabs">
         <span
           v-for="column in columns"
           :key="column.status"
@@ -70,200 +87,7 @@
       </div>
     </div>
 
-    <div :class="['workspace-layout', { 'detail-open': selectedTask, 'mobile-setup-open': mobileSetupOpen }]">
-      <aside :class="['setup-panel', { 'mobile-open': mobileSetupOpen }]">
-        <form
-          class="setup-section"
-          @submit.prevent="handleCreateWorkspace"
-        >
-          <h2>Workspace</h2>
-          <label>
-            Name
-            <input
-              v-model="workspaceForm.name"
-              placeholder="claude_hub"
-            />
-          </label>
-          <label>
-            Repository path
-            <input
-              v-model="workspaceForm.path"
-              placeholder="/Users/me/project"
-            />
-          </label>
-          <div class="form-row">
-            <label>
-              Base
-              <input
-                v-model="workspaceForm.default_branch"
-                placeholder="main"
-              />
-            </label>
-            <label>
-              Prefix
-              <input
-                v-model="workspaceForm.session_prefix"
-                placeholder="chub"
-              />
-            </label>
-          </div>
-          <button
-            type="submit"
-            class="primary-button"
-            :disabled="isLoading"
-          >
-            Create workspace
-          </button>
-        </form>
-
-        <form
-          class="setup-section"
-          @submit.prevent="handleCreateAgent"
-        >
-          <h2>Agents</h2>
-          <label>
-            Title
-            <input
-              v-model="agentForm.title"
-              placeholder="Workspace Agent"
-              :disabled="!activeWorkspaceId"
-            />
-          </label>
-          <label>
-            Type
-            <select
-              v-model="agentForm.agent_type"
-              :disabled="!activeWorkspaceId"
-            >
-              <option value="codex">Codex</option>
-              <option value="claude">Claude</option>
-              <option value="cursor">Terminal</option>
-            </select>
-          </label>
-          <button
-            type="submit"
-            class="primary-button"
-            :disabled="!activeWorkspaceId || isLoading"
-          >
-            Add agent
-          </button>
-
-          <div class="agent-list">
-            <article
-              v-for="agent in workspaceAgents"
-              :key="agent.id"
-              class="agent-row"
-            >
-              <div>
-                <strong>{{ agent.title }}</strong>
-                <span>{{ agent.agent_type }} · {{ agent.id }}</span>
-              </div>
-              <div class="agent-row-meta">
-                <span :class="['runtime-pill', `runtime-pill--${agent.runtime_status}`]">
-                  {{ agent.runtime_status }}
-                </span>
-                <span>current {{ taskTitle(agent.current_task_id) }}</span>
-                <span>queued {{ agent.queued_count }}</span>
-              </div>
-              <div class="agent-row-actions">
-                <button
-                  type="button"
-                  @click="openSession(agent)"
-                >
-                  Open
-                </button>
-                <button
-                  type="button"
-                  class="danger-button"
-                  :disabled="agent.queued_count > 0 || Boolean(agent.current_task_id)"
-                  @click="deleteAgent(agent)"
-                >
-                  Delete
-                </button>
-              </div>
-            </article>
-            <div
-              v-if="workspaceAgents.length === 0"
-              class="empty-inline"
-            >
-              No workspace agents.
-            </div>
-            <article
-              v-if="dispatcherAgent"
-              class="agent-row dispatcher-row"
-            >
-              <div>
-                <strong>{{ dispatcherAgent.title }}</strong>
-                <span>dispatcher · {{ dispatcherAgent.runtime_status }}</span>
-              </div>
-              <button
-                type="button"
-                @click="openSession(dispatcherAgent)"
-              >
-                Open
-              </button>
-            </article>
-          </div>
-        </form>
-
-        <form
-          class="setup-section"
-          @submit.prevent="handleCreateTask"
-        >
-          <h2>Task</h2>
-          <label>
-            Title
-            <input
-              v-model="taskForm.title"
-              placeholder="Implement a focused change"
-              :disabled="!activeWorkspaceId"
-            />
-          </label>
-          <label>
-            Task description
-            <textarea
-              v-model="taskForm.prompt"
-              placeholder="Describe what the workspace agent should implement..."
-              :disabled="!activeWorkspaceId"
-            />
-          </label>
-          <label>
-            Agent type
-            <select
-              v-model="taskForm.agent_type"
-              :disabled="!activeWorkspaceId"
-            >
-              <option value="codex">Codex</option>
-              <option value="claude">Claude</option>
-              <option value="cursor">Terminal</option>
-            </select>
-          </label>
-          <label>
-            Related task
-            <select
-              v-model="taskForm.related_task_id"
-              :disabled="!activeWorkspaceId"
-            >
-              <option value="">None</option>
-              <option
-                v-for="task in tasks"
-                :key="task.id"
-                :value="task.id"
-              >
-                {{ task.title }}
-              </option>
-            </select>
-          </label>
-          <button
-            type="submit"
-            class="primary-button"
-            :disabled="!activeWorkspaceId || isLoading"
-          >
-            Add task
-          </button>
-        </form>
-      </aside>
-
+    <div :class="['workspace-layout', { 'detail-open': selectedTask }]">
       <main class="board">
         <div
           v-if="!activeWorkspaceId"
@@ -309,7 +133,7 @@
                   <h3>{{ task.title }}</h3>
                   <span class="agent-badge">
                     <span :class="['status-dot', `status-dot--${task.status}`]" />
-                    {{ task.agent_type }}
+                    {{ task.status }}
                   </span>
                 </div>
                 <p>{{ task.prompt }}</p>
@@ -556,7 +380,7 @@
               v-if="selectedReports.length === 0"
               class="empty-timeline"
             >
-              No worker reports yet.
+              No agent reports yet.
             </div>
             <ol
               v-else
@@ -603,6 +427,474 @@
         </div>
       </aside>
     </div>
+
+    <div
+      v-if="showWorkspaceModal"
+      class="workspace-modal-overlay"
+      @click.self="closeWorkspaceModal"
+    >
+      <div class="workspace-modal">
+        <h3>Create Workspace</h3>
+        <form @submit.prevent="handleCreateWorkspace">
+          <div class="modal-field">
+            <label>Name</label>
+            <input
+              v-model="workspaceForm.name"
+              placeholder="claude_hub"
+              autofocus
+            />
+          </div>
+          <div class="modal-field">
+            <label>Local workspace dir</label>
+            <input
+              v-model="workspaceForm.path"
+              placeholder="/Users/me/workspace"
+            />
+          </div>
+          <div class="modal-field">
+            <label>Environment</label>
+            <div class="segmented-control">
+              <button
+                type="button"
+                :class="['segment-button', { active: workspaceForm.target === 'local' }]"
+                @click="workspaceForm.target = 'local'"
+              >
+                Local
+              </button>
+              <button
+                type="button"
+                :class="['segment-button', { active: workspaceForm.target === 'remote' }]"
+                @click="workspaceForm.target = 'remote'"
+              >
+                Remote
+              </button>
+            </div>
+          </div>
+          <template v-if="workspaceForm.target === 'remote'">
+            <div class="modal-field">
+              <label>Remote profile</label>
+              <select
+                v-model="workspaceForm.remote_profile_id"
+                :disabled="remoteProfilesLoading"
+              >
+                <option value="">Select server</option>
+                <option
+                  v-for="profile in remoteProfiles"
+                  :key="profile.id"
+                  :value="profile.id"
+                >
+                  {{ profile.name }}
+                </option>
+              </select>
+            </div>
+            <div class="modal-field">
+              <label>Remote start dir</label>
+              <input
+                v-model="workspaceForm.remote_cwd"
+                placeholder="~"
+              />
+            </div>
+            <div class="modal-field">
+              <label class="checkbox-label">
+                <input
+                  v-model="workspaceForm.remote_reconnect"
+                  type="checkbox"
+                />
+                Reconnect
+              </label>
+            </div>
+          </template>
+          <div class="form-row">
+            <div class="modal-field">
+              <label>Branch hint</label>
+              <input
+                v-model="workspaceForm.default_branch"
+                placeholder="main"
+              />
+            </div>
+            <div class="modal-field">
+              <label>Prefix</label>
+              <input
+                v-model="workspaceForm.session_prefix"
+                placeholder="chub"
+              />
+            </div>
+          </div>
+          <div class="modal-actions">
+            <button
+              type="button"
+              class="tool-button"
+              @click="closeWorkspaceModal"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              class="primary-button"
+              :disabled="isLoading || (workspaceForm.target === 'remote' && !workspaceForm.remote_profile_id)"
+            >
+              Create workspace
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div
+      v-if="showTaskModal"
+      class="workspace-modal-overlay"
+      @click.self="closeTaskModal"
+    >
+      <div class="workspace-modal">
+        <h3>Add Task</h3>
+        <form @submit.prevent="handleCreateTask">
+          <div class="modal-field">
+            <label>Title</label>
+            <input
+              v-model="taskForm.title"
+              placeholder="Implement a focused change"
+              :disabled="!activeWorkspaceId"
+              autofocus
+            />
+          </div>
+          <div class="modal-field">
+            <label>Task description</label>
+            <textarea
+              v-model="taskForm.prompt"
+              placeholder="Describe what the workspace agent should implement..."
+              :disabled="!activeWorkspaceId"
+            />
+          </div>
+          <div class="modal-field">
+            <label>Related task</label>
+            <select
+              v-model="taskForm.related_task_id"
+              :disabled="!activeWorkspaceId"
+            >
+              <option value="">None</option>
+              <option
+                v-for="task in tasks"
+                :key="task.id"
+                :value="task.id"
+              >
+                {{ task.title }}
+              </option>
+            </select>
+          </div>
+          <div class="modal-actions">
+            <button
+              type="button"
+              class="tool-button"
+              @click="closeTaskModal"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              class="primary-button"
+              :disabled="!activeWorkspaceId || isLoading || !taskForm.title.trim() || !taskForm.prompt.trim()"
+            >
+              Add task
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div
+      v-if="showAgentOptionsModal"
+      class="workspace-modal-overlay"
+      @click.self="closeAgentOptionsModal"
+    >
+      <div class="workspace-modal">
+        <h3>Add Agent</h3>
+        <form @submit.prevent="handleCreateAdvancedAgent">
+          <div class="modal-field">
+            <label>Title</label>
+            <input
+              v-model="agentOptionsForm.title"
+              placeholder="Workspace Agent"
+              autofocus
+            />
+          </div>
+
+          <div class="modal-field">
+            <label>Agent Type</label>
+            <select v-model="agentOptionsForm.agent_type">
+              <option value="codex">Codex</option>
+              <option value="claude">Claude</option>
+              <option value="cursor">Terminal</option>
+            </select>
+          </div>
+
+          <div class="modal-field">
+            <label>Run On</label>
+            <div class="segmented-control">
+              <button
+                type="button"
+                :class="['segment-button', { active: agentOptionsForm.target === 'local' }]"
+                @click="agentOptionsForm.target = 'local'"
+              >
+                Local
+              </button>
+              <button
+                type="button"
+                :class="['segment-button', { active: agentOptionsForm.target === 'remote' }]"
+                @click="agentOptionsForm.target = 'remote'"
+              >
+                Remote
+              </button>
+            </div>
+          </div>
+
+          <div
+            v-if="agentOptionsForm.target === 'remote'"
+            class="modal-field"
+          >
+            <label>Remote Server</label>
+            <select
+              v-model="agentOptionsForm.remote_profile_id"
+              :disabled="remoteProfilesLoading"
+            >
+              <option value="">Select server</option>
+              <option
+                v-for="profile in remoteProfiles"
+                :key="profile.id"
+                :value="profile.id"
+              >
+                {{ profile.name }}
+              </option>
+            </select>
+            <p
+              v-if="remoteProfiles.length === 0"
+              class="modal-hint"
+            >
+              Add profiles in ~/.claude_hub/remote_profiles.json or ~/.ssh/config
+            </p>
+          </div>
+
+          <div class="modal-field">
+            <label>Working Directory</label>
+            <div class="path-input-row">
+              <input
+                v-model="agentOptionsForm.cwd"
+                :placeholder="agentOptionsForm.target === 'remote' ? '~/workspace/project' : '/Users/me/workspace'"
+              />
+              <button
+                type="button"
+                class="tool-button"
+                :disabled="agentOptionsForm.target === 'remote' && !agentOptionsForm.remote_profile_id"
+                @click="openAgentDirectoryBrowser"
+              >
+                Browse
+              </button>
+            </div>
+          </div>
+
+          <div
+            v-if="agentOptionsForm.agent_type !== 'cursor'"
+            class="modal-field"
+          >
+            <label class="checkbox-label">
+              <input
+                v-model="agentOptionsForm.solo_mode"
+                type="checkbox"
+              />
+              YOLO mode
+            </label>
+            <p class="modal-hint">{{ agentYoloHint }}</p>
+          </div>
+
+          <div
+            v-if="agentOptionsForm.target === 'remote'"
+            class="modal-field"
+          >
+            <label class="checkbox-label">
+              <input
+                v-model="agentOptionsForm.remote_reconnect"
+                type="checkbox"
+              />
+              Auto reconnect
+            </label>
+          </div>
+
+          <div class="modal-actions">
+            <button
+              type="button"
+              class="tool-button"
+              @click="closeAgentOptionsModal"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              class="primary-button"
+              :disabled="isAgentOptionsCreateDisabled"
+            >
+              Create agent
+            </button>
+          </div>
+        </form>
+
+        <section class="modal-section">
+          <div class="modal-section-header">
+            <h4>Workspace Agents</h4>
+            <span>{{ workspaceAgents.length }}</span>
+          </div>
+          <div class="agent-list">
+            <article
+              v-for="agent in workspaceAgents"
+              :key="agent.id"
+              class="agent-row"
+            >
+              <div>
+                <strong>{{ agent.title }}</strong>
+                <span>{{ agent.agent_type }} · {{ agent.id }}</span>
+                <span>{{ agent.target }} · {{ agent.workspace_path }}</span>
+              </div>
+              <div class="agent-row-meta">
+                <span :class="['runtime-pill', `runtime-pill--${agent.runtime_status}`]">
+                  {{ agent.runtime_status }}
+                </span>
+                <span>current {{ taskTitle(agent.current_task_id) }}</span>
+                <span>queued {{ agent.queued_count }}</span>
+              </div>
+              <div class="agent-row-actions">
+                <button
+                  type="button"
+                  @click="openSession(agent)"
+                >
+                  Open
+                </button>
+                <button
+                  type="button"
+                  class="danger-button"
+                  :disabled="agent.queued_count > 0 || Boolean(agent.current_task_id)"
+                  @click="deleteAgent(agent)"
+                >
+                  Delete
+                </button>
+              </div>
+            </article>
+            <div
+              v-if="workspaceAgents.length === 0"
+              class="empty-inline"
+            >
+              No workspace agents.
+            </div>
+            <article
+              v-if="dispatcherAgent"
+              class="agent-row dispatcher-row"
+            >
+              <div>
+                <strong>{{ dispatcherAgent.title }}</strong>
+                <span>dispatcher · {{ dispatcherAgent.runtime_status }}</span>
+              </div>
+              <button
+                type="button"
+                @click="openSession(dispatcherAgent)"
+              >
+                Open
+              </button>
+            </article>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <div
+      v-if="showAgentFileBrowser"
+      class="workspace-modal-overlay file-browser-overlay"
+      @click.self="showAgentFileBrowser = false"
+    >
+      <div class="workspace-modal file-browser-modal">
+        <div class="file-browser-header">
+          <h3>{{ agentOptionsForm.target === 'remote' ? 'Select Remote Directory' : 'Select Working Directory' }}</h3>
+          <button
+            type="button"
+            class="tool-button"
+            @click="showAgentFileBrowser = false"
+          >
+            Close
+          </button>
+        </div>
+        <div class="file-browser-path">
+          <button
+            type="button"
+            class="path-nav-button"
+            @click="navigateAgentBrowserHome"
+          >
+            Home
+          </button>
+          <button
+            v-if="agentBrowserParentPath"
+            type="button"
+            class="path-nav-button"
+            @click="loadAgentDirectory(agentBrowserParentPath)"
+          >
+            Up
+          </button>
+          <input
+            v-model="agentBrowserPathInput"
+            @keyup.enter="loadAgentDirectory(agentBrowserPathInput)"
+          />
+          <button
+            type="button"
+            class="path-nav-button"
+            @click="loadAgentDirectory(agentBrowserCurrentPath || agentBrowserPathInput || '~')"
+          >
+            Refresh
+          </button>
+        </div>
+        <div class="file-browser-list">
+          <div
+            v-if="agentBrowserParentPath"
+            class="file-item is-dir"
+            @click="loadAgentDirectory(agentBrowserParentPath)"
+          >
+            <span>Dir</span>
+            <strong>..</strong>
+          </div>
+          <div
+            v-for="item in agentBrowserItems"
+            :key="item.path"
+            :class="['file-item', { 'is-dir': item.is_dir }]"
+            @click="handleAgentFileItemClick(item)"
+          >
+            <span>{{ item.is_dir ? 'Dir' : 'File' }}</span>
+            <strong>{{ item.name }}</strong>
+          </div>
+          <div
+            v-if="agentBrowserLoading"
+            class="file-status"
+          >
+            Loading...
+          </div>
+          <div
+            v-if="agentBrowserError"
+            class="file-status file-error"
+          >
+            {{ agentBrowserError }}
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button
+            type="button"
+            class="tool-button"
+            @click="showAgentFileBrowser = false"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            class="primary-button"
+            @click="selectAgentCurrentDirectory"
+          >
+            Select directory
+          </button>
+        </div>
+      </div>
+    </div>
   </section>
 </template>
 
@@ -615,7 +907,9 @@ import { useWorkspaceStore } from '@/stores/workspaceStore'
 import type {
   AgentReport,
   AgentType,
+  ExecutionTarget,
   ManagedSession,
+  RemoteProfile,
   WorkspaceTask,
   WorkspaceTaskStatus,
 } from '@/types'
@@ -624,6 +918,18 @@ interface TaskStartOptions {
   target_session_id: string
   related_task_id: string
   clear_context: boolean
+}
+
+interface FileInfo {
+  name: string
+  path: string
+  is_dir: boolean
+}
+
+interface DirectoryListing {
+  current_path: string
+  parent_path: string | null
+  items: FileInfo[]
 }
 
 const appStore = useAppStore()
@@ -643,7 +949,18 @@ const {
 const selectedWorkspaceId = ref(activeWorkspaceId.value || '')
 const selectedTaskId = ref<string | null>(null)
 const detailMessage = ref('')
-const mobileSetupOpen = ref(false)
+const showWorkspaceModal = ref(false)
+const showAgentOptionsModal = ref(false)
+const showAgentFileBrowser = ref(false)
+const showTaskModal = ref(false)
+const remoteProfiles = ref<RemoteProfile[]>([])
+const remoteProfilesLoading = ref(false)
+const agentBrowserCurrentPath = ref('')
+const agentBrowserPathInput = ref('')
+const agentBrowserParentPath = ref<string | null>(null)
+const agentBrowserItems = ref<FileInfo[]>([])
+const agentBrowserLoading = ref(false)
+const agentBrowserError = ref<string | null>(null)
 const mobileCollapsedColumns = reactive<Record<WorkspaceTaskStatus, boolean>>({
   todo: false,
   queued: false,
@@ -667,17 +984,25 @@ const workspaceForm = reactive({
   path: '/Users/bytedance/claude_hub',
   default_branch: 'main',
   session_prefix: 'chub',
+  target: 'local' as ExecutionTarget,
+  remote_profile_id: '',
+  remote_cwd: '',
+  remote_reconnect: true,
 })
 
-const agentForm = reactive({
+const agentOptionsForm = reactive({
   title: '',
   agent_type: 'codex' as AgentType,
+  target: 'local' as ExecutionTarget,
+  cwd: '',
+  solo_mode: true,
+  remote_profile_id: '',
+  remote_reconnect: true,
 })
 
 const taskForm = reactive({
   title: '',
   prompt: '',
-  agent_type: 'codex' as AgentType,
   related_task_id: '',
 })
 
@@ -695,6 +1020,27 @@ const selectedSession = computed(() =>
 
 const selectedReports = computed<AgentReport[]>(() =>
   selectedTask.value ? workspaceStore.reportsForTask(selectedTask.value) : []
+)
+
+const selectedRemoteProfile = computed(() =>
+  remoteProfiles.value.find(profile => profile.id === workspaceForm.remote_profile_id) || null
+)
+
+const selectedAgentRemoteProfile = computed(() =>
+  remoteProfiles.value.find(profile => profile.id === agentOptionsForm.remote_profile_id) || null
+)
+
+const agentYoloHint = computed(() => {
+  if (agentOptionsForm.agent_type === 'codex') {
+    return 'Runs Codex with --ask-for-approval never and --sandbox danger-full-access'
+  }
+  return 'Runs Claude with IS_SANDBOX=1 and --dangerously-skip-permissions'
+})
+
+const isAgentOptionsCreateDisabled = computed(
+  () =>
+    isLoading.value ||
+    (agentOptionsForm.target === 'remote' && !agentOptionsForm.remote_profile_id)
 )
 
 function startOptionsFor(task: WorkspaceTask): TaskStartOptions {
@@ -763,29 +1109,188 @@ function formatTime(value: string) {
   }).format(new Date(value))
 }
 
+async function fetchRemoteProfiles() {
+  remoteProfilesLoading.value = true
+  try {
+    const response = await fetch('/api/remote/profiles')
+    if (!response.ok) throw new Error('Failed to load remote profiles')
+    remoteProfiles.value = await response.json()
+    if (!workspaceForm.remote_profile_id && remoteProfiles.value.length > 0) {
+      workspaceForm.remote_profile_id = remoteProfiles.value[0].id
+    }
+  } catch (e) {
+    workspaceStore.error = e instanceof Error ? e.message : 'Failed to load remote profiles'
+  } finally {
+    remoteProfilesLoading.value = false
+  }
+}
+
 async function handleCreateWorkspace() {
   const workspace = await workspaceStore.createWorkspace({
     name: workspaceForm.name.trim(),
     path: workspaceForm.path.trim(),
     default_branch: workspaceForm.default_branch.trim() || 'main',
     session_prefix: workspaceForm.session_prefix.trim() || undefined,
+    target: workspaceForm.target,
+    remote_profile_id:
+      workspaceForm.target === 'remote' ? workspaceForm.remote_profile_id || null : null,
+    remote_cwd:
+      workspaceForm.target === 'remote' ? workspaceForm.remote_cwd.trim() || null : null,
+    remote_reconnect: workspaceForm.remote_reconnect,
   })
   if (workspace) {
     selectedWorkspaceId.value = workspace.id
-    mobileSetupOpen.value = false
+    showWorkspaceModal.value = false
   }
 }
 
-async function handleCreateAgent() {
+function resetWorkspaceForm() {
+  workspaceForm.name = 'Claude Hub'
+  workspaceForm.path = '/Users/bytedance/claude_hub'
+  workspaceForm.default_branch = 'main'
+  workspaceForm.session_prefix = 'chub'
+  workspaceForm.target = 'local'
+  workspaceForm.remote_profile_id = remoteProfiles.value[0]?.id || ''
+  workspaceForm.remote_cwd = ''
+  workspaceForm.remote_reconnect = true
+}
+
+function openWorkspaceModal() {
+  resetWorkspaceForm()
+  showWorkspaceModal.value = true
+}
+
+function closeWorkspaceModal() {
+  showWorkspaceModal.value = false
+}
+
+function resetAgentOptionsForm() {
+  const workspace = activeWorkspace.value
+  agentOptionsForm.title = ''
+  agentOptionsForm.agent_type = 'codex'
+  agentOptionsForm.target = 'local'
+  agentOptionsForm.solo_mode = true
+  agentOptionsForm.remote_reconnect = workspace?.remote_reconnect ?? true
+  agentOptionsForm.remote_profile_id =
+    workspace?.remote_profile_id || remoteProfiles.value[0]?.id || ''
+  agentOptionsForm.cwd = workspace?.path || ''
+}
+
+function openAgentOptionsModal() {
+  resetAgentOptionsForm()
+  if (agentOptionsForm.target === 'remote') {
+    fetchRemoteProfiles()
+  }
+  showAgentOptionsModal.value = true
+}
+
+function closeAgentOptionsModal() {
+  showAgentOptionsModal.value = false
+  showAgentFileBrowser.value = false
+}
+
+async function handleCreateAdvancedAgent() {
+  const cwd = agentOptionsForm.cwd.trim()
   await workspaceStore.ensureWorkspaceAgent({
-    agent_type: agentForm.agent_type,
-    title: agentForm.title.trim() || null,
+    agent_type: agentOptionsForm.agent_type,
+    title: agentOptionsForm.title.trim() || null,
     role: 'orchestrator',
     reuse_existing: false,
+    target: agentOptionsForm.target,
+    cwd: agentOptionsForm.target === 'local' ? cwd || null : null,
+    remote_profile_id:
+      agentOptionsForm.target === 'remote' ? agentOptionsForm.remote_profile_id || null : null,
+    remote_cwd: agentOptionsForm.target === 'remote' ? cwd || null : null,
+    remote_reconnect:
+      agentOptionsForm.target === 'remote' ? agentOptionsForm.remote_reconnect : null,
+    solo_mode: agentOptionsForm.agent_type === 'cursor' ? false : agentOptionsForm.solo_mode,
   })
-  agentForm.title = ''
-  mobileSetupOpen.value = false
+  showAgentOptionsModal.value = false
+  showAgentFileBrowser.value = false
   await terminalStore.fetchTabs()
+}
+
+async function listAgentDirectory(path?: string): Promise<DirectoryListing> {
+  const params = new URLSearchParams()
+  if (path) {
+    params.append('path', path)
+  }
+  if (agentOptionsForm.target === 'remote') {
+    if (!agentOptionsForm.remote_profile_id) {
+      throw new Error('Select a remote server first')
+    }
+    params.append('profile_id', agentOptionsForm.remote_profile_id)
+  }
+  const endpoint =
+    agentOptionsForm.target === 'remote' ? '/api/remote/filesystem/list' : '/api/filesystem/list'
+  const queryString = params.toString()
+  const response = await fetch(`${endpoint}${queryString ? `?${queryString}` : ''}`)
+  if (!response.ok) {
+    const error = await response.text()
+    throw new Error(error || 'Failed to list directory')
+  }
+  return await response.json()
+}
+
+async function loadAgentDirectory(path?: string) {
+  agentBrowserLoading.value = true
+  agentBrowserError.value = null
+  try {
+    const listing = await listAgentDirectory(path)
+    agentBrowserCurrentPath.value = listing.current_path
+    agentBrowserPathInput.value = listing.current_path
+    agentBrowserParentPath.value = listing.parent_path
+    agentBrowserItems.value = listing.items
+  } catch (e) {
+    agentBrowserError.value = e instanceof Error ? e.message : 'Failed to load directory'
+  } finally {
+    agentBrowserLoading.value = false
+  }
+}
+
+function openAgentDirectoryBrowser() {
+  showAgentFileBrowser.value = true
+  if (agentOptionsForm.cwd) {
+    loadAgentDirectory(agentOptionsForm.cwd)
+  } else if (agentOptionsForm.target === 'remote') {
+    loadAgentDirectory(selectedAgentRemoteProfile.value?.default_cwd || '~')
+  } else {
+    loadAgentDirectory('~')
+  }
+}
+
+function navigateAgentBrowserHome() {
+  if (agentOptionsForm.target === 'remote') {
+    loadAgentDirectory(selectedAgentRemoteProfile.value?.default_cwd || '~')
+  } else {
+    loadAgentDirectory('~')
+  }
+}
+
+function handleAgentFileItemClick(item: FileInfo) {
+  if (item.is_dir) {
+    loadAgentDirectory(item.path)
+  }
+}
+
+function selectAgentCurrentDirectory() {
+  agentOptionsForm.cwd = agentBrowserCurrentPath.value
+  showAgentFileBrowser.value = false
+}
+
+function resetTaskForm() {
+  taskForm.title = ''
+  taskForm.prompt = ''
+  taskForm.related_task_id = ''
+}
+
+function openTaskModal() {
+  resetTaskForm()
+  showTaskModal.value = true
+}
+
+function closeTaskModal() {
+  showTaskModal.value = false
 }
 
 async function handleCreateTask() {
@@ -793,13 +1298,12 @@ async function handleCreateTask() {
   await workspaceStore.createTask({
     title: taskForm.title.trim(),
     prompt: taskForm.prompt.trim(),
-    agent_type: taskForm.agent_type,
     related_task_id: taskForm.related_task_id || null,
   })
   taskForm.title = ''
   taskForm.prompt = ''
   taskForm.related_task_id = ''
-  mobileSetupOpen.value = false
+  showTaskModal.value = false
 }
 
 async function handleWorkspaceChange() {
@@ -827,7 +1331,6 @@ async function dispatchWorkspace() {
 async function startTask(task: WorkspaceTask) {
   const options = startOptionsFor(task)
   await workspaceStore.startTask(task.id, {
-    agent_type: task.agent_type,
     target_session_id: options.target_session_id || null,
     related_task_id: options.related_task_id || null,
     clear_context: options.clear_context ? true : null,
@@ -890,18 +1393,68 @@ watch(tasks, value => {
 watch(activeWorkspaceId, value => {
   selectedWorkspaceId.value = value || ''
   closeTaskDetail()
-  mobileSetupOpen.value = false
 })
 
-watch(activeWorkspace, workspace => {
-  if (!workspace) return
-  workspaceForm.name = workspace.name
-  workspaceForm.path = workspace.path
-  workspaceForm.default_branch = workspace.default_branch
-  workspaceForm.session_prefix = workspace.session_prefix
-})
+watch(
+  () => workspaceForm.target,
+  target => {
+    if (target === 'remote') {
+      fetchRemoteProfiles()
+      if (!workspaceForm.remote_cwd && selectedRemoteProfile.value?.default_cwd) {
+        workspaceForm.remote_cwd = selectedRemoteProfile.value.default_cwd
+      }
+    }
+  }
+)
+
+watch(
+  () => workspaceForm.remote_profile_id,
+  () => {
+    if (workspaceForm.target === 'remote' && !workspaceForm.remote_cwd) {
+      workspaceForm.remote_cwd = selectedRemoteProfile.value?.default_cwd || ''
+    }
+  }
+)
+
+watch(
+  () => agentOptionsForm.agent_type,
+  agentType => {
+    if (agentType === 'cursor') {
+      agentOptionsForm.solo_mode = false
+    } else if (!showAgentOptionsModal.value) {
+      agentOptionsForm.solo_mode = true
+    }
+  }
+)
+
+watch(
+  () => agentOptionsForm.target,
+  target => {
+    if (target === 'remote') {
+      fetchRemoteProfiles()
+      if (!agentOptionsForm.remote_profile_id) {
+        agentOptionsForm.remote_profile_id =
+          activeWorkspace.value?.remote_profile_id || remoteProfiles.value[0]?.id || ''
+      }
+      agentOptionsForm.cwd =
+        activeWorkspace.value?.remote_cwd || selectedAgentRemoteProfile.value?.default_cwd || '~'
+    } else {
+      agentOptionsForm.cwd = activeWorkspace.value?.path || ''
+    }
+  }
+)
+
+watch(
+  () => agentOptionsForm.remote_profile_id,
+  () => {
+    if (agentOptionsForm.target === 'remote' && !agentOptionsForm.cwd) {
+      agentOptionsForm.cwd = selectedAgentRemoteProfile.value?.default_cwd || '~'
+    }
+  }
+)
 
 onMounted(async () => {
+  await fetchRemoteProfiles()
   await workspaceStore.fetchWorkspaces()
   boardPollTimer = window.setInterval(refreshBoard, 2500)
 })
@@ -957,18 +1510,56 @@ onUnmounted(() => {
   gap: 8px;
 }
 
-.mobile-setup-button,
-.mobile-status-strip {
-  display: none;
+.workspace-actions {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.workspace-summary-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid #303030;
+  background: #1f1f1f;
+}
+
+.workspace-summary-primary,
+.workspace-column-tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.workspace-summary-primary {
+  color: #a1a1aa;
+  font-size: 12px;
+}
+
+.workspace-summary-primary strong {
+  color: #f4f4f5;
+}
+
+.workspace-column-tabs {
+  overflow-x: auto;
+}
+
+.workspace-column-tabs span {
+  flex: 0 0 auto;
+  border: 1px solid #3f3f46;
+  border-radius: 999px;
+  background: #27272a;
+  color: #d4d4d8;
+  font-size: 11px;
+  padding: 4px 8px;
 }
 
 .workspace-select,
 .tool-button,
 .primary-button,
 .danger-button,
-.setup-panel input,
-.setup-panel textarea,
-.setup-panel select,
 .advanced-start select {
   border: 1px solid #3f3f46;
   border-radius: 4px;
@@ -982,6 +1573,10 @@ onUnmounted(() => {
 .danger-button {
   height: 30px;
   padding: 0 10px;
+}
+
+.workspace-select {
+  min-width: 220px;
 }
 
 .tool-button,
@@ -1024,38 +1619,18 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 340px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .workspace-layout.detail-open {
-  grid-template-columns: 340px minmax(0, 1fr) minmax(380px, 28vw);
+  grid-template-columns: minmax(0, 1fr) minmax(380px, 28vw);
 }
 
-.setup-panel {
-  border-right: 1px solid #303030;
-  overflow-y: auto;
-  background: #1f1f1f;
-}
-
-.setup-section {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 14px;
-  border-bottom: 1px solid #303030;
-}
-
-.setup-section h2,
 .column-header h2,
 .task-card h3 {
   margin: 0;
 }
 
-.setup-section h2 {
-  font-size: 14px;
-}
-
-.setup-section label,
 .advanced-start label {
   display: flex;
   flex-direction: column;
@@ -1064,21 +1639,26 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
-.setup-panel input,
-.setup-panel select,
 .advanced-start select {
   height: 32px;
   padding: 0 9px;
 }
 
-.setup-panel textarea {
-  min-height: 120px;
-  resize: vertical;
-  padding: 9px;
+.form-row > label,
+.form-row > .modal-field {
+  flex: 1;
 }
 
-.form-row > label {
-  flex: 1;
+.agent-submit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.compact-button {
+  flex: 0 0 auto;
 }
 
 .agent-list {
@@ -1104,6 +1684,7 @@ onUnmounted(() => {
 }
 
 .agent-row span {
+  display: block;
   color: #a1a1aa;
   font-size: 11px;
 }
@@ -1548,10 +2129,319 @@ onUnmounted(() => {
   color: #a1a1aa;
 }
 
+.workspace-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow-y: auto;
+  background: rgb(0 0 0 / 55%);
+  padding: 16px;
+}
+
+.file-browser-overlay {
+  z-index: 1100;
+}
+
+.workspace-modal {
+  width: min(520px, 100%);
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  border: 1px solid #333;
+  border-radius: 8px;
+  background: #1e1e1e;
+  padding: 20px;
+}
+
+.workspace-modal h3 {
+  margin: 0 0 16px;
+  color: #fafafa;
+  font-size: 18px;
+}
+
+.modal-field {
+  margin-bottom: 14px;
+}
+
+.modal-field label {
+  display: block;
+  margin-bottom: 6px;
+  color: #c4c4cc;
+  font-size: 13px;
+}
+
+.modal-field input,
+.modal-field textarea,
+.modal-field select,
+.file-browser-path input {
+  width: 100%;
+  border: 1px solid #3f3f46;
+  border-radius: 4px;
+  background: #2b2b2b;
+  color: #f4f4f5;
+  font-size: 14px;
+  box-sizing: border-box;
+}
+
+.modal-field input,
+.modal-field select {
+  height: 34px;
+  padding: 0 10px;
+}
+
+.modal-field textarea {
+  min-height: 120px;
+  resize: vertical;
+  padding: 10px;
+}
+
+.modal-field input:focus,
+.modal-field textarea:focus,
+.modal-field select:focus,
+.file-browser-path input:focus {
+  outline: none;
+  border-color: #60a5fa;
+}
+
+.modal-field .checkbox-label {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 0;
+  color: #f4f4f5;
+}
+
+.modal-field .checkbox-label input {
+  width: 16px;
+  height: 16px;
+}
+
+.modal-hint {
+  margin: 6px 0 0;
+  color: #8f8f99;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.segmented-control {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  border: 1px solid #333;
+  border-radius: 4px;
+  background: #171717;
+  padding: 4px;
+}
+
+.segment-button {
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: #a1a1aa;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 8px 10px;
+}
+
+.segment-button.active {
+  border-color: #555;
+  background: #2d2d2d;
+  color: #fafafa;
+}
+
+.path-input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.path-input-row input {
+  min-width: 0;
+  flex: 1;
+}
+
+.path-input-row .tool-button {
+  height: 34px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.modal-section {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid #333;
+}
+
+.modal-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.modal-section-header h4 {
+  margin: 0;
+  color: #fafafa;
+  font-size: 13px;
+}
+
+.modal-section-header span {
+  color: #a1a1aa;
+  font-size: 12px;
+}
+
+.file-browser-modal {
+  width: min(720px, 100%);
+  height: min(70dvh, 620px);
+  display: flex;
+  flex-direction: column;
+}
+
+.file-browser-header,
+.file-browser-path {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.file-browser-header {
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.file-browser-header h3 {
+  margin: 0;
+}
+
+.file-browser-path {
+  border-radius: 4px;
+  background: #252525;
+  padding: 8px;
+}
+
+.file-browser-path input {
+  min-width: 0;
+  flex: 1;
+  height: 30px;
+  padding: 0 8px;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.path-nav-button {
+  height: 30px;
+  border: 1px solid #3f3f46;
+  border-radius: 4px;
+  background: #2b2b2b;
+  color: #f4f4f5;
+  cursor: pointer;
+  padding: 0 8px;
+}
+
+.file-browser-list {
+  flex: 1;
+  min-height: 160px;
+  overflow-y: auto;
+  border: 1px solid #333;
+  border-radius: 4px;
+  background: #1a1a1a;
+  margin-top: 12px;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  color: #a1a1aa;
+  cursor: default;
+}
+
+.file-item.is-dir {
+  color: #93c5fd;
+  cursor: pointer;
+}
+
+.file-item:hover {
+  background: #252525;
+}
+
+.file-item span {
+  width: 28px;
+  color: #71717a;
+  font-size: 11px;
+}
+
+.file-item strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.file-status {
+  padding: 16px;
+  text-align: center;
+  color: #8f8f99;
+  font-size: 13px;
+}
+
+.file-error {
+  color: #f87171;
+}
+
 @media (max-width: 760px) {
   .workspace-view {
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
+  }
+
+  .workspace-modal-overlay {
+    align-items: flex-start;
+    padding: 10px;
+  }
+
+  .workspace-modal {
+    width: 100%;
+    max-height: calc(100dvh - 20px);
+    padding: 14px;
+    border-radius: 6px;
+  }
+
+  .file-browser-modal {
+    height: calc(100dvh - 20px);
+  }
+
+  .path-input-row,
+  .file-browser-path {
+    flex-wrap: wrap;
+  }
+
+  .path-input-row .tool-button,
+  .file-browser-path input {
+    flex: 1 1 100%;
+  }
+
+  .modal-actions {
+    position: sticky;
+    bottom: -1px;
+    background: #1e1e1e;
+    padding-top: 10px;
+  }
+
+  .modal-actions .tool-button,
+  .modal-actions .primary-button {
+    flex: 1;
   }
 
   .workspace-header {
@@ -1576,100 +2466,47 @@ onUnmounted(() => {
   .workspace-actions {
     width: 100%;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto auto;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 6px;
   }
 
   .workspace-select {
+    grid-column: 1 / -1;
     width: 100%;
     min-width: 0;
   }
 
   .workspace-select,
-  .workspace-actions .tool-button {
+  .workspace-actions .tool-button,
+  .workspace-actions .primary-button {
     height: 36px;
   }
 
-  .workspace-actions .tool-button {
+  .workspace-actions .tool-button,
+  .workspace-actions .primary-button {
+    width: 100%;
     padding: 0 8px;
   }
 
-  .mobile-setup-button {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .mobile-status-strip {
-    display: flex;
+  .workspace-summary-strip {
     flex-direction: column;
+    align-items: stretch;
     gap: 8px;
     padding: 8px 12px;
-    border-bottom: 1px solid #303030;
-    background: #1f1f1f;
   }
 
-  .mobile-agent-summary {
-    display: flex;
-    align-items: center;
+  .workspace-summary-primary {
     justify-content: space-between;
-    gap: 10px;
-    color: #a1a1aa;
-    font-size: 12px;
   }
 
-  .mobile-agent-summary strong {
-    color: #f4f4f5;
-    font-size: 12px;
-  }
-
-  .mobile-column-tabs {
-    display: flex;
-    gap: 6px;
-    overflow-x: auto;
+  .workspace-column-tabs {
     padding-bottom: 2px;
-  }
-
-  .mobile-column-tabs span {
-    flex: 0 0 auto;
-    border: 1px solid #3f3f46;
-    border-radius: 999px;
-    background: #27272a;
-    color: #d4d4d8;
-    font-size: 11px;
-    padding: 4px 8px;
   }
 
   .workspace-layout,
   .workspace-layout.detail-open {
     display: block;
     min-height: auto;
-  }
-
-  .setup-panel {
-    display: none;
-    border-right: 0;
-    border-bottom: 1px solid #303030;
-    overflow: visible;
-  }
-
-  .setup-panel.mobile-open {
-    display: block;
-  }
-
-  .setup-section {
-    gap: 8px;
-    padding: 12px;
-  }
-
-  .setup-panel input,
-  .setup-panel select,
-  .setup-panel textarea {
-    font-size: 16px;
-  }
-
-  .setup-panel textarea {
-    min-height: 84px;
   }
 
   .agent-row-meta,
