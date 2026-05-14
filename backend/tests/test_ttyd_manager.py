@@ -1,5 +1,6 @@
 import importlib
 
+import pytest
 from pytest import MonkeyPatch
 
 from claude_hub.models import (
@@ -281,3 +282,57 @@ def test_codex_selection_prompt_classifies_as_attention(monkeypatch: MonkeyPatch
     assert status == AgentRuntimeStatus.ATTENTION
     assert status_text == "Agent waiting for input"
     assert detail == "needs your response"
+
+
+@pytest.mark.asyncio
+async def test_ensure_tab_running_starts_missing_ttyd_listener(monkeypatch: MonkeyPatch) -> None:
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._start_locks = {}
+    process = TTYDProcess(
+        tab_id="tab-missing-ttyd",
+        port=12353,
+        name="Missing TTYD",
+        agent_type=AgentType.CODEX,
+    )
+    manager.processes = {process.tab_id: process}
+
+    started: list[str] = []
+
+    async def fake_start(self: TTYDProcess) -> None:
+        started.append(self.tab_id)
+        self.is_active = True
+
+    monkeypatch.setattr(ttyd_manager_module, "_is_local_port_listening", lambda _port: False)
+    monkeypatch.setattr(TTYDProcess, "start", fake_start)
+
+    tab = await manager.ensure_tab_running(process.tab_id)
+
+    assert tab is not None
+    assert tab.id == process.tab_id
+    assert tab.is_active is True
+    assert started == [process.tab_id]
+
+
+@pytest.mark.asyncio
+async def test_ensure_tab_running_reuses_existing_listener(monkeypatch: MonkeyPatch) -> None:
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._start_locks = {}
+    process = TTYDProcess(
+        tab_id="tab-existing-ttyd",
+        port=12354,
+        name="Existing TTYD",
+        agent_type=AgentType.CODEX,
+    )
+    manager.processes = {process.tab_id: process}
+
+    async def fail_start(self: TTYDProcess) -> None:
+        raise AssertionError("start should not be called when the port already listens")
+
+    monkeypatch.setattr(ttyd_manager_module, "_is_local_port_listening", lambda _port: True)
+    monkeypatch.setattr(TTYDProcess, "start", fail_start)
+
+    tab = await manager.ensure_tab_running(process.tab_id)
+
+    assert tab is not None
+    assert tab.id == process.tab_id
+    assert tab.is_active is True

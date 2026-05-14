@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -76,6 +77,7 @@ _IDLE_TAIL_HINTS = (
 )
 
 _STATUS_CACHE_TTL_SECONDS = 0.75
+_PORT_CHECK_TIMEOUT_SECONDS = 0.2
 
 
 class CursorPosition(TypedDict):
@@ -86,6 +88,12 @@ class CursorPosition(TypedDict):
 class _AgentStatusSnapshot(TypedDict):
     hash: str
     last_changed_at: Optional[datetime]
+
+
+def _is_local_port_listening(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(_PORT_CHECK_TIMEOUT_SECONDS)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
 
 
 def _tmux_session_name(tab_id: str) -> str:
@@ -671,6 +679,7 @@ class TTYDManager:
         self._tab_order: List[str] = []
         self._status_snapshots: Dict[str, _AgentStatusSnapshot] = {}
         self._status_cache: Dict[str, TerminalAgentStatus] = {}
+        self._start_locks: Dict[str, asyncio.Lock] = {}
         logger.info("=" * 60)
         logger.info("Initializing TTYDManager - tmux session persistence enabled")
         logger.info("=" * 60)
@@ -935,6 +944,51 @@ class TTYDManager:
         if tab_id not in self.processes:
             return None
         return self.processes[tab_id].to_schema()
+
+    async def ensure_tab_running(self, tab_id: str) -> Optional[TerminalTab]:
+        """Ensure the tab has a live ttyd listener while preserving tmux state."""
+        process = self.processes.get(tab_id)
+        if not process:
+            return None
+
+        lock = self._start_locks.setdefault(tab_id, asyncio.Lock())
+        async with lock:
+            if _is_local_port_listening(process.port):
+                process.is_active = True
+                return process.to_schema()
+
+            if process.process and process.process.returncode is None:
+                logger.warning(
+                    "Tab %s has a live ttyd process object but port %s is not listening; restarting ttyd",
+                    tab_id,
+                    process.port,
+                )
+                await process.stop(kill_tmux=False)
+
+            logger.info(
+                "Starting missing ttyd listener for tab %s on port %s",
+                tab_id,
+                process.port,
+            )
+            try:
+                await process.start()
+            except Exception:
+                # During uvicorn --reload an old backend may still own the
+                # port briefly. If the listener exists now, let the proxy use
+                # it; a later request will restart ttyd if that old listener is
+                # cleaned up.
+                if _is_local_port_listening(process.port):
+                    logger.warning(
+                        "Tab %s start failed but port %s is already listening; treating it as available",
+                        tab_id,
+                        process.port,
+                    )
+                    process.is_active = True
+                    return process.to_schema()
+                process.is_active = False
+                raise
+
+            return process.to_schema()
 
     def list_tabs(self) -> list[TerminalTab]:
         # Return tabs in saved order

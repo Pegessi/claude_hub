@@ -118,7 +118,7 @@ async def websocket_endpoint(
         await websocket.close(code=4001)
         return
 
-    tab = ttyd_manager.get_tab(tab_id)
+    tab = await ttyd_manager.ensure_tab_running(tab_id)
     if not tab:
         await websocket.close(code=4004)
         return
@@ -146,7 +146,7 @@ async def proxy_ttyd_websocket(
         await websocket.close(code=4001)
         return
 
-    tab = ttyd_manager.get_tab(tab_id)
+    tab = await ttyd_manager.ensure_tab_running(tab_id)
     if not tab:
         await websocket.close(code=4004)
         return
@@ -199,7 +199,7 @@ async def get_terminal_proxy_root(
     current_user: User = Depends(get_current_user),
 ) -> RedirectResponse:
     """Redirect to the proxied ttyd page (with trailing slash for correct relative URL resolution)."""
-    tab = ttyd_manager.get_tab(tab_id)
+    tab = await ttyd_manager.ensure_tab_running(tab_id)
     if not tab:
         raise HTTPException(status_code=404, detail="Tab not found")
     return RedirectResponse(url=f"/api/terminal/proxy/{tab_id}/")
@@ -215,7 +215,7 @@ async def proxy_terminal_request(
     current_user: User = Depends(get_current_user),
 ) -> StreamingResponse:
     """Proxy HTTP requests to ttyd."""
-    tab = ttyd_manager.get_tab(tab_id)
+    tab = await ttyd_manager.ensure_tab_running(tab_id)
     if not tab:
         raise HTTPException(status_code=404, detail="Tab not found")
 
@@ -851,7 +851,7 @@ async def proxy_terminal_iframe(
     current_user: User = Depends(get_current_user),
 ) -> RedirectResponse:
     """Redirect to ttyd's web interface via our proxy."""
-    tab = ttyd_manager.get_tab(tab_id)
+    tab = await ttyd_manager.ensure_tab_running(tab_id)
     if not tab:
         raise HTTPException(status_code=404, detail="Tab not found")
     # Use our proxy endpoint
