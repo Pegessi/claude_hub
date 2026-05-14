@@ -3,6 +3,18 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-05-13
+
+### feat: add remote tab launch support
+- Add Local/Remote run targets to the new-tab modal, including remote server selection, remote working directory input and browsing, auto-reconnect, and mobile-friendly scrolling
+- Discover remote profiles from `~/.claude_hub/remote_profiles.json` and SSH config `Host` aliases
+- Add a remote filesystem listing API over SSH so remote working directories can be browsed before launch
+- Launch remote tabs through the local ttyd/tmux layer into SSH, prefer remote tmux persistence when available, and fall back to direct agent startup when remote tmux is missing
+- Bootstrap common NVM Node paths before starting Claude or Codex so Merlin machines with non-login shell PATH differences can still find agent CLIs
+- Preserve local tab behavior while persisting and duplicating remote launch configuration
+- Add backend coverage for remote command construction and shell compatibility
+- **Files**: schemas.py, remote_profiles.py, remote.py, tabs.py, ttyd_manager.py, test_ttyd_manager.py, TabBar.vue, types/index.ts
+
 ## 2026-05-12
 
 ### c3e0c64 feat: color tab indicator dot by agent runtime status
