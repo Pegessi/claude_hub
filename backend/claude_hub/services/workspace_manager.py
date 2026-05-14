@@ -47,6 +47,29 @@ AUTO_CONTINUE_MAX_ATTEMPTS = 10
 AUTO_CONTINUE_MIN_INTERVAL_SECONDS = 15
 WORKSPACE_MONITOR_INTERVAL_SECONDS = 5
 AUTO_CONTINUE_MESSAGE = "please continue"
+AUTO_CONTINUE_INTERRUPTION_PATTERNS = (
+    "api error",
+    "api_error",
+    "api request failed",
+    "api returned",
+    "failed to call api",
+    "provider returned error",
+    "unknown error",
+    "rate limit",
+    "429",
+    "400 unknown error",
+    "500 internal server error",
+    "502 bad gateway",
+    "503 service unavailable",
+    "504 gateway timeout",
+    "connection reset",
+    "connection aborted",
+    "stream error",
+    "network error",
+    "temporarily unavailable",
+    "overloaded",
+)
+
 
 def _now() -> datetime:
     return datetime.now()
@@ -1680,6 +1703,20 @@ class WorkspaceManager:
         task: WorkspaceTask,
         sampled_at: datetime,
     ) -> dict[str, Any] | None:
+        try:
+            output = await self._capture_tmux_output(session.tmux_session)
+        except RuntimeError as exc:
+            logger.warning(
+                "Could not inspect workspace agent output for auto-continue session_id=%s: %s",
+                session.id,
+                exc,
+            )
+            return None
+
+        interruption_reason = self._auto_continue_interruption_reason(output)
+        if not interruption_reason:
+            return None
+
         attempts = (
             session.auto_continue_attempts
             if session.auto_continue_task_id == task.id
@@ -1723,11 +1760,13 @@ class WorkspaceManager:
         await self._send_tmux_message(session.tmux_session, AUTO_CONTINUE_MESSAGE)
         attempts += 1
         logger.info(
-            "Auto-continued stopped workspace agent session_id=%s task_id=%s attempt=%s/%s",
+            "Auto-continued interrupted workspace agent session_id=%s task_id=%s "
+            "attempt=%s/%s reason=%s",
             session.id,
             task.id,
             attempts,
             AUTO_CONTINUE_MAX_ATTEMPTS,
+            interruption_reason,
         )
         return {
             "status": ManagedSessionStatus.WORKING,
@@ -1738,6 +1777,13 @@ class WorkspaceManager:
             "last_activity_at": sampled_at,
             "updated_at": sampled_at,
         }
+
+    def _auto_continue_interruption_reason(self, output: str) -> str | None:
+        tail = "\n".join(output.lower().splitlines()[-60:])
+        for pattern in AUTO_CONTINUE_INTERRUPTION_PATTERNS:
+            if pattern in tail:
+                return pattern
+        return None
 
     def _reconcile_task_report_statuses(self, workspace_id: str) -> None:
         changed = False

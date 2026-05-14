@@ -9,8 +9,8 @@
 - Prevent board reconciliation from restoring a stale `ready_for_review` report over a later continue transition
 - Mark review tasks as Working before sending follow-up text to the agent so tmux submit verification failures cannot leave the board in Review while the agent is active
 - Move review tasks back to Working when the assigned agent shows new working runtime activity after the review timestamp, covering direct terminal-tab follow-ups
-- Auto-send `please continue` whenever an assigned Working task's agent becomes idle, not only when the terminal tail matches known API error text
-- Add backend coverage for stale review reconciliation, direct-tab runtime continuation, generic idle auto-continue, and continue-send failure ordering
+- Auto-send `please continue` only when an assigned Working task's idle agent shows a recognized interruption such as `API Error: 400 unknown error`
+- Add backend coverage for stale review reconciliation, direct-tab runtime continuation, interrupted-idle auto-continue, normal-idle suppression, and continue-send failure ordering
 - **Files**: workspace_manager.py, test_workspaces.py
 
 ### feat: archive completed workspace task records
