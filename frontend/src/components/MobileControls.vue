@@ -95,6 +95,12 @@
         <button
           type="button"
           class="control-btn control-btn-shortcut"
+          :class="{ pressed: pressedKeys.has('ctrl-v') }"
+          @pointerdown.prevent="handleShortcut('v')"
+        >Ctrl+V</button>
+        <button
+          type="button"
+          class="control-btn control-btn-shortcut"
           :class="{ pressed: pressedKeys.has('ctrl-d') }"
           @pointerdown.prevent="handleShortcut('d')"
         >Ctrl+D</button>
