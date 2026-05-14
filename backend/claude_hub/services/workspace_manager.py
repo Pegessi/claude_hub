@@ -43,6 +43,30 @@ REMOTE_FORWARD_PORT_BASE = 18173
 TMUX_SUBMIT_ATTEMPTS = 3
 TMUX_PASTE_SETTLE_SECONDS = 0.35
 TMUX_SUBMIT_SETTLE_SECONDS = 0.7
+AUTO_CONTINUE_MAX_ATTEMPTS = 10
+AUTO_CONTINUE_MIN_INTERVAL_SECONDS = 15
+WORKSPACE_MONITOR_INTERVAL_SECONDS = 5
+AUTO_CONTINUE_MESSAGE = "please continue"
+API_ERROR_INTERRUPTION_PATTERNS = (
+    "api error",
+    "api_error",
+    "api request failed",
+    "api returned",
+    "failed to call api",
+    "provider returned error",
+    "rate limit",
+    "429",
+    "500 internal server error",
+    "502 bad gateway",
+    "503 service unavailable",
+    "504 gateway timeout",
+    "connection reset",
+    "connection aborted",
+    "stream error",
+    "network error",
+    "temporarily unavailable",
+    "overloaded",
+)
 
 
 def _now() -> datetime:
@@ -66,6 +90,7 @@ class WorkspaceManager:
         self.tasks: dict[str, WorkspaceTask] = {}
         self.sessions: dict[str, ManagedSession] = {}
         self.reports: dict[str, AgentReport] = {}
+        self._monitor_task: asyncio.Task[None] | None = None
         self._load_state()
 
     def _workspace_dir(self, workspace_id: str) -> Path:
@@ -176,6 +201,9 @@ class WorkspaceManager:
         normalized.setdefault("remote_reconnect", True)
         normalized.setdefault("solo_mode", True)
         normalized.setdefault("remote_forward_port", None)
+        normalized.setdefault("auto_continue_task_id", None)
+        normalized.setdefault("auto_continue_attempts", 0)
+        normalized.setdefault("last_auto_continue_at", None)
         return normalized
 
     def _runtime_from_managed_status(self, item: dict[str, Any]) -> str:
@@ -278,6 +306,34 @@ class WorkspaceManager:
 
     def list_workspaces(self) -> list[Workspace]:
         return sorted(self.workspaces.values(), key=lambda item: item.created_at)
+
+    def start_background_monitor(self) -> None:
+        if self._monitor_task and not self._monitor_task.done():
+            return
+        self._monitor_task = asyncio.create_task(self._background_monitor_loop())
+
+    async def stop_background_monitor(self) -> None:
+        if not self._monitor_task:
+            return
+        self._monitor_task.cancel()
+        try:
+            await self._monitor_task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._monitor_task = None
+
+    async def _background_monitor_loop(self) -> None:
+        while True:
+            try:
+                await self._refresh_session_statuses()
+                for workspace_id in list(self.workspaces):
+                    await self.dispatch_workspace(workspace_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Workspace background monitor failed")
+            await asyncio.sleep(WORKSPACE_MONITOR_INTERVAL_SECONDS)
 
     def get_workspace(self, workspace_id: str) -> Optional[Workspace]:
         return self.workspaces.get(workspace_id)
@@ -860,6 +916,9 @@ class WorkspaceManager:
                 "current_task_id": task.id,
                 "status": ManagedSessionStatus.WORKING,
                 "runtime_status": AgentRuntimeStatus.WORKING,
+                "auto_continue_task_id": task.id,
+                "auto_continue_attempts": 0,
+                "last_auto_continue_at": None,
                 "updated_at": now,
                 "last_activity_at": now,
             }
@@ -958,6 +1017,9 @@ class WorkspaceManager:
                 "current_task_id": task.id,
                 "status": ManagedSessionStatus.WORKING,
                 "runtime_status": AgentRuntimeStatus.WORKING,
+                "auto_continue_task_id": task.id,
+                "auto_continue_attempts": 0,
+                "last_auto_continue_at": None,
                 "last_activity_at": now,
                 "updated_at": now,
             }
@@ -1496,6 +1558,21 @@ class WorkspaceManager:
             if current_task_id:
                 task = self.tasks.get(current_task_id)
                 if (
+                    runtime_status == AgentRuntimeStatus.IDLE
+                    and task
+                    and task.status == WorkspaceTaskStatus.WORKING
+                ):
+                    auto_continue_update = await self._auto_continue_api_interruption(
+                        session,
+                        task,
+                        status.sampled_at,
+                    )
+                    if auto_continue_update:
+                        update.update(auto_continue_update)
+                        next_status = update["status"]
+                        runtime_status = update["runtime_status"]
+                        changed = True
+                if (
                     runtime_status == AgentRuntimeStatus.ATTENTION
                     and task
                     and task.status == WorkspaceTaskStatus.WORKING
@@ -1514,6 +1591,88 @@ class WorkspaceManager:
             changed = True
         if changed:
             self._save_state()
+
+    async def _auto_continue_api_interruption(
+        self,
+        session: ManagedSession,
+        task: WorkspaceTask,
+        sampled_at: datetime,
+    ) -> dict[str, Any] | None:
+        try:
+            output = await self._capture_tmux_output(session.tmux_session)
+        except RuntimeError as exc:
+            logger.warning(
+                "Could not inspect workspace agent output for auto-continue session_id=%s: %s",
+                session.id,
+                exc,
+            )
+            return None
+
+        if not self._looks_like_api_error_interruption(output):
+            return None
+
+        attempts = (
+            session.auto_continue_attempts
+            if session.auto_continue_task_id == task.id
+            else 0
+        )
+        if (
+            session.auto_continue_task_id == task.id
+            and session.last_auto_continue_at
+            and (sampled_at - session.last_auto_continue_at).total_seconds()
+            < AUTO_CONTINUE_MIN_INTERVAL_SECONDS
+        ):
+            return {
+                "status": ManagedSessionStatus.WORKING,
+                "runtime_status": AgentRuntimeStatus.WORKING,
+                "auto_continue_task_id": task.id,
+                "auto_continue_attempts": attempts,
+                "updated_at": sampled_at,
+            }
+        if attempts >= AUTO_CONTINUE_MAX_ATTEMPTS:
+            self.tasks[task.id] = task.model_copy(
+                update={
+                    "status": WorkspaceTaskStatus.REVIEW,
+                    "reviewed_at": sampled_at,
+                    "updated_at": sampled_at,
+                }
+            )
+            logger.warning(
+                "Workspace agent auto-continue limit reached session_id=%s task_id=%s attempts=%s",
+                session.id,
+                task.id,
+                attempts,
+            )
+            return {
+                "status": ManagedSessionStatus.NEEDS_INPUT,
+                "runtime_status": AgentRuntimeStatus.ATTENTION,
+                "auto_continue_task_id": task.id,
+                "auto_continue_attempts": attempts,
+                "updated_at": sampled_at,
+            }
+
+        await self._send_tmux_message(session.tmux_session, AUTO_CONTINUE_MESSAGE)
+        attempts += 1
+        logger.info(
+            "Auto-continued workspace agent after API interruption session_id=%s task_id=%s attempt=%s/%s",
+            session.id,
+            task.id,
+            attempts,
+            AUTO_CONTINUE_MAX_ATTEMPTS,
+        )
+        return {
+            "status": ManagedSessionStatus.WORKING,
+            "runtime_status": AgentRuntimeStatus.WORKING,
+            "auto_continue_task_id": task.id,
+            "auto_continue_attempts": attempts,
+            "last_auto_continue_at": sampled_at,
+            "last_activity_at": sampled_at,
+            "updated_at": sampled_at,
+        }
+
+    def _looks_like_api_error_interruption(self, output: str) -> bool:
+        tail = "\n".join(output.lower().splitlines()[-40:])
+        return any(pattern in tail for pattern in API_ERROR_INTERRUPTION_PATTERNS)
 
     def _reconcile_task_report_statuses(self, workspace_id: str) -> None:
         changed = False
@@ -1622,6 +1781,9 @@ class WorkspaceManager:
                     "current_task_id": None,
                     "status": ManagedSessionStatus.IDLE,
                     "runtime_status": AgentRuntimeStatus.IDLE,
+                    "auto_continue_task_id": None,
+                    "auto_continue_attempts": 0,
+                    "last_auto_continue_at": None,
                     "updated_at": _now(),
                 }
             )
@@ -1634,6 +1796,9 @@ class WorkspaceManager:
             update={
                 "task_id": task_id,
                 "current_task_id": task_id,
+                "auto_continue_task_id": task_id,
+                "auto_continue_attempts": 0,
+                "last_auto_continue_at": None,
                 "updated_at": _now(),
             }
         )

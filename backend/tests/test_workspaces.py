@@ -389,6 +389,223 @@ def test_tmux_pending_input_detection_matches_codex_paste_prompt() -> None:
     )
 
 
+def test_api_error_idle_agent_is_auto_continued(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    status_samples: list[TerminalAgentStatus] = []
+    sent_messages: list[tuple[str, str]] = []
+
+    async def fake_create_tab(
+        name: str,
+        shell: Optional[str] = None,
+        cwd: Optional[str] = None,
+        solo_mode: bool = False,
+        agent_type: AgentType = AgentType.CLAUDE,
+        target: ExecutionTarget = ExecutionTarget.LOCAL,
+        remote_profile_id: Optional[str] = None,
+        remote_cwd: Optional[str] = None,
+        remote_reconnect: bool = True,
+        remote_forward_port: Optional[int] = None,
+        workspace_id: Optional[str] = None,
+        workspace_name: Optional[str] = None,
+        workspace_role: WorkspaceSessionRole | None = None,
+    ) -> TerminalTab:
+        return TerminalTab(
+            id="tab-api-error",
+            name=name,
+            shell=shell,
+            cwd=cwd,
+            solo_mode=solo_mode,
+            agent_type=agent_type,
+            target=target,
+            remote_profile_id=remote_profile_id,
+            remote_cwd=remote_cwd,
+            remote_reconnect=remote_reconnect,
+            port=12358,
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+            workspace_role=workspace_role,
+        )
+
+    async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
+        sent_messages.append((tmux_session, message))
+
+    async def fake_ensure_session_ready(_session) -> None:
+        return None
+
+    async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
+        return status_samples
+
+    async def fake_capture_output(_tmux_session: str) -> str:
+        return "API Error: 503 Service Unavailable\n\n› "
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
+    monkeypatch.setattr(
+        workspace_module.ttyd_manager,
+        "list_tab_agent_statuses",
+        fake_list_statuses,
+    )
+    monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+    monkeypatch.setattr(
+        workspace_manager,
+        "_ensure_session_ready_for_send",
+        fake_ensure_session_ready,
+    )
+    monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture_output)
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "API Retry Repo", "path": str(repo), "session_prefix": "retry"},
+    ).json()
+    client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Retry task", "prompt": "Handle flaky API"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    sent_messages.clear()
+
+    status_samples[:] = [
+        TerminalAgentStatus(
+            tab_id="tab-api-error",
+            tab_name="API Retry Repo Agent 1",
+            agent_type=AgentType.CODEX,
+            status=AgentRuntimeStatus.IDLE,
+            status_text="Idle",
+            detail="agent prompt visible",
+            tmux_session="claude-hub-tab-api-",
+            last_changed_at=datetime.now(),
+            sampled_at=datetime.now(),
+        )
+    ]
+
+    board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
+
+    assert sent_messages == [("claude-hub-tab-api-", "please continue")]
+    assert board["tasks"][0]["status"] == "working"
+    assert board["sessions"][0]["runtime_status"] == "working"
+    assert board["sessions"][0]["auto_continue_task_id"] == started["id"]
+    assert board["sessions"][0]["auto_continue_attempts"] == 1
+
+
+def test_api_error_auto_continue_stops_after_limit(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    status_samples: list[TerminalAgentStatus] = []
+    sent_messages: list[tuple[str, str]] = []
+
+    async def fake_create_tab(
+        name: str,
+        shell: Optional[str] = None,
+        cwd: Optional[str] = None,
+        solo_mode: bool = False,
+        agent_type: AgentType = AgentType.CLAUDE,
+        target: ExecutionTarget = ExecutionTarget.LOCAL,
+        remote_profile_id: Optional[str] = None,
+        remote_cwd: Optional[str] = None,
+        remote_reconnect: bool = True,
+        remote_forward_port: Optional[int] = None,
+        workspace_id: Optional[str] = None,
+        workspace_name: Optional[str] = None,
+        workspace_role: WorkspaceSessionRole | None = None,
+    ) -> TerminalTab:
+        return TerminalTab(
+            id="tab-api-limit",
+            name=name,
+            shell=shell,
+            cwd=cwd,
+            solo_mode=solo_mode,
+            agent_type=agent_type,
+            target=target,
+            remote_profile_id=remote_profile_id,
+            remote_cwd=remote_cwd,
+            remote_reconnect=remote_reconnect,
+            port=12359,
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+            workspace_role=workspace_role,
+        )
+
+    async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
+        sent_messages.append((tmux_session, message))
+
+    async def fake_ensure_session_ready(_session) -> None:
+        return None
+
+    async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
+        return status_samples
+
+    async def fake_capture_output(_tmux_session: str) -> str:
+        return "API Error: connection reset by peer\n\n› "
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
+    monkeypatch.setattr(
+        workspace_module.ttyd_manager,
+        "list_tab_agent_statuses",
+        fake_list_statuses,
+    )
+    monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+    monkeypatch.setattr(
+        workspace_manager,
+        "_ensure_session_ready_for_send",
+        fake_ensure_session_ready,
+    )
+    monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture_output)
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "API Limit Repo", "path": str(repo), "session_prefix": "limit"},
+    ).json()
+    client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Limit task", "prompt": "Handle repeated API failures"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    session = workspace_manager.sessions[started["session_id"]]
+    workspace_manager.sessions[session.id] = session.model_copy(
+        update={
+            "auto_continue_task_id": started["id"],
+            "auto_continue_attempts": 10,
+        }
+    )
+    sent_messages.clear()
+
+    status_samples[:] = [
+        TerminalAgentStatus(
+            tab_id="tab-api-limit",
+            tab_name="API Limit Repo Agent 1",
+            agent_type=AgentType.CODEX,
+            status=AgentRuntimeStatus.IDLE,
+            status_text="Idle",
+            detail="agent prompt visible",
+            tmux_session="claude-hub-tab-api-",
+            last_changed_at=datetime.now(),
+            sampled_at=datetime.now(),
+        )
+    ]
+
+    board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
+
+    assert sent_messages == []
+    assert board["tasks"][0]["status"] == "review"
+    assert board["tasks"][0]["session_id"] == started["session_id"]
+    assert board["sessions"][0]["runtime_status"] == "attention"
+    assert board["sessions"][0]["auto_continue_attempts"] == 10
+
+
 def test_review_task_stays_in_review_when_agent_runtime_is_working(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
