@@ -3,6 +3,15 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-05-15
+
+### fix: restore main ci checks
+- Keep terminal history full replay buffered briefly after xterm accepts the replay write so late ttyd initial screen frames cannot collapse reconstructed scrollback on Linux CI
+- Apply backend Black/isort cleanup for files that were failing formatting/import-order gates
+- Fix backend mypy failures that were hidden behind the earlier formatting stop, including terminal status typing, remote workspace path fallback, and TerminalTab test construction
+- Relax mypy's untyped-def requirement for tests while keeping production code strict
+- **Files**: terminal.py, remote.py, models/__init__.py, ttyd_manager.py, workspace_manager.py, pyproject.toml, test_tabs.py, test_ttyd_manager.py, test_workspaces.py
+
 ## 2026-05-14
 
 ### fix: classify Codex selection prompts as attention

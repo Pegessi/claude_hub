@@ -4,7 +4,7 @@ import pytest
 from httpx import AsyncClient
 from pytest import MonkeyPatch
 
-from claude_hub.models import AgentType, TerminalTab
+from claude_hub.models import AgentType, ExecutionTarget, TerminalTab
 
 
 @pytest.mark.asyncio
@@ -50,6 +50,10 @@ async def test_duplicate_tab_route_preserves_solo_mode(
             cwd="/tmp",
             solo_mode=True,
             agent_type=AgentType.CODEX,
+            target=ExecutionTarget.LOCAL,
+            remote_profile_id=None,
+            remote_cwd=None,
+            remote_reconnect=True,
             port=12345,
             created_at=datetime.now(),
             is_active=True,

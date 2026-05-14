@@ -5,8 +5,8 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from ..auth.dependencies import get_current_user
 from ..api.filesystem import DirectoryListing
+from ..auth.dependencies import get_current_user
 from ..models import RemoteProfile, User
 from ..services import remote_profile_manager
 

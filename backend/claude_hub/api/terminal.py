@@ -392,7 +392,12 @@ async def proxy_terminal_request(
             // The \\x1b[3J clears scrollback, \\x1b[H\\x1b[2J clears screen.
             originalWrite('\\x1b[H\\x1b[2J\\x1b[3J' + lines.join('\\r\\n') + cursorSeq(historyCursorX, historyCursorY), function() {{
               clearTimeout(safetyTimer);
-              flushBuffer();
+              // ttyd can still deliver its initial screen payload after
+              // xterm accepts the replay write, especially under the Linux
+              // CI binary. Keep term.write buffered briefly so late duplicate
+              // initial frames cannot collapse reconstructed scrollback back
+              // to only the visible screen rows.
+              setTimeout(flushBuffer, 500);
             }});
           }} else {{
             // Phase A: term.open() has NOT been called yet (our hook will

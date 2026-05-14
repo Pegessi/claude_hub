@@ -236,9 +236,7 @@ class TTYDProcess:
         elif self.solo_mode and self.agent_type in {AgentType.CLAUDE, AgentType.CODEX}:
             user_shell = os.environ.get("SHELL", "/bin/bash")
             cmd.append(
-                shlex.join(
-                    [user_shell, "-c", f"{self._agent_start_command()}; exec {user_shell}"]
-                )
+                shlex.join([user_shell, "-c", f"{self._agent_start_command()}; exec {user_shell}"])
             )
         else:
             cmd.append(self.shell)
@@ -383,7 +381,7 @@ class TTYDProcess:
             "export PATH; "
             "fi"
         )
-        checks = []
+        checks: list[str] = []
 
         direct_start_script = "; ".join(
             [
@@ -1107,7 +1105,7 @@ class TTYDManager:
         foreground_command = await process.capture_foreground_command()
         output = _ANSI_ESCAPE_RE.sub("", raw_output)
         output_hash = hashlib.sha256(output.encode("utf-8", errors="ignore")).hexdigest()
-        status, status_text, detail, last_changed_at = self._classify_agent_status(
+        runtime_status, status_text, detail, last_changed_at = self._classify_agent_status(
             process,
             output,
             output_hash,
@@ -1118,7 +1116,7 @@ class TTYDManager:
             tab_id=process.tab_id,
             tab_name=process.name,
             agent_type=process.agent_type,
-            status=status,
+            status=runtime_status,
             status_text=status_text,
             detail=detail,
             tmux_session=process.tmux_session,
