@@ -394,14 +394,6 @@
                 <button
                   v-if="selectedTask.status === 'review'"
                   type="button"
-                  class="primary-button"
-                  @click="continueTask(selectedTask)"
-                >
-                  Continue
-                </button>
-                <button
-                  v-if="selectedTask.status === 'review'"
-                  type="button"
                   class="tool-button"
                   @click="markTask(selectedTask.id, 'done')"
                 >
@@ -1360,14 +1352,6 @@ async function startTask(task: WorkspaceTask) {
     related_task_id: options.related_task_id || null,
     clear_context: options.clear_context ? true : null,
   })
-  await terminalStore.fetchTabs()
-}
-
-async function continueTask(task: WorkspaceTask) {
-  await workspaceStore.continueTask(task.id, {
-    message: detailMessage.value.trim() || null,
-  })
-  detailMessage.value = ''
   await terminalStore.fetchTabs()
 }
 

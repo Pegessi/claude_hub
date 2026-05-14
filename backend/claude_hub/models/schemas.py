@@ -237,6 +237,9 @@ class ManagedSession(BaseModel):
     remote_reconnect: bool = True
     solo_mode: bool = True
     remote_forward_port: Optional[int] = None
+    auto_continue_task_id: Optional[str] = None
+    auto_continue_attempts: int = 0
+    last_auto_continue_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
     last_activity_at: Optional[datetime] = None

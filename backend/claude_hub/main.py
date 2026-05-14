@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .api import api_router
 from .config import settings
-from .services import ttyd_manager
+from .services import ttyd_manager, workspace_manager
 
 # Create logs directory if it doesn't exist
 log_dir = Path.home() / ".claude_hub" / "logs"
@@ -48,9 +48,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Starting Claude Hub Backend")
     # Start all saved tabs
     await ttyd_manager.start_all_tabs()
+    workspace_manager.start_background_monitor()
     yield
     # Shutdown
     logger.info("Shutting down Claude Hub Backend")
+    await workspace_manager.stop_background_monitor()
     await ttyd_manager.cleanup()
 
 
