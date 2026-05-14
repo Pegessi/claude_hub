@@ -42,6 +42,11 @@ _BARE_SHELL_PROMPT_RE = re.compile(r"[❯>$#%»→λ]\s*$")
 _ATTENTION_TAIL_PATTERNS = (
     "do you want to proceed",
     "do you want to continue",
+    "enter to select",
+    "tab/arrow keys to navigate",
+    "arrow keys to navigate",
+    "type something.",
+    "esc to cancel",
     "(y/n)",
     "(y/n/a)",
     "[y/n]",
@@ -54,7 +59,6 @@ _WORKING_TAIL_PATTERNS = (
     "esc to interrupt",
     "ctrl+c to interrupt",
     "ctrl-c to interrupt",
-    "esc to cancel",
 )
 
 # Claude Code also reports active work with spinner-style status lines such

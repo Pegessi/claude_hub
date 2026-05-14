@@ -5,6 +5,12 @@
 
 ## 2026-05-14
 
+### fix: classify Codex selection prompts as attention
+- Treat Codex interactive menus with `Enter to select`, arrow-key navigation, or `Esc to cancel` as Attention instead of Working
+- Keep active work detection on interrupt-oriented hints such as `Esc to interrupt` and Claude spinner status lines
+- Add backend coverage for Codex selection-menu status classification
+- **Files**: ttyd_manager.py, test_ttyd_manager.py
+
 ### fix: keep continued review tasks in working
 - Prevent board reconciliation from restoring a stale `ready_for_review` report over a later continue transition
 - Mark review tasks as Working before sending follow-up text to the agent so tmux submit verification failures cannot leave the board in Review while the agent is active
