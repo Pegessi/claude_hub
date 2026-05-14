@@ -9,7 +9,7 @@ import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, TypedDict
+from typing import Dict, Iterable, List, Optional, TypedDict
 
 from ..config import settings
 from ..models import (
@@ -68,6 +68,8 @@ _IDLE_TAIL_HINTS = (
     "? for shortcuts",
     "/ for commands",
 )
+
+_STATUS_CACHE_TTL_SECONDS = 0.75
 
 
 class CursorPosition(TypedDict):
@@ -664,6 +666,7 @@ class TTYDManager:
         self._next_port = settings.ttyd_base_port
         self._tab_order: List[str] = []
         self._status_snapshots: Dict[str, _AgentStatusSnapshot] = {}
+        self._status_cache: Dict[str, TerminalAgentStatus] = {}
         logger.info("=" * 60)
         logger.info("Initializing TTYDManager - tmux session persistence enabled")
         logger.info("=" * 60)
@@ -1054,15 +1057,27 @@ class TTYDManager:
             last_changed_at,
         )
 
-    async def get_tab_agent_status(self, tab_id: str) -> Optional[TerminalAgentStatus]:
+    async def get_tab_agent_status(
+        self,
+        tab_id: str,
+        use_cache: bool = True,
+    ) -> Optional[TerminalAgentStatus]:
         """Get a best-effort terminal agent status for one tab."""
         process = self.processes.get(tab_id)
         if not process:
             return None
 
         sampled_at = datetime.now()
+        cached = self._status_cache.get(tab_id)
+        if (
+            use_cache
+            and cached
+            and (sampled_at - cached.sampled_at).total_seconds() < _STATUS_CACHE_TTL_SECONDS
+        ):
+            return cached
+
         if not _tmux_session_exists(process.tmux_session):
-            return TerminalAgentStatus(
+            status = TerminalAgentStatus(
                 tab_id=process.tab_id,
                 tab_name=process.name,
                 agent_type=process.agent_type,
@@ -1073,6 +1088,8 @@ class TTYDManager:
                 last_changed_at=None,
                 sampled_at=sampled_at,
             )
+            self._status_cache[tab_id] = status
+            return status
 
         try:
             raw_output = await process.capture_history(lines=120)
@@ -1090,7 +1107,7 @@ class TTYDManager:
             foreground_command,
         )
 
-        return TerminalAgentStatus(
+        status = TerminalAgentStatus(
             tab_id=process.tab_id,
             tab_name=process.name,
             agent_type=process.agent_type,
@@ -1101,18 +1118,29 @@ class TTYDManager:
             last_changed_at=last_changed_at,
             sampled_at=sampled_at,
         )
+        self._status_cache[tab_id] = status
+        return status
 
-    async def list_tab_agent_statuses(self) -> list[TerminalAgentStatus]:
+    async def list_tab_agent_statuses(
+        self,
+        tab_ids: Optional[Iterable[str]] = None,
+    ) -> list[TerminalAgentStatus]:
         """List best-effort terminal agent statuses in tab order."""
-        statuses: list[TerminalAgentStatus] = []
-        ordered_ids = [tab_id for tab_id in self._tab_order if tab_id in self.processes]
-        ordered_ids.extend(tab_id for tab_id in self.processes if tab_id not in ordered_ids)
+        if tab_ids is None:
+            ordered_ids = [tab_id for tab_id in self._tab_order if tab_id in self.processes]
+            ordered_ids.extend(tab_id for tab_id in self.processes if tab_id not in ordered_ids)
+        else:
+            seen: set[str] = set()
+            ordered_ids = []
+            for tab_id in tab_ids:
+                if tab_id in self.processes and tab_id not in seen:
+                    ordered_ids.append(tab_id)
+                    seen.add(tab_id)
 
-        for tab_id in ordered_ids:
-            status = await self.get_tab_agent_status(tab_id)
-            if status:
-                statuses.append(status)
-        return statuses
+        results = await asyncio.gather(
+            *(self.get_tab_agent_status(tab_id) for tab_id in ordered_ids)
+        )
+        return [status for status in results if status]
 
     async def update_tab(
         self,
