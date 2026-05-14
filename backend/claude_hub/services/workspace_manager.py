@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from ..config import settings
 from ..models import (
     AgentReport,
     AgentReportCreate,
@@ -17,6 +18,7 @@ from ..models import (
     ContinueTaskRequest,
     DispatchDecisionRequest,
     EnsureWorkspaceAgentRequest,
+    ExecutionTarget,
     ManagedSession,
     ManagedSessionStatus,
     StartTaskRequest,
@@ -29,6 +31,7 @@ from ..models import (
     WorkspaceTaskCreate,
     WorkspaceTaskStatus,
 )
+from .remote_profiles import remote_profile_manager
 from .ttyd_manager import ttyd_manager
 
 logger = logging.getLogger(__name__)
@@ -36,6 +39,7 @@ logger = logging.getLogger(__name__)
 STATE_ROOT = Path.home() / ".claude_hub" / "workspaces"
 INDEX_FILE = STATE_ROOT / "index.json"
 LEGACY_STATE_FILE = Path.home() / ".claude_hub" / "workspaces.json"
+REMOTE_FORWARD_PORT_BASE = 18173
 
 
 def _now() -> datetime:
@@ -132,6 +136,10 @@ class WorkspaceManager:
         normalized = dict(item)
         normalized.pop("agent_session_id", None)
         normalized.setdefault("dispatcher_session_id", None)
+        normalized.setdefault("target", ExecutionTarget.LOCAL.value)
+        normalized.setdefault("remote_profile_id", None)
+        normalized.setdefault("remote_cwd", None)
+        normalized.setdefault("remote_reconnect", True)
         return normalized
 
     def _normalize_task_item(self, item: dict[str, Any]) -> dict[str, Any]:
@@ -154,6 +162,17 @@ class WorkspaceManager:
         normalized.setdefault("runtime_status", self._runtime_from_managed_status(normalized))
         normalized.setdefault("current_task_id", normalized.get("task_id"))
         normalized.setdefault("queued_count", 0)
+        normalized.setdefault(
+            "target",
+            ExecutionTarget.REMOTE.value
+            if normalized.get("remote_forward_port")
+            else ExecutionTarget.LOCAL.value,
+        )
+        normalized.setdefault("remote_profile_id", None)
+        normalized.setdefault("remote_cwd", None)
+        normalized.setdefault("remote_reconnect", True)
+        normalized.setdefault("solo_mode", True)
+        normalized.setdefault("remote_forward_port", None)
         return normalized
 
     def _runtime_from_managed_status(self, item: dict[str, Any]) -> str:
@@ -211,7 +230,10 @@ class WorkspaceManager:
             "",
             f"Generated: {_now().isoformat(timespec='seconds')}",
             f"Workspace: {workspace.name}",
-            f"Repository: {workspace.path}",
+            f"Target: {workspace.target.value}",
+            f"Local workspace dir: {workspace.path}",
+            f"Remote profile: {workspace.remote_profile_id or 'none'}",
+            f"Remote start dir: {self._workspace_remote_cwd(workspace) if workspace.target == ExecutionTarget.REMOTE else 'n/a'}",
             f"Default branch: {workspace.default_branch}",
             "",
             "## Agents",
@@ -223,8 +245,8 @@ class WorkspaceManager:
             lines.append(
                 "- "
                 f"{session.id}: role={session.role.value}, type={session.agent_type.value}, "
-                f"runtime={session.runtime_status.value}, current_task={current}, "
-                f"queued={self._queued_count(session.id)}"
+                f"target={session.target.value}, runtime={session.runtime_status.value}, current_task={current}, "
+                f"queued={self._queued_count(session.id)}, path={session.workspace_path}"
             )
 
         lines.extend(["", "## Tasks"])
@@ -243,6 +265,8 @@ class WorkspaceManager:
                 "",
                 "## Coordination Notes",
                 "- Only work on the task explicitly assigned to your agent session.",
+                "- The workspace is an environment, not necessarily a single repository.",
+                "- Use the task instructions to choose the correct local or remote project directory.",
                 "- Check for existing file changes before editing; do not overwrite work from another agent.",
                 "- If your terminal asks for human input, stop and let the task move to review.",
             ]
@@ -258,7 +282,12 @@ class WorkspaceManager:
     def create_workspace(self, payload: WorkspaceCreate) -> Workspace:
         source_path = Path(payload.path).expanduser().resolve()
         if not source_path.exists() or not source_path.is_dir():
-            raise ValueError(f"Workspace path does not exist: {source_path}")
+            raise ValueError(f"Local workspace dir does not exist: {source_path}")
+        if payload.target == ExecutionTarget.REMOTE:
+            if not payload.remote_profile_id:
+                raise ValueError("Remote workspace requires remote_profile_id")
+            if not remote_profile_manager.get_profile(payload.remote_profile_id):
+                raise ValueError(f"Remote profile not found: {payload.remote_profile_id}")
 
         workspace_id = str(uuid.uuid4())
         now = _now()
@@ -270,6 +299,10 @@ class WorkspaceManager:
             default_branch=payload.default_branch,
             session_prefix=prefix,
             dispatcher_session_id=None,
+            target=payload.target,
+            remote_profile_id=payload.remote_profile_id,
+            remote_cwd=payload.remote_cwd,
+            remote_reconnect=payload.remote_reconnect,
             created_at=now,
             updated_at=now,
         )
@@ -401,11 +434,41 @@ class WorkspaceManager:
         if session_id in self.sessions:
             session_id = f"{session_id}-{uuid.uuid4().hex[:6]}"
 
+        session_target = payload.target or ExecutionTarget.LOCAL
+        local_cwd = payload.cwd or workspace.path
+        remote_profile_id: str | None = None
+        remote_cwd: str | None = None
+        remote_reconnect = (
+            payload.remote_reconnect
+            if payload.remote_reconnect is not None
+            else workspace.remote_reconnect
+        )
+        if session_target == ExecutionTarget.REMOTE:
+            remote_profile_id = payload.remote_profile_id or workspace.remote_profile_id
+            if not remote_profile_id:
+                raise ValueError("Remote agent requires remote_profile_id")
+            if not remote_profile_manager.get_profile(remote_profile_id):
+                raise ValueError(f"Remote profile not found: {remote_profile_id}")
+            remote_cwd = self._resolve_remote_cwd(
+                profile_id=remote_profile_id,
+                requested_cwd=payload.remote_cwd,
+                workspace_cwd=workspace.remote_cwd,
+            )
+
+        remote_forward_port = (
+            self._next_remote_forward_port() if session_target == ExecutionTarget.REMOTE else None
+        )
+        session_workspace_path = remote_cwd if session_target == ExecutionTarget.REMOTE else local_cwd
         tab = await ttyd_manager.create_tab(
             name=title,
-            cwd=workspace.path,
-            solo_mode=True,
+            cwd=local_cwd if session_target == ExecutionTarget.LOCAL else None,
+            solo_mode=payload.solo_mode,
             agent_type=payload.agent_type,
+            target=session_target,
+            remote_profile_id=remote_profile_id,
+            remote_cwd=remote_cwd,
+            remote_reconnect=remote_reconnect,
+            remote_forward_port=remote_forward_port,
             workspace_id=workspace.id,
             workspace_name=workspace.name,
             workspace_role=role,
@@ -424,8 +487,14 @@ class WorkspaceManager:
             queued_count=0,
             title=title,
             branch=None,
-            workspace_path=workspace.path,
+            workspace_path=session_workspace_path,
             tmux_session=f"claude-hub-{tab.id[:8]}",
+            target=session_target,
+            remote_profile_id=remote_profile_id,
+            remote_cwd=remote_cwd,
+            remote_reconnect=remote_reconnect,
+            solo_mode=payload.solo_mode,
+            remote_forward_port=remote_forward_port,
             created_at=now,
             updated_at=now,
         )
@@ -436,6 +505,40 @@ class WorkspaceManager:
             )
         self._save_state()
         return session
+
+    def _workspace_remote_cwd(self, workspace: Workspace) -> str:
+        return self._resolve_remote_cwd(
+            profile_id=workspace.remote_profile_id,
+            requested_cwd=workspace.remote_cwd,
+            workspace_cwd=None,
+        )
+
+    def _resolve_remote_cwd(
+        self,
+        profile_id: str | None,
+        requested_cwd: str | None,
+        workspace_cwd: str | None,
+    ) -> str:
+        if requested_cwd:
+            return requested_cwd
+        if workspace_cwd:
+            return workspace_cwd
+        if profile_id:
+            profile = remote_profile_manager.get_profile(profile_id)
+            if profile and profile.default_cwd:
+                return profile.default_cwd
+        return "~"
+
+    def _next_remote_forward_port(self) -> int:
+        used_ports = {
+            session.remote_forward_port
+            for session in self.sessions.values()
+            if session.remote_forward_port is not None
+        }
+        port = REMOTE_FORWARD_PORT_BASE
+        while port in used_ports:
+            port += 1
+        return port
 
     async def delete_session(self, session_id: str) -> None:
         session = self.sessions.get(session_id)
@@ -476,7 +579,7 @@ class WorkspaceManager:
 
         await self._refresh_session_statuses()
 
-        if not self._workspace_agents(workspace.id):
+        if not self._workspace_agents(workspace.id, include_stopped=True):
             await self.ensure_workspace_agent(
                 workspace.id,
                 EnsureWorkspaceAgentRequest(
@@ -536,7 +639,7 @@ class WorkspaceManager:
         task: WorkspaceTask,
         payload: StartTaskRequest,
     ) -> Optional[tuple[ManagedSession, bool, str]]:
-        agents = self._workspace_agents(workspace.id)
+        agents = self._workspace_agents(workspace.id, include_stopped=True)
         if payload.target_session_id:
             target = self.sessions.get(payload.target_session_id)
             if not target or target.workspace_id != workspace.id:
@@ -566,15 +669,6 @@ class WorkspaceManager:
             if existing and existing.role == WorkspaceSessionRole.ORCHESTRATOR:
                 return existing, False, "Continuing previous task assignment"
 
-        if len(agents) == 1:
-            target = agents[0]
-            should_clear = self._has_prior_task_history(target.id)
-            return (
-                target,
-                payload.clear_context if payload.clear_context is not None else should_clear,
-                "Only one workspace agent is available",
-            )
-
         free_agents = [agent for agent in agents if self._can_dispatch_to(agent)]
         if len(free_agents) == 1:
             target = free_agents[0]
@@ -582,10 +676,45 @@ class WorkspaceManager:
             return (
                 target,
                 payload.clear_context if payload.clear_context is not None else should_clear,
-                "Only one idle workspace agent is available",
+                "Only one workspace agent is available",
+            )
+        if len(free_agents) > 1:
+            target = self._least_queued_agent(free_agents)
+            should_clear = self._has_prior_task_history(target.id)
+            return (
+                target,
+                payload.clear_context if payload.clear_context is not None else should_clear,
+                "Selected least queued available workspace agent",
+            )
+
+        if agents:
+            target = self._least_queued_agent(agents)
+            should_clear = self._has_prior_task_history(target.id)
+            return (
+                target,
+                payload.clear_context if payload.clear_context is not None else should_clear,
+                "Queued behind existing workspace agent",
             )
 
         return None
+
+    def _least_queued_agent(self, agents: list[ManagedSession]) -> ManagedSession:
+        def runtime_rank(agent: ManagedSession) -> int:
+            if agent.runtime_status == AgentRuntimeStatus.IDLE:
+                return 0
+            if agent.runtime_status == AgentRuntimeStatus.OFFLINE:
+                return 1
+            return 2
+
+        return sorted(
+            agents,
+            key=lambda agent: (
+                self._queued_count(agent.id),
+                runtime_rank(agent),
+                1 if agent.current_task_id or agent.task_id else 0,
+                agent.created_at,
+            ),
+        )[0]
 
     def _has_prior_task_history(self, session_id: str) -> bool:
         return any(
@@ -605,7 +734,7 @@ class WorkspaceManager:
         )
         await self.send_session_message(
             dispatcher.id,
-            self._build_dispatch_decision_prompt(workspace, task),
+            self._build_dispatch_decision_prompt(workspace, task, dispatcher),
         )
 
     async def apply_dispatch_decision(
@@ -684,7 +813,7 @@ class WorkspaceManager:
             raise KeyError(workspace_id)
 
         await self._refresh_session_statuses()
-        for session in self._workspace_agents(workspace_id):
+        for session in self._workspace_agents(workspace_id, include_stopped=True):
             if not self._can_dispatch_to(session):
                 continue
             next_task = self._next_queued_task(session.id)
@@ -695,7 +824,10 @@ class WorkspaceManager:
     def _can_dispatch_to(self, session: ManagedSession) -> bool:
         if session.role != WorkspaceSessionRole.ORCHESTRATOR:
             return False
-        if session.runtime_status != AgentRuntimeStatus.IDLE:
+        if session.runtime_status not in {
+            AgentRuntimeStatus.IDLE,
+            AgentRuntimeStatus.OFFLINE,
+        }:
             return False
         if session.task_id or session.current_task_id:
             current_id = session.task_id or session.current_task_id
@@ -759,121 +891,14 @@ class WorkspaceManager:
         task_id: str,
         agent_type: Optional[AgentType] = None,
     ) -> ManagedSession:
+        del agent_type
         task = self.tasks.get(task_id)
         if not task:
             raise KeyError(task_id)
-        workspace = self.workspaces.get(task.workspace_id)
-        if not workspace:
+        if task.workspace_id not in self.workspaces:
             raise KeyError(task.workspace_id)
-        if task.session_id:
-            existing = self.sessions.get(task.session_id)
-            if existing:
-                return existing
-
-        session_id = (
-            f"{workspace.session_prefix}-{len(self._sessions_for_workspace_raw(workspace.id)) + 1}"
-        )
-        selected_agent = agent_type or task.agent_type
-        branch = f"chub/{_slug(task.title)[:36]}-{session_id}"
-        worktree_path = await self._create_worktree(workspace, session_id, branch)
-
-        tab = await ttyd_manager.create_tab(
-            name=task.title,
-            cwd=str(worktree_path),
-            solo_mode=True,
-            agent_type=selected_agent,
-            workspace_id=workspace.id,
-            workspace_name=workspace.name,
-            workspace_role=WorkspaceSessionRole.WORKER,
-        )
-
-        now = _now()
-        session = ManagedSession(
-            id=session_id,
-            workspace_id=workspace.id,
-            task_id=task.id,
-            tab_id=tab.id,
-            role=WorkspaceSessionRole.WORKER,
-            agent_type=selected_agent,
-            status=ManagedSessionStatus.SPAWNING,
-            runtime_status=AgentRuntimeStatus.IDLE,
-            current_task_id=task.id,
-            queued_count=0,
-            title=task.title,
-            branch=branch,
-            workspace_path=str(worktree_path),
-            tmux_session=f"claude-hub-{tab.id[:8]}",
-            created_at=now,
-            updated_at=now,
-        )
-        self.sessions[session.id] = session
-        self.tasks[task.id] = task.model_copy(
-            update={
-                "status": WorkspaceTaskStatus.WORKING,
-                "session_id": session.id,
-                "started_at": now,
-                "updated_at": now,
-            }
-        )
-        self._save_state()
-
-        await self.send_session_message(
-            session.id, self._build_worker_prompt(workspace, self.tasks[task.id], session)
-        )
-        return session
-
-    async def _create_worktree(self, workspace: Workspace, session_id: str, branch: str) -> Path:
-        project_dir = self._workspace_dir(workspace.id) / "worktrees"
-        project_dir.mkdir(parents=True, exist_ok=True)
-        worktree_path = project_dir / session_id
-        if worktree_path.exists():
-            return worktree_path
-
-        source_path = Path(workspace.path)
-        if not (source_path / ".git").exists():
-            raise ValueError(f"Workspace path is not a git repository: {source_path}")
-
-        proc = await asyncio.create_subprocess_exec(
-            "git",
-            "worktree",
-            "add",
-            "-b",
-            branch,
-            str(worktree_path),
-            workspace.default_branch,
-            cwd=str(source_path),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            error = stderr.decode("utf-8", errors="ignore").strip()
-            raise RuntimeError(error or "git worktree add failed")
-        return worktree_path
-
-    def _build_worker_prompt(
-        self,
-        workspace: Workspace,
-        task: WorkspaceTask,
-        session: ManagedSession,
-    ) -> str:
-        return (
-            "You are a worker session in Claude Hub Agent Workspace.\n\n"
-            f"Workspace: {workspace.name}\n"
-            f"Task: {task.title}\n"
-            f"Session: {session.id}\n"
-            f"Branch: {session.branch}\n"
-            f"Worktree: {session.workspace_path}\n\n"
-            f"Instructions:\n{task.prompt}\n\n"
-            "Work only inside this worktree.\n\n"
-            "Report progress back to Claude Hub when you start, get blocked, need input, "
-            "are ready for review, or complete the work. Use this local endpoint:\n"
-            f"curl -sS -X POST http://localhost:8173/api/workspaces/sessions/{session.id}/reports "
-            "-H 'Content-Type: application/json' "
-            '-d \'{"state":"working","message":"Started implementation"}\'\n\n'
-            "Allowed report states: started, working, blocked, needs_input, "
-            "ready_for_review, completed. Final reports should include message, "
-            "changed_files, validation, and risks."
+        raise RuntimeError(
+            "Worker spawning is disabled. Add a workspace agent and start the task instead."
         )
 
     def _build_session_bootstrap_prompt(
@@ -885,18 +910,60 @@ class WorkspaceManager:
             return self._build_dispatcher_bootstrap_prompt(workspace, session)
         return self._build_workspace_agent_prompt(workspace, session)
 
+    def _report_base_url(self, session: ManagedSession) -> str:
+        if session.remote_forward_port:
+            return f"http://127.0.0.1:{session.remote_forward_port}"
+        return f"http://localhost:{settings.port}"
+
+    def _remote_target_label(self, session: ManagedSession) -> str:
+        if not session.remote_profile_id:
+            return "unknown remote host"
+        profile = remote_profile_manager.get_profile(session.remote_profile_id)
+        if not profile:
+            return session.remote_profile_id
+        host = f"{profile.user}@{profile.ssh_host}" if profile.user else profile.ssh_host
+        if profile.port != 22:
+            host = f"{host}:{profile.port}"
+        if profile.name and profile.name != profile.id:
+            return f"{profile.name} ({host})"
+        return host
+
+    def _session_environment_lines(self, workspace: Workspace, session: ManagedSession) -> str:
+        lines = [
+            f"Runtime target: {session.target.value}",
+            f"Local workspace dir: {workspace.path}",
+        ]
+        if session.target == ExecutionTarget.REMOTE:
+            lines.extend(
+                [
+                    f"SSH development target: {self._remote_target_label(session)}",
+                    f"Remote working directory: {session.workspace_path}",
+                ]
+            )
+        else:
+            lines.append(f"Default working directory: {session.workspace_path}")
+        return "\n".join(lines)
+
     def _build_workspace_agent_prompt(self, workspace: Workspace, session: ManagedSession) -> str:
         return (
-            "You are a resident Claude Hub workspace agent.\n\n"
+            "You are a resident workspace agent.\n\n"
             f"Workspace: {workspace.name}\n"
             f"Session: {session.id}\n"
-            f"Repository path: {workspace.path}\n"
+            f"{self._session_environment_lines(workspace, session)}\n"
             f"State snapshot: {self.snapshot_path(workspace.id)}\n\n"
             "Stay in this terminal and wait for assigned tasks. Do not start unrelated work. "
+            "This workspace is an environment, not necessarily a single repository. "
+            "Do not inspect repositories, run git status, edit files, or report working until "
+            "a task is explicitly assigned. Use each task to choose the correct project "
+            "directory before editing. "
             "Before editing, read the state snapshot and check for local file changes. "
             "If another agent modified files you need, avoid overwriting them and ask for review. "
-            "Report progress to Claude Hub when you start, get blocked, need input, "
-            "are ready for review, or complete the work."
+            "Report progress to the workspace coordinator only after you receive a task, "
+            "when you start, get blocked, need input, are ready for review, or complete the work.\n\n"
+            "Report endpoint for assigned tasks:\n"
+            f"curl -sS -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
+            "-H 'Content-Type: application/json' "
+            '-d \'{"task_id":"TASK_ID","state":"working","message":"Progress update"}\''
         )
 
     def _build_dispatcher_bootstrap_prompt(
@@ -905,22 +972,29 @@ class WorkspaceManager:
         session: ManagedSession,
     ) -> str:
         return (
-            "You are the Claude Hub dispatcher agent for this workspace.\n\n"
+            "You are the dispatcher agent for this workspace.\n\n"
             f"Workspace: {workspace.name}\n"
             f"Session: {session.id}\n"
-            f"Repository path: {workspace.path}\n"
+            f"{self._session_environment_lines(workspace, session)}\n"
             f"State snapshot: {self.snapshot_path(workspace.id)}\n\n"
-            "When Claude Hub asks for a dispatch decision, choose the best workspace agent "
+            "When asked for a dispatch decision, choose the best workspace agent "
             "for context continuity and decide whether the target should clear context. "
             "Return decisions only by calling the provided local API endpoint."
         )
 
-    def _build_dispatch_decision_prompt(self, workspace: Workspace, task: WorkspaceTask) -> str:
+    def _build_dispatch_decision_prompt(
+        self,
+        workspace: Workspace,
+        task: WorkspaceTask,
+        dispatcher: ManagedSession,
+    ) -> str:
         agents = [
             {
                 "id": session.id,
                 "title": session.title,
                 "agent_type": session.agent_type.value,
+                "target": session.target.value,
+                "workspace_path": session.workspace_path,
                 "runtime": session.runtime_status.value,
                 "current_task_id": session.current_task_id,
                 "queued_count": self._queued_count(session.id),
@@ -950,9 +1024,9 @@ class WorkspaceManager:
             f"Recent tasks JSON:\n{json.dumps(recent_tasks, indent=2)}\n\n"
             "Choose a target_agent_id and whether to clear context. Prefer context continuity "
             "for related work. If the best related agent is busy, still choose that agent so "
-            "Claude Hub queues the task behind its current work.\n\n"
+            "the workspace queues the task behind its current work.\n\n"
             "Call this endpoint with your decision:\n"
-            f"curl -sS -X POST http://localhost:8173/api/workspaces/tasks/{task.id}/dispatch-decision "
+            f"curl -sS -X POST {self._report_base_url(dispatcher)}/api/workspaces/tasks/{task.id}/dispatch-decision "
             "-H 'Content-Type: application/json' "
             "-d '{\"target_session_id\":\"AGENT_ID\",\"clear_context\":false,"
             "\"reason\":\"why this agent is best\"}'"
@@ -970,21 +1044,23 @@ class WorkspaceManager:
             else ""
         )
         return (
-            "New Claude Hub task assigned.\n\n"
+            "New workspace task assigned.\n\n"
             f"Workspace: {workspace.name}\n"
             f"Task ID: {task.id}\n"
             f"Task title: {task.title}\n"
-            f"Repository path: {workspace.path}\n"
+            f"{self._session_environment_lines(workspace, session)}\n"
             f"State snapshot: {self.snapshot_path(workspace.id)}\n"
             f"Dispatch reason: {task.dispatch_reason or 'not specified'}\n\n"
             f"{clear_note}"
             f"Task description:\n{task.prompt}\n\n"
-            "Start by reading the state snapshot and checking for uncommitted file changes. "
+            "Start by reading the state snapshot. This workspace may contain many projects; "
+            "use the task description to choose the correct directory before editing. "
+            "Check for uncommitted file changes. "
             "Report state started, then report working as you make progress. "
             "If blocked or waiting for user input, report blocked or needs_input. "
             "When ready for human review, report ready_for_review or completed.\n\n"
             "Report endpoint example:\n"
-            f"curl -sS -X POST http://localhost:8173/api/workspaces/sessions/{session.id}/reports "
+            f"curl -sS -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"started",'
             '"message":"Started task"}\'\n\n'
@@ -994,7 +1070,7 @@ class WorkspaceManager:
     def _build_continue_prompt(self, task: WorkspaceTask, payload: ContinueTaskRequest) -> str:
         message = payload.message.strip() if payload.message else ""
         return (
-            "Continue Claude Hub task from review.\n\n"
+            "Continue workspace task from review.\n\n"
             f"Task ID: {task.id}\n"
             f"Task title: {task.title}\n"
             f"Follow-up instructions:\n{message or 'Continue addressing the review feedback.'}\n\n"
@@ -1157,12 +1233,16 @@ class WorkspaceManager:
             session for session in self.sessions.values() if session.workspace_id == workspace_id
         ]
 
-    def _workspace_agents(self, workspace_id: str) -> list[ManagedSession]:
+    def _workspace_agents(
+        self,
+        workspace_id: str,
+        include_stopped: bool = False,
+    ) -> list[ManagedSession]:
         return [
             session
             for session in self._sessions_for_workspace_raw(workspace_id)
             if session.role == WorkspaceSessionRole.ORCHESTRATOR
-            and session.status != ManagedSessionStatus.STOPPED
+            and (include_stopped or session.status != ManagedSessionStatus.STOPPED)
         ]
 
     def _dispatcher_session(self, workspace: Workspace) -> Optional[ManagedSession]:

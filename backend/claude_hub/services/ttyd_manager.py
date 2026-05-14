@@ -154,6 +154,7 @@ class TTYDProcess:
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
         remote_reconnect: bool = True,
+        remote_forward_port: Optional[int] = None,
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: Optional[WorkspaceSessionRole] = None,
@@ -168,6 +169,7 @@ class TTYDProcess:
         self.remote_profile_id = remote_profile_id
         self.remote_cwd = remote_cwd
         self.remote_reconnect = remote_reconnect
+        self.remote_forward_port = remote_forward_port
         self.workspace_id = workspace_id
         self.workspace_name = workspace_name
         self.workspace_role = workspace_role
@@ -215,16 +217,21 @@ class TTYDProcess:
         """
         if _tmux_session_exists(self.tmux_session):
             return False
-        if self.target == ExecutionTarget.REMOTE:
-            raise RuntimeError("Cannot pre-create a remote ttyd tmux session")
 
         _ensure_tmux_server()
         cmd = ["tmux", "new-session", "-d", "-s", self.tmux_session]
-        if self.cwd:
+        if self.cwd and self.target == ExecutionTarget.LOCAL:
             cmd.extend(["-c", self.cwd])
-        if self.solo_mode and self.agent_type in {AgentType.CLAUDE, AgentType.CODEX}:
+        cmd.append("--")
+        if self.target == ExecutionTarget.REMOTE:
+            cmd.append(shlex.join(self._build_remote_launcher()))
+        elif self.solo_mode and self.agent_type in {AgentType.CLAUDE, AgentType.CODEX}:
             user_shell = os.environ.get("SHELL", "/bin/bash")
-            cmd.extend([user_shell, "-c", f"{self._agent_start_command()}; exec {user_shell}"])
+            cmd.append(
+                shlex.join(
+                    [user_shell, "-c", f"{self._agent_start_command()}; exec {user_shell}"]
+                )
+            )
         else:
             cmd.append(self.shell)
 
@@ -405,6 +412,15 @@ class TTYDProcess:
         host, port = self._remote_ssh_target()
         user_shell = os.environ.get("SHELL", "/bin/bash")
         ssh_parts = ["ssh", "-tt"]
+        if self.remote_forward_port:
+            ssh_parts.extend(
+                [
+                    "-o",
+                    "ExitOnForwardFailure=yes",
+                    "-R",
+                    f"127.0.0.1:{self.remote_forward_port}:127.0.0.1:{settings.port}",
+                ]
+            )
         if port != 22:
             ssh_parts.extend(["-p", str(port)])
         ssh_parts.extend([host, self._build_remote_attach_command()])
@@ -607,6 +623,7 @@ class TTYDProcess:
             "remote_profile_id": self.remote_profile_id,
             "remote_cwd": self.remote_cwd,
             "remote_reconnect": self.remote_reconnect,
+            "remote_forward_port": self.remote_forward_port,
             "workspace_id": self.workspace_id,
             "workspace_name": self.workspace_name,
             "workspace_role": (
@@ -695,6 +712,7 @@ class TTYDManager:
                             remote_profile_id=tab_data.get("remote_profile_id"),
                             remote_cwd=tab_data.get("remote_cwd"),
                             remote_reconnect=tab_data.get("remote_reconnect", True),
+                            remote_forward_port=tab_data.get("remote_forward_port"),
                             workspace_id=tab_data.get("workspace_id"),
                             workspace_name=tab_data.get("workspace_name"),
                             workspace_role=workspace_role,
@@ -827,12 +845,13 @@ class TTYDManager:
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
         remote_reconnect: bool = True,
+        remote_forward_port: Optional[int] = None,
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: Optional[WorkspaceSessionRole] = None,
     ) -> TerminalTab:
         logger.info(
-            f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}, target={target}, remote_profile_id={remote_profile_id}, workspace_id={workspace_id}, workspace_role={workspace_role}"
+            f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}, target={target}, remote_profile_id={remote_profile_id}, remote_forward_port={remote_forward_port}, workspace_id={workspace_id}, workspace_role={workspace_role}"
         )
         tab_id = str(uuid.uuid4())
         port = self._get_next_port()
@@ -849,6 +868,7 @@ class TTYDManager:
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
             remote_reconnect=remote_reconnect,
+            remote_forward_port=remote_forward_port,
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
@@ -885,6 +905,7 @@ class TTYDManager:
             remote_profile_id=source.remote_profile_id,
             remote_cwd=source.remote_cwd,
             remote_reconnect=source.remote_reconnect,
+            remote_forward_port=source.remote_forward_port,
         )
 
     async def delete_tab(self, tab_id: str) -> bool:
