@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from importlib import import_module
 from pathlib import Path
@@ -1281,6 +1282,137 @@ def test_delete_task_removes_reports_and_unlinks_session(
     assert board["tasks"] == []
     assert board["reports"] == []
     assert board["sessions"][0]["task_id"] is None
+
+
+def test_done_task_writes_delete_safe_task_record(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    state_root = tmp_path / "workspace-state"
+
+    async def fake_create_tab(
+        name: str,
+        shell: Optional[str] = None,
+        cwd: Optional[str] = None,
+        solo_mode: bool = False,
+        agent_type: AgentType = AgentType.CLAUDE,
+        target: ExecutionTarget = ExecutionTarget.LOCAL,
+        remote_profile_id: Optional[str] = None,
+        remote_cwd: Optional[str] = None,
+        remote_reconnect: bool = True,
+        remote_forward_port: Optional[int] = None,
+        workspace_id: Optional[str] = None,
+        workspace_name: Optional[str] = None,
+        workspace_role: WorkspaceSessionRole | None = None,
+    ) -> TerminalTab:
+        return TerminalTab(
+            id="tab-record-agent",
+            name=name,
+            shell=shell,
+            cwd=cwd,
+            solo_mode=solo_mode,
+            agent_type=agent_type,
+            target=target,
+            remote_profile_id=remote_profile_id,
+            remote_cwd=remote_cwd,
+            remote_reconnect=remote_reconnect,
+            port=12350,
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+            workspace_role=workspace_role,
+        )
+
+    async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
+        return None
+
+    async def fake_ensure_session_ready(_session) -> None:
+        return None
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
+    monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+    monkeypatch.setattr(
+        workspace_manager,
+        "_ensure_session_ready_for_send",
+        fake_ensure_session_ready,
+    )
+    monkeypatch.setattr(
+        workspace_manager,
+        "_workspace_dir",
+        lambda workspace_id: state_root / workspace_id,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Record Repo",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "record",
+        },
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={
+            "title": "Record task",
+            "prompt": "Archive this task",
+            "agent_type": "codex",
+        },
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "working",
+            "message": "Implementing archive",
+            "changed_files": ["backend/claude_hub/services/workspace_manager.py"],
+            "validation": "pytest planned",
+        },
+    )
+    client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "completed",
+            "message": "Archive complete",
+            "changed_files": ["backend/tests/test_workspaces.py"],
+            "risks": "None",
+        },
+    )
+
+    done_response = client.patch(
+        f"/api/workspaces/tasks/{task['id']}",
+        json={"status": "done"},
+    )
+
+    assert done_response.status_code == 200
+    record_files = list((state_root / workspace["id"] / "task_records").glob("*.json"))
+    assert len(record_files) == 1
+    record = json.loads(record_files[0].read_text(encoding="utf-8"))
+    assert record["schema_version"] == 1
+    assert record["task"]["id"] == task["id"]
+    assert record["task"]["status"] == "done"
+    assert record["session"]["id"] == started["session_id"]
+    assert [report["state"] for report in record["reports"]] == ["working", "completed"]
+    assert record["artifacts"]["changed_files"] == [
+        "backend/claude_hub/services/workspace_manager.py",
+        "backend/tests/test_workspaces.py",
+    ]
+    assert record["artifacts"]["validation"] == ["pytest planned"]
+    assert record["artifacts"]["risks"] == ["None"]
+    assert record["artifacts"]["commits"] == []
+    assert record["final_summary"] == "Archive complete"
+    assert [event["type"] for event in record["timeline"]].count("agent_report") == 2
+
+    delete_response = client.delete(f"/api/workspaces/tasks/{task['id']}")
+
+    assert delete_response.status_code == 204
+    assert record_files[0].exists()
 
 
 def test_workspace_routes_validate_missing_resources(tmp_path: Path) -> None:
