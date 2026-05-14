@@ -10,6 +10,8 @@
     "lint:check": "eslint . --ext .vue,.js,.jsx,.cjs,.mjs,.ts,.tsx,.cts,.mts"
   },
   "dependencies": {
+    "dompurify": "^3.4.3",
+    "marked": "^18.0.3",
     "pinia": "^2.2.0",
     "vue": "^3.5.0"
   },
