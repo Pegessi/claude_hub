@@ -5,6 +5,14 @@
 
 ## 2026-05-14
 
+### fix: keep continued review tasks in working
+- Prevent board reconciliation from restoring a stale `ready_for_review` report over a later continue transition
+- Mark review tasks as Working before sending follow-up text to the agent so tmux submit verification failures cannot leave the board in Review while the agent is active
+- Move review tasks back to Working when the assigned agent shows new working runtime activity after the review timestamp, covering direct terminal-tab follow-ups
+- Auto-send `please continue` whenever an assigned Working task's agent becomes idle, not only when the terminal tail matches known API error text
+- Add backend coverage for stale review reconciliation, direct-tab runtime continuation, generic idle auto-continue, and continue-send failure ordering
+- **Files**: workspace_manager.py, test_workspaces.py
+
 ### feat: archive completed workspace task records
 - Write a per-workspace `task_records/{completed_at}-{task_id}.json` archive whenever a task is marked Done
 - Include task/session snapshots, agent reports, an ordered timeline, changed files, validation, risks, and final summary in the archive
