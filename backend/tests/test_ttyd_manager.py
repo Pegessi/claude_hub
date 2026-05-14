@@ -150,6 +150,35 @@ def test_remote_terminal_can_disable_reconnect(monkeypatch: MonkeyPatch) -> None
     assert "${SHELL:-/bin/bash} -l" in launcher
 
 
+def test_remote_workspace_forwarding_adds_reverse_ssh_port(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ttyd_manager_module.remote_profile_manager,
+        "get_profile",
+        lambda profile_id: RemoteProfile(
+            id=profile_id,
+            name="DevBox",
+            ssh_host="devbox",
+            user="tiger",
+        ),
+    )
+    process = TTYDProcess(
+        tab_id="tab-remote-forward",
+        port=12351,
+        name="Remote Forward",
+        agent_type=AgentType.CODEX,
+        target=ExecutionTarget.REMOTE,
+        remote_profile_id="devbox",
+        remote_forward_port=18173,
+    )
+
+    launcher = process._build_ttyd_command(session_exists=False)[-1]
+
+    assert "-o ExitOnForwardFailure=yes" in launcher
+    assert "-R 127.0.0.1:18173:127.0.0.1:8173" in launcher
+    assert "ssh -tt" in launcher
+    assert "tiger@devbox" in launcher
+
+
 def test_claude_spinner_status_classifies_as_working(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
     manager = TTYDManager.__new__(TTYDManager)

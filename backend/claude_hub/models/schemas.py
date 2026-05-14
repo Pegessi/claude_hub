@@ -154,6 +154,10 @@ class WorkspaceCreate(BaseModel):
     path: str
     default_branch: str = "main"
     session_prefix: Optional[str] = None
+    target: ExecutionTarget = ExecutionTarget.LOCAL
+    remote_profile_id: Optional[str] = None
+    remote_cwd: Optional[str] = None
+    remote_reconnect: bool = True
 
 
 class Workspace(BaseModel):
@@ -165,6 +169,10 @@ class Workspace(BaseModel):
     default_branch: str
     session_prefix: str
     dispatcher_session_id: Optional[str] = None
+    target: ExecutionTarget = ExecutionTarget.LOCAL
+    remote_profile_id: Optional[str] = None
+    remote_cwd: Optional[str] = None
+    remote_reconnect: bool = True
     created_at: datetime
     updated_at: datetime
 
@@ -223,6 +231,12 @@ class ManagedSession(BaseModel):
     branch: Optional[str] = None
     workspace_path: str
     tmux_session: str
+    target: ExecutionTarget = ExecutionTarget.LOCAL
+    remote_profile_id: Optional[str] = None
+    remote_cwd: Optional[str] = None
+    remote_reconnect: bool = True
+    solo_mode: bool = True
+    remote_forward_port: Optional[int] = None
     created_at: datetime
     updated_at: datetime
     last_activity_at: Optional[datetime] = None
@@ -277,6 +291,12 @@ class EnsureWorkspaceAgentRequest(BaseModel):
     title: Optional[str] = None
     role: WorkspaceSessionRole = WorkspaceSessionRole.ORCHESTRATOR
     reuse_existing: bool = False
+    cwd: Optional[str] = None
+    solo_mode: bool = True
+    target: Optional[ExecutionTarget] = None
+    remote_profile_id: Optional[str] = None
+    remote_cwd: Optional[str] = None
+    remote_reconnect: Optional[bool] = None
 
 
 class StartTaskRequest(BaseModel):

@@ -80,6 +80,8 @@ async def ensure_workspace_agent(
         return await workspace_manager.ensure_workspace_agent(workspace_id, payload)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Workspace not found") from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.patch("/tasks/{task_id}", response_model=WorkspaceTask)
