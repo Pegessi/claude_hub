@@ -42,22 +42,6 @@
         >
           Add Task
         </button>
-        <button
-          type="button"
-          class="tool-button"
-          :disabled="!activeWorkspaceId"
-          @click="dispatchWorkspace"
-        >
-          Dispatch
-        </button>
-        <button
-          type="button"
-          class="tool-button"
-          :disabled="!activeWorkspaceId"
-          @click="refreshBoard"
-        >
-          Refresh
-        </button>
       </div>
     </header>
 
@@ -1315,14 +1299,6 @@ async function handleWorkspaceChange() {
 async function refreshBoard() {
   try {
     await workspaceStore.fetchBoard()
-  } catch {
-    // Error state is owned by the workspace store.
-  }
-}
-
-async function dispatchWorkspace() {
-  try {
-    await workspaceStore.dispatchWorkspace()
   } catch {
     // Error state is owned by the workspace store.
   }
