@@ -258,6 +258,137 @@ def test_start_task_dispatches_to_resident_agent(
     assert board_response.json()["tasks"][0]["status"] == "working"
 
 
+def test_start_task_prefers_related_task_agent(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    created_tabs: list[str] = []
+
+    async def fake_create_tab(
+        name: str,
+        shell: Optional[str] = None,
+        cwd: Optional[str] = None,
+        solo_mode: bool = False,
+        agent_type: AgentType = AgentType.CLAUDE,
+        target: ExecutionTarget = ExecutionTarget.LOCAL,
+        remote_profile_id: Optional[str] = None,
+        remote_cwd: Optional[str] = None,
+        remote_reconnect: bool = True,
+        remote_forward_port: Optional[int] = None,
+        workspace_id: Optional[str] = None,
+        workspace_name: Optional[str] = None,
+        workspace_role: WorkspaceSessionRole | None = None,
+    ) -> TerminalTab:
+        tab_id = f"related{len(created_tabs) + 1}-tab"
+        created_tabs.append(tab_id)
+        return TerminalTab(
+            id=tab_id,
+            name=name,
+            shell=shell,
+            cwd=cwd,
+            solo_mode=solo_mode,
+            agent_type=agent_type,
+            target=target,
+            remote_profile_id=remote_profile_id,
+            remote_cwd=remote_cwd,
+            remote_reconnect=remote_reconnect,
+            port=12360 + len(created_tabs),
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+            workspace_role=workspace_role,
+        )
+
+    sent_messages: list[tuple[str, str]] = []
+
+    async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
+        sent_messages.append((tmux_session, message))
+
+    async def fake_ensure_session_ready(_session) -> None:
+        return None
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
+    monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+    monkeypatch.setattr(
+        workspace_manager,
+        "_ensure_session_ready_for_send",
+        fake_ensure_session_ready,
+    )
+
+    client = TestClient(app)
+    workspace_response = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Related Repo",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "related",
+        },
+    )
+    workspace_id = workspace_response.json()["id"]
+    first_agent = client.post(f"/api/workspaces/{workspace_id}/agent", json={}).json()
+    second_agent = client.post(f"/api/workspaces/{workspace_id}/agent", json={}).json()
+
+    original_task = client.post(
+        f"/api/workspaces/{workspace_id}/tasks",
+        json={"title": "Original task", "prompt": "Use the second agent"},
+    ).json()
+    original_start = client.post(
+        f"/api/workspaces/tasks/{original_task['id']}/start",
+        json={"target_session_id": second_agent["id"]},
+    )
+    assert original_start.status_code == 201
+    assert original_start.json()["session_id"] == second_agent["id"]
+
+    done_response = client.patch(
+        f"/api/workspaces/tasks/{original_task['id']}",
+        json={"status": "done"},
+    )
+    assert done_response.status_code == 200
+
+    related_task = client.post(
+        f"/api/workspaces/{workspace_id}/tasks",
+        json={
+            "title": "Follow-up task",
+            "prompt": "Continue with the related agent",
+            "related_task_id": original_task["id"],
+        },
+    ).json()
+    related_start = client.post(
+        f"/api/workspaces/tasks/{related_task['id']}/start",
+        json={},
+    )
+
+    assert related_start.status_code == 201
+    started_related = related_start.json()
+    assert first_agent["id"] != second_agent["id"]
+    assert started_related["status"] == "working"
+    assert started_related["session_id"] == second_agent["id"]
+    assert started_related["dispatch_reason"] == f"Related to task {original_task['id']}"
+    assert sent_messages[-1][0] == "claude-hub-related2"
+    assert "Continue with the related agent" in sent_messages[-1][1]
+
+
+def test_tmux_pending_input_detection_matches_codex_paste_prompt() -> None:
+    message = "New workspace task assigned.\n\nTask description"
+
+    assert workspace_manager._message_still_in_input(
+        "\n› N[Pasted Content 1360 chars]\n  gpt-5.5 medium · ~/repo\n",
+        message,
+    )
+    assert workspace_manager._message_still_in_input(
+        "\n› New workspace task assigned.\n\n  Task description\n",
+        message,
+    )
+    assert not workspace_manager._message_still_in_input(
+        "\n› N[Pasted Content 1360 chars]\n\n• Working\n",
+        message,
+    )
+
+
 def test_review_task_stays_in_review_when_agent_runtime_is_working(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
