@@ -31,7 +31,10 @@
         <span>{{ error }}</span>
         <button class="error-close" @click="clearError">×</button>
       </div>
-      <template v-if="mode === 'terminal'">
+      <div
+        v-show="mode === 'terminal'"
+        class="terminal-mode-shell"
+      >
         <TabBar />
         <LayoutSelector />
         <div v-if="tabs.length === 0" class="empty-state">
@@ -40,8 +43,8 @@
         </div>
         <TerminalGridView v-else />
         <MobileControls />
-      </template>
-      <AgentWorkspaceView v-else />
+      </div>
+      <AgentWorkspaceView v-if="mode === 'workspace'" />
     </template>
   </div>
 </template>
@@ -144,7 +147,6 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  store.stopAgentStatusPolling()
   cleanupMobileViewportSync()
 })
 </script>
@@ -214,6 +216,13 @@ html, body, #app {
   cursor: pointer;
   padding: 0 4px;
   line-height: 1;
+}
+
+.terminal-mode-shell {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .empty-state {
