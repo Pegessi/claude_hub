@@ -4,7 +4,10 @@ import type {
   AgentReport,
   AgentReportCreate,
   AgentType,
+  ContinueTaskRequest,
+  EnsureWorkspaceAgentRequest,
   ManagedSession,
+  StartTaskRequest,
   Workspace,
   WorkspaceBoard,
   WorkspaceCreate,
@@ -38,8 +41,14 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const tasks = computed(() => board.value?.tasks || [])
   const sessions = computed(() => board.value?.sessions || [])
   const reports = computed(() => board.value?.reports || [])
+  const workspaceAgents = computed(() =>
+    sessions.value.filter(session => session.role === 'orchestrator')
+  )
+  const dispatcherAgent = computed(() =>
+    sessions.value.find(session => session.role === 'dispatcher') || null
+  )
   const workspaceAgent = computed(() =>
-    sessions.value.find(session => session.role === 'orchestrator') || null
+    workspaceAgents.value[0] || null
   )
 
   function sessionForTask(task: WorkspaceTask): ManagedSession | null {
@@ -187,15 +196,18 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
-  async function ensureWorkspaceAgent(agentType: AgentType = 'codex') {
+  async function ensureWorkspaceAgent(
+    payload: EnsureWorkspaceAgentRequest | AgentType = 'codex'
+  ) {
     if (!activeWorkspaceId.value) return
     isLoading.value = true
     error.value = null
+    const body = typeof payload === 'string' ? { agent_type: payload } : payload
     try {
       const response = await fetch(`${API_BASE}/workspaces/${activeWorkspaceId.value}/agent`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agent_type: agentType }),
+        body: JSON.stringify(body),
       })
       if (!response.ok) throw new Error(await readError(response))
       await fetchBoard()
@@ -206,14 +218,31 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
-  async function startTask(taskId: string, agentType?: AgentType) {
+  async function deleteSession(sessionId: string) {
+    isLoading.value = true
+    error.value = null
+    try {
+      const response = await fetch(`${API_BASE}/workspaces/sessions/${sessionId}`, {
+        method: 'DELETE',
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      await fetchBoard()
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Failed to delete agent'
+      throw e
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  async function startTask(taskId: string, payload: StartTaskRequest = {}) {
     isLoading.value = true
     error.value = null
     try {
       const response = await fetch(`${API_BASE}/workspaces/tasks/${taskId}/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agent_type: agentType }),
+        body: JSON.stringify(payload),
       })
       if (!response.ok) throw new Error(await readError(response))
       await fetchBoard()
@@ -222,6 +251,33 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     } finally {
       isLoading.value = false
     }
+  }
+
+  async function continueTask(taskId: string, payload: ContinueTaskRequest = {}) {
+    isLoading.value = true
+    error.value = null
+    try {
+      const response = await fetch(`${API_BASE}/workspaces/tasks/${taskId}/continue`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      await fetchBoard()
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Failed to continue task'
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  async function dispatchWorkspace() {
+    if (!activeWorkspaceId.value) return
+    const response = await fetch(`${API_BASE}/workspaces/${activeWorkspaceId.value}/dispatch`, {
+      method: 'POST',
+    })
+    if (!response.ok) throw new Error(await readError(response))
+    await fetchBoard()
   }
 
   async function sendMessage(sessionId: string, message: string) {
@@ -251,6 +307,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     tasks,
     sessions,
     reports,
+    workspaceAgents,
+    dispatcherAgent,
     workspaceAgent,
     isLoading,
     error,
@@ -266,7 +324,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     deleteTask,
     spawnWorker,
     ensureWorkspaceAgent,
+    deleteSession,
     startTask,
+    continueTask,
+    dispatchWorkspace,
     sendMessage,
     createReport,
   }

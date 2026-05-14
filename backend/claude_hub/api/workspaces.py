@@ -6,10 +6,13 @@ from ..auth.dependencies import get_current_user
 from ..models import (
     AgentReport,
     AgentReportCreate,
+    ContinueTaskRequest,
+    DispatchDecisionRequest,
     EnsureWorkspaceAgentRequest,
     ManagedSession,
     SendSessionMessageRequest,
     SpawnWorkerRequest,
+    StartTaskRequest,
     User,
     Workspace,
     WorkspaceBoard,
@@ -74,7 +77,7 @@ async def ensure_workspace_agent(
 ) -> ManagedSession:
     """Ensure a resident agent terminal exists for the workspace."""
     try:
-        return await workspace_manager.ensure_workspace_agent(workspace_id, payload.agent_type)
+        return await workspace_manager.ensure_workspace_agent(workspace_id, payload)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Workspace not found") from e
 
@@ -89,7 +92,7 @@ async def update_task(
     if payload.status is None:
         raise HTTPException(status_code=400, detail="No task update provided")
     try:
-        return workspace_manager.update_task_status(task_id, payload.status)
+        return await workspace_manager.update_task_status(task_id, payload.status)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Task not found") from e
 
@@ -121,17 +124,73 @@ async def spawn_worker(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.post("/tasks/{task_id}/start", response_model=ManagedSession, status_code=201)
+@router.post("/tasks/{task_id}/start", response_model=WorkspaceTask, status_code=201)
 async def start_task(
     task_id: str,
-    payload: SpawnWorkerRequest,
+    payload: StartTaskRequest,
     current_user: User = Depends(get_current_user),
-) -> ManagedSession:
-    """Dispatch a task to the resident workspace agent."""
+) -> WorkspaceTask:
+    """Queue a task and dispatch it when its target agent is available."""
     try:
-        return await workspace_manager.start_task(task_id, payload.agent_type)
+        return await workspace_manager.start_task(task_id, payload)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Task not found") from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/tasks/{task_id}/continue", response_model=WorkspaceTask)
+async def continue_task(
+    task_id: str,
+    payload: ContinueTaskRequest,
+    current_user: User = Depends(get_current_user),
+) -> WorkspaceTask:
+    """Move a review task back to working on its original agent."""
+    try:
+        return await workspace_manager.continue_task(task_id, payload)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Task not found") from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/tasks/{task_id}/dispatch-decision", response_model=WorkspaceTask)
+async def apply_dispatch_decision(
+    task_id: str,
+    payload: DispatchDecisionRequest,
+    current_user: User = Depends(get_current_user),
+) -> WorkspaceTask:
+    """Apply a structured dispatch decision from the dispatcher agent."""
+    try:
+        return await workspace_manager.apply_dispatch_decision(task_id, payload)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Task or agent not found") from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/{workspace_id}/dispatch", status_code=204)
+async def dispatch_workspace(
+    workspace_id: str,
+    current_user: User = Depends(get_current_user),
+) -> None:
+    """Manually trigger dispatch for queued tasks in one workspace."""
+    try:
+        await workspace_manager.dispatch_workspace(workspace_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Workspace not found") from e
+
+
+@router.delete("/sessions/{managed_session_id}", status_code=204)
+async def delete_session(
+    managed_session_id: str,
+    current_user: User = Depends(get_current_user),
+) -> None:
+    """Delete an idle managed agent session and its terminal tab."""
+    try:
+        await workspace_manager.delete_session(managed_session_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Session not found") from e
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 

@@ -1,7 +1,7 @@
 export type AgentType = 'claude' | 'codex' | 'cursor'
 export type AgentRuntimeStatus = 'idle' | 'working' | 'attention' | 'offline'
 export type AppMode = 'terminal' | 'workspace'
-export type WorkspaceTaskStatus = 'todo' | 'assigned' | 'working' | 'review' | 'done'
+export type WorkspaceTaskStatus = 'todo' | 'queued' | 'working' | 'review' | 'done'
 export type ManagedSessionStatus =
   | 'spawning'
   | 'working'
@@ -10,7 +10,7 @@ export type ManagedSessionStatus =
   | 'done'
   | 'stopped'
   | 'error'
-export type WorkspaceSessionRole = 'worker' | 'orchestrator'
+export type WorkspaceSessionRole = 'worker' | 'orchestrator' | 'dispatcher'
 export type AgentReportState =
   | 'started'
   | 'working'
@@ -68,7 +68,7 @@ export interface Workspace {
   path: string
   default_branch: string
   session_prefix: string
-  agent_session_id?: string | null
+  dispatcher_session_id?: string | null
   created_at: string
   updated_at: string
 }
@@ -88,6 +88,14 @@ export interface WorkspaceTask {
   agent_type: AgentType
   status: WorkspaceTaskStatus
   session_id?: string | null
+  related_task_id?: string | null
+  clear_context?: boolean | null
+  dispatch_reason?: string | null
+  dispatch_pending: boolean
+  queued_at?: string | null
+  started_at?: string | null
+  reviewed_at?: string | null
+  completed_at?: string | null
   created_at: string
   updated_at: string
 }
@@ -96,6 +104,25 @@ export interface WorkspaceTaskCreate {
   title: string
   prompt: string
   agent_type: AgentType
+  related_task_id?: string | null
+}
+
+export interface StartTaskRequest {
+  agent_type?: AgentType
+  target_session_id?: string | null
+  clear_context?: boolean | null
+  related_task_id?: string | null
+}
+
+export interface ContinueTaskRequest {
+  message?: string | null
+}
+
+export interface EnsureWorkspaceAgentRequest {
+  agent_type: AgentType
+  title?: string | null
+  role?: WorkspaceSessionRole
+  reuse_existing?: boolean
 }
 
 export interface ManagedSession {
@@ -106,6 +133,9 @@ export interface ManagedSession {
   role: WorkspaceSessionRole
   agent_type: AgentType
   status: ManagedSessionStatus
+  runtime_status: AgentRuntimeStatus
+  current_task_id?: string | null
+  queued_count: number
   title: string
   branch?: string | null
   workspace_path: string
@@ -142,6 +172,7 @@ export interface WorkspaceBoard {
   tasks: WorkspaceTask[]
   sessions: ManagedSession[]
   reports: AgentReport[]
+  snapshot_path?: string | null
 }
 
 export type LayoutType = '1x1' | '2x1' | '1x2' | '3x1' | '1x3' | '2x2' | '3x3'

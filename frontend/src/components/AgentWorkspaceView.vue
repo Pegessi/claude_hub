@@ -3,7 +3,7 @@
     <header class="workspace-header">
       <div>
         <h1>Agent Workspace</h1>
-        <p>Tasks dispatched to a resident workspace agent terminal.</p>
+        <p>Manual task queue with multiple resident workspace agents.</p>
       </div>
       <div class="workspace-actions">
         <select
@@ -21,11 +21,18 @@
         </select>
         <button
           type="button"
+          class="tool-button mobile-setup-button"
+          @click="mobileSetupOpen = !mobileSetupOpen"
+        >
+          {{ mobileSetupOpen ? 'Board' : 'Setup' }}
+        </button>
+        <button
+          type="button"
           class="tool-button"
           :disabled="!activeWorkspaceId"
-          @click="ensureWorkspaceAgent"
+          @click="dispatchWorkspace"
         >
-          {{ workspaceAgent ? 'Agent ready' : 'Start agent' }}
+          Dispatch
         </button>
         <button
           type="button"
@@ -45,8 +52,26 @@
       {{ error }}
     </div>
 
-    <div :class="['workspace-layout', { 'detail-open': selectedTask }]">
-      <aside class="setup-panel">
+    <div
+      v-if="activeWorkspaceId"
+      class="mobile-status-strip"
+    >
+      <div class="mobile-agent-summary">
+        <span>{{ workspaceAgents.length }} agents</span>
+        <strong>{{ workspaceAgents.filter(agent => agent.runtime_status === 'working').length }} working</strong>
+      </div>
+      <div class="mobile-column-tabs">
+        <span
+          v-for="column in columns"
+          :key="column.status"
+        >
+          {{ column.label }} {{ tasksByStatus(column.status).length }}
+        </span>
+      </div>
+    </div>
+
+    <div :class="['workspace-layout', { 'detail-open': selectedTask, 'mobile-setup-open': mobileSetupOpen }]">
+      <aside :class="['setup-panel', { 'mobile-open': mobileSetupOpen }]">
         <form
           class="setup-section"
           @submit.prevent="handleCreateWorkspace"
@@ -63,7 +88,7 @@
             Repository path
             <input
               v-model="workspaceForm.path"
-              placeholder="/Users/Apple/Project/..."
+              placeholder="/Users/me/project"
             />
           </label>
           <div class="form-row">
@@ -93,6 +118,96 @@
 
         <form
           class="setup-section"
+          @submit.prevent="handleCreateAgent"
+        >
+          <h2>Agents</h2>
+          <label>
+            Title
+            <input
+              v-model="agentForm.title"
+              placeholder="Workspace Agent"
+              :disabled="!activeWorkspaceId"
+            />
+          </label>
+          <label>
+            Type
+            <select
+              v-model="agentForm.agent_type"
+              :disabled="!activeWorkspaceId"
+            >
+              <option value="codex">Codex</option>
+              <option value="claude">Claude</option>
+              <option value="cursor">Terminal</option>
+            </select>
+          </label>
+          <button
+            type="submit"
+            class="primary-button"
+            :disabled="!activeWorkspaceId || isLoading"
+          >
+            Add agent
+          </button>
+
+          <div class="agent-list">
+            <article
+              v-for="agent in workspaceAgents"
+              :key="agent.id"
+              class="agent-row"
+            >
+              <div>
+                <strong>{{ agent.title }}</strong>
+                <span>{{ agent.agent_type }} · {{ agent.id }}</span>
+              </div>
+              <div class="agent-row-meta">
+                <span :class="['runtime-pill', `runtime-pill--${agent.runtime_status}`]">
+                  {{ agent.runtime_status }}
+                </span>
+                <span>current {{ taskTitle(agent.current_task_id) }}</span>
+                <span>queued {{ agent.queued_count }}</span>
+              </div>
+              <div class="agent-row-actions">
+                <button
+                  type="button"
+                  @click="openSession(agent)"
+                >
+                  Open
+                </button>
+                <button
+                  type="button"
+                  class="danger-button"
+                  :disabled="agent.queued_count > 0 || Boolean(agent.current_task_id)"
+                  @click="deleteAgent(agent)"
+                >
+                  Delete
+                </button>
+              </div>
+            </article>
+            <div
+              v-if="workspaceAgents.length === 0"
+              class="empty-inline"
+            >
+              No workspace agents.
+            </div>
+            <article
+              v-if="dispatcherAgent"
+              class="agent-row dispatcher-row"
+            >
+              <div>
+                <strong>{{ dispatcherAgent.title }}</strong>
+                <span>dispatcher · {{ dispatcherAgent.runtime_status }}</span>
+              </div>
+              <button
+                type="button"
+                @click="openSession(dispatcherAgent)"
+              >
+                Open
+              </button>
+            </article>
+          </div>
+        </form>
+
+        <form
+          class="setup-section"
           @submit.prevent="handleCreateTask"
         >
           <h2>Task</h2>
@@ -113,7 +228,7 @@
             />
           </label>
           <label>
-            Agent
+            Agent type
             <select
               v-model="taskForm.agent_type"
               :disabled="!activeWorkspaceId"
@@ -121,6 +236,22 @@
               <option value="codex">Codex</option>
               <option value="claude">Claude</option>
               <option value="cursor">Terminal</option>
+            </select>
+          </label>
+          <label>
+            Related task
+            <select
+              v-model="taskForm.related_task_id"
+              :disabled="!activeWorkspaceId"
+            >
+              <option value="">None</option>
+              <option
+                v-for="task in tasks"
+                :key="task.id"
+                :value="task.id"
+              >
+                {{ task.title }}
+              </option>
             </select>
           </label>
           <button
@@ -138,25 +269,41 @@
           v-if="!activeWorkspaceId"
           class="empty-board"
         >
-          Create a workspace to start a resident agent and assign tasks.
+          Create a workspace to start agents and queue tasks.
         </div>
 
         <template v-else>
           <section
             v-for="column in columns"
             :key="column.status"
-            class="task-column"
+            :class="[
+              'task-column',
+              {
+                'task-column--empty': tasksByStatus(column.status).length === 0,
+                'task-column--collapsed': isMobileColumnCollapsed(column.status),
+              },
+            ]"
           >
             <div class="column-header">
               <h2>{{ column.label }}</h2>
-              <span>{{ tasksByStatus(column.status).length }}</span>
+              <div class="column-meta">
+                <span>{{ tasksByStatus(column.status).length }}</span>
+                <button
+                  type="button"
+                  class="column-collapse-button"
+                  :aria-expanded="!isMobileColumnCollapsed(column.status)"
+                  @click="toggleMobileColumn(column.status)"
+                >
+                  {{ isMobileColumnCollapsed(column.status) ? 'Show' : 'Hide' }}
+                </button>
+              </div>
             </div>
             <div class="task-list">
               <article
                 v-for="task in tasksByStatus(column.status)"
                 :key="task.id"
                 :class="['task-card', { selected: selectedTaskId === task.id }]"
-                @click="selectTask(task.id)"
+                @click="selectTask($event, task.id)"
               >
                 <div class="task-card-header">
                   <h3>{{ task.title }}</h3>
@@ -167,26 +314,91 @@
                 </div>
                 <p>{{ task.prompt }}</p>
                 <div
+                  v-if="task.dispatch_pending"
+                  class="latest-report"
+                >
+                  Waiting for dispatcher decision
+                </div>
+                <div
+                  v-else-if="task.dispatch_reason"
+                  class="latest-report"
+                >
+                  {{ task.dispatch_reason }}
+                </div>
+                <div
                   v-if="latestReportForTask(task)"
                   class="latest-report"
                 >
                   {{ latestReportForTask(task)?.state }} · {{ latestReportForTask(task)?.message }}
                 </div>
-                <div
-                  v-if="sessionForTask(task)"
-                  class="session-meta"
-                >
+                <div class="session-meta">
                   <span>task {{ task.status }}</span>
-                  <span>agent {{ sessionForTask(task)?.status }}</span>
-                  <span>{{ sessionForTask(task)?.branch || 'no branch' }}</span>
+                  <span>agent {{ agentTitle(task.session_id) }}</span>
+                  <span v-if="sessionForTask(task)">
+                    runtime {{ sessionForTask(task)?.runtime_status }}
+                  </span>
                 </div>
+                <details
+                  v-if="task.status === 'todo'"
+                  class="advanced-start"
+                  @click.stop
+                >
+                  <summary>Dispatch options</summary>
+                  <label>
+                    Agent
+                    <select v-model="startOptionsFor(task).target_session_id">
+                      <option value="">Auto</option>
+                      <option
+                        v-for="agent in workspaceAgents"
+                        :key="agent.id"
+                        :value="agent.id"
+                      >
+                        {{ agent.title }}
+                      </option>
+                    </select>
+                  </label>
+                  <label>
+                    Related task
+                    <select v-model="startOptionsFor(task).related_task_id">
+                      <option value="">Auto</option>
+                      <option
+                        v-for="candidate in tasks.filter(item => item.id !== task.id)"
+                        :key="candidate.id"
+                        :value="candidate.id"
+                      >
+                        {{ candidate.title }}
+                      </option>
+                    </select>
+                  </label>
+                  <label class="checkbox-label">
+                    <input
+                      v-model="startOptionsFor(task).clear_context"
+                      type="checkbox"
+                    />
+                    Clear context
+                  </label>
+                </details>
                 <div class="task-actions">
                   <button
                     v-if="task.status === 'todo'"
                     type="button"
                     @click.stop="startTask(task)"
                   >
-                    Start task
+                    Start
+                  </button>
+                  <button
+                    v-if="task.status === 'review'"
+                    type="button"
+                    @click.stop="continueTask(task)"
+                  >
+                    Continue
+                  </button>
+                  <button
+                    v-if="task.status === 'review'"
+                    type="button"
+                    @click.stop="markTask(task.id, 'done')"
+                  >
+                    Done
                   </button>
                   <button
                     v-if="sessionForTask(task)"
@@ -201,13 +413,6 @@
                     @click.stop="openMessagePrompt(sessionForTask(task)!.id)"
                   >
                     Send
-                  </button>
-                  <button
-                    v-if="task.status !== 'done'"
-                    type="button"
-                    @click.stop="markTask(task.id, nextStatus(task.status))"
-                  >
-                    Move {{ nextStatus(task.status) }}
                   </button>
                   <button
                     type="button"
@@ -243,7 +448,7 @@
             class="icon-button"
             @click="closeTaskDetail"
           >
-            ×
+            x
           </button>
         </div>
 
@@ -254,7 +459,7 @@
           </section>
 
           <section class="detail-section">
-            <div class="detail-section-title">Session</div>
+            <div class="detail-section-title">Assignment</div>
             <div class="fact-grid">
               <div>
                 <span>Task stage</span>
@@ -262,19 +467,23 @@
               </div>
               <div>
                 <span>Agent runtime</span>
-                <strong>{{ selectedSession?.status || 'not spawned' }}</strong>
+                <strong>{{ selectedSession?.runtime_status || 'none' }}</strong>
               </div>
               <div>
                 <span>Agent</span>
-                <strong>{{ selectedTask.agent_type }}</strong>
+                <strong>{{ selectedSession?.title || 'auto' }}</strong>
               </div>
               <div>
-                <span>Branch</span>
-                <strong>{{ selectedSession?.branch || 'none' }}</strong>
+                <span>Queued behind</span>
+                <strong>{{ selectedSession?.queued_count || 0 }}</strong>
               </div>
               <div>
-                <span>Worktree</span>
-                <strong>{{ selectedSession?.workspace_path || 'none' }}</strong>
+                <span>Clear context</span>
+                <strong>{{ selectedTask.clear_context ? 'yes' : 'no' }}</strong>
+              </div>
+              <div>
+                <span>Snapshot</span>
+                <strong>{{ board?.snapshot_path || 'none' }}</strong>
               </div>
             </div>
           </section>
@@ -288,7 +497,23 @@
                 class="primary-button"
                 @click="startTask(selectedTask)"
               >
-                Start task
+                Start
+              </button>
+              <button
+                v-if="selectedTask.status === 'review'"
+                type="button"
+                class="primary-button"
+                @click="continueTask(selectedTask)"
+              >
+                Continue
+              </button>
+              <button
+                v-if="selectedTask.status === 'review'"
+                type="button"
+                class="tool-button"
+                @click="markTask(selectedTask.id, 'done')"
+              >
+                Done
               </button>
               <button
                 v-if="selectedSession"
@@ -297,14 +522,6 @@
                 @click="openSession(selectedSession)"
               >
                 Open terminal
-              </button>
-              <button
-                v-if="selectedTask.status !== 'done'"
-                type="button"
-                class="tool-button"
-                @click="markTask(selectedTask.id, nextStatus(selectedTask.status))"
-              >
-                Move {{ nextStatus(selectedTask.status) }}
               </button>
               <button
                 type="button"
@@ -321,7 +538,7 @@
             >
               <textarea
                 v-model="detailMessage"
-                placeholder="Send follow-up instructions..."
+                placeholder="Follow-up instructions..."
               />
               <button
                 type="submit"
@@ -403,14 +620,22 @@ import type {
   WorkspaceTaskStatus,
 } from '@/types'
 
+interface TaskStartOptions {
+  target_session_id: string
+  related_task_id: string
+  clear_context: boolean
+}
+
 const appStore = useAppStore()
 const terminalStore = useTerminalStore()
 const workspaceStore = useWorkspaceStore()
 const {
   workspaces,
   activeWorkspaceId,
+  board,
   tasks,
-  workspaceAgent,
+  workspaceAgents,
+  dispatcherAgent,
   isLoading,
   error,
 } = storeToRefs(workspaceStore)
@@ -418,11 +643,20 @@ const {
 const selectedWorkspaceId = ref(activeWorkspaceId.value || '')
 const selectedTaskId = ref<string | null>(null)
 const detailMessage = ref('')
+const mobileSetupOpen = ref(false)
+const mobileCollapsedColumns = reactive<Record<WorkspaceTaskStatus, boolean>>({
+  todo: false,
+  queued: false,
+  working: false,
+  review: false,
+  done: false,
+})
+const startOptions = reactive<Record<string, TaskStartOptions>>({})
 let boardPollTimer: number | null = null
 
 const columns: { status: WorkspaceTaskStatus; label: string }[] = [
   { status: 'todo', label: 'Todo' },
-  { status: 'assigned', label: 'Assigned' },
+  { status: 'queued', label: 'Queued' },
   { status: 'working', label: 'Working' },
   { status: 'review', label: 'Review' },
   { status: 'done', label: 'Done' },
@@ -430,15 +664,21 @@ const columns: { status: WorkspaceTaskStatus; label: string }[] = [
 
 const workspaceForm = reactive({
   name: 'Claude Hub',
-  path: '/Users/Apple/Project/claude_projects/claude_hub',
+  path: '/Users/bytedance/claude_hub',
   default_branch: 'main',
   session_prefix: 'chub',
+})
+
+const agentForm = reactive({
+  title: '',
+  agent_type: 'codex' as AgentType,
 })
 
 const taskForm = reactive({
   title: '',
   prompt: '',
   agent_type: 'codex' as AgentType,
+  related_task_id: '',
 })
 
 const activeWorkspace = computed(() =>
@@ -457,6 +697,17 @@ const selectedReports = computed<AgentReport[]>(() =>
   selectedTask.value ? workspaceStore.reportsForTask(selectedTask.value) : []
 )
 
+function startOptionsFor(task: WorkspaceTask): TaskStartOptions {
+  if (!startOptions[task.id]) {
+    startOptions[task.id] = {
+      target_session_id: '',
+      related_task_id: '',
+      clear_context: false,
+    }
+  }
+  return startOptions[task.id]
+}
+
 function tasksByStatus(status: WorkspaceTaskStatus) {
   return tasks.value.filter(task => task.status === status)
 }
@@ -469,8 +720,33 @@ function latestReportForTask(task: WorkspaceTask) {
   return workspaceStore.latestReportForTask(task)
 }
 
-function selectTask(taskId: string) {
+function agentTitle(sessionId?: string | null) {
+  if (!sessionId) return 'auto'
+  return workspaceAgents.value.find(agent => agent.id === sessionId)?.title || sessionId
+}
+
+function taskTitle(taskId?: string | null) {
+  if (!taskId) return 'none'
+  return tasks.value.find(task => task.id === taskId)?.title || taskId
+}
+
+function isInteractiveElement(target: EventTarget | null) {
+  return target instanceof HTMLElement && Boolean(target.closest(
+    'button, a, input, select, textarea, summary, details, label'
+  ))
+}
+
+function selectTask(event: MouseEvent, taskId: string) {
+  if (isInteractiveElement(event.target)) return
   selectedTaskId.value = taskId
+}
+
+function isMobileColumnCollapsed(status: WorkspaceTaskStatus) {
+  return mobileCollapsedColumns[status]
+}
+
+function toggleMobileColumn(status: WorkspaceTaskStatus) {
+  mobileCollapsedColumns[status] = !mobileCollapsedColumns[status]
 }
 
 function closeTaskDetail() {
@@ -487,14 +763,6 @@ function formatTime(value: string) {
   }).format(new Date(value))
 }
 
-function nextStatus(status: WorkspaceTaskStatus): WorkspaceTaskStatus {
-  if (status === 'todo') return 'assigned'
-  if (status === 'assigned') return 'working'
-  if (status === 'working') return 'review'
-  if (status === 'review') return 'done'
-  return 'done'
-}
-
 async function handleCreateWorkspace() {
   const workspace = await workspaceStore.createWorkspace({
     name: workspaceForm.name.trim(),
@@ -504,7 +772,20 @@ async function handleCreateWorkspace() {
   })
   if (workspace) {
     selectedWorkspaceId.value = workspace.id
+    mobileSetupOpen.value = false
   }
+}
+
+async function handleCreateAgent() {
+  await workspaceStore.ensureWorkspaceAgent({
+    agent_type: agentForm.agent_type,
+    title: agentForm.title.trim() || null,
+    role: 'orchestrator',
+    reuse_existing: false,
+  })
+  agentForm.title = ''
+  mobileSetupOpen.value = false
+  await terminalStore.fetchTabs()
 }
 
 async function handleCreateTask() {
@@ -513,9 +794,12 @@ async function handleCreateTask() {
     title: taskForm.title.trim(),
     prompt: taskForm.prompt.trim(),
     agent_type: taskForm.agent_type,
+    related_task_id: taskForm.related_task_id || null,
   })
   taskForm.title = ''
   taskForm.prompt = ''
+  taskForm.related_task_id = ''
+  mobileSetupOpen.value = false
 }
 
 async function handleWorkspaceChange() {
@@ -532,13 +816,30 @@ async function refreshBoard() {
   }
 }
 
-async function ensureWorkspaceAgent() {
-  await workspaceStore.ensureWorkspaceAgent(taskForm.agent_type)
-  await terminalStore.fetchTabs()
+async function dispatchWorkspace() {
+  try {
+    await workspaceStore.dispatchWorkspace()
+  } catch {
+    // Error state is owned by the workspace store.
+  }
 }
 
 async function startTask(task: WorkspaceTask) {
-  await workspaceStore.startTask(task.id, task.agent_type)
+  const options = startOptionsFor(task)
+  await workspaceStore.startTask(task.id, {
+    agent_type: task.agent_type,
+    target_session_id: options.target_session_id || null,
+    related_task_id: options.related_task_id || null,
+    clear_context: options.clear_context ? true : null,
+  })
+  await terminalStore.fetchTabs()
+}
+
+async function continueTask(task: WorkspaceTask) {
+  await workspaceStore.continueTask(task.id, {
+    message: detailMessage.value.trim() || null,
+  })
+  detailMessage.value = ''
   await terminalStore.fetchTabs()
 }
 
@@ -573,6 +874,13 @@ async function deleteTask(task: WorkspaceTask) {
   }
 }
 
+async function deleteAgent(agent: ManagedSession) {
+  const confirmed = window.confirm(`Delete agent "${agent.title}"?`)
+  if (!confirmed) return
+  await workspaceStore.deleteSession(agent.id)
+  await terminalStore.fetchTabs()
+}
+
 watch(tasks, value => {
   if (selectedTaskId.value && !value.some(task => task.id === selectedTaskId.value)) {
     closeTaskDetail()
@@ -582,6 +890,7 @@ watch(tasks, value => {
 watch(activeWorkspaceId, value => {
   selectedWorkspaceId.value = value || ''
   closeTaskDetail()
+  mobileSetupOpen.value = false
 })
 
 watch(activeWorkspace, workspace => {
@@ -640,10 +949,17 @@ onUnmounted(() => {
 .workspace-actions,
 .form-row,
 .task-actions,
-.session-meta {
+.session-meta,
+.agent-row-actions,
+.agent-row-meta {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.mobile-setup-button,
+.mobile-status-strip {
+  display: none;
 }
 
 .workspace-select,
@@ -652,7 +968,8 @@ onUnmounted(() => {
 .danger-button,
 .setup-panel input,
 .setup-panel textarea,
-.setup-panel select {
+.setup-panel select,
+.advanced-start select {
   border: 1px solid #3f3f46;
   border-radius: 4px;
   background: #2b2b2b;
@@ -670,13 +987,16 @@ onUnmounted(() => {
 .tool-button,
 .primary-button,
 .danger-button,
-.task-actions button {
+.task-actions button,
+.agent-row button {
   cursor: pointer;
 }
 
 .tool-button:disabled,
 .primary-button:disabled,
-.danger-button:disabled {
+.danger-button:disabled,
+.task-actions button:disabled,
+.agent-row button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }
@@ -704,11 +1024,11 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
+  grid-template-columns: 340px minmax(0, 1fr);
 }
 
 .workspace-layout.detail-open {
-  grid-template-columns: 320px minmax(0, 1fr) minmax(380px, 28vw);
+  grid-template-columns: 340px minmax(0, 1fr) minmax(380px, 28vw);
 }
 
 .setup-panel {
@@ -735,7 +1055,8 @@ onUnmounted(() => {
   font-size: 14px;
 }
 
-.setup-section label {
+.setup-section label,
+.advanced-start label {
   display: flex;
   flex-direction: column;
   gap: 5px;
@@ -744,7 +1065,8 @@ onUnmounted(() => {
 }
 
 .setup-panel input,
-.setup-panel select {
+.setup-panel select,
+.advanced-start select {
   height: 32px;
   padding: 0 9px;
 }
@@ -757,6 +1079,70 @@ onUnmounted(() => {
 
 .form-row > label {
   flex: 1;
+}
+
+.agent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-row {
+  border: 1px solid #303030;
+  border-radius: 6px;
+  background: #252525;
+  padding: 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-row strong {
+  display: block;
+  color: #fafafa;
+  font-size: 12px;
+}
+
+.agent-row span {
+  color: #a1a1aa;
+  font-size: 11px;
+}
+
+.dispatcher-row {
+  border-color: #4c1d95;
+  background: #281f35;
+}
+
+.runtime-pill {
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: #3f3f46;
+  color: #d4d4d8;
+}
+
+.runtime-pill--idle {
+  background: #14532d;
+  color: #bbf7d0;
+}
+
+.runtime-pill--working {
+  background: #78350f;
+  color: #fde68a;
+}
+
+.runtime-pill--attention {
+  background: #7f1d1d;
+  color: #fecaca;
+}
+
+.runtime-pill--offline {
+  background: #27272a;
+  color: #a1a1aa;
+}
+
+.empty-inline {
+  color: #71717a;
+  font-size: 12px;
 }
 
 .board {
@@ -799,9 +1185,19 @@ onUnmounted(() => {
   font-size: 13px;
 }
 
+.column-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .column-header span {
   color: #9ca3af;
   font-size: 12px;
+}
+
+.column-collapse-button {
+  display: none;
 }
 
 .task-list {
@@ -818,6 +1214,7 @@ onUnmounted(() => {
   background: #262626;
   padding: 10px;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .task-card.selected {
@@ -873,7 +1270,7 @@ onUnmounted(() => {
   background: #71717a;
 }
 
-.status-dot--assigned {
+.status-dot--queued {
   background: #38bdf8;
 }
 
@@ -907,56 +1304,89 @@ onUnmounted(() => {
   margin-bottom: 8px;
 }
 
+.advanced-start {
+  margin: 0 0 8px;
+  border-top: 1px solid #3f3f46;
+  padding-top: 8px;
+}
+
+.advanced-start summary {
+  margin-bottom: 8px;
+  color: #93c5fd;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.advanced-start label {
+  margin-bottom: 8px;
+}
+
+.advanced-start .checkbox-label {
+  flex-direction: row;
+  align-items: center;
+}
+
+.advanced-start input[type='checkbox'] {
+  width: 14px;
+  height: 14px;
+}
+
 .task-actions {
   flex-wrap: wrap;
 }
 
-.task-actions button {
+.task-actions button,
+.agent-row button {
   height: 26px;
   border: 1px solid #3f3f46;
   border-radius: 4px;
   background: #303030;
   color: #f4f4f5;
   padding: 0 8px;
-  font-size: 11px;
+  transition: background 0.12s ease, border-color 0.12s ease, transform 0.08s ease;
+  -webkit-tap-highlight-color: rgba(96, 165, 250, 0.22);
 }
 
-.task-actions button:hover {
+.task-actions button:active,
+.agent-row button:active,
+.tool-button:active,
+.primary-button:active,
+.danger-button:active {
+  transform: translateY(1px);
   background: #3a3a3a;
 }
 
-.task-actions .danger-button:hover {
-  background: #5f1f1f;
+.task-actions .danger-button,
+.agent-row .danger-button {
+  background: #3f1d1d;
+  border-color: #7f1d1d;
 }
 
 .column-empty {
-  padding: 14px;
   color: #71717a;
   font-size: 12px;
   text-align: center;
+  padding: 18px 0;
 }
 
 .task-detail-panel {
-  min-width: 0;
-  min-height: 0;
   border-left: 1px solid #303030;
   background: #1f1f1f;
-  display: flex;
-  flex-direction: column;
+  min-width: 0;
+  overflow-y: auto;
 }
 
 .detail-header {
   display: flex;
-  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  border-bottom: 1px solid #303030;
   padding: 14px;
+  border-bottom: 1px solid #303030;
 }
 
-.detail-eyebrow {
-  display: inline-flex;
-  margin-bottom: 6px;
+.detail-eyebrow,
+.detail-section-title {
+  display: block;
   color: #93c5fd;
   font-size: 11px;
   font-weight: 700;
@@ -964,56 +1394,42 @@ onUnmounted(() => {
 }
 
 .detail-header h2 {
-  margin: 0;
-  color: #fafafa;
-  font-size: 16px;
-  line-height: 1.3;
+  margin: 4px 0 0;
+  font-size: 18px;
 }
 
 .icon-button {
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   border: 1px solid #3f3f46;
   border-radius: 4px;
   background: #2b2b2b;
   color: #f4f4f5;
   cursor: pointer;
-  font-size: 20px;
-  line-height: 1;
 }
 
 .detail-body {
-  min-height: 0;
-  overflow-y: auto;
-  padding: 12px 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px;
 }
 
 .detail-section {
-  padding: 12px 0;
   border-bottom: 1px solid #303030;
-}
-
-.detail-section:last-child {
-  border-bottom: 0;
-}
-
-.detail-section-title {
-  margin-bottom: 8px;
-  color: #a1a1aa;
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
+  padding-bottom: 14px;
 }
 
 .detail-copy {
-  margin: 0;
+  margin: 8px 0 0;
   color: #d4d4d8;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.5;
   white-space: pre-wrap;
 }
 
 .fact-grid {
+  margin-top: 10px;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
@@ -1023,97 +1439,92 @@ onUnmounted(() => {
   min-width: 0;
   border: 1px solid #303030;
   border-radius: 6px;
-  background: #242424;
+  background: #262626;
   padding: 8px;
 }
 
 .fact-grid span {
   display: block;
-  margin-bottom: 4px;
-  color: #71717a;
-  font-size: 10px;
+  color: #a1a1aa;
+  font-size: 11px;
 }
 
 .fact-grid strong {
   display: block;
-  overflow-wrap: anywhere;
+  margin-top: 4px;
   color: #f4f4f5;
-  font-size: 11px;
-  line-height: 1.35;
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .detail-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-}
-
-.send-form {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
   margin-top: 10px;
 }
 
+.send-form {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .send-form textarea {
-  min-height: 90px;
-  resize: vertical;
+  min-height: 100px;
   border: 1px solid #3f3f46;
   border-radius: 4px;
   background: #2b2b2b;
   color: #f4f4f5;
   padding: 9px;
+  resize: vertical;
 }
 
 .empty-timeline {
+  margin-top: 8px;
   color: #71717a;
   font-size: 12px;
 }
 
 .timeline {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
 }
 
 .timeline li {
   display: grid;
-  grid-template-columns: 12px minmax(0, 1fr);
+  grid-template-columns: 10px minmax(0, 1fr);
   gap: 8px;
 }
 
 .timeline-dot {
   width: 8px;
   height: 8px;
-  margin-top: 5px;
   border-radius: 999px;
   background: #60a5fa;
+  margin-top: 5px;
 }
 
 .timeline-head {
   display: flex;
-  align-items: center;
   justify-content: space-between;
   gap: 8px;
-}
-
-.timeline-head strong {
   color: #f4f4f5;
   font-size: 12px;
 }
 
 .timeline-head span {
   color: #71717a;
-  font-size: 10px;
-  white-space: nowrap;
 }
 
 .timeline p {
   margin: 4px 0 0;
-  color: #d4d4d8;
+  color: #cbd5e1;
   font-size: 12px;
   line-height: 1.45;
 }
@@ -1122,57 +1533,327 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
-  margin-top: 7px;
+  margin-top: 6px;
 }
 
-.report-files span,
-.report-note {
-  border-radius: 4px;
+.report-files span {
+  border-radius: 999px;
   background: #303030;
-  color: #cbd5e1;
+  color: #d4d4d8;
   font-size: 10px;
-  padding: 3px 6px;
+  padding: 3px 7px;
 }
 
-@media (max-width: 900px) {
-  .workspace-layout {
-    grid-template-columns: 1fr;
+.report-note {
+  color: #a1a1aa;
+}
+
+@media (max-width: 760px) {
+  .workspace-view {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
+  .workspace-header {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+    padding: 10px 12px;
+  }
+
+  .workspace-header h1 {
+    font-size: 16px;
+    margin: 0;
+  }
+
+  .workspace-header p {
+    display: none;
+  }
+
+  .workspace-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
+    gap: 6px;
+  }
+
+  .workspace-select {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .workspace-select,
+  .workspace-actions .tool-button {
+    height: 36px;
+  }
+
+  .workspace-actions .tool-button {
+    padding: 0 8px;
+  }
+
+  .mobile-setup-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .mobile-status-strip {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px 12px;
+    border-bottom: 1px solid #303030;
+    background: #1f1f1f;
+  }
+
+  .mobile-agent-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    color: #a1a1aa;
+    font-size: 12px;
+  }
+
+  .mobile-agent-summary strong {
+    color: #f4f4f5;
+    font-size: 12px;
+  }
+
+  .mobile-column-tabs {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+
+  .mobile-column-tabs span {
+    flex: 0 0 auto;
+    border: 1px solid #3f3f46;
+    border-radius: 999px;
+    background: #27272a;
+    color: #d4d4d8;
+    font-size: 11px;
+    padding: 4px 8px;
+  }
+
+  .workspace-layout,
   .workspace-layout.detail-open {
-    grid-template-columns: 1fr;
+    display: block;
+    min-height: auto;
   }
 
   .setup-panel {
-    max-height: 44vh;
+    display: none;
     border-right: 0;
     border-bottom: 1px solid #303030;
+    overflow: visible;
+  }
+
+  .setup-panel.mobile-open {
+    display: block;
+  }
+
+  .setup-section {
+    gap: 8px;
+    padding: 12px;
+  }
+
+  .setup-panel input,
+  .setup-panel select,
+  .setup-panel textarea {
+    font-size: 16px;
+  }
+
+  .setup-panel textarea {
+    min-height: 84px;
+  }
+
+  .agent-row-meta,
+  .agent-row-actions {
+    flex-wrap: wrap;
   }
 
   .board {
-    grid-template-columns: repeat(5, minmax(220px, 70vw));
+    min-height: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    overflow: visible;
+    padding: 8px;
+  }
+
+  .task-column {
+    min-width: 0;
+    border-radius: 6px;
+  }
+
+  .task-column--collapsed .task-list {
+    display: none;
+  }
+
+  .task-column--collapsed .column-header {
+    border-bottom: 0;
+  }
+
+  .task-column--empty .task-list {
+    display: none;
+  }
+
+  .task-column--empty .column-header {
+    border-bottom: 0;
+  }
+
+  .column-header {
+    padding: 8px 10px;
+  }
+
+  .column-meta {
+    gap: 6px;
+  }
+
+  .column-collapse-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 28px;
+    min-width: 54px;
+    border: 1px solid #3f3f46;
+    border-radius: 4px;
+    background: #303030;
+    color: #f4f4f5;
+    font-size: 12px;
+    padding: 0 8px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: rgba(96, 165, 250, 0.22);
+  }
+
+  .column-collapse-button:active {
+    background: #3a3a3a;
+    transform: translateY(1px);
+  }
+
+  .task-list {
+    overflow: visible;
+    padding: 8px;
+  }
+
+  .task-card {
+    padding: 10px;
+  }
+
+  .task-card.selected {
+    border-color: #3f3f46;
+    background: #262626;
+  }
+
+  .task-card-header {
+    align-items: center;
+  }
+
+  .task-card p {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-line-clamp: 4;
+    -webkit-box-orient: vertical;
+  }
+
+  .agent-badge,
+  .session-meta span {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .task-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .task-actions button,
+  .agent-row button {
+    width: 100%;
+    height: 34px;
+  }
+
+  .advanced-start select {
+    width: 100%;
+    font-size: 16px;
   }
 
   .task-detail-panel {
     position: fixed;
-    inset: auto 0 0 0;
-    z-index: 30;
-    max-height: min(78vh, 720px);
-    border-top: 1px solid #3f3f46;
+    inset: 0;
+    z-index: 60;
     border-left: 0;
-    border-radius: 12px 12px 0 0;
-    box-shadow: 0 -16px 48px rgb(0 0 0 / 0.45);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
   .detail-header {
-    padding: 12px 14px;
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    align-items: center;
+    background: #1f1f1f;
+    padding: 12px;
+  }
+
+  .detail-header h2 {
+    font-size: 17px;
+  }
+
+  .icon-button {
+    width: 36px;
+    height: 36px;
   }
 
   .detail-body {
-    padding-bottom: calc(16px + env(safe-area-inset-bottom));
+    padding: 12px 12px 80px;
   }
 
   .fact-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .detail-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .detail-actions button,
+  .send-form button {
+    width: 100%;
+    height: 38px;
+  }
+
+  .send-form textarea {
+    min-height: 96px;
+    font-size: 16px;
+  }
+}
+
+@media (max-width: 480px) {
+  .workspace-actions {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .workspace-select {
+    grid-column: 1 / -1;
+  }
+
+  .form-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .task-actions,
+  .detail-actions {
     grid-template-columns: 1fr;
   }
 }
