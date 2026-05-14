@@ -45,6 +45,7 @@ TMUX_PASTE_SETTLE_SECONDS = 0.35
 TMUX_SUBMIT_SETTLE_SECONDS = 0.7
 AUTO_CONTINUE_MAX_ATTEMPTS = 10
 AUTO_CONTINUE_MIN_INTERVAL_SECONDS = 15
+AUTO_CONTINUE_IDLE_GRACE_SECONDS = 20
 WORKSPACE_MONITOR_INTERVAL_SECONDS = 5
 AUTO_CONTINUE_MESSAGE = "please continue"
 AUTO_CONTINUE_INTERRUPTION_PATTERNS = (
@@ -331,9 +332,9 @@ class WorkspaceManager:
     async def _background_monitor_loop(self) -> None:
         while True:
             try:
-                await self._refresh_session_statuses()
+                await self._refresh_session_statuses(run_auto_continue=True)
                 for workspace_id in list(self.workspaces):
-                    await self.dispatch_workspace(workspace_id)
+                    await self.dispatch_workspace(workspace_id, refresh_sessions=False)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -833,6 +834,17 @@ class WorkspaceManager:
                 raise KeyError(payload.target_session_id)
             if target.role != WorkspaceSessionRole.ORCHESTRATOR:
                 raise RuntimeError("Tasks can only be assigned to workspace agents")
+            if not self._can_assign_or_queue_to(target):
+                if (
+                    target.status == ManagedSessionStatus.STOPPED
+                    or target.runtime_status == AgentRuntimeStatus.OFFLINE
+                ):
+                    raise RuntimeError("Offline workspace agents cannot accept tasks")
+                if target.runtime_status == AgentRuntimeStatus.ATTENTION:
+                    raise RuntimeError(
+                        "Workspace agents waiting for input cannot accept new tasks"
+                    )
+                raise RuntimeError("Selected workspace agent cannot accept tasks yet")
             return (
                 target,
                 bool(payload.clear_context),
@@ -842,9 +854,10 @@ class WorkspaceManager:
         related_task_id = payload.related_task_id or task.related_task_id
         if related_task_id:
             related = self.tasks.get(related_task_id)
+            target = None
             if related and related.session_id:
                 target = self.sessions.get(related.session_id)
-                if target and target.role == WorkspaceSessionRole.ORCHESTRATOR:
+                if target and self._can_assign_or_queue_to(target):
                     logger.info(
                         "Dispatch target selected from related task: task_id=%s related_task_id=%s "
                         "target_session_id=%s related_status=%s",
@@ -860,16 +873,17 @@ class WorkspaceManager:
                     )
             logger.info(
                 "Related task did not provide a dispatch target: task_id=%s related_task_id=%s "
-                "related_exists=%s related_session_id=%s",
+                "related_exists=%s related_session_id=%s related_target_runtime=%s",
                 task.id,
                 related_task_id,
                 bool(related),
                 related.session_id if related else None,
+                target.runtime_status if target else None,
             )
 
         if task.session_id:
             existing = self.sessions.get(task.session_id)
-            if existing and existing.role == WorkspaceSessionRole.ORCHESTRATOR:
+            if existing and self._can_assign_or_queue_to(existing):
                 return existing, False, "Continuing previous task assignment"
 
         free_agents = [agent for agent in agents if self._can_dispatch_to(agent)]
@@ -890,8 +904,14 @@ class WorkspaceManager:
                 "Selected least queued available workspace agent",
             )
 
-        if agents:
-            target = self._least_queued_agent(agents)
+        queueable_agents = [
+            agent
+            for agent in agents
+            if agent.status != ManagedSessionStatus.STOPPED
+            and agent.runtime_status == AgentRuntimeStatus.WORKING
+        ]
+        if queueable_agents:
+            target = self._least_queued_agent(queueable_agents)
             should_clear = self._has_prior_task_history(target.id)
             return (
                 target,
@@ -899,7 +919,19 @@ class WorkspaceManager:
                 "Queued behind existing workspace agent",
             )
 
+        if agents:
+            raise RuntimeError("No idle or working workspace agent is available")
+
         return None
+
+    def _can_assign_or_queue_to(self, session: ManagedSession) -> bool:
+        if session.role != WorkspaceSessionRole.ORCHESTRATOR:
+            return False
+        if session.status == ManagedSessionStatus.STOPPED:
+            return False
+        if session.runtime_status == AgentRuntimeStatus.WORKING:
+            return True
+        return self._can_dispatch_to(session)
 
     def _least_queued_agent(self, agents: list[ManagedSession]) -> ManagedSession:
         def runtime_rank(agent: ManagedSession) -> int:
@@ -1014,11 +1046,17 @@ class WorkspaceManager:
         )
         return self.tasks[task.id]
 
-    async def dispatch_workspace(self, workspace_id: str) -> None:
+    async def dispatch_workspace(
+        self,
+        workspace_id: str,
+        *,
+        refresh_sessions: bool = True,
+    ) -> None:
         if workspace_id not in self.workspaces:
             raise KeyError(workspace_id)
 
-        await self._refresh_session_statuses(workspace_id)
+        if refresh_sessions:
+            await self._refresh_session_statuses(workspace_id)
         for session in self._workspace_agents(workspace_id, include_stopped=True):
             if not self._can_dispatch_to(session):
                 logger.info(
@@ -1039,10 +1077,9 @@ class WorkspaceManager:
     def _can_dispatch_to(self, session: ManagedSession) -> bool:
         if session.role != WorkspaceSessionRole.ORCHESTRATOR:
             return False
-        if session.runtime_status not in {
-            AgentRuntimeStatus.IDLE,
-            AgentRuntimeStatus.OFFLINE,
-        }:
+        if session.status == ManagedSessionStatus.STOPPED:
+            return False
+        if session.runtime_status != AgentRuntimeStatus.IDLE:
             return False
         if session.task_id or session.current_task_id:
             current_id = session.task_id or session.current_task_id
@@ -1609,7 +1646,12 @@ class WorkspaceManager:
             workspace_role=session.role,
         )
 
-    async def _refresh_session_statuses(self, workspace_id: Optional[str] = None) -> None:
+    async def _refresh_session_statuses(
+        self,
+        workspace_id: Optional[str] = None,
+        *,
+        run_auto_continue: bool = False,
+    ) -> None:
         sessions = [
             session
             for session in self.sessions.values()
@@ -1646,7 +1688,8 @@ class WorkspaceManager:
             if current_task_id:
                 task = self.tasks.get(current_task_id)
                 if (
-                    runtime_status == AgentRuntimeStatus.IDLE
+                    run_auto_continue
+                    and runtime_status == AgentRuntimeStatus.IDLE
                     and task
                     and task.status == WorkspaceTaskStatus.WORKING
                 ):
@@ -1715,6 +1758,25 @@ class WorkspaceManager:
             )
             return None
 
+        if self._auto_continue_output_looks_busy(output):
+            return {
+                "status": ManagedSessionStatus.WORKING,
+                "runtime_status": AgentRuntimeStatus.WORKING,
+                "auto_continue_task_id": task.id,
+                "auto_continue_attempts": session.auto_continue_attempts
+                if session.auto_continue_task_id == task.id
+                else 0,
+                "updated_at": sampled_at,
+            }
+
+        last_activity_at = session.last_activity_at
+        if (
+            last_activity_at
+            and (sampled_at - last_activity_at).total_seconds()
+            < AUTO_CONTINUE_IDLE_GRACE_SECONDS
+        ):
+            return None
+
         interruption_reason = self._auto_continue_interruption_reason(output)
         if not interruption_reason:
             return None
@@ -1781,11 +1843,45 @@ class WorkspaceManager:
         }
 
     def _auto_continue_interruption_reason(self, output: str) -> str | None:
-        tail = "\n".join(output.lower().splitlines()[-60:])
+        tail = self._auto_continue_recent_output_segment(output).lower()
         for pattern in AUTO_CONTINUE_INTERRUPTION_PATTERNS:
             if pattern in tail:
                 return pattern
         return None
+
+    def _auto_continue_recent_output_segment(self, output: str) -> str:
+        lines = output.splitlines()
+        tail_start = max(0, len(lines) - 120)
+        tail = lines[tail_start:]
+        prompt_indices = [
+            index
+            for index, line in enumerate(tail)
+            if line.strip() in {"›", "❯"} or line.strip().startswith(("› ", "❯ "))
+        ]
+        if not prompt_indices:
+            return "\n".join(tail[-60:])
+
+        last_prompt_index = prompt_indices[-1]
+        last_prompt = tail[last_prompt_index].strip()
+        if last_prompt in {"›", "❯"}:
+            previous_prompt_index = prompt_indices[-2] if len(prompt_indices) >= 2 else -1
+            return "\n".join(tail[previous_prompt_index + 1 : last_prompt_index])
+        return "\n".join(tail[last_prompt_index + 1 :])
+
+    def _auto_continue_output_looks_busy(self, output: str) -> bool:
+        tail = "\n".join(output.lower().splitlines()[-12:])
+        if re.search(r"^[✻✢✶✳✷✸✹✺✽✦✧]\s+\S+…\s+\(", tail, re.MULTILINE):
+            return True
+        return any(
+            marker in tail
+            for marker in (
+                "esc to interrupt",
+                "ctrl+c to interrupt",
+                "ctrl-c to interrupt",
+                "running…",
+                "running...",
+            )
+        )
 
     def _reconcile_task_report_statuses(self, workspace_id: str) -> None:
         changed = False

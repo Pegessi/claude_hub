@@ -1,5 +1,6 @@
+import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from importlib import import_module
 from pathlib import Path
 from typing import Generator, Optional
@@ -373,6 +374,121 @@ def test_start_task_prefers_related_task_agent(
     assert "Continue with the related agent" in sent_messages[-1][1]
 
 
+def test_start_task_skips_offline_related_task_agent(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    created_tabs: list[str] = []
+
+    async def fake_create_tab(
+        name: str,
+        shell: Optional[str] = None,
+        cwd: Optional[str] = None,
+        solo_mode: bool = False,
+        agent_type: AgentType = AgentType.CLAUDE,
+        target: ExecutionTarget = ExecutionTarget.LOCAL,
+        remote_profile_id: Optional[str] = None,
+        remote_cwd: Optional[str] = None,
+        remote_reconnect: bool = True,
+        remote_forward_port: Optional[int] = None,
+        workspace_id: Optional[str] = None,
+        workspace_name: Optional[str] = None,
+        workspace_role: WorkspaceSessionRole | None = None,
+    ) -> TerminalTab:
+        tab_id = f"offline-related{len(created_tabs) + 1}"
+        created_tabs.append(tab_id)
+        return TerminalTab(
+            id=tab_id,
+            name=name,
+            shell=shell,
+            cwd=cwd,
+            solo_mode=solo_mode,
+            agent_type=agent_type,
+            target=target,
+            remote_profile_id=remote_profile_id,
+            remote_cwd=remote_cwd,
+            remote_reconnect=remote_reconnect,
+            port=12400 + len(created_tabs),
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+            workspace_role=workspace_role,
+        )
+
+    async def fake_send_tmux_message(_tmux_session: str, _message: str) -> None:
+        return None
+
+    async def fake_ensure_session_ready(_session) -> None:
+        return None
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
+    monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+    monkeypatch.setattr(
+        workspace_manager,
+        "_ensure_session_ready_for_send",
+        fake_ensure_session_ready,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Offline Related Repo",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "offrel",
+        },
+    ).json()
+    workspace_id = workspace["id"]
+    first_agent = client.post(f"/api/workspaces/{workspace_id}/agent", json={}).json()
+    second_agent = client.post(f"/api/workspaces/{workspace_id}/agent", json={}).json()
+
+    original_task = client.post(
+        f"/api/workspaces/{workspace_id}/tasks",
+        json={"title": "Original offline context", "prompt": "Use first agent"},
+    ).json()
+    original_start = client.post(
+        f"/api/workspaces/tasks/{original_task['id']}/start",
+        json={"target_session_id": first_agent["id"]},
+    )
+    assert original_start.status_code == 201
+    assert client.patch(
+        f"/api/workspaces/tasks/{original_task['id']}",
+        json={"status": "done"},
+    ).status_code == 200
+
+    workspace_manager.sessions[first_agent["id"]] = workspace_manager.sessions[
+        first_agent["id"]
+    ].model_copy(
+        update={
+            "status": ManagedSessionStatus.STOPPED,
+            "runtime_status": AgentRuntimeStatus.OFFLINE,
+        }
+    )
+
+    related_task = client.post(
+        f"/api/workspaces/{workspace_id}/tasks",
+        json={
+            "title": "Related task",
+            "prompt": "Continue without the offline agent",
+            "related_task_id": original_task["id"],
+        },
+    ).json()
+    related_start = client.post(
+        f"/api/workspaces/tasks/{related_task['id']}/start",
+        json={},
+    )
+
+    assert related_start.status_code == 201
+    started_related = related_start.json()
+    assert started_related["status"] == "working"
+    assert started_related["session_id"] == second_agent["id"]
+    assert started_related["dispatch_reason"] == "Only one workspace agent is available"
+
+
 def test_tmux_pending_input_detection_matches_codex_paste_prompt() -> None:
     message = "New workspace task assigned.\n\nTask description"
 
@@ -390,7 +506,40 @@ def test_tmux_pending_input_detection_matches_codex_paste_prompt() -> None:
     )
 
 
-def test_interrupted_idle_working_agent_is_auto_continued(
+def test_auto_continue_ignores_stale_interruption_before_latest_continue() -> None:
+    output = "\n".join(
+        [
+            "API Error: 400 unknown error",
+            "",
+            "› please continue",
+            "",
+            "⏺ 没有新指令，等待用户输入。",
+            "",
+            "❯ ",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle) ·",
+        ]
+    )
+
+    assert workspace_manager._auto_continue_interruption_reason(output) is None
+
+
+def test_auto_continue_detects_current_interruption_segment() -> None:
+    output = "\n".join(
+        [
+            "› New workspace task assigned",
+            "",
+            "⏺ Bash(command)",
+            "  ⎿ API Error: 400 unknown error",
+            "",
+            "❯ ",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle) ·",
+        ]
+    )
+
+    assert workspace_manager._auto_continue_interruption_reason(output) == "api error"
+
+
+def test_background_monitor_auto_continues_interrupted_idle_working_agent(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -443,7 +592,16 @@ def test_interrupted_idle_working_agent_is_auto_continued(
         return status_samples
 
     async def fake_capture_output(_tmux_session: str) -> str:
-        return 'API Error: 400 unknown error\n\n› Bash(ssh merlin_dev "grep -n _rr_counter file")'
+        return "\n".join(
+            [
+                "› New workspace task assigned",
+                "",
+                '⏺ Bash(ssh merlin_dev "grep -n _rr_counter file")',
+                "  ⎿ API Error: 400 unknown error",
+                "",
+                "❯ ",
+            ]
+        )
 
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
     monkeypatch.setattr(
@@ -472,6 +630,7 @@ def test_interrupted_idle_working_agent_is_auto_continued(
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     sent_messages.clear()
 
+    sampled_at = datetime.now()
     status_samples[:] = [
         TerminalAgentStatus(
             tab_id="tab-api-error",
@@ -481,18 +640,31 @@ def test_interrupted_idle_working_agent_is_auto_continued(
             status_text="Idle",
             detail="agent prompt visible",
             tmux_session="claude-hub-tab-api-",
-            last_changed_at=datetime.now(),
-            sampled_at=datetime.now(),
+            last_changed_at=sampled_at - timedelta(seconds=30),
+            sampled_at=sampled_at,
         )
     ]
 
     board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
-
-    assert sent_messages == [("claude-hub-tab-api-", "please continue")]
+    assert sent_messages == []
     assert board["tasks"][0]["status"] == "working"
-    assert board["sessions"][0]["runtime_status"] == "working"
+    assert board["sessions"][0]["runtime_status"] == "idle"
     assert board["sessions"][0]["auto_continue_task_id"] == started["id"]
-    assert board["sessions"][0]["auto_continue_attempts"] == 1
+    assert board["sessions"][0]["auto_continue_attempts"] == 0
+
+    asyncio.run(
+        workspace_manager._refresh_session_statuses(
+            workspace["id"],
+            run_auto_continue=True,
+        )
+    )
+
+    session = workspace_manager.sessions[started["session_id"]]
+    assert sent_messages == [("claude-hub-tab-api-", "please continue")]
+    assert workspace_manager.tasks[started["id"]].status == WorkspaceTaskStatus.WORKING
+    assert session.runtime_status == AgentRuntimeStatus.WORKING
+    assert session.auto_continue_task_id == started["id"]
+    assert session.auto_continue_attempts == 1
 
 
 def test_non_interrupted_idle_working_agent_is_not_auto_continued(
@@ -577,6 +749,7 @@ def test_non_interrupted_idle_working_agent_is_not_auto_continued(
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     sent_messages.clear()
 
+    sampled_at = datetime.now()
     status_samples[:] = [
         TerminalAgentStatus(
             tab_id="tab-idle-no-error",
@@ -586,8 +759,8 @@ def test_non_interrupted_idle_working_agent_is_not_auto_continued(
             status_text="Idle",
             detail="agent prompt visible",
             tmux_session="claude-hub-tab-idle",
-            last_changed_at=datetime.now(),
-            sampled_at=datetime.now(),
+            last_changed_at=sampled_at - timedelta(seconds=30),
+            sampled_at=sampled_at,
         )
     ]
 
@@ -598,6 +771,20 @@ def test_non_interrupted_idle_working_agent_is_not_auto_continued(
     assert board["sessions"][0]["runtime_status"] == "idle"
     assert board["sessions"][0]["auto_continue_task_id"] == started["id"]
     assert board["sessions"][0]["auto_continue_attempts"] == 0
+
+    asyncio.run(
+        workspace_manager._refresh_session_statuses(
+            workspace["id"],
+            run_auto_continue=True,
+        )
+    )
+
+    session = workspace_manager.sessions[started["session_id"]]
+    assert sent_messages == []
+    assert workspace_manager.tasks[started["id"]].status == WorkspaceTaskStatus.WORKING
+    assert session.runtime_status == AgentRuntimeStatus.IDLE
+    assert session.auto_continue_task_id == started["id"]
+    assert session.auto_continue_attempts == 0
 
 
 def test_interrupted_idle_working_agent_auto_continue_stops_after_limit(
@@ -689,6 +876,7 @@ def test_interrupted_idle_working_agent_auto_continue_stops_after_limit(
     )
     sent_messages.clear()
 
+    sampled_at = datetime.now()
     status_samples[:] = [
         TerminalAgentStatus(
             tab_id="tab-api-limit",
@@ -698,18 +886,29 @@ def test_interrupted_idle_working_agent_auto_continue_stops_after_limit(
             status_text="Idle",
             detail="agent prompt visible",
             tmux_session="claude-hub-tab-api-",
-            last_changed_at=datetime.now(),
-            sampled_at=datetime.now(),
+            last_changed_at=sampled_at - timedelta(seconds=30),
+            sampled_at=sampled_at,
         )
     ]
 
     board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
-
     assert sent_messages == []
-    assert board["tasks"][0]["status"] == "review"
-    assert board["tasks"][0]["session_id"] == started["session_id"]
-    assert board["sessions"][0]["runtime_status"] == "attention"
-    assert board["sessions"][0]["auto_continue_attempts"] == 10
+    assert board["tasks"][0]["status"] == "working"
+    assert board["sessions"][0]["runtime_status"] == "idle"
+
+    asyncio.run(
+        workspace_manager._refresh_session_statuses(
+            workspace["id"],
+            run_auto_continue=True,
+        )
+    )
+
+    session = workspace_manager.sessions[started["session_id"]]
+    assert sent_messages == []
+    assert workspace_manager.tasks[started["id"]].status == WorkspaceTaskStatus.REVIEW
+    assert workspace_manager.tasks[started["id"]].session_id == started["session_id"]
+    assert session.runtime_status == AgentRuntimeStatus.ATTENTION
+    assert session.auto_continue_attempts == 10
 
 
 def test_review_task_stays_in_review_when_agent_runtime_is_working(
@@ -1542,7 +1741,7 @@ def test_create_agent_can_override_target_and_yolo_mode(
     assert created_tabs[0]["remote_reconnect"] is False
 
 
-def test_start_task_wakes_stopped_resident_agent(
+def test_start_task_does_not_dispatch_to_stopped_resident_agent(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1628,8 +1827,8 @@ def test_start_task_wakes_stopped_resident_agent(
     task_response = client.post(
         f"/api/workspaces/{workspace_id}/tasks",
         json={
-            "title": "Restart task",
-            "prompt": "Dispatch after restart",
+            "title": "Offline task",
+            "prompt": "Do not dispatch to offline agent",
             "agent_type": "codex",
         },
     )
@@ -1638,14 +1837,14 @@ def test_start_task_wakes_stopped_resident_agent(
         json={},
     )
 
-    assert response.status_code == 201
-    dispatched_task = response.json()
-    assert dispatched_task["status"] == "working"
-    assert dispatched_task["session_id"] == "restart-agent-1"
+    assert response.status_code == 400
+    assert "No idle or working workspace agent is available" in response.json()["detail"]
     assert "restart-agent-2" not in workspace_manager.sessions
     assert len(created_tabs) == 1
-    assert sent_messages[-1][0] == "claude-hub-tab-agen"
-    assert "Restart task" in sent_messages[-1][1]
+    assert len(sent_messages) == 1
+    board = client.get(f"/api/workspaces/{workspace_id}/board").json()
+    assert board["tasks"][0]["status"] == "todo"
+    assert board["tasks"][0]["session_id"] is None
 
 
 def test_delete_task_removes_reports_and_unlinks_session(
