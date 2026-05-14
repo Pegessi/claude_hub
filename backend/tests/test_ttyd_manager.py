@@ -214,6 +214,39 @@ def test_claude_spinner_status_classifies_as_working(monkeypatch: MonkeyPatch) -
     assert detail == "agent is processing"
 
 
+def test_codex_running_tool_status_classifies_as_working(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._status_snapshots = {}
+    process = TTYDProcess(
+        tab_id="tab-codex-running",
+        port=12351,
+        name="Codex Running",
+        agent_type=AgentType.CODEX,
+    )
+
+    status, status_text, detail, _last_changed_at = manager._classify_agent_status(
+        process,
+        "\n".join(
+            [
+                "⏺ Bash(ssh merlin_dev \"pytest tests\")",
+                "  ⎿  Running… (5s)",
+                "     (ctrl+b ctrl+b (twice) to run in background)",
+                "────────────────────────────────────────────────────",
+                "❯ ",
+                "────────────────────────────────────────────────────",
+                "  ⏵⏵ bypass permissions on (shift+tab to cycle) ·",
+            ]
+        ),
+        "hash",
+        "zsh",
+    )
+
+    assert status == AgentRuntimeStatus.WORKING
+    assert status_text == "Working"
+    assert detail == "agent is processing"
+
+
 def test_codex_selection_prompt_classifies_as_attention(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
     manager = TTYDManager.__new__(TTYDManager)

@@ -59,6 +59,8 @@ _WORKING_TAIL_PATTERNS = (
     "esc to interrupt",
     "ctrl+c to interrupt",
     "ctrl-c to interrupt",
+    "running…",
+    "running...",
 )
 
 # Claude Code also reports active work with spinner-style status lines such
@@ -1001,6 +1003,7 @@ class TTYDManager:
         tail_lines = non_empty[-5:]
         status_tail_lines = non_empty[-10:]
         tail = "\n".join(tail_lines).lower()
+        status_tail = "\n".join(status_tail_lines).lower()
         last_line = tail_lines[-1] if tail_lines else ""
 
         for pattern in _ATTENTION_TAIL_PATTERNS:
@@ -1013,7 +1016,7 @@ class TTYDManager:
                 )
 
         for pattern in _WORKING_TAIL_PATTERNS:
-            if pattern in tail:
+            if pattern in status_tail:
                 return (
                     AgentRuntimeStatus.WORKING,
                     "Working",
