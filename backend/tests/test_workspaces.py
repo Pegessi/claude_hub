@@ -26,6 +26,11 @@ from claude_hub.models import (
 from claude_hub.services.workspace_manager import workspace_manager
 
 workspace_module = import_module("claude_hub.services.workspace_manager")
+PNG_DATA_URL = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGA"
+    "WjR9awAAAABJRU5ErkJggg=="
+)
 
 
 @pytest.fixture(autouse=True)
@@ -92,6 +97,48 @@ def test_workspace_task_flow(tmp_path: Path) -> None:
     assert board["workspace"]["id"] == workspace["id"]
     assert [item["id"] for item in board["tasks"]] == [task["id"]]
     assert board["sessions"] == []
+
+
+def test_create_task_persists_pasted_image_attachment(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path / "state")
+
+    client = TestClient(app)
+    workspace_response = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Image Repo",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "image",
+        },
+    )
+
+    response = client.post(
+        f"/api/workspaces/{workspace_response.json()['id']}/tasks",
+        json={
+            "title": "Use screenshot",
+            "prompt": "Inspect the pasted screenshot",
+            "attachments": [
+                {
+                    "filename": "screen shot.png",
+                    "mime_type": "image/png",
+                    "data_url": PNG_DATA_URL,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 201
+    task = response.json()
+    assert task["attachments"][0]["filename"] == "screen-shot.png"
+    attachment_path = Path(task["attachments"][0]["path"])
+    assert attachment_path.exists()
+    assert attachment_path.read_bytes().startswith(b"\x89PNG")
 
 
 def test_spawn_worker_is_disabled(tmp_path: Path) -> None:

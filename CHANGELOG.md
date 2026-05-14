@@ -12,6 +12,12 @@
 - Relax mypy's untyped-def requirement for tests while keeping production code strict
 - **Files**: terminal.py, remote.py, models/__init__.py, ttyd_manager.py, workspace_manager.py, pyproject.toml, test_tabs.py, test_ttyd_manager.py, test_workspaces.py
 
+### feat: support image attachments in workspace tasks
+- Let task creation and follow-up instructions accept pasted image attachments from the browser clipboard
+- Persist image attachments under the workspace state directory, show previews in task detail, and include attachment file paths in the agent prompt
+- Add backend validation for supported image types and attachment size limits, plus test coverage for pasted-image persistence
+- **Files**: schemas.py, workspace_manager.py, workspaces.py, test_workspaces.py, AgentWorkspaceView.vue, workspaceStore.ts, types/index.ts
+
 ## 2026-05-14
 
 ### fix: classify Codex selection prompts as attention

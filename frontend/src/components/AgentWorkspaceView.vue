@@ -329,6 +329,28 @@
                 class="detail-copy"
                 :text="selectedTask.prompt"
               />
+              <div
+                v-if="selectedTask.attachments.length > 0"
+                class="attachment-list attachment-list--readonly"
+              >
+                <div
+                  v-for="attachment in selectedTask.attachments"
+                  :key="attachment.id"
+                  class="attachment-row"
+                >
+                  <div class="attachment-thumb">
+                    <img
+                      :src="`/api/workspaces/attachments/${attachment.id}`"
+                      :alt="attachment.filename"
+                    />
+                  </div>
+                  <div class="attachment-meta">
+                    <strong>{{ attachment.filename }}</strong>
+                    <span>{{ persistedAttachmentMeta(attachment) }}</span>
+                    <code>{{ attachment.path }}</code>
+                  </div>
+                </div>
+              </div>
             </section>
 
             <section class="detail-section">
@@ -484,11 +506,41 @@
                 <textarea
                   v-model="detailMessage"
                   placeholder="Follow-up instructions..."
+                  @paste="handleAttachmentPaste($event, detailAttachments)"
                 />
+                <div
+                  v-if="detailAttachments.length > 0"
+                  class="attachment-list send-attachments"
+                >
+                  <div
+                    v-for="attachment in detailAttachments"
+                    :key="attachment.id"
+                    class="attachment-row"
+                  >
+                    <div class="attachment-thumb">
+                      <img
+                        :src="attachment.preview_url"
+                        :alt="attachment.filename"
+                      />
+                    </div>
+                    <div class="attachment-meta">
+                      <strong>{{ attachment.filename }}</strong>
+                      <span>{{ attachment.mime_type }} · {{ formatAttachmentSize(attachment.size_bytes) }}</span>
+                    </div>
+                    <button
+                      type="button"
+                      class="icon-button"
+                      aria-label="Remove attachment"
+                      @click="removeDraftAttachment(detailAttachments, attachment)"
+                    >
+                      x
+                    </button>
+                  </div>
+                </div>
                 <button
                   type="submit"
                   class="primary-button"
-                  :disabled="!detailMessage.trim()"
+                  :disabled="!detailMessage.trim() && detailAttachments.length === 0"
                 >
                   Send
                 </button>
@@ -634,7 +686,37 @@
               v-model="taskForm.prompt"
               placeholder="Describe what the workspace agent should implement..."
               :disabled="!activeWorkspaceId"
+              @paste="handleAttachmentPaste($event, taskForm.attachments)"
             />
+            <div
+              v-if="taskForm.attachments.length > 0"
+              class="attachment-list"
+            >
+              <div
+                v-for="attachment in taskForm.attachments"
+                :key="attachment.id"
+                class="attachment-row"
+              >
+                <div class="attachment-thumb">
+                  <img
+                    :src="attachment.preview_url"
+                    :alt="attachment.filename"
+                  />
+                </div>
+                <div class="attachment-meta">
+                  <strong>{{ attachment.filename }}</strong>
+                  <span>{{ attachment.mime_type }} · {{ formatAttachmentSize(attachment.size_bytes) }}</span>
+                </div>
+                <button
+                  type="button"
+                  class="icon-button"
+                  aria-label="Remove attachment"
+                  @click="removeDraftAttachment(taskForm.attachments, attachment)"
+                >
+                  x
+                </button>
+              </div>
+            </div>
           </div>
           <div class="modal-field">
             <label>Related task</label>
@@ -663,7 +745,7 @@
             <button
               type="submit"
               class="primary-button"
-              :disabled="!activeWorkspaceId || isLoading || !taskForm.title.trim() || !taskForm.prompt.trim()"
+              :disabled="!activeWorkspaceId || isLoading || !taskForm.title.trim() || (!taskForm.prompt.trim() && taskForm.attachments.length === 0)"
             >
               Add task
             </button>
@@ -984,6 +1066,8 @@ import type {
   ManagedSession,
   RemoteProfile,
   TerminalAgentStatus,
+  WorkspaceAttachment,
+  WorkspaceAttachmentCreate,
   WorkspaceTask,
   WorkspaceTaskStatus,
 } from '@/types'
@@ -1006,6 +1090,12 @@ interface DirectoryListing {
   items: FileInfo[]
 }
 
+interface DraftAttachment extends WorkspaceAttachmentCreate {
+  id: string
+  preview_url: string
+  size_bytes: number
+}
+
 const appStore = useAppStore()
 const terminalStore = useTerminalStore()
 const workspaceStore = useWorkspaceStore()
@@ -1023,6 +1113,7 @@ const {
 const selectedWorkspaceId = ref(activeWorkspaceId.value || '')
 const selectedTaskId = ref<string | null>(null)
 const detailMessage = ref('')
+const detailAttachments = ref<DraftAttachment[]>([])
 const isDetailActionsExpanded = ref(false)
 const showWorkspaceModal = ref(false)
 const showAgentOptionsModal = ref(false)
@@ -1079,6 +1170,7 @@ const taskForm = reactive({
   title: '',
   prompt: '',
   related_task_id: '',
+  attachments: [] as DraftAttachment[],
 })
 
 const activeWorkspace = computed(() =>
@@ -1168,6 +1260,68 @@ function taskTitle(taskId?: string | null) {
   return tasks.value.find(task => task.id === taskId)?.title || taskId
 }
 
+function formatAttachmentSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+function persistedAttachmentMeta(attachment: WorkspaceAttachment) {
+  return `${attachment.filename} (${attachment.mime_type}, ${formatAttachmentSize(attachment.size_bytes)})`
+}
+
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = () => reject(reader.error || new Error('Failed to read attachment'))
+    reader.readAsDataURL(file)
+  })
+}
+
+async function addImageAttachments(target: DraftAttachment[], files: File[]) {
+  for (const file of files) {
+    if (!file.type.startsWith('image/')) continue
+    const dataUrl = await fileToDataUrl(file)
+    target.push({
+      id: crypto.randomUUID(),
+      filename: file.name || 'clipboard.png',
+      mime_type: file.type || 'image/png',
+      data_url: dataUrl,
+      preview_url: URL.createObjectURL(file),
+      size_bytes: file.size,
+    })
+  }
+}
+
+async function handleAttachmentPaste(event: ClipboardEvent, target: DraftAttachment[]) {
+  const files = Array.from(event.clipboardData?.files || []).filter(file =>
+    file.type.startsWith('image/')
+  )
+  if (files.length === 0) return
+  event.preventDefault()
+  await addImageAttachments(target, files)
+}
+
+function removeDraftAttachment(target: DraftAttachment[], attachment: DraftAttachment) {
+  const index = target.findIndex(item => item.id === attachment.id)
+  if (index >= 0) {
+    URL.revokeObjectURL(target[index].preview_url)
+    target.splice(index, 1)
+  }
+}
+
+function resetDraftAttachments(target: DraftAttachment[]) {
+  for (const attachment of target) {
+    URL.revokeObjectURL(attachment.preview_url)
+  }
+  target.splice(0)
+}
+
+function serializeDraftAttachments(target: DraftAttachment[]): WorkspaceAttachmentCreate[] {
+  return target.map(({ filename, mime_type, data_url }) => ({ filename, mime_type, data_url }))
+}
+
 function terminalStatusForAgent(agent: ManagedSession) {
   return terminalStatusByTabId.value[agent.tab_id] || null
 }
@@ -1202,6 +1356,7 @@ function selectTask(event: MouseEvent, taskId: string) {
   if (isInteractiveElement(event.target)) return
   if (selectedTaskId.value !== taskId) {
     detailMessage.value = ''
+    resetDraftAttachments(detailAttachments.value)
     isDetailActionsExpanded.value = false
   }
   selectedTaskId.value = taskId
@@ -1222,6 +1377,7 @@ function toggleDetailActions() {
 function closeTaskDetail() {
   selectedTaskId.value = null
   detailMessage.value = ''
+  resetDraftAttachments(detailAttachments.value)
   isDetailActionsExpanded.value = false
 }
 
@@ -1407,6 +1563,7 @@ function resetTaskForm() {
   taskForm.title = ''
   taskForm.prompt = ''
   taskForm.related_task_id = ''
+  resetDraftAttachments(taskForm.attachments)
 }
 
 function openTaskModal() {
@@ -1416,18 +1573,23 @@ function openTaskModal() {
 
 function closeTaskModal() {
   showTaskModal.value = false
+  resetDraftAttachments(taskForm.attachments)
 }
 
 async function handleCreateTask() {
-  if (!taskForm.title.trim() || !taskForm.prompt.trim()) return
+  if (!taskForm.title.trim() || (!taskForm.prompt.trim() && taskForm.attachments.length === 0)) {
+    return
+  }
   await workspaceStore.createTask({
     title: taskForm.title.trim(),
     prompt: taskForm.prompt.trim(),
     related_task_id: taskForm.related_task_id || null,
+    attachments: serializeDraftAttachments(taskForm.attachments),
   })
   taskForm.title = ''
   taskForm.prompt = ''
   taskForm.related_task_id = ''
+  resetDraftAttachments(taskForm.attachments)
   showTaskModal.value = false
 }
 
@@ -1469,14 +1631,22 @@ async function openSession(session: ManagedSession) {
 }
 
 async function sendDetailMessage() {
-  if (!selectedTask.value || !selectedSession.value || !detailMessage.value.trim()) return
+  if (
+    !selectedTask.value ||
+    !selectedSession.value ||
+    (!detailMessage.value.trim() && detailAttachments.value.length === 0)
+  ) {
+    return
+  }
   const message = detailMessage.value.trim()
+  const attachments = serializeDraftAttachments(detailAttachments.value)
   if (selectedTask.value.status === 'review') {
-    await workspaceStore.continueTask(selectedTask.value.id, { message })
+    await workspaceStore.continueTask(selectedTask.value.id, { message, attachments })
   } else {
-    await workspaceStore.sendMessage(selectedSession.value.id, message)
+    await workspaceStore.sendMessage(selectedSession.value.id, message, attachments)
   }
   detailMessage.value = ''
+  resetDraftAttachments(detailAttachments.value)
 }
 
 async function markTask(taskId: string, status: WorkspaceTaskStatus) {
@@ -1580,6 +1750,8 @@ onUnmounted(() => {
     window.clearInterval(boardPollTimer)
     boardPollTimer = null
   }
+  resetDraftAttachments(taskForm.attachments)
+  resetDraftAttachments(detailAttachments.value)
   terminalStore.stopAgentStatusPolling()
 })
 </script>
@@ -2399,13 +2571,13 @@ onUnmounted(() => {
 
 .send-form {
   margin-top: 10px;
-  display: flex;
-  align-items: flex-end;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
   gap: 8px;
 }
 
 .send-form textarea {
-  flex: 1;
   min-height: 100px;
   border: 1px solid #3f3f46;
   border-radius: 4px;
@@ -2413,6 +2585,80 @@ onUnmounted(() => {
   color: #f4f4f5;
   padding: 9px;
   resize: vertical;
+}
+
+.send-form .primary-button {
+  height: 34px;
+}
+
+.send-attachments {
+  grid-column: 1 / -1;
+}
+
+.attachment-list {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.attachment-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #3f3f46;
+  border-radius: 6px;
+  background: #252525;
+  padding: 8px;
+}
+
+.attachment-list--readonly .attachment-row {
+  grid-template-columns: 54px minmax(0, 1fr);
+}
+
+.attachment-thumb {
+  width: 54px;
+  height: 42px;
+  overflow: hidden;
+  border: 1px solid #3f3f46;
+  border-radius: 4px;
+  background: #171717;
+}
+
+.attachment-thumb img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.attachment-meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.attachment-meta strong,
+.attachment-meta span,
+.attachment-meta code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-meta strong {
+  color: #f4f4f5;
+  font-size: 12px;
+}
+
+.attachment-meta span,
+.attachment-meta code {
+  color: #a1a1aa;
+  font-size: 11px;
 }
 
 .detail-footer {
