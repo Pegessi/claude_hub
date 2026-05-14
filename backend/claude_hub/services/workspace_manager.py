@@ -99,6 +99,9 @@ class WorkspaceManager:
     def _workspace_state_file(self, workspace_id: str) -> Path:
         return self._workspace_dir(workspace_id) / "state.json"
 
+    def _workspace_task_records_dir(self, workspace_id: str) -> Path:
+        return self._workspace_dir(workspace_id) / "task_records"
+
     def snapshot_path(self, workspace_id: str) -> Path:
         return self._workspace_dir(workspace_id) / "snapshot.md"
 
@@ -422,6 +425,7 @@ class WorkspaceManager:
 
         self.tasks[task.id] = task.model_copy(update=update)
         if status == WorkspaceTaskStatus.DONE:
+            self._write_task_record(self.tasks[task.id])
             self._release_task_session(self.tasks[task.id])
         elif status == WorkspaceTaskStatus.WORKING and task.session_id:
             self._assign_current_task(task.session_id, task.id)
@@ -429,6 +433,88 @@ class WorkspaceManager:
         self._save_state()
         await self.dispatch_workspace(task.workspace_id)
         return self.tasks[task.id]
+
+    def _write_task_record(self, task: WorkspaceTask) -> None:
+        completed_at = task.completed_at or _now()
+        record_dir = self._workspace_task_records_dir(task.workspace_id)
+        record_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = completed_at.isoformat(timespec="seconds").replace(":", "-")
+        record_path = record_dir / f"{timestamp}-{task.id}.json"
+        task_reports = [
+            report
+            for report in self.reports_for_workspace(task.workspace_id)
+            if report.task_id == task.id
+        ]
+        session = self.sessions.get(task.session_id or "")
+        payload = {
+            "schema_version": 1,
+            "archived_at": _now().isoformat(),
+            "workspace_id": task.workspace_id,
+            "task": task.model_dump(mode="json"),
+            "session": session.model_dump(mode="json") if session else None,
+            "reports": [report.model_dump(mode="json") for report in task_reports],
+            "timeline": self._build_task_record_timeline(task, task_reports),
+            "artifacts": self._build_task_record_artifacts(task_reports),
+            "final_summary": self._task_record_final_summary(task_reports),
+        }
+        record_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _build_task_record_timeline(
+        self,
+        task: WorkspaceTask,
+        reports: list[AgentReport],
+    ) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = [
+            {"at": task.created_at.isoformat(), "type": "task_created", "title": task.title}
+        ]
+        for field, event_type in (
+            ("queued_at", "task_queued"),
+            ("started_at", "task_started"),
+            ("reviewed_at", "task_reviewed"),
+            ("completed_at", "task_completed"),
+        ):
+            value = getattr(task, field)
+            if value:
+                events.append({"at": value.isoformat(), "type": event_type})
+        for report in reports:
+            events.append(
+                {
+                    "at": report.created_at.isoformat(),
+                    "type": "agent_report",
+                    "state": report.state.value,
+                    "session_id": report.session_id,
+                    "message": report.message,
+                }
+            )
+        return sorted(events, key=lambda item: item["at"])
+
+    def _build_task_record_artifacts(self, reports: list[AgentReport]) -> dict[str, Any]:
+        changed_files: list[str] = []
+        validations: list[str] = []
+        risks: list[str] = []
+        for report in reports:
+            for file_path in report.changed_files:
+                if file_path not in changed_files:
+                    changed_files.append(file_path)
+            if report.validation:
+                validations.append(report.validation)
+            if report.risks:
+                risks.append(report.risks)
+        return {
+            "changed_files": changed_files,
+            "commits": [],
+            "validation": validations,
+            "risks": risks,
+        }
+
+    def _task_record_final_summary(self, reports: list[AgentReport]) -> str:
+        for report in reversed(reports):
+            if report.state in {
+                AgentReportState.COMPLETED,
+                AgentReportState.READY_FOR_REVIEW,
+            }:
+                return report.message
+        return reports[-1].message if reports else ""
 
     def delete_task(self, task_id: str) -> None:
         task = self.tasks.pop(task_id, None)

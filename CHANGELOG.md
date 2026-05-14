@@ -5,6 +5,12 @@
 
 ## 2026-05-14
 
+### feat: archive completed workspace task records
+- Write a per-workspace `task_records/{completed_at}-{task_id}.json` archive whenever a task is marked Done
+- Include task/session snapshots, agent reports, an ordered timeline, changed files, validation, risks, and final summary in the archive
+- Keep archived task records independent from task deletion so completed work remains reviewable after board cleanup
+- **Files**: workspace_manager.py, test_workspaces.py
+
 ### fix: reopen review tasks from follow-up send
 - Route follow-up sends on review tasks through the task continue API so the board moves the task back to Working immediately
 - Preserve generic session sends for non-review tasks
