@@ -455,10 +455,13 @@ def test_start_task_skips_offline_related_task_agent(
         json={"target_session_id": first_agent["id"]},
     )
     assert original_start.status_code == 201
-    assert client.patch(
-        f"/api/workspaces/tasks/{original_task['id']}",
-        json={"status": "done"},
-    ).status_code == 200
+    assert (
+        client.patch(
+            f"/api/workspaces/tasks/{original_task['id']}",
+            json={"status": "done"},
+        ).status_code
+        == 200
+    )
 
     workspace_manager.sessions[first_agent["id"]] = workspace_manager.sessions[
         first_agent["id"]
@@ -1004,9 +1007,10 @@ def test_review_task_stays_in_review_when_agent_runtime_is_working(
         },
     )
     assert review_response.status_code == 201
-    assert client.get(f"/api/workspaces/{workspace['id']}/board").json()["tasks"][0][
-        "status"
-    ] == "review"
+    assert (
+        client.get(f"/api/workspaces/{workspace['id']}/board").json()["tasks"][0]["status"]
+        == "review"
+    )
     reviewed_at = workspace_manager.tasks[task["id"]].reviewed_at
     assert reviewed_at is not None
     workspace_manager.tasks[task["id"]] = workspace_manager.tasks[task["id"]].model_copy(
@@ -1133,9 +1137,10 @@ def test_review_task_moves_to_working_when_agent_has_new_working_activity(
     assert review_response.status_code == 201
     reviewed_at = workspace_manager.tasks[task["id"]].reviewed_at
     assert reviewed_at is not None
-    assert client.get(f"/api/workspaces/{workspace['id']}/board").json()["tasks"][0][
-        "status"
-    ] == "review"
+    assert (
+        client.get(f"/api/workspaces/{workspace['id']}/board").json()["tasks"][0]["status"]
+        == "review"
+    )
 
     continued_at = datetime.now()
     assert continued_at > reviewed_at
@@ -1370,9 +1375,10 @@ def test_continue_task_marks_working_before_send_verification_failure(
         },
     )
     assert review_response.status_code == 201
-    assert client.get(f"/api/workspaces/{workspace['id']}/board").json()["tasks"][0][
-        "status"
-    ] == "review"
+    assert (
+        client.get(f"/api/workspaces/{workspace['id']}/board").json()["tasks"][0]["status"]
+        == "review"
+    )
 
     async def fake_send_session_message(_session_id: str, _message: str) -> None:
         raise RuntimeError("submit verification failed after delivery")

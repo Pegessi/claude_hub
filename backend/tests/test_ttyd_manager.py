@@ -229,7 +229,7 @@ def test_codex_running_tool_status_classifies_as_working(monkeypatch: MonkeyPatc
         process,
         "\n".join(
             [
-                "⏺ Bash(ssh merlin_dev \"pytest tests\")",
+                '⏺ Bash(ssh merlin_dev "pytest tests")',
                 "  ⎿  Running… (5s)",
                 "     (ctrl+b ctrl+b (twice) to run in background)",
                 "────────────────────────────────────────────────────",

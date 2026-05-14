@@ -159,9 +159,7 @@ class WorkspaceManager:
                 item["id"]: ManagedSession(**self._normalize_session_item(item))
                 for item in data.get("sessions", [])
             }
-            self.reports = {
-                item["id"]: AgentReport(**item) for item in data.get("reports", [])
-            }
+            self.reports = {item["id"]: AgentReport(**item) for item in data.get("reports", [])}
             self._save_state()
         except Exception as e:
             logger.error(f"Failed to load legacy workspace state: {e}")
@@ -198,9 +196,11 @@ class WorkspaceManager:
         normalized.setdefault("queued_count", 0)
         normalized.setdefault(
             "target",
-            ExecutionTarget.REMOTE.value
-            if normalized.get("remote_forward_port")
-            else ExecutionTarget.LOCAL.value,
+            (
+                ExecutionTarget.REMOTE.value
+                if normalized.get("remote_forward_port")
+                else ExecutionTarget.LOCAL.value
+            ),
         )
         normalized.setdefault("remote_profile_id", None)
         normalized.setdefault("remote_cwd", None)
@@ -578,7 +578,11 @@ class WorkspaceManager:
     ) -> ManagedSession:
         role = payload.role
         role_count = len(
-            [session for session in self._sessions_for_workspace_raw(workspace.id) if session.role == role]
+            [
+                session
+                for session in self._sessions_for_workspace_raw(workspace.id)
+                if session.role == role
+            ]
         )
         if role == WorkspaceSessionRole.DISPATCHER:
             session_id = f"{workspace.session_prefix}-dispatcher"
@@ -614,7 +618,9 @@ class WorkspaceManager:
         remote_forward_port = (
             self._next_remote_forward_port() if session_target == ExecutionTarget.REMOTE else None
         )
-        session_workspace_path = remote_cwd if session_target == ExecutionTarget.REMOTE else local_cwd
+        session_workspace_path = (
+            (remote_cwd or local_cwd) if session_target == ExecutionTarget.REMOTE else local_cwd
+        )
         tab = await ttyd_manager.create_tab(
             name=title,
             cwd=local_cwd if session_target == ExecutionTarget.LOCAL else None,
@@ -841,9 +847,7 @@ class WorkspaceManager:
                 ):
                     raise RuntimeError("Offline workspace agents cannot accept tasks")
                 if target.runtime_status == AgentRuntimeStatus.ATTENTION:
-                    raise RuntimeError(
-                        "Workspace agents waiting for input cannot accept new tasks"
-                    )
+                    raise RuntimeError("Workspace agents waiting for input cannot accept new tasks")
                 raise RuntimeError("Selected workspace agent cannot accept tasks yet")
             return (
                 target,
@@ -1298,8 +1302,8 @@ class WorkspaceManager:
             "Call this endpoint with your decision:\n"
             f"curl -sS -X POST {self._report_base_url(dispatcher)}/api/workspaces/tasks/{task.id}/dispatch-decision "
             "-H 'Content-Type: application/json' "
-            "-d '{\"target_session_id\":\"AGENT_ID\",\"clear_context\":false,"
-            "\"reason\":\"why this agent is best\"}'"
+            '-d \'{"target_session_id":"AGENT_ID","clear_context":false,'
+            '"reason":"why this agent is best"}\''
         )
 
     def _build_task_assignment_prompt(
@@ -1517,9 +1521,7 @@ class WorkspaceManager:
                 output[-240:],
             )
 
-        raise RuntimeError(
-            "Failed to submit workspace agent message; input still appears pending"
-        )
+        raise RuntimeError("Failed to submit workspace agent message; input still appears pending")
 
     def _message_still_in_input(self, output: str, message: str) -> bool:
         lines = [line.rstrip() for line in output.splitlines()]
@@ -1763,17 +1765,18 @@ class WorkspaceManager:
                 "status": ManagedSessionStatus.WORKING,
                 "runtime_status": AgentRuntimeStatus.WORKING,
                 "auto_continue_task_id": task.id,
-                "auto_continue_attempts": session.auto_continue_attempts
-                if session.auto_continue_task_id == task.id
-                else 0,
+                "auto_continue_attempts": (
+                    session.auto_continue_attempts
+                    if session.auto_continue_task_id == task.id
+                    else 0
+                ),
                 "updated_at": sampled_at,
             }
 
         last_activity_at = session.last_activity_at
         if (
             last_activity_at
-            and (sampled_at - last_activity_at).total_seconds()
-            < AUTO_CONTINUE_IDLE_GRACE_SECONDS
+            and (sampled_at - last_activity_at).total_seconds() < AUTO_CONTINUE_IDLE_GRACE_SECONDS
         ):
             return None
 
@@ -1781,11 +1784,7 @@ class WorkspaceManager:
         if not interruption_reason:
             return None
 
-        attempts = (
-            session.auto_continue_attempts
-            if session.auto_continue_task_id == task.id
-            else 0
-        )
+        attempts = session.auto_continue_attempts if session.auto_continue_task_id == task.id else 0
         if (
             session.auto_continue_task_id == task.id
             and session.last_auto_continue_at
@@ -1892,7 +1891,11 @@ class WorkspaceManager:
 
         for task_id, report in reports_by_task.items():
             task = self.tasks.get(task_id)
-            if not task or task.workspace_id != workspace_id or task.status == WorkspaceTaskStatus.DONE:
+            if (
+                not task
+                or task.workspace_id != workspace_id
+                or task.status == WorkspaceTaskStatus.DONE
+            ):
                 continue
             if report.state not in {AgentReportState.READY_FOR_REVIEW, AgentReportState.COMPLETED}:
                 continue
