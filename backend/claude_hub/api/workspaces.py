@@ -1,6 +1,7 @@
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 
 from ..auth.dependencies import get_current_user
 from ..models import (
@@ -67,6 +68,25 @@ async def create_task(
         return workspace_manager.create_task(workspace_id, payload)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Workspace not found") from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get("/attachments/{attachment_id}")
+async def get_attachment(
+    attachment_id: str,
+    current_user: User = Depends(get_current_user),
+) -> FileResponse:
+    """Return a persisted workspace task attachment."""
+    try:
+        attachment = workspace_manager.get_attachment(attachment_id)
+        return FileResponse(
+            attachment.path,
+            media_type=attachment.mime_type,
+            filename=attachment.filename,
+        )
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Attachment not found") from e
 
 
 @router.post("/{workspace_id}/agent", response_model=ManagedSession, status_code=201)
@@ -137,7 +157,7 @@ async def start_task(
         return await workspace_manager.start_task(task_id, payload)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Task not found") from e
-    except RuntimeError as e:
+    except (RuntimeError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
@@ -152,7 +172,7 @@ async def continue_task(
         return await workspace_manager.continue_task(task_id, payload)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Task not found") from e
-    except RuntimeError as e:
+    except (RuntimeError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
@@ -205,10 +225,14 @@ async def send_session_message(
 ) -> None:
     """Send a message to a managed session."""
     try:
-        await workspace_manager.send_session_message(managed_session_id, payload.message)
+        await workspace_manager.send_session_message(
+            managed_session_id,
+            payload.message,
+            payload.attachments,
+        )
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Session not found") from e
-    except RuntimeError as e:
+    except (RuntimeError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 

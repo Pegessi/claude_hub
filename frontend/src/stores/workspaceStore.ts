@@ -9,6 +9,7 @@ import type {
   ManagedSession,
   StartTaskRequest,
   Workspace,
+  WorkspaceAttachmentCreate,
   WorkspaceBoard,
   WorkspaceCreate,
   WorkspaceTask,
@@ -273,11 +274,15 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     await fetchBoard()
   }
 
-  async function sendMessage(sessionId: string, message: string) {
+  async function sendMessage(
+    sessionId: string,
+    message: string,
+    attachments: WorkspaceAttachmentCreate[] = []
+  ) {
     const response = await fetch(`${API_BASE}/workspaces/sessions/${sessionId}/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message, attachments }),
     })
     if (!response.ok) throw new Error(await readError(response))
   }

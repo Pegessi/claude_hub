@@ -184,6 +184,25 @@ class WorkspaceTaskCreate(BaseModel):
     prompt: str
     agent_type: AgentType = AgentType.CODEX
     related_task_id: Optional[str] = None
+    attachments: List["WorkspaceAttachmentCreate"] = Field(default_factory=list)
+
+
+class WorkspaceAttachmentCreate(BaseModel):
+    """Browser-provided task attachment data."""
+
+    filename: str
+    mime_type: str
+    data_url: str
+
+
+class WorkspaceAttachment(BaseModel):
+    """Persisted workspace task attachment."""
+
+    id: str
+    filename: str
+    mime_type: str
+    path: str
+    size_bytes: int
 
 
 class WorkspaceTaskUpdate(BaseModel):
@@ -199,6 +218,7 @@ class WorkspaceTask(BaseModel):
     workspace_id: str
     title: str
     prompt: str
+    attachments: List[WorkspaceAttachment] = Field(default_factory=list)
     agent_type: AgentType
     status: WorkspaceTaskStatus
     session_id: Optional[str] = None
@@ -315,6 +335,7 @@ class ContinueTaskRequest(BaseModel):
     """Payload for continuing a task from review with its original agent."""
 
     message: Optional[str] = None
+    attachments: List[WorkspaceAttachmentCreate] = Field(default_factory=list)
 
 
 class DispatchDecisionRequest(BaseModel):
@@ -329,6 +350,7 @@ class SendSessionMessageRequest(BaseModel):
     """Payload for sending a message to a managed session."""
 
     message: str
+    attachments: List[WorkspaceAttachmentCreate] = Field(default_factory=list)
 
 
 class User(BaseModel):
