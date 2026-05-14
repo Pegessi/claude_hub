@@ -71,7 +71,7 @@
       </div>
     </div>
 
-    <div :class="['workspace-layout', { 'detail-open': selectedTask }]">
+    <div class="workspace-layout">
       <main class="board">
         <div
           v-if="!activeWorkspaceId"
@@ -120,7 +120,9 @@
                     {{ task.status }}
                   </span>
                 </div>
-                <p>{{ task.prompt }}</p>
+                <p class="task-card-description">
+                  {{ task.prompt }}
+                </p>
                 <div
                   v-if="task.dispatch_pending"
                   class="latest-report"
@@ -137,7 +139,8 @@
                   v-if="latestReportForTask(task)"
                   class="latest-report"
                 >
-                  {{ latestReportForTask(task)?.state }} · {{ latestReportForTask(task)?.message }}
+                  <strong>{{ latestReportForTask(task)?.state }}</strong>
+                  <span>{{ latestReportForTask(task)?.message }}</span>
                 </div>
                 <div class="session-meta">
                   <span>task {{ task.status }}</span>
@@ -197,13 +200,6 @@
                   <button
                     v-if="task.status === 'review'"
                     type="button"
-                    @click.stop="continueTask(task)"
-                  >
-                    Continue
-                  </button>
-                  <button
-                    v-if="task.status === 'review'"
-                    type="button"
                     @click.stop="markTask(task.id, 'done')"
                   >
                     Done
@@ -214,13 +210,6 @@
                     @click.stop="openSession(sessionForTask(task)!)"
                   >
                     Open tab
-                  </button>
-                  <button
-                    v-if="sessionForTask(task)"
-                    type="button"
-                    @click.stop="openMessagePrompt(sessionForTask(task)!.id)"
-                  >
-                    Send
                   </button>
                   <button
                     type="button"
@@ -241,63 +230,146 @@
           </section>
         </template>
       </main>
+    </div>
 
-      <aside
+    <Teleport to="body">
+      <div
         v-if="selectedTask"
-        class="task-detail-panel"
+        class="task-detail-overlay"
+        @click.self="closeTaskDetail"
       >
-        <div class="detail-header">
-          <div>
-            <span class="detail-eyebrow">{{ selectedTask.status }}</span>
-            <h2>{{ selectedTask.title }}</h2>
-          </div>
-          <button
-            type="button"
-            class="icon-button"
-            @click="closeTaskDetail"
-          >
-            x
-          </button>
-        </div>
-
-        <div class="detail-body">
-          <section class="detail-section">
-            <div class="detail-section-title">Task description</div>
-            <p class="detail-copy">{{ selectedTask.prompt }}</p>
-          </section>
-
-          <section class="detail-section">
-            <div class="detail-section-title">Assignment</div>
-            <div class="fact-grid">
-              <div>
-                <span>Task stage</span>
-                <strong>{{ selectedTask.status }}</strong>
-              </div>
-              <div>
-                <span>Agent runtime</span>
-                <strong>{{ selectedSession?.runtime_status || 'none' }}</strong>
-              </div>
-              <div>
-                <span>Agent</span>
-                <strong>{{ selectedSession?.title || 'auto' }}</strong>
-              </div>
-              <div>
-                <span>Queued behind</span>
-                <strong>{{ selectedSession?.queued_count || 0 }}</strong>
-              </div>
-              <div>
-                <span>Clear context</span>
-                <strong>{{ selectedTask.clear_context ? 'yes' : 'no' }}</strong>
-              </div>
-              <div>
-                <span>Snapshot</span>
-                <strong>{{ board?.snapshot_path || 'none' }}</strong>
-              </div>
+        <aside
+          class="task-detail-panel"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="selectedTask.title"
+        >
+          <div class="detail-header">
+            <div>
+              <span class="detail-eyebrow">{{ selectedTask.status }}</span>
+              <h2>{{ selectedTask.title }}</h2>
             </div>
-          </section>
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Close task detail"
+              @click="closeTaskDetail"
+            >
+              x
+            </button>
+          </div>
 
-          <section class="detail-section">
-            <div class="detail-section-title">Actions</div>
+          <div class="detail-body">
+            <section class="detail-section">
+              <div class="detail-section-title">
+                Task description
+              </div>
+              <MarkdownContent
+                class="detail-copy"
+                :text="selectedTask.prompt"
+              />
+            </section>
+
+            <section class="detail-section">
+              <div class="detail-section-title">
+                Assignment
+              </div>
+              <div class="fact-grid">
+                <div>
+                  <span>Task stage</span>
+                  <strong>{{ selectedTask.status }}</strong>
+                </div>
+                <div>
+                  <span>Agent runtime</span>
+                  <strong>{{ selectedSession?.runtime_status || 'none' }}</strong>
+                </div>
+                <div>
+                  <span>Agent</span>
+                  <strong>{{ selectedSession?.title || 'auto' }}</strong>
+                </div>
+                <div>
+                  <span>Queued behind</span>
+                  <strong>{{ selectedSession?.queued_count || 0 }}</strong>
+                </div>
+                <div>
+                  <span>Clear context</span>
+                  <strong>{{ selectedTask.clear_context ? 'yes' : 'no' }}</strong>
+                </div>
+                <div>
+                  <span>Snapshot</span>
+                  <strong>{{ board?.snapshot_path || 'none' }}</strong>
+                </div>
+              </div>
+            </section>
+
+            <section class="detail-section">
+              <div class="detail-section-title">
+                Progress
+              </div>
+              <div
+                v-if="selectedReports.length === 0"
+                class="empty-timeline"
+              >
+                No agent reports yet.
+              </div>
+              <ol
+                v-else
+                class="timeline"
+              >
+                <li
+                  v-for="report in selectedReports"
+                  :key="report.id"
+                >
+                  <details
+                    class="report-card"
+                    :open="isLatestSelectedReport(report)"
+                  >
+                    <summary>
+                      <span class="report-state">{{ report.state }}</span>
+                      <span class="report-time">{{ formatTime(report.created_at) }}</span>
+                    </summary>
+                    <MarkdownContent
+                      class="report-message"
+                      :text="report.message"
+                    />
+                    <div
+                      v-if="report.changed_files.length > 0"
+                      class="report-files"
+                    >
+                      <span
+                        v-for="file in report.changed_files"
+                        :key="file"
+                      >
+                        {{ file }}
+                      </span>
+                    </div>
+                    <div
+                      v-if="report.validation"
+                      class="report-note"
+                    >
+                      <strong>Validation</strong>
+                      <MarkdownContent
+                        compact
+                        :text="report.validation"
+                      />
+                    </div>
+                    <div
+                      v-if="report.risks"
+                      class="report-note"
+                    >
+                      <strong>Risks</strong>
+                      <MarkdownContent
+                        compact
+                        :text="report.risks"
+                      />
+                    </div>
+                  </details>
+                </li>
+              </ol>
+            </section>
+          </div>
+
+          <div class="detail-footer">
             <div class="detail-actions">
               <button
                 v-if="selectedTask.status === 'todo'"
@@ -356,61 +428,10 @@
                 Send
               </button>
             </form>
-          </section>
-
-          <section class="detail-section">
-            <div class="detail-section-title">Progress</div>
-            <div
-              v-if="selectedReports.length === 0"
-              class="empty-timeline"
-            >
-              No agent reports yet.
-            </div>
-            <ol
-              v-else
-              class="timeline"
-            >
-              <li
-                v-for="report in selectedReports"
-                :key="report.id"
-              >
-                <div class="timeline-dot" />
-                <div>
-                  <div class="timeline-head">
-                    <strong>{{ report.state }}</strong>
-                    <span>{{ formatTime(report.created_at) }}</span>
-                  </div>
-                  <p>{{ report.message }}</p>
-                  <div
-                    v-if="report.changed_files.length > 0"
-                    class="report-files"
-                  >
-                    <span
-                      v-for="file in report.changed_files"
-                      :key="file"
-                    >
-                      {{ file }}
-                    </span>
-                  </div>
-                  <p
-                    v-if="report.validation"
-                    class="report-note"
-                  >
-                    Validation: {{ report.validation }}
-                  </p>
-                  <p
-                    v-if="report.risks"
-                    class="report-note"
-                  >
-                    Risks: {{ report.risks }}
-                  </p>
-                </div>
-              </li>
-            </ol>
-          </section>
-        </div>
-      </aside>
-    </div>
+          </div>
+        </aside>
+      </div>
+    </Teleport>
 
     <div
       v-if="showWorkspaceModal"
@@ -885,6 +906,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
+import MarkdownContent from '@/components/MarkdownContent.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
@@ -1048,6 +1070,10 @@ function sessionForTask(task: WorkspaceTask) {
 
 function latestReportForTask(task: WorkspaceTask) {
   return workspaceStore.latestReportForTask(task)
+}
+
+function isLatestSelectedReport(report: AgentReport) {
+  return selectedReports.value[selectedReports.value.length - 1]?.id === report.id
 }
 
 function agentTitle(sessionId?: string | null) {
@@ -1328,12 +1354,6 @@ async function openSession(session: ManagedSession) {
   terminalStore.setActiveTab(session.tab_id)
 }
 
-async function openMessagePrompt(sessionId: string) {
-  const message = window.prompt('Message to send')
-  if (!message?.trim()) return
-  await workspaceStore.sendMessage(sessionId, message.trim())
-}
-
 async function sendDetailMessage() {
   if (!selectedSession.value || !detailMessage.value.trim()) return
   await workspaceStore.sendMessage(selectedSession.value.id, detailMessage.value.trim())
@@ -1598,10 +1618,6 @@ onUnmounted(() => {
   grid-template-columns: minmax(0, 1fr);
 }
 
-.workspace-layout.detail-open {
-  grid-template-columns: minmax(0, 1fr) minmax(380px, 28vw);
-}
-
 .column-header h2,
 .task-card h3 {
   margin: 0;
@@ -1792,12 +1808,19 @@ onUnmounted(() => {
   line-height: 1.35;
 }
 
-.task-card p {
-  margin: 8px 0;
-  color: #cbd5e1;
-  font-size: 12px;
-  line-height: 1.4;
-  white-space: pre-wrap;
+.task-card-description {
+  max-width: 100%;
+  margin: 6px 0 8px;
+  color: #aeb7c3;
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: normal;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow-wrap: anywhere;
+  word-break: break-all;
 }
 
 .agent-badge,
@@ -1854,6 +1877,17 @@ onUnmounted(() => {
   overflow: hidden;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.latest-report strong {
+  color: #d4d4d8;
+  font-weight: 700;
+}
+
+.latest-report span {
+  margin-left: 4px;
 }
 
 .session-meta {
@@ -1926,19 +1960,42 @@ onUnmounted(() => {
   padding: 18px 0;
 }
 
-.task-detail-panel {
-  border-left: 1px solid #303030;
-  background: #1f1f1f;
-  min-width: 0;
+.task-detail-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  background: rgba(0, 0, 0, 0.58);
+  padding: 24px;
+}
+
+.task-detail-panel {
+  width: min(960px, calc(100vw - 48px));
+  max-height: min(860px, calc(100dvh - 48px));
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #3f3f46;
+  border-radius: 8px;
+  background: #1f1f1f;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
 }
 
 .detail-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px;
+  padding: 14px 16px;
   border-bottom: 1px solid #303030;
+  background: #1f1f1f;
 }
 
 .detail-eyebrow,
@@ -1966,10 +2023,13 @@ onUnmounted(() => {
 }
 
 .detail-body {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 14px;
-  padding: 14px;
+  overflow-y: auto;
+  padding: 14px 16px;
 }
 
 .detail-section {
@@ -1979,10 +2039,6 @@ onUnmounted(() => {
 
 .detail-copy {
   margin: 8px 0 0;
-  color: #d4d4d8;
-  font-size: 13px;
-  line-height: 1.5;
-  white-space: pre-wrap;
 }
 
 .fact-grid {
@@ -2018,17 +2074,17 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 10px;
 }
 
 .send-form {
   margin-top: 10px;
   display: flex;
-  flex-direction: column;
+  align-items: flex-end;
   gap: 8px;
 }
 
 .send-form textarea {
+  flex: 1;
   min-height: 100px;
   border: 1px solid #3f3f46;
   border-radius: 4px;
@@ -2036,6 +2092,15 @@ onUnmounted(() => {
   color: #f4f4f5;
   padding: 9px;
   resize: vertical;
+}
+
+.detail-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  border-top: 1px solid #303030;
+  background: #1f1f1f;
+  padding: 12px 16px;
 }
 
 .empty-timeline {
@@ -2050,47 +2115,71 @@ onUnmounted(() => {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
 .timeline li {
-  display: grid;
-  grid-template-columns: 10px minmax(0, 1fr);
-  gap: 8px;
+  min-width: 0;
 }
 
-.timeline-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: #60a5fa;
-  margin-top: 5px;
+.report-card {
+  border: 1px solid #303030;
+  border-radius: 6px;
+  background: #262626;
+  padding: 0;
 }
 
-.timeline-head {
+.report-card summary {
   display: flex;
+  align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
+  cursor: pointer;
+  padding: 10px;
   color: #f4f4f5;
   font-size: 12px;
 }
 
-.timeline-head span {
+.report-card summary::-webkit-details-marker {
+  display: none;
+}
+
+.report-card[open] summary {
+  border-bottom: 1px solid #303030;
+}
+
+.report-state {
+  position: relative;
+  padding-left: 15px;
+  font-weight: 700;
+}
+
+.report-state::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #60a5fa;
+  transform: translateY(-50%);
+}
+
+.report-time {
+  flex: 0 0 auto;
   color: #71717a;
 }
 
-.timeline p {
-  margin: 4px 0 0;
-  color: #cbd5e1;
-  font-size: 12px;
-  line-height: 1.45;
+.report-message {
+  padding: 10px;
 }
 
 .report-files {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
-  margin-top: 6px;
+  padding: 0 10px 10px;
 }
 
 .report-files span {
@@ -2102,7 +2191,18 @@ onUnmounted(() => {
 }
 
 .report-note {
+  margin: 0 10px 10px;
+  border-left: 2px solid #52525b;
+  padding-left: 8px;
   color: #a1a1aa;
+}
+
+.report-note strong {
+  display: block;
+  margin-bottom: 5px;
+  color: #d4d4d8;
+  font-size: 11px;
+  text-transform: uppercase;
 }
 
 .workspace-modal-overlay {
@@ -2479,8 +2579,7 @@ onUnmounted(() => {
     padding-bottom: 2px;
   }
 
-  .workspace-layout,
-  .workspace-layout.detail-open {
+  .workspace-layout {
     display: block;
     min-height: auto;
   }
@@ -2567,7 +2666,7 @@ onUnmounted(() => {
     align-items: center;
   }
 
-  .task-card p {
+  .task-card-description {
     display: -webkit-box;
     overflow: hidden;
     -webkit-line-clamp: 4;
@@ -2598,12 +2697,17 @@ onUnmounted(() => {
     font-size: 16px;
   }
 
+  .task-detail-overlay {
+    align-items: stretch;
+    overflow-y: hidden;
+    padding: 8px;
+  }
+
   .task-detail-panel {
-    position: fixed;
-    inset: 0;
-    z-index: 60;
-    border-left: 0;
-    overflow-y: auto;
+    width: 100%;
+    height: calc(100dvh - 16px);
+    max-height: calc(100dvh - 16px);
+    border-radius: 6px;
     -webkit-overflow-scrolling: touch;
   }
 
@@ -2626,7 +2730,7 @@ onUnmounted(() => {
   }
 
   .detail-body {
-    padding: 12px 12px 80px;
+    padding: 12px;
   }
 
   .fact-grid {
@@ -2637,6 +2741,15 @@ onUnmounted(() => {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
+  }
+
+  .detail-footer {
+    padding: 10px 12px;
+  }
+
+  .send-form {
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .detail-actions button,
