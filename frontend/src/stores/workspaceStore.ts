@@ -178,24 +178,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
-  async function spawnWorker(taskId: string, agentType?: AgentType) {
-    isLoading.value = true
-    error.value = null
-    try {
-      const response = await fetch(`${API_BASE}/workspaces/tasks/${taskId}/spawn`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agent_type: agentType }),
-      })
-      if (!response.ok) throw new Error(await readError(response))
-      await fetchBoard()
-    } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to spawn worker'
-    } finally {
-      isLoading.value = false
-    }
-  }
-
   async function ensureWorkspaceAgent(
     payload: EnsureWorkspaceAgentRequest | AgentType = 'codex'
   ) {
@@ -322,7 +304,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     createTask,
     updateTaskStatus,
     deleteTask,
-    spawnWorker,
     ensureWorkspaceAgent,
     deleteSession,
     startTask,
