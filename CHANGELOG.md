@@ -3,6 +3,14 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-05-15
+
+### feat: support image attachments in workspace tasks
+- Let task creation and follow-up instructions accept pasted image attachments from the browser clipboard
+- Persist image attachments under the workspace state directory, show previews in task detail, and include attachment file paths in the agent prompt
+- Add backend validation for supported image types and attachment size limits, plus test coverage for pasted-image persistence
+- **Files**: schemas.py, workspace_manager.py, workspaces.py, test_workspaces.py, AgentWorkspaceView.vue, workspaceStore.ts, types/index.ts
+
 ## 2026-05-14
 
 ### fix: classify Codex selection prompts as attention

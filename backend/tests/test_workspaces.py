@@ -26,6 +26,11 @@ from claude_hub.models import (
 from claude_hub.services.workspace_manager import workspace_manager
 
 workspace_module = import_module("claude_hub.services.workspace_manager")
+PNG_DATA_URL = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGA"
+    "WjR9awAAAABJRU5ErkJggg=="
+)
 
 
 @pytest.fixture(autouse=True)
@@ -92,6 +97,48 @@ def test_workspace_task_flow(tmp_path: Path) -> None:
     assert board["workspace"]["id"] == workspace["id"]
     assert [item["id"] for item in board["tasks"]] == [task["id"]]
     assert board["sessions"] == []
+
+
+def test_create_task_persists_pasted_image_attachment(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path / "state")
+
+    client = TestClient(app)
+    workspace_response = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Image Repo",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "image",
+        },
+    )
+
+    response = client.post(
+        f"/api/workspaces/{workspace_response.json()['id']}/tasks",
+        json={
+            "title": "Use screenshot",
+            "prompt": "Inspect the pasted screenshot",
+            "attachments": [
+                {
+                    "filename": "screen shot.png",
+                    "mime_type": "image/png",
+                    "data_url": PNG_DATA_URL,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 201
+    task = response.json()
+    assert task["attachments"][0]["filename"] == "screen-shot.png"
+    attachment_path = Path(task["attachments"][0]["path"])
+    assert attachment_path.exists()
+    assert attachment_path.read_bytes().startswith(b"\x89PNG")
 
 
 def test_spawn_worker_is_disabled(tmp_path: Path) -> None:
@@ -455,10 +502,13 @@ def test_start_task_skips_offline_related_task_agent(
         json={"target_session_id": first_agent["id"]},
     )
     assert original_start.status_code == 201
-    assert client.patch(
-        f"/api/workspaces/tasks/{original_task['id']}",
-        json={"status": "done"},
-    ).status_code == 200
+    assert (
+        client.patch(
+            f"/api/workspaces/tasks/{original_task['id']}",
+            json={"status": "done"},
+        ).status_code
+        == 200
+    )
 
     workspace_manager.sessions[first_agent["id"]] = workspace_manager.sessions[
         first_agent["id"]
@@ -1004,9 +1054,10 @@ def test_review_task_stays_in_review_when_agent_runtime_is_working(
         },
     )
     assert review_response.status_code == 201
-    assert client.get(f"/api/workspaces/{workspace['id']}/board").json()["tasks"][0][
-        "status"
-    ] == "review"
+    assert (
+        client.get(f"/api/workspaces/{workspace['id']}/board").json()["tasks"][0]["status"]
+        == "review"
+    )
     reviewed_at = workspace_manager.tasks[task["id"]].reviewed_at
     assert reviewed_at is not None
     workspace_manager.tasks[task["id"]] = workspace_manager.tasks[task["id"]].model_copy(
@@ -1133,9 +1184,10 @@ def test_review_task_moves_to_working_when_agent_has_new_working_activity(
     assert review_response.status_code == 201
     reviewed_at = workspace_manager.tasks[task["id"]].reviewed_at
     assert reviewed_at is not None
-    assert client.get(f"/api/workspaces/{workspace['id']}/board").json()["tasks"][0][
-        "status"
-    ] == "review"
+    assert (
+        client.get(f"/api/workspaces/{workspace['id']}/board").json()["tasks"][0]["status"]
+        == "review"
+    )
 
     continued_at = datetime.now()
     assert continued_at > reviewed_at
@@ -1370,9 +1422,10 @@ def test_continue_task_marks_working_before_send_verification_failure(
         },
     )
     assert review_response.status_code == 201
-    assert client.get(f"/api/workspaces/{workspace['id']}/board").json()["tasks"][0][
-        "status"
-    ] == "review"
+    assert (
+        client.get(f"/api/workspaces/{workspace['id']}/board").json()["tasks"][0]["status"]
+        == "review"
+    )
 
     async def fake_send_session_message(_session_id: str, _message: str) -> None:
         raise RuntimeError("submit verification failed after delivery")
