@@ -54,13 +54,17 @@
           >
             {{ getPaneCountForTab(tab.id) }}
           </span>
-          <button
+          <LoadingButton
+            type="button"
             class="tab-duplicate"
             title="Duplicate tab"
+            :loading="isPending(tabActionKey('duplicate', tab.id))"
+            hide-content-while-loading
+            loading-label="Duplicating tab"
             @click.stop="handleTabDuplicate(tab.id)"
           >
             📋
-          </button>
+          </LoadingButton>
           <button
             class="tab-close"
             @click.stop="handleTabClose(tab.id)"
@@ -175,14 +179,16 @@
                 type="text"
                 :placeholder="form.target === 'remote' ? '~/workspace/project' : 'e.g., ~/Project/my-app'"
               >
-              <button
+              <LoadingButton
                 type="button"
                 class="cwd-dropdown-btn"
                 :disabled="form.target === 'remote' && !form.remote_profile_id"
+                :loading="isPending('tab-browser:open')"
+                loading-label="Opening browser"
                 @click="toggleFileBrowser"
               >
                 Browse
-              </button>
+              </LoadingButton>
             </div>
           </div>
           <div class="form-group">
@@ -243,13 +249,15 @@
             >
               Cancel
             </button>
-            <button
+            <LoadingButton
               type="submit"
               class="btn btn-primary"
               :disabled="isCreateDisabled"
+              :loading="isPending('tab:create')"
+              loading-label="Creating tab"
             >
               {{ isLoading ? 'Creating...' : 'Create' }}
-            </button>
+            </LoadingButton>
           </div>
         </form>
       </div>
@@ -273,37 +281,46 @@
           </button>
         </div>
         <div class="file-browser-path">
-          <button
+          <LoadingButton
             type="button"
             class="path-nav-btn"
             title="Home"
+            :loading="isPending('tab-browser:home')"
+            hide-content-while-loading
+            loading-label="Loading home"
             @click="navigateToHome"
           >
             🏠
-          </button>
-          <button
+          </LoadingButton>
+          <LoadingButton
             v-if="browserParentPath"
             type="button"
             class="path-nav-btn"
             title="Parent"
-            @click="navigateToPath(browserParentPath)"
+            :loading="isPending('tab-browser:up')"
+            hide-content-while-loading
+            loading-label="Loading parent"
+            @click="navigateToParent"
           >
             ↑
-          </button>
+          </LoadingButton>
           <input
             v-model="browserPathInput"
             type="text"
             class="current-path-input"
             @keyup.enter="navigateToPath(browserPathInput)"
           >
-          <button
+          <LoadingButton
             type="button"
             class="path-nav-btn"
             title="Refresh"
-            @click="navigateToPath(browserCurrentPath || browserPathInput || '~')"
+            :loading="isPending('tab-browser:refresh')"
+            hide-content-while-loading
+            loading-label="Refreshing directory"
+            @click="refreshDirectory"
           >
             ↻
-          </button>
+          </LoadingButton>
         </div>
         <div class="file-browser-list">
           <div
@@ -374,14 +391,16 @@
           >
             Cancel
           </button>
-          <button
+          <LoadingButton
             type="button"
             class="btn btn-danger"
             :disabled="isLoading"
+            :loading="tabToClose ? isPending(tabActionKey('close', tabToClose.id)) : false"
+            loading-label="Closing tab"
             @click="confirmCloseTab"
           >
             {{ isLoading ? 'Closing...' : 'Close' }}
-          </button>
+          </LoadingButton>
         </div>
       </div>
     </div>
@@ -392,6 +411,8 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import AgentStatusFloatingPanel from '@/components/AgentStatusFloatingPanel.vue'
+import LoadingButton from '@/components/LoadingButton.vue'
+import { usePendingActions } from '@/composables/usePendingActions'
 import { useTerminalStore } from '@/stores/terminalStore'
 import type { RemoteProfile, TerminalTab } from '@/types'
 import type { AgentRuntimeStatus } from '@/types'
@@ -410,6 +431,7 @@ interface DirectoryListing {
 }
 
 const store = useTerminalStore()
+const { isPending, runPending } = usePendingActions()
 const { tabs, manualTabs, managedTabs, activeTabId, isLoading, agentStatuses } = storeToRefs(store)
 
 const tabStatusById = computed<Record<string, AgentRuntimeStatus>>(() => {
@@ -472,8 +494,15 @@ const selectedRemoteProfile = computed(() =>
   remoteProfiles.value.find(profile => profile.id === form.remote_profile_id) || null
 )
 const isCreateDisabled = computed(
-  () => isLoading.value || (form.target === 'remote' && !form.remote_profile_id)
+  () =>
+    isLoading.value ||
+    isPending('tab:create') ||
+    (form.target === 'remote' && !form.remote_profile_id)
 )
+
+function tabActionKey(action: string, tabId: string | null | undefined) {
+  return `tab:${tabId || 'none'}:${action}`
+}
 
 async function listDirectory(path?: string): Promise<DirectoryListing> {
   const params = new URLSearchParams()
@@ -497,20 +526,22 @@ async function listDirectory(path?: string): Promise<DirectoryListing> {
   return await response.json()
 }
 
-async function loadDirectory(path?: string) {
-  browserLoading.value = true
-  browserError.value = null
-  try {
-    const listing = await listDirectory(path)
-    browserCurrentPath.value = listing.current_path
-    browserPathInput.value = listing.current_path
-    browserParentPath.value = listing.parent_path
-    browserItems.value = listing.items
-  } catch (e) {
-    browserError.value = e instanceof Error ? e.message : 'Failed to load directory'
-  } finally {
-    browserLoading.value = false
-  }
+async function loadDirectory(path?: string, pendingKey = 'tab-browser:load') {
+  await runPending(pendingKey, async () => {
+    browserLoading.value = true
+    browserError.value = null
+    try {
+      const listing = await listDirectory(path)
+      browserCurrentPath.value = listing.current_path
+      browserPathInput.value = listing.current_path
+      browserParentPath.value = listing.parent_path
+      browserItems.value = listing.items
+    } catch (e) {
+      browserError.value = e instanceof Error ? e.message : 'Failed to load directory'
+    } finally {
+      browserLoading.value = false
+    }
+  })
 }
 
 async function fetchRemoteProfiles() {
@@ -618,16 +649,25 @@ function handleFileItemClick(item: FileInfo) {
   }
 }
 
-function navigateToPath(path: string) {
-  loadDirectory(path)
+function navigateToPath(path: string, pendingKey = 'tab-browser:path') {
+  loadDirectory(path, pendingKey)
 }
 
 function navigateToHome() {
   if (form.target === 'remote') {
-    loadDirectory(selectedRemoteProfile.value?.default_cwd || '~')
+    loadDirectory(selectedRemoteProfile.value?.default_cwd || '~', 'tab-browser:home')
   } else {
-    loadDirectory('~')
+    loadDirectory('~', 'tab-browser:home')
   }
+}
+
+function navigateToParent() {
+  if (!browserParentPath.value) return
+  loadDirectory(browserParentPath.value, 'tab-browser:up')
+}
+
+function refreshDirectory() {
+  loadDirectory(browserCurrentPath.value || browserPathInput.value || '~', 'tab-browser:refresh')
 }
 
 function selectCurrentDirectory() {
@@ -635,17 +675,17 @@ function selectCurrentDirectory() {
   showFileBrowser.value = false
 }
 
-function toggleFileBrowser() {
+async function toggleFileBrowser() {
   if (showFileBrowser.value) {
     showFileBrowser.value = false
   } else {
     showFileBrowser.value = true
     if (form.cwd) {
-      loadDirectory(form.cwd)
+      await loadDirectory(form.cwd, 'tab-browser:open')
     } else if (form.target === 'remote') {
-      loadDirectory(selectedRemoteProfile.value?.default_cwd || '~')
+      await loadDirectory(selectedRemoteProfile.value?.default_cwd || '~', 'tab-browser:open')
     } else {
-      loadDirectory('~')
+      await loadDirectory('~', 'tab-browser:open')
     }
   }
 }
@@ -675,21 +715,26 @@ function cancelRename() {
 
 async function handleRenameTab() {
   if (editingTabId.value && editingTabName.value.trim()) {
-    await store.updateTab(editingTabId.value, { name: editingTabName.value.trim() })
+    await runPending(tabActionKey('rename', editingTabId.value), () =>
+      store.updateTab(editingTabId.value!, { name: editingTabName.value.trim() })
+    )
   }
   editingTabId.value = null
   editingTabName.value = ''
 }
 
 async function handleTabDuplicate(tabId: string) {
-  await store.duplicateTab(tabId)
+  await runPending(tabActionKey('duplicate', tabId), () => store.duplicateTab(tabId))
 }
 
 async function confirmCloseTab() {
   if (tabToClose.value) {
-    await store.deleteTab(tabToClose.value.id)
-    tabToClose.value = null
-    showCloseConfirm.value = false
+    const tabId = tabToClose.value.id
+    await runPending(tabActionKey('close', tabId), async () => {
+      await store.deleteTab(tabId)
+      tabToClose.value = null
+      showCloseConfirm.value = false
+    })
   }
 }
 
@@ -799,26 +844,28 @@ async function handleCreateTab() {
       ? `${selectedProfile.name} · ${agent_type === 'cursor' ? 'Terminal' : agent_type === 'codex' ? 'Codex' : 'Claude'}`
       : name
 
-  await store.createTab({
-    name: tabName,
-    cwd: target === 'local' ? cwd : undefined,
-    solo_mode,
-    agent_type,
-    target,
-    remote_profile_id,
-    remote_cwd,
-    remote_reconnect,
-  })
+  await runPending('tab:create', async () => {
+    await store.createTab({
+      name: tabName,
+      cwd: target === 'local' ? cwd : undefined,
+      solo_mode,
+      agent_type,
+      target,
+      remote_profile_id,
+      remote_cwd,
+      remote_reconnect,
+    })
 
-  form.name = ''
-  form.cwd = ''
-  form.solo_mode = false
-  form.agent_type = 'claude'
-  form.target = 'local'
-  form.remote_profile_id = remoteProfiles.value[0]?.id || ''
-  form.remote_reconnect = true
-  showFileBrowser.value = false
-  showModal.value = false
+    form.name = ''
+    form.cwd = ''
+    form.solo_mode = false
+    form.agent_type = 'claude'
+    form.target = 'local'
+    form.remote_profile_id = remoteProfiles.value[0]?.id || ''
+    form.remote_reconnect = true
+    showFileBrowser.value = false
+    showModal.value = false
+  })
 }
 </script>
 

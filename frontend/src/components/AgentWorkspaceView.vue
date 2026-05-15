@@ -6,19 +6,30 @@
         <p>Manual task queue with multiple resident workspace agents.</p>
       </div>
       <div class="workspace-actions">
-        <select
-          v-model="selectedWorkspaceId"
-          class="workspace-select"
-          @change="handleWorkspaceChange"
+        <div
+          class="workspace-select-shell"
+          :data-loading="isPending('workspace:switch')"
         >
-          <option
-            v-for="workspace in workspaces"
-            :key="workspace.id"
-            :value="workspace.id"
+          <select
+            v-model="selectedWorkspaceId"
+            class="workspace-select"
+            :disabled="isPending('workspace:switch')"
+            @change="handleWorkspaceChange"
           >
-            {{ workspace.name }}
-          </option>
-        </select>
+            <option
+              v-for="workspace in workspaces"
+              :key="workspace.id"
+              :value="workspace.id"
+            >
+              {{ workspace.name }}
+            </option>
+          </select>
+          <span
+            v-if="isPending('workspace:switch')"
+            class="workspace-select-spinner"
+            aria-hidden="true"
+          />
+        </div>
         <button
           type="button"
           class="tool-button"
@@ -89,14 +100,17 @@
           >
             Manage
           </button>
-          <button
+          <LoadingButton
             type="button"
             class="agent-status-refresh"
             title="Refresh statuses"
+            :loading="isPending('workspace:refresh-statuses')"
+            hide-content-while-loading
+            loading-label="Refreshing statuses"
             @click="refreshAgentStatuses"
           >
             ↻
-          </button>
+          </LoadingButton>
         </div>
       </div>
       <div class="agent-status-grid">
@@ -108,6 +122,7 @@
           <button
             type="button"
             class="agent-status-card-main"
+            :disabled="isPending(sessionActionKey('open', agent.id))"
             @click="openSession(agent)"
           >
             <span
@@ -132,6 +147,11 @@
               class="agent-status-pill"
               :data-status="agentRuntimeStatus(agent)"
             >
+              <span
+                v-if="isPending(sessionActionKey('open', agent.id))"
+                class="agent-status-inline-spinner"
+                aria-hidden="true"
+              />
               {{ agentRuntimeText(agent) }}
             </span>
           </button>
@@ -139,15 +159,17 @@
             v-if="agent.role !== 'dispatcher'"
             class="agent-status-actions"
           >
-            <button
+            <LoadingButton
               type="button"
               class="agent-status-delete"
               :disabled="!canDeleteAgent(agent)"
               :title="agentDeleteTitle(agent)"
+              :loading="isPending(agentActionKey('delete', agent.id))"
+              loading-label="Deleting agent"
               @click="deleteAgent(agent)"
             >
               Delete
-            </button>
+            </LoadingButton>
           </div>
         </article>
         <div
@@ -278,34 +300,42 @@
                   </label>
                 </details>
                 <div class="task-actions">
-                  <button
+                  <LoadingButton
                     v-if="task.status === 'todo'"
                     type="button"
+                    :loading="isPending(taskActionKey('start', task.id))"
+                    loading-label="Starting task"
                     @click.stop="startTask(task)"
                   >
                     Start
-                  </button>
-                  <button
+                  </LoadingButton>
+                  <LoadingButton
                     v-if="task.status === 'review'"
                     type="button"
+                    :loading="isPending(taskActionKey('mark-done', task.id))"
+                    loading-label="Marking done"
                     @click.stop="markTask(task.id, 'done')"
                   >
                     Done
-                  </button>
-                  <button
+                  </LoadingButton>
+                  <LoadingButton
                     v-if="sessionForTask(task)"
                     type="button"
+                    :loading="isPending(sessionActionKey('open', task.session_id))"
+                    loading-label="Opening tab"
                     @click.stop="openSession(sessionForTask(task)!)"
                   >
                     Open tab
-                  </button>
-                  <button
+                  </LoadingButton>
+                  <LoadingButton
                     type="button"
                     class="danger-button"
+                    :loading="isPending(taskActionKey('delete', task.id))"
+                    loading-label="Deleting task"
                     @click.stop="deleteTask(task)"
                   >
                     Delete
-                  </button>
+                  </LoadingButton>
                 </div>
               </article>
               <div
@@ -493,37 +523,45 @@
             </button>
             <div class="detail-action-drawer">
               <div class="detail-actions">
-                <button
+                <LoadingButton
                   v-if="selectedTask.status === 'todo'"
                   type="button"
                   class="primary-button"
+                  :loading="isPending(taskActionKey('start', selectedTask.id))"
+                  loading-label="Starting task"
                   @click="startTask(selectedTask)"
                 >
                   Start
-                </button>
-                <button
+                </LoadingButton>
+                <LoadingButton
                   v-if="selectedTask.status === 'review'"
                   type="button"
                   class="tool-button"
+                  :loading="isPending(taskActionKey('mark-done', selectedTask.id))"
+                  loading-label="Marking done"
                   @click="markTask(selectedTask.id, 'done')"
                 >
                   Done
-                </button>
-                <button
+                </LoadingButton>
+                <LoadingButton
                   v-if="selectedSession"
                   type="button"
                   class="tool-button"
+                  :loading="isPending(sessionActionKey('open', selectedSession.id))"
+                  loading-label="Opening terminal"
                   @click="openSession(selectedSession)"
                 >
                   Open terminal
-                </button>
-                <button
+                </LoadingButton>
+                <LoadingButton
                   type="button"
                   class="danger-button"
+                  :loading="isPending(taskActionKey('delete', selectedTask.id))"
+                  loading-label="Deleting task"
                   @click="deleteTask(selectedTask)"
                 >
                   Delete
-                </button>
+                </LoadingButton>
               </div>
               <form
                 v-if="selectedSession"
@@ -564,13 +602,15 @@
                     </button>
                   </div>
                 </div>
-                <button
+                <LoadingButton
                   type="submit"
                   class="primary-button"
                   :disabled="!detailMessage.trim() && detailAttachments.length === 0"
+                  :loading="isPending(selectedTaskSendKey)"
+                  loading-label="Sending message"
                 >
                   Send
-                </button>
+                </LoadingButton>
               </form>
             </div>
           </div>
@@ -678,13 +718,15 @@
             >
               Cancel
             </button>
-            <button
+            <LoadingButton
               type="submit"
               class="primary-button"
               :disabled="isLoading || (workspaceForm.target === 'remote' && !workspaceForm.remote_profile_id)"
+              :loading="isPending('workspace:create')"
+              loading-label="Creating workspace"
             >
               Create workspace
-            </button>
+            </LoadingButton>
           </div>
         </form>
       </div>
@@ -769,13 +811,15 @@
             >
               Cancel
             </button>
-            <button
+            <LoadingButton
               type="submit"
               class="primary-button"
               :disabled="!activeWorkspaceId || isLoading || !taskForm.title.trim() || (!taskForm.prompt.trim() && taskForm.attachments.length === 0)"
+              :loading="isPending('task:create')"
+              loading-label="Adding task"
             >
               Add task
-            </button>
+            </LoadingButton>
           </div>
         </form>
       </div>
@@ -812,21 +856,25 @@
                 <span>queued {{ agent.queued_count }}</span>
               </div>
               <div class="agent-row-actions">
-                <button
+                <LoadingButton
                   type="button"
+                  :loading="isPending(sessionActionKey('open', agent.id))"
+                  loading-label="Opening agent"
                   @click="openSession(agent)"
                 >
                   Open
-                </button>
-                <button
+                </LoadingButton>
+                <LoadingButton
                   type="button"
                   class="danger-button"
                   :disabled="!canDeleteAgent(agent)"
                   :title="agentDeleteTitle(agent)"
+                  :loading="isPending(agentActionKey('delete', agent.id))"
+                  loading-label="Deleting agent"
                   @click="deleteAgent(agent)"
                 >
                   Delete
-                </button>
+                </LoadingButton>
               </div>
             </article>
             <div
@@ -843,12 +891,14 @@
                 <strong>{{ dispatcherAgent.title }}</strong>
                 <span>dispatcher · {{ dispatcherAgent.runtime_status }}</span>
               </div>
-              <button
+              <LoadingButton
                 type="button"
+                :loading="isPending(sessionActionKey('open', dispatcherAgent.id))"
+                loading-label="Opening dispatcher"
                 @click="openSession(dispatcherAgent)"
               >
                 Open
-              </button>
+              </LoadingButton>
             </article>
           </div>
         </section>
@@ -930,14 +980,16 @@
                 v-model="agentOptionsForm.cwd"
                 :placeholder="agentOptionsForm.target === 'remote' ? '~/workspace/project' : '/Users/me/workspace'"
               />
-              <button
+              <LoadingButton
                 type="button"
                 class="tool-button"
                 :disabled="agentOptionsForm.target === 'remote' && !agentOptionsForm.remote_profile_id"
+                :loading="isPending('agent-browser:open')"
+                loading-label="Opening browser"
                 @click="openAgentDirectoryBrowser"
               >
                 Browse
-              </button>
+              </LoadingButton>
             </div>
           </div>
 
@@ -976,13 +1028,15 @@
             >
               Cancel
             </button>
-            <button
+            <LoadingButton
               type="submit"
               class="primary-button"
               :disabled="isAgentOptionsCreateDisabled"
+              :loading="isPending('agent:create')"
+              loading-label="Creating agent"
             >
               Create agent
-            </button>
+            </LoadingButton>
           </div>
         </form>
       </div>
@@ -1005,32 +1059,38 @@
           </button>
         </div>
         <div class="file-browser-path">
-          <button
+          <LoadingButton
             type="button"
             class="path-nav-button"
+            :loading="isPending('agent-browser:home')"
+            loading-label="Loading home"
             @click="navigateAgentBrowserHome"
           >
             Home
-          </button>
-          <button
+          </LoadingButton>
+          <LoadingButton
             v-if="agentBrowserParentPath"
             type="button"
             class="path-nav-button"
-            @click="loadAgentDirectory(agentBrowserParentPath)"
+            :loading="isPending('agent-browser:up')"
+            loading-label="Loading parent"
+            @click="navigateAgentBrowserParent"
           >
             Up
-          </button>
+          </LoadingButton>
           <input
             v-model="agentBrowserPathInput"
             @keyup.enter="loadAgentDirectory(agentBrowserPathInput)"
           />
-          <button
+          <LoadingButton
             type="button"
             class="path-nav-button"
-            @click="loadAgentDirectory(agentBrowserCurrentPath || agentBrowserPathInput || '~')"
+            :loading="isPending('agent-browser:refresh')"
+            loading-label="Refreshing directory"
+            @click="refreshAgentDirectory"
           >
             Refresh
-          </button>
+          </LoadingButton>
         </div>
         <div class="file-browser-list">
           <div
@@ -1087,7 +1147,9 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
+import LoadingButton from '@/components/LoadingButton.vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
+import { usePendingActions } from '@/composables/usePendingActions'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
@@ -1132,6 +1194,7 @@ interface DraftAttachment extends WorkspaceAttachmentCreate {
 const appStore = useAppStore()
 const terminalStore = useTerminalStore()
 const workspaceStore = useWorkspaceStore()
+const { isPending, runPending } = usePendingActions()
 const {
   workspaces,
   activeWorkspaceId,
@@ -1218,6 +1281,10 @@ const selectedSession = computed(() =>
   selectedTask.value ? workspaceStore.sessionForTask(selectedTask.value) : null
 )
 
+const selectedTaskSendKey = computed(() =>
+  selectedTask.value ? taskActionKey('send', selectedTask.value.id) : 'task:none:send'
+)
+
 const selectedReports = computed<AgentReport[]>(() =>
   selectedTask.value ? workspaceStore.reportsForTask(selectedTask.value) : []
 )
@@ -1253,8 +1320,21 @@ const agentYoloHint = computed(() => {
 const isAgentOptionsCreateDisabled = computed(
   () =>
     isLoading.value ||
+    isPending('agent:create') ||
     (agentOptionsForm.target === 'remote' && !agentOptionsForm.remote_profile_id)
 )
+
+function taskActionKey(action: string, taskId: string | null | undefined) {
+  return `task:${taskId || 'none'}:${action}`
+}
+
+function agentActionKey(action: string, agentId: string | null | undefined) {
+  return `agent:${agentId || 'none'}:${action}`
+}
+
+function sessionActionKey(action: string, sessionId: string | null | undefined) {
+  return `session:${sessionId || 'none'}:${action}`
+}
 
 function startOptionsFor(task: WorkspaceTask): TaskStartOptions {
   if (!startOptions[task.id]) {
@@ -1461,18 +1541,20 @@ async function fetchRemoteProfiles() {
 }
 
 async function handleCreateWorkspace() {
-  const workspace = await workspaceStore.createWorkspace({
-    name: workspaceForm.name.trim(),
-    path: workspaceForm.path.trim(),
-    default_branch: workspaceForm.default_branch.trim() || 'main',
-    session_prefix: workspaceForm.session_prefix.trim() || undefined,
-    target: workspaceForm.target,
-    remote_profile_id:
-      workspaceForm.target === 'remote' ? workspaceForm.remote_profile_id || null : null,
-    remote_cwd:
-      workspaceForm.target === 'remote' ? workspaceForm.remote_cwd.trim() || null : null,
-    remote_reconnect: workspaceForm.remote_reconnect,
-  })
+  const workspace = await runPending('workspace:create', () =>
+    workspaceStore.createWorkspace({
+      name: workspaceForm.name.trim(),
+      path: workspaceForm.path.trim(),
+      default_branch: workspaceForm.default_branch.trim() || 'main',
+      session_prefix: workspaceForm.session_prefix.trim() || undefined,
+      target: workspaceForm.target,
+      remote_profile_id:
+        workspaceForm.target === 'remote' ? workspaceForm.remote_profile_id || null : null,
+      remote_cwd:
+        workspaceForm.target === 'remote' ? workspaceForm.remote_cwd.trim() || null : null,
+      remote_reconnect: workspaceForm.remote_reconnect,
+    })
+  )
   if (workspace) {
     selectedWorkspaceId.value = workspace.id
     showWorkspaceModal.value = false
@@ -1526,23 +1608,25 @@ function closeAgentOptionsModal() {
 
 async function handleCreateAdvancedAgent() {
   const cwd = agentOptionsForm.cwd.trim()
-  await workspaceStore.ensureWorkspaceAgent({
-    agent_type: agentOptionsForm.agent_type,
-    title: agentOptionsForm.title.trim() || null,
-    role: 'orchestrator',
-    reuse_existing: false,
-    target: agentOptionsForm.target,
-    cwd: agentOptionsForm.target === 'local' ? cwd || null : null,
-    remote_profile_id:
-      agentOptionsForm.target === 'remote' ? agentOptionsForm.remote_profile_id || null : null,
-    remote_cwd: agentOptionsForm.target === 'remote' ? cwd || null : null,
-    remote_reconnect:
-      agentOptionsForm.target === 'remote' ? agentOptionsForm.remote_reconnect : null,
-    solo_mode: agentOptionsForm.agent_type === 'cursor' ? false : agentOptionsForm.solo_mode,
+  await runPending('agent:create', async () => {
+    await workspaceStore.ensureWorkspaceAgent({
+      agent_type: agentOptionsForm.agent_type,
+      title: agentOptionsForm.title.trim() || null,
+      role: 'orchestrator',
+      reuse_existing: false,
+      target: agentOptionsForm.target,
+      cwd: agentOptionsForm.target === 'local' ? cwd || null : null,
+      remote_profile_id:
+        agentOptionsForm.target === 'remote' ? agentOptionsForm.remote_profile_id || null : null,
+      remote_cwd: agentOptionsForm.target === 'remote' ? cwd || null : null,
+      remote_reconnect:
+        agentOptionsForm.target === 'remote' ? agentOptionsForm.remote_reconnect : null,
+      solo_mode: agentOptionsForm.agent_type === 'cursor' ? false : agentOptionsForm.solo_mode,
+    })
+    showAgentOptionsModal.value = false
+    showAgentFileBrowser.value = false
+    await terminalStore.fetchTabs()
   })
-  showAgentOptionsModal.value = false
-  showAgentFileBrowser.value = false
-  await terminalStore.fetchTabs()
 }
 
 async function listAgentDirectory(path?: string): Promise<DirectoryListing> {
@@ -1567,39 +1651,53 @@ async function listAgentDirectory(path?: string): Promise<DirectoryListing> {
   return await response.json()
 }
 
-async function loadAgentDirectory(path?: string) {
-  agentBrowserLoading.value = true
-  agentBrowserError.value = null
-  try {
-    const listing = await listAgentDirectory(path)
-    agentBrowserCurrentPath.value = listing.current_path
-    agentBrowserPathInput.value = listing.current_path
-    agentBrowserParentPath.value = listing.parent_path
-    agentBrowserItems.value = listing.items
-  } catch (e) {
-    agentBrowserError.value = e instanceof Error ? e.message : 'Failed to load directory'
-  } finally {
-    agentBrowserLoading.value = false
-  }
+async function loadAgentDirectory(path?: string, pendingKey = 'agent-browser:load') {
+  await runPending(pendingKey, async () => {
+    agentBrowserLoading.value = true
+    agentBrowserError.value = null
+    try {
+      const listing = await listAgentDirectory(path)
+      agentBrowserCurrentPath.value = listing.current_path
+      agentBrowserPathInput.value = listing.current_path
+      agentBrowserParentPath.value = listing.parent_path
+      agentBrowserItems.value = listing.items
+    } catch (e) {
+      agentBrowserError.value = e instanceof Error ? e.message : 'Failed to load directory'
+    } finally {
+      agentBrowserLoading.value = false
+    }
+  })
 }
 
-function openAgentDirectoryBrowser() {
+async function openAgentDirectoryBrowser() {
   showAgentFileBrowser.value = true
   if (agentOptionsForm.cwd) {
-    loadAgentDirectory(agentOptionsForm.cwd)
+    await loadAgentDirectory(agentOptionsForm.cwd, 'agent-browser:open')
   } else if (agentOptionsForm.target === 'remote') {
-    loadAgentDirectory(selectedAgentRemoteProfile.value?.default_cwd || '~')
+    await loadAgentDirectory(selectedAgentRemoteProfile.value?.default_cwd || '~', 'agent-browser:open')
   } else {
-    loadAgentDirectory('~')
+    await loadAgentDirectory('~', 'agent-browser:open')
   }
 }
 
 function navigateAgentBrowserHome() {
   if (agentOptionsForm.target === 'remote') {
-    loadAgentDirectory(selectedAgentRemoteProfile.value?.default_cwd || '~')
+    loadAgentDirectory(selectedAgentRemoteProfile.value?.default_cwd || '~', 'agent-browser:home')
   } else {
-    loadAgentDirectory('~')
+    loadAgentDirectory('~', 'agent-browser:home')
   }
+}
+
+function navigateAgentBrowserParent() {
+  if (!agentBrowserParentPath.value) return
+  loadAgentDirectory(agentBrowserParentPath.value, 'agent-browser:up')
+}
+
+function refreshAgentDirectory() {
+  loadAgentDirectory(
+    agentBrowserCurrentPath.value || agentBrowserPathInput.value || '~',
+    'agent-browser:refresh'
+  )
 }
 
 function handleAgentFileItemClick(item: FileInfo) {
@@ -1634,23 +1732,28 @@ async function handleCreateTask() {
   if (!taskForm.title.trim() || (!taskForm.prompt.trim() && taskForm.attachments.length === 0)) {
     return
   }
-  await workspaceStore.createTask({
-    title: taskForm.title.trim(),
-    prompt: taskForm.prompt.trim(),
-    related_task_id: taskForm.related_task_id || null,
-    attachments: serializeDraftAttachments(taskForm.attachments),
+  await runPending('task:create', async () => {
+    await workspaceStore.createTask({
+      title: taskForm.title.trim(),
+      prompt: taskForm.prompt.trim(),
+      related_task_id: taskForm.related_task_id || null,
+      attachments: serializeDraftAttachments(taskForm.attachments),
+    })
+    taskForm.title = ''
+    taskForm.prompt = ''
+    taskForm.related_task_id = ''
+    resetDraftAttachments(taskForm.attachments)
+    showTaskModal.value = false
   })
-  taskForm.title = ''
-  taskForm.prompt = ''
-  taskForm.related_task_id = ''
-  resetDraftAttachments(taskForm.attachments)
-  showTaskModal.value = false
 }
 
 async function handleWorkspaceChange() {
   if (!selectedWorkspaceId.value) return
-  workspaceStore.setActiveWorkspace(selectedWorkspaceId.value)
-  await workspaceStore.fetchBoard(selectedWorkspaceId.value)
+  const workspaceId = selectedWorkspaceId.value
+  await runPending('workspace:switch', async () => {
+    workspaceStore.setActiveWorkspace(workspaceId)
+    await workspaceStore.fetchBoard(workspaceId)
+  })
 }
 
 async function refreshBoard() {
@@ -1662,26 +1765,32 @@ async function refreshBoard() {
 }
 
 async function refreshAgentStatuses() {
-  await Promise.all([
-    workspaceStore.fetchBoard(),
-    terminalStore.fetchAgentStatuses(),
-  ])
+  await runPending('workspace:refresh-statuses', () =>
+    Promise.all([
+      workspaceStore.fetchBoard(),
+      terminalStore.fetchAgentStatuses(),
+    ])
+  )
 }
 
 async function startTask(task: WorkspaceTask) {
-  const options = startOptionsFor(task)
-  await workspaceStore.startTask(task.id, {
-    target_session_id: options.target_session_id || null,
-    related_task_id: options.related_task_id || null,
-    clear_context: options.clear_context ? true : null,
+  await runPending(taskActionKey('start', task.id), async () => {
+    const options = startOptionsFor(task)
+    await workspaceStore.startTask(task.id, {
+      target_session_id: options.target_session_id || null,
+      related_task_id: options.related_task_id || null,
+      clear_context: options.clear_context ? true : null,
+    })
+    await terminalStore.fetchTabs()
   })
-  await terminalStore.fetchTabs()
 }
 
 async function openSession(session: ManagedSession) {
-  await terminalStore.fetchTabs()
-  appStore.setMode('terminal')
-  terminalStore.setActiveTab(session.tab_id)
+  await runPending(sessionActionKey('open', session.id), async () => {
+    await terminalStore.fetchTabs()
+    appStore.setMode('terminal')
+    terminalStore.setActiveTab(session.tab_id)
+  })
 }
 
 async function sendDetailMessage() {
@@ -1692,35 +1801,45 @@ async function sendDetailMessage() {
   ) {
     return
   }
+  const task = selectedTask.value
+  const session = selectedSession.value
   const message = detailMessage.value.trim()
   const attachments = serializeDraftAttachments(detailAttachments.value)
-  if (selectedTask.value.status === 'review') {
-    await workspaceStore.continueTask(selectedTask.value.id, { message, attachments })
-  } else {
-    await workspaceStore.sendMessage(selectedSession.value.id, message, attachments)
-  }
-  detailMessage.value = ''
-  resetDraftAttachments(detailAttachments.value)
+  await runPending(taskActionKey('send', task.id), async () => {
+    if (task.status === 'review') {
+      await workspaceStore.continueTask(task.id, { message, attachments })
+    } else {
+      await workspaceStore.sendMessage(session.id, message, attachments)
+    }
+    detailMessage.value = ''
+    resetDraftAttachments(detailAttachments.value)
+  })
 }
 
 async function markTask(taskId: string, status: WorkspaceTaskStatus) {
-  await workspaceStore.updateTaskStatus(taskId, status)
+  await runPending(taskActionKey(`mark-${status}`, taskId), () =>
+    workspaceStore.updateTaskStatus(taskId, status)
+  )
 }
 
 async function deleteTask(task: WorkspaceTask) {
   const confirmed = window.confirm(`Delete task "${task.title}"?`)
   if (!confirmed) return
-  await workspaceStore.deleteTask(task.id)
-  if (selectedTaskId.value === task.id) {
-    closeTaskDetail()
-  }
+  await runPending(taskActionKey('delete', task.id), async () => {
+    await workspaceStore.deleteTask(task.id)
+    if (selectedTaskId.value === task.id) {
+      closeTaskDetail()
+    }
+  })
 }
 
 async function deleteAgent(agent: ManagedSession) {
   const confirmed = window.confirm(`Delete agent "${agent.title}"?`)
   if (!confirmed) return
-  await workspaceStore.deleteSession(agent.id)
-  await terminalStore.fetchTabs()
+  await runPending(agentActionKey('delete', agent.id), async () => {
+    await workspaceStore.deleteSession(agent.id)
+    await terminalStore.fetchTabs()
+  })
 }
 
 watch(tasks, value => {
@@ -2013,6 +2132,11 @@ onUnmounted(() => {
   transform: translateY(1px);
 }
 
+.agent-status-card-main:disabled {
+  cursor: wait;
+  opacity: 0.8;
+}
+
 .agent-status-dot {
   width: 8px;
   height: 8px;
@@ -2081,12 +2205,29 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 5px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.08);
   color: currentColor;
   font-size: 11px;
   font-weight: 700;
   padding: 5px 8px;
+}
+
+.agent-status-inline-spinner {
+  width: 0.9em;
+  height: 0.9em;
+  flex: 0 0 auto;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 999px;
+  animation: agent-status-spin 700ms linear infinite;
+}
+
+@keyframes agent-status-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .agent-status-dot[data-status='idle'],
@@ -2152,6 +2293,11 @@ onUnmounted(() => {
   padding: 8px 0;
 }
 
+.workspace-select-shell {
+  position: relative;
+  min-width: 220px;
+}
+
 .workspace-select,
 .tool-button,
 .primary-button,
@@ -2172,7 +2318,34 @@ onUnmounted(() => {
 }
 
 .workspace-select {
+  width: 100%;
   min-width: 220px;
+  padding-right: 32px;
+}
+
+.workspace-select-shell[data-loading='true'] .workspace-select {
+  cursor: wait;
+  opacity: 0.75;
+}
+
+.workspace-select-spinner {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  margin-top: -7px;
+  pointer-events: none;
+  border: 2px solid #d4d4d8;
+  border-right-color: transparent;
+  border-radius: 999px;
+  animation: workspace-select-spin 700ms linear infinite;
+}
+
+@keyframes workspace-select-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .tool-button,
@@ -3238,9 +3411,13 @@ onUnmounted(() => {
     gap: 6px;
   }
 
-  .workspace-select {
+  .workspace-select-shell {
     grid-column: 1 / -1;
     width: 100%;
+    min-width: 0;
+  }
+
+  .workspace-select {
     min-width: 0;
   }
 
@@ -3533,7 +3710,7 @@ onUnmounted(() => {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  .workspace-select {
+  .workspace-select-shell {
     grid-column: 1 / -1;
   }
 

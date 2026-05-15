@@ -25,14 +25,17 @@
     >
       <div class="panel-header">
         <span class="panel-title">{{ panelTitle }}</span>
-        <button
+        <LoadingButton
           type="button"
           class="panel-refresh"
           title="Refresh statuses"
+          :loading="isStatusLoading"
+          hide-content-while-loading
+          loading-label="Refreshing statuses"
           @click="store.fetchAgentStatuses"
         >
           ↻
-        </button>
+        </LoadingButton>
       </div>
 
       <div
@@ -89,6 +92,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
+import LoadingButton from '@/components/LoadingButton.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import type { AgentRuntimeStatus, TerminalAgentStatus, TerminalTab } from '@/types'
@@ -117,7 +121,7 @@ const props = withDefaults(defineProps<{
 
 const store = useTerminalStore()
 const appStore = useAppStore()
-const { manualTabs, managedTabs, agentStatuses, activeTabId } = storeToRefs(store)
+const { manualTabs, managedTabs, agentStatuses, activeTabId, isStatusLoading } = storeToRefs(store)
 const { mode } = storeToRefs(appStore)
 const storageKeyExpanded = `claude_hub_${props.source}_status_expanded`
 const storageKeySize = `claude_hub_${props.source}_status_size`
