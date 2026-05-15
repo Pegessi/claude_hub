@@ -5,6 +5,11 @@
 
 ## 2026-05-15
 
+### fix: reopen completed review tasks from live runtime work
+- Treat later live Working activity after the review grace window as a valid Review-to-Working transition for both `ready_for_review` and `completed` reports
+- Keep the immediate post-report grace window so a completion report's own terminal output does not reopen the task
+- **Files**: workspace_manager.py, test_workspaces.py
+
 ### feat: add button-level loading feedback
 - Add a reusable loading button component and pending-action helper for frontend interactions
 - Show per-control processing feedback for workspace switching, workspace task actions, agent management, follow-up sends, terminal tab creation/duplication/closing, directory browsing, status refresh, login redirect, and logout

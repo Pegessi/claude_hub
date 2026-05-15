@@ -1870,7 +1870,7 @@ class WorkspaceManager:
                     and (status.last_changed_at - task.reviewed_at).total_seconds()
                     > REVIEW_RUNTIME_REOPEN_GRACE_SECONDS
                     and self._latest_report_state(current_task_id)
-                    == AgentReportState.READY_FOR_REVIEW
+                    in {AgentReportState.READY_FOR_REVIEW, AgentReportState.COMPLETED}
                 ):
                     self.tasks[current_task_id] = task.model_copy(
                         update={
