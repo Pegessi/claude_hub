@@ -50,6 +50,7 @@ TMUX_SUBMIT_SETTLE_SECONDS = 0.7
 AUTO_CONTINUE_MAX_ATTEMPTS = 10
 AUTO_CONTINUE_MIN_INTERVAL_SECONDS = 15
 AUTO_CONTINUE_IDLE_GRACE_SECONDS = 20
+REVIEW_RUNTIME_REOPEN_GRACE_SECONDS = 20
 WORKSPACE_MONITOR_INTERVAL_SECONDS = 5
 AUTO_CONTINUE_MESSAGE = (
     "Please inspect the current task state. If the task was interrupted or is unfinished, "
@@ -1866,7 +1867,8 @@ class WorkspaceManager:
                     and task.status == WorkspaceTaskStatus.REVIEW
                     and status.last_changed_at
                     and task.reviewed_at
-                    and status.last_changed_at > task.reviewed_at
+                    and (status.last_changed_at - task.reviewed_at).total_seconds()
+                    > REVIEW_RUNTIME_REOPEN_GRACE_SECONDS
                     and self._latest_report_state(current_task_id)
                     == AgentReportState.READY_FOR_REVIEW
                 ):
