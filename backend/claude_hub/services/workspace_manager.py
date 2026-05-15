@@ -51,7 +51,17 @@ AUTO_CONTINUE_MAX_ATTEMPTS = 10
 AUTO_CONTINUE_MIN_INTERVAL_SECONDS = 15
 AUTO_CONTINUE_IDLE_GRACE_SECONDS = 20
 WORKSPACE_MONITOR_INTERVAL_SECONDS = 5
-AUTO_CONTINUE_MESSAGE = "please continue"
+AUTO_CONTINUE_MESSAGE = (
+    "Please inspect the current task state. If the task was interrupted or is unfinished, "
+    "continue from the last actionable step. If the task is already complete and only missed "
+    "the workspace report, immediately POST a ready_for_review or completed report instead of "
+    "doing more work."
+)
+AUTO_REPORT_MISSING_MESSAGE = (
+    "The task appears complete but no workspace report was recorded. Please immediately POST "
+    "the final ready_for_review or completed report with changed_files, validation, and risks; "
+    "only continue work if you find it is actually unfinished."
+)
 AUTO_CONTINUE_INTERRUPTION_PATTERNS = (
     "api error",
     "api_error",
@@ -73,6 +83,19 @@ AUTO_CONTINUE_INTERRUPTION_PATTERNS = (
     "network error",
     "temporarily unavailable",
     "overloaded",
+)
+AUTO_CONTINUE_COMPLETION_PATTERNS = (
+    "ready_for_review",
+    "ready for review",
+    "ready for human review",
+    "completed report",
+    "task complete",
+    "task is complete",
+    "work is complete",
+    "changed_files",
+    "changed files",
+    "validation:",
+    "risks:",
 )
 ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024
 IMAGE_ATTACHMENT_TYPES = {
@@ -1135,6 +1158,19 @@ class WorkspaceManager:
                 "last_activity_at": now,
             }
         )
+        continue_report = AgentReport(
+            id=str(uuid.uuid4()),
+            workspace_id=task.workspace_id,
+            task_id=task.id,
+            session_id=session.id,
+            state=AgentReportState.WORKING,
+            message=payload.message or "Task continued from review",
+            changed_files=[],
+            validation=None,
+            risks=None,
+            created_at=now,
+        )
+        self.reports[continue_report.id] = continue_report
         self._save_state()
 
         await self.send_session_message(
@@ -1900,7 +1936,10 @@ class WorkspaceManager:
             return None
 
         interruption_reason = self._auto_continue_interruption_reason(output)
+        completion_reason = None
         if not interruption_reason:
+            completion_reason = self._auto_continue_completion_reason(output)
+        if not interruption_reason and not completion_reason:
             return None
 
         attempts = session.auto_continue_attempts if session.auto_continue_task_id == task.id else 0
@@ -1939,16 +1978,18 @@ class WorkspaceManager:
                 "updated_at": sampled_at,
             }
 
-        await self._send_tmux_message(session.tmux_session, AUTO_CONTINUE_MESSAGE)
+        message = AUTO_CONTINUE_MESSAGE if interruption_reason else AUTO_REPORT_MISSING_MESSAGE
+        await self._send_tmux_message(session.tmux_session, message)
         attempts += 1
         logger.info(
-            "Auto-continued interrupted workspace agent session_id=%s task_id=%s "
-            "attempt=%s/%s reason=%s",
+            "Auto-prompted idle workspace agent session_id=%s task_id=%s "
+            "attempt=%s/%s action=%s reason=%s",
             session.id,
             task.id,
             attempts,
             AUTO_CONTINUE_MAX_ATTEMPTS,
-            interruption_reason,
+            "continue" if interruption_reason else "report_missing",
+            interruption_reason or completion_reason,
         )
         return {
             "status": ManagedSessionStatus.WORKING,
@@ -1959,6 +2000,13 @@ class WorkspaceManager:
             "last_activity_at": sampled_at,
             "updated_at": sampled_at,
         }
+
+    def _auto_continue_completion_reason(self, output: str) -> str | None:
+        tail = self._auto_continue_recent_output_segment(output).lower()
+        for pattern in AUTO_CONTINUE_COMPLETION_PATTERNS:
+            if pattern in tail:
+                return pattern
+        return None
 
     def _auto_continue_interruption_reason(self, output: str) -> str | None:
         tail = self._auto_continue_recent_output_segment(output).lower()
@@ -2032,6 +2080,7 @@ class WorkspaceManager:
             self.tasks[task_id] = task.model_copy(
                 update={
                     "status": WorkspaceTaskStatus.REVIEW,
+                    "reviewed_at": report.created_at,
                     "updated_at": report.created_at,
                 }
             )
