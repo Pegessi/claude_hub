@@ -213,7 +213,11 @@
               <article
                 v-for="task in tasksByStatus(column.status)"
                 :key="task.id"
-                :class="['task-card', { selected: selectedTaskId === task.id }]"
+                :class="[
+                  'task-card',
+                  `task-card--${task.status}`,
+                  { selected: selectedTaskId === task.id },
+                ]"
                 @click="selectTask($event, task.id)"
               >
                 <div class="task-card-header">
@@ -1928,7 +1932,7 @@ onUnmounted(() => {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--ch-color-canvas);
+  background: var(--ch-color-app-bg);
   color: var(--ch-color-text);
 }
 
@@ -1937,8 +1941,8 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--ch-color-surface-control-active);
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--ch-color-border-muted);
   background: var(--ch-color-surface-raised);
 }
 
@@ -1977,9 +1981,9 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--ch-color-surface-control-active);
-  background: var(--ch-color-surface);
+  padding: 9px 18px;
+  border-bottom: 1px solid var(--ch-color-border-muted);
+  background: var(--ch-color-canvas);
 }
 
 .workspace-summary-primary,
@@ -2005,21 +2009,21 @@ onUnmounted(() => {
 
 .workspace-column-tabs span {
   flex: 0 0 auto;
-  border: 1px solid var(--ch-color-border-strong);
+  border: 1px solid var(--ch-color-border-muted);
   border-radius: 999px;
-  background: var(--ch-color-surface-muted);
+  background: var(--ch-color-chip-bg-muted);
   color: var(--ch-color-text);
   font-size: 11px;
-  padding: 4px 8px;
+  padding: 4px 9px;
 }
 
 .workspace-agent-status {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   gap: 10px;
-  border-bottom: 1px solid var(--ch-color-surface-control-active);
+  border-bottom: 1px solid var(--ch-color-border-muted);
   background: var(--ch-color-canvas);
-  padding: 10px 16px;
+  padding: 12px 18px;
 }
 
 .agent-status-header {
@@ -2051,9 +2055,9 @@ onUnmounted(() => {
 .agent-status-refresh {
   height: 28px;
   width: 28px;
-  border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
-  background: var(--ch-color-surface-muted);
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
   cursor: pointer;
 }
@@ -2072,22 +2076,25 @@ onUnmounted(() => {
 
 .agent-status-card {
   min-width: 320px;
-  flex: 0 0 min(44vw, 720px);
+  flex: 0 0 clamp(320px, 34vw, 520px);
   display: flex;
   flex-direction: column;
   gap: 8px;
   border: 1px solid var(--ch-color-border-muted);
-  border-radius: 6px;
-  background: var(--ch-color-surface-soft);
+  border-radius: var(--ch-radius-lg);
+  background: var(--ch-color-surface);
   color: inherit;
-  padding: 9px 10px;
+  padding: 10px 11px;
   scroll-snap-align: start;
-  transition: background 0.12s ease, border-color 0.12s ease, transform 0.08s ease;
+  box-shadow: 0 1px 0 var(--ch-shadow-color-soft);
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), transform var(--ch-motion-fast), box-shadow var(--ch-motion-fast);
 }
 
 .agent-status-card:hover {
-  border-color: var(--ch-color-accent-ring-strong);
-  background: var(--ch-color-surface-control-hover);
+  border-color: var(--ch-color-border-hover);
+  background: var(--ch-color-surface-raised);
+  box-shadow: 0 8px 24px var(--ch-shadow-color-soft);
+  transform: translateY(-1px);
 }
 
 .agent-status-card-main {
@@ -2176,7 +2183,7 @@ onUnmounted(() => {
 .agent-status-meta span {
   max-width: 100%;
   border-radius: 999px;
-  background: var(--ch-color-chip-bg-muted);
+  background: var(--ch-color-chip-bg);
   color: var(--ch-color-text);
   font-size: 10px;
   padding: 3px 7px;
@@ -2259,7 +2266,7 @@ onUnmounted(() => {
 .agent-status-delete {
   height: 26px;
   border: 1px solid var(--ch-color-danger-border);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   background: var(--ch-color-danger-bg);
   color: var(--ch-color-danger-text);
   cursor: pointer;
@@ -2289,7 +2296,7 @@ onUnmounted(() => {
 .danger-button,
 .advanced-start select {
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
 }
@@ -2300,6 +2307,13 @@ onUnmounted(() => {
 .danger-button {
   height: 30px;
   padding: 0 10px;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast), transform var(--ch-motion-fast);
+}
+
+.tool-button:hover,
+.primary-button:hover,
+.danger-button:hover {
+  border-color: var(--ch-color-border-hover);
 }
 
 .workspace-select {
@@ -2355,6 +2369,11 @@ onUnmounted(() => {
   border-color: var(--ch-color-accent-strong);
   color: var(--ch-color-text-inverse);
   font-weight: 700;
+}
+
+.primary-button:hover {
+  background: var(--ch-color-accent-hover);
+  border-color: var(--ch-color-accent-hover);
 }
 
 .danger-button {
@@ -2482,9 +2501,9 @@ onUnmounted(() => {
   min-height: 0;
   display: grid;
   grid-template-columns: repeat(5, minmax(220px, 1fr));
-  gap: 10px;
+  gap: 12px;
   overflow: auto;
-  padding: 10px;
+  padding: 14px;
 }
 
 .empty-board {
@@ -2500,17 +2519,19 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border: 1px solid var(--ch-color-surface-control-active);
-  border-radius: 8px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-lg);
   background: var(--ch-color-surface-raised);
+  overflow: hidden;
 }
 
 .column-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px;
-  border-bottom: 1px solid var(--ch-color-surface-control-active);
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--ch-color-border-muted);
+  background: var(--ch-color-surface);
 }
 
 .column-header h2 {
@@ -2538,21 +2559,60 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 8px;
   overflow-y: auto;
-  padding: 8px;
+  padding: 10px;
 }
 
 .task-card {
-  border: 1px solid var(--ch-color-border-strong);
-  border-radius: 6px;
-  background: var(--ch-color-surface-muted);
-  padding: 10px;
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface);
+  padding: 10px 10px 10px 12px;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), transform var(--ch-motion-fast);
+}
+
+.task-card::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--ch-color-text-subtle);
+}
+
+.task-card:hover {
+  border-color: var(--ch-color-border-hover);
+  background: var(--ch-color-surface-raised);
+  box-shadow: 0 8px 20px var(--ch-shadow-color-soft);
+  transform: translateY(-1px);
 }
 
 .task-card.selected {
   border-color: var(--ch-color-accent);
   background: var(--ch-color-surface-selected);
+  box-shadow: 0 0 0 1px var(--ch-color-accent-ring), 0 8px 20px var(--ch-shadow-color-soft);
+}
+
+.task-card--todo::before {
+  background: var(--ch-color-text-subtle);
+}
+
+.task-card--queued::before {
+  background: var(--ch-color-info);
+}
+
+.task-card--working::before {
+  background: var(--ch-color-warning-strong);
+}
+
+.task-card--review::before {
+  background: var(--ch-color-attention-strong);
+}
+
+.task-card--done::before {
+  background: var(--ch-color-success-strong);
 }
 
 .task-card-header {
@@ -2586,7 +2646,7 @@ onUnmounted(() => {
 .agent-badge,
 .session-meta span {
   border-radius: 999px;
-  background: var(--ch-color-border-strong);
+  background: var(--ch-color-chip-bg);
   color: var(--ch-color-text);
   font-size: 10px;
   padding: 3px 7px;
@@ -2629,7 +2689,9 @@ onUnmounted(() => {
 .latest-report {
   margin: 0 0 8px;
   border-left: 2px solid var(--ch-color-border-hover);
-  padding-left: 7px;
+  border-radius: 0 var(--ch-radius-sm) var(--ch-radius-sm) 0;
+  background: var(--ch-color-chip-bg-muted);
+  padding: 6px 8px;
   color: var(--ch-color-text-muted);
   font-size: 11px;
   line-height: 1.35;
@@ -2734,15 +2796,15 @@ onUnmounted(() => {
 }
 
 .task-detail-panel {
-  width: min(960px, calc(100vw - 48px));
+  width: min(1040px, calc(100vw - 48px));
   max-height: min(860px, calc(100dvh - 48px));
   min-width: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid var(--ch-color-border-strong);
-  border-radius: 8px;
-  background: var(--ch-color-surface);
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-lg);
+  background: var(--ch-color-surface-raised);
   box-shadow: var(--ch-shadow-dialog);
 }
 
@@ -2753,9 +2815,9 @@ onUnmounted(() => {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--ch-color-surface-control-active);
-  background: var(--ch-color-surface);
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--ch-color-border-muted);
+  background: var(--ch-color-surface-raised);
 }
 
 .detail-eyebrow,
@@ -2776,11 +2838,17 @@ onUnmounted(() => {
 .icon-button {
   width: 28px;
   height: 28px;
-  border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
   cursor: pointer;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), transform var(--ch-motion-fast);
+}
+
+.icon-button:hover {
+  border-color: var(--ch-color-border-hover);
+  background: var(--ch-color-surface-control-hover);
 }
 
 .detail-body {
@@ -2788,14 +2856,16 @@ onUnmounted(() => {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
   overflow-y: auto;
-  padding: 14px 16px;
+  padding: 16px 18px;
 }
 
 .detail-section {
-  border-bottom: 1px solid var(--ch-color-surface-control-active);
-  padding-bottom: 14px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-lg);
+  background: var(--ch-color-surface);
+  padding: 14px;
 }
 
 .detail-copy {
@@ -2811,9 +2881,9 @@ onUnmounted(() => {
 
 .fact-grid div {
   min-width: 0;
-  border: 1px solid var(--ch-color-surface-control-active);
-  border-radius: 6px;
-  background: var(--ch-color-surface-muted);
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-soft);
   padding: 8px;
 }
 
@@ -2856,7 +2926,7 @@ onUnmounted(() => {
 .send-form textarea {
   min-height: 100px;
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
   padding: 9px;
@@ -2941,8 +3011,8 @@ onUnmounted(() => {
   position: sticky;
   bottom: 0;
   z-index: 2;
-  border-top: 1px solid var(--ch-color-surface-control-active);
-  background: var(--ch-color-surface);
+  border-top: 1px solid var(--ch-color-border-muted);
+  background: var(--ch-color-surface-raised);
   padding: 12px 16px;
 }
 
@@ -2955,20 +3025,34 @@ onUnmounted(() => {
 .timeline {
   list-style: none;
   margin: 12px 0 0;
-  padding: 0;
+  padding: 0 0 0 12px;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  border-left: 1px solid var(--ch-color-border-muted);
 }
 
 .timeline li {
+  position: relative;
   min-width: 0;
 }
 
+.timeline li::before {
+  content: '';
+  position: absolute;
+  top: 16px;
+  left: -16px;
+  width: 7px;
+  height: 7px;
+  border: 2px solid var(--ch-color-surface);
+  border-radius: 999px;
+  background: var(--ch-color-accent);
+}
+
 .report-card {
-  border: 1px solid var(--ch-color-surface-control-active);
-  border-radius: 6px;
-  background: var(--ch-color-surface-muted);
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-soft);
   padding: 0;
 }
 
@@ -2988,7 +3072,7 @@ onUnmounted(() => {
 }
 
 .report-card[open] summary {
-  border-bottom: 1px solid var(--ch-color-surface-control-active);
+  border-bottom: 1px solid var(--ch-color-border-muted);
 }
 
 .report-state {
@@ -3069,8 +3153,9 @@ onUnmounted(() => {
   max-height: calc(100dvh - 32px);
   overflow-y: auto;
   border: 1px solid var(--ch-color-border);
-  border-radius: 8px;
+  border-radius: var(--ch-radius-lg);
   background: var(--ch-color-surface);
+  box-shadow: var(--ch-shadow-dialog);
   padding: 20px;
 }
 
@@ -3101,7 +3186,7 @@ onUnmounted(() => {
 .file-browser-path input {
   width: 100%;
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
   font-size: 14px;
@@ -3126,6 +3211,7 @@ onUnmounted(() => {
 .file-browser-path input:focus {
   outline: none;
   border-color: var(--ch-color-accent);
+  box-shadow: 0 0 0 2px var(--ch-color-accent-ring);
 }
 
 .modal-field .checkbox-label {
@@ -3154,19 +3240,20 @@ onUnmounted(() => {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 4px;
   border: 1px solid var(--ch-color-border);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-sunken);
   padding: 4px;
 }
 
 .segment-button {
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   background: transparent;
   color: var(--ch-color-text-muted);
   cursor: pointer;
   font-size: 14px;
   padding: 8px 10px;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast);
 }
 
 .segment-button.active {
@@ -3344,7 +3431,7 @@ onUnmounted(() => {
     width: 100%;
     max-height: calc(100dvh - 20px);
     padding: 14px;
-    border-radius: 6px;
+    border-radius: var(--ch-radius-md);
   }
 
   .file-browser-modal {
@@ -3485,7 +3572,7 @@ onUnmounted(() => {
 
   .task-column {
     min-width: 0;
-    border-radius: 6px;
+    border-radius: var(--ch-radius-md);
   }
 
   .task-column--collapsed .task-list {
@@ -3539,12 +3626,12 @@ onUnmounted(() => {
   }
 
   .task-card {
-    padding: 10px;
+    padding: 10px 10px 10px 12px;
   }
 
   .task-card.selected {
-    border-color: var(--ch-color-border-strong);
-    background: var(--ch-color-surface-muted);
+    border-color: var(--ch-color-accent);
+    background: var(--ch-color-surface-selected);
   }
 
   .task-card-header {
@@ -3603,7 +3690,7 @@ onUnmounted(() => {
     top: 0;
     z-index: 2;
     align-items: center;
-    background: var(--ch-color-surface);
+    background: var(--ch-color-surface-raised);
     padding: 12px;
   }
 

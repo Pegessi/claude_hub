@@ -3,6 +3,14 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-05-16
+
+### style: polish workspace and terminal surfaces
+- Refine workspace cards, columns, task detail sections, and report timeline to reduce visual noise and clarify hierarchy
+- Lighten terminal tabs, layout controls, and active pane treatment while keeping dark/light theme tokens consistent
+- Add shared radius and motion tokens for future frontend polish
+- **Files**: App.vue, AgentWorkspaceView.vue, TabBar.vue, LayoutSelector.vue, TerminalPane.vue
+
 ## 2026-05-15
 
 ### fix: reopen completed review tasks from live runtime work

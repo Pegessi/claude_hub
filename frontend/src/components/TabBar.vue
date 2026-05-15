@@ -874,9 +874,9 @@ async function handleCreateTab() {
   display: flex;
   align-items: flex-end;
   background-color: var(--ch-color-surface);
-  border-bottom: 1px solid var(--ch-color-border);
-  padding: 4px 8px;
-  gap: 4px;
+  border-bottom: 1px solid var(--ch-color-border-muted);
+  padding: 7px 10px 6px;
+  gap: 6px;
 }
 
 .tabs-shell {
@@ -919,7 +919,7 @@ async function handleCreateTab() {
 .tabs {
   display: flex;
   align-items: flex-end;
-  gap: 4px;
+  gap: 6px;
   overflow-x: auto;
   overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
@@ -937,21 +937,28 @@ async function handleCreateTab() {
   display: flex;
   align-items: center;
   gap: 6px;
-  height: 28px;
+  height: 30px;
   box-sizing: border-box;
   background-color: var(--ch-color-surface-control);
   border: 1px solid var(--ch-color-border-muted);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-md);
   padding: 0 10px;
   cursor: pointer;
   user-select: none;
   flex: 0 0 auto;
   white-space: nowrap;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), transform var(--ch-motion-fast);
+}
+
+.tab:hover {
+  border-color: var(--ch-color-border-hover);
+  background-color: var(--ch-color-surface-control-hover);
 }
 
 .tab.active {
   background-color: var(--ch-color-surface-selected);
   border-color: var(--ch-color-accent-ring-strong);
+  box-shadow: 0 1px 3px var(--ch-shadow-color-soft);
 }
 
 .tab.dragging {
@@ -983,6 +990,7 @@ async function handleCreateTab() {
   max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
+  line-height: 1;
 }
 
 .tab-name-input {
@@ -997,8 +1005,8 @@ async function handleCreateTab() {
 }
 
 .tab-indicator {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background-color: var(--ch-color-success);
   transition: background-color 120ms ease, box-shadow 120ms ease;
@@ -1038,13 +1046,15 @@ async function handleCreateTab() {
   background: none;
   border: none;
   color: var(--ch-color-text-soft);
-  font-size: 18px;
+  font-size: 17px;
   cursor: pointer;
   padding: 0 4px;
   line-height: 1;
+  border-radius: var(--ch-radius-sm);
 }
 
 .tab-close:hover {
+  background: var(--ch-color-chip-bg);
   color: var(--ch-color-text);
 }
 
@@ -1071,22 +1081,24 @@ async function handleCreateTab() {
 .add-tab {
   align-self: flex-end;
   background-color: var(--ch-color-surface-control);
-  border: 1px solid transparent;
+  border: 1px solid var(--ch-color-border-muted);
   box-sizing: border-box;
   color: var(--ch-color-text);
-  font-size: 20px;
-  width: 28px;
-  height: 28px;
-  border-radius: 4px;
+  font-size: 18px;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--ch-radius-md);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast);
 }
 
 .add-tab:hover:not(:disabled) {
   background-color: var(--ch-color-surface-control-hover);
+  border-color: var(--ch-color-border-hover);
   color: var(--ch-color-text);
 }
 
