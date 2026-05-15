@@ -109,16 +109,16 @@ onUnmounted(() => {
   position: relative;
   display: flex;
   flex-direction: column;
-  background-color: #1a1a1a;
-  border: 2px solid #333;
+  background-color: var(--ch-color-app-bg);
+  border: 2px solid var(--ch-color-border);
   border-radius: 6px;
   overflow: hidden;
   transition: border-color 0.2s;
 }
 
 .terminal-pane.active {
-  border-color: #60a5fa;
-  box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.2), 0 0 20px rgba(96, 165, 250, 0.1);
+  border-color: var(--ch-color-accent);
+  box-shadow: 0 0 0 1px var(--ch-color-accent-ring), 0 0 20px var(--ch-color-accent-ring);
 }
 
 .terminal-pane.empty {
@@ -126,21 +126,21 @@ onUnmounted(() => {
 }
 
 .terminal-pane.drag-over {
-  border-color: #22c55e;
-  background-color: rgba(34, 197, 94, 0.1);
+  border-color: var(--ch-color-success-strong);
+  background-color: var(--ch-color-success-bg);
 }
 
 .pane-header {
   display: flex;
   align-items: center;
   padding: 4px 8px;
-  background-color: #2d2d2d;
-  border-bottom: 1px solid #333;
+  background-color: var(--ch-color-surface-control);
+  border-bottom: 1px solid var(--ch-color-border);
   flex-shrink: 0;
 }
 
 .pane-tab-name {
-  color: #ccc;
+  color: var(--ch-color-text);
   font-size: 12px;
   font-weight: 500;
   white-space: nowrap;
@@ -154,7 +154,7 @@ onUnmounted(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  color: #666;
+  color: var(--ch-color-text-subtle);
   text-align: center;
   padding: 16px;
 }

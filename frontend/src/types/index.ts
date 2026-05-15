@@ -2,6 +2,7 @@ export type AgentType = 'claude' | 'codex' | 'cursor'
 export type ExecutionTarget = 'local' | 'remote'
 export type AgentRuntimeStatus = 'idle' | 'working' | 'attention' | 'offline'
 export type AppMode = 'terminal' | 'workspace'
+export type ColorScheme = 'dark' | 'light'
 export type WorkspaceTaskStatus = 'todo' | 'queued' | 'working' | 'review' | 'done'
 export type ManagedSessionStatus =
   | 'spawning'

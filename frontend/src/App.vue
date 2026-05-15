@@ -12,19 +12,41 @@
     <!-- 主应用 -->
     <template v-else>
       <div class="app-mode-bar">
+        <div
+          class="mode-switch"
+          role="tablist"
+          aria-label="Application mode"
+        >
+          <button
+            type="button"
+            :class="['mode-button', { active: mode === 'terminal' }]"
+            role="tab"
+            :aria-selected="mode === 'terminal'"
+            @click="appStore.setMode('terminal')"
+          >
+            Terminal
+          </button>
+          <button
+            type="button"
+            :class="['mode-button', { active: mode === 'workspace' }]"
+            role="tab"
+            :aria-selected="mode === 'workspace'"
+            @click="appStore.setMode('workspace')"
+          >
+            Agent Workspace
+          </button>
+        </div>
         <button
           type="button"
-          :class="['mode-button', { active: mode === 'terminal' }]"
-          @click="appStore.setMode('terminal')"
+          class="theme-switch"
+          role="switch"
+          :aria-checked="colorScheme === 'light'"
+          :title="colorScheme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'"
+          @click="appStore.toggleColorScheme()"
         >
-          Terminal
-        </button>
-        <button
-          type="button"
-          :class="['mode-button', { active: mode === 'workspace' }]"
-          @click="appStore.setMode('workspace')"
-        >
-          Agent Workspace
+          <span class="theme-switch-label">Dark</span>
+          <span class="theme-switch-label">Light</span>
+          <span class="theme-switch-thumb" />
         </button>
       </div>
       <div v-if="error" class="error-banner">
@@ -66,7 +88,7 @@ const appStore = useAppStore()
 const store = useTerminalStore()
 const authStore = useAuthStore()
 const { tabs, error, activePane } = storeToRefs(store)
-const { mode } = storeToRefs(appStore)
+const { mode, colorScheme } = storeToRefs(appStore)
 
 function clearError() {
   error.value = null
@@ -77,6 +99,10 @@ watch(() => activePane.value?.tabId || null, (tabId) => {
   if (typeof window !== 'undefined') {
     (window as Window & { __activePaneTabId?: string | null }).__activePaneTabId = tabId
   }
+}, { immediate: true })
+
+watch(colorScheme, (scheme) => {
+  document.documentElement.dataset.theme = scheme
 }, { immediate: true })
 
 // ---- Mobile viewport sync with visualViewport API ----
@@ -158,23 +184,213 @@ onUnmounted(() => {
   box-sizing: border-box;
 }
 
+:root {
+  color-scheme: dark;
+  --ch-color-app-bg: #1a1a1a;
+  --ch-color-canvas: #181818;
+  --ch-color-surface: #1e1e1e;
+  --ch-color-surface-raised: #202020;
+  --ch-color-surface-soft: #252525;
+  --ch-color-surface-muted: #262626;
+  --ch-color-surface-control: #2b2b2b;
+  --ch-color-surface-control-hover: #3c3c3c;
+  --ch-color-surface-control-active: #303030;
+  --ch-color-surface-pressed: #3a3a3a;
+  --ch-color-surface-selected: #2b3440;
+  --ch-color-surface-sunken: #171717;
+  --ch-color-surface-glass: rgba(24, 24, 27, 0.96);
+  --ch-color-overlay: rgba(0, 0, 0, 0.58);
+  --ch-color-overlay-soft: rgba(0, 0, 0, 0.5);
+  --ch-color-border: #333;
+  --ch-color-border-muted: #303030;
+  --ch-color-border-strong: #3f3f46;
+  --ch-color-border-hover: #555;
+  --ch-color-text: #f4f4f5;
+  --ch-color-text-strong: #fafafa;
+  --ch-color-text-muted: #a1a1aa;
+  --ch-color-text-subtle: #71717a;
+  --ch-color-text-soft: #888;
+  --ch-color-text-inverse: #ffffff;
+  --ch-color-text-code: #e5e7eb;
+  --ch-color-accent: #60a5fa;
+  --ch-color-accent-strong: #3b82f6;
+  --ch-color-accent-hover: #2563eb;
+  --ch-color-accent-soft: rgba(59, 130, 246, 0.2);
+  --ch-color-accent-ring: rgba(96, 165, 250, 0.2);
+  --ch-color-accent-ring-strong: rgba(96, 165, 250, 0.7);
+  --ch-color-success: #4ade80;
+  --ch-color-success-strong: #22c55e;
+  --ch-color-success-hover: #16a34a;
+  --ch-color-success-bg: rgba(74, 222, 128, 0.13);
+  --ch-color-warning: #facc15;
+  --ch-color-warning-strong: #f59e0b;
+  --ch-color-warning-bg: rgba(250, 204, 21, 0.14);
+  --ch-color-attention: #c084fc;
+  --ch-color-attention-strong: #a855f7;
+  --ch-color-attention-bg: rgba(192, 132, 252, 0.15);
+  --ch-color-info: #38bdf8;
+  --ch-color-danger: #f87171;
+  --ch-color-danger-strong: #dc2626;
+  --ch-color-danger-hover: #b91c1c;
+  --ch-color-danger-bg: #3f1d1d;
+  --ch-color-danger-border: #7f1d1d;
+  --ch-color-danger-text: #fecaca;
+  --ch-color-discovery-bg: #281f35;
+  --ch-color-discovery-border: #4c1d95;
+  --ch-color-chip-bg: rgba(255, 255, 255, 0.08);
+  --ch-color-chip-bg-muted: rgba(255, 255, 255, 0.07);
+  --ch-color-row-hover: rgba(255, 255, 255, 0.06);
+  --ch-shadow-popover: 0 18px 44px rgba(0, 0, 0, 0.42);
+  --ch-shadow-dialog: 0 24px 80px rgba(0, 0, 0, 0.45);
+  --ch-shadow-soft: 0 4px 20px rgba(0, 0, 0, 0.4);
+  --ch-shadow-color-soft: rgba(0, 0, 0, 0.32);
+  --ch-tab-fade-start: #1e1e1e;
+  --ch-tab-fade-end: rgba(30, 30, 30, 0);
+  --ch-terminal-bg: #1f1f1f;
+  --ch-terminal-canvas-filter: none;
+  --ch-terminal-fg: #e5e7eb;
+  --ch-terminal-cursor: #f4f4f5;
+  --ch-terminal-selection: rgba(96, 165, 250, 0.28);
+  --ch-terminal-black: #1f2937;
+  --ch-terminal-red: #f87171;
+  --ch-terminal-green: #4ade80;
+  --ch-terminal-yellow: #facc15;
+  --ch-terminal-blue: #60a5fa;
+  --ch-terminal-magenta: #c084fc;
+  --ch-terminal-cyan: #22d3ee;
+  --ch-terminal-white: #d4d4d8;
+  --ch-terminal-bright-black: #71717a;
+  --ch-terminal-bright-red: #fca5a5;
+  --ch-terminal-bright-green: #86efac;
+  --ch-terminal-bright-yellow: #fde047;
+  --ch-terminal-bright-blue: #93c5fd;
+  --ch-terminal-bright-magenta: #d8b4fe;
+  --ch-terminal-bright-cyan: #67e8f9;
+  --ch-terminal-bright-white: #ffffff;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --ch-color-app-bg: #f7f7f5;
+  --ch-color-canvas: #fafaf8;
+  --ch-color-surface: #fcfcfb;
+  --ch-color-surface-raised: #fdfdfc;
+  --ch-color-surface-soft: #f2f2f0;
+  --ch-color-surface-muted: #ececea;
+  --ch-color-surface-control: #f1f1ef;
+  --ch-color-surface-control-hover: #e9e9e7;
+  --ch-color-surface-control-active: #e1e1de;
+  --ch-color-surface-pressed: #d9d9d5;
+  --ch-color-surface-selected: #fdfdfc;
+  --ch-color-surface-sunken: #f0f0ee;
+  --ch-color-surface-glass: rgba(252, 252, 251, 0.96);
+  --ch-color-overlay: rgba(24, 24, 24, 0.38);
+  --ch-color-overlay-soft: rgba(24, 24, 24, 0.3);
+  --ch-color-border: #e2e2df;
+  --ch-color-border-muted: #ebebe8;
+  --ch-color-border-strong: #d1d1cc;
+  --ch-color-border-hover: #b7b7b0;
+  --ch-color-text: #262626;
+  --ch-color-text-strong: #171717;
+  --ch-color-text-muted: #686868;
+  --ch-color-text-subtle: #9a9a96;
+  --ch-color-text-soft: #777771;
+  --ch-color-text-code: #242424;
+  --ch-color-accent: #4a4a44;
+  --ch-color-accent-strong: #30302d;
+  --ch-color-accent-hover: #242421;
+  --ch-color-accent-soft: #ececea;
+  --ch-color-accent-ring: rgba(38, 38, 38, 0.09);
+  --ch-color-accent-ring-strong: rgba(38, 38, 38, 0.2);
+  --ch-color-success: #36734d;
+  --ch-color-success-strong: #2f6543;
+  --ch-color-success-hover: #28583a;
+  --ch-color-success-bg: #e4eee6;
+  --ch-color-warning: #906018;
+  --ch-color-warning-strong: #81530f;
+  --ch-color-warning-bg: #f1e8d6;
+  --ch-color-attention: #6d5b8b;
+  --ch-color-attention-strong: #5f4f7d;
+  --ch-color-attention-bg: #ece8f1;
+  --ch-color-info: #4e7185;
+  --ch-color-danger: #ad3f3f;
+  --ch-color-danger-strong: #9f3636;
+  --ch-color-danger-hover: #882d2d;
+  --ch-color-danger-bg: #f1dfdf;
+  --ch-color-danger-border: #e1c1c1;
+  --ch-color-danger-text: #7c2b2b;
+  --ch-color-discovery-bg: #ece8f1;
+  --ch-color-discovery-border: #c7bdcf;
+  --ch-color-chip-bg: rgba(38, 38, 38, 0.06);
+  --ch-color-chip-bg-muted: rgba(38, 38, 38, 0.04);
+  --ch-color-row-hover: rgba(38, 38, 38, 0.05);
+  --ch-shadow-popover: 0 18px 44px rgba(24, 24, 24, 0.11);
+  --ch-shadow-dialog: 0 24px 70px rgba(24, 24, 24, 0.13);
+  --ch-shadow-soft: 0 12px 30px rgba(24, 24, 24, 0.08);
+  --ch-shadow-color-soft: rgba(24, 24, 24, 0.08);
+  --ch-tab-fade-start: #fcfcfb;
+  --ch-tab-fade-end: rgba(252, 252, 251, 0);
+  --ch-terminal-bg: #f6f6f4;
+  --ch-terminal-canvas-filter: contrast(0.78) saturate(0.55) brightness(1.22);
+  --ch-terminal-fg: #262626;
+  --ch-terminal-cursor: #33455a;
+  --ch-terminal-selection: rgba(77, 102, 128, 0.18);
+  --ch-terminal-black: #ececea;
+  --ch-terminal-red: #f0d4d0;
+  --ch-terminal-green: #dcecdf;
+  --ch-terminal-yellow: #efe5c7;
+  --ch-terminal-blue: #d8e3ec;
+  --ch-terminal-magenta: #e4ddec;
+  --ch-terminal-cyan: #dce9ec;
+  --ch-terminal-white: #f6f6f4;
+  --ch-terminal-bright-black: #777771;
+  --ch-terminal-bright-red: #9f3636;
+  --ch-terminal-bright-green: #2f6543;
+  --ch-terminal-bright-yellow: #81530f;
+  --ch-terminal-bright-blue: #3f536b;
+  --ch-terminal-bright-magenta: #5f4f7d;
+  --ch-terminal-bright-cyan: #4e7185;
+  --ch-terminal-bright-white: #fdfdfc;
+}
+
 html, body, #app {
   height: 100%;
   overflow: hidden;
+}
+
+body {
+  background: var(--ch-color-app-bg);
+  color: var(--ch-color-text);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  color: var(--ch-color-text-strong);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
 }
 
 .app {
   height: 100%;
   display: flex;
   flex-direction: column;
-  background-color: #1a1a1a;
+  background-color: var(--ch-color-app-bg);
+  color: var(--ch-color-text);
   /* Adjust for mobile keyboard — set by visualViewport sync */
   padding-bottom: var(--keyboard-height, 0px);
 }
 
 .error-banner {
-  background-color: #dc2626;
-  color: white;
+  background-color: var(--ch-color-danger-strong);
+  color: var(--ch-color-text-inverse);
   padding: 8px 16px;
   display: flex;
   justify-content: space-between;
@@ -184,18 +400,30 @@ html, body, #app {
 .app-mode-bar {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--ch-color-border);
+  background: var(--ch-color-surface);
+}
+
+.mode-switch {
+  display: inline-grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(108px, max-content);
   gap: 4px;
-  padding: 6px 8px;
-  border-bottom: 1px solid #333;
-  background: #181818;
+  padding: 3px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: 6px;
+  background: var(--ch-color-surface-sunken);
 }
 
 .mode-button {
   height: 30px;
   border: 1px solid transparent;
   border-radius: 4px;
-  background: #252525;
-  color: #a1a1aa;
+  background: transparent;
+  color: var(--ch-color-text-muted);
   cursor: pointer;
   padding: 0 12px;
   font-size: 13px;
@@ -204,14 +432,64 @@ html, body, #app {
 
 .mode-button:hover,
 .mode-button.active {
-  background: #343434;
-  color: #f4f4f5;
+  background: var(--ch-color-surface-control-hover);
+  color: var(--ch-color-text);
+}
+
+.mode-button.active {
+  background: var(--ch-color-surface-selected);
+  border-color: var(--ch-color-accent-ring-strong);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.theme-switch {
+  position: relative;
+  display: inline-grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+  width: 112px;
+  height: 32px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: 999px;
+  background: var(--ch-color-surface-sunken);
+  color: var(--ch-color-text-muted);
+  cursor: pointer;
+  padding: 3px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.theme-switch-label {
+  position: relative;
+  z-index: 1;
+  text-align: center;
+}
+
+.theme-switch-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: calc(50% - 3px);
+  height: calc(100% - 6px);
+  border-radius: 999px;
+  background: var(--ch-color-surface-control-hover);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.16);
+  transition: transform 0.16s ease;
+}
+
+.theme-switch[aria-checked='true'] .theme-switch-thumb {
+  transform: translateX(100%);
+}
+
+.theme-switch[aria-checked='false'] .theme-switch-label:first-child,
+.theme-switch[aria-checked='true'] .theme-switch-label:nth-child(2) {
+  color: var(--ch-color-text);
 }
 
 .error-close {
   background: none;
   border: none;
-  color: white;
+  color: var(--ch-color-text-inverse);
   font-size: 20px;
   cursor: pointer;
   padding: 0 4px;
@@ -231,12 +509,12 @@ html, body, #app {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  color: #888;
+  color: var(--ch-color-text-soft);
 }
 
 .empty-state h2 {
   margin-bottom: 8px;
-  color: #ccc;
+  color: var(--ch-color-text);
 }
 
 .loading-state {
@@ -245,15 +523,15 @@ html, body, #app {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  background-color: #1a1a1a;
-  color: #888;
+  background-color: var(--ch-color-app-bg);
+  color: var(--ch-color-text-soft);
 }
 
 .loading-spinner {
   width: 40px;
   height: 40px;
-  border: 4px solid #333;
-  border-top-color: #667eea;
+  border: 4px solid var(--ch-color-border);
+  border-top-color: var(--ch-color-accent);
   border-radius: 50%;
   animation: spin 1s linear infinite;
   margin-bottom: 16px;
@@ -262,6 +540,30 @@ html, body, #app {
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 520px) {
+  .app-mode-bar {
+    gap: 8px;
+    padding: 6px 8px;
+  }
+
+  .mode-switch {
+    min-width: 0;
+    flex: 1;
+    grid-auto-columns: minmax(0, 1fr);
+  }
+
+  .mode-button {
+    min-width: 0;
+    padding: 0 8px;
+    font-size: 12px;
+  }
+
+  .theme-switch {
+    width: 96px;
+    flex: 0 0 auto;
   }
 }
 </style>

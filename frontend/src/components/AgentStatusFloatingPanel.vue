@@ -330,18 +330,18 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  border: 1px solid #333;
+  border: 1px solid var(--ch-color-border);
   border-radius: 4px;
-  background-color: #2d2d2d;
-  color: #ccc;
+  background-color: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
   cursor: pointer;
   padding: 0 9px;
 }
 
 .status-trigger:hover,
 .agent-status[data-expanded='true'] .status-trigger {
-  background-color: #3c3c3c;
-  color: #fff;
+  background-color: var(--ch-color-surface-control-hover);
+  color: var(--ch-color-text);
 }
 
 .trigger-dot,
@@ -356,25 +356,25 @@ onUnmounted(() => {
 .status-trigger[data-status='idle'],
 .status-dot[data-status='idle'],
 .status-pill[data-status='idle'] {
-  color: #4ade80;
+  color: var(--ch-color-success);
 }
 
 .status-trigger[data-status='working'],
 .status-dot[data-status='working'],
 .status-pill[data-status='working'] {
-  color: #facc15;
+  color: var(--ch-color-warning);
 }
 
 .status-trigger[data-status='attention'],
 .status-dot[data-status='attention'],
 .status-pill[data-status='attention'] {
-  color: #c084fc;
+  color: var(--ch-color-attention);
 }
 
 .status-trigger[data-status='offline'],
 .status-dot[data-status='offline'],
 .status-pill[data-status='offline'] {
-  color: #a1a1aa;
+  color: var(--ch-color-text-muted);
 }
 
 .trigger-label {
@@ -387,8 +387,8 @@ onUnmounted(() => {
   min-width: 18px;
   height: 18px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  color: #f4f4f5;
+  background: var(--ch-color-chip-bg);
+  color: var(--ch-color-text);
   font-size: 11px;
   font-weight: 700;
   line-height: 18px;
@@ -404,10 +404,10 @@ onUnmounted(() => {
   max-width: calc(100vw - 16px);
   max-height: min(60vh, 520px, calc(100vh - 72px));
   overflow: hidden;
-  border: 1px solid rgba(148, 163, 184, 0.26);
+  border: 1px solid var(--ch-color-border-strong);
   border-radius: 8px;
-  background: rgba(24, 24, 27, 0.96);
-  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.42);
+  background: var(--ch-color-surface-glass);
+  box-shadow: var(--ch-shadow-popover);
   backdrop-filter: blur(14px);
   display: flex;
   flex-direction: column;
@@ -418,11 +418,11 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   padding: 9px 10px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+  border-bottom: 1px solid var(--ch-color-border-muted);
 }
 
 .panel-title {
-  color: #f4f4f5;
+  color: var(--ch-color-text);
   font-size: 12px;
   font-weight: 700;
 }
@@ -436,19 +436,19 @@ onUnmounted(() => {
   border: 0;
   border-radius: 4px;
   background: transparent;
-  color: #a1a1aa;
+  color: var(--ch-color-text-muted);
   cursor: pointer;
   font-size: 14px;
 }
 
 .panel-refresh:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
+  background: var(--ch-color-chip-bg);
+  color: var(--ch-color-text);
 }
 
 .empty-status {
   padding: 14px 12px;
-  color: #a1a1aa;
+  color: var(--ch-color-text-muted);
   font-size: 12px;
 }
 
@@ -466,7 +466,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 10px;
   border: 0;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.11);
+  border-bottom: 1px solid var(--ch-color-border-muted);
   background: transparent;
   color: inherit;
   cursor: pointer;
@@ -480,7 +480,7 @@ onUnmounted(() => {
 
 .agent-row:hover,
 .agent-row.active {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--ch-color-row-hover);
 }
 
 .agent-main {
@@ -496,7 +496,7 @@ onUnmounted(() => {
 
 .agent-name {
   min-width: 0;
-  color: #f4f4f5;
+  color: var(--ch-color-text);
   font-size: 13px;
   font-weight: 650;
   overflow: hidden;
@@ -506,7 +506,7 @@ onUnmounted(() => {
 
 .agent-type {
   flex: 0 0 auto;
-  color: #a1a1aa;
+  color: var(--ch-color-text-muted);
   font-size: 10px;
   text-transform: uppercase;
 }
@@ -514,7 +514,7 @@ onUnmounted(() => {
 .agent-detail {
   display: block;
   margin-top: 3px;
-  color: #a1a1aa;
+  color: var(--ch-color-text-muted);
   font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -527,26 +527,26 @@ onUnmounted(() => {
   justify-content: center;
   min-width: 76px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--ch-color-chip-bg);
   padding: 5px 8px;
   font-size: 11px;
   font-weight: 700;
 }
 
 .status-pill[data-status='idle'] {
-  background: rgba(74, 222, 128, 0.13);
+  background: var(--ch-color-success-bg);
 }
 
 .status-pill[data-status='working'] {
-  background: rgba(250, 204, 21, 0.14);
+  background: var(--ch-color-warning-bg);
 }
 
 .status-pill[data-status='attention'] {
-  background: rgba(192, 132, 252, 0.15);
+  background: var(--ch-color-attention-bg);
 }
 
 .status-pill[data-status='offline'] {
-  background: rgba(161, 161, 170, 0.13);
+  background: var(--ch-color-chip-bg);
 }
 
 .resize-handle {
@@ -567,8 +567,8 @@ onUnmounted(() => {
   bottom: 5px;
   width: 8px;
   height: 8px;
-  border-left: 1px solid rgba(244, 244, 245, 0.42);
-  border-bottom: 1px solid rgba(244, 244, 245, 0.42);
+  border-left: 1px solid var(--ch-color-border-hover);
+  border-bottom: 1px solid var(--ch-color-border-hover);
 }
 
 @media (max-width: 768px), (pointer: coarse) {

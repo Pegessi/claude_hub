@@ -46,14 +46,17 @@ function handleLogin() {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: var(--ch-color-app-bg);
+  color: var(--ch-color-text);
+  padding: 24px;
 }
 
 .login-container {
-  background: white;
-  border-radius: 16px;
+  background: var(--ch-color-surface);
+  border: 1px solid var(--ch-color-border);
+  border-radius: 8px;
   padding: 48px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--ch-shadow-dialog);
   text-align: center;
   max-width: 400px;
   width: 90%;
@@ -62,12 +65,12 @@ function handleLogin() {
 .login-header h1 {
   margin: 0 0 8px 0;
   font-size: 2rem;
-  color: #333;
+  color: var(--ch-color-text-strong);
 }
 
 .login-header p {
   margin: 0 0 40px 0;
-  color: #666;
+  color: var(--ch-color-text-muted);
   font-size: 0.95rem;
 }
 
@@ -78,8 +81,8 @@ function handleLogin() {
   gap: 12px;
   width: 100%;
   padding: 16px 24px;
-  background: #2f81ff;
-  color: white;
+  background: var(--ch-color-accent-strong);
+  color: var(--ch-color-text-inverse);
   border: none;
   border-radius: 10px;
   font-size: 1.1rem;
@@ -88,9 +91,9 @@ function handleLogin() {
 }
 
 .feishu-login-btn:hover {
-  background: #1a6de8;
+  background: var(--ch-color-accent-hover);
   transform: translateY(-2px);
-  box-shadow: 0 8px 20px rgba(47, 129, 255, 0.4);
+  box-shadow: 0 8px 20px var(--ch-color-accent-ring);
 }
 
 .feishu-login-btn:active {
@@ -104,12 +107,12 @@ function handleLogin() {
 .login-footer {
   margin-top: 32px;
   padding-top: 24px;
-  border-top: 1px solid #eee;
+  border-top: 1px solid var(--ch-color-border-muted);
 }
 
 .login-footer p {
   margin: 0;
-  color: #999;
+  color: var(--ch-color-text-soft);
   font-size: 0.85rem;
 }
 </style>
