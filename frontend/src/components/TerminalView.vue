@@ -295,10 +295,11 @@ function onIframeLoad(event: Event, tabId: string) {
       }
 
       // Browser terminals do not forward image clipboard data to the TUI.
-      // Codex handles Ctrl+V by reading the macOS clipboard, so first sync the
-      // browser image data to the backend pasteboard and then trigger that key.
+      // Claude Code and Codex handle Ctrl+V by reading the macOS clipboard, so
+      // first sync the browser image data to the backend pasteboard and then
+      // trigger that key.
       document.addEventListener('paste', function(event) {
-        if (CLAUDE_HUB_AGENT_TYPE !== 'codex') return;
+        if (CLAUDE_HUB_AGENT_TYPE !== 'codex' && CLAUDE_HUB_AGENT_TYPE !== 'claude') return;
 
         var imageFile = getClipboardImageFile(event);
         if (!imageFile) return;
