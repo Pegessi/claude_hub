@@ -7,10 +7,15 @@
       </div>
 
       <div class="login-content">
-        <button class="feishu-login-btn" @click="handleLogin">
+        <LoadingButton
+          class="feishu-login-btn"
+          :loading="isLoggingIn"
+          loading-label="Redirecting to Feishu"
+          @click="handleLogin"
+        >
           <span class="feishu-icon">📎</span>
           <span>使用飞书登录</span>
-        </button>
+        </LoadingButton>
       </div>
 
       <div class="login-footer">
@@ -21,11 +26,16 @@
 </template>
 
 <script setup lang="ts">
+import { ref } from 'vue'
+import LoadingButton from '@/components/LoadingButton.vue'
 import { useAuthStore } from '@/stores/authStore'
 
 const authStore = useAuthStore()
+const isLoggingIn = ref(false)
 
 function handleLogin() {
+  if (isLoggingIn.value) return
+  isLoggingIn.value = true
   window.location.href = authStore.getLoginUrl()
 }
 </script>

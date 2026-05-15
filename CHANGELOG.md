@@ -5,6 +5,12 @@
 
 ## 2026-05-15
 
+### feat: add button-level loading feedback
+- Add a reusable loading button component and pending-action helper for frontend interactions
+- Show per-control processing feedback for workspace switching, workspace task actions, agent management, follow-up sends, terminal tab creation/duplication/closing, directory browsing, status refresh, login redirect, and logout
+- Keep pending state scoped by task, agent, session, tab, or browser action so unrelated controls remain usable
+- **Files**: LoadingButton.vue, usePendingActions.ts, AgentWorkspaceView.vue, TabBar.vue, AgentStatusFloatingPanel.vue, LayoutSelector.vue, LoginView.vue
+
 ### docs: require branch-based agent development
 - Add an agent-facing `AGENTS.md` entrypoint that points to `CLAUDE.md` and forbids direct development on `main`
 - Clarify that small fixes, documentation changes, and managed workspace tasks must still use a feature/fix branch or isolated worktree before merging back

@@ -25,13 +25,22 @@
         <span class="user-avatar-fallback" v-else>{{ authStore.user?.name?.charAt(0) || 'U' }}</span>
         <span class="user-name">{{ authStore.user?.name }}</span>
       </div>
-      <button class="logout-btn" @click="handleLogout">退出</button>
+      <LoadingButton
+        class="logout-btn"
+        :loading="logoutLoading"
+        loading-label="Logging out"
+        @click="handleLogout"
+      >
+        退出
+      </LoadingButton>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
+import { ref } from 'vue'
 import { storeToRefs } from 'pinia'
+import LoadingButton from '@/components/LoadingButton.vue'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useAuthStore } from '@/stores/authStore'
 import type { LayoutType } from '@/types'
@@ -46,6 +55,7 @@ interface LayoutOption {
 const store = useTerminalStore()
 const authStore = useAuthStore()
 const { layoutType } = storeToRefs(store)
+const logoutLoading = ref(false)
 
 const layouts: LayoutOption[] = [
   { type: '1x1', label: 'Single', count: 1, gridCols: '1fr' },
@@ -62,7 +72,13 @@ function setLayout(type: LayoutType) {
 }
 
 async function handleLogout() {
-  await authStore.logout()
+  if (logoutLoading.value) return
+  logoutLoading.value = true
+  try {
+    await authStore.logout()
+  } finally {
+    logoutLoading.value = false
+  }
 }
 </script>
 
