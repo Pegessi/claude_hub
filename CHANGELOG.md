@@ -5,6 +5,10 @@
 
 ## 2026-05-15
 
+### fix: enable terminal image paste for Claude tabs
+- Reuse the browser-image-to-macOS-clipboard paste bridge for Claude Code tabs as well as Codex tabs, so pasted screenshots can reach the TUI through Ctrl+V
+- **Files**: TerminalView.vue
+
 ### fix: keep ready reports authoritative
 - Keep `ready_for_review` and `completed` reports as the authoritative task state instead of reopening Review tasks from raw terminal Working samples
 - Preserve runtime-based Review-to-Working recovery when the assigned terminal shows new Working activity after the review timestamp, covering direct terminal follow-ups
