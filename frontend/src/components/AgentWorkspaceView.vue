@@ -32,7 +32,7 @@
           :disabled="!activeWorkspaceId"
           @click="openAgentOptionsModal"
         >
-          Add Agent
+          Manage Agents
         </button>
         <button
           type="button"
@@ -81,48 +81,75 @@
           <span class="agent-status-eyebrow">Workspace agents</span>
           <strong>{{ visibleWorkspaceSessions.length }}</strong>
         </div>
-        <button
-          type="button"
-          class="agent-status-refresh"
-          title="Refresh statuses"
-          @click="refreshAgentStatuses"
-        >
-          ↻
-        </button>
+        <div class="agent-status-toolbar">
+          <button
+            type="button"
+            class="agent-status-manage"
+            @click="openAgentOptionsModal"
+          >
+            Manage
+          </button>
+          <button
+            type="button"
+            class="agent-status-refresh"
+            title="Refresh statuses"
+            @click="refreshAgentStatuses"
+          >
+            ↻
+          </button>
+        </div>
       </div>
       <div class="agent-status-grid">
-        <button
+        <article
           v-for="agent in visibleWorkspaceSessions"
           :key="agent.id"
-          type="button"
           class="agent-status-card"
-          @click="openSession(agent)"
         >
-          <span
-            class="agent-status-dot"
-            :data-status="agentRuntimeStatus(agent)"
-          />
-          <span class="agent-status-main">
-            <span class="agent-status-line">
-              <span class="agent-status-name">{{ agent.title }}</span>
-              <span class="agent-status-kind">{{ agent.role === 'dispatcher' ? 'Dispatcher' : agent.agent_type }}</span>
-            </span>
-            <span class="agent-status-detail">
-              {{ agentRuntimeDetail(agent) }}
-            </span>
-            <span class="agent-status-meta">
-              <span>{{ agent.target }}</span>
-              <span>{{ agentTaskLabel(agent) }}</span>
-              <span>queued {{ agent.queued_count }}</span>
-            </span>
-          </span>
-          <span
-            class="agent-status-pill"
-            :data-status="agentRuntimeStatus(agent)"
+          <button
+            type="button"
+            class="agent-status-card-main"
+            @click="openSession(agent)"
           >
-            {{ agentRuntimeText(agent) }}
-          </span>
-        </button>
+            <span
+              class="agent-status-dot"
+              :data-status="agentRuntimeStatus(agent)"
+            />
+            <span class="agent-status-main">
+              <span class="agent-status-line">
+                <span class="agent-status-name">{{ agent.title }}</span>
+                <span class="agent-status-kind">{{ agent.role === 'dispatcher' ? 'Dispatcher' : agent.agent_type }}</span>
+              </span>
+              <span class="agent-status-detail">
+                {{ agentRuntimeDetail(agent) }}
+              </span>
+              <span class="agent-status-meta">
+                <span>{{ agent.target }}</span>
+                <span>{{ agentTaskLabel(agent) }}</span>
+                <span>queued {{ agent.queued_count }}</span>
+              </span>
+            </span>
+            <span
+              class="agent-status-pill"
+              :data-status="agentRuntimeStatus(agent)"
+            >
+              {{ agentRuntimeText(agent) }}
+            </span>
+          </button>
+          <div
+            v-if="agent.role !== 'dispatcher'"
+            class="agent-status-actions"
+          >
+            <button
+              type="button"
+              class="agent-status-delete"
+              :disabled="!canDeleteAgent(agent)"
+              :title="agentDeleteTitle(agent)"
+              @click="deleteAgent(agent)"
+            >
+              Delete
+            </button>
+          </div>
+        </article>
         <div
           v-if="visibleWorkspaceSessions.length === 0"
           class="agent-status-empty"
@@ -759,15 +786,85 @@
       class="workspace-modal-overlay"
       @click.self="closeAgentOptionsModal"
     >
-      <div class="workspace-modal">
-        <h3>Add Agent</h3>
-        <form @submit.prevent="handleCreateAdvancedAgent">
+      <div class="workspace-modal agent-manager-modal">
+        <h3>Manage Agents</h3>
+        <section class="modal-section modal-section--first">
+          <div class="modal-section-header">
+            <h4>Workspace Agents</h4>
+            <span>{{ workspaceAgents.length }}</span>
+          </div>
+          <div class="agent-list">
+            <article
+              v-for="agent in workspaceAgents"
+              :key="agent.id"
+              class="agent-row"
+            >
+              <div>
+                <strong>{{ agent.title }}</strong>
+                <span>{{ agent.agent_type }} · {{ agent.id }}</span>
+                <span>{{ agent.target }} · {{ agent.workspace_path }}</span>
+              </div>
+              <div class="agent-row-meta">
+                <span :class="['runtime-pill', `runtime-pill--${agent.runtime_status}`]">
+                  {{ agent.runtime_status }}
+                </span>
+                <span>current {{ taskTitle(agent.current_task_id) }}</span>
+                <span>queued {{ agent.queued_count }}</span>
+              </div>
+              <div class="agent-row-actions">
+                <button
+                  type="button"
+                  @click="openSession(agent)"
+                >
+                  Open
+                </button>
+                <button
+                  type="button"
+                  class="danger-button"
+                  :disabled="!canDeleteAgent(agent)"
+                  :title="agentDeleteTitle(agent)"
+                  @click="deleteAgent(agent)"
+                >
+                  Delete
+                </button>
+              </div>
+            </article>
+            <div
+              v-if="workspaceAgents.length === 0"
+              class="empty-inline"
+            >
+              No workspace agents.
+            </div>
+            <article
+              v-if="dispatcherAgent"
+              class="agent-row dispatcher-row"
+            >
+              <div>
+                <strong>{{ dispatcherAgent.title }}</strong>
+                <span>dispatcher · {{ dispatcherAgent.runtime_status }}</span>
+              </div>
+              <button
+                type="button"
+                @click="openSession(dispatcherAgent)"
+              >
+                Open
+              </button>
+            </article>
+          </div>
+        </section>
+
+        <form
+          class="modal-section agent-create-form"
+          @submit.prevent="handleCreateAdvancedAgent"
+        >
+          <div class="modal-section-header">
+            <h4>Add Agent</h4>
+          </div>
           <div class="modal-field">
             <label>Title</label>
             <input
               v-model="agentOptionsForm.title"
               placeholder="Workspace Agent"
-              autofocus
             />
           </div>
 
@@ -888,70 +985,6 @@
             </button>
           </div>
         </form>
-
-        <section class="modal-section">
-          <div class="modal-section-header">
-            <h4>Workspace Agents</h4>
-            <span>{{ workspaceAgents.length }}</span>
-          </div>
-          <div class="agent-list">
-            <article
-              v-for="agent in workspaceAgents"
-              :key="agent.id"
-              class="agent-row"
-            >
-              <div>
-                <strong>{{ agent.title }}</strong>
-                <span>{{ agent.agent_type }} · {{ agent.id }}</span>
-                <span>{{ agent.target }} · {{ agent.workspace_path }}</span>
-              </div>
-              <div class="agent-row-meta">
-                <span :class="['runtime-pill', `runtime-pill--${agent.runtime_status}`]">
-                  {{ agent.runtime_status }}
-                </span>
-                <span>current {{ taskTitle(agent.current_task_id) }}</span>
-                <span>queued {{ agent.queued_count }}</span>
-              </div>
-              <div class="agent-row-actions">
-                <button
-                  type="button"
-                  @click="openSession(agent)"
-                >
-                  Open
-                </button>
-                <button
-                  type="button"
-                  class="danger-button"
-                  :disabled="agent.queued_count > 0 || Boolean(agent.current_task_id)"
-                  @click="deleteAgent(agent)"
-                >
-                  Delete
-                </button>
-              </div>
-            </article>
-            <div
-              v-if="workspaceAgents.length === 0"
-              class="empty-inline"
-            >
-              No workspace agents.
-            </div>
-            <article
-              v-if="dispatcherAgent"
-              class="agent-row dispatcher-row"
-            >
-              <div>
-                <strong>{{ dispatcherAgent.title }}</strong>
-                <span>dispatcher · {{ dispatcherAgent.runtime_status }}</span>
-              </div>
-              <button
-                type="button"
-                @click="openSession(dispatcherAgent)"
-              >
-                Open
-              </button>
-            </article>
-          </div>
-        </section>
       </div>
     </div>
 
@@ -1344,6 +1377,27 @@ function agentRuntimeDetail(agent: ManagedSession) {
 function agentTaskLabel(agent: ManagedSession) {
   if (!agent.current_task_id) return 'no task'
   return taskTitle(agent.current_task_id)
+}
+
+function openTasksForAgent(agent: ManagedSession) {
+  return tasks.value.filter(task => task.session_id === agent.id && task.status !== 'done')
+}
+
+function agentDeleteDisabledReason(agent: ManagedSession) {
+  const openTasks = openTasksForAgent(agent)
+  if (openTasks.length === 0) return ''
+  if (openTasks.length === 1) {
+    return `Cannot delete while "${openTasks[0].title}" is still assigned`
+  }
+  return `Cannot delete while ${openTasks.length} tasks are still assigned`
+}
+
+function canDeleteAgent(agent: ManagedSession) {
+  return agentDeleteDisabledReason(agent) === ''
+}
+
+function agentDeleteTitle(agent: ManagedSession) {
+  return agentDeleteDisabledReason(agent) || `Delete ${agent.title}`
 }
 
 function isInteractiveElement(target: EventTarget | null) {
@@ -1792,6 +1846,7 @@ onUnmounted(() => {
 .form-row,
 .task-actions,
 .session-meta,
+.agent-status-toolbar,
 .agent-row-actions,
 .agent-row-meta {
   display: flex;
@@ -1855,7 +1910,7 @@ onUnmounted(() => {
 }
 
 .agent-status-header {
-  min-width: 122px;
+  min-width: 176px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1876,9 +1931,14 @@ onUnmounted(() => {
   text-transform: uppercase;
 }
 
-.agent-status-refresh {
-  width: 28px;
+.agent-status-toolbar {
+  justify-content: flex-end;
+}
+
+.agent-status-refresh,
+.agent-status-manage {
   height: 28px;
+  width: 28px;
   border: 1px solid #3f3f46;
   border-radius: 4px;
   background: #27272a;
@@ -1886,26 +1946,36 @@ onUnmounted(() => {
   cursor: pointer;
 }
 
+.agent-status-manage {
+  width: auto;
+  padding: 0 9px;
+  font-size: 12px;
+}
+
 .agent-status-grid {
   min-width: 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  display: flex;
+  flex-wrap: nowrap;
   gap: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
+  scroll-snap-type: x proximity;
+  -webkit-overflow-scrolling: touch;
 }
 
 .agent-status-card {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 12px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
+  min-width: 320px;
+  flex: 0 0 min(44vw, 720px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   border: 1px solid rgba(148, 163, 184, 0.2);
   border-radius: 6px;
   background: #242427;
   color: inherit;
-  cursor: pointer;
   padding: 9px 10px;
-  text-align: left;
+  scroll-snap-align: start;
   transition: background 0.12s ease, border-color 0.12s ease, transform 0.08s ease;
 }
 
@@ -1914,7 +1984,31 @@ onUnmounted(() => {
   background: #2b2b31;
 }
 
-.agent-status-card:active,
+.agent-status-card-main {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+}
+
+.agent-status-card-main:focus-visible,
+.agent-status-delete:focus-visible,
+.agent-status-manage:focus-visible,
+.agent-status-refresh:focus-visible {
+  outline: 2px solid rgba(96, 165, 250, 0.7);
+  outline-offset: 2px;
+}
+
+.agent-status-card-main:active,
+.agent-status-delete:active,
+.agent-status-manage:active,
 .agent-status-refresh:active {
   transform: translateY(1px);
 }
@@ -2029,6 +2123,27 @@ onUnmounted(() => {
 
 .agent-status-pill[data-status='offline'] {
   background: rgba(161, 161, 170, 0.13);
+}
+
+.agent-status-actions {
+  justify-content: flex-end;
+  padding-left: 22px;
+}
+
+.agent-status-delete {
+  height: 26px;
+  border: 1px solid #7f1d1d;
+  border-radius: 4px;
+  background: #3f1d1d;
+  color: #fecaca;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 9px;
+}
+
+.agent-status-delete:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .agent-status-empty {
@@ -2798,6 +2913,10 @@ onUnmounted(() => {
   padding: 20px;
 }
 
+.agent-manager-modal {
+  width: min(720px, 100%);
+}
+
 .workspace-modal h3 {
   margin: 0 0 16px;
   color: #fafafa;
@@ -2920,6 +3039,12 @@ onUnmounted(() => {
   margin-top: 20px;
   padding-top: 16px;
   border-top: 1px solid #333;
+}
+
+.modal-section--first {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
 }
 
 .modal-section-header {
@@ -3421,7 +3546,7 @@ onUnmounted(() => {
     grid-template-columns: 1fr;
   }
 
-  .agent-status-card {
+  .agent-status-card-main {
     grid-template-columns: 10px minmax(0, 1fr);
   }
 
