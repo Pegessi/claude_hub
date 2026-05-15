@@ -244,6 +244,11 @@ onUnmounted(() => {
   --ch-shadow-dialog: 0 24px 80px rgba(0, 0, 0, 0.45);
   --ch-shadow-soft: 0 4px 20px rgba(0, 0, 0, 0.4);
   --ch-shadow-color-soft: rgba(0, 0, 0, 0.32);
+  --ch-radius-sm: 5px;
+  --ch-radius-md: 7px;
+  --ch-radius-lg: 10px;
+  --ch-motion-fast: 120ms ease;
+  --ch-motion-standard: 180ms ease;
   --ch-tab-fade-start: #1e1e1e;
   --ch-tab-fade-end: rgba(30, 30, 30, 0);
   --ch-terminal-bg: #1f1f1f;
@@ -328,6 +333,11 @@ onUnmounted(() => {
   --ch-shadow-dialog: 0 24px 70px rgba(24, 24, 24, 0.13);
   --ch-shadow-soft: 0 12px 30px rgba(24, 24, 24, 0.08);
   --ch-shadow-color-soft: rgba(24, 24, 24, 0.08);
+  --ch-radius-sm: 5px;
+  --ch-radius-md: 7px;
+  --ch-radius-lg: 10px;
+  --ch-motion-fast: 120ms ease;
+  --ch-motion-standard: 180ms ease;
   --ch-tab-fade-start: #fcfcfb;
   --ch-tab-fade-end: rgba(252, 252, 251, 0);
   --ch-terminal-bg: #f6f6f4;
@@ -402,7 +412,7 @@ textarea {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 7px 10px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--ch-color-border);
   background: var(--ch-color-surface);
 }
@@ -414,20 +424,21 @@ textarea {
   gap: 4px;
   padding: 3px;
   border: 1px solid var(--ch-color-border);
-  border-radius: 6px;
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-sunken);
 }
 
 .mode-button {
   height: 30px;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   background: transparent;
   color: var(--ch-color-text-muted);
   cursor: pointer;
   padding: 0 12px;
   font-size: 13px;
   font-weight: 700;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast);
 }
 
 .mode-button:hover,
@@ -474,7 +485,7 @@ textarea {
   border-radius: 999px;
   background: var(--ch-color-surface-control-hover);
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.16);
-  transition: transform 0.16s ease;
+  transition: transform var(--ch-motion-standard), background var(--ch-motion-fast);
 }
 
 .theme-switch[aria-checked='true'] .theme-switch-thumb {

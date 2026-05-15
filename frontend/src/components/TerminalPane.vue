@@ -110,15 +110,15 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   background-color: var(--ch-color-app-bg);
-  border: 2px solid var(--ch-color-border);
-  border-radius: 6px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-lg);
   overflow: hidden;
-  transition: border-color 0.2s;
+  transition: border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast);
 }
 
 .terminal-pane.active {
   border-color: var(--ch-color-accent);
-  box-shadow: 0 0 0 1px var(--ch-color-accent-ring), 0 0 20px var(--ch-color-accent-ring);
+  box-shadow: 0 0 0 1px var(--ch-color-accent-ring), 0 10px 28px var(--ch-shadow-color-soft);
 }
 
 .terminal-pane.empty {
@@ -133,9 +133,9 @@ onUnmounted(() => {
 .pane-header {
   display: flex;
   align-items: center;
-  padding: 4px 8px;
-  background-color: var(--ch-color-surface-control);
-  border-bottom: 1px solid var(--ch-color-border);
+  padding: 5px 9px;
+  background-color: var(--ch-color-surface);
+  border-bottom: 1px solid var(--ch-color-border-muted);
   flex-shrink: 0;
 }
 

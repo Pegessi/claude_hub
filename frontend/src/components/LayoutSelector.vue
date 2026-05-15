@@ -88,37 +88,40 @@ async function handleLogout() {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 4px 8px;
-  background-color: var(--ch-color-surface);
-  border-bottom: 1px solid var(--ch-color-border);
+  padding: 7px 10px;
+  background-color: var(--ch-color-canvas);
+  border-bottom: 1px solid var(--ch-color-border-muted);
 }
 
 .layout-buttons {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
 }
 
 .layout-btn {
-  background: none;
-  border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  width: 32px;
+  height: 30px;
+  background: var(--ch-color-surface-control);
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
   padding: 4px;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.2s;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), transform var(--ch-motion-fast);
 }
 
 .layout-btn:hover {
   background-color: var(--ch-color-surface-control-hover);
-  border-color: var(--ch-color-text-subtle);
+  border-color: var(--ch-color-border-hover);
 }
 
 .layout-btn.active {
   border-color: var(--ch-color-accent-strong);
   background-color: var(--ch-color-accent-soft);
+  box-shadow: 0 1px 3px var(--ch-shadow-color-soft);
 }
 
 .layout-icon {
