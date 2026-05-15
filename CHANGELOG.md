@@ -5,6 +5,11 @@
 
 ## 2026-05-15
 
+### docs: require branch-based agent development
+- Add an agent-facing `AGENTS.md` entrypoint that points to `CLAUDE.md` and forbids direct development on `main`
+- Clarify that small fixes, documentation changes, and managed workspace tasks must still use a feature/fix branch or isolated worktree before merging back
+- **Files**: AGENTS.md, CLAUDE.md
+
 ### feat: make workspace agents manageable
 - Rename the workspace agent entry point to agent management and show the existing agent list before the add-agent form
 - Add visible delete actions to the agent status strip and management modal, with disabled-state hints while an agent still owns open tasks
