@@ -5,6 +5,11 @@
 
 ## 2026-05-15
 
+### feat: make workspace agents manageable
+- Rename the workspace agent entry point to agent management and show the existing agent list before the add-agent form
+- Add visible delete actions to the agent status strip and management modal, with disabled-state hints while an agent still owns open tasks
+- **Files**: AgentWorkspaceView.vue
+
 ### fix: enable terminal image paste for Claude tabs
 - Reuse the browser-image-to-macOS-clipboard paste bridge for Claude Code tabs as well as Codex tabs, so pasted screenshots can reach the TUI through Ctrl+V
 - **Files**: TerminalView.vue
