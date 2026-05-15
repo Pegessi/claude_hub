@@ -8,6 +8,7 @@
 ### fix: keep ready reports authoritative
 - Keep `ready_for_review` and `completed` reports as the authoritative task state instead of reopening Review tasks from raw terminal Working samples
 - Preserve runtime-based Review-to-Working recovery when the assigned terminal shows new Working activity after the review timestamp, covering direct terminal follow-ups
+- Add a short grace window after explicit ready reports so the reporting agent's own terminal activity cannot immediately reopen the task
 - Add an explicit `working` report when a Review task is continued through the workspace flow so follow-up work has a durable state transition
 - Restore tasks whose latest report is ready/completed back to Review during board reconciliation unless the task has later explicit or runtime Working activity
 - Make auto-continue prompts semantic: interruption-like idle output asks the agent to continue, while completion-like idle output asks the agent to submit the missing final report
