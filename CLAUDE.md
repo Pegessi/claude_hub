@@ -45,6 +45,12 @@ For all new feature development:
 6. **Update CHANGELOG.md** with the merge entry (commit hash, date, summary, key files)
 7. **Merge into main**
 
+This workflow also applies to small UI fixes, backend fixes, documentation
+changes, and managed workspace tasks. Agents must not edit directly on `main`;
+if a task starts while the checkout is on `main`, create a feature/fix branch
+or an isolated worktree before editing. A user request to merge or push means
+finish the branch-to-main flow after validation, not skip the branch.
+
 ## Commit Convention
 Use conventional commits:
 - `feat: new feature`
