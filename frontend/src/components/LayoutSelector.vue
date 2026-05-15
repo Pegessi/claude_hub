@@ -89,8 +89,8 @@ async function handleLogout() {
   justify-content: space-between;
   gap: 8px;
   padding: 4px 8px;
-  background-color: #1e1e1e;
-  border-bottom: 1px solid #333;
+  background-color: var(--ch-color-surface);
+  border-bottom: 1px solid var(--ch-color-border);
 }
 
 .layout-buttons {
@@ -101,7 +101,7 @@ async function handleLogout() {
 
 .layout-btn {
   background: none;
-  border: 1px solid #444;
+  border: 1px solid var(--ch-color-border-strong);
   border-radius: 4px;
   padding: 4px;
   cursor: pointer;
@@ -112,13 +112,13 @@ async function handleLogout() {
 }
 
 .layout-btn:hover {
-  background-color: #3c3c3c;
-  border-color: #666;
+  background-color: var(--ch-color-surface-control-hover);
+  border-color: var(--ch-color-text-subtle);
 }
 
 .layout-btn.active {
-  border-color: #3b82f6;
-  background-color: rgba(59, 130, 246, 0.2);
+  border-color: var(--ch-color-accent-strong);
+  background-color: var(--ch-color-accent-soft);
 }
 
 .layout-icon {
@@ -127,14 +127,14 @@ async function handleLogout() {
 }
 
 .layout-cell {
-  background-color: #666;
+  background-color: var(--ch-color-text-subtle);
   border-radius: 2px;
   min-height: 4px;
   min-width: 4px;
 }
 
 .layout-btn.active .layout-cell {
-  background-color: #3b82f6;
+  background-color: var(--ch-color-accent-strong);
 }
 
 .user-section {
@@ -160,8 +160,8 @@ async function handleLogout() {
   width: 24px;
   height: 24px;
   border-radius: 50%;
-  background-color: #667eea;
-  color: white;
+  background-color: var(--ch-color-accent);
+  color: var(--ch-color-text-inverse);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -170,14 +170,14 @@ async function handleLogout() {
 }
 
 .user-name {
-  color: #ccc;
+  color: var(--ch-color-text);
   font-size: 13px;
 }
 
 .logout-btn {
   background: none;
-  border: 1px solid #666;
-  color: #ccc;
+  border: 1px solid var(--ch-color-text-subtle);
+  color: var(--ch-color-text);
   padding: 3px 10px;
   border-radius: 4px;
   cursor: pointer;
@@ -186,8 +186,8 @@ async function handleLogout() {
 }
 
 .logout-btn:hover {
-  background-color: #444;
-  border-color: #888;
-  color: white;
+  background-color: var(--ch-color-border-strong);
+  border-color: var(--ch-color-text-soft);
+  color: var(--ch-color-text);
 }
 </style>

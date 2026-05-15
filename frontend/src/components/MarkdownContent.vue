@@ -36,7 +36,7 @@ const safeHtml = computed(() => {
 
 <style scoped>
 .markdown-content {
-  color: #d4d4d8;
+  color: var(--ch-color-text);
   font-size: 13px;
   line-height: 1.55;
   overflow-wrap: anywhere;
@@ -70,7 +70,7 @@ const safeHtml = computed(() => {
 .markdown-content :deep(h3),
 .markdown-content :deep(h4) {
   margin: 14px 0 6px;
-  color: #f4f4f5;
+  color: var(--ch-color-text);
   line-height: 1.25;
 }
 
@@ -88,16 +88,16 @@ const safeHtml = computed(() => {
 }
 
 .markdown-content :deep(a) {
-  color: #93c5fd;
+  color: var(--ch-color-accent);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
 
 .markdown-content :deep(code) {
-  border: 1px solid #3f3f46;
+  border: 1px solid var(--ch-color-border-strong);
   border-radius: 4px;
-  background: #18181b;
-  color: #e5e7eb;
+  background: var(--ch-color-canvas);
+  color: var(--ch-color-text-code);
   padding: 1px 4px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 0.92em;
@@ -105,9 +105,9 @@ const safeHtml = computed(() => {
 
 .markdown-content :deep(pre) {
   overflow-x: auto;
-  border: 1px solid #303030;
+  border: 1px solid var(--ch-color-surface-control-active);
   border-radius: 6px;
-  background: #18181b;
+  background: var(--ch-color-canvas);
   padding: 10px;
 }
 
@@ -119,8 +119,8 @@ const safeHtml = computed(() => {
 }
 
 .markdown-content :deep(blockquote) {
-  border-left: 3px solid #52525b;
-  color: #a1a1aa;
+  border-left: 3px solid var(--ch-color-border-hover);
+  color: var(--ch-color-text-muted);
   padding-left: 10px;
 }
 
@@ -141,7 +141,7 @@ const safeHtml = computed(() => {
 
 .markdown-content :deep(th),
 .markdown-content :deep(td) {
-  border: 1px solid #3f3f46;
+  border: 1px solid var(--ch-color-border-strong);
   padding: 6px 8px;
 }
 </style>

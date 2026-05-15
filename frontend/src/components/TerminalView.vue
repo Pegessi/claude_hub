@@ -17,6 +17,8 @@
 
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { storeToRefs } from 'pinia'
+import { useAppStore } from '@/stores/appStore'
 import type { AgentType } from '@/types'
 
 const props = defineProps<{
@@ -36,6 +38,18 @@ type TerminalKeyState = {
   queues: Record<string, TerminalKeyItem[]>
 }
 
+type TerminalThemePayload = {
+  scheme: string
+  minimumContrastRatio: number
+  page: {
+    background: string
+    canvasFilter: string
+    foreground: string
+    selection: string
+  }
+  xterm: Record<string, string>
+}
+
 declare global {
   interface Window {
     __activePaneTabId?: string | null
@@ -47,6 +61,8 @@ declare global {
 
 const iframeRefs: Record<string, HTMLIFrameElement | null> = {}
 const cachedTabIds = ref<string[]>([])
+const appStore = useAppStore()
+const { colorScheme } = storeToRefs(appStore)
 
 function getTerminalState(): TerminalKeyState {
   if (!window.__claudeHubTerminalState) {
@@ -125,6 +141,67 @@ function flushKeyQueue(tabId: string) {
     const item = queue[0]
     if (!postTerminalKey(tabId, item)) return
     queue.shift()
+  }
+}
+
+function cssVar(name: string) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+}
+
+function terminalColor(name: string, fallbackName?: string) {
+  return cssVar(name) || (fallbackName ? cssVar(fallbackName) : '')
+}
+
+function terminalThemePayload(): TerminalThemePayload {
+  const background = cssVar('--ch-terminal-bg')
+  const foreground = cssVar('--ch-terminal-fg')
+
+  return {
+    scheme: colorScheme.value,
+    minimumContrastRatio: colorScheme.value === 'light' ? 4.5 : 1,
+    page: {
+      background,
+      canvasFilter: cssVar('--ch-terminal-canvas-filter') || 'none',
+      foreground,
+      selection: cssVar('--ch-terminal-selection'),
+    },
+    xterm: {
+      background,
+      foreground,
+      cursor: cssVar('--ch-terminal-cursor'),
+      cursorAccent: background,
+      selectionBackground: cssVar('--ch-terminal-selection'),
+      black: cssVar('--ch-terminal-black'),
+      red: cssVar('--ch-terminal-red'),
+      green: cssVar('--ch-terminal-green'),
+      yellow: cssVar('--ch-terminal-yellow'),
+      blue: cssVar('--ch-terminal-blue'),
+      magenta: cssVar('--ch-terminal-magenta'),
+      cyan: cssVar('--ch-terminal-cyan'),
+      white: cssVar('--ch-terminal-white'),
+      brightBlack: cssVar('--ch-terminal-bright-black'),
+      brightRed: terminalColor('--ch-terminal-bright-red', '--ch-terminal-red'),
+      brightGreen: terminalColor('--ch-terminal-bright-green', '--ch-terminal-green'),
+      brightYellow: terminalColor('--ch-terminal-bright-yellow', '--ch-terminal-yellow'),
+      brightBlue: terminalColor('--ch-terminal-bright-blue', '--ch-terminal-blue'),
+      brightMagenta: terminalColor('--ch-terminal-bright-magenta', '--ch-terminal-magenta'),
+      brightCyan: terminalColor('--ch-terminal-bright-cyan', '--ch-terminal-cyan'),
+      brightWhite: cssVar('--ch-terminal-bright-white'),
+    },
+  }
+}
+
+function postTerminalTheme(tabId?: string) {
+  const payload = terminalThemePayload()
+  const targetTabIds = tabId ? [tabId] : Object.keys(iframeRefs)
+
+  for (const id of targetTabIds) {
+    const iframe = iframeRefs[id]
+    if (!iframe?.contentWindow) continue
+    iframe.contentWindow.postMessage({
+      type: 'terminal-theme',
+      payload,
+    }, '*')
   }
 }
 
@@ -209,6 +286,62 @@ function onIframeLoad(event: Event, tabId: string) {
           (term._core && term._core.coreService && typeof term._core.coreService.triggerDataEvent === 'function') ||
           typeof term.paste === 'function'
         ));
+      }
+
+      var pendingTerminalTheme = null;
+
+      function ensureTerminalThemeStyle() {
+        var style = document.getElementById('claude-hub-terminal-theme');
+        if (!style) {
+          style = document.createElement('style');
+          style.id = 'claude-hub-terminal-theme';
+          document.head.appendChild(style);
+        }
+        return style;
+      }
+
+      function applyTerminalTheme(payload) {
+        if (!payload || !payload.xterm || !payload.page) return;
+        pendingTerminalTheme = payload;
+
+        var page = payload.page;
+        document.documentElement.dataset.theme = payload.scheme || 'dark';
+        document.documentElement.style.backgroundColor = page.background;
+        document.body.style.backgroundColor = page.background;
+        document.body.style.color = page.foreground;
+
+        ensureTerminalThemeStyle().textContent =
+          'html, body, #terminal, .terminal, .xterm { background: ' + page.background + ' !important; color: ' + page.foreground + ' !important; }' +
+          '.xterm-viewport { background-color: ' + page.background + ' !important; }' +
+          '.xterm-screen canvas { filter: ' + page.canvasFilter + ' !important; }' +
+          '.xterm-selection div { background-color: ' + page.selection + ' !important; }';
+
+        var term = findTerminal();
+        if (!term) return;
+
+        try {
+          if (term.options) {
+            term.options.theme = payload.xterm;
+            if (typeof payload.minimumContrastRatio === 'number') {
+              term.options.minimumContrastRatio = payload.minimumContrastRatio;
+            }
+          }
+          if (typeof term.setOption === 'function') {
+            term.setOption('theme', payload.xterm);
+            if (typeof payload.minimumContrastRatio === 'number') {
+              try {
+                term.setOption('minimumContrastRatio', payload.minimumContrastRatio);
+              } catch (contrastError) {
+                console.warn('Unable to apply Claude Hub terminal contrast option:', contrastError);
+              }
+            }
+          }
+          if (typeof term.refresh === 'function') {
+            term.refresh(0, Math.max(0, (term.rows || 1) - 1));
+          }
+        } catch (error) {
+          console.warn('Unable to apply Claude Hub terminal theme:', error);
+        }
       }
 
       function getClipboardImageFile(event) {
@@ -333,6 +466,7 @@ function onIframeLoad(event: Event, tabId: string) {
       var termCheckInterval = setInterval(function() {
         if (hasTerminalInputApi()) {
           clearInterval(termCheckInterval);
+          if (pendingTerminalTheme) applyTerminalTheme(pendingTerminalTheme);
           console.log('=== Terminal ready, notifying parent ===');
           notifyReady();
         }
@@ -343,7 +477,14 @@ function onIframeLoad(event: Event, tabId: string) {
 
       // Handle key messages from parent (virtual keyboard)
       window.addEventListener('message', function(event) {
-        if (!event.data || event.data.type !== 'terminal-key') return;
+        if (!event.data) return;
+
+        if (event.data.type === 'terminal-theme') {
+          applyTerminalTheme(event.data.payload);
+          return;
+        }
+
+        if (event.data.type !== 'terminal-key') return;
 
         var key = event.data.key;
         var ctrl = event.data.ctrl || false;
@@ -391,10 +532,15 @@ function onIframeLoad(event: Event, tabId: string) {
       console.log('=== Claude Hub terminal handler ready ===');
     `
     iframe.contentDocument.head.appendChild(script)
+    postTerminalTheme(tabId)
   } catch (e) {
     console.error('Error injecting script into iframe:', e)
   }
 }
+
+watch(colorScheme, () => {
+  requestAnimationFrame(() => postTerminalTheme())
+})
 
 // Listen for messages from iframes
 function handleMessage(event: MessageEvent) {

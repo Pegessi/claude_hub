@@ -284,8 +284,8 @@ onUnmounted(() => {
 
 .controls-panel {
   pointer-events: auto;
-  background-color: rgba(30, 30, 30, 0.95);
-  border: 1px solid #444;
+  background-color: var(--ch-color-surface-glass);
+  border: 1px solid var(--ch-color-border-strong);
   border-radius: 12px;
   padding: 10px 12px;
   display: flex;
@@ -294,7 +294,7 @@ onUnmounted(() => {
   width: 100%;
   max-width: 420px;
   margin-bottom: 12px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--ch-shadow-soft);
 }
 
 .controls-row {
@@ -316,9 +316,9 @@ onUnmounted(() => {
 }
 
 .control-btn {
-  background-color: #3c3c3c;
-  color: #fff;
-  border: 1px solid #555;
+  background-color: var(--ch-color-surface-control-hover);
+  color: var(--ch-color-text);
+  border: 1px solid var(--ch-color-border-hover);
   border-radius: 8px;
   padding: 10px 8px;
   font-size: 13px;
@@ -334,22 +334,23 @@ onUnmounted(() => {
 
 .control-btn:active,
 .control-btn.pressed {
-  background-color: #555;
+  background-color: var(--ch-color-border-hover);
   transform: scale(0.92);
-  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.4);
-  border-color: #666;
+  box-shadow: inset 0 2px 8px var(--ch-shadow-color-soft);
+  border-color: var(--ch-color-text-subtle);
 }
 
 .control-btn.active {
-  background-color: #3b82f6;
-  border-color: #60a5fa;
-  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3);
+  background-color: var(--ch-color-accent-strong);
+  border-color: var(--ch-color-accent);
+  color: var(--ch-color-text-inverse);
+  box-shadow: 0 0 0 2px var(--ch-color-accent-ring);
 }
 
 .control-btn.active:active,
 .control-btn.active.pressed {
-  background-color: #2563eb;
-  border-color: #3b82f6;
+  background-color: var(--ch-color-accent-hover);
+  border-color: var(--ch-color-accent-strong);
 }
 
 .control-btn-arrow {
@@ -359,15 +360,16 @@ onUnmounted(() => {
 }
 
 .control-btn-enter {
-  background-color: #22c55e;
-  border-color: #16a34a;
+  background-color: var(--ch-color-success-strong);
+  border-color: var(--ch-color-success-hover);
+  color: var(--ch-color-text-inverse);
   min-width: 58px;
 }
 
 .control-btn-enter:active,
 .control-btn-enter.pressed {
-  background-color: #16a34a;
-  border-color: #15803d;
+  background-color: var(--ch-color-success-hover);
+  border-color: var(--ch-color-success-hover);
 }
 
 .control-btn-wide {
@@ -377,8 +379,8 @@ onUnmounted(() => {
 }
 
 .control-btn-shortcut {
-  background-color: #2d2d5e;
-  border-color: #4a4a8a;
+  background-color: var(--ch-color-accent-soft);
+  border-color: var(--ch-color-border-hover);
   font-size: 11px;
   min-width: 50px;
   padding: 8px 6px;
@@ -387,15 +389,15 @@ onUnmounted(() => {
 
 .control-btn-shortcut:active,
 .control-btn-shortcut.pressed {
-  background-color: #4a4a8a;
-  border-color: #6a6aaa;
+  background-color: var(--ch-color-border-hover);
+  border-color: var(--ch-color-accent);
 }
 
 .toggle-btn {
   pointer-events: auto;
-  background-color: #2d2d2d;
-  color: #fff;
-  border: 1px solid #444;
+  background-color: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  border: 1px solid var(--ch-color-border-strong);
   border-radius: 50%;
   width: 56px;
   height: 56px;
@@ -404,28 +406,28 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 4px 12px var(--ch-shadow-color-soft);
   transition: background-color 0.1s, transform 0.1s, box-shadow 0.1s;
 }
 
 .toggle-btn:hover {
-  background-color: #3c3c3c;
+  background-color: var(--ch-color-surface-control-hover);
 }
 
 .toggle-btn:active,
 .toggle-btn.pressed {
   transform: scale(0.88);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
-  background-color: #444;
+  box-shadow: 0 2px 6px var(--ch-shadow-color-soft);
+  background-color: var(--ch-color-border-strong);
 }
 
 .toggle-btn.expanded {
-  background-color: #444;
+  background-color: var(--ch-color-border-strong);
 }
 
 .toggle-btn.expanded:active,
 .toggle-btn.expanded.pressed {
-  background-color: #555;
+  background-color: var(--ch-color-border-hover);
 }
 
 @media (min-width: 769px) {
