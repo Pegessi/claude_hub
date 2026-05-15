@@ -93,13 +93,6 @@
           <strong>{{ visibleWorkspaceSessions.length }}</strong>
         </div>
         <div class="agent-status-toolbar">
-          <button
-            type="button"
-            class="agent-status-manage"
-            @click="openAgentOptionsModal"
-          >
-            Manage
-          </button>
           <LoadingButton
             type="button"
             class="agent-status-refresh"
@@ -2054,8 +2047,7 @@ onUnmounted(() => {
   justify-content: flex-end;
 }
 
-.agent-status-refresh,
-.agent-status-manage {
+.agent-status-refresh {
   height: 28px;
   width: 28px;
   border: 1px solid #3f3f46;
@@ -2063,12 +2055,6 @@ onUnmounted(() => {
   background: #27272a;
   color: #d4d4d8;
   cursor: pointer;
-}
-
-.agent-status-manage {
-  width: auto;
-  padding: 0 9px;
-  font-size: 12px;
 }
 
 .agent-status-grid {
@@ -2119,7 +2105,6 @@ onUnmounted(() => {
 
 .agent-status-card-main:focus-visible,
 .agent-status-delete:focus-visible,
-.agent-status-manage:focus-visible,
 .agent-status-refresh:focus-visible {
   outline: 2px solid rgba(96, 165, 250, 0.7);
   outline-offset: 2px;
@@ -2127,7 +2112,6 @@ onUnmounted(() => {
 
 .agent-status-card-main:active,
 .agent-status-delete:active,
-.agent-status-manage:active,
 .agent-status-refresh:active {
   transform: translateY(1px);
 }
