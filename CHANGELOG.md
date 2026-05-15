@@ -5,6 +5,14 @@
 
 ## 2026-05-15
 
+### fix: keep ready reports authoritative
+- Keep `ready_for_review` and `completed` reports as the authoritative task state instead of reopening Review tasks from raw terminal Working samples
+- Preserve runtime-based Review-to-Working recovery when the assigned terminal shows new Working activity after the review timestamp, covering direct terminal follow-ups
+- Add an explicit `working` report when a Review task is continued through the workspace flow so follow-up work has a durable state transition
+- Restore tasks whose latest report is ready/completed back to Review during board reconciliation unless the task has later explicit or runtime Working activity
+- Make auto-continue prompts semantic: interruption-like idle output asks the agent to continue, while completion-like idle output asks the agent to submit the missing final report
+- **Files**: workspace_manager.py, test_workspaces.py
+
 ### fix: restore main ci checks
 - Keep terminal history full replay buffered briefly after xterm accepts the replay write so late ttyd initial screen frames cannot collapse reconstructed scrollback on Linux CI
 - Apply backend Black/isort cleanup for files that were failing formatting/import-order gates
