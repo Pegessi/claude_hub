@@ -1582,9 +1582,15 @@ def test_fresh_ready_report_is_not_immediately_reopened_by_runtime_working(
     assert board["sessions"][0]["runtime_status"] == "working"
 
 
-def test_completed_review_task_is_not_reopened_by_working_runtime(
+@pytest.mark.parametrize(
+    ("activity_delay_seconds", "expected_task_status"),
+    [(5, "review"), (30, "working")],
+)
+def test_completed_review_task_reopens_only_after_runtime_grace(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
+    activity_delay_seconds: int,
+    expected_task_status: str,
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1687,14 +1693,14 @@ def test_completed_review_task_is_not_reopened_by_working_runtime(
             status_text="Working",
             detail="agent is processing follow-up",
             tmux_session="claude-hub-tab-done",
-            last_changed_at=datetime.now(),
-            sampled_at=datetime.now(),
+            last_changed_at=reviewed_at + timedelta(seconds=activity_delay_seconds),
+            sampled_at=reviewed_at + timedelta(seconds=activity_delay_seconds),
         )
     ]
 
     board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
 
-    assert board["tasks"][0]["status"] == "review"
+    assert board["tasks"][0]["status"] == expected_task_status
     assert board["tasks"][0]["session_id"] == session_id
     assert board["sessions"][0]["runtime_status"] == "working"
 
