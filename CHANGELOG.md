@@ -5,6 +5,10 @@
 
 ## 2026-05-16
 
+### fix: fill embedded terminal viewport edge-to-edge
+- Remove ttyd's default embedded terminal padding and stretch the xterm screen/canvas to the pane edges so light mode no longer shows white gutters
+- **Files**: TerminalView.vue
+
 ### fix: refit terminal canvas after light theme layout changes
 - Trigger ttyd/xterm resize from the active iframe after theme, tab, and container-size changes so the terminal canvas fills the pane in light mode
 - **Files**: TerminalView.vue

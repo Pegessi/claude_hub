@@ -347,9 +347,11 @@ function onIframeLoad(event: Event, tabId: string) {
         document.body.style.color = page.foreground;
 
         ensureTerminalThemeStyle().textContent =
-          'html, body, #terminal, .terminal, .xterm { background: ' + page.background + ' !important; color: ' + page.foreground + ' !important; }' +
-          '.xterm-viewport { background-color: ' + page.background + ' !important; }' +
-          '.xterm-screen canvas { filter: ' + page.canvasFilter + ' !important; }' +
+          'html, body { width: 100% !important; height: 100% !important; margin: 0 !important; padding: 0 !important; overflow: hidden !important; background: ' + page.background + ' !important; color: ' + page.foreground + ' !important; }' +
+          '#terminal, .terminal, .xterm { width: 100% !important; height: 100% !important; box-sizing: border-box !important; margin: 0 !important; padding: 0 !important; background: ' + page.background + ' !important; color: ' + page.foreground + ' !important; }' +
+          '.xterm-viewport { inset: 0 !important; width: 100% !important; height: 100% !important; background-color: ' + page.background + ' !important; }' +
+          '.xterm-screen { width: 100% !important; height: 100% !important; }' +
+          '.xterm-screen canvas { width: 100% !important; height: 100% !important; filter: ' + page.canvasFilter + ' !important; }' +
           '.xterm-selection div { background-color: ' + page.selection + ' !important; }';
 
         requestTerminalResize();
