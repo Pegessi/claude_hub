@@ -9,6 +9,7 @@
 - Drive the app shell height from `visualViewport` so the mobile keyboard does not double-shrink the terminal layout
 - Enter a compact terminal mode while the keyboard is open, hiding nonessential chrome and tightening tab, pane, and mobile-control spacing
 - Move the mobile split-layout shortcuts into a top-bar dropdown so the standalone layout row no longer consumes vertical space on phones
+- Collapse the mobile terminal tab chrome while the keyboard is open and smooth the floating virtual-key panel transition
 - **Files**: App.vue, LayoutSelector.vue, MobileControls.vue, TabBar.vue
 
 ### fix: avoid false pending workspace dispatch
