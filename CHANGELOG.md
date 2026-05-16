@@ -5,6 +5,12 @@
 
 ## 2026-05-16
 
+### fix: replay remote tab tmux history
+- Capture scrollback from the remote tmux session for remote tabs so reconnect/history replay includes the agent's actual remote terminal history instead of only the local SSH wrapper screen
+- Keep local tmux capture as a fallback when remote SSH capture fails, using non-interactive SSH options to avoid blocking page load
+- Add backend coverage for remote history preference, local fallback, and remote capture command construction
+- **Files**: ttyd_manager.py, test_ttyd_manager.py
+
 ### fix: harden terminal replay hold on Linux CI
 - Extend the full-replay hold window and perform a final replay before marking history as complete, so late ttyd initial frames cannot collapse xterm scrollback immediately before E2E assertions
 - Verify the xterm buffer contains expected scrollback before publishing replay readiness, with a short post-ready watchdog for late Linux runner redraws
