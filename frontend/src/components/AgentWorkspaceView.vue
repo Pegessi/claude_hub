@@ -2564,6 +2564,7 @@ onUnmounted(() => {
 
 .task-card {
   position: relative;
+  flex: 0 0 auto;
   overflow: hidden;
   border: 1px solid var(--ch-color-border-muted);
   border-radius: var(--ch-radius-md);
@@ -2613,6 +2614,36 @@ onUnmounted(() => {
 
 .task-card--done::before {
   background: var(--ch-color-success-strong);
+}
+
+.task-card--done {
+  min-height: 46px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.task-card--done .task-card-header {
+  align-items: center;
+  min-height: 28px;
+}
+
+.task-card--done h3 {
+  display: flex;
+  align-items: center;
+  min-height: 24px;
+  line-height: 1.2;
+}
+
+.task-card--done .agent-badge {
+  align-self: center;
+}
+
+.task-card--done .task-card-description,
+.task-card--done .latest-report,
+.task-card--done .session-meta,
+.task-card--done .advanced-start,
+.task-card--done .task-actions {
+  display: none;
 }
 
 .task-card-header {
