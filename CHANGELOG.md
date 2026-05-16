@@ -5,6 +5,10 @@
 
 ## 2026-05-16
 
+### fix: soften embedded terminal edge padding
+- Restore a small terminal-colored inset around xterm content so light mode feels less crowded without reintroducing page-colored gutters
+- **Files**: TerminalView.vue
+
 ### fix: fill embedded terminal viewport edge-to-edge
 - Remove ttyd's default embedded terminal padding and stretch the xterm screen/canvas to the pane edges so light mode no longer shows white gutters
 - **Files**: TerminalView.vue
