@@ -1,5 +1,8 @@
 <template>
-  <div class="terminal-container">
+  <div
+    ref="terminalContainer"
+    class="terminal-container"
+  >
     <iframe
       v-for="cachedTabId in cachedTabIds"
       :key="cachedTabId"
@@ -61,8 +64,10 @@ declare global {
 
 const iframeRefs: Record<string, HTMLIFrameElement | null> = {}
 const cachedTabIds = ref<string[]>([])
+const terminalContainer = ref<HTMLElement | null>(null)
 const appStore = useAppStore()
 const { colorScheme } = storeToRefs(appStore)
+let terminalResizeObserver: ResizeObserver | null = null
 
 function getTerminalState(): TerminalKeyState {
   if (!window.__claudeHubTerminalState) {
@@ -86,6 +91,7 @@ watch(
   () => props.tabId,
   (newTabId) => {
     cacheTabId(newTabId)
+    requestAnimationFrame(() => scheduleTerminalResize(newTabId))
   },
   { immediate: true }
 )
@@ -205,6 +211,26 @@ function postTerminalTheme(tabId?: string) {
   }
 }
 
+function postTerminalResize(tabId?: string) {
+  const targetTabIds = tabId ? [tabId] : Object.keys(iframeRefs)
+
+  for (const id of targetTabIds) {
+    const iframe = iframeRefs[id]
+    if (!iframe?.contentWindow) continue
+    iframe.contentWindow.postMessage({
+      type: 'terminal-resize',
+    }, '*')
+  }
+}
+
+function scheduleTerminalResize(tabId?: string) {
+  if (typeof window === 'undefined') return
+
+  postTerminalResize(tabId)
+  window.setTimeout(() => postTerminalResize(tabId), 50)
+  window.setTimeout(() => postTerminalResize(tabId), 250)
+}
+
 function onIframeLoad(event: Event, tabId: string) {
   const iframe = event.target as HTMLIFrameElement
   if (!iframe || !iframe.contentDocument) return
@@ -290,6 +316,16 @@ function onIframeLoad(event: Event, tabId: string) {
 
       var pendingTerminalTheme = null;
 
+      function requestTerminalResize() {
+        window.dispatchEvent(new Event('resize'));
+        setTimeout(function() {
+          window.dispatchEvent(new Event('resize'));
+        }, 50);
+        setTimeout(function() {
+          window.dispatchEvent(new Event('resize'));
+        }, 250);
+      }
+
       function ensureTerminalThemeStyle() {
         var style = document.getElementById('claude-hub-terminal-theme');
         if (!style) {
@@ -315,6 +351,8 @@ function onIframeLoad(event: Event, tabId: string) {
           '.xterm-viewport { background-color: ' + page.background + ' !important; }' +
           '.xterm-screen canvas { filter: ' + page.canvasFilter + ' !important; }' +
           '.xterm-selection div { background-color: ' + page.selection + ' !important; }';
+
+        requestTerminalResize();
 
         var term = findTerminal();
         if (!term) return;
@@ -467,6 +505,7 @@ function onIframeLoad(event: Event, tabId: string) {
         if (hasTerminalInputApi()) {
           clearInterval(termCheckInterval);
           if (pendingTerminalTheme) applyTerminalTheme(pendingTerminalTheme);
+          requestTerminalResize();
           console.log('=== Terminal ready, notifying parent ===');
           notifyReady();
         }
@@ -481,6 +520,11 @@ function onIframeLoad(event: Event, tabId: string) {
 
         if (event.data.type === 'terminal-theme') {
           applyTerminalTheme(event.data.payload);
+          return;
+        }
+
+        if (event.data.type === 'terminal-resize') {
+          requestTerminalResize();
           return;
         }
 
@@ -533,13 +577,17 @@ function onIframeLoad(event: Event, tabId: string) {
     `
     iframe.contentDocument.head.appendChild(script)
     postTerminalTheme(tabId)
+    scheduleTerminalResize(tabId)
   } catch (e) {
     console.error('Error injecting script into iframe:', e)
   }
 }
 
 watch(colorScheme, () => {
-  requestAnimationFrame(() => postTerminalTheme())
+  requestAnimationFrame(() => {
+    postTerminalTheme()
+    scheduleTerminalResize()
+  })
 })
 
 // Listen for messages from iframes
@@ -552,6 +600,7 @@ function handleMessage(event: MessageEvent) {
       getTerminalState().ready[tabId] = true
       // Flush any queued keys for this tab
       flushKeyQueue(tabId)
+      scheduleTerminalResize(tabId)
     }
   }
 
@@ -595,11 +644,20 @@ onMounted(() => {
     }
 
     window.addEventListener('message', handleMessage)
+    if (terminalContainer.value && typeof ResizeObserver !== 'undefined') {
+      terminalResizeObserver = new ResizeObserver(() => {
+        scheduleTerminalResize(props.tabId)
+      })
+      terminalResizeObserver.observe(terminalContainer.value)
+    }
+    scheduleTerminalResize(props.tabId)
   }
 })
 
 onUnmounted(() => {
   window.removeEventListener('message', handleMessage)
+  terminalResizeObserver?.disconnect()
+  terminalResizeObserver = null
 })
 </script>
 
