@@ -1,6 +1,6 @@
 # Claude Hub Backend
 
-FastAPI backend for Claude Terminal Hub.
+FastAPI backend for Claude Hub's persistent terminal and Agent Workspace flows.
 
 ## Development
 
