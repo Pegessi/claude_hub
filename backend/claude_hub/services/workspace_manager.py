@@ -1692,9 +1692,12 @@ class WorkspaceManager:
             has_message_prefix = bool(first_line and first_line in stripped)
             if not has_pasted_placeholder and not has_message_prefix:
                 continue
-            following = "\n".join(tail[index + 1 : index + 6]).lstrip()
-            if following.startswith(("•", "⏺", "●")):
-                return False
+            following_lines = tail[index + 1 :]
+            if any(next_line.strip().startswith(("›", ">", "❯")) for next_line in following_lines):
+                continue
+            following = "\n".join(following_lines[:5]).lstrip()
+            if following.startswith(("•", "⏺", "●", "⎿")):
+                continue
             return True
         return False
 
