@@ -138,6 +138,8 @@ let lastAppliedViewportHeight = ''
 let lastAppliedStableViewportHeight = ''
 let lastAppliedKeyboardHeight = ''
 let lastAppliedViewportOffsetTop = ''
+let lastAppliedControlsViewportShift = ''
+let fixedViewportProbe: HTMLDivElement | null = null
 
 const KEYBOARD_OPEN_THRESHOLD_PX = 36
 const KEYBOARD_CLOSE_THRESHOLD_PX = 12
@@ -189,6 +191,40 @@ function clearKeyboardCloseTimer() {
   }
 }
 
+function getFixedViewportProbe() {
+  if (fixedViewportProbe?.isConnected) {
+    return fixedViewportProbe
+  }
+
+  if (!document.body) return null
+
+  fixedViewportProbe = document.createElement('div')
+  fixedViewportProbe.setAttribute('aria-hidden', 'true')
+  fixedViewportProbe.style.cssText = [
+    'position: fixed',
+    'left: 0',
+    'bottom: 0',
+    'width: 0',
+    'height: 0',
+    'padding: 0',
+    'border: 0',
+    'pointer-events: none',
+    'visibility: hidden',
+    'z-index: -1',
+  ].join(';')
+  document.body.appendChild(fixedViewportProbe)
+  return fixedViewportProbe
+}
+
+function measureControlsViewportShift(viewportHeight: number, isMobileViewport: boolean) {
+  if (!isMobileViewport) return 0
+
+  const probe = getFixedViewportProbe()
+  if (!probe) return 0
+
+  return Math.round(viewportHeight - probe.getBoundingClientRect().bottom)
+}
+
 function applyKeyboardOpenState(open: boolean) {
   const root = document.documentElement
   keyboardOpenState = open
@@ -222,6 +258,7 @@ function updateViewportMetrics(vv?: VisualViewport) {
   const stableViewportHeightValue = `${Math.round(isMobileViewport ? largestVisualViewportHeight || viewportHeight : viewportHeight)}px`
   const keyboardHeightValue = `${Math.round(keyboardHeight)}px`
   const viewportOffsetTopValue = `${Math.round(offsetTop)}px`
+  const controlsViewportShiftValue = `${measureControlsViewportShift(viewportHeight, isMobileViewport)}px`
 
   if (viewportHeightValue !== lastAppliedViewportHeight) {
     root.style.setProperty('--visual-viewport-height', viewportHeightValue)
@@ -241,6 +278,11 @@ function updateViewportMetrics(vv?: VisualViewport) {
   if (viewportOffsetTopValue !== lastAppliedViewportOffsetTop) {
     root.style.setProperty('--visual-viewport-offset-top', viewportOffsetTopValue)
     lastAppliedViewportOffsetTop = viewportOffsetTopValue
+  }
+
+  if (controlsViewportShiftValue !== lastAppliedControlsViewportShift) {
+    root.style.setProperty('--mobile-controls-viewport-shift', controlsViewportShiftValue)
+    lastAppliedControlsViewportShift = controlsViewportShiftValue
   }
 
   if (!isMobileViewport) {
@@ -285,6 +327,8 @@ function cleanupMobileViewportSync() {
     viewportUpdateFrame = null
   }
   applyKeyboardOpenState(false)
+  fixedViewportProbe?.remove()
+  fixedViewportProbe = null
 }
 
 onMounted(async () => {
@@ -314,6 +358,7 @@ onUnmounted(() => {
   --visual-viewport-height: 100dvh;
   --stable-viewport-height: 100dvh;
   --visual-viewport-offset-top: 0px;
+  --mobile-controls-viewport-shift: 0px;
   --keyboard-height: 0px;
   --ch-color-app-bg: #1a1a1a;
   --ch-color-canvas: #181818;
