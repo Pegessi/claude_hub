@@ -103,10 +103,11 @@
             </LoadingButton>
             <button
               type="button"
-              class="workspace-mobile-menu-item"
+              class="workspace-mobile-menu-item workspace-mobile-menu-item--theme"
               @click="toggleThemeFromMenu"
             >
-              {{ colorScheme === 'dark' ? 'Light Theme' : 'Dark Theme' }}
+              <span>{{ colorScheme === 'dark' ? 'Switch to Light' : 'Switch to Dark' }}</span>
+              <strong>{{ colorScheme }}</strong>
             </button>
           </div>
         </details>
@@ -2169,6 +2170,23 @@ onUnmounted(() => {
   opacity: 0.55;
 }
 
+.workspace-mobile-menu-item--theme {
+  justify-content: space-between;
+  margin-top: 4px;
+  border-color: var(--ch-color-accent-ring-strong);
+  background: var(--ch-color-accent-soft);
+}
+
+.workspace-mobile-menu-item--theme strong {
+  border-radius: 999px;
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  font-size: 10px;
+  line-height: 1;
+  padding: 4px 7px;
+  text-transform: uppercase;
+}
+
 .workspace-summary-strip {
   display: flex;
   align-items: center;
@@ -3688,11 +3706,15 @@ onUnmounted(() => {
     position: sticky;
     top: 0;
     z-index: 20;
-    flex-direction: column;
+    flex-direction: row;
     align-items: stretch;
-    gap: 8px;
-    padding: 8px 10px;
+    gap: 0;
+    padding: 6px 8px;
     background: var(--ch-color-surface);
+  }
+
+  .workspace-title-block {
+    display: none;
   }
 
   .workspace-header .workspace-title-block > h1,
@@ -3760,7 +3782,7 @@ onUnmounted(() => {
   .workspace-select,
   .workspace-actions .tool-button,
   .workspace-actions .primary-button {
-    height: 34px;
+    height: 32px;
   }
 
   .workspace-actions .tool-button,
@@ -3776,7 +3798,7 @@ onUnmounted(() => {
   .workspace-actions .primary-button {
     grid-column: auto;
     width: auto;
-    min-width: 78px;
+    min-width: 74px;
     white-space: nowrap;
   }
 
@@ -3785,8 +3807,8 @@ onUnmounted(() => {
   }
 
   .workspace-mobile-menu-trigger {
-    width: 34px;
-    height: 34px;
+    width: 32px;
+    height: 32px;
   }
 
   .workspace-summary-strip {
