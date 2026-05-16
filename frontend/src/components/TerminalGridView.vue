@@ -1,5 +1,8 @@
 <template>
-  <div class="terminal-grid" :class="`layout-${layoutType}`">
+  <div
+    class="terminal-grid"
+    :class="`layout-${layoutType}`"
+  >
     <TerminalPane
       v-for="pane in panes"
       :key="pane.id"
@@ -30,6 +33,7 @@ function setActivePane(paneId: string) {
   padding: 4px;
   overflow: hidden;
   min-height: 0;
+  transition: padding 180ms cubic-bezier(0.2, 0, 0, 1), gap 180ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 .layout-1x1 {

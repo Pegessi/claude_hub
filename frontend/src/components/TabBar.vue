@@ -81,6 +81,7 @@
     >
       {{ isLoading ? '...' : '+' }}
     </button>
+    <LayoutSelector variant="menu" />
     <AgentStatusFloatingPanel
       v-if="manualTabs.length > 0"
       source="manual"
@@ -411,6 +412,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import AgentStatusFloatingPanel from '@/components/AgentStatusFloatingPanel.vue'
+import LayoutSelector from '@/components/LayoutSelector.vue'
 import LoadingButton from '@/components/LoadingButton.vue'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { useTerminalStore } from '@/stores/terminalStore'
@@ -877,6 +879,13 @@ async function handleCreateTab() {
   border-bottom: 1px solid var(--ch-color-border-muted);
   padding: 7px 10px 6px;
   gap: 6px;
+  max-height: 48px;
+  overflow: visible;
+  transition: max-height 180ms cubic-bezier(0.2, 0, 0, 1), padding 180ms cubic-bezier(0.2, 0, 0, 1), gap 180ms cubic-bezier(0.2, 0, 0, 1), border-color 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.tab-bar > :not(.modal-overlay) {
+  transition: opacity 120ms ease;
 }
 
 .tabs-shell {
@@ -947,7 +956,7 @@ async function handleCreateTab() {
   user-select: none;
   flex: 0 0 auto;
   white-space: nowrap;
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), transform var(--ch-motion-fast);
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), transform var(--ch-motion-fast), height 180ms cubic-bezier(0.2, 0, 0, 1), padding 180ms cubic-bezier(0.2, 0, 0, 1), gap 180ms cubic-bezier(0.2, 0, 0, 1), border-radius 180ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 .tab:hover {
@@ -991,6 +1000,7 @@ async function handleCreateTab() {
   overflow: hidden;
   text-overflow: ellipsis;
   line-height: 1;
+  transition: font-size 180ms cubic-bezier(0.2, 0, 0, 1), max-width 180ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 .tab-name-input {
@@ -1051,6 +1061,7 @@ async function handleCreateTab() {
   padding: 0 4px;
   line-height: 1;
   border-radius: var(--ch-radius-sm);
+  transition: color var(--ch-motion-fast), background var(--ch-motion-fast), font-size 180ms cubic-bezier(0.2, 0, 0, 1), padding 180ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 .tab-close:hover {
@@ -1093,7 +1104,7 @@ async function handleCreateTab() {
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast);
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast), width 180ms cubic-bezier(0.2, 0, 0, 1), height 180ms cubic-bezier(0.2, 0, 0, 1), border-radius 180ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 .add-tab:hover:not(:disabled) {
