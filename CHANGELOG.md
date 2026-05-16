@@ -7,6 +7,7 @@
 
 ### fix: harden terminal replay hold on Linux CI
 - Extend the full-replay hold window and perform a final replay before marking history as complete, so late ttyd initial frames cannot collapse xterm scrollback immediately before E2E assertions
+- Verify the xterm buffer contains expected scrollback before publishing replay readiness, with a short post-ready watchdog for late Linux runner redraws
 - **Files**: terminal.py
 
 ### fix: stabilize terminal replay CI and refresh README
