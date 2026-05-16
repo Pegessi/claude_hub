@@ -78,6 +78,7 @@ _IDLE_TAIL_HINTS = (
 
 _STATUS_CACHE_TTL_SECONDS = 0.75
 _PORT_CHECK_TIMEOUT_SECONDS = 0.2
+_REMOTE_CAPTURE_TIMEOUT_SECONDS = 10.0
 
 
 class CursorPosition(TypedDict):
@@ -373,15 +374,9 @@ class TTYDProcess:
         host = f"{profile.user}@{profile.ssh_host}" if profile.user else profile.ssh_host
         return host, profile.port
 
-    def _build_remote_attach_command(self) -> str:
-        remote_session = f"claude-hub-{self.tab_id[:8]}"
-        cwd = self.remote_cwd or self.cwd or "~"
-        start_command = self._agent_start_command()
-        quoted_cwd = self._quote_remote_cwd(cwd)
-        quoted_session = shlex.quote(remote_session)
-        quoted_start = shlex.quote(start_command)
-        shell = "${SHELL:-/bin/bash}"
-        bootstrap_path = (
+    @staticmethod
+    def _remote_path_bootstrap() -> str:
+        return (
             'if [ -d "$HOME/.nvm/versions/node" ]; then '
             'for dir in "$HOME"/.nvm/versions/node/*/bin; do '
             '[ -d "$dir" ] && PATH="$dir:$PATH"; '
@@ -389,6 +384,37 @@ class TTYDProcess:
             "export PATH; "
             "fi"
         )
+
+    @staticmethod
+    def _remote_shell_command(script: str) -> str:
+        return f"exec ${{SHELL:-/bin/bash}} -lc {shlex.quote(script)}"
+
+    def _build_remote_ssh_command(self, remote_command: str) -> list[str]:
+        host, port = self._remote_ssh_target()
+        cmd = [
+            "ssh",
+            "-T",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "NumberOfPasswordPrompts=0",
+            "-o",
+            "ConnectTimeout=5",
+        ]
+        if port != 22:
+            cmd.extend(["-p", str(port)])
+        cmd.extend([host, remote_command])
+        return cmd
+
+    def _build_remote_attach_command(self) -> str:
+        remote_session = self.tmux_session
+        cwd = self.remote_cwd or self.cwd or "~"
+        start_command = self._agent_start_command()
+        quoted_cwd = self._quote_remote_cwd(cwd)
+        quoted_session = shlex.quote(remote_session)
+        quoted_start = shlex.quote(start_command)
+        shell = "${SHELL:-/bin/bash}"
+        bootstrap_path = self._remote_path_bootstrap()
         checks: list[str] = []
 
         direct_start_script = "; ".join(
@@ -412,7 +438,7 @@ class TTYDProcess:
                 direct_start_script,
             ]
         )
-        return f"exec {shell} -lc {shlex.quote(script)}"
+        return self._remote_shell_command(script)
 
     @staticmethod
     def _quote_remote_cwd(cwd: str) -> str:
@@ -511,7 +537,45 @@ class TTYDProcess:
         except Exception as e:
             logger.warning(f"Failed to configure tmux for tab {self.tab_id}: {e}")
 
-    async def capture_history(self, lines: int = 100000) -> str:
+    async def _run_remote_capture_command(self, remote_command: str) -> str:
+        proc = await asyncio.create_subprocess_exec(
+            *self._build_remote_ssh_command(remote_command),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=_REMOTE_CAPTURE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as exc:
+            proc.kill()
+            await proc.wait()
+            raise RuntimeError("remote tmux capture timed out") from exc
+
+        if proc.returncode != 0:
+            error = stderr.decode("utf-8", errors="ignore").strip()
+            raise RuntimeError(error or f"remote tmux capture failed with code {proc.returncode}")
+
+        return stdout.decode("utf-8", errors="ignore")
+
+    async def _capture_remote_history(self, lines: int = 100000) -> str:
+        safe_lines = max(100, min(lines, 100000))
+        start = f"-{safe_lines}"
+        script = "; ".join(
+            [
+                self._remote_path_bootstrap(),
+                "command -v tmux >/dev/null 2>&1",
+                (
+                    "tmux capture-pane -p -e "
+                    f"-S {shlex.quote(start)} "
+                    f"-t {shlex.quote(self.tmux_session)}"
+                ),
+            ]
+        )
+        return await self._run_remote_capture_command(self._remote_shell_command(script))
+
+    async def _capture_local_history(self, lines: int = 100000) -> str:
         """Capture full terminal history from tmux for replay on reconnect.
 
         Captures the entire terminal content (scrollback + visible screen)
@@ -546,7 +610,21 @@ class TTYDProcess:
 
         return stdout.decode("utf-8", errors="ignore")
 
-    async def capture_cursor_position(self) -> Optional[CursorPosition]:
+    async def capture_history(self, lines: int = 100000, prefer_remote: bool = False) -> str:
+        if prefer_remote and self.target == ExecutionTarget.REMOTE:
+            try:
+                remote_history = await self._capture_remote_history(lines)
+                if remote_history:
+                    return remote_history
+            except Exception as e:
+                logger.debug(
+                    "Falling back to local history for remote tab %s after remote capture failed: %s",
+                    self.tab_id,
+                    e,
+                )
+        return await self._capture_local_history(lines)
+
+    async def _capture_local_cursor_position(self) -> Optional[CursorPosition]:
         """Capture tmux pane cursor position as zero-based x/y coordinates."""
         if not _tmux_session_exists(self.tmux_session):
             return None
@@ -574,6 +652,44 @@ class TTYDProcess:
             return {"cursor_x": int(parts[0]), "cursor_y": int(parts[1])}
         except ValueError:
             return None
+
+    async def _capture_remote_cursor_position(self) -> Optional[CursorPosition]:
+        script = "; ".join(
+            [
+                self._remote_path_bootstrap(),
+                "command -v tmux >/dev/null 2>&1",
+                (
+                    "tmux display-message -p "
+                    f"-t {shlex.quote(self.tmux_session)} "
+                    f"{shlex.quote('#{cursor_x} #{cursor_y}')}"
+                ),
+            ]
+        )
+        stdout = await self._run_remote_capture_command(self._remote_shell_command(script))
+        parts = stdout.strip().split()
+        if len(parts) != 2:
+            return None
+        try:
+            return {"cursor_x": int(parts[0]), "cursor_y": int(parts[1])}
+        except ValueError:
+            return None
+
+    async def capture_cursor_position(
+        self,
+        prefer_remote: bool = False,
+    ) -> Optional[CursorPosition]:
+        if prefer_remote and self.target == ExecutionTarget.REMOTE:
+            try:
+                remote_cursor = await self._capture_remote_cursor_position()
+                if remote_cursor:
+                    return remote_cursor
+            except Exception as e:
+                logger.debug(
+                    "Falling back to local cursor for remote tab %s after remote capture failed: %s",
+                    self.tab_id,
+                    e,
+                )
+        return await self._capture_local_cursor_position()
 
     async def capture_foreground_command(self) -> Optional[str]:
         """Capture the foreground command currently running in the tmux pane."""
@@ -1012,14 +1128,14 @@ class TTYDManager:
         process = self.processes.get(tab_id)
         if not process:
             return None
-        return await process.capture_history(lines)
+        return await process.capture_history(lines, prefer_remote=True)
 
     async def get_tab_cursor_position(self, tab_id: str) -> Optional[CursorPosition]:
         """Get tmux cursor position for a tab."""
         process = self.processes.get(tab_id)
         if not process:
             return None
-        return await process.capture_cursor_position()
+        return await process.capture_cursor_position(prefer_remote=True)
 
     def _classify_agent_status(
         self,

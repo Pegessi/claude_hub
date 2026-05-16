@@ -180,6 +180,117 @@ def test_remote_workspace_forwarding_adds_reverse_ssh_port(monkeypatch: MonkeyPa
     assert "tiger@devbox" in launcher
 
 
+def test_remote_capture_ssh_command_is_noninteractive(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ttyd_manager_module.remote_profile_manager,
+        "get_profile",
+        lambda profile_id: RemoteProfile(
+            id=profile_id,
+            name="DevBox",
+            ssh_host="devbox",
+            user="tiger",
+            port=2222,
+        ),
+    )
+    process = TTYDProcess(
+        tab_id="tab-remote-capture",
+        port=12352,
+        name="Remote Capture",
+        target=ExecutionTarget.REMOTE,
+        remote_profile_id="devbox",
+    )
+
+    cmd = process._build_remote_ssh_command("tmux capture-pane")
+
+    assert cmd == [
+        "ssh",
+        "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "NumberOfPasswordPrompts=0",
+        "-o",
+        "ConnectTimeout=5",
+        "-p",
+        "2222",
+        "tiger@devbox",
+        "tmux capture-pane",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_remote_history_prefers_remote_tmux_capture(monkeypatch: MonkeyPatch) -> None:
+    process = TTYDProcess(
+        tab_id="tab-remote-history",
+        port=12353,
+        name="Remote History",
+        target=ExecutionTarget.REMOTE,
+        remote_profile_id="devbox",
+    )
+    commands: list[str] = []
+
+    async def fake_remote(remote_command: str) -> str:
+        commands.append(remote_command)
+        return "remote scrollback\nremote visible\n"
+
+    async def fail_local(_lines: int = 100000) -> str:
+        raise AssertionError("local history should not be used when remote capture succeeds")
+
+    monkeypatch.setattr(process, "_run_remote_capture_command", fake_remote)
+    monkeypatch.setattr(process, "_capture_local_history", fail_local)
+
+    history = await process.capture_history(lines=500, prefer_remote=True)
+
+    assert history == "remote scrollback\nremote visible\n"
+    assert len(commands) == 1
+    assert "tmux capture-pane -p -e -S -500 -t claude-hub-tab-remo" in commands[0]
+
+
+@pytest.mark.asyncio
+async def test_remote_history_falls_back_to_local_tmux_on_capture_failure(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    process = TTYDProcess(
+        tab_id="tab-remote-fallback",
+        port=12354,
+        name="Remote Fallback",
+        target=ExecutionTarget.REMOTE,
+        remote_profile_id="devbox",
+    )
+
+    async def fail_remote(_lines: int = 100000) -> str:
+        raise RuntimeError("ssh unavailable")
+
+    async def fake_local(_lines: int = 100000) -> str:
+        return "local visible\n"
+
+    monkeypatch.setattr(process, "_capture_remote_history", fail_remote)
+    monkeypatch.setattr(process, "_capture_local_history", fake_local)
+
+    assert await process.capture_history(lines=500, prefer_remote=True) == "local visible\n"
+
+
+@pytest.mark.asyncio
+async def test_get_tab_history_requests_remote_preferred_capture(monkeypatch: MonkeyPatch) -> None:
+    manager = TTYDManager.__new__(TTYDManager)
+    process = TTYDProcess(
+        tab_id="tab-1",
+        port=12355,
+        name="History Tab",
+    )
+    calls: list[tuple[int, bool]] = []
+
+    async def fake_capture_history(lines: int, prefer_remote: bool = False) -> str:
+        calls.append((lines, prefer_remote))
+        return "history"
+
+    monkeypatch.setattr(process, "capture_history", fake_capture_history)
+    manager.processes = {process.tab_id: process}
+
+    assert await manager.get_tab_history("tab-1", lines=250) == "history"
+    assert calls == [(250, True)]
+
+
 def test_claude_spinner_status_classifies_as_working(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
     manager = TTYDManager.__new__(TTYDManager)
