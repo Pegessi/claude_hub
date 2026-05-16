@@ -761,6 +761,7 @@ textarea {
   }
 
   .app[data-mode='terminal'] .app-mode-bar,
+  .app[data-mode='workspace'] .app-mode-bar,
   .app[data-mode='terminal'] .layout-selector--row {
     display: none;
   }
