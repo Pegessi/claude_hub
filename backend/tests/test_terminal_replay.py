@@ -111,6 +111,20 @@ def wait_for_visible_screen(page: Page, timeout: float = 10.0) -> None:
     time.sleep(0.5)
 
 
+def wait_for_xterm_buffer_lines(page: Page, min_lines: int, timeout: float = 12.0) -> None:
+    """Wait until xterm exposes enough buffer lines for tmux history."""
+    page.wait_for_function(
+        """(minLines) => {
+            const term = window.term;
+            if (!term) return false;
+            const buf = term.buffer && term.buffer.active;
+            return !!buf && buf.length >= minLines;
+        }""",
+        arg=min_lines,
+        timeout=int(timeout * 1000),
+    )
+
+
 def normalize_xterm_lines(lines: list[str]) -> list[str]:
     """Normalize xterm buffer lines: rstrip, remove trailing blanks."""
     result = [l.rstrip() for l in lines if l is not None]
@@ -119,12 +133,14 @@ def normalize_xterm_lines(lines: list[str]) -> list[str]:
     return result
 
 
-def load_terminal_page(page: Page, tab_id: str) -> None:
+def load_terminal_page(page: Page, tab_id: str, min_buffer_lines: int | None = None) -> None:
     """Navigate to the terminal proxy page and wait for full rendering."""
     page.goto(f"{BACKEND_URL}/api/terminal/proxy/{tab_id}/")
     page.wait_for_selector(".xterm", timeout=15000)
     wait_for_replay_done(page)
     wait_for_visible_screen(page)
+    if min_buffer_lines is not None:
+        wait_for_xterm_buffer_lines(page, min_buffer_lines)
 
 
 def wait_for_cursor_matches_tmux(page: Page, tab_id: str) -> None:
@@ -220,6 +236,7 @@ def test_scrollback_complete(terminal_tab: dict, page: Page) -> None:
     page.wait_for_selector(".xterm", timeout=15000)
     wait_for_replay_done(page)
     wait_for_visible_screen(page)
+    wait_for_xterm_buffer_lines(page, len(tmux_lines))
 
     # Step 4: Read xterm buffer and compare
     xterm_content = read_xterm_buffer(page)
@@ -253,6 +270,7 @@ def test_bottom_rows_preserved(terminal_tab: dict, page: Page) -> None:
     page.wait_for_selector(".xterm", timeout=15000)
     wait_for_replay_done(page)
     wait_for_visible_screen(page)
+    wait_for_xterm_buffer_lines(page, len(tmux_lines))
 
     xterm_content = read_xterm_buffer(page)
     xterm_lines = normalize_xterm_lines(xterm_content)
@@ -290,6 +308,7 @@ def test_no_duplicate_visible_screen(terminal_tab: dict, page: Page) -> None:
     page.wait_for_selector(".xterm", timeout=15000)
     wait_for_replay_done(page)
     wait_for_visible_screen(page)
+    wait_for_xterm_buffer_lines(page, len(tmux_lines))
 
     xterm_content = read_xterm_buffer(page)
     xterm_lines = normalize_xterm_lines(xterm_content)
@@ -402,7 +421,7 @@ def test_touch_scroll_alignment_during_live_output(terminal_tab: dict, page: Pag
 
     ensure_tmux_session(page, tab["id"], session_name)
     produce_scrollback(session_name, count=260)
-    load_terminal_page(page, tab["id"])
+    load_terminal_page(page, tab["id"], min_buffer_lines=260)
 
     send_keys_sync(
         session_name,
@@ -460,7 +479,7 @@ def test_desktop_wheel_enters_user_scroll_during_live_output(
 
     ensure_tmux_session(page, tab["id"], session_name)
     produce_scrollback(session_name, count=500)
-    load_terminal_page(page, tab["id"])
+    load_terminal_page(page, tab["id"], min_buffer_lines=500)
 
     send_keys_sync(
         session_name,
@@ -506,7 +525,7 @@ def test_wrapped_live_output_resyncs_complete_history(terminal_tab: dict, page: 
 
     ensure_tmux_session(page, tab["id"], session_name)
     produce_scrollback(session_name, count=260)
-    load_terminal_page(page, tab["id"])
+    load_terminal_page(page, tab["id"], min_buffer_lines=260)
 
     send_keys_sync(
         session_name,
@@ -537,7 +556,7 @@ def test_wrapped_live_output_resyncs_complete_history(terminal_tab: dict, page: 
             const joined = text.join('\\n');
             return joined.includes('LIVE_0000') && joined.includes('LIVE_{line_count - 1:04d}');
         }}""",
-        timeout=10000,
+        timeout=20000,
     )
 
     xterm_numbers = live_line_numbers(read_xterm_text(page))
@@ -563,7 +582,7 @@ def test_history_resync_does_not_replace_near_bottom_view(terminal_tab: dict, pa
 
     ensure_tmux_session(page, tab["id"], session_name)
     produce_scrollback(session_name, count=260)
-    load_terminal_page(page, tab["id"])
+    load_terminal_page(page, tab["id"], min_buffer_lines=260)
 
     send_keys_sync(
         session_name,

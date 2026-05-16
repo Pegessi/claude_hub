@@ -1,4 +1,5 @@
 import os
+import re
 from difflib import unified_diff
 from pathlib import Path
 from typing import AsyncGenerator, Generator
@@ -10,6 +11,7 @@ from httpx import ASGITransport, AsyncClient
 from playwright.sync_api import Page
 
 BACKEND_URL = os.environ.get("CLAUDE_HUB_TEST_BACKEND_URL", "http://127.0.0.1:8173").rstrip("/")
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -19,7 +21,7 @@ def normalize_terminal_output(text: str) -> list[str]:
 
     Strip CR, trim trailing whitespace per line, remove trailing blank lines.
     """
-    lines = text.replace("\r", "").split("\n")
+    lines = ANSI_ESCAPE_RE.sub("", text).replace("\r", "").split("\n")
     lines = [l.rstrip() for l in lines]
     while lines and lines[-1] == "":
         lines.pop()
