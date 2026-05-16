@@ -1,11 +1,17 @@
 <template>
-  <div class="app">
+  <div
+    class="app"
+    :data-mode="mode"
+  >
     <!-- 登录页面 -->
     <LoginView v-if="authStore.authRequired && !authStore.isAuthenticated && !authStore.isLoading" />
 
     <!-- 加载状态 -->
-    <div v-else-if="authStore.isLoading" class="loading-state">
-      <div class="loading-spinner"></div>
+    <div
+      v-else-if="authStore.isLoading"
+      class="loading-state"
+    >
+      <div class="loading-spinner" />
       <p>Loading...</p>
     </div>
 
@@ -49,9 +55,17 @@
           <span class="theme-switch-thumb" />
         </button>
       </div>
-      <div v-if="error" class="error-banner">
+      <div
+        v-if="error"
+        class="error-banner"
+      >
         <span>{{ error }}</span>
-        <button class="error-close" @click="clearError">×</button>
+        <button
+          class="error-close"
+          @click="clearError"
+        >
+          ×
+        </button>
       </div>
       <div
         v-show="mode === 'terminal'"
@@ -59,7 +73,10 @@
       >
         <TabBar />
         <LayoutSelector />
-        <div v-if="tabs.length === 0" class="empty-state">
+        <div
+          v-if="tabs.length === 0"
+          class="empty-state"
+        >
           <h2>No Terminal Tabs</h2>
           <p>Click the + button to create a new terminal tab</p>
         </div>
@@ -111,45 +128,62 @@ watch(colorScheme, (scheme) => {
 // the terminal area and mobile controls adjust properly.
 let vvResizeHandler: (() => void) | null = null
 let vvScrollHandler: (() => void) | null = null
+let largestVisualViewportHeight = 0
+let lastVisualViewportWidth = 0
 
 function setupMobileViewportSync() {
   const vv = window.visualViewport
   if (!vv) {
     // Fallback for browsers without visualViewport: listen to window resize
     window.addEventListener('resize', handleFallbackResize)
+    handleFallbackResize()
     return
   }
 
   vvResizeHandler = () => {
-    updateKeyboardHeight(vv)
+    updateViewportMetrics(vv)
   }
   vvScrollHandler = () => {
     // On iOS, visualViewport scrolls when keyboard is open.
     // The offsetTop tells us how far the page scrolled.
-    updateKeyboardHeight(vv)
+    updateViewportMetrics(vv)
   }
 
   vv.addEventListener('resize', vvResizeHandler)
   vv.addEventListener('scroll', vvScrollHandler)
+  updateViewportMetrics(vv)
 }
 
 function handleFallbackResize() {
-  // Rough fallback: if innerHeight dropped significantly, keyboard is likely open
-  const app = document.documentElement
-  app.style.setProperty('--keyboard-height', '0px')
+  updateViewportMetrics()
 }
 
-function updateKeyboardHeight(vv: VisualViewport) {
-  const fullHeight = window.innerHeight
-  const viewportHeight = vv.height
-  const keyboardHeight = Math.max(0, fullHeight - viewportHeight - vv.offsetTop)
+function updateViewportMetrics(vv?: VisualViewport) {
+  const root = document.documentElement
+  const viewportHeight = vv?.height ?? window.innerHeight
+  const viewportWidth = vv?.width ?? window.innerWidth
+  const offsetTop = vv?.offsetTop ?? 0
+  const isMobileViewport = window.innerWidth <= 768
 
-  const app = document.documentElement
-  if (keyboardHeight > 50) {
-    // Keyboard is open (threshold to avoid false positives from URL bar)
-    app.style.setProperty('--keyboard-height', `${keyboardHeight}px`)
+  if (Math.abs(viewportWidth - lastVisualViewportWidth) > 24) {
+    largestVisualViewportHeight = viewportHeight
+    lastVisualViewportWidth = viewportWidth
+  } else if (!largestVisualViewportHeight || viewportHeight > largestVisualViewportHeight) {
+    largestVisualViewportHeight = viewportHeight
+  }
+
+  const keyboardHeight = isMobileViewport
+    ? Math.max(0, largestVisualViewportHeight - viewportHeight - offsetTop)
+    : 0
+  const keyboardOpen = keyboardHeight > 50
+
+  root.style.setProperty('--visual-viewport-height', `${Math.round(viewportHeight)}px`)
+  root.style.setProperty('--keyboard-height', `${Math.round(keyboardHeight)}px`)
+
+  if (keyboardOpen) {
+    root.dataset.keyboardOpen = 'true'
   } else {
-    app.style.setProperty('--keyboard-height', '0px')
+    delete root.dataset.keyboardOpen
   }
 }
 
@@ -160,6 +194,7 @@ function cleanupMobileViewportSync() {
     if (vvScrollHandler) vv.removeEventListener('scroll', vvScrollHandler)
   }
   window.removeEventListener('resize', handleFallbackResize)
+  delete document.documentElement.dataset.keyboardOpen
 }
 
 onMounted(async () => {
@@ -186,6 +221,8 @@ onUnmounted(() => {
 
 :root {
   color-scheme: dark;
+  --visual-viewport-height: 100dvh;
+  --keyboard-height: 0px;
   --ch-color-app-bg: #1a1a1a;
   --ch-color-canvas: #181818;
   --ch-color-surface: #1e1e1e;
@@ -389,13 +426,12 @@ textarea {
 }
 
 .app {
-  height: 100%;
+  height: var(--visual-viewport-height, 100dvh);
   display: flex;
   flex-direction: column;
   background-color: var(--ch-color-app-bg);
   color: var(--ch-color-text);
-  /* Adjust for mobile keyboard — set by visualViewport sync */
-  padding-bottom: var(--keyboard-height, 0px);
+  min-height: 0;
 }
 
 .error-banner {
@@ -575,6 +611,70 @@ textarea {
   .theme-switch {
     width: 96px;
     flex: 0 0 auto;
+  }
+}
+
+@media (max-width: 768px) {
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .app-mode-bar,
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .layout-selector,
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .pane-header {
+    display: none;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-bar {
+    gap: 4px;
+    padding: 3px 6px;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab {
+    height: 26px;
+    gap: 4px;
+    padding: 0 8px;
+    border-radius: var(--ch-radius-sm);
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-name {
+    max-width: 118px;
+    font-size: 12px;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-close {
+    padding: 0 2px;
+    font-size: 15px;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-duplicate {
+    display: none;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .add-tab,
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .status-trigger {
+    height: 26px;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .add-tab {
+    width: 28px;
+    border-radius: var(--ch-radius-sm);
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .status-trigger {
+    min-width: 0;
+    gap: 4px;
+    padding: 0 7px;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .terminal-grid {
+    gap: 0;
+    padding: 0;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .terminal-pane {
+    border-width: 0;
+    border-radius: 0;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .terminal-pane.active {
+    box-shadow: none;
   }
 }
 </style>

@@ -5,6 +5,11 @@
 
 ## 2026-05-16
 
+### feat: expand mobile terminal space while typing
+- Drive the app shell height from `visualViewport` so the mobile keyboard does not double-shrink the terminal layout
+- Enter a compact terminal mode while the keyboard is open, hiding nonessential chrome and tightening tab, pane, and mobile-control spacing
+- **Files**: App.vue, MobileControls.vue
+
 ### fix: avoid false pending workspace dispatch
 - Treat submitted Claude slash-command output and older prompt echoes as completed sends, so queued workspace tasks are not blocked after a successful `/clear`
 - Add regression coverage for the Claude `/clear` output shape that kept the H20 workspace task queued
