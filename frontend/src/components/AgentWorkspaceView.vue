@@ -1,9 +1,14 @@
 <template>
   <section class="workspace-view">
     <header class="workspace-header">
-      <div>
+      <div class="workspace-title-block">
         <h1>Agent Workspace</h1>
         <p>Manual task queue with multiple resident workspace agents.</p>
+        <div class="workspace-mobile-identity">
+          <span>Agent Workspace</span>
+          <strong>{{ activeWorkspace?.name || 'No workspace' }}</strong>
+          <small>{{ mobileWorkspaceSummary }}</small>
+        </div>
       </div>
       <div class="workspace-actions">
         <div
@@ -32,14 +37,14 @@
         </div>
         <button
           type="button"
-          class="tool-button"
+          class="tool-button workspace-desktop-action"
           @click="openWorkspaceModal"
         >
           New Workspace
         </button>
         <button
           type="button"
-          class="tool-button"
+          class="tool-button workspace-desktop-action"
           :disabled="!activeWorkspaceId"
           @click="openAgentOptionsModal"
         >
@@ -53,6 +58,67 @@
         >
           Add Task
         </button>
+        <details
+          ref="workspaceMobileMenuRef"
+          class="workspace-mobile-menu"
+        >
+          <summary
+            class="workspace-mobile-menu-trigger"
+            title="Workspace menu"
+            aria-label="Workspace menu"
+          >
+            ⋯
+          </summary>
+          <div class="workspace-mobile-menu-panel">
+            <button
+              type="button"
+              class="workspace-mobile-menu-item workspace-mobile-menu-item--mode"
+              @click="goToTerminalMode"
+            >
+              <span>Terminal</span>
+            </button>
+            <button
+              type="button"
+              class="workspace-mobile-menu-item workspace-mobile-menu-item--mode active"
+              @click="closeWorkspaceMobileMenu"
+            >
+              <span>Workspace</span>
+              <strong>Current</strong>
+            </button>
+            <button
+              type="button"
+              class="workspace-mobile-menu-item"
+              @click="openWorkspaceModalFromMenu"
+            >
+              New Workspace
+            </button>
+            <button
+              type="button"
+              class="workspace-mobile-menu-item"
+              :disabled="!activeWorkspaceId"
+              @click="openAgentOptionsModalFromMenu"
+            >
+              Manage Agents
+            </button>
+            <LoadingButton
+              type="button"
+              class="workspace-mobile-menu-item"
+              :loading="isPending('workspace:refresh-statuses')"
+              loading-label="Refreshing"
+              @click="refreshAgentStatusesFromMenu"
+            >
+              Refresh
+            </LoadingButton>
+            <button
+              type="button"
+              class="workspace-mobile-menu-item workspace-mobile-menu-item--theme"
+              @click="toggleThemeFromMenu"
+            >
+              <span>{{ colorScheme === 'dark' ? 'Switch to Light' : 'Switch to Dark' }}</span>
+              <strong>{{ colorScheme }}</strong>
+            </button>
+          </div>
+        </details>
       </div>
     </header>
 
@@ -1192,6 +1258,7 @@ const appStore = useAppStore()
 const terminalStore = useTerminalStore()
 const workspaceStore = useWorkspaceStore()
 const { isPending, runPending } = usePendingActions()
+const { colorScheme } = storeToRefs(appStore)
 const {
   workspaces,
   activeWorkspaceId,
@@ -1212,6 +1279,7 @@ const showWorkspaceModal = ref(false)
 const showAgentOptionsModal = ref(false)
 const showAgentFileBrowser = ref(false)
 const showTaskModal = ref(false)
+const workspaceMobileMenuRef = ref<HTMLDetailsElement | null>(null)
 const remoteProfiles = ref<RemoteProfile[]>([])
 const remoteProfilesLoading = ref(false)
 const agentBrowserCurrentPath = ref('')
@@ -1269,6 +1337,15 @@ const taskForm = reactive({
 const activeWorkspace = computed(() =>
   workspaces.value.find(workspace => workspace.id === activeWorkspaceId.value) || null
 )
+
+const mobileWorkspaceSummary = computed(() => {
+  if (!activeWorkspaceId.value) return 'Create a workspace to begin'
+
+  const agentCount = workspaceAgents.value.length
+  const workingCount = workspaceAgents.value.filter(agent => agent.runtime_status === 'working').length
+  const queuedCount = tasksByStatus('queued').length
+  return `${agentCount} agents · ${workingCount} working · ${queuedCount} queued`
+})
 
 const selectedTask = computed(() =>
   tasks.value.find(task => task.id === selectedTaskId.value) || null
@@ -1578,6 +1655,43 @@ function closeWorkspaceModal() {
   showWorkspaceModal.value = false
 }
 
+function closeWorkspaceMobileMenu() {
+  if (workspaceMobileMenuRef.value) {
+    workspaceMobileMenuRef.value.open = false
+  }
+}
+
+function handleWorkspaceDocumentPointerDown(event: PointerEvent) {
+  const target = event.target
+  if (
+    target instanceof Node &&
+    workspaceMobileMenuRef.value?.open &&
+    !workspaceMobileMenuRef.value.contains(target)
+  ) {
+    closeWorkspaceMobileMenu()
+  }
+}
+
+function goToTerminalMode() {
+  appStore.setMode('terminal')
+  closeWorkspaceMobileMenu()
+}
+
+function openWorkspaceModalFromMenu() {
+  openWorkspaceModal()
+  closeWorkspaceMobileMenu()
+}
+
+function openAgentOptionsModalFromMenu() {
+  openAgentOptionsModal()
+  closeWorkspaceMobileMenu()
+}
+
+function toggleThemeFromMenu() {
+  appStore.toggleColorScheme()
+  closeWorkspaceMobileMenu()
+}
+
 function resetAgentOptionsForm() {
   const workspace = activeWorkspace.value
   agentOptionsForm.title = ''
@@ -1770,6 +1884,11 @@ async function refreshAgentStatuses() {
   )
 }
 
+async function refreshAgentStatusesFromMenu() {
+  await refreshAgentStatuses()
+  closeWorkspaceMobileMenu()
+}
+
 async function startTask(task: WorkspaceTask) {
   await runPending(taskActionKey('start', task.id), async () => {
     const options = startOptionsFor(task)
@@ -1909,6 +2028,7 @@ watch(
 )
 
 onMounted(async () => {
+  document.addEventListener('pointerdown', handleWorkspaceDocumentPointerDown)
   await fetchRemoteProfiles()
   await workspaceStore.fetchWorkspaces()
   terminalStore.startAgentStatusPolling()
@@ -1916,6 +2036,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  document.removeEventListener('pointerdown', handleWorkspaceDocumentPointerDown)
   if (boardPollTimer !== null) {
     window.clearInterval(boardPollTimer)
     boardPollTimer = null
@@ -1959,6 +2080,15 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
+.workspace-title-block {
+  min-width: 0;
+}
+
+.workspace-mobile-identity,
+.workspace-mobile-menu {
+  display: none;
+}
+
 .workspace-actions,
 .form-row,
 .task-actions,
@@ -1974,6 +2104,120 @@ onUnmounted(() => {
 .workspace-actions {
   justify-content: flex-end;
   flex-wrap: wrap;
+}
+
+.workspace-mobile-menu {
+  position: relative;
+}
+
+.workspace-mobile-menu summary {
+  list-style: none;
+}
+
+.workspace-mobile-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.workspace-mobile-menu-trigger {
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast);
+}
+
+.workspace-mobile-menu-trigger:hover,
+.workspace-mobile-menu[open] .workspace-mobile-menu-trigger {
+  border-color: var(--ch-color-border-hover);
+  background: var(--ch-color-surface-control-hover);
+}
+
+.workspace-mobile-menu-panel {
+  position: absolute;
+  top: calc(100% + 7px);
+  right: 0;
+  z-index: 80;
+  width: 188px;
+  padding: 6px;
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-glass);
+  box-shadow: var(--ch-shadow-soft);
+}
+
+.workspace-mobile-menu-item {
+  width: 100%;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--ch-radius-sm);
+  background: transparent;
+  color: var(--ch-color-text);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.workspace-mobile-menu-item:hover {
+  background: var(--ch-color-surface-control-hover);
+}
+
+.workspace-mobile-menu-item--mode {
+  justify-content: space-between;
+  border-color: var(--ch-color-border-muted);
+  background: var(--ch-color-surface-soft);
+}
+
+.workspace-mobile-menu-item--mode + .workspace-mobile-menu-item:not(.workspace-mobile-menu-item--mode) {
+  margin-top: 4px;
+}
+
+.workspace-mobile-menu-item--mode.active {
+  border-color: var(--ch-color-accent-ring-strong);
+  background: var(--ch-color-accent-soft);
+}
+
+.workspace-mobile-menu-item--mode strong {
+  border-radius: 999px;
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  font-size: 10px;
+  line-height: 1;
+  padding: 4px 7px;
+  text-transform: uppercase;
+}
+
+.workspace-mobile-menu-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.workspace-mobile-menu-item--theme {
+  justify-content: space-between;
+  margin-top: 4px;
+  border-color: var(--ch-color-accent-ring-strong);
+  background: var(--ch-color-accent-soft);
+}
+
+.workspace-mobile-menu-item--theme strong {
+  border-radius: 999px;
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  font-size: 10px;
+  line-height: 1;
+  padding: 4px 7px;
+  text-transform: uppercase;
 }
 
 .workspace-summary-strip {
@@ -3495,10 +3739,50 @@ onUnmounted(() => {
     position: sticky;
     top: 0;
     z-index: 20;
-    flex-direction: column;
+    flex-direction: row;
     align-items: stretch;
-    gap: 10px;
-    padding: 10px 12px;
+    gap: 0;
+    padding: 6px 8px;
+    background: var(--ch-color-surface);
+  }
+
+  .workspace-title-block {
+    display: none;
+  }
+
+  .workspace-header .workspace-title-block > h1,
+  .workspace-header .workspace-title-block > p {
+    display: none;
+  }
+
+  .workspace-mobile-identity {
+    min-width: 0;
+    display: grid;
+    gap: 2px;
+  }
+
+  .workspace-mobile-identity span {
+    color: var(--ch-color-text-muted);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    text-transform: uppercase;
+  }
+
+  .workspace-mobile-identity strong {
+    min-width: 0;
+    color: var(--ch-color-text-strong);
+    font-size: 15px;
+    line-height: 1.2;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .workspace-mobile-identity small {
+    color: var(--ch-color-text-muted);
+    font-size: 11px;
+    line-height: 1.2;
   }
 
   .workspace-header h1 {
@@ -3513,12 +3797,13 @@ onUnmounted(() => {
   .workspace-actions {
     width: 100%;
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
     gap: 6px;
   }
 
   .workspace-select-shell {
-    grid-column: 1 / -1;
+    grid-column: auto;
     width: 100%;
     min-width: 0;
   }
@@ -3530,7 +3815,7 @@ onUnmounted(() => {
   .workspace-select,
   .workspace-actions .tool-button,
   .workspace-actions .primary-button {
-    height: 36px;
+    height: 32px;
   }
 
   .workspace-actions .tool-button,
@@ -3539,47 +3824,93 @@ onUnmounted(() => {
     padding: 0 8px;
   }
 
+  .workspace-actions .workspace-desktop-action {
+    display: none;
+  }
+
   .workspace-actions .primary-button {
-    grid-column: 1 / -1;
+    grid-column: auto;
+    width: auto;
+    min-width: 74px;
+    white-space: nowrap;
+  }
+
+  .workspace-mobile-menu {
+    display: block;
+  }
+
+  .workspace-mobile-menu-trigger {
+    width: 32px;
+    height: 32px;
   }
 
   .workspace-summary-strip {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 8px;
-    padding: 8px 12px;
-  }
-
-  .workspace-summary-primary {
-    justify-content: space-between;
-  }
-
-  .workspace-column-tabs {
-    padding-bottom: 2px;
+    display: none;
   }
 
   .workspace-agent-status {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    padding: 8px 12px;
+    gap: 6px;
+    padding: 7px 10px;
+    background: var(--ch-color-canvas);
   }
 
   .agent-status-header {
-    min-width: 0;
+    display: none;
   }
 
   .agent-status-grid {
     display: flex;
-    gap: 8px;
+    gap: 6px;
     overflow-x: auto;
     padding-bottom: 2px;
     scroll-snap-type: x proximity;
   }
 
   .agent-status-card {
-    flex: 0 0 min(92vw, 360px);
+    min-width: 0;
+    flex: 0 0 min(46vw, 184px);
+    gap: 0;
+    padding: 7px 8px;
+    border-radius: var(--ch-radius-md);
     scroll-snap-align: start;
+    box-shadow: none;
+  }
+
+  .agent-status-card:hover {
+    transform: none;
+    box-shadow: none;
+  }
+
+  .agent-status-card-main {
+    grid-template-columns: 9px minmax(0, 1fr);
+    gap: 7px;
+    align-items: start;
+  }
+
+  .agent-status-line {
+    gap: 4px;
+  }
+
+  .agent-status-kind,
+  .agent-status-detail,
+  .agent-status-meta,
+  .agent-status-actions {
+    display: none;
+  }
+
+  .agent-status-name {
+    font-size: 12px;
+  }
+
+  .agent-status-pill {
+    grid-column: 2;
+    width: fit-content;
+    min-width: 0;
+    margin-top: 3px;
+    padding: 3px 6px;
+    font-size: 10px;
   }
 
   .workspace-layout {
@@ -3817,11 +4148,11 @@ onUnmounted(() => {
 
 @media (max-width: 480px) {
   .workspace-actions {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr) auto auto;
   }
 
   .workspace-select-shell {
-    grid-column: 1 / -1;
+    grid-column: auto;
   }
 
   .form-row {
