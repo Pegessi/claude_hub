@@ -616,7 +616,7 @@ textarea {
 
 @media (max-width: 768px) {
   html[data-keyboard-open='true'] .app[data-mode='terminal'] .app-mode-bar,
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .layout-selector,
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .layout-selector--row,
   html[data-keyboard-open='true'] .app[data-mode='terminal'] .pane-header {
     display: none;
   }
