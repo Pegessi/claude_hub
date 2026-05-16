@@ -5,6 +5,10 @@
 
 ## 2026-05-16
 
+### fix: refit terminal canvas after light theme layout changes
+- Trigger ttyd/xterm resize from the active iframe after theme, tab, and container-size changes so the terminal canvas fills the pane in light mode
+- **Files**: TerminalView.vue
+
 ### fix: align compact done task cards
 - Prevent crowded task columns from flex-shrinking task cards below their content height
 - Make Done task cards an explicit compact single-line surface so titles and status badges stay vertically centered
