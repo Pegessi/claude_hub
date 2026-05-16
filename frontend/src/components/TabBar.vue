@@ -82,6 +82,43 @@
       {{ isLoading ? '...' : '+' }}
     </button>
     <LayoutSelector variant="menu" />
+    <div class="mobile-app-menu">
+      <details
+        ref="mobileAppMenuRef"
+        class="mobile-app-menu-details"
+      >
+        <summary
+          class="mobile-app-menu-trigger"
+          title="App menu"
+          aria-label="App menu"
+        >
+          ⋯
+        </summary>
+        <div class="mobile-app-menu-panel">
+          <button
+            type="button"
+            :class="['mobile-app-menu-item', { active: mode === 'terminal' }]"
+            @click="setAppMode('terminal')"
+          >
+            Terminal
+          </button>
+          <button
+            type="button"
+            :class="['mobile-app-menu-item', { active: mode === 'workspace' }]"
+            @click="setAppMode('workspace')"
+          >
+            Agent Workspace
+          </button>
+          <button
+            type="button"
+            class="mobile-app-menu-item"
+            @click="toggleColorScheme"
+          >
+            {{ colorScheme === 'dark' ? 'Light Theme' : 'Dark Theme' }}
+          </button>
+        </div>
+      </details>
+    </div>
     <AgentStatusFloatingPanel
       v-if="manualTabs.length > 0"
       source="manual"
@@ -415,8 +452,9 @@ import AgentStatusFloatingPanel from '@/components/AgentStatusFloatingPanel.vue'
 import LayoutSelector from '@/components/LayoutSelector.vue'
 import LoadingButton from '@/components/LoadingButton.vue'
 import { usePendingActions } from '@/composables/usePendingActions'
+import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
-import type { RemoteProfile, TerminalTab } from '@/types'
+import type { AppMode, RemoteProfile, TerminalTab } from '@/types'
 import type { AgentRuntimeStatus } from '@/types'
 
 interface FileInfo {
@@ -433,8 +471,10 @@ interface DirectoryListing {
 }
 
 const store = useTerminalStore()
+const appStore = useAppStore()
 const { isPending, runPending } = usePendingActions()
 const { tabs, manualTabs, managedTabs, activeTabId, isLoading, agentStatuses } = storeToRefs(store)
+const { mode, colorScheme } = storeToRefs(appStore)
 
 const tabStatusById = computed<Record<string, AgentRuntimeStatus>>(() => {
   const map: Record<string, AgentRuntimeStatus> = {}
@@ -460,6 +500,7 @@ const tabToClose = ref<TerminalTab | null>(null)
 const editingTabId = ref<string | null>(null)
 const editingTabName = ref('')
 const renameInputRef = ref<HTMLInputElement | null>(null)
+const mobileAppMenuRef = ref<HTMLDetailsElement | null>(null)
 const tabsContainerRef = ref<HTMLDivElement | null>(null)
 const showLeftFade = ref(false)
 const showRightFade = ref(false)
@@ -745,6 +786,29 @@ function openCreateModal() {
   fetchRemoteProfiles()
 }
 
+function closeMobileAppMenu() {
+  if (mobileAppMenuRef.value) {
+    mobileAppMenuRef.value.open = false
+  }
+}
+
+function setAppMode(nextMode: AppMode) {
+  appStore.setMode(nextMode)
+  closeMobileAppMenu()
+}
+
+function toggleColorScheme() {
+  appStore.toggleColorScheme()
+  closeMobileAppMenu()
+}
+
+function handleDocumentPointerDown(event: PointerEvent) {
+  const target = event.target
+  if (target instanceof Node && mobileAppMenuRef.value && !mobileAppMenuRef.value.contains(target)) {
+    closeMobileAppMenu()
+  }
+}
+
 function closeCreateModal() {
   showModal.value = false
   showFileBrowser.value = false
@@ -817,10 +881,12 @@ onMounted(() => {
     updateScrollFadeState()
   })
   window.addEventListener('resize', updateScrollFadeState)
+  document.addEventListener('pointerdown', handleDocumentPointerDown)
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', updateScrollFadeState)
+  document.removeEventListener('pointerdown', handleDocumentPointerDown)
 })
 
 async function handleCreateTab() {
@@ -886,6 +952,82 @@ async function handleCreateTab() {
 
 .tab-bar > :not(.modal-overlay) {
   transition: opacity 120ms ease;
+}
+
+.mobile-app-menu {
+  display: none;
+}
+
+.mobile-app-menu-details {
+  position: relative;
+}
+
+.mobile-app-menu-details summary {
+  list-style: none;
+}
+
+.mobile-app-menu-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.mobile-app-menu-trigger {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast);
+}
+
+.mobile-app-menu-trigger:hover,
+.mobile-app-menu-details[open] .mobile-app-menu-trigger {
+  border-color: var(--ch-color-border-hover);
+  background: var(--ch-color-surface-control-hover);
+}
+
+.mobile-app-menu-panel {
+  position: absolute;
+  top: calc(100% + 7px);
+  right: 0;
+  z-index: 1200;
+  width: 184px;
+  padding: 6px;
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-glass);
+  box-shadow: var(--ch-shadow-soft);
+}
+
+.mobile-app-menu-item {
+  width: 100%;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--ch-radius-sm);
+  background: transparent;
+  color: var(--ch-color-text);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mobile-app-menu-item:hover {
+  background: var(--ch-color-surface-control-hover);
+}
+
+.mobile-app-menu-item.active {
+  border-color: var(--ch-color-accent-ring-strong);
+  background: var(--ch-color-accent-soft);
 }
 
 .tabs-shell {
@@ -1536,6 +1678,13 @@ async function handleCreateTab() {
   .modal-actions .btn,
   .file-browser-footer .btn {
     flex: 1;
+  }
+}
+
+@media (max-width: 768px) {
+  .mobile-app-menu {
+    display: flex;
+    flex: 0 0 auto;
   }
 }
 </style>

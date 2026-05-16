@@ -317,6 +317,7 @@ onUnmounted(() => {
   pointer-events: none;
   display: flex;
   flex-direction: column;
+  justify-content: flex-end;
   align-items: flex-end;
   padding: 12px;
   padding-bottom: calc(12px + env(safe-area-inset-bottom, 0));
@@ -490,7 +491,9 @@ onUnmounted(() => {
 }
 
 :global(html[data-keyboard-open='true'] .mobile-controls-overlay) {
-  bottom: 0;
+  top: var(--visual-viewport-offset-top, 0);
+  bottom: auto;
+  height: var(--visual-viewport-height, 100dvh);
   padding: 6px;
   padding-bottom: max(6px, env(safe-area-inset-bottom, 0));
 }
