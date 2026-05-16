@@ -72,10 +72,18 @@
           <div class="workspace-mobile-menu-panel">
             <button
               type="button"
-              class="workspace-mobile-menu-item"
+              class="workspace-mobile-menu-item workspace-mobile-menu-item--mode"
               @click="goToTerminalMode"
             >
-              Terminal
+              <span>Terminal</span>
+            </button>
+            <button
+              type="button"
+              class="workspace-mobile-menu-item workspace-mobile-menu-item--mode active"
+              @click="closeWorkspaceMobileMenu"
+            >
+              <span>Workspace</span>
+              <strong>Current</strong>
             </button>
             <button
               type="button"
@@ -2163,6 +2171,31 @@ onUnmounted(() => {
 
 .workspace-mobile-menu-item:hover {
   background: var(--ch-color-surface-control-hover);
+}
+
+.workspace-mobile-menu-item--mode {
+  justify-content: space-between;
+  border-color: var(--ch-color-border-muted);
+  background: var(--ch-color-surface-soft);
+}
+
+.workspace-mobile-menu-item--mode + .workspace-mobile-menu-item:not(.workspace-mobile-menu-item--mode) {
+  margin-top: 4px;
+}
+
+.workspace-mobile-menu-item--mode.active {
+  border-color: var(--ch-color-accent-ring-strong);
+  background: var(--ch-color-accent-soft);
+}
+
+.workspace-mobile-menu-item--mode strong {
+  border-radius: 999px;
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  font-size: 10px;
+  line-height: 1;
+  padding: 4px 7px;
+  text-transform: uppercase;
 }
 
 .workspace-mobile-menu-item:disabled {

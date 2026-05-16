@@ -97,17 +97,19 @@
         <div class="mobile-app-menu-panel">
           <button
             type="button"
-            :class="['mobile-app-menu-item', { active: mode === 'terminal' }]"
+            :class="['mobile-app-menu-item', 'mobile-app-menu-item--mode', { active: mode === 'terminal' }]"
             @click="setAppMode('terminal')"
           >
-            Terminal
+            <span>Terminal</span>
+            <strong v-if="mode === 'terminal'">Current</strong>
           </button>
           <button
             type="button"
-            :class="['mobile-app-menu-item', { active: mode === 'workspace' }]"
+            :class="['mobile-app-menu-item', 'mobile-app-menu-item--mode', { active: mode === 'workspace' }]"
             @click="setAppMode('workspace')"
           >
-            Agent Workspace
+            <span>Agent Workspace</span>
+            <strong v-if="mode === 'workspace'">Current</strong>
           </button>
           <button
             type="button"
@@ -1023,6 +1025,26 @@ async function handleCreateTab() {
 
 .mobile-app-menu-item:hover {
   background: var(--ch-color-surface-control-hover);
+}
+
+.mobile-app-menu-item--mode {
+  justify-content: space-between;
+  border-color: var(--ch-color-border-muted);
+  background: var(--ch-color-surface-soft);
+}
+
+.mobile-app-menu-item--mode + .mobile-app-menu-item:not(.mobile-app-menu-item--mode) {
+  margin-top: 4px;
+}
+
+.mobile-app-menu-item--mode strong {
+  border-radius: 999px;
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  font-size: 10px;
+  line-height: 1;
+  padding: 4px 7px;
+  text-transform: uppercase;
 }
 
 .mobile-app-menu-item.active {
