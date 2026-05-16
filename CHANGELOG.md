@@ -5,6 +5,10 @@
 
 ## 2026-05-16
 
+### fix: match terminal padding to rendered canvas background
+- Compute the light-mode terminal inset color through the same canvas filter used by xterm so the padding matches the rendered terminal surface
+- **Files**: TerminalView.vue
+
 ### fix: soften embedded terminal edge padding
 - Restore a small terminal-colored inset around xterm content so light mode feels less crowded without reintroducing page-colored gutters
 - **Files**: TerminalView.vue
