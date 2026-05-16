@@ -1,7 +1,7 @@
 [project]
 name = "claude-hub"
 version = "0.1.0"
-description = "Web-based persistent Claude terminal service"
+description = "Persistent Claude/Codex terminal and Agent Workspace dashboard"
 authors = [
     { name = "Your Name", email = "you@example.com" }
 ]
