@@ -135,7 +135,9 @@ let keyboardCloseTimer: number | null = null
 let viewportUpdateFrame: number | null = null
 let pendingVisualViewport: VisualViewport | undefined
 let lastAppliedViewportHeight = ''
+let lastAppliedStableViewportHeight = ''
 let lastAppliedKeyboardHeight = ''
+let lastAppliedViewportOffsetTop = ''
 
 const KEYBOARD_OPEN_THRESHOLD_PX = 36
 const KEYBOARD_CLOSE_THRESHOLD_PX = 12
@@ -217,16 +219,28 @@ function updateViewportMetrics(vv?: VisualViewport) {
     : 0
 
   const viewportHeightValue = `${Math.round(viewportHeight)}px`
+  const stableViewportHeightValue = `${Math.round(isMobileViewport ? largestVisualViewportHeight || viewportHeight : viewportHeight)}px`
   const keyboardHeightValue = `${Math.round(keyboardHeight)}px`
+  const viewportOffsetTopValue = `${Math.round(offsetTop)}px`
 
   if (viewportHeightValue !== lastAppliedViewportHeight) {
     root.style.setProperty('--visual-viewport-height', viewportHeightValue)
     lastAppliedViewportHeight = viewportHeightValue
   }
 
+  if (stableViewportHeightValue !== lastAppliedStableViewportHeight) {
+    root.style.setProperty('--stable-viewport-height', stableViewportHeightValue)
+    lastAppliedStableViewportHeight = stableViewportHeightValue
+  }
+
   if (keyboardHeightValue !== lastAppliedKeyboardHeight) {
     root.style.setProperty('--keyboard-height', keyboardHeightValue)
     lastAppliedKeyboardHeight = keyboardHeightValue
+  }
+
+  if (viewportOffsetTopValue !== lastAppliedViewportOffsetTop) {
+    root.style.setProperty('--visual-viewport-offset-top', viewportOffsetTopValue)
+    lastAppliedViewportOffsetTop = viewportOffsetTopValue
   }
 
   if (!isMobileViewport) {
@@ -298,6 +312,8 @@ onUnmounted(() => {
 :root {
   color-scheme: dark;
   --visual-viewport-height: 100dvh;
+  --stable-viewport-height: 100dvh;
+  --visual-viewport-offset-top: 0px;
   --keyboard-height: 0px;
   --ch-color-app-bg: #1a1a1a;
   --ch-color-canvas: #181818;
@@ -696,94 +712,12 @@ textarea {
 
 @media (max-width: 768px) {
   .app[data-mode='terminal'] {
-    transition: height 180ms cubic-bezier(0.2, 0, 0, 1);
+    height: var(--stable-viewport-height, 100dvh);
   }
 
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .app-mode-bar {
-    max-height: 0;
-    padding-top: 0;
-    padding-bottom: 0;
-    border-bottom-color: transparent;
-    opacity: 0;
-    transform: translateY(-6px);
-    pointer-events: none;
-  }
-
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .layout-selector--row {
+  .app[data-mode='terminal'] .app-mode-bar,
+  .app[data-mode='terminal'] .layout-selector--row {
     display: none;
-  }
-
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-bar {
-    max-height: 0;
-    gap: 0;
-    padding: 0 6px;
-    border-bottom-color: transparent;
-  }
-
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-bar > :not(.modal-overlay) {
-    opacity: 0;
-    pointer-events: none;
-  }
-
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-duplicate {
-    display: none;
-  }
-
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab {
-    height: 26px;
-    gap: 4px;
-    padding: 0 8px;
-    border-radius: var(--ch-radius-sm);
-  }
-
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-name {
-    max-width: 118px;
-    font-size: 12px;
-  }
-
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-close {
-    padding: 0 2px;
-    font-size: 15px;
-  }
-
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .add-tab,
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .layout-menu-trigger,
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .status-trigger {
-    height: 26px;
-  }
-
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .add-tab,
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .layout-menu-trigger {
-    width: 28px;
-    border-radius: var(--ch-radius-sm);
-  }
-
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .status-trigger {
-    min-width: 0;
-    gap: 4px;
-    padding: 0 7px;
-  }
-
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .terminal-grid {
-    gap: 2px;
-    padding: 2px;
-  }
-
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .terminal-pane {
-    border-radius: var(--ch-radius-md);
-  }
-
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .terminal-pane.active {
-    box-shadow: 0 0 0 1px var(--ch-color-accent-ring);
-  }
-
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .pane-header {
-    max-height: 0;
-    padding-top: 0;
-    padding-bottom: 0;
-    border-bottom-color: transparent;
-    opacity: 0;
-    transform: translateY(-4px);
   }
 }
 </style>
