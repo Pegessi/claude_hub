@@ -299,13 +299,22 @@ async def proxy_terminal_request(
         let historyText = '';
         let historyCursorX = null;
         let historyCursorY = null;
+        let historyLoaded = false;
 
-        try {{
-          const xhr = new XMLHttpRequest();
-          xhr.open('GET', `/api/terminal/history/${{TAB_ID}}?lines=${{HISTORY_LINES}}`, false);
-          xhr.send(null);
-          if (xhr.status >= 200 && xhr.status < 300) {{
-            const payload = JSON.parse(xhr.responseText || '{{}}');
+        function markHistoryLoaded() {{
+          historyLoaded = true;
+          tryHookTerm();
+        }}
+
+        fetch(`/api/terminal/history/${{TAB_ID}}?lines=${{HISTORY_LINES}}`, {{
+          cache: 'no-store',
+          credentials: 'same-origin',
+        }})
+          .then(function(response) {{
+            if (!response.ok) throw new Error('history preload failed: ' + response.status);
+            return response.json();
+          }})
+          .then(function(payload) {{
             if (payload && typeof payload.history === 'string') {{
               historyText = payload.history;
             }}
@@ -313,18 +322,27 @@ async def proxy_terminal_request(
               historyCursorX = payload.cursor_x;
               historyCursorY = payload.cursor_y;
             }}
-          }}
-        }} catch (error) {{
-          console.debug('claude-hub history preload failed', error);
-        }}
+          }})
+          .catch(function(error) {{
+            console.debug('claude-hub history preload failed', error);
+          }})
+          .finally(markHistoryLoaded);
+
+        // Do not leave the terminal blank if the history endpoint stalls.
+        setTimeout(function() {{
+          if (!historyLoaded) markHistoryLoaded();
+        }}, 3000);
 
         // NOTE: Do NOT early-return when historyText is empty.  The
         // hook and resize-guard logic below must run regardless of
         // whether there is history to replay.
 
-        const normalizedHistory = historyText.replace(/\\r?\\n/g, '\\r\\n');
         let currentTerm = undefined;
         let replayed = false;
+
+        function normalizedHistoryText() {{
+          return historyText.replace(/\\r?\\n/g, '\\r\\n');
+        }}
 
         function cursorSeq(cursorX, cursorY) {{
           if (!Number.isInteger(cursorX) || !Number.isInteger(cursorY)) return '';
@@ -337,7 +355,7 @@ async def proxy_terminal_request(
 
           // The history API now returns the FULL terminal content
           // (scrollback + visible screen) from tmux capture-pane.
-          const lines = normalizedHistory.replace(/\\r/g, '').split('\\n');
+          const lines = normalizedHistoryText().replace(/\\r/g, '').split('\\n');
           // Drop the trailing empty string from split('foo\\n') → ['foo','']
           if (lines.length > 0 && lines[lines.length - 1] === '') {{
             lines.pop();
@@ -352,10 +370,19 @@ async def proxy_terminal_request(
           const buffer = [];
           let historyDone = false;
           const originalWrite = term.write.bind(term);
+          const FULL_REPLAY_MIN_HOLD_MS = 1200;
+          const FULL_REPLAY_QUIET_MS = 250;
+          const FULL_REPLAY_MAX_HOLD_MS = 3500;
+          let fullReplayHoldStartedAt = 0;
+          let lastBufferedAt = 0;
+          let fullReplayHoldTimer = null;
 
           term.write = function(data, cb) {{
             if (historyDone) {{
               return originalWrite(data, cb);
+            }}
+            if (fullReplay) {{
+              lastBufferedAt = Date.now();
             }}
             buffer.push({{ data, cb }});
             return undefined;
@@ -363,6 +390,10 @@ async def proxy_terminal_request(
 
           function flushBuffer() {{
             if (historyDone) return;
+            if (fullReplayHoldTimer) {{
+              clearTimeout(fullReplayHoldTimer);
+              fullReplayHoldTimer = null;
+            }}
             historyDone = true;
             term.__claudeHubReplayDone = true;
             term.write = originalWrite;
@@ -380,6 +411,31 @@ async def proxy_terminal_request(
             buffer.length = 0;
           }}
 
+          function finishFullReplayWhenQuiet() {{
+            if (!fullReplay) {{
+              flushBuffer();
+              return;
+            }}
+            const now = Date.now();
+            const elapsed = now - fullReplayHoldStartedAt;
+            const quietFor = lastBufferedAt ? now - lastBufferedAt : elapsed;
+            if (
+              elapsed >= FULL_REPLAY_MAX_HOLD_MS ||
+              (elapsed >= FULL_REPLAY_MIN_HOLD_MS && quietFor >= FULL_REPLAY_QUIET_MS)
+            ) {{
+              flushBuffer();
+              return;
+            }}
+            const waitMs = Math.max(
+              50,
+              Math.min(
+                FULL_REPLAY_MAX_HOLD_MS - elapsed,
+                Math.max(FULL_REPLAY_MIN_HOLD_MS - elapsed, FULL_REPLAY_QUIET_MS - quietFor)
+              )
+            );
+            fullReplayHoldTimer = setTimeout(finishFullReplayWhenQuiet, waitMs);
+          }}
+
           // Safety timeout: release buffer if callback never fires
           const safetyTimer = setTimeout(flushBuffer, 5000);
 
@@ -394,10 +450,11 @@ async def proxy_terminal_request(
               clearTimeout(safetyTimer);
               // ttyd can still deliver its initial screen payload after
               // xterm accepts the replay write, especially under the Linux
-              // CI binary. Keep term.write buffered briefly so late duplicate
-              // initial frames cannot collapse reconstructed scrollback back
-              // to only the visible screen rows.
-              setTimeout(flushBuffer, 500);
+              // CI binary. Keep term.write buffered until that stream has
+              // gone quiet so late duplicate initial frames cannot collapse
+              // reconstructed scrollback back to only the visible screen rows.
+              fullReplayHoldStartedAt = Date.now();
+              finishFullReplayWhenQuiet();
             }});
           }} else {{
             // Phase A: term.open() has NOT been called yet (our hook will
@@ -798,6 +855,9 @@ async def proxy_terminal_request(
         // once it appears.  We also check immediately in case it was
         // already set.
         function tryHookTerm() {{
+          if (!historyLoaded) {{
+            return false;
+          }}
           if (window.term && typeof window.term === 'object' && !window.term.__claudeHubHistoryHooked) {{
             currentTerm = window.term;
             hookTerm(window.term);

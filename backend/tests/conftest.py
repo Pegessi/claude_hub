@@ -1,13 +1,15 @@
+import os
 from difflib import unified_diff
 from pathlib import Path
 from typing import AsyncGenerator, Generator
+from urllib.parse import urlparse
 
 import pytest
 import requests
 from httpx import ASGITransport, AsyncClient
 from playwright.sync_api import Page
 
-BACKEND_URL = "http://127.0.0.1:8173"
+BACKEND_URL = os.environ.get("CLAUDE_HUB_TEST_BACKEND_URL", "http://127.0.0.1:8173").rstrip("/")
 
 # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -84,6 +86,12 @@ def read_tail(path: Path, max_chars: int = 4000) -> str:
         return ""
 
 
+def backend_bind() -> tuple[str, int]:
+    """Return host/port for the real test backend server."""
+    parsed = urlparse(BACKEND_URL)
+    return parsed.hostname or "127.0.0.1", parsed.port or 8173
+
+
 # ── fixtures ─────────────────────────────────────────────────────────────
 
 
@@ -109,6 +117,7 @@ def backend_server() -> Generator[None, None, None]:
 
     log_path = backend_dir / ".pytest-backend.log"
     log_file = log_path.open("wb")
+    backend_host, backend_port = backend_bind()
 
     proc = subprocess.Popen(
         [
@@ -117,9 +126,9 @@ def backend_server() -> Generator[None, None, None]:
             "uvicorn",
             "claude_hub.main:app",
             "--host",
-            "127.0.0.1",
+            backend_host,
             "--port",
-            "8173",
+            str(backend_port),
             "--log-level",
             "error",
         ],

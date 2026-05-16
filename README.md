@@ -1,167 +1,174 @@
 # Claude Hub
 
-Web-based persistent Claude terminal service with tabbed interface.
+Persistent web dashboard for terminal-based AI agents.
 
-![Claude Hub Screenshot](docs/screenshots/terminal_demo.jpg)
+Claude Hub keeps Claude, Codex, and shell sessions alive in `tmux`, serves them
+through `ttyd`, and adds an Agent Workspace board for queueing tasks, dispatching
+resident agents, sending follow-up instructions, and reviewing progress reports.
 
-## Features
+![Claude Hub Agent Workspace](docs/screenshots/agent_workspace_demo.png)
 
-- Create, delete, and switch between multiple terminal tabs
-- Multi-pane layouts (1x1, 2x1, 1x2, 2x2, 3x3)
-- Drag and drop tab reordering
-- Persistent terminal sessions using ttyd + tmux
-- Real-time WebSocket communication
-- Optional Feishu OAuth authentication for public deployment
-  - Open ID whitelist support (recommended)
-  - Email whitelist support
-- Cloudflare Tunnel support for public access
-  - One-click startup script with auto .env update
-- Vue 3 frontend with TypeScript
-- FastAPI backend with Python
+## What It Does
+
+### Agent Workspace
+
+- Manage one or more local or remote workspaces.
+- Keep resident Claude or Codex agents running in persistent terminal tabs.
+- Add tasks with optional pasted image attachments.
+- Dispatch tasks to a specific agent or let the workspace choose the available agent.
+- Track task state across Todo, Queued, Working, Review, and Done columns.
+- Send follow-up messages from the task detail panel without leaving the board.
+- Record agent reports with changed files, validation, risks, and review status.
+- Preserve completed task records under the workspace state directory.
+
+### Persistent Terminals
+
+- Create Claude, Codex, or shell terminal tabs backed by `ttyd` and `tmux`.
+- Switch, duplicate, rename, delete, and drag-reorder tabs.
+- Use multi-pane layouts from single pane up to 3x3.
+- Keep scrollback and visible terminal state aligned across reloads.
+- Open remote SSH-backed tabs with optional remote working directories.
+- Monitor best-effort agent runtime state: idle, working, attention, or offline.
+- Paste local clipboard images into Claude or Codex terminal UIs through the
+  browser-to-macOS clipboard bridge.
+- Use mobile controls for common terminal shortcuts, including Ctrl+V.
+- Toggle dark and light themes.
+
+### Deployment And Access
+
+- Optional Feishu OAuth for public deployments.
+- Open ID and email whitelist support.
+- Cloudflare Tunnel helper scripts for temporary or persistent public URLs.
+- Local-network requests can bypass auth for trusted development use.
 
 ## Tech Stack
 
-- **Frontend**: Vue 3 + TypeScript + Vite + Pinia
-- **Backend**: Python 3.11+ + FastAPI + WebSocket + uv
-- **Terminal**: ttyd
+- **Frontend**: Vue 3, TypeScript, Vite, Pinia
+- **Backend**: Python 3.11+, FastAPI, WebSocket, uv
+- **Terminal runtime**: ttyd, tmux
+- **Validation**: backend pytest/mypy/black/isort, frontend ESLint/type-check/build,
+  and Playwright terminal replay E2E tests
 
-## Getting Started
-
-### Prerequisites
+## Requirements
 
 - Python 3.11+
 - Node.js 20+
 - pnpm
-- uv (https://docs.astral.sh/uv/getting-started/installation)
+- uv: <https://docs.astral.sh/uv/getting-started/installation>
+- tmux
 - ttyd
+- cloudflared, optional for public tunnel scripts
 
-### Installation
+## Quick Start
 
-#### Quick Setup (Recommended)
-
-First, run the setup script to install uv (if missing) and check other dependencies:
+Install or verify local dependencies:
 
 ```bash
 ./setup.sh
 ```
 
-Then start the application:
+Start backend and frontend together:
 
 ```bash
 ./start.sh
 ```
 
-#### Manual Installation
+Open the app:
 
-##### Backend
+- Frontend: <http://localhost:5173>
+- Backend API: <http://localhost:8173>
+- API docs: <http://localhost:8173/docs>
+
+Stop services with `Ctrl+C` in the `start.sh` terminal, or run:
+
+```bash
+./stop.sh
+```
+
+## Manual Development
+
+Backend:
 
 ```bash
 cd backend
 uv sync --dev
+uv run uvicorn claude_hub.main:app --reload --host 0.0.0.0 --port 8173
 ```
 
-#### Frontend
+Frontend:
 
 ```bash
 cd frontend
 pnpm install
+pnpm dev
 ```
 
-### Running the Application
+## Public Tunnel
 
-#### Quick Start (Recommended)
-
-Use the startup script to automatically start both backend and frontend:
-
-```bash
-./start.sh
-```
-
-To stop all services:
-```bash
-# Press Ctrl+C in the terminal where start.sh is running
-# Or use the stop script:
-./stop.sh
-```
-
-#### One-Click Public Tunnel (Cloudflare)
-
-Start backend, frontend, and get a public URL with a single command:
+Start backend, frontend, and a temporary Cloudflare Tunnel URL:
 
 ```bash
 ./scripts/start-temp-tunnel.sh
 ```
 
-This will:
-- Automatically start backend, frontend, and Cloudflare Tunnel
-- Get a random public URL like `https://random-name.trycloudflare.com`
-- **Auto-update `.env` file** with the new public URL
-- Show reminder to update Feishu redirect URL (if using authentication)
+The script starts all services, prints a `trycloudflare.com` URL, updates `.env`
+with the public URL, and reminds you to update Feishu redirect settings when
+auth is enabled.
 
-Press `Ctrl+C` to stop all services.
+For persistent deployment options, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
-To manually stop services if needed:
-```bash
-./scripts/stop-all.sh
+## Authentication
+
+Feishu OAuth is optional. For public access, configure either an Open ID
+whitelist or an email whitelist:
+
+```env
+AUTH_ALLOWED_OPEN_IDS=ou_xxx
+AUTH_ALLOWED_EMAILS=user@example.com
 ```
 
-#### Authentication
+Open ID whitelisting is preferred when available. Full setup details are in
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
-The application supports optional Feishu OAuth authentication for public deployment. You can restrict access by:
+## Validation
 
-- **Open ID whitelist** (recommended, more secure):
-  ```env
-  AUTH_ALLOWED_OPEN_IDS=your_open_id_here
-  ```
-
-- **Email whitelist**:
-  ```env
-  AUTH_ALLOWED_EMAILS=user1@company.com,user2@company.com
-  ```
-
-See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for full authentication setup instructions.
-
-#### Public Deployment with Authentication
-
-See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for:
-- Feishu OAuth authentication setup
-- Cloudflare Tunnel with persistent domain
-- frp/ngrok alternatives
-- Nginx reverse proxy configuration
-
-#### Manual Start
-
-##### Backend
+Run the same checks used by CI:
 
 ```bash
 cd backend
-uv sync --dev  # First time only
-uv run uvicorn claude_hub.main:app --reload --host 0.0.0.0 --port 8173
+uv run black --check .
+uv run isort --check .
+uv run mypy .
+uv run pytest -xvs --ignore=tests/test_terminal_replay.py
+uv run pytest tests/test_terminal_replay.py -v
 ```
-
-The backend will be available at http://localhost:8173
-
-API docs: http://localhost:8173/docs
-
-##### Frontend
 
 ```bash
 cd frontend
-pnpm install  # First time only
-pnpm dev
+pnpm run lint:check
+pnpm run build
 ```
 
-The frontend will be available at http://localhost:5173
+The terminal replay tests require `tmux`, `ttyd`, and Playwright Chromium.
 
 ## Project Structure
 
-```
+```text
 claude_hub/
-├── frontend/          # Vue 3 frontend application
-├── backend/           # FastAPI backend application
+├── frontend/          # Vue application
+├── backend/           # FastAPI application and terminal/workspace services
+├── docs/              # Deployment notes, screenshots, and working logs
+├── scripts/           # Local startup and tunnel helpers
 ├── docker/            # Docker configuration
 └── .github/           # GitHub Actions workflows
 ```
+
+## Reference Docs
+
+- [CLAUDE.md](CLAUDE.md): project conventions and development workflow
+- [CHANGELOG.md](CHANGELOG.md): merge-level change history
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): auth and public deployment setup
+- [docs/working-logs/](docs/working-logs): implementation notes and incident logs
 
 ## License
 
