@@ -336,21 +336,53 @@ function onIframeLoad(event: Event, tabId: string) {
         return style;
       }
 
+      function resolveRenderedTerminalBackground(page) {
+        if (!page || !page.background || !page.canvasFilter || page.canvasFilter === 'none') {
+          return page.background;
+        }
+
+        try {
+          var canvas = document.createElement('canvas');
+          canvas.width = 1;
+          canvas.height = 1;
+
+          var context = canvas.getContext('2d');
+          if (!context || !('filter' in context)) return page.background;
+
+          context.filter = page.canvasFilter;
+          context.fillStyle = page.background;
+          context.fillRect(0, 0, 1, 1);
+
+          var pixel = context.getImageData(0, 0, 1, 1).data;
+          if (!pixel || pixel[3] === 0) return page.background;
+
+          var alpha = Math.round((pixel[3] / 255) * 1000) / 1000;
+          if (alpha >= 1) {
+            return 'rgb(' + pixel[0] + ', ' + pixel[1] + ', ' + pixel[2] + ')';
+          }
+          return 'rgba(' + pixel[0] + ', ' + pixel[1] + ', ' + pixel[2] + ', ' + alpha + ')';
+        } catch (error) {
+          console.warn('Unable to resolve rendered terminal background:', error);
+          return page.background;
+        }
+      }
+
       function applyTerminalTheme(payload) {
         if (!payload || !payload.xterm || !payload.page) return;
         pendingTerminalTheme = payload;
 
         var page = payload.page;
+        var renderedBackground = resolveRenderedTerminalBackground(page);
         document.documentElement.dataset.theme = payload.scheme || 'dark';
-        document.documentElement.style.backgroundColor = page.background;
-        document.body.style.backgroundColor = page.background;
+        document.documentElement.style.backgroundColor = renderedBackground;
+        document.body.style.backgroundColor = renderedBackground;
         document.body.style.color = page.foreground;
 
         ensureTerminalThemeStyle().textContent =
-          'html, body { width: 100% !important; height: 100% !important; margin: 0 !important; padding: 0 !important; overflow: hidden !important; background: ' + page.background + ' !important; color: ' + page.foreground + ' !important; }' +
-          '#terminal, .terminal { width: 100% !important; height: 100% !important; box-sizing: border-box !important; margin: 0 !important; padding: 0 !important; background: ' + page.background + ' !important; color: ' + page.foreground + ' !important; }' +
-          '.xterm { width: 100% !important; height: 100% !important; box-sizing: border-box !important; margin: 0 !important; padding: 6px !important; background: ' + page.background + ' !important; color: ' + page.foreground + ' !important; }' +
-          '.xterm-viewport { inset: 0 !important; width: 100% !important; height: 100% !important; background-color: ' + page.background + ' !important; }' +
+          'html, body { width: 100% !important; height: 100% !important; margin: 0 !important; padding: 0 !important; overflow: hidden !important; background: ' + renderedBackground + ' !important; color: ' + page.foreground + ' !important; }' +
+          '#terminal, .terminal { width: 100% !important; height: 100% !important; box-sizing: border-box !important; margin: 0 !important; padding: 0 !important; background: ' + renderedBackground + ' !important; color: ' + page.foreground + ' !important; }' +
+          '.xterm { width: 100% !important; height: 100% !important; box-sizing: border-box !important; margin: 0 !important; padding: 6px !important; background: ' + renderedBackground + ' !important; color: ' + page.foreground + ' !important; }' +
+          '.xterm-viewport { inset: 0 !important; width: 100% !important; height: 100% !important; background-color: ' + renderedBackground + ' !important; }' +
           '.xterm-screen { width: 100% !important; height: 100% !important; }' +
           '.xterm-screen canvas { width: 100% !important; height: 100% !important; filter: ' + page.canvasFilter + ' !important; }' +
           '.xterm-selection div { background-color: ' + page.selection + ' !important; }';
