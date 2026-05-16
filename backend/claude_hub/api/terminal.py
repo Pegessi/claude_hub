@@ -370,12 +370,14 @@ async def proxy_terminal_request(
           const buffer = [];
           let historyDone = false;
           const originalWrite = term.write.bind(term);
-          const FULL_REPLAY_MIN_HOLD_MS = 1200;
-          const FULL_REPLAY_QUIET_MS = 250;
-          const FULL_REPLAY_MAX_HOLD_MS = 3500;
+          const FULL_REPLAY_MIN_HOLD_MS = 2500;
+          const FULL_REPLAY_QUIET_MS = 750;
+          const FULL_REPLAY_MAX_HOLD_MS = 8000;
           let fullReplayHoldStartedAt = 0;
           let lastBufferedAt = 0;
           let fullReplayHoldTimer = null;
+          let fullReplayFinalizing = false;
+          const replayPayload = '\\x1b[H\\x1b[2J\\x1b[3J' + lines.join('\\r\\n') + cursorSeq(historyCursorX, historyCursorY);
 
           term.write = function(data, cb) {{
             if (historyDone) {{
@@ -394,6 +396,7 @@ async def proxy_terminal_request(
               clearTimeout(fullReplayHoldTimer);
               fullReplayHoldTimer = null;
             }}
+            clearTimeout(safetyTimer);
             historyDone = true;
             term.__claudeHubReplayDone = true;
             term.write = originalWrite;
@@ -411,6 +414,22 @@ async def proxy_terminal_request(
             buffer.length = 0;
           }}
 
+          function finishFullReplay() {{
+            if (!fullReplay) {{
+              flushBuffer();
+              return;
+            }}
+            if (fullReplayFinalizing) return;
+            fullReplayFinalizing = true;
+            if (fullReplayHoldTimer) {{
+              clearTimeout(fullReplayHoldTimer);
+              fullReplayHoldTimer = null;
+            }}
+            // A final replay right before releasing the buffer overwrites any
+            // late ttyd initial-screen frames that arrived during the hold.
+            originalWrite(replayPayload, flushBuffer);
+          }}
+
           function finishFullReplayWhenQuiet() {{
             if (!fullReplay) {{
               flushBuffer();
@@ -423,7 +442,7 @@ async def proxy_terminal_request(
               elapsed >= FULL_REPLAY_MAX_HOLD_MS ||
               (elapsed >= FULL_REPLAY_MIN_HOLD_MS && quietFor >= FULL_REPLAY_QUIET_MS)
             ) {{
-              flushBuffer();
+              finishFullReplay();
               return;
             }}
             const waitMs = Math.max(
@@ -436,8 +455,14 @@ async def proxy_terminal_request(
             fullReplayHoldTimer = setTimeout(finishFullReplayWhenQuiet, waitMs);
           }}
 
-          // Safety timeout: release buffer if callback never fires
-          const safetyTimer = setTimeout(flushBuffer, 5000);
+          // Safety timeout: release buffer if callbacks never fire.
+          const safetyTimer = setTimeout(function() {{
+            if (fullReplay && !fullReplayFinalizing) {{
+              finishFullReplay();
+              return;
+            }}
+            flushBuffer();
+          }}, FULL_REPLAY_MAX_HOLD_MS + 2000);
 
           if (fullReplay) {{
             // Phase B: term.open() was already called by ttyd and the
@@ -446,8 +471,7 @@ async def proxy_terminal_request(
             // from scratch.  The last `rows` lines will land on the
             // visible screen; the rest becomes scrollback.
             // The \\x1b[3J clears scrollback, \\x1b[H\\x1b[2J clears screen.
-            originalWrite('\\x1b[H\\x1b[2J\\x1b[3J' + lines.join('\\r\\n') + cursorSeq(historyCursorX, historyCursorY), function() {{
-              clearTimeout(safetyTimer);
+            originalWrite(replayPayload, function() {{
               // ttyd can still deliver its initial screen payload after
               // xterm accepts the replay write, especially under the Linux
               // CI binary. Keep term.write buffered until that stream has
@@ -465,7 +489,6 @@ async def proxy_terminal_request(
             // scrollback so the visible screen is left blank for ttyd.
             var scrollUpSeq = '\\x1b[' + (term.rows || 24) + 'S';
             originalWrite(lines.join('\\r\\n') + '\\r\\n' + scrollUpSeq, function() {{
-              clearTimeout(safetyTimer);
               flushBuffer();
             }});
           }}
@@ -712,7 +735,7 @@ async def proxy_terminal_request(
           var tries = 0;
           var iv = setInterval(function() {{
             tries++;
-            if (term.__claudeHubReplayDone || tries > 200) {{
+            if (term.__claudeHubReplayDone || tries > 300) {{
               clearInterval(iv);
               setupHistoryResync(term);
             }}
