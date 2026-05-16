@@ -5,6 +5,11 @@
 
 ## 2026-05-16
 
+### fix: align compact done task cards
+- Prevent crowded task columns from flex-shrinking task cards below their content height
+- Make Done task cards an explicit compact single-line surface so titles and status badges stay vertically centered
+- **Files**: AgentWorkspaceView.vue
+
 ### style: polish workspace and terminal surfaces
 - Refine workspace cards, columns, task detail sections, and report timeline to reduce visual noise and clarify hierarchy
 - Lighten terminal tabs, layout controls, and active pane treatment while keeping dark/light theme tokens consistent
