@@ -130,6 +130,16 @@ let vvResizeHandler: (() => void) | null = null
 let vvScrollHandler: (() => void) | null = null
 let largestVisualViewportHeight = 0
 let lastVisualViewportWidth = 0
+let keyboardOpenState = false
+let keyboardCloseTimer: number | null = null
+let viewportUpdateFrame: number | null = null
+let pendingVisualViewport: VisualViewport | undefined
+let lastAppliedViewportHeight = ''
+let lastAppliedKeyboardHeight = ''
+
+const KEYBOARD_OPEN_THRESHOLD_PX = 80
+const KEYBOARD_CLOSE_THRESHOLD_PX = 32
+const KEYBOARD_CLOSE_DELAY_MS = 160
 
 function setupMobileViewportSync() {
   const vv = window.visualViewport
@@ -141,12 +151,12 @@ function setupMobileViewportSync() {
   }
 
   vvResizeHandler = () => {
-    updateViewportMetrics(vv)
+    scheduleViewportMetricsUpdate(vv)
   }
   vvScrollHandler = () => {
     // On iOS, visualViewport scrolls when keyboard is open.
     // The offsetTop tells us how far the page scrolled.
-    updateViewportMetrics(vv)
+    scheduleViewportMetricsUpdate(vv)
   }
 
   vv.addEventListener('resize', vvResizeHandler)
@@ -155,7 +165,37 @@ function setupMobileViewportSync() {
 }
 
 function handleFallbackResize() {
-  updateViewportMetrics()
+  scheduleViewportMetricsUpdate()
+}
+
+function scheduleViewportMetricsUpdate(vv?: VisualViewport) {
+  pendingVisualViewport = vv
+
+  if (viewportUpdateFrame !== null) return
+
+  viewportUpdateFrame = window.requestAnimationFrame(() => {
+    viewportUpdateFrame = null
+    updateViewportMetrics(pendingVisualViewport)
+    pendingVisualViewport = undefined
+  })
+}
+
+function clearKeyboardCloseTimer() {
+  if (keyboardCloseTimer !== null) {
+    window.clearTimeout(keyboardCloseTimer)
+    keyboardCloseTimer = null
+  }
+}
+
+function applyKeyboardOpenState(open: boolean) {
+  const root = document.documentElement
+  keyboardOpenState = open
+
+  if (open) {
+    root.dataset.keyboardOpen = 'true'
+  } else {
+    delete root.dataset.keyboardOpen
+  }
 }
 
 function updateViewportMetrics(vv?: VisualViewport) {
@@ -175,15 +215,46 @@ function updateViewportMetrics(vv?: VisualViewport) {
   const keyboardHeight = isMobileViewport
     ? Math.max(0, largestVisualViewportHeight - viewportHeight - offsetTop)
     : 0
-  const keyboardOpen = keyboardHeight > 50
 
-  root.style.setProperty('--visual-viewport-height', `${Math.round(viewportHeight)}px`)
-  root.style.setProperty('--keyboard-height', `${Math.round(keyboardHeight)}px`)
+  const viewportHeightValue = `${Math.round(viewportHeight)}px`
+  const keyboardHeightValue = `${Math.round(keyboardHeight)}px`
 
-  if (keyboardOpen) {
-    root.dataset.keyboardOpen = 'true'
-  } else {
-    delete root.dataset.keyboardOpen
+  if (viewportHeightValue !== lastAppliedViewportHeight) {
+    root.style.setProperty('--visual-viewport-height', viewportHeightValue)
+    lastAppliedViewportHeight = viewportHeightValue
+  }
+
+  if (keyboardHeightValue !== lastAppliedKeyboardHeight) {
+    root.style.setProperty('--keyboard-height', keyboardHeightValue)
+    lastAppliedKeyboardHeight = keyboardHeightValue
+  }
+
+  if (!isMobileViewport) {
+    clearKeyboardCloseTimer()
+    if (keyboardOpenState) {
+      applyKeyboardOpenState(false)
+    }
+    return
+  }
+
+  if (keyboardHeight >= KEYBOARD_OPEN_THRESHOLD_PX) {
+    clearKeyboardCloseTimer()
+    if (!keyboardOpenState) {
+      applyKeyboardOpenState(true)
+    }
+    return
+  }
+
+  if (keyboardOpenState && keyboardHeight > KEYBOARD_CLOSE_THRESHOLD_PX) {
+    clearKeyboardCloseTimer()
+    return
+  }
+
+  if (keyboardOpenState && keyboardHeight <= KEYBOARD_CLOSE_THRESHOLD_PX && keyboardCloseTimer === null) {
+    keyboardCloseTimer = window.setTimeout(() => {
+      keyboardCloseTimer = null
+      applyKeyboardOpenState(false)
+    }, KEYBOARD_CLOSE_DELAY_MS)
   }
 }
 
@@ -194,7 +265,12 @@ function cleanupMobileViewportSync() {
     if (vvScrollHandler) vv.removeEventListener('scroll', vvScrollHandler)
   }
   window.removeEventListener('resize', handleFallbackResize)
-  delete document.documentElement.dataset.keyboardOpen
+  clearKeyboardCloseTimer()
+  if (viewportUpdateFrame !== null) {
+    window.cancelAnimationFrame(viewportUpdateFrame)
+    viewportUpdateFrame = null
+  }
+  applyKeyboardOpenState(false)
 }
 
 onMounted(async () => {
@@ -622,45 +698,16 @@ textarea {
   }
 
   html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-bar {
-    gap: 4px;
-    padding: 3px 6px;
+    height: 0;
+    min-height: 0;
+    gap: 0;
+    padding: 0;
+    border-bottom: 0;
+    overflow: visible;
   }
 
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab {
-    height: 26px;
-    gap: 4px;
-    padding: 0 8px;
-    border-radius: var(--ch-radius-sm);
-  }
-
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-name {
-    max-width: 118px;
-    font-size: 12px;
-  }
-
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-close {
-    padding: 0 2px;
-    font-size: 15px;
-  }
-
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-duplicate {
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-bar > :not(.modal-overlay) {
     display: none;
-  }
-
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .add-tab,
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .status-trigger {
-    height: 26px;
-  }
-
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .add-tab {
-    width: 28px;
-    border-radius: var(--ch-radius-sm);
-  }
-
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .status-trigger {
-    min-width: 0;
-    gap: 4px;
-    padding: 0 7px;
   }
 
   html[data-keyboard-open='true'] .app[data-mode='terminal'] .terminal-grid {
