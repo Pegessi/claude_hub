@@ -5,6 +5,13 @@
 
 ## 2026-05-16
 
+### fix: stabilize terminal replay CI and refresh README
+- Replace synchronous browser history preload with an async preload gate before hooking xterm, so Chromium on Linux CI reliably receives tmux history before replay
+- Keep full terminal replay writes buffered until ttyd's initial frame stream goes quiet, preventing late frames from collapsing scrollback to only visible rows
+- Allow terminal replay E2E tests to bind a temporary backend URL so local validation can avoid the live 8173 service
+- Update README, backend package description, and current Agent Workspace screenshot to reflect the workspace-agent, remote-tab, clipboard-image, and validation flows
+- **Files**: terminal.py, conftest.py, README.md, backend/README.md, pyproject.toml, agent_workspace_demo.png
+
 ### fix: match terminal padding to rendered canvas background
 - Compute the light-mode terminal inset color through the same canvas filter used by xterm so the padding matches the rendered terminal surface
 - **Files**: TerminalView.vue
