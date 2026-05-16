@@ -1,135 +1,175 @@
 <template>
-  <div v-if="isMobile" class="mobile-controls-overlay">
-    <div v-if="isExpanded" class="controls-panel">
-      <!-- Main row: Esc, Tab, arrows, Enter -->
-      <div class="controls-row">
-        <button
-          type="button"
-          class="control-btn"
-          :class="{ pressed: pressedKeys.has('Escape') }"
-          @pointerdown.prevent="handlePress('Escape')"
-          @pointerup.prevent="handleRelease('Escape')"
-          @pointercancel.prevent="handleRelease('Escape')"
-          @pointerleave="handleRelease('Escape')"
-        >Esc</button>
-        <button
-          type="button"
-          class="control-btn"
-          :class="{ pressed: pressedKeys.has('Tab') }"
-          @pointerdown.prevent="handlePress('Tab')"
-          @pointerup.prevent="handleRelease('Tab')"
-          @pointercancel.prevent="handleRelease('Tab')"
-          @pointerleave="handleRelease('Tab')"
-        >Tab</button>
-        <button
-          type="button"
-          class="control-btn control-btn-arrow"
-          :class="{ pressed: pressedKeys.has('ArrowUp') }"
-          @pointerdown.prevent="handlePress('ArrowUp')"
-          @pointerup.prevent="handleRelease('ArrowUp')"
-          @pointercancel.prevent="handleRelease('ArrowUp')"
-          @pointerleave="handleRelease('ArrowUp')"
-        >&#x2191;</button>
-        <button
-          type="button"
-          class="control-btn control-btn-arrow"
-          :class="{ pressed: pressedKeys.has('ArrowDown') }"
-          @pointerdown.prevent="handlePress('ArrowDown')"
-          @pointerup.prevent="handleRelease('ArrowDown')"
-          @pointercancel.prevent="handleRelease('ArrowDown')"
-          @pointerleave="handleRelease('ArrowDown')"
-        >&#x2193;</button>
-        <button
-          type="button"
-          class="control-btn control-btn-arrow"
-          :class="{ pressed: pressedKeys.has('ArrowLeft') }"
-          @pointerdown.prevent="handlePress('ArrowLeft')"
-          @pointerup.prevent="handleRelease('ArrowLeft')"
-          @pointercancel.prevent="handleRelease('ArrowLeft')"
-          @pointerleave="handleRelease('ArrowLeft')"
-        >&#x2190;</button>
-        <button
-          type="button"
-          class="control-btn control-btn-arrow"
-          :class="{ pressed: pressedKeys.has('ArrowRight') }"
-          @pointerdown.prevent="handlePress('ArrowRight')"
-          @pointerup.prevent="handleRelease('ArrowRight')"
-          @pointercancel.prevent="handleRelease('ArrowRight')"
-          @pointerleave="handleRelease('ArrowRight')"
-        >&#x2192;</button>
-        <button
-          type="button"
-          class="control-btn control-btn-enter"
-          :class="{ pressed: pressedKeys.has('Enter') }"
-          @pointerdown.prevent="handlePress('Enter')"
-          @pointerup.prevent="handleRelease('Enter')"
-          @pointercancel.prevent="handleRelease('Enter')"
-          @pointerleave="handleRelease('Enter')"
-        >Enter</button>
-      </div>
+  <div
+    v-if="isMobile"
+    class="mobile-controls-overlay"
+  >
+    <Transition name="mobile-controls-panel">
+      <div
+        v-if="isExpanded"
+        class="controls-panel"
+      >
+        <!-- Main row: Esc, Tab, arrows, Enter -->
+        <div class="controls-row">
+          <button
+            type="button"
+            class="control-btn"
+            :class="{ pressed: pressedKeys.has('Escape') }"
+            @pointerdown.prevent="handlePress('Escape')"
+            @pointerup.prevent="handleRelease('Escape')"
+            @pointercancel.prevent="handleRelease('Escape')"
+            @pointerleave="handleRelease('Escape')"
+          >
+            Esc
+          </button>
+          <button
+            type="button"
+            class="control-btn"
+            :class="{ pressed: pressedKeys.has('Tab') }"
+            @pointerdown.prevent="handlePress('Tab')"
+            @pointerup.prevent="handleRelease('Tab')"
+            @pointercancel.prevent="handleRelease('Tab')"
+            @pointerleave="handleRelease('Tab')"
+          >
+            Tab
+          </button>
+          <button
+            type="button"
+            class="control-btn control-btn-arrow"
+            :class="{ pressed: pressedKeys.has('ArrowUp') }"
+            @pointerdown.prevent="handlePress('ArrowUp')"
+            @pointerup.prevent="handleRelease('ArrowUp')"
+            @pointercancel.prevent="handleRelease('ArrowUp')"
+            @pointerleave="handleRelease('ArrowUp')"
+          >
+            &#x2191;
+          </button>
+          <button
+            type="button"
+            class="control-btn control-btn-arrow"
+            :class="{ pressed: pressedKeys.has('ArrowDown') }"
+            @pointerdown.prevent="handlePress('ArrowDown')"
+            @pointerup.prevent="handleRelease('ArrowDown')"
+            @pointercancel.prevent="handleRelease('ArrowDown')"
+            @pointerleave="handleRelease('ArrowDown')"
+          >
+            &#x2193;
+          </button>
+          <button
+            type="button"
+            class="control-btn control-btn-arrow"
+            :class="{ pressed: pressedKeys.has('ArrowLeft') }"
+            @pointerdown.prevent="handlePress('ArrowLeft')"
+            @pointerup.prevent="handleRelease('ArrowLeft')"
+            @pointercancel.prevent="handleRelease('ArrowLeft')"
+            @pointerleave="handleRelease('ArrowLeft')"
+          >
+            &#x2190;
+          </button>
+          <button
+            type="button"
+            class="control-btn control-btn-arrow"
+            :class="{ pressed: pressedKeys.has('ArrowRight') }"
+            @pointerdown.prevent="handlePress('ArrowRight')"
+            @pointerup.prevent="handleRelease('ArrowRight')"
+            @pointercancel.prevent="handleRelease('ArrowRight')"
+            @pointerleave="handleRelease('ArrowRight')"
+          >
+            &#x2192;
+          </button>
+          <button
+            type="button"
+            class="control-btn control-btn-enter"
+            :class="{ pressed: pressedKeys.has('Enter') }"
+            @pointerdown.prevent="handlePress('Enter')"
+            @pointerup.prevent="handleRelease('Enter')"
+            @pointercancel.prevent="handleRelease('Enter')"
+            @pointerleave="handleRelease('Enter')"
+          >
+            Enter
+          </button>
+        </div>
 
-      <!-- Modifier row: Ctrl, Shift -->
-      <div class="controls-row controls-row-modifiers">
-        <button
-          type="button"
-          class="control-btn control-btn-wide"
-          :class="{ active: ctrlHeld, pressed: pressedKeys.has('ctrl') }"
-          @pointerdown.prevent="toggleCtrl()"
-        >Ctrl{{ ctrlHeld ? ' ON' : '' }}</button>
-        <button
-          type="button"
-          class="control-btn control-btn-wide"
-          :class="{ active: shiftHeld, pressed: pressedKeys.has('shift') }"
-          @pointerdown.prevent="toggleShift()"
-        >Shift{{ shiftHeld ? ' ON' : '' }}</button>
-      </div>
+        <!-- Modifier row: Ctrl, Shift -->
+        <div class="controls-row controls-row-modifiers">
+          <button
+            type="button"
+            class="control-btn control-btn-wide"
+            :class="{ active: ctrlHeld, pressed: pressedKeys.has('ctrl') }"
+            @pointerdown.prevent="toggleCtrl()"
+          >
+            Ctrl{{ ctrlHeld ? ' ON' : '' }}
+          </button>
+          <button
+            type="button"
+            class="control-btn control-btn-wide"
+            :class="{ active: shiftHeld, pressed: pressedKeys.has('shift') }"
+            @pointerdown.prevent="toggleShift()"
+          >
+            Shift{{ shiftHeld ? ' ON' : '' }}
+          </button>
+        </div>
 
-      <!-- Shortcut row: common combos -->
-      <div class="controls-row controls-row-shortcuts">
-        <button
-          type="button"
-          class="control-btn control-btn-shortcut"
-          :class="{ pressed: pressedKeys.has('ctrl-c') }"
-          @pointerdown.prevent="handleShortcut('c')"
-        >Ctrl+C</button>
-        <button
-          type="button"
-          class="control-btn control-btn-shortcut"
-          :class="{ pressed: pressedKeys.has('ctrl-v') }"
-          @pointerdown.prevent="handleShortcut('v')"
-        >Ctrl+V</button>
-        <button
-          type="button"
-          class="control-btn control-btn-shortcut"
-          :class="{ pressed: pressedKeys.has('ctrl-d') }"
-          @pointerdown.prevent="handleShortcut('d')"
-        >Ctrl+D</button>
-        <button
-          type="button"
-          class="control-btn control-btn-shortcut"
-          :class="{ pressed: pressedKeys.has('ctrl-l') }"
-          @pointerdown.prevent="handleShortcut('l')"
-        >Ctrl+L</button>
-        <button
-          type="button"
-          class="control-btn control-btn-shortcut"
-          :class="{ pressed: pressedKeys.has('ctrl-a') }"
-          @pointerdown.prevent="handleShortcut('a')"
-        >Ctrl+A</button>
-        <button
-          type="button"
-          class="control-btn control-btn-shortcut"
-          :class="{ pressed: pressedKeys.has('ctrl-e') }"
-          @pointerdown.prevent="handleShortcut('e')"
-        >Ctrl+E</button>
-        <button
-          type="button"
-          class="control-btn control-btn-shortcut"
-          :class="{ pressed: pressedKeys.has('shift-tab') }"
-          @pointerdown.prevent="handleShiftTab()"
-        >S-Tab</button>
+        <!-- Shortcut row: common combos -->
+        <div class="controls-row controls-row-shortcuts">
+          <button
+            type="button"
+            class="control-btn control-btn-shortcut"
+            :class="{ pressed: pressedKeys.has('ctrl-c') }"
+            @pointerdown.prevent="handleShortcut('c')"
+          >
+            Ctrl+C
+          </button>
+          <button
+            type="button"
+            class="control-btn control-btn-shortcut"
+            :class="{ pressed: pressedKeys.has('ctrl-v') }"
+            @pointerdown.prevent="handleShortcut('v')"
+          >
+            Ctrl+V
+          </button>
+          <button
+            type="button"
+            class="control-btn control-btn-shortcut"
+            :class="{ pressed: pressedKeys.has('ctrl-d') }"
+            @pointerdown.prevent="handleShortcut('d')"
+          >
+            Ctrl+D
+          </button>
+          <button
+            type="button"
+            class="control-btn control-btn-shortcut"
+            :class="{ pressed: pressedKeys.has('ctrl-l') }"
+            @pointerdown.prevent="handleShortcut('l')"
+          >
+            Ctrl+L
+          </button>
+          <button
+            type="button"
+            class="control-btn control-btn-shortcut"
+            :class="{ pressed: pressedKeys.has('ctrl-a') }"
+            @pointerdown.prevent="handleShortcut('a')"
+          >
+            Ctrl+A
+          </button>
+          <button
+            type="button"
+            class="control-btn control-btn-shortcut"
+            :class="{ pressed: pressedKeys.has('ctrl-e') }"
+            @pointerdown.prevent="handleShortcut('e')"
+          >
+            Ctrl+E
+          </button>
+          <button
+            type="button"
+            class="control-btn control-btn-shortcut"
+            :class="{ pressed: pressedKeys.has('shift-tab') }"
+            @pointerdown.prevent="handleShiftTab()"
+          >
+            S-Tab
+          </button>
+        </div>
       </div>
-    </div>
+    </Transition>
     <button
       type="button"
       class="toggle-btn"
@@ -297,6 +337,19 @@ onUnmounted(() => {
   box-shadow: var(--ch-shadow-soft);
 }
 
+.mobile-controls-panel-enter-active,
+.mobile-controls-panel-leave-active {
+  transition: opacity 140ms ease, transform 140ms ease;
+  transform-origin: right bottom;
+  will-change: opacity, transform;
+}
+
+.mobile-controls-panel-enter-from,
+.mobile-controls-panel-leave-to {
+  opacity: 0;
+  transform: translateY(8px) scale(0.985);
+}
+
 .controls-row {
   display: flex;
   gap: 5px;
@@ -434,5 +487,52 @@ onUnmounted(() => {
   .mobile-controls-overlay {
     display: none;
   }
+}
+
+:global(html[data-keyboard-open='true'] .mobile-controls-overlay) {
+  bottom: 0;
+  padding: 6px;
+  padding-bottom: max(6px, env(safe-area-inset-bottom, 0));
+}
+
+:global(html[data-keyboard-open='true'] .controls-panel) {
+  gap: 4px;
+  max-width: none;
+  margin-bottom: 6px;
+  padding: 6px;
+  border-radius: 8px;
+}
+
+:global(html[data-keyboard-open='true'] .controls-row) {
+  gap: 4px;
+}
+
+:global(html[data-keyboard-open='true'] .control-btn) {
+  min-width: 34px;
+  padding: 7px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+:global(html[data-keyboard-open='true'] .control-btn-arrow) {
+  min-width: 32px;
+  padding: 6px 5px;
+  font-size: 16px;
+}
+
+:global(html[data-keyboard-open='true'] .control-btn-enter) {
+  min-width: 50px;
+}
+
+:global(html[data-keyboard-open='true'] .control-btn-shortcut) {
+  min-width: 44px;
+  padding: 6px 5px;
+  font-size: 10px;
+}
+
+:global(html[data-keyboard-open='true'] .toggle-btn) {
+  width: 42px;
+  height: 42px;
+  font-size: 20px;
 }
 </style>

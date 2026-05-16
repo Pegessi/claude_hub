@@ -68,6 +68,14 @@ const terminalContainer = ref<HTMLElement | null>(null)
 const appStore = useAppStore()
 const { colorScheme } = storeToRefs(appStore)
 let terminalResizeObserver: ResizeObserver | null = null
+let keyboardResizeSettleTimer: number | null = null
+let keyboardResizeSettlesAt = 0
+let lastKeyboardOpenState = false
+let pendingKeyboardResizeAll = false
+const pendingKeyboardResizeTabIds = new Set<string>()
+
+const MOBILE_TERMINAL_BREAKPOINT_PX = 768
+const MOBILE_KEYBOARD_RESIZE_SETTLE_MS = 260
 
 function getTerminalState(): TerminalKeyState {
   if (!window.__claudeHubTerminalState) {
@@ -223,8 +231,60 @@ function postTerminalResize(tabId?: string) {
   }
 }
 
-function scheduleTerminalResize(tabId?: string) {
+function isMobileKeyboardResizeActive() {
+  if (typeof window === 'undefined') return false
+  if (window.innerWidth > MOBILE_TERMINAL_BREAKPOINT_PX) return false
+
+  const now = window.performance.now()
+  const root = document.documentElement
+  const keyboardOpen = root.dataset.keyboardOpen === 'true'
+
+  if (keyboardOpen !== lastKeyboardOpenState) {
+    lastKeyboardOpenState = keyboardOpen
+    keyboardResizeSettlesAt = now + MOBILE_KEYBOARD_RESIZE_SETTLE_MS
+  }
+
+  return keyboardOpen || now < keyboardResizeSettlesAt
+}
+
+function flushKeyboardResizeQueue() {
+  keyboardResizeSettleTimer = null
+
+  if (pendingKeyboardResizeAll) {
+    pendingKeyboardResizeAll = false
+    pendingKeyboardResizeTabIds.clear()
+    postTerminalResize()
+    return
+  }
+
+  const tabIds = Array.from(pendingKeyboardResizeTabIds)
+  pendingKeyboardResizeTabIds.clear()
+  for (const id of tabIds) {
+    postTerminalResize(id)
+  }
+}
+
+function queueKeyboardSettledResize(tabId?: string) {
+  if (tabId) {
+    pendingKeyboardResizeTabIds.add(tabId)
+  } else {
+    pendingKeyboardResizeAll = true
+  }
+
+  if (keyboardResizeSettleTimer !== null) {
+    window.clearTimeout(keyboardResizeSettleTimer)
+  }
+
+  keyboardResizeSettleTimer = window.setTimeout(flushKeyboardResizeQueue, MOBILE_KEYBOARD_RESIZE_SETTLE_MS)
+}
+
+function scheduleTerminalResize(tabId?: string, options: { coalesceMobileKeyboard?: boolean } = {}) {
   if (typeof window === 'undefined') return
+
+  if (options.coalesceMobileKeyboard && isMobileKeyboardResizeActive()) {
+    queueKeyboardSettledResize(tabId)
+    return
+  }
 
   postTerminalResize(tabId)
   window.setTimeout(() => postTerminalResize(tabId), 50)
@@ -681,7 +741,7 @@ onMounted(() => {
     window.addEventListener('message', handleMessage)
     if (terminalContainer.value && typeof ResizeObserver !== 'undefined') {
       terminalResizeObserver = new ResizeObserver(() => {
-        scheduleTerminalResize(props.tabId)
+        scheduleTerminalResize(props.tabId, { coalesceMobileKeyboard: true })
       })
       terminalResizeObserver.observe(terminalContainer.value)
     }
@@ -693,6 +753,12 @@ onUnmounted(() => {
   window.removeEventListener('message', handleMessage)
   terminalResizeObserver?.disconnect()
   terminalResizeObserver = null
+  if (keyboardResizeSettleTimer !== null) {
+    window.clearTimeout(keyboardResizeSettleTimer)
+    keyboardResizeSettleTimer = null
+  }
+  pendingKeyboardResizeAll = false
+  pendingKeyboardResizeTabIds.clear()
 })
 </script>
 

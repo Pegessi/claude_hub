@@ -8,15 +8,25 @@
     @drop="handleDrop"
   >
     <!-- Pane 头部：显示当前 tab 名称 -->
-    <div v-if="pane.tabId" class="pane-header">
+    <div
+      v-if="pane.tabId"
+      class="pane-header"
+    >
       <span class="pane-tab-name">{{ getTabName() }}</span>
     </div>
 
     <!-- 空状态 -->
-    <div v-else class="pane-empty">
-      <div class="empty-icon">📋</div>
+    <div
+      v-else
+      class="pane-empty"
+    >
+      <div class="empty-icon">
+        📋
+      </div>
       <p>Click a tab to assign to this pane</p>
-      <p class="empty-hint">Or drag a tab here</p>
+      <p class="empty-hint">
+        Or drag a tab here
+      </p>
     </div>
 
     <!-- 终端视图 -->
@@ -113,7 +123,7 @@ onUnmounted(() => {
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-lg);
   overflow: hidden;
-  transition: border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast);
+  transition: border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), border-radius 180ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 .terminal-pane.active {
@@ -133,10 +143,13 @@ onUnmounted(() => {
 .pane-header {
   display: flex;
   align-items: center;
+  max-height: 28px;
   padding: 5px 9px;
   background-color: var(--ch-color-surface);
   border-bottom: 1px solid var(--ch-color-border-muted);
   flex-shrink: 0;
+  overflow: hidden;
+  transition: max-height 180ms cubic-bezier(0.2, 0, 0, 1), padding 180ms cubic-bezier(0.2, 0, 0, 1), border-color 180ms cubic-bezier(0.2, 0, 0, 1), opacity 140ms ease, transform 180ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 .pane-tab-name {

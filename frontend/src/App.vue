@@ -1,11 +1,17 @@
 <template>
-  <div class="app">
+  <div
+    class="app"
+    :data-mode="mode"
+  >
     <!-- 登录页面 -->
     <LoginView v-if="authStore.authRequired && !authStore.isAuthenticated && !authStore.isLoading" />
 
     <!-- 加载状态 -->
-    <div v-else-if="authStore.isLoading" class="loading-state">
-      <div class="loading-spinner"></div>
+    <div
+      v-else-if="authStore.isLoading"
+      class="loading-state"
+    >
+      <div class="loading-spinner" />
       <p>Loading...</p>
     </div>
 
@@ -49,9 +55,17 @@
           <span class="theme-switch-thumb" />
         </button>
       </div>
-      <div v-if="error" class="error-banner">
+      <div
+        v-if="error"
+        class="error-banner"
+      >
         <span>{{ error }}</span>
-        <button class="error-close" @click="clearError">×</button>
+        <button
+          class="error-close"
+          @click="clearError"
+        >
+          ×
+        </button>
       </div>
       <div
         v-show="mode === 'terminal'"
@@ -59,7 +73,10 @@
       >
         <TabBar />
         <LayoutSelector />
-        <div v-if="tabs.length === 0" class="empty-state">
+        <div
+          v-if="tabs.length === 0"
+          class="empty-state"
+        >
           <h2>No Terminal Tabs</h2>
           <p>Click the + button to create a new terminal tab</p>
         </div>
@@ -111,45 +128,133 @@ watch(colorScheme, (scheme) => {
 // the terminal area and mobile controls adjust properly.
 let vvResizeHandler: (() => void) | null = null
 let vvScrollHandler: (() => void) | null = null
+let largestVisualViewportHeight = 0
+let lastVisualViewportWidth = 0
+let keyboardOpenState = false
+let keyboardCloseTimer: number | null = null
+let viewportUpdateFrame: number | null = null
+let pendingVisualViewport: VisualViewport | undefined
+let lastAppliedViewportHeight = ''
+let lastAppliedKeyboardHeight = ''
+
+const KEYBOARD_OPEN_THRESHOLD_PX = 36
+const KEYBOARD_CLOSE_THRESHOLD_PX = 12
+const KEYBOARD_CLOSE_DELAY_MS = 160
 
 function setupMobileViewportSync() {
   const vv = window.visualViewport
   if (!vv) {
     // Fallback for browsers without visualViewport: listen to window resize
     window.addEventListener('resize', handleFallbackResize)
+    handleFallbackResize()
     return
   }
 
   vvResizeHandler = () => {
-    updateKeyboardHeight(vv)
+    scheduleViewportMetricsUpdate(vv)
   }
   vvScrollHandler = () => {
     // On iOS, visualViewport scrolls when keyboard is open.
     // The offsetTop tells us how far the page scrolled.
-    updateKeyboardHeight(vv)
+    scheduleViewportMetricsUpdate(vv)
   }
 
   vv.addEventListener('resize', vvResizeHandler)
   vv.addEventListener('scroll', vvScrollHandler)
+  updateViewportMetrics(vv)
 }
 
 function handleFallbackResize() {
-  // Rough fallback: if innerHeight dropped significantly, keyboard is likely open
-  const app = document.documentElement
-  app.style.setProperty('--keyboard-height', '0px')
+  scheduleViewportMetricsUpdate()
 }
 
-function updateKeyboardHeight(vv: VisualViewport) {
-  const fullHeight = window.innerHeight
-  const viewportHeight = vv.height
-  const keyboardHeight = Math.max(0, fullHeight - viewportHeight - vv.offsetTop)
+function scheduleViewportMetricsUpdate(vv?: VisualViewport) {
+  pendingVisualViewport = vv
 
-  const app = document.documentElement
-  if (keyboardHeight > 50) {
-    // Keyboard is open (threshold to avoid false positives from URL bar)
-    app.style.setProperty('--keyboard-height', `${keyboardHeight}px`)
+  if (viewportUpdateFrame !== null) return
+
+  viewportUpdateFrame = window.requestAnimationFrame(() => {
+    viewportUpdateFrame = null
+    updateViewportMetrics(pendingVisualViewport)
+    pendingVisualViewport = undefined
+  })
+}
+
+function clearKeyboardCloseTimer() {
+  if (keyboardCloseTimer !== null) {
+    window.clearTimeout(keyboardCloseTimer)
+    keyboardCloseTimer = null
+  }
+}
+
+function applyKeyboardOpenState(open: boolean) {
+  const root = document.documentElement
+  keyboardOpenState = open
+
+  if (open) {
+    root.dataset.keyboardOpen = 'true'
   } else {
-    app.style.setProperty('--keyboard-height', '0px')
+    delete root.dataset.keyboardOpen
+  }
+}
+
+function updateViewportMetrics(vv?: VisualViewport) {
+  const root = document.documentElement
+  const viewportHeight = vv?.height ?? window.innerHeight
+  const viewportWidth = vv?.width ?? window.innerWidth
+  const offsetTop = vv?.offsetTop ?? 0
+  const isMobileViewport = window.innerWidth <= 768
+
+  if (Math.abs(viewportWidth - lastVisualViewportWidth) > 24) {
+    largestVisualViewportHeight = viewportHeight
+    lastVisualViewportWidth = viewportWidth
+  } else if (!largestVisualViewportHeight || viewportHeight > largestVisualViewportHeight) {
+    largestVisualViewportHeight = viewportHeight
+  }
+
+  const keyboardHeight = isMobileViewport
+    ? Math.max(0, largestVisualViewportHeight - viewportHeight - offsetTop)
+    : 0
+
+  const viewportHeightValue = `${Math.round(viewportHeight)}px`
+  const keyboardHeightValue = `${Math.round(keyboardHeight)}px`
+
+  if (viewportHeightValue !== lastAppliedViewportHeight) {
+    root.style.setProperty('--visual-viewport-height', viewportHeightValue)
+    lastAppliedViewportHeight = viewportHeightValue
+  }
+
+  if (keyboardHeightValue !== lastAppliedKeyboardHeight) {
+    root.style.setProperty('--keyboard-height', keyboardHeightValue)
+    lastAppliedKeyboardHeight = keyboardHeightValue
+  }
+
+  if (!isMobileViewport) {
+    clearKeyboardCloseTimer()
+    if (keyboardOpenState) {
+      applyKeyboardOpenState(false)
+    }
+    return
+  }
+
+  if (keyboardHeight >= KEYBOARD_OPEN_THRESHOLD_PX) {
+    clearKeyboardCloseTimer()
+    if (!keyboardOpenState) {
+      applyKeyboardOpenState(true)
+    }
+    return
+  }
+
+  if (keyboardOpenState && keyboardHeight > KEYBOARD_CLOSE_THRESHOLD_PX) {
+    clearKeyboardCloseTimer()
+    return
+  }
+
+  if (keyboardOpenState && keyboardHeight <= KEYBOARD_CLOSE_THRESHOLD_PX && keyboardCloseTimer === null) {
+    keyboardCloseTimer = window.setTimeout(() => {
+      keyboardCloseTimer = null
+      applyKeyboardOpenState(false)
+    }, KEYBOARD_CLOSE_DELAY_MS)
   }
 }
 
@@ -160,6 +265,12 @@ function cleanupMobileViewportSync() {
     if (vvScrollHandler) vv.removeEventListener('scroll', vvScrollHandler)
   }
   window.removeEventListener('resize', handleFallbackResize)
+  clearKeyboardCloseTimer()
+  if (viewportUpdateFrame !== null) {
+    window.cancelAnimationFrame(viewportUpdateFrame)
+    viewportUpdateFrame = null
+  }
+  applyKeyboardOpenState(false)
 }
 
 onMounted(async () => {
@@ -186,6 +297,8 @@ onUnmounted(() => {
 
 :root {
   color-scheme: dark;
+  --visual-viewport-height: 100dvh;
+  --keyboard-height: 0px;
   --ch-color-app-bg: #1a1a1a;
   --ch-color-canvas: #181818;
   --ch-color-surface: #1e1e1e;
@@ -389,13 +502,12 @@ textarea {
 }
 
 .app {
-  height: 100%;
+  height: var(--visual-viewport-height, 100dvh);
   display: flex;
   flex-direction: column;
   background-color: var(--ch-color-app-bg);
   color: var(--ch-color-text);
-  /* Adjust for mobile keyboard — set by visualViewport sync */
-  padding-bottom: var(--keyboard-height, 0px);
+  min-height: 0;
 }
 
 .error-banner {
@@ -412,9 +524,13 @@ textarea {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  max-height: 52px;
+  min-height: 0;
   padding: 8px 12px;
   border-bottom: 1px solid var(--ch-color-border);
   background: var(--ch-color-surface);
+  overflow: hidden;
+  transition: max-height 200ms cubic-bezier(0.2, 0, 0, 1), padding 200ms cubic-bezier(0.2, 0, 0, 1), border-color 200ms cubic-bezier(0.2, 0, 0, 1), opacity 160ms ease, transform 200ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 .mode-switch {
@@ -575,6 +691,99 @@ textarea {
   .theme-switch {
     width: 96px;
     flex: 0 0 auto;
+  }
+}
+
+@media (max-width: 768px) {
+  .app[data-mode='terminal'] {
+    transition: height 180ms cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .app-mode-bar {
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    border-bottom-color: transparent;
+    opacity: 0;
+    transform: translateY(-6px);
+    pointer-events: none;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .layout-selector--row {
+    display: none;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-bar {
+    max-height: 0;
+    gap: 0;
+    padding: 0 6px;
+    border-bottom-color: transparent;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-bar > :not(.modal-overlay) {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-duplicate {
+    display: none;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab {
+    height: 26px;
+    gap: 4px;
+    padding: 0 8px;
+    border-radius: var(--ch-radius-sm);
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-name {
+    max-width: 118px;
+    font-size: 12px;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-close {
+    padding: 0 2px;
+    font-size: 15px;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .add-tab,
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .layout-menu-trigger,
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .status-trigger {
+    height: 26px;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .add-tab,
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .layout-menu-trigger {
+    width: 28px;
+    border-radius: var(--ch-radius-sm);
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .status-trigger {
+    min-width: 0;
+    gap: 4px;
+    padding: 0 7px;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .terminal-grid {
+    gap: 2px;
+    padding: 2px;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .terminal-pane {
+    border-radius: var(--ch-radius-md);
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .terminal-pane.active {
+    box-shadow: 0 0 0 1px var(--ch-color-accent-ring);
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .pane-header {
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    border-bottom-color: transparent;
+    opacity: 0;
+    transform: translateY(-4px);
   }
 }
 </style>
