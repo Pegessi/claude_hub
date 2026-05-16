@@ -8,7 +8,8 @@
 ### fix: harden terminal replay hold on Linux CI
 - Extend the full-replay hold window and perform a final replay before marking history as complete, so late ttyd initial frames cannot collapse xterm scrollback immediately before E2E assertions
 - Verify the xterm buffer contains expected scrollback before publishing replay readiness, with a short post-ready watchdog for late Linux runner redraws
-- **Files**: terminal.py
+- Normalize styled tmux prompts in terminal E2E comparisons and wait for the expected xterm buffer depth before asserting scrollback state
+- **Files**: terminal.py, conftest.py, test_terminal_replay.py
 
 ### fix: stabilize terminal replay CI and refresh README
 - Replace synchronous browser history preload with an async preload gate before hooking xterm, so Chromium on Linux CI reliably receives tmux history before replay
