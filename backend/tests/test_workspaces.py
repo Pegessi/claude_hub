@@ -554,6 +554,10 @@ def test_tmux_pending_input_detection_matches_codex_paste_prompt() -> None:
         "\n› N[Pasted Content 1360 chars]\n\n• Working\n",
         message,
     )
+    assert not workspace_manager._message_still_in_input(
+        "\n❯ /clear\n  ⎿ \xa0(no content)\n\n❯\xa0\n",
+        "/clear",
+    )
 
 
 def test_auto_continue_ignores_stale_interruption_before_latest_continue() -> None:
