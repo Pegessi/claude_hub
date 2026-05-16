@@ -81,6 +81,7 @@
     >
       {{ isLoading ? '...' : '+' }}
     </button>
+    <LayoutSelector variant="menu" />
     <AgentStatusFloatingPanel
       v-if="manualTabs.length > 0"
       source="manual"
@@ -411,6 +412,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import AgentStatusFloatingPanel from '@/components/AgentStatusFloatingPanel.vue'
+import LayoutSelector from '@/components/LayoutSelector.vue'
 import LoadingButton from '@/components/LoadingButton.vue'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { useTerminalStore } from '@/stores/terminalStore'

@@ -8,7 +8,8 @@
 ### feat: expand mobile terminal space while typing
 - Drive the app shell height from `visualViewport` so the mobile keyboard does not double-shrink the terminal layout
 - Enter a compact terminal mode while the keyboard is open, hiding nonessential chrome and tightening tab, pane, and mobile-control spacing
-- **Files**: App.vue, MobileControls.vue
+- Move the mobile split-layout shortcuts into a top-bar dropdown so the standalone layout row no longer consumes vertical space on phones
+- **Files**: App.vue, LayoutSelector.vue, MobileControls.vue, TabBar.vue
 
 ### fix: avoid false pending workspace dispatch
 - Treat submitted Claude slash-command output and older prompt echoes as completed sends, so queued workspace tasks are not blocked after a successful `/clear`
