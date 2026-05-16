@@ -321,6 +321,8 @@ onUnmounted(() => {
   align-items: flex-end;
   padding: 12px;
   padding-bottom: calc(12px + env(safe-area-inset-bottom, 0));
+  transition: transform 180ms cubic-bezier(0.2, 0, 0, 1);
+  will-change: transform;
 }
 
 .controls-panel {
@@ -491,9 +493,16 @@ onUnmounted(() => {
 }
 
 :global(html[data-keyboard-open='true'] .mobile-controls-overlay) {
-  top: var(--visual-viewport-offset-top, 0);
-  bottom: auto;
-  height: var(--visual-viewport-height, 100dvh);
+  bottom: 0;
+  transform: translate3d(
+    0,
+    calc(
+      var(--visual-viewport-offset-top, 0px) +
+      var(--visual-viewport-height, 100dvh) -
+      var(--stable-viewport-height, 100dvh)
+    ),
+    0
+  );
   padding: 6px;
   padding-bottom: max(6px, env(safe-area-inset-bottom, 0));
 }

@@ -15,6 +15,7 @@
 - Keep the floating virtual-key toggle pinned to the active viewport bottom during keyboard-open mode
 - Coalesce terminal resize messages during mobile keyboard animation so xterm redraws only after the layout settles
 - Replace the mobile keyboard folding chrome with a stable compact top bar and app menu so the terminal canvas does not resize when the keyboard opens
+- Keep the mobile virtual-key overlay content-sized while tracking the visual viewport, preserving native xterm touch inertia
 - **Files**: App.vue, AgentStatusFloatingPanel.vue, LayoutSelector.vue, MobileControls.vue, TabBar.vue, TerminalGridView.vue, TerminalPane.vue, TerminalView.vue
 
 ### fix: avoid false pending workspace dispatch
