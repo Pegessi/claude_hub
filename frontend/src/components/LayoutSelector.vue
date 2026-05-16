@@ -263,7 +263,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast);
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), width 180ms cubic-bezier(0.2, 0, 0, 1), height 180ms cubic-bezier(0.2, 0, 0, 1), border-radius 180ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 .layout-menu-trigger:hover,

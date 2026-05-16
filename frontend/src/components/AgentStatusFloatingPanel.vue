@@ -336,6 +336,7 @@ onUnmounted(() => {
   color: var(--ch-color-text);
   cursor: pointer;
   padding: 0 9px;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast), height 180ms cubic-bezier(0.2, 0, 0, 1), min-width 180ms cubic-bezier(0.2, 0, 0, 1), padding 180ms cubic-bezier(0.2, 0, 0, 1), gap 180ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 .status-trigger:hover,
