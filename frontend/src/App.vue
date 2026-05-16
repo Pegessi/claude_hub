@@ -691,6 +691,10 @@ textarea {
 }
 
 @media (max-width: 768px) {
+  .app[data-mode='terminal'] {
+    transition: height 180ms cubic-bezier(0.2, 0, 0, 1);
+  }
+
   html[data-keyboard-open='true'] .app[data-mode='terminal'] .app-mode-bar,
   html[data-keyboard-open='true'] .app[data-mode='terminal'] .layout-selector--row,
   html[data-keyboard-open='true'] .app[data-mode='terminal'] .pane-header {
@@ -698,16 +702,47 @@ textarea {
   }
 
   html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-bar {
-    height: 0;
-    min-height: 0;
-    gap: 0;
-    padding: 0;
-    border-bottom: 0;
-    overflow: visible;
+    gap: 4px;
+    padding: 3px 6px;
   }
 
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-bar > :not(.modal-overlay) {
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-duplicate {
     display: none;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab {
+    height: 26px;
+    gap: 4px;
+    padding: 0 8px;
+    border-radius: var(--ch-radius-sm);
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-name {
+    max-width: 118px;
+    font-size: 12px;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-close {
+    padding: 0 2px;
+    font-size: 15px;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .add-tab,
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .layout-menu-trigger,
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .status-trigger {
+    height: 26px;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .add-tab,
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .layout-menu-trigger {
+    width: 28px;
+    border-radius: var(--ch-radius-sm);
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .status-trigger {
+    min-width: 0;
+    gap: 4px;
+    padding: 0 7px;
   }
 
   html[data-keyboard-open='true'] .app[data-mode='terminal'] .terminal-grid {
