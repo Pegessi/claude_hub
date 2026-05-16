@@ -373,9 +373,9 @@ async def proxy_terminal_request(
           const FULL_REPLAY_MIN_HOLD_MS = 2500;
           const FULL_REPLAY_QUIET_MS = 750;
           const FULL_REPLAY_MAX_HOLD_MS = 8000;
-          const FULL_REPLAY_VERIFY_DELAY_MS = 350;
-          const FULL_REPLAY_VERIFY_ATTEMPTS = 8;
-          const FULL_REPLAY_WATCH_MS = 2000;
+          const FULL_REPLAY_VERIFY_DELAY_MS = 250;
+          const FULL_REPLAY_VERIFY_ATTEMPTS = 20;
+          const FULL_REPLAY_WATCH_MS = 8000;
           const FULL_REPLAY_WATCH_INTERVAL_MS = 100;
           let fullReplayHoldStartedAt = 0;
           let lastBufferedAt = 0;
@@ -506,7 +506,7 @@ async def proxy_terminal_request(
               return;
             }}
             flushBuffer();
-          }}, FULL_REPLAY_MAX_HOLD_MS + 5000);
+          }}, FULL_REPLAY_MAX_HOLD_MS + 8000);
 
           if (fullReplay) {{
             // Phase B: term.open() was already called by ttyd and the
