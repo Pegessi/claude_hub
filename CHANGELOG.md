@@ -13,7 +13,8 @@
 - Fold the mobile tab bar without dropping the terminal pane frame so the keyboard transition keeps a continuous border
 - Animate mobile top chrome and pane-header collapse so the terminal frame slides with the keyboard instead of jumping into place
 - Keep the floating virtual-key toggle pinned to the active viewport bottom during keyboard-open mode
-- **Files**: App.vue, AgentStatusFloatingPanel.vue, LayoutSelector.vue, MobileControls.vue, TabBar.vue, TerminalGridView.vue, TerminalPane.vue
+- Coalesce terminal resize messages during mobile keyboard animation so xterm redraws only after the layout settles
+- **Files**: App.vue, AgentStatusFloatingPanel.vue, LayoutSelector.vue, MobileControls.vue, TabBar.vue, TerminalGridView.vue, TerminalPane.vue, TerminalView.vue
 
 ### fix: avoid false pending workspace dispatch
 - Treat submitted Claude slash-command output and older prompt echoes as completed sends, so queued workspace tasks are not blocked after a successful `/clear`
