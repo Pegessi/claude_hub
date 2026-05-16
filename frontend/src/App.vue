@@ -137,8 +137,8 @@ let pendingVisualViewport: VisualViewport | undefined
 let lastAppliedViewportHeight = ''
 let lastAppliedKeyboardHeight = ''
 
-const KEYBOARD_OPEN_THRESHOLD_PX = 80
-const KEYBOARD_CLOSE_THRESHOLD_PX = 32
+const KEYBOARD_OPEN_THRESHOLD_PX = 36
+const KEYBOARD_CLOSE_THRESHOLD_PX = 12
 const KEYBOARD_CLOSE_DELAY_MS = 160
 
 function setupMobileViewportSync() {
@@ -524,9 +524,13 @@ textarea {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  max-height: 52px;
+  min-height: 0;
   padding: 8px 12px;
   border-bottom: 1px solid var(--ch-color-border);
   background: var(--ch-color-surface);
+  overflow: hidden;
+  transition: max-height 200ms cubic-bezier(0.2, 0, 0, 1), padding 200ms cubic-bezier(0.2, 0, 0, 1), border-color 200ms cubic-bezier(0.2, 0, 0, 1), opacity 160ms ease, transform 200ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 .mode-switch {
@@ -695,15 +699,30 @@ textarea {
     transition: height 180ms cubic-bezier(0.2, 0, 0, 1);
   }
 
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .app-mode-bar,
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .layout-selector--row,
-  html[data-keyboard-open='true'] .app[data-mode='terminal'] .pane-header {
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .app-mode-bar {
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    border-bottom-color: transparent;
+    opacity: 0;
+    transform: translateY(-6px);
+    pointer-events: none;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .layout-selector--row {
     display: none;
   }
 
   html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-bar {
-    gap: 4px;
-    padding: 3px 6px;
+    max-height: 0;
+    gap: 0;
+    padding: 0 6px;
+    border-bottom-color: transparent;
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-bar > :not(.modal-overlay) {
+    opacity: 0;
+    pointer-events: none;
   }
 
   html[data-keyboard-open='true'] .app[data-mode='terminal'] .tab-duplicate {
@@ -746,17 +765,25 @@ textarea {
   }
 
   html[data-keyboard-open='true'] .app[data-mode='terminal'] .terminal-grid {
-    gap: 0;
-    padding: 0;
+    gap: 2px;
+    padding: 2px;
   }
 
   html[data-keyboard-open='true'] .app[data-mode='terminal'] .terminal-pane {
-    border-width: 0;
-    border-radius: 0;
+    border-radius: var(--ch-radius-md);
   }
 
   html[data-keyboard-open='true'] .app[data-mode='terminal'] .terminal-pane.active {
-    box-shadow: none;
+    box-shadow: 0 0 0 1px var(--ch-color-accent-ring);
+  }
+
+  html[data-keyboard-open='true'] .app[data-mode='terminal'] .pane-header {
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    border-bottom-color: transparent;
+    opacity: 0;
+    transform: translateY(-4px);
   }
 }
 </style>

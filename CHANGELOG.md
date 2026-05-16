@@ -10,7 +10,10 @@
 - Enter a compact terminal mode while the keyboard is open, hiding nonessential chrome and tightening tab, pane, and mobile-control spacing
 - Move the mobile split-layout shortcuts into a top-bar dropdown so the standalone layout row no longer consumes vertical space on phones
 - Keep the mobile terminal tab bar anchored while the keyboard is open and smooth the compact layout plus floating virtual-key panel transitions
-- **Files**: App.vue, AgentStatusFloatingPanel.vue, LayoutSelector.vue, MobileControls.vue, TabBar.vue
+- Fold the mobile tab bar without dropping the terminal pane frame so the keyboard transition keeps a continuous border
+- Animate mobile top chrome and pane-header collapse so the terminal frame slides with the keyboard instead of jumping into place
+- Keep the floating virtual-key toggle pinned to the active viewport bottom during keyboard-open mode
+- **Files**: App.vue, AgentStatusFloatingPanel.vue, LayoutSelector.vue, MobileControls.vue, TabBar.vue, TerminalGridView.vue, TerminalPane.vue
 
 ### fix: avoid false pending workspace dispatch
 - Treat submitted Claude slash-command output and older prompt echoes as completed sends, so queued workspace tasks are not blocked after a successful `/clear`

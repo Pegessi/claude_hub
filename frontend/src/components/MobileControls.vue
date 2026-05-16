@@ -490,7 +490,7 @@ onUnmounted(() => {
 }
 
 :global(html[data-keyboard-open='true'] .mobile-controls-overlay) {
-  bottom: var(--keyboard-height, 0);
+  bottom: 0;
   padding: 6px;
   padding-bottom: max(6px, env(safe-area-inset-bottom, 0));
 }

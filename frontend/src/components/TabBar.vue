@@ -879,7 +879,13 @@ async function handleCreateTab() {
   border-bottom: 1px solid var(--ch-color-border-muted);
   padding: 7px 10px 6px;
   gap: 6px;
-  transition: padding 180ms cubic-bezier(0.2, 0, 0, 1), gap 180ms cubic-bezier(0.2, 0, 0, 1);
+  max-height: 48px;
+  overflow: visible;
+  transition: max-height 180ms cubic-bezier(0.2, 0, 0, 1), padding 180ms cubic-bezier(0.2, 0, 0, 1), gap 180ms cubic-bezier(0.2, 0, 0, 1), border-color 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.tab-bar > :not(.modal-overlay) {
+  transition: opacity 120ms ease;
 }
 
 .tabs-shell {
