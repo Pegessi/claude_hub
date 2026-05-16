@@ -373,10 +373,15 @@ async def proxy_terminal_request(
           const FULL_REPLAY_MIN_HOLD_MS = 2500;
           const FULL_REPLAY_QUIET_MS = 750;
           const FULL_REPLAY_MAX_HOLD_MS = 8000;
+          const FULL_REPLAY_VERIFY_DELAY_MS = 350;
+          const FULL_REPLAY_VERIFY_ATTEMPTS = 8;
+          const FULL_REPLAY_WATCH_MS = 2000;
+          const FULL_REPLAY_WATCH_INTERVAL_MS = 100;
           let fullReplayHoldStartedAt = 0;
           let lastBufferedAt = 0;
           let fullReplayHoldTimer = null;
           let fullReplayFinalizing = false;
+          let fullReplayVerifyAttempts = 0;
           const replayPayload = '\\x1b[H\\x1b[2J\\x1b[3J' + lines.join('\\r\\n') + cursorSeq(historyCursorX, historyCursorY);
 
           term.write = function(data, cb) {{
@@ -412,6 +417,42 @@ async def proxy_terminal_request(
               }}
             }}
             buffer.length = 0;
+            startPostReplayWatch();
+          }}
+
+          function hasExpectedReplayBuffer() {{
+            if (!fullReplay) return true;
+            const active = term.buffer && term.buffer.active;
+            if (!active) return true;
+            const rows = term.rows || 24;
+            if (lines.length > rows && active.baseY <= 0) return false;
+            return active.length >= Math.min(lines.length, rows);
+          }}
+
+          function startPostReplayWatch() {{
+            if (!fullReplay) return;
+            const watchUntil = Date.now() + FULL_REPLAY_WATCH_MS;
+            function watch() {{
+              if (!historyDone) return;
+              if (!hasExpectedReplayBuffer()) {{
+                originalWrite(replayPayload, function() {{}});
+              }}
+              if (Date.now() < watchUntil) {{
+                setTimeout(watch, FULL_REPLAY_WATCH_INTERVAL_MS);
+              }}
+            }}
+            setTimeout(watch, FULL_REPLAY_WATCH_INTERVAL_MS);
+          }}
+
+          function verifyFullReplayBeforeDone() {{
+            setTimeout(function() {{
+              if (hasExpectedReplayBuffer() || fullReplayVerifyAttempts >= FULL_REPLAY_VERIFY_ATTEMPTS) {{
+                flushBuffer();
+                return;
+              }}
+              fullReplayVerifyAttempts++;
+              originalWrite(replayPayload, verifyFullReplayBeforeDone);
+            }}, FULL_REPLAY_VERIFY_DELAY_MS);
           }}
 
           function finishFullReplay() {{
@@ -427,7 +468,10 @@ async def proxy_terminal_request(
             }}
             // A final replay right before releasing the buffer overwrites any
             // late ttyd initial-screen frames that arrived during the hold.
-            originalWrite(replayPayload, flushBuffer);
+            // On Linux CI, a later resize/initial-frame burst can still
+            // collapse scrollback; verify the xterm buffer before setting
+            // the public replay-done flag used by E2E readiness checks.
+            originalWrite(replayPayload, verifyFullReplayBeforeDone);
           }}
 
           function finishFullReplayWhenQuiet() {{
@@ -462,7 +506,7 @@ async def proxy_terminal_request(
               return;
             }}
             flushBuffer();
-          }}, FULL_REPLAY_MAX_HOLD_MS + 2000);
+          }}, FULL_REPLAY_MAX_HOLD_MS + 5000);
 
           if (fullReplay) {{
             // Phase B: term.open() was already called by ttyd and the
