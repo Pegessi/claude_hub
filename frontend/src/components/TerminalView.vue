@@ -172,7 +172,7 @@ function terminalThemePayload(): TerminalThemePayload {
 
   return {
     scheme: colorScheme.value,
-    minimumContrastRatio: colorScheme.value === 'light' ? 4.5 : 1,
+    minimumContrastRatio: colorScheme.value === 'light' ? 4.5 : 3,
     page: {
       background,
       canvasFilter: cssVar('--ch-terminal-canvas-filter') || 'none',

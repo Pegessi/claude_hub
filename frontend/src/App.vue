@@ -431,12 +431,12 @@ onUnmounted(() => {
   --ch-terminal-cursor: #f4f4f5;
   --ch-terminal-selection: rgba(96, 165, 250, 0.28);
   --ch-terminal-black: #1f2937;
-  --ch-terminal-red: #f87171;
-  --ch-terminal-green: #4ade80;
-  --ch-terminal-yellow: #facc15;
-  --ch-terminal-blue: #60a5fa;
-  --ch-terminal-magenta: #c084fc;
-  --ch-terminal-cyan: #22d3ee;
+  --ch-terminal-red: #c26b6b;
+  --ch-terminal-green: #4f8f63;
+  --ch-terminal-yellow: #b8944a;
+  --ch-terminal-blue: #5f8fbf;
+  --ch-terminal-magenta: #8b6fb2;
+  --ch-terminal-cyan: #4f8f98;
   --ch-terminal-white: #d4d4d8;
   --ch-terminal-bright-black: #71717a;
   --ch-terminal-bright-red: #fca5a5;

@@ -5,6 +5,11 @@
 
 ## 2026-05-17
 
+### fix: mute dark terminal ANSI background colors
+- Replace dark terminal base ANSI colors with lower-saturation values so remote Claude prompts that paint large ANSI background regions do not turn the pane bright green
+- Apply a modest dark-mode xterm minimum contrast ratio to keep colored terminal text readable on muted ANSI backgrounds
+- **Files**: App.vue, TerminalView.vue
+
 ### fix: keep remote Claude launches out of bare shells
 - Fall back to the remote home directory when a remote tab or workspace agent is launched with a cwd that does not exist on the SSH host, then continue starting Claude/Codex instead of dropping straight into a login shell
 - Reset remote tab/agent cwd defaults when switching to a remote target so local macOS paths are not carried into SSH launches
