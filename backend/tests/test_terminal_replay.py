@@ -192,6 +192,28 @@ def read_scroll_alignment(page: Page) -> dict[str, Any] | None:
     return result if isinstance(result, dict) else None
 
 
+def scroll_terminal_to_top(page: Page) -> None:
+    """Move the xterm viewport away from the latest output."""
+    page.evaluate("""() => {
+            const term = window.term;
+            if (!term) return;
+            if (typeof term.scrollToTop === 'function') {
+                term.scrollToTop();
+            } else if (typeof term.scrollToLine === 'function') {
+                term.scrollToLine(0);
+            }
+        }""")
+    page.wait_for_function(
+        """() => {
+            const term = window.term;
+            if (!term) return false;
+            const buffer = term.buffer.active;
+            return buffer.viewportY < buffer.baseY;
+        }""",
+        timeout=5000,
+    )
+
+
 def read_xterm_text(page: Page) -> str:
     """Read the full xterm buffer as newline-delimited text."""
     lines: list[str] = page.evaluate("""() => {
@@ -509,6 +531,79 @@ def test_desktop_wheel_enters_user_scroll_during_live_output(
     assert after["viewportY"] < after["baseY"], (
         f"wheel-up did not leave the live-output bottom after first event: "
         f"before={before}, after={after}"
+    )
+
+
+def test_manual_history_refresh_message_scrolls_to_latest(terminal_tab: dict, page: Page) -> None:
+    """Manual history refresh replays tmux history and returns to the latest output."""
+    tab = terminal_tab
+    session_name = f"claude-hub-{tab['id'][:8]}"
+
+    ensure_tmux_session(page, tab["id"], session_name)
+    produce_scrollback(session_name, count=260)
+    load_terminal_page(page, tab["id"], min_buffer_lines=260)
+    scroll_terminal_to_top(page)
+
+    page.evaluate("""() => {
+            window.__claudeHubRefreshEvents = [];
+            window.addEventListener('message', function(event) {
+                if (event.data && event.data.type === 'terminal-history-refresh-done') {
+                    window.__claudeHubRefreshEvents.push(event.data);
+                }
+            });
+            window.postMessage({
+                type: 'terminal-history-refresh',
+                reason: 'test-manual',
+                scrollToBottom: true
+            }, '*');
+        }""")
+
+    page.wait_for_function(
+        """() => Array.isArray(window.__claudeHubRefreshEvents) &&
+            window.__claudeHubRefreshEvents.some(function(event) {
+                return event.reason === 'test-manual' && event.ok === true;
+            })""",
+        timeout=10000,
+    )
+    wait_for_xterm_buffer_lines(page, 260)
+
+    alignment = read_scroll_alignment(page)
+    assert alignment is not None
+    assert (
+        alignment["viewportY"] == alignment["baseY"]
+    ), f"manual history refresh did not return to latest output: {alignment}"
+
+
+def test_terminal_activate_message_scrolls_to_latest(terminal_tab: dict, page: Page) -> None:
+    """Mobile tab activation can force a cached terminal back to the latest output."""
+    tab = terminal_tab
+    session_name = f"claude-hub-{tab['id'][:8]}"
+
+    ensure_tmux_session(page, tab["id"], session_name)
+    produce_scrollback(session_name, count=260)
+    load_terminal_page(page, tab["id"], min_buffer_lines=260)
+    scroll_terminal_to_top(page)
+
+    page.evaluate(
+        """(tabId) => {
+            window.postMessage({
+                type: 'terminal-activate',
+                tabId,
+                refreshHistory: false,
+                scrollToBottom: true
+            }, '*');
+        }""",
+        arg=tab["id"],
+    )
+
+    page.wait_for_function(
+        """() => {
+            const term = window.term;
+            if (!term) return false;
+            const buffer = term.buffer.active;
+            return buffer.viewportY === buffer.baseY;
+        }""",
+        timeout=5000,
     )
 
 

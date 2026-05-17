@@ -53,11 +53,17 @@ type TerminalThemePayload = {
   xterm: Record<string, string>
 }
 
+type TerminalHistoryRefreshOptions = {
+  reason?: string
+  scrollToBottom?: boolean
+}
+
 declare global {
   interface Window {
     __activePaneTabId?: string | null
     __claudeHubTerminalState?: TerminalKeyState
     __registerTerminalIframe?: (el: HTMLIFrameElement | null, tabId: string) => void
+    __refreshTerminalHistory?: (tabId?: string) => void
     __sendTerminalKey?: (key: string, ctrl?: boolean, shift?: boolean) => void
   }
 }
@@ -99,7 +105,10 @@ watch(
   () => props.tabId,
   (newTabId) => {
     cacheTabId(newTabId)
-    requestAnimationFrame(() => scheduleTerminalResize(newTabId))
+    requestAnimationFrame(() => {
+      scheduleTerminalResize(newTabId)
+      scheduleMobileTerminalActivation(newTabId)
+    })
   },
   { immediate: true }
 )
@@ -229,6 +238,65 @@ function postTerminalResize(tabId?: string) {
       type: 'terminal-resize',
     }, '*')
   }
+}
+
+function postTerminalMessage(tabId: string, message: Record<string, unknown>): boolean {
+  const iframe = iframeRefs[tabId] || getTerminalState().iframes[tabId]
+  if (!iframe?.contentWindow) return false
+
+  iframe.contentWindow.postMessage({
+    ...message,
+    tabId,
+  }, '*')
+  return true
+}
+
+function postTerminalHistoryRefresh(
+  tabId: string,
+  options: TerminalHistoryRefreshOptions = {}
+): boolean {
+  return postTerminalMessage(tabId, {
+    type: 'terminal-history-refresh',
+    reason: options.reason || 'manual',
+    scrollToBottom: options.scrollToBottom !== false,
+  })
+}
+
+function postTerminalScrollBottom(tabId: string): boolean {
+  return postTerminalMessage(tabId, {
+    type: 'terminal-scroll-bottom',
+  })
+}
+
+function isMobileTerminalViewport() {
+  if (typeof window === 'undefined') return false
+  return (
+    window.innerWidth <= MOBILE_TERMINAL_BREAKPOINT_PX ||
+    (typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches)
+  )
+}
+
+function scheduleMobileTerminalActivation(tabId?: string) {
+  if (!tabId || !isMobileTerminalViewport()) return
+
+  postTerminalMessage(tabId, {
+    type: 'terminal-activate',
+    refreshHistory: true,
+    scrollToBottom: true,
+  })
+  window.setTimeout(() => postTerminalScrollBottom(tabId), 120)
+  window.setTimeout(() => postTerminalScrollBottom(tabId), 360)
+}
+
+function refreshTerminalHistory(tabId?: string) {
+  const targetTabId = tabId || window.__activePaneTabId || props.tabId
+  if (!targetTabId) return
+
+  postTerminalHistoryRefresh(targetTabId, {
+    reason: 'manual',
+    scrollToBottom: true,
+  })
+  window.setTimeout(() => postTerminalScrollBottom(targetTabId), 400)
 }
 
 function isMobileKeyboardResizeActive() {
@@ -673,6 +741,9 @@ function onIframeLoad(event: Event, tabId: string) {
     iframe.contentDocument.head.appendChild(script)
     postTerminalTheme(tabId)
     scheduleTerminalResize(tabId)
+    if (tabId === props.tabId) {
+      scheduleMobileTerminalActivation(tabId)
+    }
   } catch (e) {
     console.error('Error injecting script into iframe:', e)
   }
@@ -706,6 +777,12 @@ function handleMessage(event: MessageEvent) {
     }
   }
 
+  if (event.data.type === 'terminal-history-refresh-done') {
+    window.dispatchEvent(new CustomEvent('terminal-history-refresh-done', {
+      detail: event.data,
+    }))
+  }
+
   // Handle terminal-click for pane activation
   if (event.data.type === 'terminal-click') {
     // This is handled by TerminalPane.vue
@@ -715,6 +792,7 @@ function handleMessage(event: MessageEvent) {
 onMounted(() => {
   if (typeof window !== 'undefined') {
     window.__registerTerminalIframe = registerIframe
+    window.__refreshTerminalHistory = refreshTerminalHistory
 
     // Key sending function with queue support
     window.__sendTerminalKey = function(key: string, ctrl = false, shift = false) {
@@ -751,6 +829,9 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('message', handleMessage)
+  if (window.__refreshTerminalHistory === refreshTerminalHistory) {
+    delete window.__refreshTerminalHistory
+  }
   terminalResizeObserver?.disconnect()
   terminalResizeObserver = null
   if (keyboardResizeSettleTimer !== null) {
