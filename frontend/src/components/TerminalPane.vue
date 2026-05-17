@@ -13,6 +13,20 @@
       class="pane-header"
     >
       <span class="pane-tab-name">{{ getTabName() }}</span>
+      <button
+        type="button"
+        class="pane-action-button"
+        :class="{ refreshing: isRefreshingHistory }"
+        :disabled="isRefreshingHistory"
+        title="Refresh terminal history"
+        aria-label="Refresh terminal history"
+        @click.stop="refreshHistory"
+      >
+        <span
+          class="pane-action-icon"
+          aria-hidden="true"
+        >&#x21bb;</span>
+      </button>
     </div>
 
     <!-- 空状态 -->
@@ -58,6 +72,12 @@ const store = useTerminalStore()
 const { tabs } = storeToRefs(store)
 
 const isDragOver = ref(false)
+const isRefreshingHistory = ref(false)
+let refreshFeedbackTimer: number | null = null
+
+type WindowWithTerminalHistory = Window & {
+  __refreshTerminalHistory?: (tabId?: string) => void
+}
 
 function getTabName(): string {
   if (!props.pane.tabId) return ''
@@ -73,6 +93,35 @@ function getAgentType() {
 
 function handleClick() {
   emit('click')
+}
+
+function clearRefreshFeedbackTimer() {
+  if (refreshFeedbackTimer !== null) {
+    window.clearTimeout(refreshFeedbackTimer)
+    refreshFeedbackTimer = null
+  }
+}
+
+function stopRefreshFeedbackAfter(delayMs: number) {
+  clearRefreshFeedbackTimer()
+  refreshFeedbackTimer = window.setTimeout(() => {
+    isRefreshingHistory.value = false
+    refreshFeedbackTimer = null
+  }, delayMs)
+}
+
+function refreshHistory() {
+  if (!props.pane.tabId) return
+  isRefreshingHistory.value = true
+  const refreshTerminalHistory = (window as WindowWithTerminalHistory).__refreshTerminalHistory
+  refreshTerminalHistory?.(props.pane.tabId)
+  stopRefreshFeedbackAfter(3000)
+}
+
+function handleHistoryRefreshDone(event: Event) {
+  const detail = (event as CustomEvent<{ tabId?: string }>).detail
+  if (!detail || detail.tabId !== props.pane.tabId) return
+  stopRefreshFeedbackAfter(250)
 }
 
 function handleMessage(event: MessageEvent) {
@@ -107,10 +156,13 @@ function handleDrop(event: DragEvent) {
 
 onMounted(() => {
   window.addEventListener('message', handleMessage)
+  window.addEventListener('terminal-history-refresh-done', handleHistoryRefreshDone)
 })
 
 onUnmounted(() => {
   window.removeEventListener('message', handleMessage)
+  window.removeEventListener('terminal-history-refresh-done', handleHistoryRefreshDone)
+  clearRefreshFeedbackTimer()
 })
 </script>
 
@@ -143,6 +195,7 @@ onUnmounted(() => {
 .pane-header {
   display: flex;
   align-items: center;
+  gap: 8px;
   max-height: 28px;
   padding: 5px 9px;
   background-color: var(--ch-color-surface);
@@ -153,12 +206,65 @@ onUnmounted(() => {
 }
 
 .pane-tab-name {
+  flex: 1;
+  min-width: 0;
   color: var(--ch-color-text);
   font-size: 12px;
   font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.pane-action-button {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  color: var(--ch-color-text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--ch-radius-sm);
+  cursor: pointer;
+  transition: color var(--ch-motion-fast), background-color var(--ch-motion-fast), border-color var(--ch-motion-fast);
+}
+
+.pane-action-button:hover:not(:disabled) {
+  color: var(--ch-color-text);
+  background-color: var(--ch-color-surface-control-hover);
+  border-color: var(--ch-color-border-muted);
+}
+
+.pane-action-button:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring);
+  outline-offset: 1px;
+}
+
+.pane-action-button:disabled {
+  cursor: default;
+  opacity: 0.8;
+}
+
+.pane-action-icon {
+  display: inline-block;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.pane-action-button.refreshing .pane-action-icon {
+  animation: pane-history-spin 700ms linear infinite;
+}
+
+@keyframes pane-history-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .pane-empty {
