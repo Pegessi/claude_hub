@@ -42,18 +42,21 @@
             Agent Workspace
           </button>
         </div>
-        <button
-          type="button"
-          class="theme-switch"
-          role="switch"
-          :aria-checked="colorScheme === 'light'"
-          :title="colorScheme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'"
-          @click="appStore.toggleColorScheme()"
-        >
-          <span class="theme-switch-label">Dark</span>
-          <span class="theme-switch-label">Light</span>
-          <span class="theme-switch-thumb" />
-        </button>
+        <div class="app-mode-tools">
+          <NetworkAccessMenu />
+          <button
+            type="button"
+            class="theme-switch"
+            role="switch"
+            :aria-checked="colorScheme === 'light'"
+            :title="colorScheme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'"
+            @click="appStore.toggleColorScheme()"
+          >
+            <span class="theme-switch-label">Dark</span>
+            <span class="theme-switch-label">Light</span>
+            <span class="theme-switch-thumb" />
+          </button>
+        </div>
       </div>
       <div
         v-if="error"
@@ -96,6 +99,7 @@ import LayoutSelector from '@/components/LayoutSelector.vue'
 import TerminalGridView from '@/components/TerminalGridView.vue'
 import MobileControls from '@/components/MobileControls.vue'
 import AgentWorkspaceView from '@/components/AgentWorkspaceView.vue'
+import NetworkAccessMenu from '@/components/NetworkAccessMenu.vue'
 import LoginView from '@/views/LoginView.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
@@ -581,6 +585,8 @@ textarea {
 }
 
 .app-mode-bar {
+  position: relative;
+  z-index: 50;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -590,7 +596,7 @@ textarea {
   padding: 8px 12px;
   border-bottom: 1px solid var(--ch-color-border);
   background: var(--ch-color-surface);
-  overflow: hidden;
+  overflow: visible;
   transition: max-height 200ms cubic-bezier(0.2, 0, 0, 1), padding 200ms cubic-bezier(0.2, 0, 0, 1), border-color 200ms cubic-bezier(0.2, 0, 0, 1), opacity 160ms ease, transform 200ms cubic-bezier(0.2, 0, 0, 1);
 }
 
@@ -628,6 +634,13 @@ textarea {
   background: var(--ch-color-surface-selected);
   border-color: var(--ch-color-accent-ring-strong);
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.app-mode-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
 }
 
 .theme-switch {
@@ -747,6 +760,10 @@ textarea {
     min-width: 0;
     padding: 0 8px;
     font-size: 12px;
+  }
+
+  .app-mode-tools {
+    gap: 6px;
   }
 
   .theme-switch {
