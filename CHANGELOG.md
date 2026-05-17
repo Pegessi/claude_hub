@@ -3,6 +3,13 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-05-17
+
+### fix: keep remote Claude launches out of bare shells
+- Fall back to the remote home directory when a remote tab or workspace agent is launched with a cwd that does not exist on the SSH host, then continue starting Claude/Codex instead of dropping straight into a login shell
+- Reset remote tab/agent cwd defaults when switching to a remote target so local macOS paths are not carried into SSH launches
+- **Files**: ttyd_manager.py, test_ttyd_manager.py, TabBar.vue, AgentWorkspaceView.vue
+
 ## 2026-05-16
 
 ### feat: expand mobile terminal space while typing

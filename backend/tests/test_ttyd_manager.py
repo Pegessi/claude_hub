@@ -115,9 +115,45 @@ def test_remote_codex_solo_mode_uses_reconnect_launcher(monkeypatch: MonkeyPatch
     assert "ssh -tt devbox" in launcher
     assert "$HOME/.nvm/versions/node" in launcher
     assert "cd ~/repo" in launcher
+    assert "Remote cwd not found: %s; using home directory" in launcher
+    assert "cd ~ ||" in launcher
     assert "tmux new-session -A -s claude-hub-tab-remo" in launcher
     assert "Remote tmux not found in PATH; starting without remote tmux persistence" in launcher
     assert "codex --ask-for-approval never --sandbox danger-full-access" in launcher
+
+
+def test_remote_launcher_starts_agent_after_missing_cwd_fallback(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        ttyd_manager_module.remote_profile_manager,
+        "get_profile",
+        lambda profile_id: RemoteProfile(
+            id=profile_id,
+            name="DevBox",
+            ssh_host="devbox",
+        ),
+    )
+    process = TTYDProcess(
+        tab_id="tab-remote-claude",
+        port=12356,
+        name="Remote Claude",
+        solo_mode=True,
+        agent_type=AgentType.CLAUDE,
+        target=ExecutionTarget.REMOTE,
+        remote_profile_id="devbox",
+        remote_cwd="/Users/local/project",
+    )
+
+    launcher = process._build_ttyd_command(session_exists=False)[-1]
+
+    assert "cd /Users/local/project ||" in launcher
+    assert "Remote cwd not found: %s; using home directory" in launcher
+    assert "cd ~ ||" in launcher
+    assert launcher.index("cd /Users/local/project ||") < launcher.index(
+        "tmux new-session -A -s claude-hub-tab-remo"
+    )
+    assert "IS_SANDBOX=1 claude --dangerously-skip-permissions" in launcher
 
 
 def test_remote_terminal_can_disable_reconnect(monkeypatch: MonkeyPatch) -> None:

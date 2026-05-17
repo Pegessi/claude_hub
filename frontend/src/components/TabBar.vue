@@ -843,10 +843,9 @@ watch(
   (target) => {
     if (target === 'remote') {
       fetchRemoteProfiles()
-      if (!form.cwd && selectedRemoteProfile.value?.default_cwd) {
-        form.cwd = selectedRemoteProfile.value.default_cwd
-      }
+      form.cwd = selectedRemoteProfile.value?.default_cwd || '~'
     } else {
+      form.cwd = ''
       form.remote_reconnect = true
     }
   }
@@ -855,8 +854,8 @@ watch(
 watch(
   () => form.remote_profile_id,
   () => {
-    if (form.target === 'remote' && !form.cwd && selectedRemoteProfile.value?.default_cwd) {
-      form.cwd = selectedRemoteProfile.value.default_cwd
+    if (form.target === 'remote' && (!form.cwd || form.cwd === '~')) {
+      form.cwd = selectedRemoteProfile.value?.default_cwd || '~'
     }
   }
 )
