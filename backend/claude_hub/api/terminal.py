@@ -306,22 +306,11 @@ async def proxy_terminal_request(
           tryHookTerm();
         }}
 
-        fetch(`/api/terminal/history/${{TAB_ID}}?lines=${{HISTORY_LINES}}`, {{
-          cache: 'no-store',
-          credentials: 'same-origin',
-        }})
-          .then(function(response) {{
-            if (!response.ok) throw new Error('history preload failed: ' + response.status);
-            return response.json();
-          }})
-          .then(function(payload) {{
-            if (payload && typeof payload.history === 'string') {{
-              historyText = payload.history;
-            }}
-            if (payload && Number.isInteger(payload.cursor_x) && Number.isInteger(payload.cursor_y)) {{
-              historyCursorX = payload.cursor_x;
-              historyCursorY = payload.cursor_y;
-            }}
+        fetchHistorySnapshot()
+          .then(function(snapshot) {{
+            historyText = snapshot.history;
+            historyCursorX = snapshot.cursorX;
+            historyCursorY = snapshot.cursorY;
           }})
           .catch(function(error) {{
             console.debug('claude-hub history preload failed', error);
@@ -347,6 +336,73 @@ async def proxy_terminal_request(
         function cursorSeq(cursorX, cursorY) {{
           if (!Number.isInteger(cursorX) || !Number.isInteger(cursorY)) return '';
           return '\\x1b[' + (cursorY + 1) + ';' + (cursorX + 1) + 'H';
+        }}
+
+        function snapshotFromPayload(payload) {{
+          return {{
+            history: payload && typeof payload.history === 'string' ? payload.history : '',
+            cursorX: payload && Number.isInteger(payload.cursor_x) ? payload.cursor_x : null,
+            cursorY: payload && Number.isInteger(payload.cursor_y) ? payload.cursor_y : null,
+          }};
+        }}
+
+        async function fetchHistorySnapshot() {{
+          const response = await fetch(`/api/terminal/history/${{TAB_ID}}?lines=${{HISTORY_LINES}}`, {{
+            cache: 'no-store',
+            credentials: 'same-origin',
+          }});
+          if (!response.ok) throw new Error('history fetch failed: ' + response.status);
+          return snapshotFromPayload(await response.json());
+        }}
+
+        function historyLinesFromText(text) {{
+          const lines = (text || '').replace(/\\r?\\n/g, '\\r\\n').replace(/\\r/g, '').split('\\n');
+          if (lines.length > 0 && lines[lines.length - 1] === '') {{
+            lines.pop();
+          }}
+          return lines;
+        }}
+
+        function fullReplayPayloadForSnapshot(snapshot) {{
+          const safeSnapshot = snapshot || {{}};
+          const lines = historyLinesFromText(safeSnapshot.history);
+          if (lines.length === 0) return '';
+          return '\\x1b[H\\x1b[2J\\x1b[3J' + lines.join('\\r\\n') + cursorSeq(safeSnapshot.cursorX, safeSnapshot.cursorY);
+        }}
+
+        function scrollTerminalToBottom(term) {{
+          if (!term) return;
+          try {{
+            const bufferService = term._core && term._core._bufferService;
+            if (bufferService) {{
+              bufferService.isUserScrolling = false;
+            }}
+            if (typeof term.scrollToBottom === 'function') {{
+              term.scrollToBottom();
+            }}
+            const viewportEl = document.querySelector('.xterm-viewport');
+            if (viewportEl) {{
+              viewportEl.scrollTop = viewportEl.scrollHeight;
+            }}
+            if (typeof term.refresh === 'function') {{
+              term.refresh(0, Math.max(0, (term.rows || 1) - 1));
+            }}
+          }} catch (error) {{
+            console.debug('claude-hub scroll-to-bottom failed', error);
+          }}
+        }}
+
+        function postHistoryRefreshResult(reason, ok, detail) {{
+          try {{
+            const target = window.parent && window.parent !== window ? window.parent : window;
+            target.postMessage({{
+              type: 'terminal-history-refresh-done',
+              tabId: TAB_ID,
+              reason: reason || 'manual',
+              ok: !!ok,
+              error: detail || null,
+            }}, '*');
+          }} catch (error) {{}}
         }}
 
         function replayHistory(term, fullReplay) {{
@@ -653,6 +709,8 @@ async def proxy_terminal_request(
           let resyncing = false;
           let pendingWhenBottom = false;
           const resyncBuffer = [];
+          let forcedRefreshRunning = false;
+          let forcedRefreshPendingOptions = null;
 
           function bufferService() {{
             return term._core && term._core._bufferService;
@@ -676,6 +734,60 @@ async def proxy_terminal_request(
             timer = setTimeout(runResync, RESYNC_IDLE_MS);
           }}
 
+          function flushResyncBuffer() {{
+            while (resyncBuffer.length > 0) {{
+              const item = resyncBuffer.shift();
+              writeThrough(item.data, item.cb);
+            }}
+          }}
+
+          function writeHistorySnapshot(snapshot, options, cb) {{
+            const payload = fullReplayPayloadForSnapshot(snapshot);
+            const shouldScrollToBottom = !options || options.scrollToBottom !== false;
+
+            function done(ok) {{
+              resyncing = false;
+              flushResyncBuffer();
+              if (shouldScrollToBottom) {{
+                scrollTerminalToBottom(term);
+              }}
+              if (cb) cb(ok);
+            }}
+
+            resyncing = true;
+            if (!payload) {{
+              done(true);
+              return;
+            }}
+
+            writeThrough(payload, function() {{
+              done(true);
+            }});
+          }}
+
+          async function refreshHistoryFromTmux(options) {{
+            const opts = options || {{}};
+            if (forcedRefreshRunning) {{
+              forcedRefreshPendingOptions = opts;
+              return false;
+            }}
+
+            forcedRefreshRunning = true;
+            try {{
+              const snapshot = await fetchHistorySnapshot();
+              return await new Promise(function(resolve) {{
+                writeHistorySnapshot(snapshot, opts, resolve);
+              }});
+            }} finally {{
+              forcedRefreshRunning = false;
+              if (forcedRefreshPendingOptions) {{
+                const nextOptions = forcedRefreshPendingOptions;
+                forcedRefreshPendingOptions = null;
+                refreshHistoryFromTmux(nextOptions);
+              }}
+            }}
+          }}
+
           function noteLiveWrite() {{
             writeGeneration++;
             if (isAtBottom()) {{
@@ -696,6 +808,11 @@ async def proxy_terminal_request(
             return result;
           }};
 
+          term.__claudeHubRefreshHistory = refreshHistoryFromTmux;
+          term.__claudeHubScrollToBottom = function() {{
+            scrollTerminalToBottom(term);
+          }};
+
           const viewportEl = document.querySelector('.xterm-viewport');
           if (viewportEl) {{
             viewportEl.addEventListener('scroll', function() {{
@@ -711,17 +828,6 @@ async def proxy_terminal_request(
           // session lazily after ttyd connects; this brings the prompt and
           // cursor back into the same xterm buffer once tmux history exists.
           scheduleResync();
-
-          async function fetchHistorySnapshot() {{
-            const response = await fetch(`/api/terminal/history/${{TAB_ID}}?lines=${{HISTORY_LINES}}`);
-            if (!response.ok) throw new Error('history resync failed: ' + response.status);
-            const payload = await response.json();
-            return {{
-              history: payload && typeof payload.history === 'string' ? payload.history : '',
-              cursorX: payload && Number.isInteger(payload.cursor_x) ? payload.cursor_x : null,
-              cursorY: payload && Number.isInteger(payload.cursor_y) ? payload.cursor_y : null,
-            }};
-          }}
 
           async function runResync() {{
             timer = null;
@@ -745,24 +851,14 @@ async def proxy_terminal_request(
               return;
             }}
 
-            const lines = snapshot.history.replace(/\\r?\\n/g, '\\r\\n').replace(/\\r/g, '').split('\\n');
-            if (lines.length > 0 && lines[lines.length - 1] === '') {{
-              lines.pop();
-            }}
-            if (lines.length === 0) return;
+            const payload = fullReplayPayloadForSnapshot(snapshot);
+            if (!payload) return;
 
             resyncing = true;
-            writeThrough('\\x1b[H\\x1b[2J\\x1b[3J' + lines.join('\\r\\n') + cursorSeq(snapshot.cursorX, snapshot.cursorY), function() {{
+            writeThrough(payload, function() {{
               resyncing = false;
-              while (resyncBuffer.length > 0) {{
-                const item = resyncBuffer.shift();
-                writeThrough(item.data, item.cb);
-              }}
-              try {{
-                if (typeof term.scrollToBottom === 'function') {{
-                  term.scrollToBottom();
-                }}
-              }} catch (error) {{}}
+              flushResyncBuffer();
+              scrollTerminalToBottom(term);
               if (resyncBuffer.length > 0 || generationAtStart !== writeGeneration) {{
                 scheduleResync();
               }}
@@ -785,6 +881,83 @@ async def proxy_terminal_request(
             }}
           }}, 50);
         }}
+
+        function termForHistoryAction() {{
+          return currentTerm || _getTerm();
+        }}
+
+        function refreshHistoryWhenReady(options, attemptsLeft) {{
+          const opts = options || {{}};
+          const reason = opts.reason || 'manual';
+          const term = termForHistoryAction();
+
+          if (term && typeof term.__claudeHubRefreshHistory === 'function') {{
+            Promise.resolve(term.__claudeHubRefreshHistory(opts))
+              .then(function(ok) {{
+                postHistoryRefreshResult(reason, ok !== false, null);
+              }})
+              .catch(function(error) {{
+                console.debug('claude-hub history refresh failed', error);
+                postHistoryRefreshResult(reason, false, error && error.message ? error.message : 'refresh failed');
+              }});
+            return;
+          }}
+
+          if (attemptsLeft > 0) {{
+            setTimeout(function() {{
+              refreshHistoryWhenReady(opts, attemptsLeft - 1);
+            }}, 100);
+            return;
+          }}
+
+          postHistoryRefreshResult(reason, false, 'terminal not ready');
+        }}
+
+        function scrollBottomWhenReady(attemptsLeft) {{
+          const term = termForHistoryAction();
+          if (term) {{
+            if (typeof term.__claudeHubScrollToBottom === 'function') {{
+              term.__claudeHubScrollToBottom();
+            }} else {{
+              scrollTerminalToBottom(term);
+            }}
+            return;
+          }}
+
+          if (attemptsLeft > 0) {{
+            setTimeout(function() {{
+              scrollBottomWhenReady(attemptsLeft - 1);
+            }}, 100);
+          }}
+        }}
+
+        window.addEventListener('message', function(event) {{
+          if (!event.data || (event.data.tabId && event.data.tabId !== TAB_ID)) return;
+
+          if (event.data.type === 'terminal-history-refresh') {{
+            refreshHistoryWhenReady({{
+              reason: event.data.reason || 'manual',
+              scrollToBottom: event.data.scrollToBottom !== false,
+            }}, 80);
+            return;
+          }}
+
+          if (event.data.type === 'terminal-scroll-bottom') {{
+            scrollBottomWhenReady(50);
+            return;
+          }}
+
+          if (event.data.type === 'terminal-activate') {{
+            if (event.data.refreshHistory) {{
+              refreshHistoryWhenReady({{
+                reason: 'activate',
+                scrollToBottom: event.data.scrollToBottom !== false,
+              }}, 80);
+            }} else if (event.data.scrollToBottom) {{
+              scrollBottomWhenReady(50);
+            }}
+          }}
+        }});
 
         // ---- Mobile scrolling: native inertia ----
         // xterm.js registers touchstart/touchmove on the .xterm element (parent).
