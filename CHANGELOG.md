@@ -5,6 +5,11 @@
 
 ## 2026-05-17
 
+### fix: refresh terminal history on demand
+- Add a pane-level history refresh action that forces the embedded terminal to recapture tmux scrollback and rebuild the xterm buffer
+- Refresh and scroll mobile terminals to the latest output when switching back to cached tabs, avoiding stale initial-screen views
+- **Files**: terminal.py, TerminalView.vue, TerminalPane.vue, test_terminal_replay.py
+
 ### fix: mute dark terminal ANSI background colors
 - Replace dark terminal base ANSI colors with lower-saturation values so remote Claude prompts that paint large ANSI background regions do not turn the pane bright green
 - Apply a modest dark-mode xterm minimum contrast ratio to keep colored terminal text readable on muted ANSI backgrounds
