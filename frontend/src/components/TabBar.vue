@@ -111,6 +111,7 @@
             <span>Agent Workspace</span>
             <strong v-if="mode === 'workspace'">Current</strong>
           </button>
+          <NetworkAccessMenu variant="menu" />
           <button
             type="button"
             class="mobile-app-menu-item"
@@ -453,6 +454,7 @@ import { storeToRefs } from 'pinia'
 import AgentStatusFloatingPanel from '@/components/AgentStatusFloatingPanel.vue'
 import LayoutSelector from '@/components/LayoutSelector.vue'
 import LoadingButton from '@/components/LoadingButton.vue'
+import NetworkAccessMenu from '@/components/NetworkAccessMenu.vue'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
