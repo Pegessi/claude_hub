@@ -2021,7 +2021,10 @@ watch(
 watch(
   () => agentOptionsForm.remote_profile_id,
   () => {
-    if (agentOptionsForm.target === 'remote' && !agentOptionsForm.cwd) {
+    if (
+      agentOptionsForm.target === 'remote' &&
+      (!agentOptionsForm.cwd || agentOptionsForm.cwd === '~')
+    ) {
       agentOptionsForm.cwd = selectedAgentRemoteProfile.value?.default_cwd || '~'
     }
   }

@@ -410,7 +410,6 @@ class TTYDProcess:
         remote_session = self.tmux_session
         cwd = self.remote_cwd or self.cwd or "~"
         start_command = self._agent_start_command()
-        quoted_cwd = self._quote_remote_cwd(cwd)
         quoted_session = shlex.quote(remote_session)
         quoted_start = shlex.quote(start_command)
         shell = "${SHELL:-/bin/bash}"
@@ -431,7 +430,7 @@ class TTYDProcess:
             [
                 bootstrap_path,
                 *checks,
-                f"cd {quoted_cwd} || {{ printf 'Remote cwd not found: {cwd}\\n'; exec {shell} -l; }}",
+                self._remote_cwd_command(cwd, shell),
                 "if command -v tmux >/dev/null 2>&1; then "
                 f"exec tmux new-session -A -s {quoted_session} {quoted_start}; "
                 "fi",
@@ -439,6 +438,20 @@ class TTYDProcess:
             ]
         )
         return self._remote_shell_command(script)
+
+    @classmethod
+    def _remote_cwd_command(cls, cwd: str, shell: str) -> str:
+        quoted_cwd = cls._quote_remote_cwd(cwd)
+        cwd_arg = shlex.quote(cwd)
+        return (
+            f"cd {quoted_cwd} || {{ "
+            f"printf 'Remote cwd not found: %s; using home directory.\\n' {cwd_arg}; "
+            "cd ~ || { "
+            "printf 'Remote home directory not available; dropping to shell.\\n'; "
+            f"exec {shell} -l; "
+            "}; "
+            "}"
+        )
 
     @staticmethod
     def _quote_remote_cwd(cwd: str) -> str:
