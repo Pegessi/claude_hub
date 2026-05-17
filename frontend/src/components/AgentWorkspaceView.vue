@@ -109,6 +109,7 @@
             >
               Refresh
             </LoadingButton>
+            <NetworkAccessMenu variant="menu" />
             <button
               type="button"
               class="workspace-mobile-menu-item workspace-mobile-menu-item--theme"
@@ -1212,6 +1213,7 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import LoadingButton from '@/components/LoadingButton.vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
+import NetworkAccessMenu from '@/components/NetworkAccessMenu.vue'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'

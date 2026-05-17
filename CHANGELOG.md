@@ -3,6 +3,14 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-05-18
+
+### feat: show copyable frontend LAN access links
+- Add a top-bar network menu that lists copyable frontend URLs for loopback and discovered local IPv4 addresses
+- Keep mobile top bars compact by placing the same access list inside the existing terminal and workspace overflow menus
+- Discover interface IPv4 addresses from the backend and allow Vite review sessions to route the system endpoint to a branch backend
+- **Files**: system.py, test_system.py, NetworkAccessMenu.vue, App.vue, TabBar.vue, AgentWorkspaceView.vue, vite.config.ts
+
 ## 2026-05-17
 
 ### fix: refresh terminal history on demand

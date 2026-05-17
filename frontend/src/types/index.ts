@@ -73,6 +73,16 @@ export interface RemoteProfile {
   default_cwd?: string | null
 }
 
+export interface NetworkAddress {
+  address: string
+  label: string
+}
+
+export interface NetworkAccessInfo {
+  hostname: string
+  addresses: NetworkAddress[]
+}
+
 export interface TerminalAgentStatus {
   tab_id: string
   tab_name: string
