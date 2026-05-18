@@ -328,6 +328,11 @@ async def proxy_terminal_request(
 
         let currentTerm = undefined;
         let replayed = false;
+        let userScrollGeneration = 0;
+
+        function noteUserScrollIntent() {{
+          userScrollGeneration++;
+        }}
 
         function normalizedHistoryText() {{
           return historyText.replace(/\\r?\\n/g, '\\r\\n');
@@ -708,6 +713,8 @@ async def proxy_terminal_request(
           let timer = null;
           let resyncing = false;
           let pendingWhenBottom = false;
+          let bottomFollowQueued = false;
+          let bottomFollowGeneration = 0;
           const resyncBuffer = [];
           let forcedRefreshRunning = false;
           let forcedRefreshPendingOptions = null;
@@ -732,6 +739,24 @@ async def proxy_terminal_request(
             if (resyncing) return;
             if (timer) clearTimeout(timer);
             timer = setTimeout(runResync, RESYNC_IDLE_MS);
+          }}
+
+          function scheduleBottomFollow(generationAtWrite) {{
+            bottomFollowGeneration = generationAtWrite;
+            if (bottomFollowQueued) return;
+            bottomFollowQueued = true;
+
+            function run() {{
+              bottomFollowQueued = false;
+              if (userScrollGeneration !== bottomFollowGeneration) return;
+              scrollTerminalToBottom(term);
+            }}
+
+            if (typeof requestAnimationFrame === 'function') {{
+              requestAnimationFrame(run);
+            }} else {{
+              setTimeout(run, 0);
+            }}
           }}
 
           function flushResyncBuffer() {{
@@ -788,9 +813,9 @@ async def proxy_terminal_request(
             }}
           }}
 
-          function noteLiveWrite() {{
+          function noteLiveWrite(wasAtBottom) {{
             writeGeneration++;
-            if (isAtBottom()) {{
+            if (wasAtBottom || isAtBottom()) {{
               pendingWhenBottom = false;
               scheduleResync();
             }} else {{
@@ -803,8 +828,19 @@ async def proxy_terminal_request(
               resyncBuffer.push({{ data, cb }});
               return undefined;
             }}
-            const result = writeThrough(data, cb);
-            noteLiveWrite();
+            const wasAtBottom = isAtBottom();
+            const generationAtWrite = userScrollGeneration;
+            const wrappedCb = typeof cb === 'function' ? function() {{
+              if (wasAtBottom) {{
+                scheduleBottomFollow(generationAtWrite);
+              }}
+              cb();
+            }} : undefined;
+            const result = writeThrough(data, wrappedCb);
+            if (wasAtBottom) {{
+              scheduleBottomFollow(generationAtWrite);
+            }}
+            noteLiveWrite(wasAtBottom);
             return result;
           }};
 
@@ -816,6 +852,9 @@ async def proxy_terminal_request(
           const viewportEl = document.querySelector('.xterm-viewport');
           if (viewportEl) {{
             viewportEl.addEventListener('scroll', function() {{
+              if (!isAtBottom()) {{
+                noteUserScrollIntent();
+              }}
               if (pendingWhenBottom && isAtBottom()) {{
                 pendingWhenBottom = false;
                 scheduleResync();
@@ -1035,6 +1074,7 @@ async def proxy_terminal_request(
             const insideTerminal = !target || target === window || target === document ||
               (target.closest && target.closest('.xterm'));
             if (insideTerminal && event.deltaY < 0) {{
+              noteUserScrollIntent();
               _markUserScrolling();
               _scrollAwayFromBottom(event.deltaY);
             }}
@@ -1062,6 +1102,7 @@ async def proxy_terminal_request(
           viewportEl.addEventListener('touchmove', function(event) {{
             if (touchStartY !== null && event.touches && event.touches.length > 0) {{
               if (event.touches[0].clientY - touchStartY > 8) {{
+                noteUserScrollIntent();
                 _markUserScrolling();
               }}
             }}
