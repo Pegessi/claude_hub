@@ -9,14 +9,20 @@
 - Stop dropping ttyd ws frames in the Phase B full-replay hold; flush buffered frames and reconcile with a fresh tmux snapshot so sparse-update TUIs (Claude) keep showing the latest output instead of a stale screen
 - Rework `runResync` to set the resyncing flag before the async fetch so concurrent live writes buffer instead of forcing abort + retry under hot write streams
 - Replace `startPostReplayWatch`'s stale `replayPayload` rewrite with a fresh tmux refetch so the recovery path no longer rolls back several seconds of real ws data
-- Trigger a history refresh on desktop tab switches (mobile already had this via `terminal-activate`) so switching back to a tab repaints the latest content immediately
+- Trigger a history refresh on cursor/plain desktop tab switches (mobile already had this via `terminal-activate`) so switching back to a plain terminal repaints the latest content immediately
 - **Files**: terminal.py, TerminalView.vue
 
 ### fix: keep live terminal output pinned to latest
 - Preserve bottom-follow behavior during active terminal output by scrolling after xterm renders when the viewport was already at the latest line
-- Treat wheel, touch, and viewport scroll-away events as user intent so live following does not override manual history inspection
-- Add terminal replay coverage for live-output bottom pinning and DOM bottom-gap drift
-- **Files**: terminal.py, test_terminal_replay.py
+- Treat wheel and touch scroll-away events as user intent so live following does not override manual history inspection
+- Ignore xterm-internal scroll events and keep bottom-follow active briefly after live writes so dynamic Claude/Codex status UIs do not leave the viewport stuck mid-buffer
+- Disable automatic idle history replay for Claude/Codex TUI tabs, preventing tmux snapshot replays from corrupting relative cursor redraws while agents are working
+- Limit automatic tab-activation history refreshes to plain cursor terminals; Claude/Codex tabs now scroll to bottom without replaying tmux snapshots unless the user requests a manual refresh
+- Avoid refresh-heavy bottom-follow loops during live input echo so Claude prompt typing stays responsive
+- Preserve Claude/Codex scrollback continuity by filtering held duplicate ttyd initial-screen frames while keeping real live output produced during Phase B history reconstruction
+- Freeze Claude/Codex live redraws while the user is browsing history, then restore from tmux when returning to the bottom so the visible historical viewport is not overwritten by the fixed input/status area
+- Add terminal replay coverage for live-output bottom pinning, dynamic internal scroll events, DOM bottom-gap drift, and agent history viewport stability
+- **Files**: terminal.py, TerminalView.vue, test_terminal_replay.py
 
 ### feat: show copyable frontend LAN access links
 - Add a top-bar network menu that lists copyable frontend URLs for loopback and discovered local IPv4 addresses

@@ -108,13 +108,17 @@ watch(
     requestAnimationFrame(() => {
       scheduleTerminalResize(newTabId)
       scheduleMobileTerminalActivation(newTabId)
-      // Desktop reactivation: mobile already gets terminal-activate with
-      // refreshHistory above. Without this, switching back to a tab with
-      // a sparse-update TUI (Claude) can show a stale screen until ttyd
-      // pushes its next frame. Skip on the first activation since the
-      // initial replay already loaded history.
+      // Desktop reactivation: plain terminals can refresh scrollback when
+      // switched back in. Agent TUIs keep their cursor-driven live screen and
+      // only scroll to bottom; tmux text snapshots can corrupt their redraws.
       if (oldTabId && oldTabId !== newTabId && !isMobileTerminalViewport()) {
-        refreshTerminalHistory(newTabId)
+        if (shouldAutoRefreshHistory()) {
+          refreshTerminalHistory(newTabId)
+        } else {
+          postTerminalScrollBottom(newTabId)
+          window.setTimeout(() => postTerminalScrollBottom(newTabId), 120)
+          window.setTimeout(() => postTerminalScrollBottom(newTabId), 360)
+        }
       }
     })
   },
@@ -284,12 +288,17 @@ function isMobileTerminalViewport() {
   )
 }
 
+function shouldAutoRefreshHistory() {
+  return props.agentType === 'cursor'
+}
+
 function scheduleMobileTerminalActivation(tabId?: string) {
   if (!tabId || !isMobileTerminalViewport()) return
 
+  const refreshHistory = shouldAutoRefreshHistory()
   postTerminalMessage(tabId, {
     type: 'terminal-activate',
-    refreshHistory: true,
+    refreshHistory,
     scrollToBottom: true,
   })
   window.setTimeout(() => postTerminalScrollBottom(tabId), 120)
