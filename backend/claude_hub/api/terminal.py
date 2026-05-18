@@ -295,6 +295,7 @@ async def proxy_terminal_request(
     <script>
       (function () {{
         const TAB_ID = {json.dumps(tab_id)};
+        const AGENT_TYPE = {json.dumps(tab.agent_type.value)};
         const HISTORY_LINES = 100000;
         let historyText = '';
         let historyCursorX = null;
@@ -375,8 +376,9 @@ async def proxy_terminal_request(
           return '\\x1b[H\\x1b[2J\\x1b[3J' + lines.join('\\r\\n') + cursorSeq(safeSnapshot.cursorX, safeSnapshot.cursorY);
         }}
 
-        function scrollTerminalToBottom(term) {{
+        function scrollTerminalToBottom(term, options) {{
           if (!term) return;
+          const shouldRefresh = options && options.refresh === true;
           try {{
             const bufferService = term._core && term._core._bufferService;
             if (bufferService) {{
@@ -389,7 +391,7 @@ async def proxy_terminal_request(
             if (viewportEl) {{
               viewportEl.scrollTop = viewportEl.scrollHeight;
             }}
-            if (typeof term.refresh === 'function') {{
+            if (shouldRefresh && typeof term.refresh === 'function') {{
               term.refresh(0, Math.max(0, (term.rows || 1) - 1));
             }}
           }} catch (error) {{
@@ -444,6 +446,36 @@ async def proxy_terminal_request(
           let fullReplayFinalizing = false;
           let fullReplayVerifyAttempts = 0;
           const replayPayload = '\\x1b[H\\x1b[2J\\x1b[3J' + lines.join('\\r\\n') + cursorSeq(historyCursorX, historyCursorY);
+          const replayPlainText = lines.join('\\n');
+
+          function printableTextFromTerminalData(data) {{
+            return String(data || '')
+              .replace(/\\x1b\\][^\\x07]*(?:\\x07|\\x1b\\\\)/g, '')
+              .replace(/\\x1b\\[[0-?]*[ -/]*[@-~]/g, '')
+              .replace(/\\x1b[()][A-Za-z0-9]/g, '')
+              .replace(/[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f]/g, '')
+              .replace(/\\r/g, '\\n')
+              .split('\\n')
+              .map(function(line) {{ return line.trim(); }})
+              .filter(Boolean)
+              .join('\\n');
+          }}
+
+          function isDuplicateInitialFrame(data) {{
+            const printable = printableTextFromTerminalData(data);
+            const compact = printable.replace(/\\s+/g, ' ').trim();
+            if (!compact) return true;
+            if (compact.length < 12) return false;
+            if (replayPlainText.indexOf(printable) >= 0 || replayPlainText.indexOf(compact) >= 0) {{
+              return true;
+            }}
+            const fragments = printable.split('\\n').map(function(line) {{
+              return line.trim();
+            }}).filter(Boolean);
+            return fragments.length > 0 && fragments.every(function(fragment) {{
+              return fragment.length < 12 || replayPlainText.indexOf(fragment) >= 0;
+            }});
+          }}
 
           term.write = function(data, cb) {{
             if (historyDone) {{
@@ -466,19 +498,25 @@ async def proxy_terminal_request(
             historyDone = true;
             term.__claudeHubReplayDone = true;
             term.write = originalWrite;
-            // Always flush buffered ws frames. Phase B (fullReplay) used to
-            // drop them outright because ttyd's first frame duplicates the
-            // visible screen and clobbers replayed scrollback. But anything
-            // ttyd delivers AFTER that initial frame is real new output —
-            // dropping it makes sparse-update TUIs (Claude) appear frozen
-            // until the next write. Apply the buffer; any clobbered
+            // Flush buffered ws frames for plain terminals; any clobbered
             // scrollback is corrected by the post-flush tmux refresh below.
+            // Agent TUIs cannot safely take that corrective snapshot replay, so
+            // keep the final replayed tmux history intact and drop the held
+            // ttyd initial-screen frames that would otherwise create duplicate
+            // or discontinuous scrollback while the user scrolls history. Keep
+            // frames that contain text not present in the replay snapshot; those
+            // are real Claude/Codex updates produced during the hold.
+            const filterDuplicateFrames = fullReplay && !AUTO_HISTORY_REPLAY_ENABLED;
             for (const item of buffer) {{
+              if (filterDuplicateFrames && isDuplicateInitialFrame(item.data)) {{
+                if (typeof item.cb === 'function') item.cb();
+                continue;
+              }}
               originalWrite(item.data, item.cb);
             }}
             buffer.length = 0;
             startPostReplayWatch();
-            if (fullReplay) {{
+            if (fullReplay && AUTO_HISTORY_REPLAY_ENABLED) {{
               // Reconcile xterm with current tmux state once the resync
               // hooks attach. Repairs any scrollback clobbered by the
               // ttyd initial-screen frame we just flushed.
@@ -502,7 +540,7 @@ async def proxy_terminal_request(
             const watchUntil = Date.now() + FULL_REPLAY_WATCH_MS;
             function watch() {{
               if (!historyDone) return;
-              if (!hasExpectedReplayBuffer()) {{
+              if (!hasExpectedReplayBuffer() && AUTO_HISTORY_REPLAY_ENABLED) {{
                 // Rewriting the snapshot we captured at replay time would
                 // roll back any live ws data that arrived during the hold.
                 // Refetch tmux for the current state instead.
@@ -712,6 +750,12 @@ async def proxy_terminal_request(
         // skip scrollback that is still present in tmux history. After live
         // output goes idle and the user is at the bottom, reconcile xterm
         // with tmux history so newly produced long/wrapped output is complete.
+        // Agent TUIs such as Claude/Codex redraw status panes with relative
+        // cursor operations; replaying a plain tmux snapshot mid-redraw breaks
+        // that cursor state and leaves stale/status fragments on screen.
+        const AUTO_HISTORY_REPLAY_ENABLED = AGENT_TYPE === 'cursor';
+        const AUTO_HISTORY_RESYNC_ENABLED = AUTO_HISTORY_REPLAY_ENABLED;
+        const PROTECT_AGENT_HISTORY_VIEW = AGENT_TYPE === 'claude' || AGENT_TYPE === 'codex';
         const RESYNC_IDLE_MS = 700;
 
         function setupHistoryResync(term) {{
@@ -725,9 +769,11 @@ async def proxy_terminal_request(
           let pendingWhenBottom = false;
           let bottomFollowQueued = false;
           let bottomFollowGeneration = 0;
+          let bottomFollowUntil = 0;
           const resyncBuffer = [];
           let forcedRefreshRunning = false;
           let forcedRefreshPendingOptions = null;
+          let agentHistoryViewNeedsSnapshot = false;
 
           function bufferService() {{
             return term._core && term._core._bufferService;
@@ -737,29 +783,51 @@ async def proxy_terminal_request(
             const buffer = term.buffer && term.buffer.active;
             const service = bufferService();
             if (!buffer) return true;
+            return !(service && service.isUserScrolling) && viewportIsAtBottom();
+          }}
+
+          function viewportIsAtBottom() {{
+            const buffer = term.buffer && term.buffer.active;
+            if (!buffer) return true;
             const viewportEl = document.querySelector('.xterm-viewport');
             const domAtBottom = !viewportEl ||
               viewportEl.scrollTop >= viewportEl.scrollHeight - viewportEl.clientHeight - 1;
-            return !(service && service.isUserScrolling) &&
-              buffer.viewportY === buffer.baseY &&
-              domAtBottom;
+            return buffer.viewportY === buffer.baseY && domAtBottom;
           }}
 
           function scheduleResync() {{
+            if (!AUTO_HISTORY_RESYNC_ENABLED) return;
             if (resyncing) return;
             if (timer) clearTimeout(timer);
             timer = setTimeout(runResync, RESYNC_IDLE_MS);
           }}
 
-          function scheduleBottomFollow(generationAtWrite) {{
+          function scheduleBottomFollow(generationAtWrite, extendWindow) {{
             bottomFollowGeneration = generationAtWrite;
+            if (extendWindow !== false) {{
+              bottomFollowUntil = Math.max(bottomFollowUntil, Date.now() + 120);
+            }}
             if (bottomFollowQueued) return;
             bottomFollowQueued = true;
+
+            function needsBottomScroll() {{
+              const buffer = term.buffer && term.buffer.active;
+              if (!buffer) return false;
+              const viewportEl = document.querySelector('.xterm-viewport');
+              const domAtBottom = !viewportEl ||
+                viewportEl.scrollTop >= viewportEl.scrollHeight - viewportEl.clientHeight - 1;
+              return buffer.viewportY !== buffer.baseY || !domAtBottom;
+            }}
 
             function run() {{
               bottomFollowQueued = false;
               if (userScrollGeneration !== bottomFollowGeneration) return;
-              scrollTerminalToBottom(term);
+              if (needsBottomScroll()) {{
+                scrollTerminalToBottom(term, {{ refresh: false }});
+              }}
+              if (Date.now() < bottomFollowUntil) {{
+                scheduleBottomFollow(generationAtWrite, false);
+              }}
             }}
 
             if (typeof requestAnimationFrame === 'function') {{
@@ -784,7 +852,7 @@ async def proxy_terminal_request(
               resyncing = false;
               flushResyncBuffer();
               if (shouldScrollToBottom) {{
-                scrollTerminalToBottom(term);
+                scrollTerminalToBottom(term, {{ refresh: true }});
               }}
               if (cb) cb(ok);
             }}
@@ -823,6 +891,17 @@ async def proxy_terminal_request(
             }}
           }}
 
+          function refreshAgentHistoryViewWhenBottom() {{
+            if (!PROTECT_AGENT_HISTORY_VIEW || !agentHistoryViewNeedsSnapshot || !viewportIsAtBottom()) return;
+            const service = bufferService();
+            if (service) {{
+              service.isUserScrolling = false;
+            }}
+            agentHistoryViewNeedsSnapshot = false;
+            pendingWhenBottom = false;
+            refreshHistoryFromTmux({{ reason: 'agent-return-bottom', scrollToBottom: true }});
+          }}
+
           function noteLiveWrite(wasAtBottom) {{
             writeGeneration++;
             if (wasAtBottom || isAtBottom()) {{
@@ -839,6 +918,15 @@ async def proxy_terminal_request(
               return undefined;
             }}
             const wasAtBottom = isAtBottom();
+            if (PROTECT_AGENT_HISTORY_VIEW && !wasAtBottom) {{
+              agentHistoryViewNeedsSnapshot = true;
+              pendingWhenBottom = true;
+              writeGeneration++;
+              if (typeof cb === 'function') {{
+                setTimeout(cb, 0);
+              }}
+              return undefined;
+            }}
             const generationAtWrite = userScrollGeneration;
             const wrappedCb = typeof cb === 'function' ? function() {{
               if (wasAtBottom) {{
@@ -857,17 +945,19 @@ async def proxy_terminal_request(
           term.__claudeHubRefreshHistory = refreshHistoryFromTmux;
           term.__claudeHubScrollToBottom = function() {{
             scrollTerminalToBottom(term);
+            refreshAgentHistoryViewWhenBottom();
           }};
 
           const viewportEl = document.querySelector('.xterm-viewport');
           if (viewportEl) {{
             viewportEl.addEventListener('scroll', function() {{
-              if (!isAtBottom()) {{
-                noteUserScrollIntent();
-              }}
-              if (pendingWhenBottom && isAtBottom()) {{
-                pendingWhenBottom = false;
-                scheduleResync();
+              if (pendingWhenBottom && (agentHistoryViewNeedsSnapshot ? viewportIsAtBottom() : isAtBottom())) {{
+                if (agentHistoryViewNeedsSnapshot) {{
+                  refreshAgentHistoryViewWhenBottom();
+                }} else {{
+                  pendingWhenBottom = false;
+                  scheduleResync();
+                }}
               }}
             }}, {{ passive: true }});
           }}
@@ -920,7 +1010,7 @@ async def proxy_terminal_request(
             writeThrough(payload, function() {{
               resyncing = false;
               flushResyncBuffer();
-              scrollTerminalToBottom(term);
+              scrollTerminalToBottom(term, {{ refresh: true }});
               // If new live writes arrived after the snapshot was taken,
               // schedule another reconciliation so they're picked up.
               if (resyncBuffer.length > 0) {{

@@ -21,6 +21,7 @@ from .conftest import (
     BACKEND_URL,
     capture_pane_sync,
     diff_summary,
+    local_requests_session,
     normalize_terminal_output,
     send_keys_sync,
     tmux_session_exists,
@@ -223,6 +224,23 @@ def read_xterm_text(page: Page) -> str:
             const buffer = window.term.buffer.active;
             const lines = [];
             for (let i = 0; i < buffer.length; i++) {
+                const line = buffer.getLine(i);
+                if (line) lines.push(line.translateToString(true));
+            }
+            return lines;
+        }""")
+    return "\n".join(lines)
+
+
+def read_visible_xterm_text(page: Page) -> str:
+    """Read only the currently visible xterm viewport."""
+    lines: list[str] = page.evaluate("""() => {
+            const term = window.term;
+            if (!term) return [];
+            const buffer = term.buffer.active;
+            const rows = term.rows || 24;
+            const lines = [];
+            for (let i = buffer.viewportY; i < Math.min(buffer.length, buffer.viewportY + rows); i++) {
                 const line = buffer.getLine(i);
                 if (line) lines.push(line.translateToString(true));
             }
@@ -614,6 +632,367 @@ def test_live_output_keeps_viewport_pinned_to_latest(terminal_tab: dict, page: P
     ), f"terminal DOM viewport ended away from bottom: {final}"
 
 
+def test_internal_scroll_event_does_not_cancel_live_bottom_follow(
+    terminal_tab: dict, page: Page
+) -> None:
+    """xterm's own scroll events should not look like user history scrolling.
+
+    Dynamic terminal UIs can update the viewport while live data is still
+    rendering. A plain scroll event from that path must not cancel the
+    bottom-follow scheduled for an already-bottom viewport.
+    """
+    tab = terminal_tab
+    session_name = f"claude-hub-{tab['id'][:8]}"
+    line_count = 220
+
+    ensure_tmux_session(page, tab["id"], session_name)
+    produce_scrollback(session_name, count=260)
+    load_terminal_page(page, tab["id"], min_buffer_lines=260)
+
+    page.evaluate("""() => {
+            const term = window.term;
+            const originalWrite = term.write.bind(term);
+            let injected = false;
+            term.write = function(data, cb) {
+                return originalWrite(data, function() {
+                    if (!injected && String(data).includes('DYNAMIC_')) {
+                        injected = true;
+                        const viewportEl = document.querySelector('.xterm-viewport');
+                        const vpObj = term._core && term._core.viewport;
+                        const rowHeight = (vpObj && vpObj._currentRowHeight) || 15;
+                        if (viewportEl) {
+                            viewportEl.scrollTop = Math.max(0, viewportEl.scrollTop - rowHeight * 8);
+                            viewportEl.dispatchEvent(new Event('scroll'));
+                        }
+                    }
+                    if (cb) cb();
+                });
+            };
+        }""")
+
+    send_keys_sync(
+        session_name,
+        (
+            f"for i in $(seq 0 {line_count - 1}); do "
+            "printf '\\rDYNAMIC_%04d' $i; "
+            "echo DYNAMIC_$(printf '%04d' $i); "
+            "sleep 0.004; "
+            "done"
+        ),
+        "Enter",
+    )
+
+    for _ in range(120):
+        if f"DYNAMIC_{line_count - 1:04d}" in capture_pane_sync(session_name):
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("dynamic live output did not finish in tmux")
+
+    page.wait_for_function(
+        f"""() => {{
+            const buffer = window.term.buffer.active;
+            const rows = window.term.rows || 24;
+            if (buffer.viewportY !== buffer.baseY) return false;
+            const visible = [];
+            for (let i = buffer.viewportY; i < buffer.viewportY + rows; i++) {{
+                const line = buffer.getLine(i);
+                if (line) visible.push(line.translateToString(true));
+            }}
+            return visible.join('\\n').includes('DYNAMIC_{line_count - 1:04d}');
+        }}""",
+        timeout=10000,
+    )
+
+    final = read_scroll_alignment(page)
+    assert final is not None
+    assert final["viewportY"] == final["baseY"], f"internal scroll event cancelled follow: {final}"
+    assert (
+        final["bottomGap"] <= final["rowHeight"] * 2
+    ), f"internal scroll event left DOM viewport away from bottom: {final}"
+
+
+def test_agent_tui_tab_does_not_auto_resync_after_live_writes_or_activation(
+    backend_server: None, page: Page
+) -> None:
+    """Claude/Codex-style TUI tabs must not auto-replay tmux implicitly.
+
+    Agent TUIs use relative cursor operations to update status blocks. Replaying
+    a plain tmux snapshot while those updates are still active corrupts xterm's
+    screen state, so automatic idle history resync and scroll-only activation
+    paths must avoid fetching history for agent tabs. The tab runs zsh for
+    determinism but is tagged as a Claude tab, which exercises the injected
+    agent-type gate without depending on a real Claude login in CI.
+    """
+    session = local_requests_session()
+    resp = session.post(
+        f"{BACKEND_URL}/api/tabs",
+        json={
+            "name": "test-agent-tui-no-auto-resync",
+            "agent_type": "claude",
+            "shell": "/bin/zsh",
+        },
+    )
+    assert resp.status_code == 201, f"Failed to create tab: {resp.text}"
+    tab = resp.json()
+    session_name = f"claude-hub-{tab['id'][:8]}"
+
+    try:
+        ensure_tmux_session(page, tab["id"], session_name)
+        produce_scrollback(session_name, count=160)
+        initial_history_fetches: list[str] = []
+        page.on(
+            "request",
+            lambda request: (
+                initial_history_fetches.append(request.url)
+                if f"/api/terminal/history/{tab['id']}" in request.url
+                else None
+            ),
+        )
+        load_terminal_page(page, tab["id"], min_buffer_lines=160)
+        page.wait_for_timeout(1200)
+        assert len(initial_history_fetches) == 1, (
+            "agent-tagged terminal performed implicit post-replay history refreshes: "
+            f"{initial_history_fetches}"
+        )
+        agent_text = read_xterm_text(page)
+        agent_history_numbers = {
+            int(match.group(1)) for match in re.finditer(r"LINE_(\d{4})", agent_text)
+        }
+        assert agent_history_numbers == set(range(160)), (
+            "agent-tagged terminal lost or duplicated replayed scrollback "
+            f"without a corrective history refresh: {sorted(agent_history_numbers)}"
+        )
+
+        page.evaluate("""() => {
+                window.__claudeHubHistoryFetches = [];
+                const originalFetch = window.fetch.bind(window);
+                window.fetch = function(input, init) {
+                    const url = typeof input === 'string' ? input : (input && input.url) || '';
+                    if (url.indexOf('/api/terminal/history/') >= 0) {
+                        window.__claudeHubHistoryFetches.push(url);
+                    }
+                    return originalFetch(input, init);
+                };
+            }""")
+
+        send_keys_sync(
+            session_name,
+            (
+                "for i in $(seq 0 5); do "
+                "echo AGENT_TUI_NO_RESYNC_$(printf '%04d' $i); "
+                "sleep 1; "
+                "done"
+            ),
+            "Enter",
+        )
+
+        for _ in range(40):
+            if "AGENT_TUI_NO_RESYNC_0005" in capture_pane_sync(session_name):
+                break
+            time.sleep(0.2)
+        else:
+            pytest.fail("agent-tagged shell output did not finish in tmux")
+
+        page.wait_for_timeout(1500)
+        history_fetches = page.evaluate("() => window.__claudeHubHistoryFetches || []")
+        assert history_fetches == [], (
+            "agent-tagged terminal performed automatic history resync during live output: "
+            f"{history_fetches}"
+        )
+
+        page.evaluate(
+            """(tabId) => {
+                window.postMessage({
+                    type: 'terminal-activate',
+                    tabId,
+                    refreshHistory: false,
+                    scrollToBottom: true
+                }, '*');
+            }""",
+            arg=tab["id"],
+        )
+        page.wait_for_timeout(600)
+        history_fetches = page.evaluate("() => window.__claudeHubHistoryFetches || []")
+        assert history_fetches == [], (
+            "scroll-only activation fetched history for an agent-tagged terminal: "
+            f"{history_fetches}"
+        )
+    finally:
+        try:
+            session.delete(f"{BACKEND_URL}/api/tabs/{tab['id']}", timeout=5)
+        except Exception:
+            pass
+
+
+def test_agent_tui_initial_replay_keeps_live_frames(backend_server: None, page: Page) -> None:
+    """Agent replay filters duplicate initial frames without swallowing new output."""
+    session = local_requests_session()
+    resp = session.post(
+        f"{BACKEND_URL}/api/tabs",
+        json={
+            "name": "test-agent-tui-live-frames",
+            "agent_type": "claude",
+            "shell": "/bin/zsh",
+        },
+    )
+    assert resp.status_code == 201, f"Failed to create tab: {resp.text}"
+    tab = resp.json()
+    session_name = f"claude-hub-{tab['id'][:8]}"
+
+    try:
+        ensure_tmux_session(page, tab["id"], session_name)
+        produce_scrollback(session_name, count=120)
+        send_keys_sync(
+            session_name,
+            (
+                "for i in $(seq 0 29); do "
+                "echo AGENT_HELD_FRAME_$(printf '%04d' $i); "
+                "sleep 0.08; "
+                "done"
+            ),
+            "Enter",
+        )
+
+        history_fetches: list[str] = []
+        page.on(
+            "request",
+            lambda request: (
+                history_fetches.append(request.url)
+                if f"/api/terminal/history/{tab['id']}" in request.url
+                else None
+            ),
+        )
+        page.goto(f"{BACKEND_URL}/api/terminal/proxy/{tab['id']}/")
+        page.wait_for_selector(".xterm", timeout=15000)
+        wait_for_replay_done(page, timeout=30)
+
+        for _ in range(50):
+            if "AGENT_HELD_FRAME_0029" in capture_pane_sync(session_name):
+                break
+            time.sleep(0.2)
+        else:
+            pytest.fail("agent held-frame output did not finish in tmux")
+
+        page.wait_for_function(
+            """() => {
+                const term = window.term;
+                if (!term) return false;
+                const buffer = term.buffer.active;
+                const lines = [];
+                for (let i = 0; i < buffer.length; i++) {
+                    const line = buffer.getLine(i);
+                    if (line) lines.push(line.translateToString(true));
+                }
+                const text = lines.join('\\n');
+                return text.includes('AGENT_HELD_FRAME_0000') &&
+                    text.includes('AGENT_HELD_FRAME_0029');
+            }""",
+            timeout=10000,
+        )
+        assert len(history_fetches) == 1, (
+            "agent initial replay needed implicit history refresh to recover live frames: "
+            f"{history_fetches}"
+        )
+    finally:
+        try:
+            session.delete(f"{BACKEND_URL}/api/tabs/{tab['id']}", timeout=5)
+        except Exception:
+            pass
+
+
+def test_agent_tui_history_view_is_stable_during_live_redraws(
+    backend_server: None, page: Page
+) -> None:
+    """Claude/Codex live redraws must not overwrite a user-selected history viewport."""
+    session = local_requests_session()
+    resp = session.post(
+        f"{BACKEND_URL}/api/tabs",
+        json={
+            "name": "test-agent-tui-history-view-freeze",
+            "agent_type": "claude",
+            "shell": "/bin/zsh",
+        },
+    )
+    assert resp.status_code == 201, f"Failed to create tab: {resp.text}"
+    tab = resp.json()
+    session_name = f"claude-hub-{tab['id'][:8]}"
+    line_count = 40
+
+    try:
+        ensure_tmux_session(page, tab["id"], session_name)
+        produce_scrollback(session_name, count=260)
+        load_terminal_page(page, tab["id"], min_buffer_lines=260)
+
+        page.evaluate("""() => {
+                const term = window.term;
+                const buffer = term.buffer.active;
+                const rows = term.rows || 24;
+                const target = Math.max(0, buffer.baseY - Math.max(4, Math.floor(rows / 2)));
+                term.scrollToLine(target);
+            }""")
+        page.wait_for_function(
+            """() => {
+                const term = window.term;
+                if (!term) return false;
+                const buffer = term.buffer.active;
+                return buffer.viewportY < buffer.baseY;
+            }""",
+            timeout=5000,
+        )
+        before = read_visible_xterm_text(page)
+        assert "AGENT_HISTORY_VIEW_LIVE_" not in before
+
+        send_keys_sync(
+            session_name,
+            (
+                f"for i in $(seq 0 {line_count - 1}); do "
+                "printf '\\rAGENT_HISTORY_VIEW_LIVE_%04d' $i; "
+                "echo AGENT_HISTORY_VIEW_LIVE_$(printf '%04d' $i); "
+                "sleep 0.03; "
+                "done"
+            ),
+            "Enter",
+        )
+
+        for _ in range(80):
+            if f"AGENT_HISTORY_VIEW_LIVE_{line_count - 1:04d}" in capture_pane_sync(session_name):
+                break
+            time.sleep(0.2)
+        else:
+            pytest.fail("agent live redraw output did not finish in tmux")
+
+        page.wait_for_timeout(500)
+        while_scrolled = read_visible_xterm_text(page)
+        assert while_scrolled == before, (
+            "agent live redraws changed the visible history viewport while the user "
+            "was scrolled away from the bottom"
+        )
+        assert "AGENT_HISTORY_VIEW_LIVE_" not in while_scrolled
+
+        page.evaluate("() => window.term.scrollToBottom()")
+        page.wait_for_function(
+            f"""() => {{
+                const term = window.term;
+                if (!term) return false;
+                const buffer = term.buffer.active;
+                const text = [];
+                for (let i = 0; i < buffer.length; i++) {{
+                    const line = buffer.getLine(i);
+                    if (line) text.push(line.translateToString(true));
+                }}
+                return text.join('\\n').includes('AGENT_HISTORY_VIEW_LIVE_{line_count - 1:04d}') &&
+                    buffer.viewportY === buffer.baseY;
+            }}""",
+            timeout=10000,
+        )
+    finally:
+        try:
+            session.delete(f"{BACKEND_URL}/api/tabs/{tab['id']}", timeout=5)
+        except Exception:
+            pass
+
+
 def test_manual_history_refresh_message_scrolls_to_latest(terminal_tab: dict, page: Page) -> None:
     """Manual history refresh replays tmux history and returns to the latest output."""
     tab = terminal_tab
@@ -777,12 +1156,19 @@ def test_history_resync_does_not_replace_near_bottom_view(terminal_tab: dict, pa
     else:
         pytest.fail("wrapped live output did not finish in tmux")
 
-    page.evaluate("""() => {
-            const vp = document.querySelector('.xterm-viewport');
-            vp.scrollTop = Math.max(0, vp.scrollHeight - vp.clientHeight - 240);
-            vp.dispatchEvent(new Event('scroll'));
-        }""")
-    time.sleep(0.2)
+    box = page.locator(".xterm-viewport").bounding_box()
+    assert box is not None, "xterm viewport not found"
+    page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    page.mouse.wheel(0, -240)
+    page.wait_for_function(
+        """() => {
+            const term = window.term;
+            if (!term) return false;
+            const buffer = term.buffer.active;
+            return buffer.viewportY < buffer.baseY;
+        }""",
+        timeout=5000,
+    )
     before = read_scroll_alignment(page)
     assert before is not None
     assert before["viewportY"] < before["baseY"]
