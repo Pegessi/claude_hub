@@ -5,6 +5,13 @@
 
 ## 2026-05-18
 
+### fix: restore live terminal updates after tab activation
+- Stop dropping ttyd ws frames in the Phase B full-replay hold; flush buffered frames and reconcile with a fresh tmux snapshot so sparse-update TUIs (Claude) keep showing the latest output instead of a stale screen
+- Rework `runResync` to set the resyncing flag before the async fetch so concurrent live writes buffer instead of forcing abort + retry under hot write streams
+- Replace `startPostReplayWatch`'s stale `replayPayload` rewrite with a fresh tmux refetch so the recovery path no longer rolls back several seconds of real ws data
+- Trigger a history refresh on desktop tab switches (mobile already had this via `terminal-activate`) so switching back to a tab repaints the latest content immediately
+- **Files**: terminal.py, TerminalView.vue
+
 ### fix: keep live terminal output pinned to latest
 - Preserve bottom-follow behavior during active terminal output by scrolling after xterm renders when the viewport was already at the latest line
 - Treat wheel, touch, and viewport scroll-away events as user intent so live following does not override manual history inspection
