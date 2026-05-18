@@ -466,19 +466,26 @@ async def proxy_terminal_request(
             historyDone = true;
             term.__claudeHubReplayDone = true;
             term.write = originalWrite;
-            // Phase B (fullReplay): ttyd already rendered the visible screen
-            // and buffered WS data contains duplicate visible-screen content
-            // that would overwrite our replay.  Discard the entire buffer —
-            // our replay already wrote the complete terminal state.
-            // New real-time output will arrive after flush and be written
-            // normally through the restored term.write.
-            if (!fullReplay) {{
-              for (const item of buffer) {{
-                originalWrite(item.data, item.cb);
-              }}
+            // Always flush buffered ws frames. Phase B (fullReplay) used to
+            // drop them outright because ttyd's first frame duplicates the
+            // visible screen and clobbers replayed scrollback. But anything
+            // ttyd delivers AFTER that initial frame is real new output —
+            // dropping it makes sparse-update TUIs (Claude) appear frozen
+            // until the next write. Apply the buffer; any clobbered
+            // scrollback is corrected by the post-flush tmux refresh below.
+            for (const item of buffer) {{
+              originalWrite(item.data, item.cb);
             }}
             buffer.length = 0;
             startPostReplayWatch();
+            if (fullReplay) {{
+              // Reconcile xterm with current tmux state once the resync
+              // hooks attach. Repairs any scrollback clobbered by the
+              // ttyd initial-screen frame we just flushed.
+              setTimeout(function() {{
+                refreshHistoryWhenReady({{ reason: 'post-replay-flush', scrollToBottom: true }}, 50);
+              }}, 0);
+            }}
           }}
 
           function hasExpectedReplayBuffer() {{
@@ -496,7 +503,10 @@ async def proxy_terminal_request(
             function watch() {{
               if (!historyDone) return;
               if (!hasExpectedReplayBuffer()) {{
-                originalWrite(replayPayload, function() {{}});
+                // Rewriting the snapshot we captured at replay time would
+                // roll back any live ws data that arrived during the hold.
+                // Refetch tmux for the current state instead.
+                refreshHistoryWhenReady({{ reason: 'post-replay-watch', scrollToBottom: false }}, 0);
               }}
               if (Date.now() < watchUntil) {{
                 setTimeout(watch, FULL_REPLAY_WATCH_INTERVAL_MS);
@@ -871,34 +881,49 @@ async def proxy_terminal_request(
           async function runResync() {{
             timer = null;
             if (!isAtBottom() || resyncing) {{
-              pendingWhenBottom = true;
+              pendingWhenBottom = !isAtBottom();
               return;
             }}
 
-            const generationAtStart = writeGeneration;
+            // Set resyncing BEFORE the async fetch so any concurrent
+            // term.write calls land in resyncBuffer instead of slipping
+            // through and forcing us to abort + retry forever under a
+            // hot live-write stream (e.g. Claude TUI redraws).
+            resyncing = true;
             let snapshot = null;
             try {{
               snapshot = await fetchHistorySnapshot();
             }} catch (error) {{
               console.debug('claude-hub history resync failed', error);
+              resyncing = false;
+              flushResyncBuffer();
               return;
             }}
 
-            if (generationAtStart !== writeGeneration || !isAtBottom()) {{
-              pendingWhenBottom = !isAtBottom();
-              if (isAtBottom()) scheduleResync();
+            if (!isAtBottom()) {{
+              // User scrolled away while we were fetching; abandon the
+              // snapshot but flush any buffered live writes so nothing
+              // is lost.
+              resyncing = false;
+              flushResyncBuffer();
+              pendingWhenBottom = true;
               return;
             }}
 
             const payload = fullReplayPayloadForSnapshot(snapshot);
-            if (!payload) return;
+            if (!payload) {{
+              resyncing = false;
+              flushResyncBuffer();
+              return;
+            }}
 
-            resyncing = true;
             writeThrough(payload, function() {{
               resyncing = false;
               flushResyncBuffer();
               scrollTerminalToBottom(term);
-              if (resyncBuffer.length > 0 || generationAtStart !== writeGeneration) {{
+              // If new live writes arrived after the snapshot was taken,
+              // schedule another reconciliation so they're picked up.
+              if (resyncBuffer.length > 0) {{
                 scheduleResync();
               }}
             }});
