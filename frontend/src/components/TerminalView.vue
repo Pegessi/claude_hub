@@ -103,11 +103,19 @@ function cacheTabId(tabId: string) {
 
 watch(
   () => props.tabId,
-  (newTabId) => {
+  (newTabId, oldTabId) => {
     cacheTabId(newTabId)
     requestAnimationFrame(() => {
       scheduleTerminalResize(newTabId)
       scheduleMobileTerminalActivation(newTabId)
+      // Desktop reactivation: mobile already gets terminal-activate with
+      // refreshHistory above. Without this, switching back to a tab with
+      // a sparse-update TUI (Claude) can show a stale screen until ttyd
+      // pushes its next frame. Skip on the first activation since the
+      // initial replay already loaded history.
+      if (oldTabId && oldTabId !== newTabId && !isMobileTerminalViewport()) {
+        refreshTerminalHistory(newTabId)
+      }
     })
   },
   { immediate: true }
