@@ -186,6 +186,9 @@ def read_scroll_alignment(page: Page) -> dict[str, Any] | None:
                 baseY: buffer.baseY,
                 isUserScrolling: term._core._bufferService.isUserScrolling,
                 rowHeight,
+                scrollHeight: viewportEl.scrollHeight,
+                clientHeight: viewportEl.clientHeight,
+                bottomGap: viewportEl.scrollHeight - viewportEl.clientHeight - viewportEl.scrollTop,
                 delta: Math.abs(viewportEl.scrollTop - buffer.viewportY * rowHeight),
             };
         }""")
@@ -532,6 +535,83 @@ def test_desktop_wheel_enters_user_scroll_during_live_output(
         f"wheel-up did not leave the live-output bottom after first event: "
         f"before={before}, after={after}"
     )
+
+
+def test_live_output_keeps_viewport_pinned_to_latest(terminal_tab: dict, page: Page) -> None:
+    """Live output should keep following the bottom when the user has not scrolled away.
+
+    Regression guard for the terminal appearing to freeze on an intermediate
+    section while xterm keeps adding rows below the visible viewport.
+    """
+    tab = terminal_tab
+    session_name = f"claude-hub-{tab['id'][:8]}"
+    line_count = 700
+
+    ensure_tmux_session(page, tab["id"], session_name)
+    produce_scrollback(session_name, count=260)
+    load_terminal_page(page, tab["id"], min_buffer_lines=260)
+
+    initial = read_scroll_alignment(page)
+    assert initial is not None
+    assert initial["viewportY"] == initial["baseY"], f"terminal did not start at bottom: {initial}"
+
+    send_keys_sync(
+        session_name,
+        (
+            f"for i in $(seq 0 {line_count - 1}); do "
+            "echo FOLLOW_$(printf '%04d' $i); "
+            "sleep 0.003; "
+            "done"
+        ),
+        "Enter",
+    )
+
+    samples: list[dict[str, Any]] = []
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        state = read_scroll_alignment(page)
+        if state and state["baseY"] > initial["baseY"]:
+            samples.append(state)
+            if state["baseY"] >= initial["baseY"] + 80:
+                break
+        time.sleep(0.05)
+    else:
+        pytest.fail("live output did not advance the xterm buffer")
+
+    drifted = [
+        sample
+        for sample in samples
+        if sample["viewportY"] != sample["baseY"] or sample["bottomGap"] > sample["rowHeight"] * 2
+    ]
+    assert not drifted, f"viewport drifted away from latest live output: {drifted[:5]}"
+
+    for _ in range(120):
+        if f"FOLLOW_{line_count - 1:04d}" in capture_pane_sync(session_name):
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("live output did not finish in tmux")
+
+    page.wait_for_function(
+        f"""() => {{
+            const buffer = window.term.buffer.active;
+            const rows = window.term.rows || 24;
+            const visible = [];
+            for (let i = buffer.viewportY; i < buffer.viewportY + rows; i++) {{
+                const line = buffer.getLine(i);
+                if (line) visible.push(line.translateToString(true));
+            }}
+            return visible.join('\\n').includes('FOLLOW_{line_count - 1:04d}');
+        }}""",
+        timeout=10000,
+    )
+
+    final = read_scroll_alignment(page)
+    assert final is not None
+    assert final["viewportY"] == final["baseY"], f"terminal ended away from latest output: {final}"
+    assert (
+        final["bottomGap"] <= final["rowHeight"] * 2
+    ), f"terminal DOM viewport ended away from bottom: {final}"
 
 
 def test_manual_history_refresh_message_scrolls_to_latest(terminal_tab: dict, page: Page) -> None:

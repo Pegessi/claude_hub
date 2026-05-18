@@ -5,6 +5,12 @@
 
 ## 2026-05-18
 
+### fix: keep live terminal output pinned to latest
+- Preserve bottom-follow behavior during active terminal output by scrolling after xterm renders when the viewport was already at the latest line
+- Treat wheel, touch, and viewport scroll-away events as user intent so live following does not override manual history inspection
+- Add terminal replay coverage for live-output bottom pinning and DOM bottom-gap drift
+- **Files**: terminal.py, test_terminal_replay.py
+
 ### feat: show copyable frontend LAN access links
 - Add a top-bar network menu that lists copyable frontend URLs for loopback and discovered local IPv4 addresses
 - Keep mobile top bars compact by placing the same access list inside the existing terminal and workspace overflow menus
