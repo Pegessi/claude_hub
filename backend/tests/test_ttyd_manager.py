@@ -112,12 +112,17 @@ def test_remote_codex_solo_mode_uses_reconnect_launcher(monkeypatch: MonkeyPatch
     assert cmd[-2] == "-lc"
     launcher = cmd[-1]
     assert "while true; do" in launcher
-    assert "ssh -tt devbox" in launcher
+    assert "ssh -tt -o LogLevel=ERROR devbox" in launcher
     assert "$HOME/.nvm/versions/node" in launcher
     assert "cd ~/repo" in launcher
     assert "Remote cwd not found: %s; using home directory" in launcher
     assert "cd ~ ||" in launcher
-    assert "tmux new-session -A -s claude-hub-tab-remo" in launcher
+    assert "tmux new-session -d -s claude-hub-tab-remo" in launcher
+    assert "tmux set-option -t claude-hub-tab-remo status off" in launcher
+    assert "tmux set-option -t claude-hub-tab-remo mouse off" in launcher
+    assert "tmux set-option -t claude-hub-tab-remo focus-events on" in launcher
+    assert "tmux set-window-option -t claude-hub-tab-remo mode-keys vi" in launcher
+    assert "exec tmux attach-session -t claude-hub-tab-remo" in launcher
     assert "Remote tmux not found in PATH; starting without remote tmux persistence" in launcher
     assert "codex --ask-for-approval never --sandbox danger-full-access" in launcher
 
@@ -151,7 +156,7 @@ def test_remote_launcher_starts_agent_after_missing_cwd_fallback(
     assert "Remote cwd not found: %s; using home directory" in launcher
     assert "cd ~ ||" in launcher
     assert launcher.index("cd /Users/local/project ||") < launcher.index(
-        "tmux new-session -A -s claude-hub-tab-remo"
+        "tmux new-session -d -s claude-hub-tab-remo"
     )
     assert "IS_SANDBOX=1 claude --dangerously-skip-permissions" in launcher
 
@@ -182,7 +187,7 @@ def test_remote_terminal_can_disable_reconnect(monkeypatch: MonkeyPatch) -> None
     launcher = process._build_ttyd_command(session_exists=False)[-1]
 
     assert launcher.startswith("exec ")
-    assert "ssh -tt -p 2222 tiger@devbox" in launcher
+    assert "ssh -tt -o LogLevel=ERROR -p 2222 tiger@devbox" in launcher
     assert "cd /opt/tiger/app" in launcher
     assert "${SHELL:-/bin/bash} -l" in launcher
 
@@ -212,7 +217,7 @@ def test_remote_workspace_forwarding_adds_reverse_ssh_port(monkeypatch: MonkeyPa
 
     assert "-o ExitOnForwardFailure=yes" in launcher
     assert "-R 127.0.0.1:18173:127.0.0.1:8173" in launcher
-    assert "ssh -tt" in launcher
+    assert "ssh -tt -o LogLevel=ERROR" in launcher
     assert "tiger@devbox" in launcher
 
 
@@ -247,6 +252,8 @@ def test_remote_capture_ssh_command_is_noninteractive(monkeypatch: MonkeyPatch) 
         "NumberOfPasswordPrompts=0",
         "-o",
         "ConnectTimeout=5",
+        "-o",
+        "LogLevel=ERROR",
         "-p",
         "2222",
         "tiger@devbox",
