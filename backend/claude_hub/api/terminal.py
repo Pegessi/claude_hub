@@ -296,6 +296,9 @@ async def proxy_terminal_request(
       (function () {{
         const TAB_ID = {json.dumps(tab_id)};
         const AGENT_TYPE = {json.dumps(tab.agent_type.value)};
+        const EXECUTION_TARGET = {json.dumps(tab.target.value)};
+        const IS_AGENT_TUI = AGENT_TYPE === 'claude' || AGENT_TYPE === 'codex';
+        const IS_REMOTE_AGENT_TUI = EXECUTION_TARGET === 'remote' && IS_AGENT_TUI;
         const HISTORY_LINES = 100000;
         let historyText = '';
         let historyCursorX = null;
@@ -307,21 +310,30 @@ async def proxy_terminal_request(
           tryHookTerm();
         }}
 
-        fetchHistorySnapshot()
-          .then(function(snapshot) {{
-            historyText = snapshot.history;
-            historyCursorX = snapshot.cursorX;
-            historyCursorY = snapshot.cursorY;
-          }})
-          .catch(function(error) {{
-            console.debug('claude-hub history preload failed', error);
-          }})
-          .finally(markHistoryLoaded);
+        if (IS_REMOTE_AGENT_TUI) {{
+          // Remote Claude/Codex redraws its TUI after attach, while remote
+          // tmux history capture requires another SSH round-trip. Replaying a
+          // late snapshot can overwrite fresh prompt/input state, so keep the
+          // initial attach live and leave explicit history recovery to the
+          // manual refresh control.
+          markHistoryLoaded();
+        }} else {{
+          fetchHistorySnapshot()
+            .then(function(snapshot) {{
+              historyText = snapshot.history;
+              historyCursorX = snapshot.cursorX;
+              historyCursorY = snapshot.cursorY;
+            }})
+            .catch(function(error) {{
+              console.debug('claude-hub history preload failed', error);
+            }})
+            .finally(markHistoryLoaded);
 
-        // Do not leave the terminal blank if the history endpoint stalls.
-        setTimeout(function() {{
-          if (!historyLoaded) markHistoryLoaded();
-        }}, 3000);
+          // Do not leave the terminal blank if the history endpoint stalls.
+          setTimeout(function() {{
+            if (!historyLoaded) markHistoryLoaded();
+          }}, 3000);
+        }}
 
         // NOTE: Do NOT early-return when historyText is empty.  The
         // hook and resize-guard logic below must run regardless of
@@ -433,9 +445,10 @@ async def proxy_terminal_request(
           const buffer = [];
           let historyDone = false;
           const originalWrite = term.write.bind(term);
-          const FULL_REPLAY_MIN_HOLD_MS = 2500;
-          const FULL_REPLAY_QUIET_MS = 750;
-          const FULL_REPLAY_MAX_HOLD_MS = 8000;
+          const isRemoteAgentReplay = fullReplay && IS_REMOTE_AGENT_TUI;
+          const FULL_REPLAY_MIN_HOLD_MS = isRemoteAgentReplay ? 250 : 2500;
+          const FULL_REPLAY_QUIET_MS = isRemoteAgentReplay ? 150 : 750;
+          const FULL_REPLAY_MAX_HOLD_MS = isRemoteAgentReplay ? 2000 : 8000;
           const FULL_REPLAY_VERIFY_DELAY_MS = 250;
           const FULL_REPLAY_VERIFY_ATTEMPTS = 20;
           const FULL_REPLAY_WATCH_MS = 8000;
@@ -755,7 +768,7 @@ async def proxy_terminal_request(
         // that cursor state and leaves stale/status fragments on screen.
         const AUTO_HISTORY_REPLAY_ENABLED = AGENT_TYPE === 'cursor';
         const AUTO_HISTORY_RESYNC_ENABLED = AUTO_HISTORY_REPLAY_ENABLED;
-        const PROTECT_AGENT_HISTORY_VIEW = AGENT_TYPE === 'claude' || AGENT_TYPE === 'codex';
+        const PROTECT_AGENT_HISTORY_VIEW = IS_AGENT_TUI;
         const RESYNC_IDLE_MS = 700;
 
         function setupHistoryResync(term) {{

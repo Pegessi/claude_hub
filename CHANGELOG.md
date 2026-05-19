@@ -3,6 +3,14 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-05-19
+
+### fix: stabilize remote Claude agent display
+- Configure remote tmux sessions before attach so Claude/Codex tabs hide nested tmux status bars, keep mouse off, enable focus events, and preserve a large history limit
+- Suppress SSH log-level noise in remote launch and capture commands so known-host warnings do not mix into the terminal canvas
+- Let remote Claude/Codex tabs attach live immediately instead of replaying a slow initial SSH history snapshot that can overwrite fresh prompt/input state; manual history refresh still captures the remote tmux session on demand
+- **Files**: terminal.py, ttyd_manager.py, test_ttyd_manager.py
+
 ## 2026-05-18
 
 ### fix: restore live terminal updates after tab activation

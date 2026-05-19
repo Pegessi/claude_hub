@@ -400,6 +400,8 @@ class TTYDProcess:
             "NumberOfPasswordPrompts=0",
             "-o",
             "ConnectTimeout=5",
+            "-o",
+            "LogLevel=ERROR",
         ]
         if port != 22:
             cmd.extend(["-p", str(port)])
@@ -432,7 +434,14 @@ class TTYDProcess:
                 *checks,
                 self._remote_cwd_command(cwd, shell),
                 "if command -v tmux >/dev/null 2>&1; then "
-                f"exec tmux new-session -A -s {quoted_session} {quoted_start}; "
+                f"tmux has-session -t {quoted_session} 2>/dev/null || "
+                f"tmux new-session -d -s {quoted_session} {quoted_start}; "
+                f"tmux set-option -t {quoted_session} status off >/dev/null 2>&1 || true; "
+                f"tmux set-option -t {quoted_session} mouse off >/dev/null 2>&1 || true; "
+                f"tmux set-option -t {quoted_session} focus-events on >/dev/null 2>&1 || true; "
+                f"tmux set-option -t {quoted_session} history-limit 100000 >/dev/null 2>&1 || true; "
+                f"tmux set-window-option -t {quoted_session} mode-keys vi >/dev/null 2>&1 || true; "
+                f"exec tmux attach-session -t {quoted_session}; "
                 "fi",
                 direct_start_script,
             ]
@@ -465,6 +474,7 @@ class TTYDProcess:
         host, port = self._remote_ssh_target()
         user_shell = os.environ.get("SHELL", "/bin/bash")
         ssh_parts = ["ssh", "-tt"]
+        ssh_parts.extend(["-o", "LogLevel=ERROR"])
         if self.remote_forward_port:
             ssh_parts.extend(
                 [
