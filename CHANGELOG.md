@@ -22,6 +22,7 @@
 - Preserve Claude/Codex scrollback continuity by filtering held duplicate ttyd initial-screen frames while keeping real live output produced during Phase B history reconstruction
 - Freeze Claude/Codex live redraws while the user is browsing history, then restore from tmux when returning to the bottom so the visible historical viewport is not overwritten by the fixed input/status area
 - Add terminal replay coverage for live-output bottom pinning, dynamic internal scroll events, DOM bottom-gap drift, and agent history viewport stability
+- **Working log**: docs/working-logs/2026-05-19-fix-claude-terminal-live-history.md
 - **Files**: terminal.py, TerminalView.vue, test_terminal_replay.py
 
 ### feat: show copyable frontend LAN access links
