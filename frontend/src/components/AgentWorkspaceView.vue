@@ -631,11 +631,11 @@
                 v-if="selectedSession"
                 class="send-form"
                 @submit.prevent="sendDetailMessage"
+                @paste="handleAttachmentPaste($event, detailAttachments)"
               >
                 <textarea
                   v-model="detailMessage"
                   placeholder="Follow-up instructions..."
-                  @paste="handleAttachmentPaste($event, detailAttachments)"
                 />
                 <div
                   v-if="detailAttachments.length > 0"
@@ -803,7 +803,10 @@
     >
       <div class="workspace-modal">
         <h3>Add Task</h3>
-        <form @submit.prevent="handleCreateTask">
+        <form
+          @submit.prevent="handleCreateTask"
+          @paste="handleAttachmentPaste($event, taskForm.attachments)"
+        >
           <div class="modal-field">
             <label>Title</label>
             <input
@@ -819,7 +822,6 @@
               v-model="taskForm.prompt"
               placeholder="Describe what the workspace agent should implement..."
               :disabled="!activeWorkspaceId"
-              @paste="handleAttachmentPaste($event, taskForm.attachments)"
             />
             <div
               v-if="taskForm.attachments.length > 0"
@@ -1459,37 +1461,159 @@ function persistedAttachmentMeta(attachment: WorkspaceAttachment) {
   return `${attachment.filename} (${attachment.mime_type}, ${formatAttachmentSize(attachment.size_bytes)})`
 }
 
-function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result))
-    reader.onerror = () => reject(reader.error || new Error('Failed to read attachment'))
-    reader.readAsDataURL(file)
+function draftAttachmentId() {
+  if (typeof globalThis.crypto?.randomUUID === 'function') {
+    return globalThis.crypto.randomUUID()
+  }
+  return `attachment-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer) {
+  const bytes = new Uint8Array(buffer)
+  const chunkSize = 0x8000
+  let binary = ''
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize))
+  }
+  return btoa(binary)
+}
+
+async function fileToImageDataUrl(file: File, mimeType: string): Promise<string> {
+  const base64 = arrayBufferToBase64(await file.arrayBuffer())
+  return `data:${mimeType};base64,${base64}`
+}
+
+function imageFilename(file: File) {
+  if (file.name) return file.name
+  if (file.type === 'image/jpeg') return 'clipboard.jpg'
+  if (file.type === 'image/gif') return 'clipboard.gif'
+  if (file.type === 'image/webp') return 'clipboard.webp'
+  return 'clipboard.png'
+}
+
+function imageMimeType(file: File): string | null {
+  const mimeType = file.type.trim().toLowerCase()
+  if (mimeType.startsWith('image/')) {
+    return mimeType === 'image/jpg' ? 'image/jpeg' : mimeType
+  }
+
+  const extension = file.name.split('.').pop()?.toLowerCase()
+  if (extension === 'png') return 'image/png'
+  if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg'
+  if (extension === 'gif') return 'image/gif'
+  if (extension === 'webp') return 'image/webp'
+  return null
+}
+
+function normalizeImageDataUrl(dataUrl: string, mimeType: string) {
+  if (dataUrl.startsWith(`data:${mimeType};base64,`)) return dataUrl
+  return dataUrl.replace(/^data:[^;,]*(;base64,)/i, `data:${mimeType}$1`)
+}
+
+function clipboardImageFiles(event: ClipboardEvent): File[] {
+  const clipboard = event.clipboardData
+  if (!clipboard) return []
+
+  const files: File[] = []
+  const seen = new Set<string>()
+
+  const addFile = (file: File | null) => {
+    if (!file || !imageMimeType(file)) return
+    const key = `${file.name}:${file.type}:${file.size}:${file.lastModified}`
+    if (seen.has(key)) return
+    seen.add(key)
+    files.push(file)
+  }
+
+  for (const item of Array.from(clipboard.items || [])) {
+    if (item.kind === 'file') {
+      addFile(item.getAsFile())
+    }
+  }
+
+  for (const file of Array.from(clipboard.files || [])) {
+    addFile(file)
+  }
+
+  return files
+}
+
+function dataUrlFilename(mimeType: string, index: number) {
+  if (mimeType === 'image/jpeg') return `clipboard-${index}.jpg`
+  if (mimeType === 'image/gif') return `clipboard-${index}.gif`
+  if (mimeType === 'image/webp') return `clipboard-${index}.webp`
+  return `clipboard-${index}.png`
+}
+
+function imageDataUrlsFromText(value: string): string[] {
+  const matches = value.match(/data:image\/(?:png|jpeg|jpg|gif|webp);base64,[A-Za-z0-9+/=]+/gi)
+  return matches || []
+}
+
+function clipboardImageDataUrls(event: ClipboardEvent): string[] {
+  const clipboard = event.clipboardData
+  if (!clipboard) return []
+
+  const urls = new Set<string>()
+  const html = clipboard.getData('text/html')
+  if (html) {
+    const document = new DOMParser().parseFromString(html, 'text/html')
+    for (const image of Array.from(document.images)) {
+      if (image.src.startsWith('data:image/')) {
+        urls.add(image.src)
+      }
+    }
+    for (const url of imageDataUrlsFromText(html)) {
+      urls.add(url)
+    }
+  }
+
+  for (const url of imageDataUrlsFromText(clipboard.getData('text/plain'))) {
+    urls.add(url)
+  }
+
+  return Array.from(urls)
+}
+
+function addDataUrlAttachments(target: DraftAttachment[], dataUrls: string[]) {
+  dataUrls.forEach((dataUrl, index) => {
+    const match = dataUrl.match(/^data:(image\/(?:png|jpeg|jpg|gif|webp));base64,/i)
+    if (!match) return
+    const mimeType = match[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : match[1].toLowerCase()
+    target.push({
+      id: draftAttachmentId(),
+      filename: dataUrlFilename(mimeType, index + 1),
+      mime_type: mimeType,
+      data_url: dataUrl.replace(/^data:image\/jpg;/i, 'data:image/jpeg;'),
+      preview_url: dataUrl,
+      size_bytes: Math.floor((dataUrl.length - dataUrl.indexOf(',') - 1) * 0.75),
+    })
   })
 }
 
 async function addImageAttachments(target: DraftAttachment[], files: File[]) {
   for (const file of files) {
-    if (!file.type.startsWith('image/')) continue
-    const dataUrl = await fileToDataUrl(file)
+    const mimeType = imageMimeType(file)
+    if (!mimeType) continue
+    const dataUrl = normalizeImageDataUrl(await fileToImageDataUrl(file, mimeType), mimeType)
     target.push({
-      id: crypto.randomUUID(),
-      filename: file.name || 'clipboard.png',
-      mime_type: file.type || 'image/png',
+      id: draftAttachmentId(),
+      filename: imageFilename(file),
+      mime_type: mimeType,
       data_url: dataUrl,
-      preview_url: URL.createObjectURL(file),
+      preview_url: dataUrl,
       size_bytes: file.size,
     })
   }
 }
 
 async function handleAttachmentPaste(event: ClipboardEvent, target: DraftAttachment[]) {
-  const files = Array.from(event.clipboardData?.files || []).filter(file =>
-    file.type.startsWith('image/')
-  )
-  if (files.length === 0) return
+  const files = clipboardImageFiles(event)
+  const dataUrls = clipboardImageDataUrls(event)
+  if (files.length === 0 && dataUrls.length === 0) return
   event.preventDefault()
   await addImageAttachments(target, files)
+  addDataUrlAttachments(target, dataUrls)
 }
 
 function removeDraftAttachment(target: DraftAttachment[], attachment: DraftAttachment) {
