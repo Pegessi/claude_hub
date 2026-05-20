@@ -1738,11 +1738,13 @@ class WorkspaceManager:
             raise KeyError(session_id)
 
         now = _now()
+        task: WorkspaceTask | None = None
         task_id = payload.task_id or session.task_id or session.current_task_id
         if task_id:
             task = self.tasks.get(task_id)
             if not task or task.workspace_id != session.workspace_id:
                 raise KeyError(task_id)
+            session = await self._rename_session_for_task(session, task, updated_at=now)
 
         report = AgentReport(
             id=str(uuid.uuid4()),
@@ -1768,6 +1770,8 @@ class WorkspaceManager:
         if task_id:
             session_update["task_id"] = task_id
             session_update["current_task_id"] = task_id
+        if task:
+            session_update["title"] = session.title
         self.sessions[session.id] = session.model_copy(update=session_update)
 
         if task_id and task_id in self.tasks:
@@ -2587,10 +2591,22 @@ class WorkspaceManager:
         session = self.sessions.get(session_id)
         if not session:
             return
+        task = self.tasks.get(task_id)
+        title = task.title.strip() if task and task.title.strip() else session.title
+        if task:
+            renamed = ttyd_manager.rename_tab(session.tab_id, title)
+            if not renamed:
+                logger.warning(
+                    "Could not rename workspace session tab for task session_id=%s tab_id=%s task_id=%s",
+                    session.id,
+                    session.tab_id,
+                    task.id,
+                )
         self.sessions[session_id] = session.model_copy(
             update={
                 "task_id": task_id,
                 "current_task_id": task_id,
+                "title": title,
                 "auto_continue_task_id": task_id,
                 "auto_continue_attempts": 0,
                 "last_auto_continue_at": None,
