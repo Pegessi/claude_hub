@@ -382,7 +382,7 @@
                     <input
                       v-model="startOptionsFor(task).clear_context"
                       type="checkbox"
-                    />
+                    >
                     Clear context
                   </label>
                 </details>
@@ -486,7 +486,7 @@
                     <img
                       :src="`/api/workspaces/attachments/${attachment.id}`"
                       :alt="attachment.filename"
-                    />
+                    >
                   </div>
                   <div class="attachment-meta">
                     <strong>{{ attachment.filename }}</strong>
@@ -681,7 +681,7 @@
                       <img
                         :src="attachment.preview_url"
                         :alt="attachment.filename"
-                      />
+                      >
                     </div>
                     <div class="attachment-meta">
                       <strong>{{ attachment.filename }}</strong>
@@ -727,14 +727,14 @@
               v-model="workspaceForm.name"
               placeholder="claude_hub"
               autofocus
-            />
+            >
           </div>
           <div class="modal-field">
             <label>Local workspace dir</label>
             <input
               v-model="workspaceForm.path"
               placeholder="/Users/me/workspace"
-            />
+            >
           </div>
           <div class="modal-field">
             <label>Environment</label>
@@ -762,7 +762,9 @@
                 v-model="workspaceForm.remote_profile_id"
                 :disabled="remoteProfilesLoading"
               >
-                <option value="">Select server</option>
+                <option value="">
+                  Select server
+                </option>
                 <option
                   v-for="profile in remoteProfiles"
                   :key="profile.id"
@@ -777,14 +779,14 @@
               <input
                 v-model="workspaceForm.remote_cwd"
                 placeholder="~"
-              />
+              >
             </div>
             <div class="modal-field">
               <label class="checkbox-label">
                 <input
                   v-model="workspaceForm.remote_reconnect"
                   type="checkbox"
-                />
+                >
                 Reconnect
               </label>
             </div>
@@ -795,14 +797,14 @@
               <input
                 v-model="workspaceForm.default_branch"
                 placeholder="main"
-              />
+              >
             </div>
             <div class="modal-field">
               <label>Prefix</label>
               <input
                 v-model="workspaceForm.session_prefix"
                 placeholder="chub"
-              />
+              >
             </div>
           </div>
           <div class="modal-actions">
@@ -845,7 +847,7 @@
               placeholder="Implement a focused change"
               :disabled="!activeWorkspaceId"
               autofocus
-            />
+            >
           </div>
           <div class="modal-field">
             <label>Task description</label>
@@ -867,7 +869,7 @@
                   <img
                     :src="attachment.preview_url"
                     :alt="attachment.filename"
-                  />
+                  >
                 </div>
                 <div class="attachment-meta">
                   <strong>{{ attachment.filename }}</strong>
@@ -890,7 +892,9 @@
               v-model="taskForm.related_task_id"
               :disabled="!activeWorkspaceId"
             >
-              <option value="">None</option>
+              <option value="">
+                None
+              </option>
               <option
                 v-for="task in tasks"
                 :key="task.id"
@@ -997,7 +1001,7 @@
             <input
               v-model="agentOptionsForm.title"
               placeholder="Workspace Agent"
-            />
+            >
           </div>
 
           <div class="modal-field">
@@ -1056,7 +1060,9 @@
               v-model="agentOptionsForm.remote_profile_id"
               :disabled="remoteProfilesLoading"
             >
-              <option value="">Select server</option>
+              <option value="">
+                Select server
+              </option>
               <option
                 v-for="profile in remoteProfiles"
                 :key="profile.id"
@@ -1079,7 +1085,7 @@
               <input
                 v-model="agentOptionsForm.cwd"
                 :placeholder="agentOptionsForm.target === 'remote' ? '~/workspace/project' : '/Users/me/workspace'"
-              />
+              >
               <LoadingButton
                 type="button"
                 class="tool-button"
@@ -1101,10 +1107,12 @@
               <input
                 v-model="agentOptionsForm.solo_mode"
                 type="checkbox"
-              />
+              >
               YOLO mode
             </label>
-            <p class="modal-hint">{{ agentYoloHint }}</p>
+            <p class="modal-hint">
+              {{ agentYoloHint }}
+            </p>
           </div>
 
           <div
@@ -1115,7 +1123,7 @@
               <input
                 v-model="agentOptionsForm.remote_reconnect"
                 type="checkbox"
-              />
+              >
               Auto reconnect
             </label>
           </div>
@@ -1181,7 +1189,7 @@
           <input
             v-model="agentBrowserPathInput"
             @keyup.enter="loadAgentDirectory(agentBrowserPathInput)"
-          />
+          >
           <LoadingButton
             type="button"
             class="path-nav-button"
