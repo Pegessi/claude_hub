@@ -34,6 +34,7 @@ class WorkspaceSessionRole(str, Enum):
 
     WORKER = "worker"
     ORCHESTRATOR = "orchestrator"
+    REVIEWER = "reviewer"
     DISPATCHER = "dispatcher"
 
 
@@ -68,6 +69,10 @@ class AgentReportState(str, Enum):
     NEEDS_INPUT = "needs_input"
     READY_FOR_REVIEW = "ready_for_review"
     COMPLETED = "completed"
+    REVIEW_STARTED = "review_started"
+    REVIEW_PASSED = "review_passed"
+    REVIEW_FAILED = "review_failed"
+    REVIEW_NEEDS_INPUT = "review_needs_input"
 
 
 class TerminalTabBase(BaseModel):
@@ -226,6 +231,10 @@ class WorkspaceTask(BaseModel):
     clear_context: Optional[bool] = None
     dispatch_reason: Optional[str] = None
     dispatch_pending: bool = False
+    review_session_id: Optional[str] = None
+    review_attempts: int = 0
+    review_requested_at: Optional[datetime] = None
+    review_completed_at: Optional[datetime] = None
     queued_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     reviewed_at: Optional[datetime] = None
@@ -256,6 +265,7 @@ class ManagedSession(BaseModel):
     remote_cwd: Optional[str] = None
     remote_reconnect: bool = True
     solo_mode: bool = True
+    ephemeral: bool = False
     remote_forward_port: Optional[int] = None
     auto_continue_task_id: Optional[str] = None
     auto_continue_attempts: int = 0
@@ -320,6 +330,7 @@ class EnsureWorkspaceAgentRequest(BaseModel):
     remote_profile_id: Optional[str] = None
     remote_cwd: Optional[str] = None
     remote_reconnect: Optional[bool] = None
+    ephemeral: bool = False
 
 
 class StartTaskRequest(BaseModel):
