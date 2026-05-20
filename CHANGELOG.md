@@ -3,6 +3,14 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-05-20
+
+### fix: support workspace task screenshot paste
+- Read pasted workspace task images from clipboard files, clipboard items, and data URL payloads so screenshots can attach in both new task and task interaction forms
+- Avoid secure-context-only draft attachment IDs by falling back when `crypto.randomUUID()` is unavailable on LAN HTTP access
+- Keep the workspace task UI paste-only without adding a separate file-picker attachment control
+- **Files**: AgentWorkspaceView.vue
+
 ## 2026-05-19
 
 ### fix: stabilize remote Claude agent display
