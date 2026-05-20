@@ -44,7 +44,13 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const sessions = computed(() => board.value?.sessions || [])
   const reports = computed(() => board.value?.reports || [])
   const workspaceAgents = computed(() =>
-    sessions.value.filter(session => session.role === 'orchestrator')
+    sessions.value.filter(session => session.role === 'orchestrator' || session.role === 'worker')
+  )
+  const reviewerAgents = computed(() =>
+    sessions.value.filter(session => session.role === 'reviewer' && !session.ephemeral)
+  )
+  const temporaryReviewers = computed(() =>
+    sessions.value.filter(session => session.role === 'reviewer' && session.ephemeral)
   )
   const dispatcherAgent = computed(() =>
     sessions.value.find(session => session.role === 'dispatcher') || null
@@ -306,6 +312,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     sessions,
     reports,
     workspaceAgents,
+    reviewerAgents,
+    temporaryReviewers,
     dispatcherAgent,
     workspaceAgent,
     isLoading,

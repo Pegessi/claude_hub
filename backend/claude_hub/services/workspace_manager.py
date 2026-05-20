@@ -51,6 +51,7 @@ AUTO_CONTINUE_MAX_ATTEMPTS = 10
 AUTO_CONTINUE_MIN_INTERVAL_SECONDS = 15
 AUTO_CONTINUE_IDLE_GRACE_SECONDS = 20
 REVIEW_RUNTIME_REOPEN_GRACE_SECONDS = 20
+MAX_AUTOMATED_REVIEW_FAILURES = 3
 WORKSPACE_MONITOR_INTERVAL_SECONDS = 5
 AUTO_CONTINUE_MESSAGE = (
     "Please inspect the current task state. If the task was interrupted or is unfinished, "
@@ -228,6 +229,10 @@ class WorkspaceManager:
         normalized.setdefault("clear_context", None)
         normalized.setdefault("dispatch_reason", None)
         normalized.setdefault("dispatch_pending", False)
+        normalized.setdefault("review_session_id", None)
+        normalized.setdefault("review_attempts", 0)
+        normalized.setdefault("review_requested_at", None)
+        normalized.setdefault("review_completed_at", None)
         normalized.setdefault("queued_at", None)
         normalized.setdefault("started_at", None)
         normalized.setdefault("reviewed_at", None)
@@ -251,6 +256,7 @@ class WorkspaceManager:
         normalized.setdefault("remote_cwd", None)
         normalized.setdefault("remote_reconnect", True)
         normalized.setdefault("solo_mode", True)
+        normalized.setdefault("ephemeral", False)
         normalized.setdefault("remote_forward_port", None)
         normalized.setdefault("auto_continue_task_id", None)
         normalized.setdefault("auto_continue_attempts", 0)
@@ -351,6 +357,7 @@ class WorkspaceManager:
                 "- Use the task instructions to choose the correct local or remote project directory.",
                 "- Check for existing file changes before editing; do not overwrite work from another agent.",
                 "- If your terminal asks for human input, stop and let the task move to review.",
+                "- Reviewer agents are independent quality gates; dispatcher agents are reserved for future smart assignment flows.",
             ]
         )
         self.snapshot_path(workspace_id).write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -675,6 +682,11 @@ class WorkspaceManager:
             if existing:
                 self._sync_session_tab_metadata(existing)
                 return existing
+        elif payload.role == WorkspaceSessionRole.REVIEWER and payload.reuse_existing:
+            existing = self._first_available_reviewer(workspace.id)
+            if existing:
+                self._sync_session_tab_metadata(existing)
+                return existing
         elif payload.reuse_existing:
             existing = self._first_available_workspace_agent(workspace.id)
             if existing:
@@ -704,6 +716,9 @@ class WorkspaceManager:
         if role == WorkspaceSessionRole.DISPATCHER:
             session_id = f"{workspace.session_prefix}-dispatcher"
             title = payload.title or f"{workspace.name} Dispatcher"
+        elif role == WorkspaceSessionRole.REVIEWER:
+            session_id = f"{workspace.session_prefix}-reviewer-{role_count + 1}"
+            title = payload.title or f"{workspace.name} Reviewer {role_count + 1}"
         else:
             session_id = f"{workspace.session_prefix}-agent-{role_count + 1}"
             title = payload.title or f"{workspace.name} Agent {role_count + 1}"
@@ -773,6 +788,7 @@ class WorkspaceManager:
             remote_cwd=remote_cwd,
             remote_reconnect=remote_reconnect,
             solo_mode=payload.solo_mode,
+            ephemeral=payload.ephemeral,
             remote_forward_port=remote_forward_port,
             created_at=now,
             updated_at=now,
@@ -827,7 +843,8 @@ class WorkspaceManager:
         blocking = [
             task
             for task in self.tasks.values()
-            if task.session_id == session_id and task.status != WorkspaceTaskStatus.DONE
+            if (task.session_id == session_id or task.review_session_id == session_id)
+            and task.status != WorkspaceTaskStatus.DONE
         ]
         if blocking:
             raise RuntimeError("Cannot delete an agent with queued, working, or review tasks")
@@ -1136,8 +1153,12 @@ class WorkspaceManager:
         if not task.session_id or task.session_id not in self.sessions:
             raise RuntimeError("Review task has no original agent")
 
-        session = self.sessions[task.session_id]
         now = _now()
+        session = await self._rename_session_for_task(
+            self.sessions[task.session_id],
+            task,
+            updated_at=now,
+        )
         self.tasks[task.id] = task.model_copy(
             update={
                 "status": WorkspaceTaskStatus.WORKING,
@@ -1243,6 +1264,8 @@ class WorkspaceManager:
         if not workspace:
             raise KeyError(task.workspace_id)
 
+        session = await self._rename_session_for_task(session, task)
+
         if task.clear_context:
             await self.send_session_message(session.id, "/clear")
             await asyncio.sleep(0.5)
@@ -1312,6 +1335,8 @@ class WorkspaceManager:
     ) -> str:
         if session.role == WorkspaceSessionRole.DISPATCHER:
             return self._build_dispatcher_bootstrap_prompt(workspace, session)
+        if session.role == WorkspaceSessionRole.REVIEWER:
+            return self._build_reviewer_bootstrap_prompt(workspace, session)
         return self._build_workspace_agent_prompt(workspace, session)
 
     def _report_base_url(self, session: ManagedSession) -> str:
@@ -1362,6 +1387,9 @@ class WorkspaceManager:
             "directory before editing. "
             "Before editing, read the state snapshot and check for local file changes. "
             "If another agent modified files you need, avoid overwriting them and ask for review. "
+            "When you report completed, the workspace may assign an independent reviewer. "
+            "If reviewer feedback is sent back to you, continue from that feedback and report "
+            "completed again when the fixes are done. "
             "Report progress to the workspace coordinator only after you receive a task, "
             "when you start, get blocked, need input, are ready for review, or complete the work.\n\n"
             "Report endpoint for assigned tasks:\n"
@@ -1383,7 +1411,53 @@ class WorkspaceManager:
             f"State snapshot: {self.snapshot_path(workspace.id)}\n\n"
             "When asked for a dispatch decision, choose the best workspace agent "
             "for context continuity and decide whether the target should clear context. "
-            "Return decisions only by calling the provided local API endpoint."
+            "Return decisions only by calling the provided local API endpoint. "
+            "This dispatcher path is a reserved smart-assignment extension point and is "
+            "independent from reviewer workflow decisions."
+        )
+
+    def _build_reviewer_bootstrap_prompt(
+        self,
+        workspace: Workspace,
+        session: ManagedSession,
+    ) -> str:
+        return (
+            "You are an independent reviewer agent for this workspace.\n\n"
+            f"Workspace: {workspace.name}\n"
+            f"Session: {session.id}\n"
+            f"{self._session_environment_lines(workspace, session)}\n"
+            f"State snapshot: {self.snapshot_path(workspace.id)}\n\n"
+            "Wait for explicit review assignments. Do not implement, refactor, format, or edit files.\n\n"
+            "Reviewer operating contract:\n"
+            "- Derive concrete acceptance criteria from the task description, user intent, "
+            "recent task reports, changed files, and repository conventions.\n"
+            "- Review against those criteria plus regression risk, integration fit, validation quality, "
+            "and whether the implementation stayed within scope.\n"
+            "- Treat reported validation as evidence to evaluate, not proof. Inspect enough code and "
+            "state to decide whether it is adequate.\n"
+            "- Report review_started when you begin.\n"
+            "- Finish by reporting exactly one of review_passed, review_failed, or review_needs_input.\n\n"
+            "Review exit rules:\n"
+            "- Use review_passed only when all acceptance criteria are met, no blocking defects remain, "
+            "validation is adequate for the risk, and residual risks are acceptable for human review.\n"
+            "- Use review_failed when the implementation agent can fix concrete defects or missing checks. "
+            "Include required fixes specific enough for the implementation agent to follow.\n"
+            "- Use review_needs_input only when a product, credential, environment, or requirement decision "
+            "is genuinely required before review can finish.\n\n"
+            "Final review message format:\n"
+            "Verdict: review_passed | review_failed | review_needs_input\n"
+            "Acceptance criteria checked:\n"
+            "- ...\n"
+            "Findings:\n"
+            "- Severity, file/area, issue, evidence, required fix or reason non-blocking\n"
+            "Validation reviewed:\n"
+            "- Commands/evidence reviewed, gaps, and whether gaps block acceptance\n"
+            "Risks:\n"
+            "- Residual risks or none\n\n"
+            "Report endpoint for assigned reviews:\n"
+            f"curl -sS -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
+            "-H 'Content-Type: application/json' "
+            '-d \'{"task_id":"TASK_ID","state":"review_started","message":"Started review"}\''
         )
 
     def _build_dispatch_decision_prompt(
@@ -1466,13 +1540,101 @@ class WorkspaceManager:
             "Check for uncommitted file changes. "
             "Report state started, then report working as you make progress. "
             "If blocked or waiting for user input, report blocked or needs_input. "
-            "When ready for human review, report ready_for_review or completed.\n\n"
+            "When ready for human review, report ready_for_review. When you believe the task is "
+            "fully complete and ready for independent reviewer checks, report completed.\n\n"
             "Report endpoint example:\n"
             f"curl -sS -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"started",'
             '"message":"Started task"}\'\n\n'
             "Final reports should include task_id, state, message, changed_files, validation, and risks."
+        )
+
+    def _build_review_prompt(
+        self,
+        workspace: Workspace,
+        task: WorkspaceTask,
+        reviewer: ManagedSession,
+        trigger_report: AgentReport,
+    ) -> str:
+        task_reports = [
+            report
+            for report in self.reports_for_workspace(task.workspace_id)
+            if report.task_id == task.id
+        ][-12:]
+        report_payload = [
+            {
+                "state": report.state.value,
+                "session_id": report.session_id,
+                "message": report.message,
+                "changed_files": report.changed_files,
+                "validation": report.validation,
+                "risks": report.risks,
+                "created_at": report.created_at.isoformat(),
+            }
+            for report in task_reports
+        ]
+        return (
+            "Review workspace task.\n\n"
+            f"Workspace: {workspace.name}\n"
+            f"Task ID: {task.id}\n"
+            f"Task title: {task.title}\n"
+            f"Implementation agent session: {task.session_id or 'unknown'}\n"
+            f"Reviewer session: {reviewer.id}\n"
+            f"{self._session_environment_lines(workspace, reviewer)}\n"
+            f"State snapshot: {self.snapshot_path(workspace.id)}\n\n"
+            "Task description:\n"
+            f"{task.prompt}\n\n"
+            "Review workflow:\n"
+            "1. Stay read-only. Do not edit files, run formatters that write changes, or revert work.\n"
+            "2. Derive a task-specific acceptance checklist before judging the implementation. Use:\n"
+            "   - the task title and description,\n"
+            "   - explicit user requirements and attachments,\n"
+            "   - changed_files, validation, and risks from the implementation reports,\n"
+            "   - repository conventions and nearby behavior,\n"
+            "   - any blocked/needs_input context from the trigger report.\n"
+            "3. Inspect changed files and related code paths enough to verify correctness and scope.\n"
+            "4. Evaluate validation evidence. Decide whether missing tests/checks are acceptable or blocking.\n"
+            "5. Produce one final verdict using the exit criteria below.\n\n"
+            "Acceptance standards:\n"
+            "- Functional correctness: the requested behavior is implemented end to end.\n"
+            "- Scope control: changes are limited to the task and do not introduce unrelated churn.\n"
+            "- Integration fit: code follows local architecture, state flow, API contracts, and UI conventions.\n"
+            "- Regression safety: existing user flows, persistence, concurrency, and error paths are not broken.\n"
+            "- Validation quality: reported checks match the risk level; missing checks are called out clearly.\n"
+            "- Handoff quality: changed_files, validation, and risks are understandable for a human reviewer.\n\n"
+            "Review exit criteria:\n"
+            "- review_passed: every acceptance criterion is satisfied; no blocking defects remain; validation is "
+            "adequate or any gaps are explicitly non-blocking; residual risks are acceptable.\n"
+            "- review_failed: at least one blocking defect, regression, scope issue, or missing required validation "
+            "can be fixed by the implementation agent. Include a Required fixes section.\n"
+            "- review_needs_input: review cannot finish without user/product clarification, credentials, unavailable "
+            "environment, or another decision the implementation agent cannot safely infer.\n\n"
+            "Required final report format:\n"
+            "Verdict: review_passed | review_failed | review_needs_input\n"
+            "Acceptance criteria checked:\n"
+            "- [pass/fail/unclear] criterion and evidence\n"
+            "Findings:\n"
+            "- Severity, file/area, issue, evidence, required fix or why non-blocking\n"
+            "Validation reviewed:\n"
+            "- Commands/evidence reviewed; missing or weak checks; whether gaps block acceptance\n"
+            "Required fixes:\n"
+            "- Only for review_failed; concrete steps for the implementation agent\n"
+            "Risks:\n"
+            "- Residual risks or none\n\n"
+            "Trigger report JSON:\n"
+            f"{trigger_report.model_dump_json()}\n\n"
+            "Recent task reports JSON:\n"
+            f"{json.dumps(report_payload, indent=2)}\n\n"
+            "First report review_started, then finish with exactly one final review report:\n"
+            f"curl -sS -X POST {self._report_base_url(reviewer)}/api/workspaces/sessions/{reviewer.id}/reports "
+            "-H 'Content-Type: application/json' "
+            f'-d \'{{"task_id":"{task.id}","state":"review_passed",'
+            '"message":"Verdict, acceptance criteria checked, findings, validation reviewed, '
+            'required fixes if any, and risks","validation":"Checks reviewed",'
+            '"risks":"Residual risk or none"}}\'\n\n'
+            "Use review_failed when fixes are required. Use review_needs_input only for genuine blockers "
+            "outside the implementation agent's control."
         )
 
     def _build_continue_prompt(self, task: WorkspaceTask, payload: ContinueTaskRequest) -> str:
@@ -1570,7 +1732,7 @@ class WorkspaceManager:
             )
         )
 
-    def create_report(self, session_id: str, payload: AgentReportCreate) -> AgentReport:
+    async def create_report(self, session_id: str, payload: AgentReportCreate) -> AgentReport:
         session = self.sessions.get(session_id)
         if not session:
             raise KeyError(session_id)
@@ -1619,7 +1781,158 @@ class WorkspaceManager:
                 self.tasks[task_id] = self.tasks[task_id].model_copy(update=task_update)
 
         self._save_state()
+        if task_id and task_id in self.tasks:
+            await self._after_report_recorded(
+                self.tasks[task_id], self.sessions[session.id], report
+            )
         return report
+
+    async def _after_report_recorded(
+        self,
+        task: WorkspaceTask,
+        session: ManagedSession,
+        report: AgentReport,
+    ) -> None:
+        if session.role == WorkspaceSessionRole.REVIEWER:
+            await self._handle_review_report(task, session, report)
+            return
+        if session.role != WorkspaceSessionRole.ORCHESTRATOR:
+            return
+        if report.state not in {
+            AgentReportState.READY_FOR_REVIEW,
+            AgentReportState.COMPLETED,
+            AgentReportState.BLOCKED,
+            AgentReportState.NEEDS_INPUT,
+        }:
+            return
+        if task.review_requested_at and not task.review_completed_at:
+            return
+        await self._request_task_review(task, report)
+
+    async def _request_task_review(
+        self,
+        task: WorkspaceTask,
+        trigger_report: AgentReport,
+    ) -> None:
+        workspace = self.workspaces.get(task.workspace_id)
+        if not workspace:
+            raise KeyError(task.workspace_id)
+        reviewer = await self._select_or_create_reviewer(workspace, task)
+        now = _now()
+        reviewer = await self._rename_session_for_task(reviewer, task, updated_at=now)
+        self.tasks[task.id] = task.model_copy(
+            update={
+                "status": WorkspaceTaskStatus.WORKING,
+                "review_session_id": reviewer.id,
+                "review_attempts": task.review_attempts + 1,
+                "review_requested_at": now,
+                "review_completed_at": None,
+                "updated_at": now,
+            }
+        )
+        self.sessions[reviewer.id] = reviewer.model_copy(
+            update={
+                "task_id": task.id,
+                "current_task_id": task.id,
+                "status": ManagedSessionStatus.WORKING,
+                "runtime_status": AgentRuntimeStatus.WORKING,
+                "updated_at": now,
+                "last_activity_at": now,
+            }
+        )
+        self._save_state()
+        await self.send_session_message(
+            reviewer.id,
+            self._build_review_prompt(
+                workspace,
+                self.tasks[task.id],
+                self.sessions[reviewer.id],
+                trigger_report,
+            ),
+        )
+
+    async def _select_or_create_reviewer(
+        self,
+        workspace: Workspace,
+        task: WorkspaceTask,
+    ) -> ManagedSession:
+        reviewer = self._first_available_reviewer(workspace.id)
+        if reviewer:
+            return reviewer
+        return await self.ensure_workspace_agent(
+            workspace.id,
+            EnsureWorkspaceAgentRequest(
+                agent_type=task.agent_type,
+                title=f"{workspace.name} Temporary Reviewer",
+                role=WorkspaceSessionRole.REVIEWER,
+                reuse_existing=False,
+                cwd=workspace.path,
+                target=workspace.target,
+                remote_profile_id=workspace.remote_profile_id,
+                remote_cwd=workspace.remote_cwd,
+                remote_reconnect=workspace.remote_reconnect,
+                ephemeral=True,
+            ),
+        )
+
+    async def _handle_review_report(
+        self,
+        task: WorkspaceTask,
+        reviewer: ManagedSession,
+        report: AgentReport,
+    ) -> None:
+        if report.state == AgentReportState.REVIEW_STARTED:
+            return
+        if report.state not in {
+            AgentReportState.REVIEW_PASSED,
+            AgentReportState.REVIEW_FAILED,
+            AgentReportState.REVIEW_NEEDS_INPUT,
+        }:
+            return
+
+        now = _now()
+        self.sessions[reviewer.id] = reviewer.model_copy(
+            update={
+                "task_id": None,
+                "current_task_id": None,
+                "status": (
+                    ManagedSessionStatus.NEEDS_INPUT
+                    if report.state == AgentReportState.REVIEW_NEEDS_INPUT
+                    else ManagedSessionStatus.IDLE
+                ),
+                "runtime_status": (
+                    AgentRuntimeStatus.ATTENTION
+                    if report.state == AgentReportState.REVIEW_NEEDS_INPUT
+                    else AgentRuntimeStatus.IDLE
+                ),
+                "updated_at": now,
+                "last_activity_at": now,
+            }
+        )
+        self.tasks[task.id] = task.model_copy(
+            update={
+                "status": WorkspaceTaskStatus.REVIEW,
+                "review_session_id": reviewer.id,
+                "review_completed_at": now,
+                "reviewed_at": task.reviewed_at or now,
+                "updated_at": now,
+            }
+        )
+        self._save_state()
+
+        if report.state != AgentReportState.REVIEW_FAILED:
+            return
+        updated_task = self.tasks[task.id]
+        if updated_task.review_attempts > MAX_AUTOMATED_REVIEW_FAILURES:
+            return
+        feedback = (
+            "Reviewer requested changes.\n\n"
+            f"Reviewer session: {reviewer.id}\n"
+            f"Review attempt: {updated_task.review_attempts}\n\n"
+            f"{report.message}\n\n"
+            "Address the required fixes, rerun appropriate validation, and report completed again."
+        )
+        await self.continue_task(updated_task.id, ContinueTaskRequest(message=feedback))
 
     def reports_for_workspace(self, workspace_id: str) -> list[AgentReport]:
         return sorted(
@@ -1713,6 +2026,44 @@ class WorkspaceManager:
             error = stderr.decode("utf-8", errors="ignore").strip()
             raise RuntimeError(error or f"tmux {' '.join(args)} failed with code {proc.returncode}")
 
+    async def _rename_session_for_task(
+        self,
+        session: ManagedSession,
+        task: WorkspaceTask,
+        *,
+        updated_at: datetime | None = None,
+    ) -> ManagedSession:
+        title = task.title
+        if session.title == title:
+            return session
+
+        try:
+            updated_tab = await ttyd_manager.update_tab(session.tab_id, name=title)
+        except Exception:
+            logger.exception(
+                "Failed to rename workspace terminal tab_id=%s session_id=%s task_id=%s",
+                session.tab_id,
+                session.id,
+                task.id,
+            )
+        else:
+            if not updated_tab:
+                logger.warning(
+                    "Could not rename missing workspace terminal tab_id=%s session_id=%s task_id=%s",
+                    session.tab_id,
+                    session.id,
+                    task.id,
+                )
+
+        updated_session = session.model_copy(
+            update={
+                "title": title,
+                "updated_at": updated_at or _now(),
+            }
+        )
+        self.sessions[session.id] = updated_session
+        return updated_session
+
     def sessions_for_workspace(self, workspace_id: str) -> list[ManagedSession]:
         sessions = self._sessions_for_workspace_raw(workspace_id)
         return [self._with_assignment_summary(session) for session in sessions]
@@ -1754,6 +2105,20 @@ class WorkspaceManager:
     def _first_available_workspace_agent(self, workspace_id: str) -> Optional[ManagedSession]:
         agents = self._workspace_agents(workspace_id)
         return agents[0] if agents else None
+
+    def _first_available_reviewer(self, workspace_id: str) -> Optional[ManagedSession]:
+        reviewers = [
+            session
+            for session in self._sessions_for_workspace_raw(workspace_id)
+            if session.role == WorkspaceSessionRole.REVIEWER
+            and session.status != ManagedSessionStatus.STOPPED
+            and session.runtime_status == AgentRuntimeStatus.IDLE
+            and not session.task_id
+            and not session.current_task_id
+        ]
+        if not reviewers:
+            return None
+        return sorted(reviewers, key=lambda session: (session.ephemeral, session.created_at))[0]
 
     def _queued_count(self, session_id: str) -> int:
         return len(
@@ -1873,7 +2238,11 @@ class WorkspaceManager:
                     and (status.last_changed_at - task.reviewed_at).total_seconds()
                     > REVIEW_RUNTIME_REOPEN_GRACE_SECONDS
                     and self._latest_report_state(current_task_id)
-                    in {AgentReportState.READY_FOR_REVIEW, AgentReportState.COMPLETED}
+                    in {
+                        AgentReportState.READY_FOR_REVIEW,
+                        AgentReportState.COMPLETED,
+                        AgentReportState.REVIEW_PASSED,
+                    }
                 ):
                     self.tasks[current_task_id] = task.model_copy(
                         update={
@@ -1889,13 +2258,22 @@ class WorkspaceManager:
                     and task
                     and task.status == WorkspaceTaskStatus.WORKING
                 ):
-                    self.tasks[current_task_id] = task.model_copy(
-                        update={
-                            "status": WorkspaceTaskStatus.REVIEW,
-                            "reviewed_at": status.sampled_at,
-                            "updated_at": status.sampled_at,
-                        }
-                    )
+                    if not (task.review_requested_at and not task.review_completed_at):
+                        report = AgentReport(
+                            id=str(uuid.uuid4()),
+                            workspace_id=task.workspace_id,
+                            task_id=task.id,
+                            session_id=session.id,
+                            state=AgentReportState.NEEDS_INPUT,
+                            message=status.detail
+                            or "Agent runtime is waiting for input; reviewer diagnosis requested.",
+                            changed_files=[],
+                            validation=None,
+                            risks=None,
+                            created_at=status.sampled_at,
+                        )
+                        self.reports[report.id] = report
+                        await self._request_task_review(task, report)
                     update["task_id"] = current_task_id
                     changed = True
 
@@ -2069,7 +2447,11 @@ class WorkspaceManager:
                 or task.status == WorkspaceTaskStatus.DONE
             ):
                 continue
-            if report.state not in {AgentReportState.READY_FOR_REVIEW, AgentReportState.COMPLETED}:
+            if report.state not in {
+                AgentReportState.READY_FOR_REVIEW,
+                AgentReportState.COMPLETED,
+                AgentReportState.REVIEW_PASSED,
+            }:
                 continue
             if task.status == WorkspaceTaskStatus.REVIEW:
                 continue
@@ -2125,6 +2507,13 @@ class WorkspaceManager:
                 return ManagedSessionStatus.IDLE
             if state == AgentReportState.BLOCKED:
                 return ManagedSessionStatus.NEEDS_INPUT
+        if session.role == WorkspaceSessionRole.REVIEWER:
+            if state == AgentReportState.REVIEW_STARTED:
+                return ManagedSessionStatus.WORKING
+            if state in {AgentReportState.REVIEW_PASSED, AgentReportState.REVIEW_FAILED}:
+                return ManagedSessionStatus.IDLE
+            if state == AgentReportState.REVIEW_NEEDS_INPUT:
+                return ManagedSessionStatus.NEEDS_INPUT
         if state == AgentReportState.BLOCKED:
             return ManagedSessionStatus.ERROR
         if state == AgentReportState.NEEDS_INPUT:
@@ -2150,18 +2539,26 @@ class WorkspaceManager:
             return AgentRuntimeStatus.WORKING
         if state in {AgentReportState.READY_FOR_REVIEW, AgentReportState.COMPLETED}:
             return AgentRuntimeStatus.IDLE
+        if state == AgentReportState.REVIEW_STARTED:
+            return AgentRuntimeStatus.WORKING
+        if state in {AgentReportState.REVIEW_PASSED, AgentReportState.REVIEW_FAILED}:
+            return AgentRuntimeStatus.IDLE
+        if state == AgentReportState.REVIEW_NEEDS_INPUT:
+            return AgentRuntimeStatus.ATTENTION
         return session.runtime_status
 
     def _task_status_from_report(self, state: AgentReportState) -> Optional[WorkspaceTaskStatus]:
-        if state == AgentReportState.COMPLETED:
-            return WorkspaceTaskStatus.REVIEW
-        if state == AgentReportState.READY_FOR_REVIEW:
+        if state in {AgentReportState.REVIEW_PASSED, AgentReportState.REVIEW_NEEDS_INPUT}:
             return WorkspaceTaskStatus.REVIEW
         if state in {
             AgentReportState.STARTED,
             AgentReportState.WORKING,
             AgentReportState.BLOCKED,
             AgentReportState.NEEDS_INPUT,
+            AgentReportState.READY_FOR_REVIEW,
+            AgentReportState.COMPLETED,
+            AgentReportState.REVIEW_STARTED,
+            AgentReportState.REVIEW_FAILED,
         }:
             return WorkspaceTaskStatus.WORKING
         return None
