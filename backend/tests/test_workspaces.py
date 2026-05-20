@@ -15,6 +15,7 @@ from claude_hub.models import (
     AgentRuntimeStatus,
     AgentType,
     ExecutionTarget,
+    ManagedSession,
     ManagedSessionStatus,
     RemoteProfile,
     TerminalAgentStatus,
@@ -708,6 +709,7 @@ def test_start_task_dispatches_to_resident_agent(
     assert len(sent_messages) == 2
     assert "resident workspace agent" in sent_messages[0][1]
     assert "Run this in the resident terminal" in sent_messages[1][1]
+    assert renamed_tabs == [("tab-agent", "Resident task")]
 
     board_response = client.get(f"/api/workspaces/{workspace_response.json()['id']}/board")
     board = board_response.json()
@@ -733,6 +735,98 @@ def test_start_task_dispatches_to_resident_agent(
     assert report_response.status_code == 201
     board_response = client.get(f"/api/workspaces/{workspace_response.json()['id']}/board")
     assert board_response.json()["tasks"][0]["status"] == "working"
+
+
+def test_report_with_task_renames_non_orchestrator_session(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    renamed_tabs: list[tuple[str, str | None]] = []
+
+    async def fake_update_tab(tab_id: str, name: Optional[str] = None, **_: object) -> TerminalTab:
+        renamed_tabs.append((tab_id, name))
+        return TerminalTab(
+            id=tab_id,
+            name=name or "unchanged",
+            shell=None,
+            cwd=str(repo),
+            solo_mode=True,
+            agent_type=AgentType.CODEX,
+            target=ExecutionTarget.LOCAL,
+            remote_profile_id=None,
+            remote_cwd=None,
+            remote_reconnect=True,
+            port=12600,
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=None,
+            workspace_name=None,
+            workspace_role=None,
+        )
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "update_tab", fake_update_tab)
+
+    client = TestClient(app)
+    workspace_response = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Review Repo",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "review",
+        },
+    )
+    task_response = client.post(
+        f"/api/workspaces/{workspace_response.json()['id']}/tasks",
+        json={
+            "title": "Review assigned task",
+            "prompt": "Review this change",
+            "agent_type": "codex",
+        },
+    )
+    now = datetime.now()
+    workspace_manager.sessions["review-reviewer-1"] = ManagedSession(
+        id="review-reviewer-1",
+        workspace_id=workspace_response.json()["id"],
+        task_id=None,
+        tab_id="tab-reviewer",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CODEX,
+        status=ManagedSessionStatus.IDLE,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        current_task_id=None,
+        queued_count=0,
+        title="Reviewer 1",
+        branch=None,
+        workspace_path=str(repo),
+        tmux_session="claude-hub-tab-revi",
+        target=ExecutionTarget.LOCAL,
+        remote_profile_id=None,
+        remote_cwd=None,
+        remote_reconnect=True,
+        solo_mode=True,
+        remote_forward_port=None,
+        created_at=now,
+        updated_at=now,
+    )
+
+    report_response = client.post(
+        "/api/workspaces/sessions/review-reviewer-1/reports",
+        json={
+            "task_id": task_response.json()["id"],
+            "state": "started",
+            "message": "Started review",
+        },
+    )
+
+    assert report_response.status_code == 201
+    session = workspace_manager.sessions["review-reviewer-1"]
+    assert session.role == WorkspaceSessionRole.WORKER
+    assert session.title == "Review assigned task"
+    assert session.current_task_id == task_response.json()["id"]
+    assert renamed_tabs == [("tab-reviewer", "Review assigned task")]
 
 
 def test_start_task_prefers_related_task_agent(
