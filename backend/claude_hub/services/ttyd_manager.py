@@ -963,6 +963,19 @@ class TTYDManager:
         self._save_state()
         return True
 
+    def rename_tab(self, tab_id: str, name: str) -> bool:
+        """Rename a tab without restarting its terminal process."""
+        process = self.processes.get(tab_id)
+        if not process:
+            return False
+
+        if process.name == name:
+            return True
+
+        process.name = name
+        self._save_state()
+        return True
+
     def _sync_order_with_processes(self) -> None:
         """Sync order list with current processes - add any missing tabs."""
         # Add any tabs that are in processes but not in order

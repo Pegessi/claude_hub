@@ -244,6 +244,6 @@ async def create_session_report(
 ) -> AgentReport:
     """Append a progress report to a managed session."""
     try:
-        return workspace_manager.create_report(managed_session_id, payload)
+        return await workspace_manager.create_report(managed_session_id, payload)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Session not found") from e

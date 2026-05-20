@@ -136,6 +136,7 @@
     >
       <div class="workspace-summary-primary">
         <span>{{ workspaceAgents.length }} agents</span>
+        <span>{{ reviewerAgents.length + temporaryReviewers.length }} reviewers</span>
         <strong>{{ workspaceAgents.filter(agent => agent.runtime_status === 'working').length }} working</strong>
         <span>{{ tasksByStatus('queued').length }} queued</span>
       </div>
@@ -155,9 +156,26 @@
       aria-label="Current workspace agent statuses"
     >
       <div class="agent-status-header">
-        <div>
-          <span class="agent-status-eyebrow">Workspace agents</span>
-          <strong>{{ visibleWorkspaceSessions.length }}</strong>
+        <div
+          class="agent-status-view-switch"
+          aria-label="Agent status view"
+        >
+          <button
+            type="button"
+            :data-active="workspaceSessionView === 'agents'"
+            @click="workspaceSessionView = 'agents'"
+          >
+            <span>Agents</span>
+            <strong>{{ workspaceAgents.length }}</strong>
+          </button>
+          <button
+            type="button"
+            :data-active="workspaceSessionView === 'reviewers'"
+            @click="workspaceSessionView = 'reviewers'"
+          >
+            <span>Reviewers</span>
+            <strong>{{ reviewerSessions.length }}</strong>
+          </button>
         </div>
         <div class="agent-status-toolbar">
           <LoadingButton
@@ -192,13 +210,14 @@
             <span class="agent-status-main">
               <span class="agent-status-line">
                 <span class="agent-status-name">{{ agent.title }}</span>
-                <span class="agent-status-kind">{{ agent.role === 'dispatcher' ? 'Dispatcher' : agent.agent_type }}</span>
+                <span class="agent-status-kind">{{ agentRoleLabel(agent) }}</span>
               </span>
               <span class="agent-status-detail">
                 {{ agentRuntimeDetail(agent) }}
               </span>
               <span class="agent-status-meta">
                 <span>{{ agent.target }}</span>
+                <span v-if="agent.ephemeral">temporary</span>
                 <span>{{ agentTaskLabel(agent) }}</span>
                 <span>queued {{ agent.queued_count }}</span>
               </span>
@@ -236,7 +255,7 @@
           v-if="visibleWorkspaceSessions.length === 0"
           class="agent-status-empty"
         >
-          No agents in this workspace.
+          {{ visibleWorkspaceSessionsEmptyText }}
         </div>
       </div>
     </section>
@@ -319,6 +338,10 @@
                 <div class="session-meta">
                   <span>task {{ task.status }}</span>
                   <span>agent {{ agentTitle(task.session_id) }}</span>
+                  <span v-if="task.review_session_id">
+                    reviewer {{ reviewerTitle(task.review_session_id) }}
+                  </span>
+                  <span v-if="reviewStatusLabel(task)">{{ reviewStatusLabel(task) }}</span>
                   <span v-if="sessionForTask(task)">
                     runtime {{ sessionForTask(task)?.runtime_status }}
                   </span>
@@ -359,7 +382,7 @@
                     <input
                       v-model="startOptionsFor(task).clear_context"
                       type="checkbox"
-                    />
+                    >
                     Clear context
                   </label>
                 </details>
@@ -463,7 +486,7 @@
                     <img
                       :src="`/api/workspaces/attachments/${attachment.id}`"
                       :alt="attachment.filename"
-                    />
+                    >
                   </div>
                   <div class="attachment-meta">
                     <strong>{{ attachment.filename }}</strong>
@@ -490,6 +513,14 @@
                 <div>
                   <span>Agent</span>
                   <strong>{{ selectedSession?.title || 'auto' }}</strong>
+                </div>
+                <div>
+                  <span>Reviewer</span>
+                  <strong>{{ selectedTask.review_session_id ? reviewerTitle(selectedTask.review_session_id) : 'none' }}</strong>
+                </div>
+                <div>
+                  <span>Review state</span>
+                  <strong>{{ reviewStatusLabel(selectedTask) || 'not requested' }}</strong>
                 </div>
                 <div>
                   <span>Queued behind</span>
@@ -650,7 +681,7 @@
                       <img
                         :src="attachment.preview_url"
                         :alt="attachment.filename"
-                      />
+                      >
                     </div>
                     <div class="attachment-meta">
                       <strong>{{ attachment.filename }}</strong>
@@ -696,14 +727,14 @@
               v-model="workspaceForm.name"
               placeholder="claude_hub"
               autofocus
-            />
+            >
           </div>
           <div class="modal-field">
             <label>Local workspace dir</label>
             <input
               v-model="workspaceForm.path"
               placeholder="/Users/me/workspace"
-            />
+            >
           </div>
           <div class="modal-field">
             <label>Environment</label>
@@ -731,7 +762,9 @@
                 v-model="workspaceForm.remote_profile_id"
                 :disabled="remoteProfilesLoading"
               >
-                <option value="">Select server</option>
+                <option value="">
+                  Select server
+                </option>
                 <option
                   v-for="profile in remoteProfiles"
                   :key="profile.id"
@@ -746,14 +779,14 @@
               <input
                 v-model="workspaceForm.remote_cwd"
                 placeholder="~"
-              />
+              >
             </div>
             <div class="modal-field">
               <label class="checkbox-label">
                 <input
                   v-model="workspaceForm.remote_reconnect"
                   type="checkbox"
-                />
+                >
                 Reconnect
               </label>
             </div>
@@ -764,14 +797,14 @@
               <input
                 v-model="workspaceForm.default_branch"
                 placeholder="main"
-              />
+              >
             </div>
             <div class="modal-field">
               <label>Prefix</label>
               <input
                 v-model="workspaceForm.session_prefix"
                 placeholder="chub"
-              />
+              >
             </div>
           </div>
           <div class="modal-actions">
@@ -814,7 +847,7 @@
               placeholder="Implement a focused change"
               :disabled="!activeWorkspaceId"
               autofocus
-            />
+            >
           </div>
           <div class="modal-field">
             <label>Task description</label>
@@ -836,7 +869,7 @@
                   <img
                     :src="attachment.preview_url"
                     :alt="attachment.filename"
-                  />
+                  >
                 </div>
                 <div class="attachment-meta">
                   <strong>{{ attachment.filename }}</strong>
@@ -859,7 +892,9 @@
               v-model="taskForm.related_task_id"
               :disabled="!activeWorkspaceId"
             >
-              <option value="">None</option>
+              <option value="">
+                None
+              </option>
               <option
                 v-for="task in tasks"
                 :key="task.id"
@@ -901,23 +936,24 @@
         <section class="modal-section modal-section--first">
           <div class="modal-section-header">
             <h4>Workspace Agents</h4>
-            <span>{{ workspaceAgents.length }}</span>
+            <span>{{ managedWorkspaceSessions.length }}</span>
           </div>
           <div class="agent-list">
             <article
-              v-for="agent in workspaceAgents"
+              v-for="agent in managedWorkspaceSessions"
               :key="agent.id"
-              class="agent-row"
+              :class="['agent-row', { 'dispatcher-row': agent.role === 'dispatcher' }]"
             >
               <div>
                 <strong>{{ agent.title }}</strong>
-                <span>{{ agent.agent_type }} · {{ agent.id }}</span>
+                <span>{{ agentRoleLabel(agent) }} · {{ agent.agent_type }} · {{ agent.id }}</span>
                 <span>{{ agent.target }} · {{ agent.workspace_path }}</span>
               </div>
               <div class="agent-row-meta">
                 <span :class="['runtime-pill', `runtime-pill--${agent.runtime_status}`]">
                   {{ agent.runtime_status }}
                 </span>
+                <span v-if="agent.ephemeral">temporary</span>
                 <span>current {{ taskTitle(agent.current_task_id) }}</span>
                 <span>queued {{ agent.queued_count }}</span>
               </div>
@@ -931,6 +967,7 @@
                   Open
                 </LoadingButton>
                 <LoadingButton
+                  v-if="agent.role !== 'dispatcher'"
                   type="button"
                   class="danger-button"
                   :disabled="!canDeleteAgent(agent)"
@@ -944,28 +981,11 @@
               </div>
             </article>
             <div
-              v-if="workspaceAgents.length === 0"
+              v-if="managedWorkspaceSessions.length === 0"
               class="empty-inline"
             >
               No workspace agents.
             </div>
-            <article
-              v-if="dispatcherAgent"
-              class="agent-row dispatcher-row"
-            >
-              <div>
-                <strong>{{ dispatcherAgent.title }}</strong>
-                <span>dispatcher · {{ dispatcherAgent.runtime_status }}</span>
-              </div>
-              <LoadingButton
-                type="button"
-                :loading="isPending(sessionActionKey('open', dispatcherAgent.id))"
-                loading-label="Opening dispatcher"
-                @click="openSession(dispatcherAgent)"
-              >
-                Open
-              </LoadingButton>
-            </article>
           </div>
         </section>
 
@@ -981,15 +1001,33 @@
             <input
               v-model="agentOptionsForm.title"
               placeholder="Workspace Agent"
-            />
+            >
+          </div>
+
+          <div class="modal-field">
+            <label>Role</label>
+            <select v-model="agentOptionsForm.role">
+              <option value="orchestrator">
+                Agent
+              </option>
+              <option value="reviewer">
+                Reviewer
+              </option>
+            </select>
           </div>
 
           <div class="modal-field">
             <label>Agent Type</label>
             <select v-model="agentOptionsForm.agent_type">
-              <option value="codex">Codex</option>
-              <option value="claude">Claude</option>
-              <option value="cursor">Terminal</option>
+              <option value="codex">
+                Codex
+              </option>
+              <option value="claude">
+                Claude
+              </option>
+              <option value="cursor">
+                Terminal
+              </option>
             </select>
           </div>
 
@@ -1022,7 +1060,9 @@
               v-model="agentOptionsForm.remote_profile_id"
               :disabled="remoteProfilesLoading"
             >
-              <option value="">Select server</option>
+              <option value="">
+                Select server
+              </option>
               <option
                 v-for="profile in remoteProfiles"
                 :key="profile.id"
@@ -1045,7 +1085,7 @@
               <input
                 v-model="agentOptionsForm.cwd"
                 :placeholder="agentOptionsForm.target === 'remote' ? '~/workspace/project' : '/Users/me/workspace'"
-              />
+              >
               <LoadingButton
                 type="button"
                 class="tool-button"
@@ -1067,10 +1107,12 @@
               <input
                 v-model="agentOptionsForm.solo_mode"
                 type="checkbox"
-              />
+              >
               YOLO mode
             </label>
-            <p class="modal-hint">{{ agentYoloHint }}</p>
+            <p class="modal-hint">
+              {{ agentYoloHint }}
+            </p>
           </div>
 
           <div
@@ -1081,7 +1123,7 @@
               <input
                 v-model="agentOptionsForm.remote_reconnect"
                 type="checkbox"
-              />
+              >
               Auto reconnect
             </label>
           </div>
@@ -1147,7 +1189,7 @@
           <input
             v-model="agentBrowserPathInput"
             @keyup.enter="loadAgentDirectory(agentBrowserPathInput)"
-          />
+          >
           <LoadingButton
             type="button"
             class="path-nav-button"
@@ -1230,6 +1272,7 @@ import type {
   TerminalAgentStatus,
   WorkspaceAttachment,
   WorkspaceAttachmentCreate,
+  WorkspaceSessionRole,
   WorkspaceTask,
   WorkspaceTaskStatus,
 } from '@/types'
@@ -1258,6 +1301,8 @@ interface DraftAttachment extends WorkspaceAttachmentCreate {
   size_bytes: number
 }
 
+type WorkspaceSessionView = 'agents' | 'reviewers'
+
 const appStore = useAppStore()
 const terminalStore = useTerminalStore()
 const workspaceStore = useWorkspaceStore()
@@ -1269,6 +1314,8 @@ const {
   board,
   tasks,
   workspaceAgents,
+  reviewerAgents,
+  temporaryReviewers,
   dispatcherAgent,
   isLoading,
   error,
@@ -1283,6 +1330,7 @@ const showWorkspaceModal = ref(false)
 const showAgentOptionsModal = ref(false)
 const showAgentFileBrowser = ref(false)
 const showTaskModal = ref(false)
+const workspaceSessionView = ref<WorkspaceSessionView>('agents')
 const workspaceMobileMenuRef = ref<HTMLDetailsElement | null>(null)
 const remoteProfiles = ref<RemoteProfile[]>([])
 const remoteProfilesLoading = ref(false)
@@ -1323,6 +1371,7 @@ const workspaceForm = reactive({
 
 const agentOptionsForm = reactive({
   title: '',
+  role: 'orchestrator' as WorkspaceSessionRole,
   agent_type: 'codex' as AgentType,
   target: 'local' as ExecutionTarget,
   cwd: '',
@@ -1346,9 +1395,10 @@ const mobileWorkspaceSummary = computed(() => {
   if (!activeWorkspaceId.value) return 'Create a workspace to begin'
 
   const agentCount = workspaceAgents.value.length
+  const reviewerCount = reviewerAgents.value.length + temporaryReviewers.value.length
   const workingCount = workspaceAgents.value.filter(agent => agent.runtime_status === 'working').length
   const queuedCount = tasksByStatus('queued').length
-  return `${agentCount} agents · ${workingCount} working · ${queuedCount} queued`
+  return `${agentCount} agents · ${reviewerCount} reviewers · ${workingCount} working · ${queuedCount} queued`
 })
 
 const selectedTask = computed(() =>
@@ -1367,10 +1417,26 @@ const selectedReports = computed<AgentReport[]>(() =>
   selectedTask.value ? workspaceStore.reportsForTask(selectedTask.value) : []
 )
 
-const visibleWorkspaceSessions = computed<ManagedSession[]>(() => [
+const reviewerSessions = computed<ManagedSession[]>(() => [
+  ...reviewerAgents.value,
+  ...temporaryReviewers.value,
+])
+
+const managedWorkspaceSessions = computed<ManagedSession[]>(() => [
   ...workspaceAgents.value,
+  ...reviewerSessions.value,
   ...(dispatcherAgent.value ? [dispatcherAgent.value] : []),
 ])
+
+const visibleWorkspaceSessions = computed<ManagedSession[]>(() =>
+  workspaceSessionView.value === 'reviewers' ? reviewerSessions.value : workspaceAgents.value
+)
+
+const visibleWorkspaceSessionsEmptyText = computed(() =>
+  workspaceSessionView.value === 'reviewers'
+    ? 'No reviewers in this workspace.'
+    : 'No agents in this workspace.'
+)
 
 const terminalStatusByTabId = computed<Record<string, TerminalAgentStatus>>(() => {
   const map: Record<string, TerminalAgentStatus> = {}
@@ -1437,13 +1503,38 @@ function latestReportForTask(task: WorkspaceTask) {
   return workspaceStore.latestReportForTask(task)
 }
 
+function reviewStatusLabel(task: WorkspaceTask) {
+  const reviewReports = workspaceStore
+    .reportsForTask(task)
+    .filter(report => report.state.startsWith('review_'))
+  const latestReviewReport = reviewReports[reviewReports.length - 1]
+  if (latestReviewReport?.state === 'review_passed') return 'Review passed'
+  if (latestReviewReport?.state === 'review_failed') return 'Changes requested'
+  if (latestReviewReport?.state === 'review_needs_input') return 'Review needs input'
+  if (latestReviewReport?.state === 'review_started') return 'Reviewing'
+  if (task.review_requested_at && !task.review_completed_at) return 'Pending review'
+  if (task.review_attempts > 0) return `Review attempts ${task.review_attempts}`
+  return ''
+}
+
 function isLatestSelectedReport(report: AgentReport) {
   return selectedReports.value[selectedReports.value.length - 1]?.id === report.id
 }
 
 function agentTitle(sessionId?: string | null) {
   if (!sessionId) return 'auto'
-  return workspaceAgents.value.find(agent => agent.id === sessionId)?.title || sessionId
+  return managedWorkspaceSessions.value.find(agent => agent.id === sessionId)?.title || sessionId
+}
+
+function reviewerTitle(sessionId?: string | null) {
+  if (!sessionId) return 'none'
+  return managedWorkspaceSessions.value.find(agent => agent.id === sessionId)?.title || sessionId
+}
+
+function agentRoleLabel(agent: ManagedSession) {
+  if (agent.role === 'dispatcher') return 'Dispatcher'
+  if (agent.role === 'reviewer') return agent.ephemeral ? 'Temporary Reviewer' : 'Reviewer'
+  return 'Agent'
 }
 
 function taskTitle(taskId?: string | null) {
@@ -1660,7 +1751,11 @@ function agentTaskLabel(agent: ManagedSession) {
 }
 
 function openTasksForAgent(agent: ManagedSession) {
-  return tasks.value.filter(task => task.session_id === agent.id && task.status !== 'done')
+  return tasks.value.filter(
+    task =>
+      (task.session_id === agent.id || task.review_session_id === agent.id) &&
+      task.status !== 'done'
+  )
 }
 
 function agentDeleteDisabledReason(agent: ManagedSession) {
@@ -1821,6 +1916,7 @@ function toggleThemeFromMenu() {
 function resetAgentOptionsForm() {
   const workspace = activeWorkspace.value
   agentOptionsForm.title = ''
+  agentOptionsForm.role = 'orchestrator'
   agentOptionsForm.agent_type = 'codex'
   agentOptionsForm.target = 'local'
   agentOptionsForm.solo_mode = true
@@ -1849,7 +1945,7 @@ async function handleCreateAdvancedAgent() {
     await workspaceStore.ensureWorkspaceAgent({
       agent_type: agentOptionsForm.agent_type,
       title: agentOptionsForm.title.trim() || null,
-      role: 'orchestrator',
+      role: agentOptionsForm.role,
       reuse_existing: false,
       target: agentOptionsForm.target,
       cwd: agentOptionsForm.target === 'local' ? cwd || null : null,
@@ -2092,6 +2188,7 @@ watch(tasks, value => {
 
 watch(activeWorkspaceId, value => {
   selectedWorkspaceId.value = value || ''
+  workspaceSessionView.value = 'agents'
   closeTaskDetail()
 })
 
@@ -2400,18 +2497,60 @@ onUnmounted(() => {
 }
 
 .agent-status-header {
-  min-width: 176px;
+  min-width: 210px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
 }
 
-.agent-status-header strong {
-  display: block;
-  margin-top: 2px;
+.agent-status-view-switch {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agent-status-view-switch button {
+  height: 30px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text-muted);
+  cursor: pointer;
+  padding: 0 9px;
+  text-align: left;
+}
+
+.agent-status-view-switch button[data-active='true'] {
+  border-color: var(--ch-color-border-strong);
+  background: var(--ch-color-surface-control-hover);
   color: var(--ch-color-text);
-  font-size: 18px;
+}
+
+.agent-status-view-switch span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.agent-status-view-switch strong {
+  min-width: 20px;
+  border-radius: 999px;
+  background: var(--ch-color-chip-bg);
+  color: currentColor;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
 }
 
 .agent-status-eyebrow {
@@ -2486,14 +2625,16 @@ onUnmounted(() => {
 
 .agent-status-card-main:focus-visible,
 .agent-status-delete:focus-visible,
-.agent-status-refresh:focus-visible {
+.agent-status-refresh:focus-visible,
+.agent-status-view-switch button:focus-visible {
   outline: 2px solid var(--ch-color-accent-ring-strong);
   outline-offset: 2px;
 }
 
 .agent-status-card-main:active,
 .agent-status-delete:active,
-.agent-status-refresh:active {
+.agent-status-refresh:active,
+.agent-status-view-switch button:active {
   transform: translateY(1px);
 }
 
@@ -3986,7 +4127,33 @@ onUnmounted(() => {
   }
 
   .agent-status-header {
-    display: none;
+    min-width: 0;
+    display: flex;
+    gap: 8px;
+  }
+
+  .agent-status-view-switch {
+    flex-direction: row;
+    gap: 6px;
+  }
+
+  .agent-status-view-switch button {
+    height: 28px;
+    padding: 0 8px;
+  }
+
+  .agent-status-view-switch span {
+    font-size: 11px;
+  }
+
+  .agent-status-view-switch strong {
+    min-width: 18px;
+    font-size: 10px;
+    line-height: 17px;
+  }
+
+  .agent-status-toolbar {
+    flex: 0 0 auto;
   }
 
   .agent-status-grid {
