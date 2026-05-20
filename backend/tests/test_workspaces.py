@@ -15,6 +15,7 @@ from claude_hub.models import (
     AgentRuntimeStatus,
     AgentType,
     ExecutionTarget,
+    ManagedSession,
     ManagedSessionStatus,
     RemoteProfile,
     TerminalAgentStatus,
@@ -31,6 +32,19 @@ PNG_DATA_URL = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGA"
     "WjR9awAAAABJRU5ErkJggg=="
 )
+
+
+def pass_task_review(client: TestClient, task_id: str, message: str = "Review passed"):
+    reviewer_id = workspace_manager.tasks[task_id].review_session_id
+    assert reviewer_id is not None
+    return client.post(
+        f"/api/workspaces/sessions/{reviewer_id}/reports",
+        json={
+            "task_id": task_id,
+            "state": "review_passed",
+            "message": message,
+        },
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -174,6 +188,396 @@ def test_spawn_worker_is_disabled(tmp_path: Path) -> None:
     assert workspace_manager.sessions == {}
 
 
+def test_completed_report_creates_temporary_reviewer(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    created_tabs: list[str] = []
+    sent_messages: list[tuple[str, str]] = []
+    renamed_tabs: list[tuple[str, str | None]] = []
+
+    async def fake_create_tab(
+        name: str,
+        shell: Optional[str] = None,
+        cwd: Optional[str] = None,
+        solo_mode: bool = False,
+        agent_type: AgentType = AgentType.CLAUDE,
+        target: ExecutionTarget = ExecutionTarget.LOCAL,
+        remote_profile_id: Optional[str] = None,
+        remote_cwd: Optional[str] = None,
+        remote_reconnect: bool = True,
+        remote_forward_port: Optional[int] = None,
+        workspace_id: Optional[str] = None,
+        workspace_name: Optional[str] = None,
+        workspace_role: WorkspaceSessionRole | None = None,
+    ) -> TerminalTab:
+        created_tabs.append(name)
+        return TerminalTab(
+            id=f"review-tab-{len(created_tabs)}",
+            name=name,
+            shell=shell,
+            cwd=cwd,
+            solo_mode=solo_mode,
+            agent_type=agent_type,
+            target=target,
+            remote_profile_id=remote_profile_id,
+            remote_cwd=remote_cwd,
+            remote_reconnect=remote_reconnect,
+            port=12400 + len(created_tabs),
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+            workspace_role=workspace_role,
+        )
+
+    async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
+        sent_messages.append((tmux_session, message))
+
+    async def fake_ensure_session_ready(_session) -> None:
+        return None
+
+    async def fake_update_tab(tab_id: str, name: Optional[str] = None, **_: object) -> TerminalTab:
+        renamed_tabs.append((tab_id, name))
+        return TerminalTab(
+            id=tab_id,
+            name=name or "unchanged",
+            shell=None,
+            cwd=str(repo),
+            solo_mode=True,
+            agent_type=AgentType.CODEX,
+            target=ExecutionTarget.LOCAL,
+            remote_profile_id=None,
+            remote_cwd=None,
+            remote_reconnect=True,
+            port=12499,
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=None,
+            workspace_name=None,
+            workspace_role=None,
+        )
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
+    monkeypatch.setattr(workspace_module.ttyd_manager, "update_tab", fake_update_tab)
+    monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+    monkeypatch.setattr(
+        workspace_manager,
+        "_ensure_session_ready_for_send",
+        fake_ensure_session_ready,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Review Loop", "path": str(repo), "session_prefix": "rl"},
+    ).json()
+    worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Review me", "prompt": "Implement then review"},
+    ).json()
+    started = client.post(
+        f"/api/workspaces/tasks/{task['id']}/start",
+        json={"target_session_id": worker["id"]},
+    ).json()
+
+    response = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "completed",
+            "message": "Done",
+            "changed_files": ["frontend/src/App.vue"],
+            "validation": "pnpm build",
+        },
+    )
+
+    assert response.status_code == 201
+    updated = workspace_manager.tasks[task["id"]]
+    assert updated.status == WorkspaceTaskStatus.WORKING
+    assert updated.review_attempts == 1
+    assert updated.review_session_id is not None
+    reviewer = workspace_manager.sessions[updated.review_session_id]
+    assert reviewer.role == WorkspaceSessionRole.REVIEWER
+    assert reviewer.ephemeral is True
+    assert reviewer.current_task_id == task["id"]
+    assert reviewer.title == "Review me"
+    assert renamed_tabs[-1] == (reviewer.tab_id, "Review me")
+    assert "independent reviewer agent" in sent_messages[-2][1]
+    assert "Review workspace task" in sent_messages[-1][1]
+
+
+@pytest.mark.parametrize("report_state", ["ready_for_review", "blocked", "needs_input"])
+def test_agent_review_gate_states_trigger_reviewer(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+    report_state: str,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    created_tabs: list[str] = []
+
+    async def fake_create_tab(
+        name: str,
+        shell: Optional[str] = None,
+        cwd: Optional[str] = None,
+        solo_mode: bool = False,
+        agent_type: AgentType = AgentType.CLAUDE,
+        target: ExecutionTarget = ExecutionTarget.LOCAL,
+        remote_profile_id: Optional[str] = None,
+        remote_cwd: Optional[str] = None,
+        remote_reconnect: bool = True,
+        remote_forward_port: Optional[int] = None,
+        workspace_id: Optional[str] = None,
+        workspace_name: Optional[str] = None,
+        workspace_role: WorkspaceSessionRole | None = None,
+    ) -> TerminalTab:
+        created_tabs.append(name)
+        return TerminalTab(
+            id=f"manual-review-tab-{len(created_tabs)}",
+            name=name,
+            shell=shell,
+            cwd=cwd,
+            solo_mode=solo_mode,
+            agent_type=agent_type,
+            target=target,
+            remote_profile_id=remote_profile_id,
+            remote_cwd=remote_cwd,
+            remote_reconnect=remote_reconnect,
+            port=12500 + len(created_tabs),
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+            workspace_role=workspace_role,
+        )
+
+    async def fake_send_tmux_message(_tmux_session: str, _message: str) -> None:
+        return None
+
+    async def fake_ensure_session_ready(_session) -> None:
+        return None
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
+    monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+    monkeypatch.setattr(
+        workspace_manager,
+        "_ensure_session_ready_for_send",
+        fake_ensure_session_ready,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Manual Review", "path": str(repo), "session_prefix": "manual"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Manual gate", "prompt": "Stop at human review"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+
+    response = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": report_state,
+            "message": "Needs reviewer gate",
+        },
+    )
+
+    assert response.status_code == 201
+    updated = workspace_manager.tasks[task["id"]]
+    assert updated.status == WorkspaceTaskStatus.WORKING
+    assert updated.review_session_id is not None
+    assert (
+        workspace_manager.sessions[updated.review_session_id].role == WorkspaceSessionRole.REVIEWER
+    )
+
+
+def test_review_passed_keeps_task_in_review(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    created_tabs: list[str] = []
+
+    async def fake_create_tab(
+        name: str,
+        shell: Optional[str] = None,
+        cwd: Optional[str] = None,
+        solo_mode: bool = False,
+        agent_type: AgentType = AgentType.CLAUDE,
+        target: ExecutionTarget = ExecutionTarget.LOCAL,
+        remote_profile_id: Optional[str] = None,
+        remote_cwd: Optional[str] = None,
+        remote_reconnect: bool = True,
+        remote_forward_port: Optional[int] = None,
+        workspace_id: Optional[str] = None,
+        workspace_name: Optional[str] = None,
+        workspace_role: WorkspaceSessionRole | None = None,
+    ) -> TerminalTab:
+        created_tabs.append(name)
+        return TerminalTab(
+            id=f"pass-tab-{len(created_tabs)}",
+            name=name,
+            shell=shell,
+            cwd=cwd,
+            solo_mode=solo_mode,
+            agent_type=agent_type,
+            target=target,
+            remote_profile_id=remote_profile_id,
+            remote_cwd=remote_cwd,
+            remote_reconnect=remote_reconnect,
+            port=12600 + len(created_tabs),
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+            workspace_role=workspace_role,
+        )
+
+    async def fake_send_tmux_message(_tmux_session: str, _message: str) -> None:
+        return None
+
+    async def fake_ensure_session_ready(_session) -> None:
+        return None
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
+    monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+    monkeypatch.setattr(
+        workspace_manager,
+        "_ensure_session_ready_for_send",
+        fake_ensure_session_ready,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Pass Review", "path": str(repo), "session_prefix": "pass"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Pass task", "prompt": "Complete cleanly"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={"task_id": task["id"], "state": "completed", "message": "Done"},
+    )
+    reviewer_id = workspace_manager.tasks[task["id"]].review_session_id
+
+    response = client.post(
+        f"/api/workspaces/sessions/{reviewer_id}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "review_passed",
+            "message": "Looks good",
+            "validation": "Reviewed reported checks",
+        },
+    )
+
+    assert response.status_code == 201
+    assert workspace_manager.tasks[task["id"]].status == WorkspaceTaskStatus.REVIEW
+    assert workspace_manager.tasks[task["id"]].review_completed_at is not None
+    assert workspace_manager.sessions[reviewer_id].current_task_id is None
+
+
+def test_review_failed_returns_feedback_to_original_agent(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    created_tabs: list[str] = []
+    sent_messages: list[tuple[str, str]] = []
+
+    async def fake_create_tab(
+        name: str,
+        shell: Optional[str] = None,
+        cwd: Optional[str] = None,
+        solo_mode: bool = False,
+        agent_type: AgentType = AgentType.CLAUDE,
+        target: ExecutionTarget = ExecutionTarget.LOCAL,
+        remote_profile_id: Optional[str] = None,
+        remote_cwd: Optional[str] = None,
+        remote_reconnect: bool = True,
+        remote_forward_port: Optional[int] = None,
+        workspace_id: Optional[str] = None,
+        workspace_name: Optional[str] = None,
+        workspace_role: WorkspaceSessionRole | None = None,
+    ) -> TerminalTab:
+        created_tabs.append(name)
+        return TerminalTab(
+            id=f"fail-tab-{len(created_tabs)}",
+            name=name,
+            shell=shell,
+            cwd=cwd,
+            solo_mode=solo_mode,
+            agent_type=agent_type,
+            target=target,
+            remote_profile_id=remote_profile_id,
+            remote_cwd=remote_cwd,
+            remote_reconnect=remote_reconnect,
+            port=12700 + len(created_tabs),
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+            workspace_role=workspace_role,
+        )
+
+    async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
+        sent_messages.append((tmux_session, message))
+
+    async def fake_ensure_session_ready(_session) -> None:
+        return None
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
+    monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+    monkeypatch.setattr(
+        workspace_manager,
+        "_ensure_session_ready_for_send",
+        fake_ensure_session_ready,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Fail Review", "path": str(repo), "session_prefix": "fail"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Fail task", "prompt": "Needs a fix"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={"task_id": task["id"], "state": "completed", "message": "Done"},
+    )
+    reviewer_id = workspace_manager.tasks[task["id"]].review_session_id
+
+    response = client.post(
+        f"/api/workspaces/sessions/{reviewer_id}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "review_failed",
+            "message": "Required fixes: add the missing assertion.",
+        },
+    )
+
+    assert response.status_code == 201
+    updated = workspace_manager.tasks[task["id"]]
+    assert updated.status == WorkspaceTaskStatus.WORKING
+    assert workspace_manager.sessions[started["session_id"]].current_task_id == task["id"]
+    assert "Reviewer requested changes" in sent_messages[-1][1]
+    assert "add the missing assertion" in sent_messages[-1][1]
+
+
 def test_start_task_dispatches_to_resident_agent(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
@@ -217,12 +621,34 @@ def test_start_task_dispatches_to_resident_agent(
 
     sent_messages: list[tuple[str, str]] = []
     tab_metadata_updates: list[tuple[str, str | None, str | None, WorkspaceSessionRole | None]] = []
+    renamed_tabs: list[tuple[str, str | None]] = []
 
     async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
         sent_messages.append((tmux_session, message))
 
     async def fake_ensure_session_ready(_session) -> None:
         return None
+
+    async def fake_update_tab(tab_id: str, name: Optional[str] = None, **_: object) -> TerminalTab:
+        renamed_tabs.append((tab_id, name))
+        return TerminalTab(
+            id=tab_id,
+            name=name or "unchanged",
+            shell=None,
+            cwd=str(repo),
+            solo_mode=True,
+            agent_type=AgentType.CODEX,
+            target=ExecutionTarget.LOCAL,
+            remote_profile_id=None,
+            remote_cwd=None,
+            remote_reconnect=True,
+            port=12346,
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=workspace_response.json()["id"],
+            workspace_name="Resident Repo",
+            workspace_role=WorkspaceSessionRole.ORCHESTRATOR,
+        )
 
     def fake_set_tab_workspace_metadata(
         tab_id: str,
@@ -234,6 +660,7 @@ def test_start_task_dispatches_to_resident_agent(
         return True
 
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
+    monkeypatch.setattr(workspace_module.ttyd_manager, "update_tab", fake_update_tab)
     monkeypatch.setattr(
         workspace_module.ttyd_manager,
         "set_tab_workspace_metadata",
@@ -276,10 +703,13 @@ def test_start_task_dispatches_to_resident_agent(
     assert started_task["session_id"] == "resident-agent-1"
     session = workspace_manager.sessions[started_task["session_id"]]
     assert session.role == WorkspaceSessionRole.ORCHESTRATOR
+    assert session.title == "Resident task"
     assert session.workspace_path == str(repo)
+    assert renamed_tabs == [("tab-agent", "Resident task")]
     assert len(sent_messages) == 2
     assert "resident workspace agent" in sent_messages[0][1]
     assert "Run this in the resident terminal" in sent_messages[1][1]
+    assert renamed_tabs == [("tab-agent", "Resident task")]
 
     board_response = client.get(f"/api/workspaces/{workspace_response.json()['id']}/board")
     board = board_response.json()
@@ -305,6 +735,98 @@ def test_start_task_dispatches_to_resident_agent(
     assert report_response.status_code == 201
     board_response = client.get(f"/api/workspaces/{workspace_response.json()['id']}/board")
     assert board_response.json()["tasks"][0]["status"] == "working"
+
+
+def test_report_with_task_renames_non_orchestrator_session(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    renamed_tabs: list[tuple[str, str | None]] = []
+
+    async def fake_update_tab(tab_id: str, name: Optional[str] = None, **_: object) -> TerminalTab:
+        renamed_tabs.append((tab_id, name))
+        return TerminalTab(
+            id=tab_id,
+            name=name or "unchanged",
+            shell=None,
+            cwd=str(repo),
+            solo_mode=True,
+            agent_type=AgentType.CODEX,
+            target=ExecutionTarget.LOCAL,
+            remote_profile_id=None,
+            remote_cwd=None,
+            remote_reconnect=True,
+            port=12600,
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=None,
+            workspace_name=None,
+            workspace_role=None,
+        )
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "update_tab", fake_update_tab)
+
+    client = TestClient(app)
+    workspace_response = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Review Repo",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "review",
+        },
+    )
+    task_response = client.post(
+        f"/api/workspaces/{workspace_response.json()['id']}/tasks",
+        json={
+            "title": "Review assigned task",
+            "prompt": "Review this change",
+            "agent_type": "codex",
+        },
+    )
+    now = datetime.now()
+    workspace_manager.sessions["review-reviewer-1"] = ManagedSession(
+        id="review-reviewer-1",
+        workspace_id=workspace_response.json()["id"],
+        task_id=None,
+        tab_id="tab-reviewer",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CODEX,
+        status=ManagedSessionStatus.IDLE,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        current_task_id=None,
+        queued_count=0,
+        title="Reviewer 1",
+        branch=None,
+        workspace_path=str(repo),
+        tmux_session="claude-hub-tab-revi",
+        target=ExecutionTarget.LOCAL,
+        remote_profile_id=None,
+        remote_cwd=None,
+        remote_reconnect=True,
+        solo_mode=True,
+        remote_forward_port=None,
+        created_at=now,
+        updated_at=now,
+    )
+
+    report_response = client.post(
+        "/api/workspaces/sessions/review-reviewer-1/reports",
+        json={
+            "task_id": task_response.json()["id"],
+            "state": "started",
+            "message": "Started review",
+        },
+    )
+
+    assert report_response.status_code == 201
+    session = workspace_manager.sessions["review-reviewer-1"]
+    assert session.role == WorkspaceSessionRole.WORKER
+    assert session.title == "Review assigned task"
+    assert session.current_task_id == task_response.json()["id"]
+    assert renamed_tabs == [("tab-reviewer", "Review assigned task")]
 
 
 def test_start_task_prefers_related_task_agent(
@@ -1105,9 +1627,13 @@ def test_interrupted_idle_working_agent_auto_continue_stops_after_limit(
     )
 
     session = workspace_manager.sessions[started["session_id"]]
-    assert sent_messages == []
-    assert workspace_manager.tasks[started["id"]].status == WorkspaceTaskStatus.REVIEW
-    assert workspace_manager.tasks[started["id"]].session_id == started["session_id"]
+    task_after_limit = workspace_manager.tasks[started["id"]]
+    assert len(sent_messages) == 2
+    assert "independent reviewer agent" in sent_messages[0][1]
+    assert "Review workspace task" in sent_messages[1][1]
+    assert task_after_limit.status == WorkspaceTaskStatus.WORKING
+    assert task_after_limit.session_id == started["session_id"]
+    assert task_after_limit.review_session_id is not None
     assert session.runtime_status == AgentRuntimeStatus.ATTENTION
     assert session.auto_continue_attempts == 10
 
@@ -1205,6 +1731,8 @@ def test_review_task_stays_in_review_when_agent_runtime_is_working(
         },
     )
     assert review_response.status_code == 201
+    pass_response = pass_task_review(client, task["id"])
+    assert pass_response.status_code == 201
     assert (
         client.get(f"/api/workspaces/{workspace['id']}/board").json()["tasks"][0]["status"]
         == "review"
@@ -1333,6 +1861,8 @@ def test_review_task_moves_to_working_when_agent_has_new_working_activity(
         },
     )
     assert review_response.status_code == 201
+    pass_response = pass_task_review(client, task["id"])
+    assert pass_response.status_code == 201
     reviewed_at = workspace_manager.tasks[task["id"]].reviewed_at
     assert reviewed_at is not None
     assert (
@@ -1455,7 +1985,9 @@ def test_latest_ready_report_does_not_override_later_working_activity(
         },
     )
     assert review_response.status_code == 201
-    review_created_at = datetime.fromisoformat(review_response.json()["created_at"])
+    pass_response = pass_task_review(client, task["id"])
+    assert pass_response.status_code == 201
+    review_created_at = datetime.fromisoformat(pass_response.json()["created_at"])
     stale_started_at = review_created_at + timedelta(seconds=30)
     workspace_manager.tasks[task["id"]] = workspace_manager.tasks[task["id"]].model_copy(
         update={
@@ -1468,7 +2000,7 @@ def test_latest_ready_report_does_not_override_later_working_activity(
     board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
 
     assert board["tasks"][0]["status"] == "working"
-    assert board["tasks"][0]["reviewed_at"] == review_response.json()["created_at"]
+    assert board["tasks"][0]["reviewed_at"] == pass_response.json()["created_at"]
 
 
 def test_fresh_ready_report_is_not_immediately_reopened_by_runtime_working(
@@ -1564,6 +2096,8 @@ def test_fresh_ready_report_is_not_immediately_reopened_by_runtime_working(
         },
     )
     assert review_response.status_code == 201
+    pass_response = pass_task_review(client, task["id"])
+    assert pass_response.status_code == 201
     reviewed_at = workspace_manager.tasks[task["id"]].reviewed_at
     assert reviewed_at is not None
     status_samples[:] = [
@@ -1685,6 +2219,8 @@ def test_completed_review_task_reopens_only_after_runtime_grace(
         },
     )
     assert completed_response.status_code == 201
+    pass_response = pass_task_review(client, task["id"])
+    assert pass_response.status_code == 201
     reviewed_at = workspace_manager.tasks[task["id"]].reviewed_at
     assert reviewed_at is not None
 
@@ -1801,6 +2337,8 @@ def test_continue_task_marks_working_before_send_verification_failure(
         },
     )
     assert review_response.status_code == 201
+    pass_response = pass_task_review(client, task["id"])
+    assert pass_response.status_code == 201
     assert (
         client.get(f"/api/workspaces/{workspace['id']}/board").json()["tasks"][0]["status"]
         == "review"
@@ -1824,6 +2362,7 @@ def test_continue_task_marks_working_before_send_verification_failure(
     assert board["sessions"][0]["current_task_id"] == task["id"]
     assert [report["state"] for report in board["reports"]] == [
         "ready_for_review",
+        "review_passed",
         "working",
     ]
 

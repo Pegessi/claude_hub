@@ -12,7 +12,7 @@ export type ManagedSessionStatus =
   | 'done'
   | 'stopped'
   | 'error'
-export type WorkspaceSessionRole = 'worker' | 'orchestrator' | 'dispatcher'
+export type WorkspaceSessionRole = 'worker' | 'orchestrator' | 'reviewer' | 'dispatcher'
 export type AgentReportState =
   | 'started'
   | 'working'
@@ -20,6 +20,10 @@ export type AgentReportState =
   | 'needs_input'
   | 'ready_for_review'
   | 'completed'
+  | 'review_started'
+  | 'review_passed'
+  | 'review_failed'
+  | 'review_needs_input'
 
 export interface TerminalTab {
   id: string
@@ -148,6 +152,10 @@ export interface WorkspaceTask {
   clear_context?: boolean | null
   dispatch_reason?: string | null
   dispatch_pending: boolean
+  review_session_id?: string | null
+  review_attempts: number
+  review_requested_at?: string | null
+  review_completed_at?: string | null
   queued_at?: string | null
   started_at?: string | null
   reviewed_at?: string | null
@@ -187,6 +195,7 @@ export interface EnsureWorkspaceAgentRequest {
   remote_profile_id?: string | null
   remote_cwd?: string | null
   remote_reconnect?: boolean | null
+  ephemeral?: boolean
 }
 
 export interface ManagedSession {
@@ -209,6 +218,7 @@ export interface ManagedSession {
   remote_cwd?: string | null
   remote_reconnect: boolean
   solo_mode: boolean
+  ephemeral: boolean
   remote_forward_port?: number | null
   created_at: string
   updated_at: string

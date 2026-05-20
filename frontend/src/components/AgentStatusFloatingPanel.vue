@@ -1,6 +1,6 @@
 <template>
   <div
-    v-if="rows.length > 0"
+    v-if="availableRows.length > 0"
     class="agent-status"
     :data-expanded="expanded"
   >
@@ -24,7 +24,15 @@
       :aria-label="panelTitle"
     >
       <div class="panel-header">
-        <span class="panel-title">{{ panelTitle }}</span>
+        <div class="panel-title-block">
+          <span class="panel-title">{{ panelTitle }}</span>
+          <span
+            v-if="isManagedSource"
+            class="panel-subtitle"
+          >
+            {{ managedViewLabel }} {{ rows.length }}
+          </span>
+        </div>
         <LoadingButton
           type="button"
           class="panel-refresh"
@@ -32,51 +40,87 @@
           :loading="isStatusLoading"
           hide-content-while-loading
           loading-label="Refreshing statuses"
-          @click="store.fetchAgentStatuses"
+          @click="refreshPanelData"
         >
           ↻
         </LoadingButton>
       </div>
 
       <div
+        v-if="isManagedSource"
+        class="panel-mode-switch"
+        aria-label="Workspace terminal role view"
+      >
+        <button
+          type="button"
+          :data-active="managedView === 'agents'"
+          @click="managedView = 'agents'"
+        >
+          <span>Agents</span>
+          <strong>{{ managedAgentRows.length }}</strong>
+        </button>
+        <button
+          type="button"
+          :data-active="managedView === 'reviewers'"
+          @click="managedView = 'reviewers'"
+        >
+          <span>Reviewers</span>
+          <strong>{{ managedReviewerRows.length }}</strong>
+        </button>
+      </div>
+
+      <div
         v-if="rows.length === 0"
         class="empty-status"
       >
-        Loading statuses...
+        {{ emptyStatusText }}
       </div>
 
       <div
         v-else
         class="agent-list"
       >
-        <button
-          v-for="row in rows"
-          :key="row.tab.id"
-          type="button"
-          class="agent-row"
-          :class="{ active: row.tab.id === activeTabId }"
-          @click="selectTab(row.tab.id)"
+        <section
+          v-for="group in rowGroups"
+          :key="group.key"
+          class="agent-group"
         >
-          <span
-            class="status-dot"
-            :data-status="getRowStatus(row)"
-          />
-          <span class="agent-main">
-            <span class="agent-line">
-              <span class="agent-name">{{ row.tab.name }}</span>
-              <span class="agent-type">{{ getTabKindLabel(row.tab) }}</span>
-            </span>
-            <span class="agent-detail">
-              {{ getRowDetail(row) }}
-            </span>
-          </span>
-          <span
-            class="status-pill"
-            :data-status="getRowStatus(row)"
+          <div
+            v-if="group.title"
+            class="agent-group-header"
           >
-            {{ getRowStatusText(row) }}
-          </span>
-        </button>
+            <span>{{ group.title }}</span>
+            <strong>{{ group.rows.length }}</strong>
+          </div>
+          <button
+            v-for="row in group.rows"
+            :key="row.tab.id"
+            type="button"
+            class="agent-row"
+            :class="{ active: row.tab.id === activeTabId }"
+            @click="selectTab(row.tab.id)"
+          >
+            <span
+              class="status-dot"
+              :data-status="getRowStatus(row)"
+            />
+            <span class="agent-main">
+              <span class="agent-line">
+                <span class="agent-name">{{ row.tab.name }}</span>
+                <span class="agent-type">{{ getTabKindLabel(row.tab) }}</span>
+              </span>
+              <span class="agent-detail">
+                {{ getRowDetail(row) }}
+              </span>
+            </span>
+            <span
+              class="status-pill"
+              :data-status="getRowStatus(row)"
+            >
+              {{ getRowStatusText(row) }}
+            </span>
+          </button>
+        </section>
       </div>
 
       <button
@@ -108,6 +152,8 @@ interface PanelSize {
   width: number
   height: number
 }
+
+type ManagedView = 'agents' | 'reviewers'
 
 const props = withDefaults(defineProps<{
   source?: 'manual' | 'managed'
@@ -142,6 +188,12 @@ interface AgentRow {
   status?: TerminalAgentStatus
 }
 
+interface AgentRowGroup {
+  key: string
+  title: string
+  rows: AgentRow[]
+}
+
 const statusByTabId = computed<Record<string, TerminalAgentStatus>>(() => {
   const map: Record<string, TerminalAgentStatus> = {}
   for (const status of agentStatuses.value) {
@@ -154,15 +206,62 @@ const targetTabs = computed<TerminalTab[]>(() =>
   props.source === 'manual' ? manualTabs.value : managedTabs.value
 )
 
-const rows = computed<AgentRow[]>(() =>
+const allRows = computed<AgentRow[]>(() =>
   targetTabs.value.map(tab => ({
     tab,
     status: statusByTabId.value[tab.id],
   }))
 )
 
-const label = computed(() => props.label)
+const isManagedSource = computed(() => props.source === 'managed')
+const managedView = ref<ManagedView>('agents')
+
+const managedAgentRows = computed<AgentRow[]>(() =>
+  allRows.value.filter(row => isManagedAgentTab(row.tab))
+)
+
+const managedReviewerRows = computed<AgentRow[]>(() =>
+  allRows.value.filter(row => row.tab.workspace_role === 'reviewer')
+)
+
+const rows = computed<AgentRow[]>(() => {
+  if (!isManagedSource.value) return allRows.value
+  return managedView.value === 'reviewers' ? managedReviewerRows.value : managedAgentRows.value
+})
+
+const availableRows = computed<AgentRow[]>(() =>
+  isManagedSource.value ? [...managedAgentRows.value, ...managedReviewerRows.value] : allRows.value
+)
+
+const rowGroups = computed<AgentRowGroup[]>(() => {
+  if (!isManagedSource.value) {
+    return [{ key: 'manual', title: '', rows: rows.value }]
+  }
+
+  const groups = new Map<string, AgentRowGroup>()
+  for (const row of rows.value) {
+    const key = row.tab.workspace_id || 'unknown'
+    const title = row.tab.workspace_name || 'Workspace'
+    const existing = groups.get(key)
+    if (existing) {
+      existing.rows.push(row)
+    } else {
+      groups.set(key, { key, title, rows: [row] })
+    }
+  }
+  return Array.from(groups.values())
+})
+
+const label = computed(() =>
+  isManagedSource.value && managedView.value === 'reviewers' ? 'Reviewers' : props.label
+)
 const panelTitle = computed(() => props.panelTitle)
+const managedViewLabel = computed(() => (managedView.value === 'reviewers' ? 'Reviewers' : 'Agents'))
+const emptyStatusText = computed(() =>
+  isManagedSource.value && managedView.value === 'reviewers'
+    ? 'No reviewer terminals.'
+    : 'No agent terminals.'
+)
 const triggerTitle = computed(() =>
   props.source === 'manual' ? 'Manual terminal statuses' : 'Workspace agent terminals'
 )
@@ -211,7 +310,15 @@ function toggleExpanded() {
   expanded.value = !expanded.value
   if (expanded.value) {
     window.dispatchEvent(new CustomEvent(PANEL_OPEN_EVENT, { detail: panelInstanceKey }))
+    void refreshPanelData()
   }
+}
+
+async function refreshPanelData() {
+  await Promise.all([
+    store.fetchTabs(),
+    store.fetchAgentStatuses(),
+  ])
 }
 
 function handlePeerPanelOpen(event: Event) {
@@ -235,9 +342,15 @@ function getRowStatusText(row: AgentRow): string {
 
 function getTabKindLabel(tab: TerminalTab): string {
   if (props.source === 'managed') {
+    if (tab.workspace_role === 'reviewer') return 'Reviewer'
+    if (tab.workspace_role === 'dispatcher') return 'Dispatcher'
     return tab.workspace_role === 'worker' ? 'Worker' : 'Agent'
   }
   return tab.agent_type || 'terminal'
+}
+
+function isManagedAgentTab(tab: TerminalTab): boolean {
+  return tab.workspace_role !== 'reviewer' && tab.workspace_role !== 'dispatcher'
 }
 
 function getRowDetail(row: AgentRow): string {
@@ -293,6 +406,7 @@ function setStatusPolling(active: boolean) {
   if (active === statusPollingActive) return
   statusPollingActive = active
   if (active) {
+    void store.fetchTabs()
     store.startAgentStatusPolling()
   } else {
     store.stopAgentStatusPolling()
@@ -305,6 +419,7 @@ onMounted(() => {
   window.addEventListener(PANEL_OPEN_EVENT, handlePeerPanelOpen)
   if (expanded.value) {
     window.dispatchEvent(new CustomEvent(PANEL_OPEN_EVENT, { detail: panelInstanceKey }))
+    void refreshPanelData()
   }
 })
 
@@ -422,10 +537,24 @@ onUnmounted(() => {
   border-bottom: 1px solid var(--ch-color-border-muted);
 }
 
+.panel-title-block {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .panel-title {
   color: var(--ch-color-text);
   font-size: 12px;
   font-weight: 700;
+}
+
+.panel-subtitle {
+  color: var(--ch-color-text-muted);
+  font-size: 10px;
+  font-weight: 650;
+  text-transform: uppercase;
 }
 
 .panel-refresh {
@@ -447,6 +576,60 @@ onUnmounted(() => {
   color: var(--ch-color-text);
 }
 
+.panel-mode-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--ch-color-border-muted);
+}
+
+.panel-mode-switch button {
+  height: 28px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: 4px;
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text-muted);
+  cursor: pointer;
+  padding: 0 8px;
+  text-align: left;
+}
+
+.panel-mode-switch button[data-active='true'] {
+  border-color: var(--ch-color-border-strong);
+  background: var(--ch-color-surface-control-hover);
+  color: var(--ch-color-text);
+}
+
+.panel-mode-switch span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.panel-mode-switch strong {
+  min-width: 18px;
+  border-radius: 999px;
+  background: var(--ch-color-chip-bg);
+  color: currentColor;
+  font-size: 10px;
+  line-height: 17px;
+  text-align: center;
+}
+
+.panel-mode-switch button:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring-strong);
+  outline-offset: 2px;
+}
+
 .empty-status {
   padding: 14px 12px;
   color: var(--ch-color-text-muted);
@@ -458,6 +641,36 @@ onUnmounted(() => {
   min-height: 0;
   max-height: min(420px, calc(60vh - 44px));
   overflow-y: auto;
+}
+
+.agent-group + .agent-group {
+  border-top: 1px solid var(--ch-color-border-muted);
+}
+
+.agent-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--ch-color-surface-raised);
+  color: var(--ch-color-text-muted);
+  padding: 7px 11px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.agent-group-header span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-group-header strong {
+  flex: 0 0 auto;
+  color: var(--ch-color-text);
+  font-size: 10px;
 }
 
 .agent-row {

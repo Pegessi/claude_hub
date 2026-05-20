@@ -152,7 +152,12 @@ export const useTerminalStore = defineStore('terminal', () => {
     try {
       const response = await fetch(`${API_BASE}/tabs/status`)
       if (!response.ok) throw new Error('Failed to fetch agent statuses')
-      agentStatuses.value = await response.json()
+      const statuses: TerminalAgentStatus[] = await response.json()
+      agentStatuses.value = statuses
+      const knownTabIds = new Set(tabs.value.map(tab => tab.id))
+      if (statuses.some(status => !knownTabIds.has(status.tab_id))) {
+        void fetchTabs()
+      }
     } catch (e) {
       console.error('Error fetching agent statuses:', e)
     } finally {
