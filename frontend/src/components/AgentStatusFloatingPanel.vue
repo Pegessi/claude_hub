@@ -37,10 +37,10 @@
           type="button"
           class="panel-refresh"
           title="Refresh statuses"
-          :loading="isStatusLoading"
+          :loading="isPanelRefreshLoading"
           hide-content-while-loading
           loading-label="Refreshing statuses"
-          @click="refreshPanelData"
+          @click="refreshPanelData()"
         >
           ↻
         </LoadingButton>
@@ -167,13 +167,14 @@ const props = withDefaults(defineProps<{
 
 const store = useTerminalStore()
 const appStore = useAppStore()
-const { manualTabs, managedTabs, agentStatuses, activeTabId, isStatusLoading } = storeToRefs(store)
+const { manualTabs, managedTabs, agentStatuses, activeTabId } = storeToRefs(store)
 const { mode } = storeToRefs(appStore)
 const storageKeyExpanded = `claude_hub_${props.source}_status_expanded`
 const storageKeySize = `claude_hub_${props.source}_status_size`
 const panelInstanceKey = props.source
 const expanded = ref(localStorage.getItem(storageKeyExpanded) === 'true')
 const panelSize = ref<PanelSize | null>(loadPanelSize())
+const isPanelRefreshLoading = ref(false)
 let statusPollingActive = false
 let resizeState: {
   startX: number
@@ -310,15 +311,27 @@ function toggleExpanded() {
   expanded.value = !expanded.value
   if (expanded.value) {
     window.dispatchEvent(new CustomEvent(PANEL_OPEN_EVENT, { detail: panelInstanceKey }))
-    void refreshPanelData()
+    void refreshPanelData({ showIndicator: false })
   }
 }
 
-async function refreshPanelData() {
-  await Promise.all([
-    store.fetchTabs(),
-    store.fetchAgentStatuses(),
-  ])
+async function refreshPanelData(options: { showIndicator?: boolean } = {}) {
+  const showIndicator = options.showIndicator !== false
+  if (showIndicator) {
+    if (isPanelRefreshLoading.value) return
+    isPanelRefreshLoading.value = true
+  }
+
+  try {
+    await Promise.all([
+      store.fetchTabs(),
+      store.fetchAgentStatuses(),
+    ])
+  } finally {
+    if (showIndicator) {
+      isPanelRefreshLoading.value = false
+    }
+  }
 }
 
 function handlePeerPanelOpen(event: Event) {
@@ -419,7 +432,7 @@ onMounted(() => {
   window.addEventListener(PANEL_OPEN_EVENT, handlePeerPanelOpen)
   if (expanded.value) {
     window.dispatchEvent(new CustomEvent(PANEL_OPEN_EVENT, { detail: panelInstanceKey }))
-    void refreshPanelData()
+    void refreshPanelData({ showIndicator: false })
   }
 })
 
