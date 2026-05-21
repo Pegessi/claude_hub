@@ -3,6 +3,16 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-05-21
+
+### fix: serialize workspace task dispatch
+- Serialize per-workspace dispatch so the background monitor and task start path cannot send `/clear` and the assignment prompt for the same queued task twice
+- Keep pasted Codex task prompts marked pending when only a command-result marker follows, avoiding false success that leaves task content pasted but not submitted
+- Keep tasks in Review after `review_passed` until a human clicks Done, while releasing reviewer assignments and preventing runtime refreshes from moving reviewed tasks back to Working
+- Require future development to use isolated worktrees with task branches; frontend changes should use a dedicated debug server and stop it before merge or handoff
+- Add regression coverage for concurrent workspace dispatch and pasted-input submit detection
+- **Files**: AGENTS.md, CLAUDE.md, workspace_manager.py, test_workspaces.py
+
 ## 2026-05-20
 
 ### feat: add workspace reviewer loop
