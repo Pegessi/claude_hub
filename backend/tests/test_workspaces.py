@@ -1047,6 +1047,103 @@ def test_start_task_dispatches_to_resident_agent(
     assert board_response.json()["tasks"][0]["status"] == "working"
 
 
+def test_idle_review_task_releases_agent_for_queued_dispatch(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    status_samples: list[TerminalAgentStatus] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="queue-review-tab",
+        port=12347,
+        sent_messages=sent_messages,
+    )
+
+    async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
+        return status_samples
+
+    monkeypatch.setattr(
+        workspace_module.ttyd_manager,
+        "list_tab_agent_statuses",
+        fake_list_statuses,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Queue Review Repo",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "queue-review",
+        },
+    ).json()
+    client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
+    first_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={
+            "title": "First task",
+            "prompt": "Complete this before the next queued task",
+        },
+    ).json()
+    first_start = client.post(f"/api/workspaces/tasks/{first_task['id']}/start", json={}).json()
+    session_id = first_start["session_id"]
+    session = workspace_manager.sessions[session_id]
+
+    ready_response = client.post(
+        f"/api/workspaces/sessions/{session_id}/reports",
+        json={
+            "task_id": first_task["id"],
+            "state": "ready_for_review",
+            "message": "Ready for review",
+        },
+    )
+    assert ready_response.status_code == 201
+    assert pass_task_review(client, first_task["id"]).status_code == 201
+    assert workspace_manager.tasks[first_task["id"]].status == WorkspaceTaskStatus.REVIEW
+    assert workspace_manager.sessions[session_id].current_task_id == first_task["id"]
+
+    reviewed_at = workspace_manager.tasks[first_task["id"]].reviewed_at
+    assert reviewed_at is not None
+    status_samples[:] = [
+        TerminalAgentStatus(
+            tab_id=session.tab_id,
+            tab_name="Queue Review Repo Agent 1",
+            agent_type=AgentType.CODEX,
+            status=AgentRuntimeStatus.IDLE,
+            status_text="Idle",
+            detail=None,
+            tmux_session=session.tmux_session,
+            last_changed_at=reviewed_at,
+            sampled_at=reviewed_at + timedelta(seconds=1),
+        )
+    ]
+
+    second_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={
+            "title": "Second task",
+            "prompt": "Run after the reviewed task releases the idle agent",
+        },
+    ).json()
+    second_start = client.post(
+        f"/api/workspaces/tasks/{second_task['id']}/start",
+        json={},
+    )
+
+    assert second_start.status_code == 201
+    started_second = second_start.json()
+    assert started_second["status"] == "working"
+    assert started_second["session_id"] == session_id
+    assert workspace_manager.tasks[first_task["id"]].status == WorkspaceTaskStatus.REVIEW
+    assert workspace_manager.sessions[session_id].current_task_id == second_task["id"]
+    assert "Run after the reviewed task releases the idle agent" in sent_messages[-1][1]
+
+
 def test_report_with_task_renames_non_orchestrator_session(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,

@@ -1291,7 +1291,10 @@ class WorkspaceManager:
         if session.task_id or session.current_task_id:
             current_id = session.task_id or session.current_task_id
             current = self.tasks.get(current_id) if current_id else None
-            if current and current.status != WorkspaceTaskStatus.DONE:
+            if current and current.status not in {
+                WorkspaceTaskStatus.DONE,
+                WorkspaceTaskStatus.REVIEW,
+            }:
                 return False
         return True
 
@@ -2386,6 +2389,24 @@ class WorkspaceManager:
 
             if current_task_id:
                 task = self.tasks.get(current_task_id)
+                if (
+                    runtime_status == AgentRuntimeStatus.IDLE
+                    and task
+                    and task.status == WorkspaceTaskStatus.REVIEW
+                ):
+                    update.update(
+                        {
+                            "task_id": None,
+                            "current_task_id": None,
+                            "status": ManagedSessionStatus.IDLE,
+                            "runtime_status": AgentRuntimeStatus.IDLE,
+                            "auto_continue_task_id": None,
+                            "auto_continue_attempts": 0,
+                            "last_auto_continue_at": None,
+                        }
+                    )
+                    current_task_id = None
+                    changed = True
                 if (
                     run_auto_continue
                     and runtime_status == AgentRuntimeStatus.IDLE

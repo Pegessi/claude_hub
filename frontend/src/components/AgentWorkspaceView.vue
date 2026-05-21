@@ -1665,6 +1665,13 @@ function imageDataUrlsFromText(value: string): string[] {
   return matches || []
 }
 
+function imageDataUrlKey(dataUrl: string): string | null {
+  const match = dataUrl.match(/^data:(image\/(?:png|jpeg|jpg|gif|webp));base64,([A-Za-z0-9+/=]+)$/i)
+  if (!match) return null
+  const mimeType = match[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : match[1].toLowerCase()
+  return `${mimeType}:${match[2]}`
+}
+
 function clipboardImageDataUrls(event: ClipboardEvent): string[] {
   const clipboard = event.clipboardData
   if (!clipboard) return []
@@ -1690,27 +1697,42 @@ function clipboardImageDataUrls(event: ClipboardEvent): string[] {
   return Array.from(urls)
 }
 
-function addDataUrlAttachments(target: DraftAttachment[], dataUrls: string[]) {
+function addDataUrlAttachments(
+  target: DraftAttachment[],
+  dataUrls: string[],
+  seenDataUrlKeys: Set<string>
+) {
   dataUrls.forEach((dataUrl, index) => {
     const match = dataUrl.match(/^data:(image\/(?:png|jpeg|jpg|gif|webp));base64,/i)
     if (!match) return
     const mimeType = match[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : match[1].toLowerCase()
+    const normalizedDataUrl = dataUrl.replace(/^data:image\/jpg;/i, 'data:image/jpeg;')
+    const key = imageDataUrlKey(normalizedDataUrl)
+    if (key && seenDataUrlKeys.has(key)) return
+    if (key) seenDataUrlKeys.add(key)
     target.push({
       id: draftAttachmentId(),
       filename: dataUrlFilename(mimeType, index + 1),
       mime_type: mimeType,
-      data_url: dataUrl.replace(/^data:image\/jpg;/i, 'data:image/jpeg;'),
+      data_url: normalizedDataUrl,
       preview_url: dataUrl,
       size_bytes: Math.floor((dataUrl.length - dataUrl.indexOf(',') - 1) * 0.75),
     })
   })
 }
 
-async function addImageAttachments(target: DraftAttachment[], files: File[]) {
+async function addImageAttachments(
+  target: DraftAttachment[],
+  files: File[],
+  seenDataUrlKeys: Set<string>
+) {
   for (const file of files) {
     const mimeType = imageMimeType(file)
     if (!mimeType) continue
     const dataUrl = normalizeImageDataUrl(await fileToImageDataUrl(file, mimeType), mimeType)
+    const key = imageDataUrlKey(dataUrl)
+    if (key && seenDataUrlKeys.has(key)) continue
+    if (key) seenDataUrlKeys.add(key)
     target.push({
       id: draftAttachmentId(),
       filename: imageFilename(file),
@@ -1727,8 +1749,9 @@ async function handleAttachmentPaste(event: ClipboardEvent, target: DraftAttachm
   const dataUrls = clipboardImageDataUrls(event)
   if (files.length === 0 && dataUrls.length === 0) return
   event.preventDefault()
-  await addImageAttachments(target, files)
-  addDataUrlAttachments(target, dataUrls)
+  const seenDataUrlKeys = new Set<string>()
+  await addImageAttachments(target, files, seenDataUrlKeys)
+  addDataUrlAttachments(target, dataUrls, seenDataUrlKeys)
 }
 
 function removeDraftAttachment(target: DraftAttachment[], attachment: DraftAttachment) {
