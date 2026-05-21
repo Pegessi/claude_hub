@@ -5,6 +5,11 @@
 
 ## 2026-05-21
 
+### fix: stop re-prompting orchestrator after review is in flight
+- Skip the auto-continue "no workspace report was recorded" nudge when `review_requested_at` is set without `review_completed_at`, or when the latest report for the task is already `ready_for_review` / `completed` / `blocked` / `needs_input`
+- Previously the orchestrator session stayed parked with `task.status == WORKING` while the reviewer ran, so the monitor kept matching completion patterns in scrollback and re-sending the nudge every ~15s up to 10 attempts
+- **Files**: workspace_manager.py, test_workspaces.py
+
 ### feat: bilingual report detail with EN | 中 toggle in task progress
 - Add optional `message_en` and `message_zh` fields to the AgentReport schema so workers can submit each progress update in both languages; legacy `message` remains a fallback
 - Render a small EN | 中 toggle next to the Progress section in task details that switches the timeline message body between languages, with sticky preference in localStorage
