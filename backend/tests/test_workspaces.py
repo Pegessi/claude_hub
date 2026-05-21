@@ -202,6 +202,41 @@ def test_workspace_task_flow(tmp_path: Path) -> None:
     assert board["sessions"] == []
 
 
+def test_update_workspace_changes_path_and_remote_cwd(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    new_repo = tmp_path / "new-repo"
+    new_repo.mkdir()
+
+    client = TestClient(app)
+    create_response = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Editable",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "edit",
+        },
+    )
+    assert create_response.status_code == 201
+    workspace_id = create_response.json()["id"]
+
+    update_response = client.patch(
+        f"/api/workspaces/{workspace_id}",
+        json={"path": str(new_repo), "remote_cwd": "~/projects/foo"},
+    )
+    assert update_response.status_code == 200
+    updated = update_response.json()
+    assert updated["path"] == str(new_repo.resolve())
+    assert updated["remote_cwd"] == "~/projects/foo"
+
+    missing_response = client.patch(
+        f"/api/workspaces/{workspace_id}",
+        json={"path": str(tmp_path / "does-not-exist")},
+    )
+    assert missing_response.status_code == 400
+
+
 def test_create_task_persists_pasted_image_attachment(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,

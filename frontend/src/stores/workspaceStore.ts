@@ -15,6 +15,7 @@ import type {
   WorkspaceTask,
   WorkspaceTaskCreate,
   WorkspaceTaskStatus,
+  WorkspaceUpdate,
 } from '@/types'
 
 const API_BASE = '/api'
@@ -145,6 +146,34 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       return workspace
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Failed to create workspace'
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  async function updateWorkspace(workspaceId: string, payload: WorkspaceUpdate) {
+    isLoading.value = true
+    error.value = null
+    try {
+      const response = await fetch(`${API_BASE}/workspaces/${workspaceId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      const workspace: Workspace = await response.json()
+      const index = workspaces.value.findIndex(item => item.id === workspaceId)
+      if (index >= 0) {
+        workspaces.value[index] = workspace
+      } else {
+        workspaces.value.push(workspace)
+      }
+      if (board.value && board.value.workspace.id === workspaceId) {
+        board.value = { ...board.value, workspace }
+      }
+      return workspace
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Failed to update workspace'
     } finally {
       isLoading.value = false
     }
@@ -342,6 +371,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     setActiveWorkspace,
     fetchBoard,
     createWorkspace,
+    updateWorkspace,
     createTask,
     updateTaskStatus,
     deleteTask,
