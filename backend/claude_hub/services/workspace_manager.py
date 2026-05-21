@@ -2489,6 +2489,16 @@ class WorkspaceManager:
         task: WorkspaceTask,
         sampled_at: datetime,
     ) -> dict[str, Any] | None:
+        if task.review_requested_at and not task.review_completed_at:
+            return None
+        latest_state = self._latest_report_state(task.id)
+        if latest_state in {
+            AgentReportState.READY_FOR_REVIEW,
+            AgentReportState.COMPLETED,
+            AgentReportState.BLOCKED,
+            AgentReportState.NEEDS_INPUT,
+        }:
+            return None
         try:
             output = await self._capture_tmux_output(session.tmux_session)
         except RuntimeError as exc:
