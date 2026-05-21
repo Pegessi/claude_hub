@@ -5,6 +5,11 @@
 
 ## 2026-05-21
 
+### feat: surface AI review state on working tasks
+- Show a colored "AI reviewing" / "Awaiting AI review" / "Review needs input" badge in the task card header for tasks still in the Working column while a reviewer agent is engaged
+- Drive the badge from existing `review_session_id`, `review_requested_at`, and the latest `review_*` AgentReport so it pulses live during `review_started` and clears once review completes
+- **Files**: AgentWorkspaceView.vue
+
 ### fix: task progress timeline cleanup and bilingual state labels
 - Remove redundant inner status dot on each progress card so the timeline rail dot is the only marker per entry
 - Append a Chinese label after the English state (started/working/completed/...) for bilingual readability
