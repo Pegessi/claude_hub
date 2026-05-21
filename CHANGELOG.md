@@ -5,6 +5,11 @@
 
 ## 2026-05-21
 
+### fix: avoid duplicate split-pane terminal clients
+- Keep a terminal tab assigned to only one visible pane at a time so split layouts cannot attach duplicate ttyd/tmux browser clients to the same Claude session
+- Drop hidden iframe caches when leaving single-pane mode, preventing stale hidden clients from continuing Claude TUI redraw and resize work while another pane displays that tab
+- **Files**: terminalStore.ts, TerminalView.vue
+
 ### fix: serialize workspace task dispatch
 - Serialize per-workspace dispatch so the background monitor and task start path cannot send `/clear` and the assignment prompt for the same queued task twice
 - Keep pasted Codex task prompts marked pending when only a command-result marker follows, avoiding false success that leaves task content pasted but not submitted

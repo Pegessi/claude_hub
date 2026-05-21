@@ -52,12 +52,19 @@ export const useTerminalStore = defineStore('terminal', () => {
     const config = LAYOUT_CONFIGS[layoutType.value]
     const paneCount = config.rows * config.cols
     const newPanes: Pane[] = []
+    const assignedTabIds = new Set<string>()
 
     let foundActive = false
     for (let i = 0; i < paneCount; i++) {
       const existingPane = panes.value[i]
       const id = existingPane?.id || generatePaneId()
-      const tabId = existingPane?.tabId || null
+      let tabId = existingPane?.tabId || null
+      if (tabId && assignedTabIds.has(tabId)) {
+        tabId = null
+      }
+      if (tabId) {
+        assignedTabIds.add(tabId)
+      }
       const isActive = existingPane?.isActive && !foundActive ? true : i === 0
       if (isActive) foundActive = true
 
@@ -104,9 +111,19 @@ export const useTerminalStore = defineStore('terminal', () => {
     const targetPaneId = paneId || activePaneId.value
     if (!targetPaneId) return
 
-    const pane = panes.value.find(p => p.id === targetPaneId)
-    if (pane) {
-      pane.tabId = tabId
+    let assigned = false
+    panes.value = panes.value.map(pane => {
+      if (pane.id === targetPaneId) {
+        assigned = true
+        return { ...pane, tabId }
+      }
+      if (pane.tabId === tabId) {
+        return { ...pane, tabId: null }
+      }
+      return pane
+    })
+
+    if (assigned) {
       activeTabId.value = tabId
     }
   }
