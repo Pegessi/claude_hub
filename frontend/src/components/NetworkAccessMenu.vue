@@ -71,57 +71,67 @@
     </div>
   </details>
 
-  <div
+  <details
     v-else
-    ref="menuRef"
+    ref="menuDetailsRef"
     class="network-access network-access--menu"
+    @toggle="handleMenuToggle"
   >
-    <div class="network-access-menu-heading">
+    <summary class="network-access-menu-summary">
       <div>
         <span>Frontend Access</span>
         <strong>Port {{ frontendPort }}</strong>
       </div>
-      <button
-        type="button"
-        class="network-access-refresh"
-        :disabled="isLoading"
-        @click="fetchNetworkAccess"
+      <span
+        class="network-access-menu-chevron"
+        aria-hidden="true"
+      />
+    </summary>
+    <div class="network-access-submenu-panel">
+      <div class="network-access-menu-heading">
+        <span>{{ networkInfo?.hostname || 'Local machine' }}</span>
+        <button
+          type="button"
+          class="network-access-refresh"
+          :disabled="isLoading"
+          @click="fetchNetworkAccess"
+        >
+          Refresh
+        </button>
+      </div>
+      <div class="network-access-list">
+        <button
+          v-for="link in accessLinks"
+          :key="link.host"
+          type="button"
+          class="network-access-link"
+          @click="copyLink(link.url)"
+        >
+          <span>{{ link.label }}</span>
+          <code>{{ link.url }}</code>
+          <strong>{{ copiedUrl === link.url ? 'Copied' : 'Copy' }}</strong>
+        </button>
+      </div>
+      <p
+        v-if="isLoading"
+        class="network-access-status"
       >
-        Refresh
-      </button>
-    </div>
-    <div class="network-access-list">
-      <button
-        v-for="link in accessLinks"
-        :key="link.host"
-        type="button"
-        class="network-access-link"
-        @click="copyLink(link.url)"
+        Loading local IPs...
+      </p>
+      <p
+        v-else-if="loadError"
+        class="network-access-status network-access-status--error"
       >
-        <span>{{ link.label }}</span>
-        <code>{{ link.url }}</code>
-        <strong>{{ copiedUrl === link.url ? 'Copied' : 'Copy' }}</strong>
-      </button>
+        {{ loadError }}
+      </p>
+      <p
+        v-else-if="copyError"
+        class="network-access-status network-access-status--error"
+      >
+        {{ copyError }}
+      </p>
     </div>
-    <p
-      v-if="isLoading"
-      class="network-access-status"
-    >
-      Loading local IPs...
-    </p>
-    <p
-      v-else-if="loadError"
-      class="network-access-status network-access-status--error"
-    >
-      {{ loadError }}
-    </p>
-    <p
-      v-else-if="copyError"
-      class="network-access-status network-access-status--error"
-    >
-      {{ copyError }}
-    </p>
-  </div>
+  </details>
 </template>
 
 <script setup lang="ts">
@@ -143,7 +153,7 @@ const props = withDefaults(defineProps<{
 })
 
 const detailsRef = ref<HTMLDetailsElement | null>(null)
-const menuRef = ref<HTMLElement | null>(null)
+const menuDetailsRef = ref<HTMLDetailsElement | null>(null)
 const networkInfo = ref<NetworkAccessInfo | null>(null)
 const isLoading = ref(false)
 const loadError = ref<string | null>(null)
@@ -235,6 +245,13 @@ function handleToggle(event: Event): void {
   }
 }
 
+function handleMenuToggle(event: Event): void {
+  const target = event.currentTarget as HTMLDetailsElement
+  if (target.open && !networkInfo.value) {
+    void fetchNetworkAccess()
+  }
+}
+
 async function copyLink(url: string): Promise<void> {
   copyError.value = null
   try {
@@ -281,20 +298,17 @@ function handleDocumentPointerDown(event: PointerEvent): void {
 }
 
 function handleParentMenuToggle(): void {
-  if (parentMenuDetails?.open && !networkInfo.value) {
-    void fetchNetworkAccess()
+  if (!parentMenuDetails?.open && menuDetailsRef.value?.open) {
+    menuDetailsRef.value.open = false
   }
 }
 
 onMounted(() => {
   document.addEventListener('pointerdown', handleDocumentPointerDown)
   if (props.variant === 'menu') {
-    parentMenuDetails = menuRef.value?.closest('details') || null
+    parentMenuDetails = menuDetailsRef.value?.parentElement?.closest('details') || null
     if (parentMenuDetails) {
       parentMenuDetails.addEventListener('toggle', handleParentMenuToggle)
-      handleParentMenuToggle()
-    } else {
-      void fetchNetworkAccess()
     }
   }
 })
@@ -502,9 +516,87 @@ onUnmounted(() => {
 }
 
 .network-access--menu {
-  margin-top: 6px;
-  padding-top: 8px;
+  margin-top: 4px;
+  padding-top: 4px;
   border-top: 1px solid var(--ch-color-border);
+}
+
+.network-access--menu summary {
+  list-style: none;
+}
+
+.network-access--menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.network-access-menu-summary {
+  width: 100%;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid transparent;
+  border-radius: var(--ch-radius-sm);
+  background: transparent;
+  color: var(--ch-color-text);
+  padding: 5px 8px;
+  cursor: pointer;
+}
+
+.network-access-menu-summary:hover,
+.network-access--menu[open] > .network-access-menu-summary {
+  background: var(--ch-color-surface-control-hover);
+}
+
+.network-access-menu-summary:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring-strong);
+  outline-offset: 2px;
+}
+
+.network-access-menu-summary > div {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.network-access-menu-summary span {
+  overflow: hidden;
+  color: var(--ch-color-text);
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.network-access-menu-summary strong {
+  color: var(--ch-color-text-muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.network-access-menu-chevron {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  color: var(--ch-color-text-muted);
+  transform: rotate(-45deg);
+  transition: transform var(--ch-motion-fast);
+}
+
+.network-access--menu[open] .network-access-menu-chevron {
+  transform: rotate(45deg);
+}
+
+.network-access-submenu-panel {
+  padding: 4px 0 2px;
+}
+
+.network-access--menu .network-access-menu-heading {
+  padding: 0 2px;
 }
 
 .network-access--menu .network-access-link {
