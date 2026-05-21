@@ -1159,6 +1159,77 @@ def test_wrapped_live_output_resyncs_complete_history(terminal_tab: dict, page: 
     )
 
 
+def test_typed_wrapped_output_resyncs_after_input_quiets(terminal_tab: dict, page: Page) -> None:
+    """User-typed high-volume output should resync after the input quiet window."""
+    tab = terminal_tab
+    session_name = f"claude-hub-{tab['id'][:8]}"
+    line_count = 120
+
+    ensure_tmux_session(page, tab["id"], session_name)
+    produce_scrollback(session_name, count=260)
+    load_terminal_page(page, tab["id"], min_buffer_lines=260)
+    page.wait_for_timeout(9000)
+    page.evaluate("""() => {
+        window.__claudeHubHistoryFetches = [];
+        const originalFetch = window.fetch.bind(window);
+        window.fetch = function(input, init) {
+            const url = typeof input === 'string' ? input : (input && input.url) || '';
+            if (url.indexOf('/api/terminal/history/') >= 0) {
+                window.__claudeHubHistoryFetches.push(url);
+            }
+            return originalFetch(input, init);
+        };
+    }""")
+
+    box = page.locator(".xterm").bounding_box()
+    assert box is not None, "xterm not found"
+    page.mouse.click(box["x"] + 24, box["y"] + 24)
+    page.keyboard.type(
+        (
+            f"for i in $(seq 0 {line_count - 1}); do "
+            "echo LIVE_$(printf '%04d' $i)_$(printf 'x%.0s' $(seq 1 220)); "
+            "sleep 0.01; "
+            "done"
+        ),
+        delay=1,
+    )
+    page.keyboard.press("Enter")
+
+    for _ in range(120):
+        if f"LIVE_{line_count - 1:04d}" in capture_pane_sync(session_name):
+            break
+        time.sleep(0.2)
+    else:
+        pytest.fail("typed wrapped output did not finish in tmux")
+
+    page.wait_for_function(
+        "() => (window.__claudeHubHistoryFetches || []).length > 0",
+        timeout=8000,
+    )
+    page.wait_for_function(
+        f"""() => {{
+            const buffer = window.term.buffer.active;
+            const text = [];
+            for (let i = 0; i < buffer.length; i++) {{
+                const line = buffer.getLine(i);
+                if (line) text.push(line.translateToString(true));
+            }}
+            const joined = text.join('\\n');
+            return joined.includes('LIVE_0000') && joined.includes('LIVE_{line_count - 1:04d}');
+        }}""",
+        timeout=20000,
+    )
+
+    xterm_numbers = live_line_numbers(read_xterm_text(page))
+    expected = set(range(line_count))
+
+    assert xterm_numbers == expected, (
+        f"typed xterm live output markers are discontinuous after delayed resync; "
+        f"missing={sorted(expected - xterm_numbers)[:30]}, "
+        f"extra={sorted(xterm_numbers - expected)[:30]}"
+    )
+
+
 def test_history_resync_does_not_replace_near_bottom_view(terminal_tab: dict, page: Page) -> None:
     """Idle history resync must not rewrite while the user is near bottom.
 
