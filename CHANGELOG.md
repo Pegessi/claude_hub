@@ -11,6 +11,12 @@
 - Mark approved skip decisions in the Review column with a reason and expose a manual Request review action for skipped tasks
 - **Files**: workspace_manager.py, schemas.py, workspaces.py, test_workspaces.py, AgentWorkspaceView.vue, workspaceStore.ts, index.ts
 
+### fix: keep terminal typing responsive during history refresh
+- Release the initial terminal replay hold as soon as the user types, so opening a populated tab no longer delays local input echo behind the scrollback stabilization window
+- Cancel or postpone automatic tmux history repair when input arrives during live-output refresh, keeping typed text responsive while preserving a later quiet-window recovery path
+- Add replay E2E coverage for typing during tab open and typing while a delayed live-output resync is pending
+- **Files**: terminal.py, test_terminal_replay.py
+
 ### fix: avoid duplicate split-pane terminal clients
 - Keep a terminal tab assigned to only one visible pane at a time so split layouts cannot attach duplicate ttyd/tmux browser clients to the same Claude session
 - Drop hidden iframe caches when leaving single-pane mode, preventing stale hidden clients from continuing Claude TUI redraw and resize work while another pane displays that tab
