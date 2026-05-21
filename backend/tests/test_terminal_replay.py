@@ -1066,6 +1066,42 @@ def test_terminal_activate_message_scrolls_to_latest(terminal_tab: dict, page: P
     )
 
 
+def test_terminal_typing_does_not_auto_resync_history(terminal_tab: dict, page: Page) -> None:
+    """Plain terminal input echo should not trigger full tmux history replay."""
+    tab = terminal_tab
+    session_name = f"claude-hub-{tab['id'][:8]}"
+
+    ensure_tmux_session(page, tab["id"], session_name)
+    load_terminal_page(page, tab["id"])
+    page.wait_for_timeout(9000)
+    page.evaluate("""() => {
+        window.__claudeHubHistoryFetches = [];
+        const originalFetch = window.fetch.bind(window);
+        window.fetch = function(input, init) {
+            const url = typeof input === 'string' ? input : (input && input.url) || '';
+            if (url.indexOf('/api/terminal/history/') >= 0) {
+                window.__claudeHubHistoryFetches.push(url);
+            }
+            return originalFetch(input, init);
+        };
+    }""")
+
+    box = page.locator(".xterm").bounding_box()
+    assert box is not None, "xterm not found"
+    page.mouse.click(box["x"] + 24, box["y"] + 24)
+    for char in "abcd":
+        page.keyboard.type(char)
+        page.wait_for_timeout(850)
+    page.wait_for_timeout(1400)
+
+    assert "abcd" in capture_pane_sync(session_name)
+    history_fetches = page.evaluate("() => window.__claudeHubHistoryFetches || []")
+    assert history_fetches == [], (
+        "plain terminal typing echo performed automatic history resync: "
+        f"{history_fetches}"
+    )
+
+
 def test_wrapped_live_output_resyncs_complete_history(terminal_tab: dict, page: Page) -> None:
     """Fast wrapped output is reconciled from tmux history after it goes idle.
 
