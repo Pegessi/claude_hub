@@ -176,6 +176,20 @@ async def continue_task(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+@router.post("/tasks/{task_id}/request-review", response_model=WorkspaceTask)
+async def request_task_review(
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+) -> WorkspaceTask:
+    """Manually request reviewer checks for a task."""
+    try:
+        return await workspace_manager.request_task_review(task_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Task not found") from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 @router.post("/tasks/{task_id}/dispatch-decision", response_model=WorkspaceTask)
 async def apply_dispatch_decision(
     task_id: str,

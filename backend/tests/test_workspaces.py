@@ -48,6 +48,91 @@ def pass_task_review(client: TestClient, task_id: str, message: str = "Review pa
     )
 
 
+def stub_workspace_terminal(
+    monkeypatch: MonkeyPatch,
+    repo: Path,
+    *,
+    tab_id: str,
+    port: int,
+    sent_messages: list[tuple[str, str]] | None = None,
+) -> None:
+    created_count = 0
+
+    async def fake_create_tab(
+        name: str,
+        shell: Optional[str] = None,
+        cwd: Optional[str] = None,
+        solo_mode: bool = False,
+        agent_type: AgentType = AgentType.CLAUDE,
+        target: ExecutionTarget = ExecutionTarget.LOCAL,
+        remote_profile_id: Optional[str] = None,
+        remote_cwd: Optional[str] = None,
+        remote_reconnect: bool = True,
+        remote_forward_port: Optional[int] = None,
+        workspace_id: Optional[str] = None,
+        workspace_name: Optional[str] = None,
+        workspace_role: WorkspaceSessionRole | None = None,
+    ) -> TerminalTab:
+        nonlocal created_count
+        created_count += 1
+        return TerminalTab(
+            id=f"{tab_id}-{created_count}",
+            name=name,
+            shell=shell,
+            cwd=cwd,
+            solo_mode=solo_mode,
+            agent_type=agent_type,
+            target=target,
+            remote_profile_id=remote_profile_id,
+            remote_cwd=remote_cwd,
+            remote_reconnect=remote_reconnect,
+            port=port,
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+            workspace_role=workspace_role,
+        )
+
+    async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
+        if sent_messages is not None:
+            sent_messages.append((tmux_session, message))
+
+    async def fake_update_tab(
+        tab_id_to_update: str, name: Optional[str] = None, **_: object
+    ) -> TerminalTab:
+        return TerminalTab(
+            id=tab_id_to_update,
+            name=name or "unchanged",
+            shell=None,
+            cwd=str(repo),
+            solo_mode=True,
+            agent_type=AgentType.CODEX,
+            target=ExecutionTarget.LOCAL,
+            remote_profile_id=None,
+            remote_cwd=None,
+            remote_reconnect=True,
+            port=port,
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=None,
+            workspace_name=None,
+            workspace_role=None,
+        )
+
+    async def fake_ensure_session_ready(_session) -> None:
+        return None
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
+    monkeypatch.setattr(workspace_module.ttyd_manager, "update_tab", fake_update_tab)
+    monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+    monkeypatch.setattr(
+        workspace_manager,
+        "_ensure_session_ready_for_send",
+        fake_ensure_session_ready,
+    )
+
+
 @pytest.fixture(autouse=True)
 def isolated_workspace_manager(monkeypatch: MonkeyPatch) -> Generator[None, None, None]:
     workspace_manager.workspaces.clear()
@@ -400,6 +485,210 @@ def test_agent_review_gate_states_trigger_reviewer(
     assert (
         workspace_manager.sessions[updated.review_session_id].role == WorkspaceSessionRole.REVIEWER
     )
+
+
+def test_completed_skip_review_marks_review_without_reviewer(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="skip-review-tab",
+        port=12550,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Skip Review", "path": str(repo), "session_prefix": "skip"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Analysis task", "prompt": "Analyze without editing"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    sent_messages.clear()
+
+    response = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "completed",
+            "message": "Read-only analysis complete",
+            "review_decision": "skip",
+            "review_reason": "No files changed; analysis only.",
+            "risk_level": "low",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["review_decision"] == "skip"
+    updated = workspace_manager.tasks[task["id"]]
+    assert updated.status == WorkspaceTaskStatus.REVIEW
+    assert updated.review_session_id is None
+    assert updated.review_attempts == 0
+    assert updated.review_skipped_at is not None
+    assert updated.review_skip_reason == "No files changed; analysis only."
+    assert sent_messages == []
+
+
+def test_completed_skip_review_is_denied_for_changed_files(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="skip-denied-tab",
+        port=12551,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Skip Denied", "path": str(repo), "session_prefix": "skip-denied"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Code task", "prompt": "Change code"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    sent_messages.clear()
+
+    response = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "completed",
+            "message": "Code changed but requesting skip",
+            "changed_files": ["backend/claude_hub/services/workspace_manager.py"],
+            "review_decision": "skip",
+            "review_reason": "Agent thinks this is safe.",
+            "risk_level": "low",
+        },
+    )
+
+    assert response.status_code == 201
+    updated = workspace_manager.tasks[task["id"]]
+    assert updated.status == WorkspaceTaskStatus.WORKING
+    assert updated.review_session_id is not None
+    assert updated.review_attempts == 1
+    assert updated.review_skipped_at is None
+    assert "Review workspace task" in sent_messages[-1][1]
+
+
+def test_completed_skip_review_is_denied_for_tracked_diff(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="skip-diff-tab",
+        port=12552,
+        sent_messages=sent_messages,
+    )
+
+    async def fake_has_tracked_changes(_workspace_id: str) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_workspace_has_tracked_changes",
+        fake_has_tracked_changes,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Skip Tracked Diff", "path": str(repo), "session_prefix": "skip-diff"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Dirty task", "prompt": "Change tracked files"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    sent_messages.clear()
+
+    response = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "completed",
+            "message": "No changed_files reported but repo is dirty",
+            "review_decision": "skip",
+            "review_reason": "No changed_files in report.",
+            "risk_level": "low",
+        },
+    )
+
+    assert response.status_code == 201
+    updated = workspace_manager.tasks[task["id"]]
+    assert updated.review_session_id is not None
+    assert updated.review_attempts == 1
+    assert "Review workspace task" in sent_messages[-1][1]
+
+
+def test_manual_request_review_after_skipped_review(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="manual-review-tab",
+        port=12553,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Manual Review", "path": str(repo), "session_prefix": "manual-review"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Manual request", "prompt": "Maybe review later"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "completed",
+            "message": "Skipping review for now",
+            "review_decision": "skip",
+            "review_reason": "No changes.",
+            "risk_level": "low",
+        },
+    )
+    sent_messages.clear()
+
+    response = client.post(f"/api/workspaces/tasks/{task['id']}/request-review")
+
+    assert response.status_code == 200
+    updated = workspace_manager.tasks[task["id"]]
+    assert updated.status == WorkspaceTaskStatus.WORKING
+    assert updated.review_session_id is not None
+    assert updated.review_attempts == 1
+    assert updated.review_skipped_at is None
+    assert "Human requested reviewer checks" in list(workspace_manager.reports.values())[-1].message
+    assert "Review workspace task" in sent_messages[-1][1]
 
 
 def test_review_passed_keeps_task_in_review(

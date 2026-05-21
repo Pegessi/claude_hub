@@ -271,6 +271,23 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
+  async function requestTaskReview(taskId: string) {
+    isLoading.value = true
+    error.value = null
+    try {
+      const response = await fetch(`${API_BASE}/workspaces/tasks/${taskId}/request-review`, {
+        method: 'POST',
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      await fetchBoard()
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Failed to request review'
+      throw e
+    } finally {
+      isLoading.value = false
+    }
+  }
+
   async function dispatchWorkspace() {
     if (!activeWorkspaceId.value) return
     const response = await fetch(`${API_BASE}/workspaces/${activeWorkspaceId.value}/dispatch`, {
@@ -332,6 +349,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     deleteSession,
     startTask,
     continueTask,
+    requestTaskReview,
     dispatchWorkspace,
     sendMessage,
     createReport,
