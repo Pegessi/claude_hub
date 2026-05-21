@@ -1449,11 +1449,15 @@ class WorkspaceManager:
             "independent reviewer checks are needed, skip only for low-risk no-change analysis or "
             "manual follow-up that does not need reviewer checks, and include review_reason. "
             "Report progress to the workspace coordinator only after you receive a task, "
-            "when you start, get blocked, need input, are ready for review, or complete the work.\n\n"
+            "when you start, get blocked, need input, are ready for review, or complete the work. "
+            "Every report should include both message_en (concise English) and message_zh "
+            "(concise 中文) so the workspace UI can render either language; keep the legacy "
+            "message field as a short fallback (English is fine).\n\n"
             "Report endpoint for assigned tasks:\n"
             f"curl -sS -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
-            '-d \'{"task_id":"TASK_ID","state":"working","message":"Progress update"}\''
+            '-d \'{"task_id":"TASK_ID","state":"working","message":"Progress update",'
+            '"message_en":"Progress update","message_zh":"进度更新"}\''
         )
 
     def _build_dispatcher_bootstrap_prompt(
@@ -1612,9 +1616,11 @@ class WorkspaceManager:
             f"curl -sS -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"started",'
-            '"message":"Started task"}\'\n\n'
-            "Final reports should include task_id, state, message, changed_files, validation, "
-            "risks, review_decision, review_reason, and risk_level."
+            '"message":"Started task","message_en":"Started task","message_zh":"已开始任务"}\'\n\n'
+            "Every report should include both message_en (concise English) and message_zh "
+            "(concise 中文); keep the legacy message field as a short fallback. "
+            "Final reports should include task_id, state, message, message_en, message_zh, "
+            "changed_files, validation, risks, review_decision, review_reason, and risk_level."
         )
 
     def _build_review_prompt(
@@ -1823,6 +1829,8 @@ class WorkspaceManager:
             session_id=session.id,
             state=payload.state,
             message=payload.message,
+            message_en=payload.message_en,
+            message_zh=payload.message_zh,
             changed_files=payload.changed_files,
             validation=payload.validation,
             risks=payload.risks,
