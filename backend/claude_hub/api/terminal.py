@@ -342,9 +342,20 @@ async def proxy_terminal_request(
         let currentTerm = undefined;
         let replayed = false;
         let userScrollGeneration = 0;
+        let userInputGeneration = 0;
+        let lastUserInputAt = 0;
 
         function noteUserScrollIntent() {{
           userScrollGeneration++;
+        }}
+
+        function noteTerminalUserInput() {{
+          userInputGeneration++;
+          lastUserInputAt = Date.now();
+        }}
+
+        function hasRecentUserInput() {{
+          return lastUserInputAt > 0 && Date.now() - lastUserInputAt < 1500;
         }}
 
         function normalizedHistoryText() {{
@@ -551,9 +562,11 @@ async def proxy_terminal_request(
           function startPostReplayWatch() {{
             if (!fullReplay) return;
             const watchUntil = Date.now() + FULL_REPLAY_WATCH_MS;
+            const watchInputGeneration = userInputGeneration;
             function watch() {{
               if (!historyDone) return;
-              if (!hasExpectedReplayBuffer() && AUTO_HISTORY_REPLAY_ENABLED) {{
+              if (userInputGeneration !== watchInputGeneration) return;
+              if (!hasExpectedReplayBuffer() && AUTO_HISTORY_REPLAY_ENABLED && !hasRecentUserInput()) {{
                 // Rewriting the snapshot we captured at replay time would
                 // roll back any live ws data that arrived during the hold.
                 // Refetch tmux for the current state instead.
@@ -770,6 +783,8 @@ async def proxy_terminal_request(
         const AUTO_HISTORY_RESYNC_ENABLED = AUTO_HISTORY_REPLAY_ENABLED;
         const PROTECT_AGENT_HISTORY_VIEW = IS_AGENT_TUI;
         const RESYNC_IDLE_MS = 700;
+        const RESYNC_MIN_PRINTABLE_CHARS = 4096;
+        const RESYNC_MIN_LINE_BREAKS = 8;
 
         function setupHistoryResync(term) {{
           if (!term || term.__claudeHubHistoryResyncHooked || typeof term.write !== 'function') return;
@@ -787,6 +802,8 @@ async def proxy_terminal_request(
           let forcedRefreshRunning = false;
           let forcedRefreshPendingOptions = null;
           let agentHistoryViewNeedsSnapshot = false;
+          let pendingResyncChars = 0;
+          let pendingResyncLineBreaks = 0;
 
           function bufferService() {{
             return term._core && term._core._bufferService;
@@ -808,8 +825,52 @@ async def proxy_terminal_request(
             return buffer.viewportY === buffer.baseY && domAtBottom;
           }}
 
-          function scheduleResync() {{
+          function terminalDataText(data) {{
+            if (data instanceof Uint8Array && typeof TextDecoder !== 'undefined') {{
+              try {{
+                return new TextDecoder('utf-8').decode(data);
+              }} catch (error) {{
+                return '';
+              }}
+            }}
+            return String(data || '');
+          }}
+
+          function terminalDataStats(data) {{
+            const text = terminalDataText(data)
+              .replace(/\\x1b\\][^\\x07]*(?:\\x07|\\x1b\\\\)/g, '')
+              .replace(/\\x1b\\[[0-?]*[ -/]*[@-~]/g, '')
+              .replace(/\\x1b[()][A-Za-z0-9]/g, '')
+              .replace(/[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f]/g, '');
+            return {{
+              chars: text.replace(/[\\r\\n]/g, '').length,
+              lineBreaks: (text.match(/\\n/g) || []).length,
+            }};
+          }}
+
+          function noteResyncPressure(data) {{
             if (!AUTO_HISTORY_RESYNC_ENABLED) return;
+            const stats = terminalDataStats(data);
+            pendingResyncChars += stats.chars;
+            pendingResyncLineBreaks += stats.lineBreaks;
+          }}
+
+          function resetResyncPressure() {{
+            pendingResyncChars = 0;
+            pendingResyncLineBreaks = 0;
+          }}
+
+          function hasEnoughResyncPressure() {{
+            return (
+              pendingResyncChars >= RESYNC_MIN_PRINTABLE_CHARS ||
+              pendingResyncLineBreaks >= RESYNC_MIN_LINE_BREAKS
+            );
+          }}
+
+          function scheduleResync(force) {{
+            if (!AUTO_HISTORY_RESYNC_ENABLED) return;
+            if (!force && hasRecentUserInput()) return;
+            if (!force && !hasEnoughResyncPressure()) return;
             if (resyncing) return;
             if (timer) clearTimeout(timer);
             timer = setTimeout(runResync, RESYNC_IDLE_MS);
@@ -863,6 +924,7 @@ async def proxy_terminal_request(
 
             function done(ok) {{
               resyncing = false;
+              resetResyncPressure();
               flushResyncBuffer();
               if (shouldScrollToBottom) {{
                 scrollTerminalToBottom(term, {{ refresh: true }});
@@ -915,11 +977,12 @@ async def proxy_terminal_request(
             refreshHistoryFromTmux({{ reason: 'agent-return-bottom', scrollToBottom: true }});
           }}
 
-          function noteLiveWrite(wasAtBottom) {{
+          function noteLiveWrite(wasAtBottom, data) {{
             writeGeneration++;
+            noteResyncPressure(data);
             if (wasAtBottom || isAtBottom()) {{
               pendingWhenBottom = false;
-              scheduleResync();
+              scheduleResync(false);
             }} else {{
               pendingWhenBottom = true;
             }}
@@ -951,7 +1014,7 @@ async def proxy_terminal_request(
             if (wasAtBottom) {{
               scheduleBottomFollow(generationAtWrite);
             }}
-            noteLiveWrite(wasAtBottom);
+            noteLiveWrite(wasAtBottom, data);
             return result;
           }};
 
@@ -969,7 +1032,7 @@ async def proxy_terminal_request(
                   refreshAgentHistoryViewWhenBottom();
                 }} else {{
                   pendingWhenBottom = false;
-                  scheduleResync();
+                  scheduleResync(false);
                 }}
               }}
             }}, {{ passive: true }});
@@ -979,7 +1042,9 @@ async def proxy_terminal_request(
           // initial history preload can be empty because tmux creates the
           // session lazily after ttyd connects; this brings the prompt and
           // cursor back into the same xterm buffer once tmux history exists.
-          scheduleResync();
+          if (historyText.length === 0) {{
+            scheduleResync(true);
+          }}
 
           async function runResync() {{
             timer = null;
@@ -1017,17 +1082,19 @@ async def proxy_terminal_request(
             if (!payload) {{
               resyncing = false;
               flushResyncBuffer();
+              resetResyncPressure();
               return;
             }}
 
             writeThrough(payload, function() {{
               resyncing = false;
+              resetResyncPressure();
               flushResyncBuffer();
               scrollTerminalToBottom(term, {{ refresh: true }});
               // If new live writes arrived after the snapshot was taken,
               // schedule another reconciliation so they're picked up.
               if (resyncBuffer.length > 0) {{
-                scheduleResync();
+                scheduleResync(false);
               }}
             }});
           }}
@@ -1101,6 +1168,11 @@ async def proxy_terminal_request(
         window.addEventListener('message', function(event) {{
           if (!event.data || (event.data.tabId && event.data.tabId !== TAB_ID)) return;
 
+          if (event.data.type === 'terminal-key') {{
+            noteTerminalUserInput();
+            return;
+          }}
+
           if (event.data.type === 'terminal-history-refresh') {{
             refreshHistoryWhenReady({{
               reason: event.data.reason || 'manual',
@@ -1125,6 +1197,10 @@ async def proxy_terminal_request(
             }}
           }}
         }});
+
+        window.addEventListener('keydown', noteTerminalUserInput, true);
+        window.addEventListener('beforeinput', noteTerminalUserInput, true);
+        window.addEventListener('paste', noteTerminalUserInput, true);
 
         // ---- Mobile scrolling: native inertia ----
         // xterm.js registers touchstart/touchmove on the .xterm element (parent).

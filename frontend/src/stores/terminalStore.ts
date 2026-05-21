@@ -11,7 +11,7 @@ import type {
 
 const API_BASE = '/api'
 const STORAGE_KEY_LAYOUT = 'claude_hub_layout_type'
-const STATUS_POLL_INTERVAL_MS = 1000
+const STATUS_POLL_INTERVAL_MS = 5000
 
 function generatePaneId(): string {
   return 'pane-' + Math.random().toString(36).substr(2, 9)

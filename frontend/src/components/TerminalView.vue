@@ -85,6 +85,7 @@ const pendingKeyboardResizeTabIds = new Set<string>()
 
 const MOBILE_TERMINAL_BREAKPOINT_PX = 768
 const MOBILE_KEYBOARD_RESIZE_SETTLE_MS = 260
+const MAX_SINGLE_PANE_CACHED_TERMINALS = 2
 
 function getTerminalState(): TerminalKeyState {
   if (!window.__claudeHubTerminalState) {
@@ -104,9 +105,8 @@ function cacheTabId(tabId: string) {
     cachedTabIds.value = [tabId]
     return
   }
-  if (!cachedTabIds.value.includes(tabId)) {
-    cachedTabIds.value.push(tabId)
-  }
+  const cachedWithoutCurrent = cachedTabIds.value.filter(id => id !== tabId)
+  cachedTabIds.value = [...cachedWithoutCurrent, tabId].slice(-MAX_SINGLE_PANE_CACHED_TERMINALS)
 }
 
 watch(
