@@ -5,6 +5,11 @@
 
 ## 2026-05-21
 
+### fix: let mobile overflow menus scroll when expanded
+- Bound terminal and workspace mobile overflow menus to the viewport so long nested sections do not run off-screen
+- Enable touch scrolling inside the menu panels while keeping scroll chaining contained
+- **Files**: TabBar.vue, AgentWorkspaceView.vue
+
 ### fix: collapse mobile frontend access links
 - Keep the mobile overflow menu compact by showing Frontend Access as a collapsed submenu by default
 - Fetch and reveal the local frontend URLs only when the nested menu is opened, then reset it collapsed when the parent overflow menu closes
