@@ -5,6 +5,12 @@
 
 ## 2026-05-21
 
+### fix: release idle reviewed agents and dedupe pasted task images
+- Let an idle implementation agent accept the next queued task after its previous task has reached Review, while preserving working/pending-review assignments
+- Reconcile stale review-stage `current_task_id` session state during status refresh so queues do not remain blocked by already-reviewed tasks
+- Deduplicate clipboard image files against embedded HTML/plaintext data URLs so a single pasted screenshot does not create two task attachments
+- **Files**: workspace_manager.py, test_workspaces.py, AgentWorkspaceView.vue
+
 ### feat: let agents skip low-risk reviewer checks
 - Add explicit `review_decision` metadata to workspace reports so agents can request, skip, or defer to automatic reviewer routing
 - Keep backend guardrails that force review for changed files, tracked dirty worktrees, blocked/input-needed states, runtime attention diagnostics, and failed-review follow-ups
