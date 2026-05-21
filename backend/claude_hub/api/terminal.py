@@ -344,6 +344,8 @@ async def proxy_terminal_request(
         let userScrollGeneration = 0;
         let userInputGeneration = 0;
         let lastUserInputAt = 0;
+        const USER_INPUT_QUIET_MS = 1500;
+        const terminalUserInputListeners = [];
 
         function noteUserScrollIntent() {{
           userScrollGeneration++;
@@ -352,10 +354,22 @@ async def proxy_terminal_request(
         function noteTerminalUserInput() {{
           userInputGeneration++;
           lastUserInputAt = Date.now();
+          terminalUserInputListeners.forEach(function(listener) {{
+            try {{
+              listener();
+            }} catch (error) {{
+              console.debug('claude-hub terminal input listener failed', error);
+            }}
+          }});
         }}
 
         function hasRecentUserInput() {{
-          return lastUserInputAt > 0 && Date.now() - lastUserInputAt < 1500;
+          return lastUserInputAt > 0 && Date.now() - lastUserInputAt < USER_INPUT_QUIET_MS;
+        }}
+
+        function userInputQuietDelayMs() {{
+          if (lastUserInputAt <= 0) return 0;
+          return Math.max(0, USER_INPUT_QUIET_MS - (Date.now() - lastUserInputAt));
         }}
 
         function normalizedHistoryText() {{
@@ -804,6 +818,7 @@ async def proxy_terminal_request(
           let agentHistoryViewNeedsSnapshot = false;
           let pendingResyncChars = 0;
           let pendingResyncLineBreaks = 0;
+          let inputQuietResyncTimer = null;
 
           function bufferService() {{
             return term._core && term._core._bufferService;
@@ -855,9 +870,17 @@ async def proxy_terminal_request(
             pendingResyncLineBreaks += stats.lineBreaks;
           }}
 
+          function clearInputQuietResyncTimer() {{
+            if (inputQuietResyncTimer) {{
+              clearTimeout(inputQuietResyncTimer);
+              inputQuietResyncTimer = null;
+            }}
+          }}
+
           function resetResyncPressure() {{
             pendingResyncChars = 0;
             pendingResyncLineBreaks = 0;
+            clearInputQuietResyncTimer();
           }}
 
           function hasEnoughResyncPressure() {{
@@ -867,11 +890,35 @@ async def proxy_terminal_request(
             );
           }}
 
+          function scheduleResyncAfterInputQuiet() {{
+            if (!AUTO_HISTORY_RESYNC_ENABLED || !hasEnoughResyncPressure()) return;
+            clearInputQuietResyncTimer();
+            inputQuietResyncTimer = setTimeout(function() {{
+              inputQuietResyncTimer = null;
+              scheduleResync(false);
+            }}, userInputQuietDelayMs() + RESYNC_IDLE_MS);
+          }}
+
+          function deferScheduledResyncForInput() {{
+            if (!AUTO_HISTORY_RESYNC_ENABLED || !hasEnoughResyncPressure()) return;
+            if (timer) {{
+              clearTimeout(timer);
+              timer = null;
+            }}
+            scheduleResyncAfterInputQuiet();
+          }}
+
+          terminalUserInputListeners.push(deferScheduledResyncForInput);
+
           function scheduleResync(force) {{
             if (!AUTO_HISTORY_RESYNC_ENABLED) return;
-            if (!force && hasRecentUserInput()) return;
             if (!force && !hasEnoughResyncPressure()) return;
+            if (!force && hasRecentUserInput()) {{
+              scheduleResyncAfterInputQuiet();
+              return;
+            }}
             if (resyncing) return;
+            clearInputQuietResyncTimer();
             if (timer) clearTimeout(timer);
             timer = setTimeout(runResync, RESYNC_IDLE_MS);
           }}
@@ -1048,6 +1095,10 @@ async def proxy_terminal_request(
 
           async function runResync() {{
             timer = null;
+            if (hasRecentUserInput()) {{
+              scheduleResync(false);
+              return;
+            }}
             if (!isAtBottom() || resyncing) {{
               pendingWhenBottom = !isAtBottom();
               return;
