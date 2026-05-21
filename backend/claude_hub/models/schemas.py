@@ -75,6 +75,14 @@ class AgentReportState(str, Enum):
     REVIEW_NEEDS_INPUT = "review_needs_input"
 
 
+class ReviewDecision(str, Enum):
+    """Agent's requested reviewer routing for a report."""
+
+    AUTO = "auto"
+    REQUEST = "request"
+    SKIP = "skip"
+
+
 class TerminalTabBase(BaseModel):
     """Base schema for TerminalTab."""
 
@@ -235,6 +243,8 @@ class WorkspaceTask(BaseModel):
     review_attempts: int = 0
     review_requested_at: Optional[datetime] = None
     review_completed_at: Optional[datetime] = None
+    review_skipped_at: Optional[datetime] = None
+    review_skip_reason: Optional[str] = None
     queued_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     reviewed_at: Optional[datetime] = None
@@ -284,6 +294,9 @@ class AgentReportCreate(BaseModel):
     changed_files: List[str] = Field(default_factory=list)
     validation: Optional[str] = None
     risks: Optional[str] = None
+    review_decision: ReviewDecision = ReviewDecision.AUTO
+    review_reason: Optional[str] = None
+    risk_level: Optional[str] = None
 
 
 class AgentReport(BaseModel):
@@ -298,6 +311,9 @@ class AgentReport(BaseModel):
     changed_files: List[str] = Field(default_factory=list)
     validation: Optional[str] = None
     risks: Optional[str] = None
+    review_decision: ReviewDecision = ReviewDecision.AUTO
+    review_reason: Optional[str] = None
+    risk_level: Optional[str] = None
     created_at: datetime
 
 

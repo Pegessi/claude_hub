@@ -406,6 +406,15 @@
                     Done
                   </LoadingButton>
                   <LoadingButton
+                    v-if="task.status === 'review' && task.review_skipped_at"
+                    type="button"
+                    :loading="isPending(taskActionKey('request-review', task.id))"
+                    loading-label="Requesting review"
+                    @click.stop="requestReview(task.id)"
+                  >
+                    Request review
+                  </LoadingButton>
+                  <LoadingButton
                     v-if="sessionForTask(task)"
                     type="button"
                     :loading="isPending(sessionActionKey('open', task.session_id))"
@@ -522,6 +531,10 @@
                   <span>Review state</span>
                   <strong>{{ reviewStatusLabel(selectedTask) || 'not requested' }}</strong>
                 </div>
+                <div v-if="selectedTask.review_skip_reason">
+                  <span>Review reason</span>
+                  <strong>{{ selectedTask.review_skip_reason }}</strong>
+                </div>
                 <div>
                   <span>Queued behind</span>
                   <strong>{{ selectedSession?.queued_count || 0 }}</strong>
@@ -637,6 +650,16 @@
                   @click="markTask(selectedTask.id, 'done')"
                 >
                   Done
+                </LoadingButton>
+                <LoadingButton
+                  v-if="selectedTask.status === 'review' && selectedTask.review_skipped_at"
+                  type="button"
+                  class="tool-button"
+                  :loading="isPending(taskActionKey('request-review', selectedTask.id))"
+                  loading-label="Requesting review"
+                  @click="requestReview(selectedTask.id)"
+                >
+                  Request review
                 </LoadingButton>
                 <LoadingButton
                   v-if="selectedSession"
@@ -1504,6 +1527,7 @@ function latestReportForTask(task: WorkspaceTask) {
 }
 
 function reviewStatusLabel(task: WorkspaceTask) {
+  if (task.review_skipped_at) return 'Review skipped'
   const reviewReports = workspaceStore
     .reportsForTask(task)
     .filter(report => report.state.startsWith('review_'))
@@ -2157,6 +2181,12 @@ async function sendDetailMessage() {
 async function markTask(taskId: string, status: WorkspaceTaskStatus) {
   await runPending(taskActionKey(`mark-${status}`, taskId), () =>
     workspaceStore.updateTaskStatus(taskId, status)
+  )
+}
+
+async function requestReview(taskId: string) {
+  await runPending(taskActionKey('request-review', taskId), () =>
+    workspaceStore.requestTaskReview(taskId)
   )
 }
 

@@ -24,6 +24,7 @@ export type AgentReportState =
   | 'review_passed'
   | 'review_failed'
   | 'review_needs_input'
+export type ReviewDecision = 'auto' | 'request' | 'skip'
 
 export interface TerminalTab {
   id: string
@@ -156,6 +157,8 @@ export interface WorkspaceTask {
   review_attempts: number
   review_requested_at?: string | null
   review_completed_at?: string | null
+  review_skipped_at?: string | null
+  review_skip_reason?: string | null
   queued_at?: string | null
   started_at?: string | null
   reviewed_at?: string | null
@@ -235,6 +238,9 @@ export interface AgentReport {
   changed_files: string[]
   validation?: string | null
   risks?: string | null
+  review_decision: ReviewDecision
+  review_reason?: string | null
+  risk_level?: string | null
   created_at: string
 }
 
@@ -245,6 +251,9 @@ export interface AgentReportCreate {
   changed_files?: string[]
   validation?: string | null
   risks?: string | null
+  review_decision?: ReviewDecision
+  review_reason?: string | null
+  risk_level?: string | null
 }
 
 export interface WorkspaceBoard {

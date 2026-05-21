@@ -23,6 +23,7 @@ from ..models import (
     ExecutionTarget,
     ManagedSession,
     ManagedSessionStatus,
+    ReviewDecision,
     StartTaskRequest,
     TerminalAgentStatus,
     Workspace,
@@ -234,6 +235,8 @@ class WorkspaceManager:
         normalized.setdefault("review_attempts", 0)
         normalized.setdefault("review_requested_at", None)
         normalized.setdefault("review_completed_at", None)
+        normalized.setdefault("review_skipped_at", None)
+        normalized.setdefault("review_skip_reason", None)
         normalized.setdefault("queued_at", None)
         normalized.setdefault("started_at", None)
         normalized.setdefault("reviewed_at", None)
@@ -612,6 +615,8 @@ class WorkspaceManager:
                     "state": report.state.value,
                     "session_id": report.session_id,
                     "message": report.message,
+                    "review_decision": report.review_decision.value,
+                    "review_reason": report.review_reason,
                 }
             )
         return sorted(events, key=lambda item: item["at"])
@@ -1164,6 +1169,8 @@ class WorkspaceManager:
             update={
                 "status": WorkspaceTaskStatus.WORKING,
                 "started_at": now,
+                "review_skipped_at": None,
+                "review_skip_reason": None,
                 "updated_at": now,
                 "dispatch_pending": False,
             }
@@ -1200,6 +1207,37 @@ class WorkspaceManager:
             session.id,
             self._build_continue_prompt(self.tasks[task.id], payload),
         )
+        return self.tasks[task.id]
+
+    async def request_task_review(self, task_id: str) -> WorkspaceTask:
+        task = self.tasks.get(task_id)
+        if not task:
+            raise KeyError(task_id)
+        if task.status == WorkspaceTaskStatus.DONE:
+            raise RuntimeError("Done tasks cannot request review")
+        if task.review_requested_at and not task.review_completed_at:
+            return task
+        if not task.session_id:
+            raise RuntimeError("Task has no implementation agent")
+
+        now = _now()
+        report = AgentReport(
+            id=str(uuid.uuid4()),
+            workspace_id=task.workspace_id,
+            task_id=task.id,
+            session_id=task.session_id,
+            state=AgentReportState.READY_FOR_REVIEW,
+            message="Human requested reviewer checks after review was skipped.",
+            changed_files=[],
+            validation=None,
+            risks=None,
+            review_decision=ReviewDecision.REQUEST,
+            review_reason="Human requested reviewer checks.",
+            risk_level=None,
+            created_at=now,
+        )
+        self.reports[report.id] = report
+        await self._request_task_review(task, report)
         return self.tasks[task.id]
 
     async def dispatch_workspace(
@@ -1404,6 +1442,9 @@ class WorkspaceManager:
             "When you report completed, the workspace may assign an independent reviewer. "
             "If reviewer feedback is sent back to you, continue from that feedback and report "
             "completed again when the fixes are done. "
+            "Final reports may include review_decision: auto, request, or skip. Use request when "
+            "independent reviewer checks are needed, skip only for low-risk no-change analysis or "
+            "manual follow-up that does not need reviewer checks, and include review_reason. "
             "Report progress to the workspace coordinator only after you receive a task, "
             "when you start, get blocked, need input, are ready for review, or complete the work.\n\n"
             "Report endpoint for assigned tasks:\n"
@@ -1556,12 +1597,21 @@ class WorkspaceManager:
             "If blocked or waiting for user input, report blocked or needs_input. "
             "When ready for human review, report ready_for_review. When you believe the task is "
             "fully complete and ready for independent reviewer checks, report completed.\n\n"
+            "For completed reports, decide reviewer routing explicitly:\n"
+            "- review_decision=request when this should go to an independent reviewer.\n"
+            "- review_decision=skip only for low-risk no-change analysis or manual follow-up "
+            "where reviewer checks are unnecessary.\n"
+            "- review_decision=auto to use the workspace default reviewer policy.\n"
+            "Always include review_reason when choosing request or skip. The backend may still "
+            "force review for changed files, failed review follow-ups, blocked input, runtime "
+            "attention, or other higher-risk work.\n\n"
             "Report endpoint example:\n"
             f"curl -sS -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"started",'
             '"message":"Started task"}\'\n\n'
-            "Final reports should include task_id, state, message, changed_files, validation, and risks."
+            "Final reports should include task_id, state, message, changed_files, validation, "
+            "risks, review_decision, review_reason, and risk_level."
         )
 
     def _build_review_prompt(
@@ -1584,6 +1634,9 @@ class WorkspaceManager:
                 "changed_files": report.changed_files,
                 "validation": report.validation,
                 "risks": report.risks,
+                "review_decision": report.review_decision.value,
+                "review_reason": report.review_reason,
+                "risk_level": report.risk_level,
                 "created_at": report.created_at.isoformat(),
             }
             for report in task_reports
@@ -1770,6 +1823,9 @@ class WorkspaceManager:
             changed_files=payload.changed_files,
             validation=payload.validation,
             risks=payload.risks,
+            review_decision=payload.review_decision,
+            review_reason=payload.review_reason,
+            risk_level=payload.risk_level,
             created_at=now,
         )
         self.reports[report.id] = report
@@ -1825,7 +1881,93 @@ class WorkspaceManager:
             return
         if task.review_requested_at and not task.review_completed_at:
             return
-        await self._request_task_review(task, report)
+        should_review = await self._should_request_task_review(
+            task,
+            report,
+            trigger_kind="agent_report",
+        )
+        if should_review:
+            await self._request_task_review(task, report)
+            return
+        self._mark_task_review_skipped(task, report)
+
+    async def _should_request_task_review(
+        self,
+        task: WorkspaceTask,
+        report: AgentReport,
+        *,
+        trigger_kind: str,
+    ) -> bool:
+        if trigger_kind != "agent_report":
+            return True
+        if report.review_decision == ReviewDecision.REQUEST:
+            return True
+        if report.state in {
+            AgentReportState.READY_FOR_REVIEW,
+            AgentReportState.BLOCKED,
+            AgentReportState.NEEDS_INPUT,
+        }:
+            return True
+        if report.review_decision != ReviewDecision.SKIP:
+            return True
+        return not await self._can_skip_task_review(task, report)
+
+    async def _can_skip_task_review(self, task: WorkspaceTask, report: AgentReport) -> bool:
+        if report.state != AgentReportState.COMPLETED:
+            return False
+        if report.changed_files:
+            return False
+        if (report.risk_level or "").strip().lower() not in {"", "low", "none"}:
+            return False
+        if self._latest_review_report_state(task.id) == AgentReportState.REVIEW_FAILED:
+            return False
+        if await self._workspace_has_tracked_changes(task.workspace_id):
+            return False
+        return True
+
+    async def _workspace_has_tracked_changes(self, workspace_id: str) -> bool:
+        workspace = self.workspaces.get(workspace_id)
+        if not workspace or workspace.target != ExecutionTarget.LOCAL:
+            return False
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git",
+                "-C",
+                workspace.path,
+                "status",
+                "--porcelain",
+                "--untracked-files=no",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return True
+        except OSError:
+            return True
+        if proc.returncode != 0:
+            return False
+        return bool(stdout.strip())
+
+    def _mark_task_review_skipped(self, task: WorkspaceTask, report: AgentReport) -> None:
+        now = _now()
+        reason = report.review_reason or "Agent completed the task without requesting review."
+        self.tasks[task.id] = task.model_copy(
+            update={
+                "status": WorkspaceTaskStatus.REVIEW,
+                "review_session_id": None,
+                "review_requested_at": None,
+                "review_completed_at": None,
+                "review_skipped_at": now,
+                "review_skip_reason": reason,
+                "reviewed_at": now,
+                "completed_at": None,
+                "updated_at": now,
+            }
+        )
+        self._save_state()
 
     async def _request_task_review(
         self,
@@ -1845,6 +1987,8 @@ class WorkspaceManager:
                 "review_attempts": task.review_attempts + 1,
                 "review_requested_at": now,
                 "review_completed_at": None,
+                "review_skipped_at": None,
+                "review_skip_reason": None,
                 "completed_at": None,
                 "updated_at": now,
             }
@@ -1932,6 +2076,8 @@ class WorkspaceManager:
         task_update = {
             "review_session_id": reviewer.id,
             "review_completed_at": now,
+            "review_skipped_at": None,
+            "review_skip_reason": None,
             "reviewed_at": task.reviewed_at or now,
             "completed_at": None,
             "updated_at": now,
@@ -2526,6 +2672,17 @@ class WorkspaceManager:
     def _latest_report_state(self, task_id: str) -> AgentReportState | None:
         reports = sorted(
             [report for report in self.reports.values() if report.task_id == task_id],
+            key=lambda report: report.created_at,
+        )
+        return reports[-1].state if reports else None
+
+    def _latest_review_report_state(self, task_id: str) -> AgentReportState | None:
+        reports = sorted(
+            [
+                report
+                for report in self.reports.values()
+                if report.task_id == task_id and report.state.value.startswith("review_")
+            ],
             key=lambda report: report.created_at,
         )
         return reports[-1].state if reports else None

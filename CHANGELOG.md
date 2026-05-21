@@ -5,6 +5,12 @@
 
 ## 2026-05-21
 
+### feat: let agents skip low-risk reviewer checks
+- Add explicit `review_decision` metadata to workspace reports so agents can request, skip, or defer to automatic reviewer routing
+- Keep backend guardrails that force review for changed files, tracked dirty worktrees, blocked/input-needed states, runtime attention diagnostics, and failed-review follow-ups
+- Mark approved skip decisions in the Review column with a reason and expose a manual Request review action for skipped tasks
+- **Files**: workspace_manager.py, schemas.py, workspaces.py, test_workspaces.py, AgentWorkspaceView.vue, workspaceStore.ts, index.ts
+
 ### fix: avoid duplicate split-pane terminal clients
 - Keep a terminal tab assigned to only one visible pane at a time so split layouts cannot attach duplicate ttyd/tmux browser clients to the same Claude session
 - Drop hidden iframe caches when leaving single-pane mode, preventing stale hidden clients from continuing Claude TUI redraw and resize work while another pane displays that tab
