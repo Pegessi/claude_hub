@@ -5,6 +5,11 @@
 
 ## 2026-05-21
 
+### fix: keep status panel refresh icon idle during polling
+- Make the Workspace Agents status-panel refresh button use a local manual-refresh pending state instead of the global background status-poll loading flag
+- Keep automatic panel-open and periodic status refreshes silent so the header icon no longer appears to spin continuously while data is polling
+- **Files**: AgentStatusFloatingPanel.vue
+
 ### feat: let agents skip low-risk reviewer checks
 - Add explicit `review_decision` metadata to workspace reports so agents can request, skip, or defer to automatic reviewer routing
 - Keep backend guardrails that force review for changed files, tracked dirty worktrees, blocked/input-needed states, runtime attention diagnostics, and failed-review follow-ups
