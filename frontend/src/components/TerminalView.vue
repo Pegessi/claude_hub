@@ -22,6 +22,7 @@
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useAppStore } from '@/stores/appStore'
+import { useTerminalStore } from '@/stores/terminalStore'
 import type { AgentType } from '@/types'
 
 const props = defineProps<{
@@ -72,7 +73,9 @@ const iframeRefs: Record<string, HTMLIFrameElement | null> = {}
 const cachedTabIds = ref<string[]>([])
 const terminalContainer = ref<HTMLElement | null>(null)
 const appStore = useAppStore()
+const terminalStore = useTerminalStore()
 const { colorScheme } = storeToRefs(appStore)
+const { layoutType } = storeToRefs(terminalStore)
 let terminalResizeObserver: ResizeObserver | null = null
 let keyboardResizeSettleTimer: number | null = null
 let keyboardResizeSettlesAt = 0
@@ -96,6 +99,11 @@ function getTerminalState(): TerminalKeyState {
 
 function cacheTabId(tabId: string) {
   if (!tabId) return
+  // Split layouts must not keep hidden iframe clients attached to tmux.
+  if (layoutType.value !== '1x1') {
+    cachedTabIds.value = [tabId]
+    return
+  }
   if (!cachedTabIds.value.includes(tabId)) {
     cachedTabIds.value.push(tabId)
   }
@@ -124,6 +132,12 @@ watch(
   },
   { immediate: true }
 )
+
+watch(layoutType, () => {
+  if (layoutType.value !== '1x1' && props.tabId) {
+    cachedTabIds.value = [props.tabId]
+  }
+})
 
 function registerIframe(el: any, tabId: string) {
   const previous = iframeRefs[tabId]
