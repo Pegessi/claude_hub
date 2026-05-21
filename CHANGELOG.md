@@ -5,6 +5,11 @@
 
 ## 2026-05-21
 
+### fix: collapse mobile frontend access links
+- Keep the mobile overflow menu compact by showing Frontend Access as a collapsed submenu by default
+- Fetch and reveal the local frontend URLs only when the nested menu is opened, then reset it collapsed when the parent overflow menu closes
+- **Files**: NetworkAccessMenu.vue
+
 ### fix: drop generated terminal probe replies in agent tabs
 - Filter xterm.js device-attribute and cursor-position replies from Claude/Codex tab WebSocket input so terminal capability probes no longer appear as stray text like `0;276;0c` in the agent prompt
 - Keep the filter scoped to generated probe replies on agent tabs, leaving normal typing, escape keys, resize frames, and plain terminal tabs unchanged
