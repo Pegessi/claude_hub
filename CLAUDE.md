@@ -36,20 +36,27 @@ claude_hub/
 ```
 
 ## Development Branch Workflow
-For all new feature development:
-1. **Create a new branch**: `git checkout -b feat/your-feature-name`
-2. **Develop your feature** on the branch
-3. **Commit your changes** using conventional commits
-4. **Push the branch** and create a pull request (or merge locally)
-5. **Wait for CI to pass**
-6. **Update CHANGELOG.md** with the merge entry (commit hash, date, summary, key files)
-7. **Merge into main**
+For all new feature development, bug fixes, UI changes, tests, documentation
+changes, and managed workspace tasks:
+1. **Start from clean `main`**: fetch/sync first, and do not edit directly on
+   `main`.
+2. **Create an isolated worktree with a new branch**:
+   `git worktree add ../claude_hub-<slug> -b feat/your-feature-name main`.
+3. **Develop inside that worktree**. Do not reuse another task's worktree or the
+   shared main checkout for new work.
+4. **For frontend changes**, run a dedicated dev/review server from that
+   worktree on its own port. After the user confirms the result, or after the
+   validation window is complete, stop that debug service before merging or
+   leaving the task.
+5. **Commit your changes** using conventional commits.
+6. **Validate the branch** with tests/builds appropriate to the touched files.
+7. **Update CHANGELOG.md** with the merge entry summary and key files for
+   meaningful shipped changes.
+8. **Merge into `main` after validation and review/approval**, then push
+   `main`.
 
-This workflow also applies to small UI fixes, backend fixes, documentation
-changes, and managed workspace tasks. Agents must not edit directly on `main`;
-if a task starts while the checkout is on `main`, create a feature/fix branch
-or an isolated worktree before editing. A user request to merge or push means
-finish the branch-to-main flow after validation, not skip the branch.
+A user request to merge or push means finish the worktree branch-to-main flow
+after validation; it is not permission to skip the worktree branch.
 
 ## Commit Convention
 Use conventional commits:

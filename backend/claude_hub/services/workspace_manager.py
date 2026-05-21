@@ -135,6 +135,7 @@ class WorkspaceManager:
         self.tasks: dict[str, WorkspaceTask] = {}
         self.sessions: dict[str, ManagedSession] = {}
         self.reports: dict[str, AgentReport] = {}
+        self._dispatch_locks: dict[str, asyncio.Lock] = {}
         self._monitor_task: asyncio.Task[None] | None = None
         self._load_state()
 
@@ -1210,6 +1211,19 @@ class WorkspaceManager:
         if workspace_id not in self.workspaces:
             raise KeyError(workspace_id)
 
+        lock = self._dispatch_locks.setdefault(workspace_id, asyncio.Lock())
+        async with lock:
+            await self._dispatch_workspace_locked(
+                workspace_id,
+                refresh_sessions=refresh_sessions,
+            )
+
+    async def _dispatch_workspace_locked(
+        self,
+        workspace_id: str,
+        *,
+        refresh_sessions: bool,
+    ) -> None:
         if refresh_sessions:
             await self._refresh_session_statuses(workspace_id)
         for session in self._workspace_agents(workspace_id, include_stopped=True):
@@ -1831,6 +1845,7 @@ class WorkspaceManager:
                 "review_attempts": task.review_attempts + 1,
                 "review_requested_at": now,
                 "review_completed_at": None,
+                "completed_at": None,
                 "updated_at": now,
             }
         )
@@ -1895,31 +1910,36 @@ class WorkspaceManager:
             return
 
         now = _now()
-        self.sessions[reviewer.id] = reviewer.model_copy(
-            update={
-                "task_id": None,
-                "current_task_id": None,
-                "status": (
-                    ManagedSessionStatus.NEEDS_INPUT
-                    if report.state == AgentReportState.REVIEW_NEEDS_INPUT
-                    else ManagedSessionStatus.IDLE
-                ),
-                "runtime_status": (
-                    AgentRuntimeStatus.ATTENTION
-                    if report.state == AgentReportState.REVIEW_NEEDS_INPUT
-                    else AgentRuntimeStatus.IDLE
-                ),
-                "updated_at": now,
-                "last_activity_at": now,
-            }
+        reviewer_status = (
+            ManagedSessionStatus.NEEDS_INPUT
+            if report.state == AgentReportState.REVIEW_NEEDS_INPUT
+            else ManagedSessionStatus.IDLE
         )
+        reviewer_runtime_status = (
+            AgentRuntimeStatus.ATTENTION
+            if report.state == AgentReportState.REVIEW_NEEDS_INPUT
+            else AgentRuntimeStatus.IDLE
+        )
+        task_with_reviewer = task.model_copy(update={"review_session_id": reviewer.id})
+        self._release_reviewer_session(
+            task_with_reviewer,
+            status=reviewer_status,
+            runtime_status=reviewer_runtime_status,
+            updated_at=now,
+            include_stale_assignments=report.state != AgentReportState.REVIEW_NEEDS_INPUT,
+        )
+
+        task_update = {
+            "review_session_id": reviewer.id,
+            "review_completed_at": now,
+            "reviewed_at": task.reviewed_at or now,
+            "completed_at": None,
+            "updated_at": now,
+        }
         self.tasks[task.id] = task.model_copy(
             update={
+                **task_update,
                 "status": WorkspaceTaskStatus.REVIEW,
-                "review_session_id": reviewer.id,
-                "review_completed_at": now,
-                "reviewed_at": task.reviewed_at or now,
-                "updated_at": now,
             }
         )
         self._save_state()
@@ -1999,6 +2019,7 @@ class WorkspaceManager:
     def _message_still_in_input(self, output: str, message: str) -> bool:
         lines = [line.rstrip() for line in output.splitlines()]
         first_line = message.strip().splitlines()[0][:80] if message.strip() else ""
+        is_slash_command = message.strip().startswith("/")
         tail_start = max(0, len(lines) - 16)
         tail = lines[tail_start:]
         for index, line in enumerate(tail):
@@ -2013,7 +2034,9 @@ class WorkspaceManager:
             if any(next_line.strip().startswith(("›", ">", "❯")) for next_line in following_lines):
                 continue
             following = "\n".join(following_lines[:5]).lstrip()
-            if following.startswith(("•", "⏺", "●", "⎿")):
+            if following.startswith(("•", "⏺", "●")):
+                continue
+            if following.startswith("⎿") and (is_slash_command or not has_pasted_placeholder):
                 continue
             return True
         return False
@@ -2245,7 +2268,6 @@ class WorkspaceManager:
                     in {
                         AgentReportState.READY_FOR_REVIEW,
                         AgentReportState.COMPLETED,
-                        AgentReportState.REVIEW_PASSED,
                     }
                 ):
                     self.tasks[current_task_id] = task.model_copy(
@@ -2457,6 +2479,27 @@ class WorkspaceManager:
                 AgentReportState.REVIEW_PASSED,
             }:
                 continue
+            if report.state == AgentReportState.REVIEW_PASSED:
+                reviewed_task = task.model_copy(
+                    update={
+                        "status": WorkspaceTaskStatus.REVIEW,
+                        "review_session_id": report.session_id,
+                        "review_completed_at": task.review_completed_at or report.created_at,
+                        "reviewed_at": task.reviewed_at or report.created_at,
+                        "completed_at": None,
+                        "updated_at": report.created_at,
+                    }
+                )
+                self.tasks[task_id] = reviewed_task
+                self._release_reviewer_session(
+                    reviewed_task,
+                    status=ManagedSessionStatus.IDLE,
+                    runtime_status=AgentRuntimeStatus.IDLE,
+                    updated_at=report.created_at,
+                    include_stale_assignments=True,
+                )
+                changed = True
+                continue
             if task.status == WorkspaceTaskStatus.REVIEW:
                 continue
             if task.reviewed_at != report.created_at:
@@ -2584,6 +2627,45 @@ class WorkspaceManager:
                     "auto_continue_attempts": 0,
                     "last_auto_continue_at": None,
                     "updated_at": _now(),
+                }
+            )
+
+    def _release_reviewer_session(
+        self,
+        task: WorkspaceTask,
+        *,
+        status: ManagedSessionStatus,
+        runtime_status: AgentRuntimeStatus,
+        updated_at: datetime,
+        include_stale_assignments: bool = False,
+    ) -> None:
+        session_ids: set[str] = set()
+        if task.review_session_id:
+            session_ids.add(task.review_session_id)
+        if include_stale_assignments:
+            session_ids.update(
+                session.id
+                for session in self.sessions.values()
+                if session.role == WorkspaceSessionRole.REVIEWER
+                and (session.task_id == task.id or session.current_task_id == task.id)
+            )
+
+        for session_id in session_ids:
+            session = self.sessions.get(session_id)
+            if (
+                not session
+                or session.role != WorkspaceSessionRole.REVIEWER
+                or (session.task_id != task.id and session.current_task_id != task.id)
+            ):
+                continue
+            self.sessions[session.id] = session.model_copy(
+                update={
+                    "task_id": None,
+                    "current_task_id": None,
+                    "status": status,
+                    "runtime_status": runtime_status,
+                    "updated_at": updated_at,
+                    "last_activity_at": updated_at,
                 }
             )
 
