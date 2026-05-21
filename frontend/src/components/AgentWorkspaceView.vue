@@ -564,8 +564,31 @@
             </section>
 
             <section class="detail-section">
-              <div class="detail-section-title">
-                Progress
+              <div class="detail-section-title detail-section-title--with-controls">
+                <span>Progress</span>
+                <div
+                  v-if="selectedReports.length > 0 && hasBilingualReport"
+                  class="lang-toggle"
+                  role="group"
+                  aria-label="Report language"
+                >
+                  <button
+                    type="button"
+                    class="lang-toggle-btn"
+                    :class="{ active: reportLang === 'en' }"
+                    @click="setReportLang('en')"
+                  >
+                    EN
+                  </button>
+                  <button
+                    type="button"
+                    class="lang-toggle-btn"
+                    :class="{ active: reportLang === 'zh' }"
+                    @click="setReportLang('zh')"
+                  >
+                    中
+                  </button>
+                </div>
               </div>
               <div
                 v-if="selectedReports.length === 0"
@@ -586,15 +609,12 @@
                     :open="isLatestSelectedReport(report)"
                   >
                     <summary>
-                      <span class="report-state">
-                        <span class="report-state-en">{{ report.state }}</span>
-                        <span class="report-state-zh">{{ formatReportStateZh(report.state) }}</span>
-                      </span>
+                      <span class="report-state">{{ report.state }}</span>
                       <span class="report-time">{{ formatTime(report.created_at) }}</span>
                     </summary>
                     <MarkdownContent
                       class="report-message"
-                      :text="report.message"
+                      :text="reportMessageForLang(report)"
                     />
                     <div
                       v-if="report.changed_files.length > 0"
@@ -1918,22 +1938,31 @@ function formatTime(value: string) {
   }).format(new Date(value))
 }
 
-const REPORT_STATE_ZH: Record<string, string> = {
-  started: '已开始',
-  working: '进行中',
-  blocked: '已阻塞',
-  needs_input: '需要输入',
-  ready_for_review: '待审核',
-  completed: '已完成',
-  review_started: '审核中',
-  review_passed: '审核通过',
-  review_failed: '审核未通过',
-  review_needs_input: '审核待补充',
+const REPORT_LANG_STORAGE_KEY = 'claude-hub:report-lang'
+type ReportLang = 'en' | 'zh'
+
+const reportLang = ref<ReportLang>(
+  (typeof localStorage !== 'undefined' && (localStorage.getItem(REPORT_LANG_STORAGE_KEY) as ReportLang | null)) || 'en'
+)
+
+function setReportLang(lang: ReportLang) {
+  reportLang.value = lang
+  try {
+    localStorage.setItem(REPORT_LANG_STORAGE_KEY, lang)
+  } catch {
+    /* ignore quota / disabled storage */
+  }
 }
 
-function formatReportStateZh(state: string) {
-  return REPORT_STATE_ZH[state] ?? state
+function reportMessageForLang(report: AgentReport): string {
+  const preferred = reportLang.value === 'zh' ? report.message_zh : report.message_en
+  const fallback = reportLang.value === 'zh' ? report.message_en : report.message_zh
+  return preferred || fallback || report.message
 }
+
+const hasBilingualReport = computed(() =>
+  selectedReports.value.some((r) => (r.message_en && r.message_en.trim()) || (r.message_zh && r.message_zh.trim()))
+)
 
 async function fetchRemoteProfiles() {
   remoteProfilesLoading.value = true
@@ -3557,6 +3586,41 @@ onUnmounted(() => {
   text-transform: uppercase;
 }
 
+.detail-section-title--with-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.lang-toggle {
+  display: inline-flex;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: 999px;
+  overflow: hidden;
+  text-transform: none;
+}
+
+.lang-toggle-btn {
+  padding: 2px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--ch-color-text-subtle);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+}
+
+.lang-toggle-btn:hover {
+  color: var(--ch-color-text);
+}
+
+.lang-toggle-btn.active {
+  background: var(--ch-color-accent);
+  color: var(--ch-color-on-accent, #fff);
+}
+
 .detail-header h2 {
   margin: 4px 0 0;
   color: var(--ch-color-text-strong);
@@ -3804,21 +3868,8 @@ onUnmounted(() => {
 }
 
 .report-state {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
-  min-width: 0;
-}
-
-.report-state-en {
   font-weight: 700;
   color: var(--ch-color-text);
-}
-
-.report-state-zh {
-  color: var(--ch-color-text-subtle);
-  font-size: 11px;
-  font-weight: 500;
 }
 
 .report-time {
