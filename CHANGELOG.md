@@ -5,15 +5,16 @@
 
 ## 2026-05-21
 
+### fix: stop re-prompting orchestrator after review is in flight
+- Skip the auto-continue "no workspace report was recorded" nudge when `review_requested_at` is set without `review_completed_at`, or when the latest report for the task is already `ready_for_review` / `completed` / `blocked` / `needs_input`
+- Previously the orchestrator session stayed parked with `task.status == WORKING` while the reviewer ran, so the monitor kept matching completion patterns in scrollback and re-sending the nudge every ~15s up to 10 attempts
+- **Files**: workspace_manager.py, test_workspaces.py
+
 ### fix: disabled segment-button styling on edit workspace modal
 - Add a `:disabled` style for segmented controls so the locked Local/Remote toggle in the Edit Workspace modal renders with reduced opacity and a not-allowed cursor on both desktop and mobile, instead of looking falsely interactive
 - **Files**: AgentWorkspaceView.vue
 
 ### feat: editable workspace working dir as default for new agents
-- Pre-fill the New Agent modal's working directory with the workspace's local path or remote start dir based on the selected target, and keep the prefill in sync when the user toggles between Local and Remote
-- Add an Edit Workspace flow (header button + mobile menu entry) that lets users update the workspace name, default branch, local working directory, and remote start dir post-creation
-- Expose a `PATCH /api/workspaces/{workspace_id}` endpoint backed by a new `update_workspace` manager method that validates the local path before saving and refreshes the workspace snapshot
-- **Files**: AgentWorkspaceView.vue, workspaceStore.ts, types/index.ts, api/workspaces.py, services/workspace_manager.py, models/schemas.py, models/__init__.py, tests/test_workspaces.py
 
 ### feat: bilingual report detail with EN | 中 toggle in task progress
 - Add optional `message_en` and `message_zh` fields to the AgentReport schema so workers can submit each progress update in both languages; legacy `message` remains a fallback
