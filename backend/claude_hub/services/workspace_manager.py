@@ -35,6 +35,7 @@ from ..models import (
     WorkspaceTask,
     WorkspaceTaskCreate,
     WorkspaceTaskStatus,
+    WorkspaceUpdate,
 )
 from .remote_profiles import remote_profile_manager
 from .ttyd_manager import ttyd_manager
@@ -430,6 +431,44 @@ class WorkspaceManager:
         self.workspaces[workspace_id] = workspace
         self._save_state()
         return workspace
+
+    def update_workspace(self, workspace_id: str, payload: WorkspaceUpdate) -> Workspace:
+        workspace = self.workspaces.get(workspace_id)
+        if workspace is None:
+            raise KeyError(workspace_id)
+
+        update_kwargs: dict[str, Any] = {}
+        if payload.name is not None:
+            name = payload.name.strip()
+            if not name:
+                raise ValueError("Workspace name cannot be empty")
+            update_kwargs["name"] = name
+        if payload.path is not None:
+            new_path = payload.path.strip()
+            if not new_path:
+                raise ValueError("Local workspace dir cannot be empty")
+            resolved = Path(new_path).expanduser().resolve()
+            if not resolved.exists() or not resolved.is_dir():
+                raise ValueError(f"Local workspace dir does not exist: {resolved}")
+            update_kwargs["path"] = str(resolved)
+        if payload.default_branch is not None:
+            branch = payload.default_branch.strip()
+            if not branch:
+                raise ValueError("Default branch cannot be empty")
+            update_kwargs["default_branch"] = branch
+        if payload.remote_cwd is not None:
+            value = payload.remote_cwd.strip()
+            update_kwargs["remote_cwd"] = value or None
+        if payload.remote_reconnect is not None:
+            update_kwargs["remote_reconnect"] = payload.remote_reconnect
+
+        if not update_kwargs:
+            return workspace
+
+        updated = workspace.model_copy(update={**update_kwargs, "updated_at": _now()})
+        self.workspaces[workspace_id] = updated
+        self._save_state()
+        return updated
 
     def create_task(self, workspace_id: str, payload: WorkspaceTaskCreate) -> WorkspaceTask:
         if workspace_id not in self.workspaces:

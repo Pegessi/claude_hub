@@ -126,6 +126,14 @@ export interface WorkspaceCreate {
   remote_reconnect?: boolean
 }
 
+export interface WorkspaceUpdate {
+  name?: string
+  path?: string
+  default_branch?: string
+  remote_cwd?: string | null
+  remote_reconnect?: boolean
+}
+
 export interface WorkspaceAttachment {
   id: string
   filename: string

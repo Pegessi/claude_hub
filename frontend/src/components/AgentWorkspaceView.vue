@@ -46,6 +46,14 @@
           type="button"
           class="tool-button workspace-desktop-action"
           :disabled="!activeWorkspaceId"
+          @click="openEditWorkspaceModal"
+        >
+          Edit Workspace
+        </button>
+        <button
+          type="button"
+          class="tool-button workspace-desktop-action"
+          :disabled="!activeWorkspaceId"
           @click="openAgentOptionsModal"
         >
           Manage Agents
@@ -91,6 +99,14 @@
               @click="openWorkspaceModalFromMenu"
             >
               New Workspace
+            </button>
+            <button
+              type="button"
+              class="workspace-mobile-menu-item"
+              :disabled="!activeWorkspaceId"
+              @click="openEditWorkspaceModalFromMenu"
+            >
+              Edit Workspace
             </button>
             <button
               type="button"
@@ -778,8 +794,8 @@
       @click.self="closeWorkspaceModal"
     >
       <div class="workspace-modal">
-        <h3>Create Workspace</h3>
-        <form @submit.prevent="handleCreateWorkspace">
+        <h3>{{ workspaceModalMode === 'edit' ? 'Edit Workspace' : 'Create Workspace' }}</h3>
+        <form @submit.prevent="handleSubmitWorkspace">
           <div class="modal-field">
             <label>Name</label>
             <input
@@ -794,6 +810,9 @@
               v-model="workspaceForm.path"
               placeholder="/Users/me/workspace"
             >
+            <p class="modal-hint">
+              Used as the default working directory for new agents in this workspace.
+            </p>
           </div>
           <div class="modal-field">
             <label>Environment</label>
@@ -801,6 +820,7 @@
               <button
                 type="button"
                 :class="['segment-button', { active: workspaceForm.target === 'local' }]"
+                :disabled="workspaceModalMode === 'edit'"
                 @click="workspaceForm.target = 'local'"
               >
                 Local
@@ -808,6 +828,7 @@
               <button
                 type="button"
                 :class="['segment-button', { active: workspaceForm.target === 'remote' }]"
+                :disabled="workspaceModalMode === 'edit'"
                 @click="workspaceForm.target = 'remote'"
               >
                 Remote
@@ -819,7 +840,7 @@
               <label>Remote profile</label>
               <select
                 v-model="workspaceForm.remote_profile_id"
-                :disabled="remoteProfilesLoading"
+                :disabled="remoteProfilesLoading || workspaceModalMode === 'edit'"
               >
                 <option value="">
                   Select server
@@ -839,6 +860,9 @@
                 v-model="workspaceForm.remote_cwd"
                 placeholder="~"
               >
+              <p class="modal-hint">
+                Used as the default remote working directory for new agents.
+              </p>
             </div>
             <div class="modal-field">
               <label class="checkbox-label">
@@ -863,6 +887,7 @@
               <input
                 v-model="workspaceForm.session_prefix"
                 placeholder="chub"
+                :disabled="workspaceModalMode === 'edit'"
               >
             </div>
           </div>
@@ -878,10 +903,10 @@
               type="submit"
               class="primary-button"
               :disabled="isLoading || (workspaceForm.target === 'remote' && !workspaceForm.remote_profile_id)"
-              :loading="isPending('workspace:create')"
-              loading-label="Creating workspace"
+              :loading="isPending(workspaceModalMode === 'edit' ? 'workspace:update' : 'workspace:create')"
+              :loading-label="workspaceModalMode === 'edit' ? 'Saving workspace' : 'Creating workspace'"
             >
-              Create workspace
+              {{ workspaceModalMode === 'edit' ? 'Save workspace' : 'Create workspace' }}
             </LoadingButton>
           </div>
         </form>
@@ -1096,14 +1121,14 @@
               <button
                 type="button"
                 :class="['segment-button', { active: agentOptionsForm.target === 'local' }]"
-                @click="agentOptionsForm.target = 'local'"
+                @click="handleAgentTargetChange('local')"
               >
                 Local
               </button>
               <button
                 type="button"
                 :class="['segment-button', { active: agentOptionsForm.target === 'remote' }]"
-                @click="agentOptionsForm.target = 'remote'"
+                @click="handleAgentTargetChange('remote')"
               >
                 Remote
               </button>
@@ -1386,6 +1411,8 @@ const detailMessage = ref('')
 const detailAttachments = ref<DraftAttachment[]>([])
 const isDetailActionsExpanded = ref(false)
 const showWorkspaceModal = ref(false)
+const workspaceModalMode = ref<'create' | 'edit'>('create')
+const editingWorkspaceId = ref<string | null>(null)
 const showAgentOptionsModal = ref(false)
 const showAgentFileBrowser = ref(false)
 const showTaskModal = ref(false)
@@ -1980,6 +2007,13 @@ async function fetchRemoteProfiles() {
   }
 }
 
+async function handleSubmitWorkspace() {
+  if (workspaceModalMode.value === 'edit') {
+    return handleSaveWorkspace()
+  }
+  return handleCreateWorkspace()
+}
+
 async function handleCreateWorkspace() {
   const workspace = await runPending('workspace:create', () =>
     workspaceStore.createWorkspace({
@@ -2001,6 +2035,25 @@ async function handleCreateWorkspace() {
   }
 }
 
+async function handleSaveWorkspace() {
+  const workspaceId = editingWorkspaceId.value
+  if (!workspaceId) return
+  const workspace = await runPending('workspace:update', () =>
+    workspaceStore.updateWorkspace(workspaceId, {
+      name: workspaceForm.name.trim() || undefined,
+      path: workspaceForm.path.trim() || undefined,
+      default_branch: workspaceForm.default_branch.trim() || undefined,
+      remote_cwd:
+        workspaceForm.target === 'remote' ? workspaceForm.remote_cwd.trim() || null : undefined,
+      remote_reconnect:
+        workspaceForm.target === 'remote' ? workspaceForm.remote_reconnect : undefined,
+    })
+  )
+  if (workspace) {
+    showWorkspaceModal.value = false
+  }
+}
+
 function resetWorkspaceForm() {
   workspaceForm.name = 'Claude Hub'
   workspaceForm.path = '/Users/bytedance/claude_hub'
@@ -2014,11 +2067,34 @@ function resetWorkspaceForm() {
 
 function openWorkspaceModal() {
   resetWorkspaceForm()
+  workspaceModalMode.value = 'create'
+  editingWorkspaceId.value = null
   showWorkspaceModal.value = true
+}
+
+function openEditWorkspaceModal() {
+  const workspace = activeWorkspace.value
+  if (!workspace) return
+  workspaceForm.name = workspace.name
+  workspaceForm.path = workspace.path
+  workspaceForm.default_branch = workspace.default_branch
+  workspaceForm.session_prefix = workspace.session_prefix
+  workspaceForm.target = workspace.target
+  workspaceForm.remote_profile_id = workspace.remote_profile_id || ''
+  workspaceForm.remote_cwd = workspace.remote_cwd || ''
+  workspaceForm.remote_reconnect = workspace.remote_reconnect
+  workspaceModalMode.value = 'edit'
+  editingWorkspaceId.value = workspace.id
+  showWorkspaceModal.value = true
+  if (workspace.target === 'remote') {
+    fetchRemoteProfiles()
+  }
 }
 
 function closeWorkspaceModal() {
   showWorkspaceModal.value = false
+  workspaceModalMode.value = 'create'
+  editingWorkspaceId.value = null
 }
 
 function closeWorkspaceMobileMenu() {
@@ -2048,6 +2124,11 @@ function openWorkspaceModalFromMenu() {
   closeWorkspaceMobileMenu()
 }
 
+function openEditWorkspaceModalFromMenu() {
+  openEditWorkspaceModal()
+  closeWorkspaceMobileMenu()
+}
+
 function openAgentOptionsModalFromMenu() {
   openAgentOptionsModal()
   closeWorkspaceMobileMenu()
@@ -2056,6 +2137,15 @@ function openAgentOptionsModalFromMenu() {
 function toggleThemeFromMenu() {
   appStore.toggleColorScheme()
   closeWorkspaceMobileMenu()
+}
+
+function workspaceDefaultCwd(target: ExecutionTarget): string {
+  const workspace = activeWorkspace.value
+  if (!workspace) return ''
+  if (target === 'remote') {
+    return workspace.remote_cwd || selectedAgentRemoteProfile.value?.default_cwd || ''
+  }
+  return workspace.path || ''
 }
 
 function resetAgentOptionsForm() {
@@ -2068,7 +2158,19 @@ function resetAgentOptionsForm() {
   agentOptionsForm.remote_reconnect = workspace?.remote_reconnect ?? true
   agentOptionsForm.remote_profile_id =
     workspace?.remote_profile_id || remoteProfiles.value[0]?.id || ''
-  agentOptionsForm.cwd = workspace?.path || ''
+  agentOptionsForm.cwd = workspaceDefaultCwd(agentOptionsForm.target)
+}
+
+function handleAgentTargetChange(target: ExecutionTarget) {
+  if (agentOptionsForm.target === target) return
+  const previousDefault = workspaceDefaultCwd(agentOptionsForm.target)
+  agentOptionsForm.target = target
+  if (!agentOptionsForm.cwd.trim() || agentOptionsForm.cwd === previousDefault) {
+    agentOptionsForm.cwd = workspaceDefaultCwd(target)
+  }
+  if (target === 'remote') {
+    fetchRemoteProfiles()
+  }
 }
 
 function openAgentOptionsModal() {

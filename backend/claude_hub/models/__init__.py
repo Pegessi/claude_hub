@@ -34,6 +34,7 @@ from .schemas import (
     WorkspaceTaskCreate,
     WorkspaceTaskStatus,
     WorkspaceTaskUpdate,
+    WorkspaceUpdate,
 )
 
 __all__ = [
@@ -62,6 +63,7 @@ __all__ = [
     "EnsureWorkspaceAgentRequest",
     "WorkspaceCreate",
     "Workspace",
+    "WorkspaceUpdate",
     "WorkspaceAttachmentCreate",
     "WorkspaceAttachment",
     "WorkspaceTaskCreate",

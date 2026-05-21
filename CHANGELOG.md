@@ -5,6 +5,12 @@
 
 ## 2026-05-21
 
+### feat: editable workspace working dir as default for new agents
+- Pre-fill the New Agent modal's working directory with the workspace's local path or remote start dir based on the selected target, and keep the prefill in sync when the user toggles between Local and Remote
+- Add an Edit Workspace flow (header button + mobile menu entry) that lets users update the workspace name, default branch, local working directory, and remote start dir post-creation
+- Expose a `PATCH /api/workspaces/{workspace_id}` endpoint backed by a new `update_workspace` manager method that validates the local path before saving and refreshes the workspace snapshot
+- **Files**: AgentWorkspaceView.vue, workspaceStore.ts, types/index.ts, api/workspaces.py, services/workspace_manager.py, models/schemas.py, models/__init__.py, tests/test_workspaces.py
+
 ### feat: bilingual report detail with EN | 中 toggle in task progress
 - Add optional `message_en` and `message_zh` fields to the AgentReport schema so workers can submit each progress update in both languages; legacy `message` remains a fallback
 - Render a small EN | 中 toggle next to the Progress section in task details that switches the timeline message body between languages, with sticky preference in localStorage
