@@ -2425,11 +2425,17 @@ onUnmounted(() => {
   right: 0;
   z-index: 80;
   width: 188px;
+  max-height: min(560px, calc(100dvh - 96px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 6px;
   border: 1px solid var(--ch-color-border-strong);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-glass);
   box-shadow: var(--ch-shadow-soft);
+  scrollbar-width: thin;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
 }
 
 .workspace-mobile-menu-item {
