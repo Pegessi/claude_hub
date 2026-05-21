@@ -1,5 +1,6 @@
 import json
 import os
+import re
 
 # Disable all proxies for localhost connections
 os.environ["NO_PROXY"] = "localhost,127.0.0.1"
@@ -31,7 +32,7 @@ from pydantic import BaseModel
 from websockets.typing import Subprotocol
 
 from ..auth.dependencies import get_current_user, get_current_user_ws
-from ..models import User
+from ..models import AgentType, User
 from ..services import ttyd_manager
 
 logger = logging.getLogger(__name__)
@@ -56,10 +57,39 @@ class TerminalHistoryResponse(BaseModel):
     cursor_y: Optional[int] = None
 
 
+_TERMINAL_PROBE_RESPONSE_RE = re.compile(
+    r"^(?:\x1b\[\>[0-9]+(?:;[0-9]+){1,3}c|\x1b\[\?[0-9;]*c|\x1b\[[0-9;]+R)$"
+)
+
+
+def _ttyd_input_payload(message: str | bytes) -> str:
+    if isinstance(message, bytes):
+        try:
+            text = message.decode("utf-8")
+        except UnicodeDecodeError:
+            return ""
+    else:
+        text = message
+
+    # ttyd client input frames are prefixed with "0"; direct terminal websocket
+    # clients may send the payload without that protocol byte.
+    if text.startswith("0"):
+        return text[1:]
+    return text
+
+
+def is_generated_terminal_probe_response(message: str | bytes) -> bool:
+    """Return True for xterm.js replies that should not become agent prompt input."""
+    payload = _ttyd_input_payload(message)
+    return bool(_TERMINAL_PROBE_RESPONSE_RE.fullmatch(payload))
+
+
 async def proxy_websocket(
     client_ws: WebSocket,
     server_uri: str,
     subprotocols: Optional[Sequence[Subprotocol]] = None,
+    *,
+    filter_terminal_probe_responses: bool = False,
 ) -> None:
     """Proxy WebSocket messages between client and ttyd."""
     try:
@@ -71,8 +101,24 @@ async def proxy_websocket(
                         data = await client_ws.receive()
                         if data["type"] == "websocket.receive":
                             if "text" in data:
+                                if (
+                                    filter_terminal_probe_responses
+                                    and is_generated_terminal_probe_response(data["text"])
+                                ):
+                                    logger.debug(
+                                        "Dropped generated terminal probe response for agent tab"
+                                    )
+                                    continue
                                 await server_ws.send(data["text"])
                             elif "bytes" in data:
+                                if (
+                                    filter_terminal_probe_responses
+                                    and is_generated_terminal_probe_response(data["bytes"])
+                                ):
+                                    logger.debug(
+                                        "Dropped generated terminal probe response for agent tab"
+                                    )
+                                    continue
                                 await server_ws.send(data["bytes"])
                 except WebSocketDisconnect:
                     pass
@@ -126,9 +172,15 @@ async def websocket_endpoint(
     await websocket.accept(subprotocol="tty")
 
     ttyd_ws_uri = f"ws://127.0.0.1:{tab.port}/ws"
+    filter_probe_responses = tab.agent_type in {AgentType.CLAUDE, AgentType.CODEX}
 
     try:
-        await proxy_websocket(websocket, ttyd_ws_uri, subprotocols=[Subprotocol("tty")])
+        await proxy_websocket(
+            websocket,
+            ttyd_ws_uri,
+            subprotocols=[Subprotocol("tty")],
+            filter_terminal_probe_responses=filter_probe_responses,
+        )
     except WebSocketDisconnect:
         pass
     except Exception as e:
@@ -154,9 +206,15 @@ async def proxy_ttyd_websocket(
     await websocket.accept(subprotocol="tty")
 
     ttyd_ws_uri = f"ws://127.0.0.1:{tab.port}/ws"
+    filter_probe_responses = tab.agent_type in {AgentType.CLAUDE, AgentType.CODEX}
 
     try:
-        await proxy_websocket(websocket, ttyd_ws_uri, subprotocols=[Subprotocol("tty")])
+        await proxy_websocket(
+            websocket,
+            ttyd_ws_uri,
+            subprotocols=[Subprotocol("tty")],
+            filter_terminal_probe_responses=filter_probe_responses,
+        )
     except WebSocketDisconnect:
         pass
     except Exception as e:

@@ -5,6 +5,11 @@
 
 ## 2026-05-21
 
+### fix: drop generated terminal probe replies in agent tabs
+- Filter xterm.js device-attribute and cursor-position replies from Claude/Codex tab WebSocket input so terminal capability probes no longer appear as stray text like `0;276;0c` in the agent prompt
+- Keep the filter scoped to generated probe replies on agent tabs, leaving normal typing, escape keys, resize frames, and plain terminal tabs unchanged
+- **Files**: terminal.py, test_terminal_proxy.py
+
 ### fix: keep status panel refresh icon idle during polling
 - Make the Workspace Agents status-panel refresh button use a local manual-refresh pending state instead of the global background status-poll loading flag
 - Keep automatic panel-open and periodic status refreshes silent so the header icon no longer appears to spin continuously while data is polling
