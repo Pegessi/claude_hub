@@ -336,7 +336,10 @@
                       <span class="review-badge-dot" />
                       {{ activeReviewBadge(task)?.label }}
                     </span>
-                    <span class="agent-badge">
+                    <span
+                      v-else
+                      class="agent-badge"
+                    >
                       <span :class="['status-dot', `status-dot--${task.status}`]" />
                       {{ task.status }}
                     </span>

@@ -5,6 +5,10 @@
 
 ## 2026-05-21
 
+### fix: replace yellow working badge with AI reviewing on task card
+- When a task is under active AI review, show only the existing "AI reviewing" pill on the task card header instead of stacking it next to a redundant yellow `working` status pill; the status pill still renders for non-reviewing states
+- **Files**: AgentWorkspaceView.vue
+
 ### fix: stop re-prompting orchestrator after review is in flight
 - Skip the auto-continue "no workspace report was recorded" nudge when `review_requested_at` is set without `review_completed_at`, or when the latest report for the task is already `ready_for_review` / `completed` / `blocked` / `needs_input`
 - Previously the orchestrator session stayed parked with `task.status == WORKING` while the reviewer ran, so the monitor kept matching completion patterns in scrollback and re-sending the nudge every ~15s up to 10 attempts
