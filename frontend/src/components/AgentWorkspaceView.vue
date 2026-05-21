@@ -308,9 +308,22 @@
               >
                 <div class="task-card-header">
                   <h3>{{ task.title }}</h3>
-                  <span class="agent-badge">
-                    <span :class="['status-dot', `status-dot--${task.status}`]" />
-                    {{ task.status }}
+                  <span class="task-card-badges">
+                    <span
+                      v-if="task.status === 'working' && activeReviewBadge(task)"
+                      :class="[
+                        'review-badge',
+                        `review-badge--${activeReviewBadge(task)?.kind}`,
+                      ]"
+                      :title="activeReviewBadge(task)?.title"
+                    >
+                      <span class="review-badge-dot" />
+                      {{ activeReviewBadge(task)?.label }}
+                    </span>
+                    <span class="agent-badge">
+                      <span :class="['status-dot', `status-dot--${task.status}`]" />
+                      {{ task.status }}
+                    </span>
                   </span>
                 </div>
                 <p class="task-card-description">
@@ -1542,6 +1555,42 @@ function reviewStatusLabel(task: WorkspaceTask) {
   if (task.review_requested_at && !task.review_completed_at) return 'Pending review'
   if (task.review_attempts > 0) return `Review attempts ${task.review_attempts}`
   return ''
+}
+
+function activeReviewBadge(
+  task: WorkspaceTask,
+): { kind: 'active' | 'pending' | 'attention'; label: string; title: string } | null {
+  if (task.review_skipped_at) return null
+  if (task.review_completed_at) return null
+  const reviewReports = workspaceStore
+    .reportsForTask(task)
+    .filter(report => report.state.startsWith('review_'))
+  const latestReviewReport = reviewReports[reviewReports.length - 1]
+  const reviewerName = task.review_session_id
+    ? reviewerTitle(task.review_session_id)
+    : 'AI reviewer'
+  if (latestReviewReport?.state === 'review_started') {
+    return {
+      kind: 'active',
+      label: 'AI reviewing',
+      title: `${reviewerName} is reviewing this task`,
+    }
+  }
+  if (latestReviewReport?.state === 'review_needs_input') {
+    return {
+      kind: 'attention',
+      label: 'Review needs input',
+      title: `${reviewerName} needs input to continue the review`,
+    }
+  }
+  if (task.review_requested_at) {
+    return {
+      kind: 'pending',
+      label: 'Awaiting AI review',
+      title: `Queued for review by ${reviewerName}`,
+    }
+  }
+  return null
 }
 
 function isLatestSelectedReport(report: AgentReport) {
@@ -3281,6 +3330,61 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+}
+
+.task-card-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.review-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+
+.review-badge-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.review-badge--active {
+  background: color-mix(in srgb, var(--ch-color-info) 18%, transparent);
+  border-color: color-mix(in srgb, var(--ch-color-info) 45%, transparent);
+  color: var(--ch-color-info);
+}
+
+.review-badge--active .review-badge-dot {
+  animation: review-badge-pulse 1.4s ease-in-out infinite;
+}
+
+.review-badge--pending {
+  background: color-mix(in srgb, var(--ch-color-text-subtle) 18%, transparent);
+  border-color: color-mix(in srgb, var(--ch-color-text-subtle) 45%, transparent);
+  color: var(--ch-color-text-muted);
+}
+
+.review-badge--attention {
+  background: color-mix(in srgb, var(--ch-color-attention-strong) 18%, transparent);
+  border-color: color-mix(in srgb, var(--ch-color-attention-strong) 45%, transparent);
+  color: var(--ch-color-attention-strong);
+}
+
+@keyframes review-badge-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.7); }
 }
 
 .status-dot {
