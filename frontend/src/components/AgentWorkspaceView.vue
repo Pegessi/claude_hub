@@ -4143,6 +4143,11 @@ onUnmounted(() => {
   color: var(--ch-color-text-strong);
 }
 
+.segment-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .path-input-row {
   display: flex;
   gap: 8px;

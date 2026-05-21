@@ -5,6 +5,10 @@
 
 ## 2026-05-21
 
+### fix: disabled segment-button styling on edit workspace modal
+- Add a `:disabled` style for segmented controls so the locked Local/Remote toggle in the Edit Workspace modal renders with reduced opacity and a not-allowed cursor on both desktop and mobile, instead of looking falsely interactive
+- **Files**: AgentWorkspaceView.vue
+
 ### feat: editable workspace working dir as default for new agents
 - Pre-fill the New Agent modal's working directory with the workspace's local path or remote start dir based on the selected target, and keep the prefill in sync when the user toggles between Local and Remote
 - Add an Edit Workspace flow (header button + mobile menu entry) that lets users update the workspace name, default branch, local working directory, and remote start dir post-creation
