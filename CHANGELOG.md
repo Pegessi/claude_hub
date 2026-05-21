@@ -5,6 +5,11 @@
 
 ## 2026-05-21
 
+### fix: task progress timeline cleanup and bilingual state labels
+- Remove redundant inner status dot on each progress card so the timeline rail dot is the only marker per entry
+- Append a Chinese label after the English state (started/working/completed/...) for bilingual readability
+- **Files**: AgentWorkspaceView.vue
+
 ### fix: let mobile overflow menus scroll when expanded
 - Bound terminal and workspace mobile overflow menus to the viewport so long nested sections do not run off-screen
 - Enable touch scrolling inside the menu panels while keeping scroll chaining contained
