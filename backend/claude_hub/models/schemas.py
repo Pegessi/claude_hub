@@ -190,6 +190,16 @@ class Workspace(BaseModel):
     updated_at: datetime
 
 
+class WorkspaceUpdate(BaseModel):
+    """Editable fields for an existing workspace."""
+
+    name: Optional[str] = None
+    path: Optional[str] = None
+    default_branch: Optional[str] = None
+    remote_cwd: Optional[str] = None
+    remote_reconnect: Optional[bool] = None
+
+
 class WorkspaceTaskCreate(BaseModel):
     """Payload for creating a workspace task."""
 

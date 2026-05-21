@@ -21,6 +21,7 @@ from ..models import (
     WorkspaceTask,
     WorkspaceTaskCreate,
     WorkspaceTaskUpdate,
+    WorkspaceUpdate,
 )
 from ..services import workspace_manager
 
@@ -41,6 +42,21 @@ async def create_workspace(
     """Create an Agent Workspace."""
     try:
         return workspace_manager.create_workspace(payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.patch("/{workspace_id}", response_model=Workspace)
+async def update_workspace(
+    workspace_id: str,
+    payload: WorkspaceUpdate,
+    current_user: User = Depends(get_current_user),
+) -> Workspace:
+    """Update an Agent Workspace's editable fields."""
+    try:
+        return workspace_manager.update_workspace(workspace_id, payload)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Workspace not found") from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
