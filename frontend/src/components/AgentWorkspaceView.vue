@@ -573,7 +573,10 @@
                     :open="isLatestSelectedReport(report)"
                   >
                     <summary>
-                      <span class="report-state">{{ report.state }}</span>
+                      <span class="report-state">
+                        <span class="report-state-en">{{ report.state }}</span>
+                        <span class="report-state-zh">{{ formatReportStateZh(report.state) }}</span>
+                      </span>
                       <span class="report-time">{{ formatTime(report.created_at) }}</span>
                     </summary>
                     <MarkdownContent
@@ -1864,6 +1867,23 @@ function formatTime(value: string) {
     hour: '2-digit',
     minute: '2-digit',
   }).format(new Date(value))
+}
+
+const REPORT_STATE_ZH: Record<string, string> = {
+  started: '已开始',
+  working: '进行中',
+  blocked: '已阻塞',
+  needs_input: '需要输入',
+  ready_for_review: '待审核',
+  completed: '已完成',
+  review_started: '审核中',
+  review_passed: '审核通过',
+  review_failed: '审核未通过',
+  review_needs_input: '审核待补充',
+}
+
+function formatReportStateZh(state: string) {
+  return REPORT_STATE_ZH[state] ?? state
 }
 
 async function fetchRemoteProfiles() {
@@ -3680,21 +3700,21 @@ onUnmounted(() => {
 }
 
 .report-state {
-  position: relative;
-  padding-left: 15px;
-  font-weight: 700;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
 }
 
-.report-state::before {
-  content: '';
-  position: absolute;
-  top: 50%;
-  left: 0;
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: var(--ch-color-accent);
-  transform: translateY(-50%);
+.report-state-en {
+  font-weight: 700;
+  color: var(--ch-color-text);
+}
+
+.report-state-zh {
+  color: var(--ch-color-text-subtle);
+  font-size: 11px;
+  font-weight: 500;
 }
 
 .report-time {
