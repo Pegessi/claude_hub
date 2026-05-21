@@ -290,6 +290,8 @@ class AgentReportCreate(BaseModel):
 
     state: AgentReportState
     message: str
+    message_en: Optional[str] = None
+    message_zh: Optional[str] = None
     task_id: Optional[str] = None
     changed_files: List[str] = Field(default_factory=list)
     validation: Optional[str] = None
@@ -308,6 +310,8 @@ class AgentReport(BaseModel):
     session_id: str
     state: AgentReportState
     message: str
+    message_en: Optional[str] = None
+    message_zh: Optional[str] = None
     changed_files: List[str] = Field(default_factory=list)
     validation: Optional[str] = None
     risks: Optional[str] = None

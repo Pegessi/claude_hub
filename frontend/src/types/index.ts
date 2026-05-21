@@ -235,6 +235,8 @@ export interface AgentReport {
   session_id: string
   state: AgentReportState
   message: string
+  message_en?: string | null
+  message_zh?: string | null
   changed_files: string[]
   validation?: string | null
   risks?: string | null
@@ -247,6 +249,8 @@ export interface AgentReport {
 export interface AgentReportCreate {
   state: AgentReportState
   message: string
+  message_en?: string | null
+  message_zh?: string | null
   task_id?: string | null
   changed_files?: string[]
   validation?: string | null
