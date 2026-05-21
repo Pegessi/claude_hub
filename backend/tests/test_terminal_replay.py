@@ -1097,9 +1097,142 @@ def test_terminal_typing_does_not_auto_resync_history(terminal_tab: dict, page: 
     assert "abcd" in capture_pane_sync(session_name)
     history_fetches = page.evaluate("() => window.__claudeHubHistoryFetches || []")
     assert history_fetches == [], (
-        "plain terminal typing echo performed automatic history resync: "
-        f"{history_fetches}"
+        "plain terminal typing echo performed automatic history resync: " f"{history_fetches}"
     )
+
+
+def test_typing_releases_initial_replay_buffer(terminal_tab: dict, page: Page) -> None:
+    """Typing during tab open should not wait behind the replay hold window."""
+    tab = terminal_tab
+    session_name = f"claude-hub-{tab['id'][:8]}"
+    typed_text = "openinputfast"
+
+    ensure_tmux_session(page, tab["id"], session_name)
+    produce_scrollback(session_name, count=260)
+
+    history_pattern = f"**/api/terminal/history/{tab['id']}?**"
+
+    def delay_history(route) -> None:
+        time.sleep(1.0)
+        route.continue_()
+
+    page.route(history_pattern, delay_history)
+    try:
+        page.goto(f"{BACKEND_URL}/api/terminal/proxy/{tab['id']}/")
+        page.wait_for_selector(".xterm", timeout=15000)
+        page.wait_for_function(
+            "() => window.term && window.term.__claudeHubReplayBuffering === true",
+            timeout=10000,
+        )
+
+        box = page.locator(".xterm").bounding_box()
+        assert box is not None, "xterm not found"
+        page.mouse.click(box["x"] + 24, box["y"] + 24)
+        page.keyboard.type(typed_text, delay=1)
+
+        page.wait_for_function(
+            """(text) => {
+                const term = window.term;
+                if (!term) return false;
+                const buffer = term.buffer.active;
+                const lines = [];
+                for (let i = 0; i < buffer.length; i++) {
+                    const line = buffer.getLine(i);
+                    if (line) lines.push(line.translateToString(true));
+                }
+                return lines.join('\\n').includes(text);
+            }""",
+            arg=typed_text,
+            timeout=1000,
+        )
+    finally:
+        page.unroute(history_pattern, delay_history)
+
+    assert typed_text in capture_pane_sync(session_name)
+
+
+def test_typing_interrupts_pending_history_resync(terminal_tab: dict, page: Page) -> None:
+    """Typing while live-output history repair is fetching should echo immediately."""
+    tab = terminal_tab
+    session_name = f"claude-hub-{tab['id'][:8]}"
+    line_count = 80
+    typed_text = "resyncinputfast"
+
+    ensure_tmux_session(page, tab["id"], session_name)
+    produce_scrollback(session_name, count=260)
+    load_terminal_page(page, tab["id"], min_buffer_lines=260)
+    page.wait_for_timeout(9000)
+    page.evaluate("""() => {
+        window.__delayNextHistoryFetch = true;
+        window.__historyFetchStarted = false;
+        window.__releaseHistoryFetch = null;
+        const originalFetch = window.fetch.bind(window);
+        window.fetch = function(input, init) {
+            const url = typeof input === 'string' ? input : (input && input.url) || '';
+            if (window.__delayNextHistoryFetch && url.indexOf('/api/terminal/history/') >= 0) {
+                window.__delayNextHistoryFetch = false;
+                window.__historyFetchStarted = true;
+                return new Promise(function(resolve, reject) {
+                    window.__releaseHistoryFetch = function() {
+                        originalFetch(input, init).then(resolve, reject);
+                    };
+                });
+            }
+            return originalFetch(input, init);
+        };
+    }""")
+
+    send_keys_sync(
+        session_name,
+        (
+            f"for i in $(seq 0 {line_count - 1}); do "
+            "echo LIVE_$(printf '%04d' $i)_$(printf 'x%.0s' $(seq 1 220)); "
+            "done"
+        ),
+        "Enter",
+    )
+
+    try:
+        for _ in range(80):
+            if f"LIVE_{line_count - 1:04d}" in capture_pane_sync(session_name):
+                break
+            time.sleep(0.2)
+        else:
+            pytest.fail("wrapped live output did not finish in tmux")
+
+        page.wait_for_function(
+            "() => window.__historyFetchStarted === true",
+            timeout=10000,
+        )
+
+        box = page.locator(".xterm").bounding_box()
+        assert box is not None, "xterm not found"
+        page.mouse.click(box["x"] + 24, box["y"] + 24)
+        page.keyboard.type(typed_text, delay=1)
+
+        page.wait_for_function(
+            """(text) => {
+                const term = window.term;
+                if (!term) return false;
+                const buffer = term.buffer.active;
+                const lines = [];
+                for (let i = 0; i < buffer.length; i++) {
+                    const line = buffer.getLine(i);
+                    if (line) lines.push(line.translateToString(true));
+                }
+                return lines.join('\\n').includes(text);
+            }""",
+            arg=typed_text,
+            timeout=1000,
+        )
+    finally:
+        page.evaluate("""() => {
+            if (typeof window.__releaseHistoryFetch === 'function') {
+                window.__releaseHistoryFetch();
+            }
+        }""")
+
+    assert typed_text in capture_pane_sync(session_name)
 
 
 def test_wrapped_live_output_resyncs_complete_history(terminal_tab: dict, page: Page) -> None:

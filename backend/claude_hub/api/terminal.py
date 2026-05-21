@@ -485,6 +485,8 @@ async def proxy_terminal_request(
           let fullReplayVerifyAttempts = 0;
           const replayPayload = '\\x1b[H\\x1b[2J\\x1b[3J' + lines.join('\\r\\n') + cursorSeq(historyCursorX, historyCursorY);
           const replayPlainText = lines.join('\\n');
+          let replayInputListenerRegistered = false;
+          let replayReleasedForInput = false;
 
           function printableTextFromTerminalData(data) {{
             return String(data || '')
@@ -525,6 +527,35 @@ async def proxy_terminal_request(
             buffer.push({{ data, cb }});
             return undefined;
           }};
+          term.__claudeHubReplayBuffering = true;
+
+          function removeReplayInputListener() {{
+            if (!replayInputListenerRegistered) return;
+            replayInputListenerRegistered = false;
+            const index = terminalUserInputListeners.indexOf(releaseReplayForUserInput);
+            if (index >= 0) {{
+              terminalUserInputListeners.splice(index, 1);
+            }}
+          }}
+
+          function scheduleReplayRecoveryAfterInputQuiet() {{
+            if (!fullReplay || !AUTO_HISTORY_REPLAY_ENABLED) return;
+            setTimeout(function waitForReplayRecoveryQuiet() {{
+              if (hasRecentUserInput()) {{
+                setTimeout(waitForReplayRecoveryQuiet, userInputQuietDelayMs() + 100);
+                return;
+              }}
+              refreshHistoryWhenReady({{ reason: 'post-replay-input-quiet', scrollToBottom: true }}, 50);
+            }}, userInputQuietDelayMs() + 100);
+          }}
+
+          function releaseReplayForUserInput() {{
+            if (historyDone || !fullReplay) return;
+            replayReleasedForInput = true;
+            fullReplayFinalizing = true;
+            flushBuffer();
+            scheduleReplayRecoveryAfterInputQuiet();
+          }}
 
           function flushBuffer() {{
             if (historyDone) return;
@@ -535,6 +566,8 @@ async def proxy_terminal_request(
             clearTimeout(safetyTimer);
             historyDone = true;
             term.__claudeHubReplayDone = true;
+            term.__claudeHubReplayBuffering = false;
+            removeReplayInputListener();
             term.write = originalWrite;
             // Flush buffered ws frames for plain terminals; any clobbered
             // scrollback is corrected by the post-flush tmux refresh below.
@@ -554,7 +587,7 @@ async def proxy_terminal_request(
             }}
             buffer.length = 0;
             startPostReplayWatch();
-            if (fullReplay && AUTO_HISTORY_REPLAY_ENABLED) {{
+            if (fullReplay && AUTO_HISTORY_REPLAY_ENABLED && !replayReleasedForInput) {{
               // Reconcile xterm with current tmux state once the resync
               // hooks attach. Repairs any scrollback clobbered by the
               // ttyd initial-screen frame we just flushed.
@@ -656,6 +689,11 @@ async def proxy_terminal_request(
             }}
             flushBuffer();
           }}, FULL_REPLAY_MAX_HOLD_MS + 8000);
+
+          if (fullReplay) {{
+            replayInputListenerRegistered = true;
+            terminalUserInputListeners.push(releaseReplayForUserInput);
+          }}
 
           if (fullReplay) {{
             // Phase B: term.open() was already called by ttyd and the
@@ -819,6 +857,9 @@ async def proxy_terminal_request(
           let pendingResyncChars = 0;
           let pendingResyncLineBreaks = 0;
           let inputQuietResyncTimer = null;
+          let nextAutoResyncId = 1;
+          let activeAutoResyncId = null;
+          const cancelledAutoResyncIds = new Set();
 
           function bufferService() {{
             return term._core && term._core._bufferService;
@@ -899,13 +940,28 @@ async def proxy_terminal_request(
             }}, userInputQuietDelayMs() + RESYNC_IDLE_MS);
           }}
 
+          function cancelActiveAutoResyncForInput() {{
+            if (activeAutoResyncId === null) return false;
+            cancelledAutoResyncIds.add(activeAutoResyncId);
+            activeAutoResyncId = null;
+            if (resyncing) {{
+              resyncing = false;
+              flushResyncBuffer();
+            }}
+            return true;
+          }}
+
           function deferScheduledResyncForInput() {{
-            if (!AUTO_HISTORY_RESYNC_ENABLED || !hasEnoughResyncPressure()) return;
+            if (!AUTO_HISTORY_RESYNC_ENABLED) return;
+            const cancelledActiveResync = cancelActiveAutoResyncForInput();
+            if (!cancelledActiveResync && !hasEnoughResyncPressure()) return;
             if (timer) {{
               clearTimeout(timer);
               timer = null;
             }}
-            scheduleResyncAfterInputQuiet();
+            if (hasEnoughResyncPressure()) {{
+              scheduleResyncAfterInputQuiet();
+            }}
           }}
 
           terminalUserInputListeners.push(deferScheduledResyncForInput);
@@ -998,8 +1054,19 @@ async def proxy_terminal_request(
             }}
 
             forcedRefreshRunning = true;
+            const inputSensitiveRefresh = opts.reason !== 'manual';
+            const inputGenerationAtStart = userInputGeneration;
             try {{
               const snapshot = await fetchHistorySnapshot();
+              if (
+                inputSensitiveRefresh &&
+                (userInputGeneration !== inputGenerationAtStart || hasRecentUserInput())
+              ) {{
+                setTimeout(function() {{
+                  refreshHistoryFromTmux(opts);
+                }}, userInputQuietDelayMs() + 100);
+                return false;
+              }}
               return await new Promise(function(resolve) {{
                 writeHistorySnapshot(snapshot, opts, resolve);
               }});
@@ -1108,14 +1175,38 @@ async def proxy_terminal_request(
             // term.write calls land in resyncBuffer instead of slipping
             // through and forcing us to abort + retry forever under a
             // hot live-write stream (e.g. Claude TUI redraws).
+            const resyncId = nextAutoResyncId++;
+            activeAutoResyncId = resyncId;
+            const inputGenerationAtStart = userInputGeneration;
             resyncing = true;
             let snapshot = null;
             try {{
               snapshot = await fetchHistorySnapshot();
             }} catch (error) {{
               console.debug('claude-hub history resync failed', error);
-              resyncing = false;
-              flushResyncBuffer();
+              cancelledAutoResyncIds.delete(resyncId);
+              if (activeAutoResyncId === resyncId) {{
+                activeAutoResyncId = null;
+                resyncing = false;
+                flushResyncBuffer();
+              }}
+              return;
+            }}
+
+            const isCurrentResync = activeAutoResyncId === resyncId;
+            if (
+              cancelledAutoResyncIds.has(resyncId) ||
+              !isCurrentResync ||
+              userInputGeneration !== inputGenerationAtStart ||
+              hasRecentUserInput()
+            ) {{
+              cancelledAutoResyncIds.delete(resyncId);
+              if (isCurrentResync) {{
+                activeAutoResyncId = null;
+                resyncing = false;
+                flushResyncBuffer();
+                scheduleResyncAfterInputQuiet();
+              }}
               return;
             }}
 
@@ -1123,6 +1214,8 @@ async def proxy_terminal_request(
               // User scrolled away while we were fetching; abandon the
               // snapshot but flush any buffered live writes so nothing
               // is lost.
+              cancelledAutoResyncIds.delete(resyncId);
+              if (activeAutoResyncId === resyncId) activeAutoResyncId = null;
               resyncing = false;
               flushResyncBuffer();
               pendingWhenBottom = true;
@@ -1131,6 +1224,8 @@ async def proxy_terminal_request(
 
             const payload = fullReplayPayloadForSnapshot(snapshot);
             if (!payload) {{
+              cancelledAutoResyncIds.delete(resyncId);
+              if (activeAutoResyncId === resyncId) activeAutoResyncId = null;
               resyncing = false;
               flushResyncBuffer();
               resetResyncPressure();
@@ -1138,6 +1233,20 @@ async def proxy_terminal_request(
             }}
 
             writeThrough(payload, function() {{
+              if (cancelledAutoResyncIds.has(resyncId)) {{
+                cancelledAutoResyncIds.delete(resyncId);
+                if (activeAutoResyncId === resyncId) {{
+                  activeAutoResyncId = null;
+                  resyncing = false;
+                  flushResyncBuffer();
+                  scheduleResyncAfterInputQuiet();
+                }}
+                return;
+              }}
+              if (activeAutoResyncId !== resyncId) {{
+                return;
+              }}
+              activeAutoResyncId = null;
               resyncing = false;
               resetResyncPressure();
               flushResyncBuffer();
