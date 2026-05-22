@@ -1082,7 +1082,7 @@ def test_start_task_dispatches_to_resident_agent(
     assert board_response.json()["tasks"][0]["status"] == "working"
 
 
-def test_idle_review_task_releases_agent_for_queued_dispatch(
+def test_idle_review_task_keeps_agent_reserved_for_review(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1170,13 +1170,107 @@ def test_idle_review_task_releases_agent_for_queued_dispatch(
         json={},
     )
 
+    # The agent must stay paired with the review-state task so its context is
+    # preserved for any follow-up review feedback.
+    assert second_start.status_code == 201
+    started_second = second_start.json()
+    assert started_second["status"] == "queued"
+    assert started_second["session_id"] == session_id
+    assert workspace_manager.tasks[first_task["id"]].status == WorkspaceTaskStatus.REVIEW
+    assert workspace_manager.sessions[session_id].current_task_id == first_task["id"]
+    # No assignment prompt for the second task should have been sent yet.
+    assert all(
+        "Run after the reviewed task releases the idle agent" not in body
+        for _, body in sent_messages
+    )
+
+    # Marking the review task done releases the agent and unblocks the queue.
+    done_response = client.patch(
+        f"/api/workspaces/tasks/{first_task['id']}",
+        json={"status": "done"},
+    )
+    assert done_response.status_code == 200
+    assert workspace_manager.tasks[second_task["id"]].status == WorkspaceTaskStatus.WORKING
+    assert workspace_manager.sessions[session_id].current_task_id == second_task["id"]
+    assert any(
+        "Run after the reviewed task releases the idle agent" in body for _, body in sent_messages
+    )
+
+
+def test_dispatch_skips_review_holding_agent_when_other_agent_idle(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="multi-review-tab",
+        port=12351,
+        sent_messages=sent_messages,
+    )
+
+    async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
+        return []
+
+    monkeypatch.setattr(
+        workspace_module.ttyd_manager,
+        "list_tab_agent_statuses",
+        fake_list_statuses,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Multi Agent Review",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "multi-review",
+        },
+    ).json()
+    busy_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    free_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+
+    first_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "First task", "prompt": "Review held"},
+    ).json()
+    first_start = client.post(
+        f"/api/workspaces/tasks/{first_task['id']}/start",
+        json={"target_session_id": busy_agent["id"]},
+    ).json()
+    assert first_start["session_id"] == busy_agent["id"]
+
+    ready_response = client.post(
+        f"/api/workspaces/sessions/{busy_agent['id']}/reports",
+        json={
+            "task_id": first_task["id"],
+            "state": "ready_for_review",
+            "message": "Ready",
+        },
+    )
+    assert ready_response.status_code == 201
+    assert pass_task_review(client, first_task["id"]).status_code == 201
+    assert workspace_manager.tasks[first_task["id"]].status == WorkspaceTaskStatus.REVIEW
+    assert workspace_manager.sessions[busy_agent["id"]].current_task_id == first_task["id"]
+
+    second_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Second task", "prompt": "Pick the free agent"},
+    ).json()
+    second_start = client.post(
+        f"/api/workspaces/tasks/{second_task['id']}/start",
+        json={},
+    )
+
     assert second_start.status_code == 201
     started_second = second_start.json()
     assert started_second["status"] == "working"
-    assert started_second["session_id"] == session_id
-    assert workspace_manager.tasks[first_task["id"]].status == WorkspaceTaskStatus.REVIEW
-    assert workspace_manager.sessions[session_id].current_task_id == second_task["id"]
-    assert "Run after the reviewed task releases the idle agent" in sent_messages[-1][1]
+    assert started_second["session_id"] == free_agent["id"]
+    assert workspace_manager.sessions[busy_agent["id"]].current_task_id == first_task["id"]
 
 
 def test_report_with_task_renames_non_orchestrator_session(
