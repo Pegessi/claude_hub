@@ -540,6 +540,55 @@
 
             <section class="detail-section">
               <div class="detail-section-title">
+                Goal Packet
+              </div>
+              <div
+                v-if="!selectedTask.goal_packet"
+                class="empty-timeline"
+              >
+                No goal packet recorded yet.
+              </div>
+              <div
+                v-else
+                class="goal-packet"
+              >
+                <div class="goal-packet-objective">
+                  <span>Objective</span>
+                  <MarkdownContent
+                    compact
+                    :text="selectedTask.goal_packet.objective"
+                  />
+                </div>
+                <div class="goal-packet-meta">
+                  <span>{{ selectedTask.goal_packet.status || 'draft' }}</span>
+                  <span>{{ selectedTask.goal_packet.source || 'agent_generated' }}</span>
+                </div>
+                <div
+                  v-for="section in goalPacketSections(selectedTask.goal_packet)"
+                  :key="section.key"
+                  class="goal-packet-section"
+                >
+                  <strong>{{ section.label }}</strong>
+                  <ol v-if="section.items.length > 0">
+                    <li
+                      v-for="item in section.items"
+                      :key="item"
+                    >
+                      {{ item }}
+                    </li>
+                  </ol>
+                  <span
+                    v-else
+                    class="goal-packet-empty"
+                  >
+                    none
+                  </span>
+                </div>
+              </div>
+            </section>
+
+            <section class="detail-section">
+              <div class="detail-section-title">
                 Assignment
               </div>
               <div class="fact-grid">
@@ -655,6 +704,21 @@
                         compact
                         :text="report.validation"
                       />
+                    </div>
+                    <div
+                      v-if="acceptanceChecksFor(report).length > 0"
+                      class="report-note"
+                    >
+                      <strong>Acceptance Check</strong>
+                      <ol class="acceptance-check-list">
+                        <li
+                          v-for="check in acceptanceChecksFor(report)"
+                          :key="`${check.criterion}-${check.status}`"
+                        >
+                          <span>{{ check.status }}</span>
+                          {{ check.criterion }} - {{ check.evidence }}
+                        </li>
+                      </ol>
                     </div>
                     <div
                       v-if="report.risks"
@@ -1356,7 +1420,9 @@ import type {
   AgentReport,
   AgentRuntimeStatus,
   AgentType,
+  AcceptanceCheck,
   ExecutionTarget,
+  GoalPacket,
   ManagedSession,
   RemoteProfile,
   TerminalAgentStatus,
@@ -1508,6 +1574,44 @@ const selectedTaskSendKey = computed(() =>
 const selectedReports = computed<AgentReport[]>(() =>
   selectedTask.value ? workspaceStore.reportsForTask(selectedTask.value) : []
 )
+
+function goalPacketSections(goalPacket: GoalPacket) {
+  return [
+    {
+      key: 'acceptance_criteria',
+      label: 'Acceptance Criteria',
+      items: goalPacketItems(goalPacket.acceptance_criteria),
+    },
+    {
+      key: 'validation_plan',
+      label: 'Validation Plan',
+      items: goalPacketItems(goalPacket.validation_plan),
+    },
+    {
+      key: 'assumptions',
+      label: 'Assumptions',
+      items: goalPacketItems(goalPacket.assumptions),
+    },
+    {
+      key: 'out_of_scope',
+      label: 'Out of Scope',
+      items: goalPacketItems(goalPacket.out_of_scope),
+    },
+    {
+      key: 'handoff_requirements',
+      label: 'Handoff Requirements',
+      items: goalPacketItems(goalPacket.handoff_requirements),
+    },
+  ]
+}
+
+function goalPacketItems(items: string[] | undefined): string[] {
+  return Array.isArray(items) ? items : []
+}
+
+function acceptanceChecksFor(report: AgentReport): AcceptanceCheck[] {
+  return Array.isArray(report.acceptance_check) ? report.acceptance_check : []
+}
 
 const reviewerSessions = computed<ManagedSession[]>(() => [
   ...reviewerAgents.value,
@@ -3932,6 +4036,63 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
+.goal-packet {
+  margin-top: 10px;
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.goal-packet-objective,
+.goal-packet-section {
+  min-width: 0;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: 6px;
+  background: var(--ch-color-surface-soft);
+  padding: 10px;
+}
+
+.goal-packet-objective span,
+.goal-packet-section strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--ch-color-text);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.goal-packet-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.goal-packet-meta span {
+  border-radius: 999px;
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text-muted);
+  font-size: 10px;
+  padding: 3px 7px;
+}
+
+.goal-packet-section ol {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.goal-packet-section li {
+  overflow-wrap: anywhere;
+}
+
+.goal-packet-empty {
+  color: var(--ch-color-text-subtle);
+  font-size: 12px;
+}
+
 .timeline {
   list-style: none;
   margin: 12px 0 0;
@@ -4027,6 +4188,23 @@ onUnmounted(() => {
   color: var(--ch-color-text);
   font-size: 11px;
   text-transform: uppercase;
+}
+
+.acceptance-check-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.acceptance-check-list li {
+  overflow-wrap: anywhere;
+}
+
+.acceptance-check-list span {
+  margin-right: 5px;
+  color: var(--ch-color-text);
+  font-weight: 700;
 }
 
 .workspace-modal-overlay {

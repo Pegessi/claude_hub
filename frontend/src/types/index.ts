@@ -148,12 +148,36 @@ export interface WorkspaceAttachmentCreate {
   data_url: string
 }
 
+export type GoalPacketStatus = 'draft' | 'frozen' | 'superseded'
+
+export type AcceptanceCheckStatus = 'passed' | 'failed' | 'partial' | 'not_checked'
+
+export interface GoalPacket {
+  objective: string
+  acceptance_criteria?: string[]
+  validation_plan?: string[]
+  assumptions?: string[]
+  out_of_scope?: string[]
+  handoff_requirements?: string[]
+  source?: string
+  status?: GoalPacketStatus
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+export interface AcceptanceCheck {
+  criterion: string
+  status: AcceptanceCheckStatus
+  evidence: string
+}
+
 export interface WorkspaceTask {
   id: string
   workspace_id: string
   title: string
   prompt: string
   attachments: WorkspaceAttachment[]
+  goal_packet?: GoalPacket | null
   agent_type: AgentType
   status: WorkspaceTaskStatus
   session_id?: string | null
@@ -181,6 +205,7 @@ export interface WorkspaceTaskCreate {
   agent_type?: AgentType
   related_task_id?: string | null
   attachments?: WorkspaceAttachmentCreate[]
+  goal_packet?: GoalPacket | null
 }
 
 export interface StartTaskRequest {
@@ -248,6 +273,7 @@ export interface AgentReport {
   changed_files: string[]
   validation?: string | null
   risks?: string | null
+  acceptance_check?: AcceptanceCheck[]
   review_decision: ReviewDecision
   review_reason?: string | null
   risk_level?: string | null
@@ -263,6 +289,8 @@ export interface AgentReportCreate {
   changed_files?: string[]
   validation?: string | null
   risks?: string | null
+  acceptance_check?: AcceptanceCheck[]
+  goal_packet?: GoalPacket | null
   review_decision?: ReviewDecision
   review_reason?: string | null
   risk_level?: string | null

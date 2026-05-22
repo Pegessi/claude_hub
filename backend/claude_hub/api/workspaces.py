@@ -126,11 +126,11 @@ async def update_task(
     payload: WorkspaceTaskUpdate,
     current_user: User = Depends(get_current_user),
 ) -> WorkspaceTask:
-    """Update task status."""
-    if payload.status is None:
+    """Update task metadata or status."""
+    if payload.status is None and payload.goal_packet is None:
         raise HTTPException(status_code=400, detail="No task update provided")
     try:
-        return await workspace_manager.update_task_status(task_id, payload.status)
+        return await workspace_manager.update_task(task_id, payload)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Task not found") from e
 
