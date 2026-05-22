@@ -1091,7 +1091,10 @@ class WorkspaceManager:
             agent
             for agent in agents
             if agent.status != ManagedSessionStatus.STOPPED
-            and agent.runtime_status == AgentRuntimeStatus.WORKING
+            and (
+                agent.runtime_status == AgentRuntimeStatus.WORKING
+                or self._is_holding_unresolved_review_task(agent)
+            )
         ]
         if queueable_agents:
             target = self._least_queued_agent(queueable_agents)
@@ -1113,6 +1116,8 @@ class WorkspaceManager:
         if session.status == ManagedSessionStatus.STOPPED:
             return False
         if session.runtime_status == AgentRuntimeStatus.WORKING:
+            return True
+        if self._is_holding_unresolved_review_task(session):
             return True
         return self._can_dispatch_to(session)
 
@@ -1335,7 +1340,28 @@ class WorkspaceManager:
                 WorkspaceTaskStatus.REVIEW,
             }:
                 return False
+            # While a task is in REVIEW we hold the original agent so that
+            # reviewer-failure feedback can re-engage the same context. Once
+            # the reviewer has approved the work, free the agent so the queue
+            # can advance without waiting for a manual "done" click.
+            if current and current.status == WorkspaceTaskStatus.REVIEW:
+                if not self._is_review_passed(current):
+                    return False
         return True
+
+    def _is_review_passed(self, task: WorkspaceTask) -> bool:
+        if task.review_completed_at is None:
+            return False
+        return self._latest_review_report_state(task.id) == AgentReportState.REVIEW_PASSED
+
+    def _is_holding_unresolved_review_task(self, session: ManagedSession) -> bool:
+        current_id = session.task_id or session.current_task_id
+        if not current_id:
+            return False
+        current = self.tasks.get(current_id)
+        if not current or current.status != WorkspaceTaskStatus.REVIEW:
+            return False
+        return not self._is_review_passed(current)
 
     def _next_queued_task(self, session_id: str) -> Optional[WorkspaceTask]:
         tasks = [
@@ -2440,6 +2466,7 @@ class WorkspaceManager:
                     runtime_status == AgentRuntimeStatus.IDLE
                     and task
                     and task.status == WorkspaceTaskStatus.REVIEW
+                    and self._is_review_passed(task)
                 ):
                     update.update(
                         {
