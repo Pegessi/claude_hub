@@ -462,7 +462,7 @@ import { usePendingActions } from '@/composables/usePendingActions'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import type { AppMode, RemoteProfile, TerminalTab } from '@/types'
-import type { AgentRuntimeStatus } from '@/types'
+import type { AgentRuntimeStatus, AgentType } from '@/types'
 
 interface FileInfo {
   name: string
@@ -515,7 +515,7 @@ const form = reactive({
   name: '',
   cwd: '',
   solo_mode: false,
-  agent_type: 'claude' as 'claude' | 'codex' | 'cursor',
+  agent_type: 'claude' as AgentType,
   target: 'local' as 'local' | 'remote',
   remote_profile_id: '',
   remote_reconnect: true,
@@ -552,6 +552,20 @@ const isCreateDisabled = computed(
 
 function tabActionKey(action: string, tabId: string | null | undefined) {
   return `tab:${tabId || 'none'}:${action}`
+}
+
+function agentTypeLabel(agentType: AgentType): string {
+  switch (agentType) {
+    case 'codex':
+      return 'Codex'
+    case 'cursor':
+      return 'Cursor'
+    case 'terminal':
+      return 'Terminal'
+    case 'claude':
+    default:
+      return 'Claude'
+  }
 }
 
 async function listDirectory(path?: string): Promise<DirectoryListing> {
@@ -837,7 +851,7 @@ watch(showModal, (newVal) => {
 watch(
   () => form.agent_type,
   (agentType) => {
-    if (agentType === 'cursor') {
+    if (agentType === 'cursor' || agentType === 'terminal') {
       form.solo_mode = false
     }
   }
@@ -915,7 +929,7 @@ async function handleCreateTab() {
   const tabName = form.name.trim()
     ? name
     : target === 'remote' && selectedProfile
-      ? `${selectedProfile.name} · ${agent_type === 'cursor' ? 'Terminal' : agent_type === 'codex' ? 'Codex' : 'Claude'}`
+      ? `${selectedProfile.name} · ${agentTypeLabel(agent_type)}`
       : name
 
   await runPending('tab:create', async () => {
