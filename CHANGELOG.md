@@ -5,8 +5,9 @@
 
 ## 2026-05-22
 
-### fix: keep orchestrator agent reserved while task is in review
-- Stop releasing an orchestrator session's `task_id`/`current_task_id` when its task transitions to `REVIEW`, so the agent's context stays loaded for any review-failure retry instead of being dispatched to an unrelated task; new tasks are now queued behind a review-holding agent (or routed to another idle agent if available) until the reviewed task is marked `done`
+### fix: hold orchestrator agent only while review is unresolved
+- Hold the orchestrator's `task_id`/`current_task_id` binding while a task's review is still in flight or after `REVIEW_FAILED` (so reviewer-failure feedback can re-engage the same context), but auto-release the agent once the latest review report is `REVIEW_PASSED` so the queue advances without waiting for a manual "done" click
+- Replaces the earlier behavior that held the agent all the way through to `done` and could leave the queue looking stuck when a single resident agent finished review
 - **Files**: backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspaces.py, CHANGELOG.md
 
 ## 2026-05-21
