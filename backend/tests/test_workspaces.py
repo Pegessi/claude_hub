@@ -1082,7 +1082,7 @@ def test_start_task_dispatches_to_resident_agent(
     assert board_response.json()["tasks"][0]["status"] == "working"
 
 
-def test_idle_review_task_keeps_agent_reserved_for_review(
+def test_idle_review_task_releases_agent_for_queued_dispatch(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1170,44 +1170,30 @@ def test_idle_review_task_keeps_agent_reserved_for_review(
         json={},
     )
 
-    # The agent must stay paired with the review-state task so its context is
-    # preserved for any follow-up review feedback.
+    # REVIEW_PASSED is treated as approval, so the agent should be freed for
+    # the queued task without waiting for a manual "done" click.
     assert second_start.status_code == 201
     started_second = second_start.json()
-    assert started_second["status"] == "queued"
+    assert started_second["status"] == "working"
     assert started_second["session_id"] == session_id
     assert workspace_manager.tasks[first_task["id"]].status == WorkspaceTaskStatus.REVIEW
-    assert workspace_manager.sessions[session_id].current_task_id == first_task["id"]
-    # No assignment prompt for the second task should have been sent yet.
-    assert all(
-        "Run after the reviewed task releases the idle agent" not in body
-        for _, body in sent_messages
-    )
-
-    # Marking the review task done releases the agent and unblocks the queue.
-    done_response = client.patch(
-        f"/api/workspaces/tasks/{first_task['id']}",
-        json={"status": "done"},
-    )
-    assert done_response.status_code == 200
-    assert workspace_manager.tasks[second_task["id"]].status == WorkspaceTaskStatus.WORKING
     assert workspace_manager.sessions[session_id].current_task_id == second_task["id"]
-    assert any(
-        "Run after the reviewed task releases the idle agent" in body for _, body in sent_messages
-    )
+    assert "Run after the reviewed task releases the idle agent" in sent_messages[-1][1]
 
 
-def test_dispatch_skips_review_holding_agent_when_other_agent_idle(
+def test_dispatch_holds_agent_during_in_flight_review(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Agent stays bound to its task while reviewer is still running."""
+
     repo = tmp_path / "repo"
     repo.mkdir()
     sent_messages: list[tuple[str, str]] = []
     stub_workspace_terminal(
         monkeypatch,
         repo,
-        tab_id="multi-review-tab",
+        tab_id="hold-review-tab",
         port=12351,
         sent_messages=sent_messages,
     )
@@ -1225,10 +1211,10 @@ def test_dispatch_skips_review_holding_agent_when_other_agent_idle(
     workspace = client.post(
         "/api/workspaces",
         json={
-            "name": "Multi Agent Review",
+            "name": "Hold Review Repo",
             "path": str(repo),
             "default_branch": "main",
-            "session_prefix": "multi-review",
+            "session_prefix": "hold-review",
         },
     ).json()
     busy_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
@@ -1244,6 +1230,8 @@ def test_dispatch_skips_review_holding_agent_when_other_agent_idle(
     ).json()
     assert first_start["session_id"] == busy_agent["id"]
 
+    # Agent reports ready_for_review; reviewer is now working but has not
+    # produced a review_passed/failed verdict yet.
     ready_response = client.post(
         f"/api/workspaces/sessions/{busy_agent['id']}/reports",
         json={
@@ -1253,8 +1241,9 @@ def test_dispatch_skips_review_holding_agent_when_other_agent_idle(
         },
     )
     assert ready_response.status_code == 201
-    assert pass_task_review(client, first_task["id"]).status_code == 201
-    assert workspace_manager.tasks[first_task["id"]].status == WorkspaceTaskStatus.REVIEW
+    held_task = workspace_manager.tasks[first_task["id"]]
+    assert held_task.review_requested_at is not None
+    assert held_task.review_completed_at is None
     assert workspace_manager.sessions[busy_agent["id"]].current_task_id == first_task["id"]
 
     second_task = client.post(
