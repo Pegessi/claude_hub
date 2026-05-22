@@ -191,7 +191,7 @@ def terminal_tab(backend_server: None) -> Generator[dict, None, None]:
     # Create tab via API
     resp = session.post(
         f"{BACKEND_URL}/api/tabs",
-        json={"name": "test-replay", "agent_type": "cursor"},
+        json={"name": "test-replay", "agent_type": "terminal"},
     )
     assert resp.status_code == 201, f"Failed to create tab: {resp.text}"
     tab = resp.json()
