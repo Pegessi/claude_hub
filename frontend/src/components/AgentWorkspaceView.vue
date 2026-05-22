@@ -1113,6 +1113,9 @@
                 Claude
               </option>
               <option value="cursor">
+                Cursor
+              </option>
+              <option value="terminal">
                 Terminal
               </option>
             </select>
@@ -1187,7 +1190,7 @@
           </div>
 
           <div
-            v-if="agentOptionsForm.agent_type !== 'cursor'"
+            v-if="agentSupportsSoloMode"
             class="modal-field"
           >
             <label class="checkbox-label">
@@ -1541,6 +1544,12 @@ const selectedRemoteProfile = computed(() =>
 
 const selectedAgentRemoteProfile = computed(() =>
   remoteProfiles.value.find(profile => profile.id === agentOptionsForm.remote_profile_id) || null
+)
+
+const agentSupportsSoloMode = computed(
+  () =>
+    agentOptionsForm.agent_type !== 'cursor' &&
+    agentOptionsForm.agent_type !== 'terminal',
 )
 
 const agentYoloHint = computed(() => {
@@ -2204,10 +2213,14 @@ async function handleCreateAdvancedAgent() {
       remote_cwd: agentOptionsForm.target === 'remote' ? cwd || null : null,
       remote_reconnect:
         agentOptionsForm.target === 'remote' ? agentOptionsForm.remote_reconnect : null,
-      solo_mode: agentOptionsForm.agent_type === 'cursor' ? false : agentOptionsForm.solo_mode,
+      solo_mode:
+        agentOptionsForm.agent_type === 'cursor' ||
+        agentOptionsForm.agent_type === 'terminal'
+          ? false
+          : agentOptionsForm.solo_mode,
     })
-    showAgentOptionsModal.value = false
     showAgentFileBrowser.value = false
+    agentOptionsForm.title = ''
     await terminalStore.fetchTabs()
   })
 }
@@ -2472,7 +2485,7 @@ watch(
 watch(
   () => agentOptionsForm.agent_type,
   agentType => {
-    if (agentType === 'cursor') {
+    if (agentType === 'cursor' || agentType === 'terminal') {
       agentOptionsForm.solo_mode = false
     } else if (!showAgentOptionsModal.value) {
       agentOptionsForm.solo_mode = true
