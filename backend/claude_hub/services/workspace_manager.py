@@ -1091,10 +1091,7 @@ class WorkspaceManager:
             agent
             for agent in agents
             if agent.status != ManagedSessionStatus.STOPPED
-            and (
-                agent.runtime_status == AgentRuntimeStatus.WORKING
-                or self._is_holding_review_task(agent)
-            )
+            and agent.runtime_status == AgentRuntimeStatus.WORKING
         ]
         if queueable_agents:
             target = self._least_queued_agent(queueable_agents)
@@ -1116,8 +1113,6 @@ class WorkspaceManager:
         if session.status == ManagedSessionStatus.STOPPED:
             return False
         if session.runtime_status == AgentRuntimeStatus.WORKING:
-            return True
-        if self._is_holding_review_task(session):
             return True
         return self._can_dispatch_to(session)
 
@@ -1335,19 +1330,12 @@ class WorkspaceManager:
         if session.task_id or session.current_task_id:
             current_id = session.task_id or session.current_task_id
             current = self.tasks.get(current_id) if current_id else None
-            # Agents bound to a task that is not yet fully done must keep their
-            # context. Tasks in REVIEW may still get reviewer feedback that needs
-            # the original agent, so we do not free them up for new dispatch.
-            if current and current.status != WorkspaceTaskStatus.DONE:
+            if current and current.status not in {
+                WorkspaceTaskStatus.DONE,
+                WorkspaceTaskStatus.REVIEW,
+            }:
                 return False
         return True
-
-    def _is_holding_review_task(self, session: ManagedSession) -> bool:
-        current_id = session.task_id or session.current_task_id
-        if not current_id:
-            return False
-        current = self.tasks.get(current_id)
-        return bool(current and current.status == WorkspaceTaskStatus.REVIEW)
 
     def _next_queued_task(self, session_id: str) -> Optional[WorkspaceTask]:
         tasks = [
@@ -2448,6 +2436,24 @@ class WorkspaceManager:
 
             if current_task_id:
                 task = self.tasks.get(current_task_id)
+                if (
+                    runtime_status == AgentRuntimeStatus.IDLE
+                    and task
+                    and task.status == WorkspaceTaskStatus.REVIEW
+                ):
+                    update.update(
+                        {
+                            "task_id": None,
+                            "current_task_id": None,
+                            "status": ManagedSessionStatus.IDLE,
+                            "runtime_status": AgentRuntimeStatus.IDLE,
+                            "auto_continue_task_id": None,
+                            "auto_continue_attempts": 0,
+                            "last_auto_continue_at": None,
+                        }
+                    )
+                    current_task_id = None
+                    changed = True
                 if (
                     run_auto_continue
                     and runtime_status == AgentRuntimeStatus.IDLE
