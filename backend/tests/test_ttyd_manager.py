@@ -177,7 +177,7 @@ def test_remote_terminal_can_disable_reconnect(monkeypatch: MonkeyPatch) -> None
         tab_id="tab-remote-terminal",
         port=12349,
         name="Remote Terminal",
-        agent_type=AgentType.CURSOR,
+        agent_type=AgentType.TERMINAL,
         target=ExecutionTarget.REMOTE,
         remote_profile_id="devbox",
         remote_cwd="/opt/tiger/app",
