@@ -1,7 +1,12 @@
 # Claude Hub - Project Conventions
 
+> This file is the canonical project conventions document. `AGENTS.md` is kept
+> in sync with this file — both must contain identical content.
+
 ## Overview
-Claude Terminal Hub is a web-based persistent Claude terminal service with tabbed interface.
+Claude Terminal Hub is a web-based persistent Claude terminal service with a
+tabbed interface and a workspace orchestration layer that drives multiple
+agents (Claude / Cursor / plain Terminal) against the same workspace.
 
 ## Tech Stack
 - **Frontend**: Vue 3 (Composition API) + TypeScript + Vite + Pinia
@@ -35,15 +40,16 @@ claude_hub/
 └── .github/           # GitHub Actions workflows
 ```
 
-## Development Branch Workflow
-For all new feature development, bug fixes, UI changes, tests, documentation
-changes, and managed workspace tasks:
+## Mandatory Branch Workflow
+Do not develop directly on `main`. For all new feature development, bug fixes,
+UI changes, tests, documentation changes, and managed workspace tasks:
+
 1. **Start from clean `main`**: fetch/sync first, and do not edit directly on
    `main`.
 2. **Create an isolated worktree with a new branch**:
    `git worktree add ../claude_hub-<slug> -b feat/your-feature-name main`.
-3. **Develop inside that worktree**. Do not reuse another task's worktree or the
-   shared main checkout for new work.
+3. **Develop inside that worktree**. Do not reuse another task's worktree or
+   the shared main checkout for new work.
 4. **For frontend changes**, run a dedicated dev/review server from that
    worktree on its own port. After the user confirms the result, or after the
    validation window is complete, stop that debug service before merging or
@@ -57,6 +63,13 @@ changes, and managed workspace tasks:
 
 A user request to merge or push means finish the worktree branch-to-main flow
 after validation; it is not permission to skip the worktree branch.
+
+## Protected Local State
+Do not delete, reset, or overwrite untracked or unrelated files. Treat local
+noise such as `.cursor/`, `tasks/`, `tmp_remote_media/`, captured logs
+(`*.log`), and ad-hoc probe scripts (`abl_*.json`, `nccl_*`, `pure_pytorch_*`,
+`run_*.sh`, `summarize_mem*.py`, `sweep_*.sh`) as protected unless the user
+explicitly asks to modify them.
 
 ## Commit Convention
 Use conventional commits:
@@ -87,6 +100,15 @@ Significant development work should be documented in `docs/working-logs/` with t
 - **`WORKLOG.md`** — Bug troubleshooting reference: symptom → root cause → fix → lesson
 - **`docs/working-logs/`** — Detailed development logs per topic
 
+## Agent Types
+The workspace orchestrator can launch tabs as different agent backends. Keep
+these in mind when changing agent-related code:
+- **`claude`** — default Claude Code CLI session.
+- **`cursor`** — Cursor CLI (`agent`); always runs in YOLO mode by default and
+  the solo-mode toggle does not apply.
+- **`terminal`** — plain user-shell session, used for free-form interactive
+  work.
+
 ## Terminal History Replay (Quick Reference)
 When modifying `terminal.py` or `ttyd_manager.py`, understand the Phase A/B model:
 - **Phase A**: `term.open()` not yet called → write scrollback only, use SU escape to push bottom rows into scrollback, leave visible screen blank for ttyd WS data
@@ -102,6 +124,7 @@ When modifying `terminal.py` or `ttyd_manager.py`, understand the Phase A/B mode
 | Change auth logic | `auth/dependencies.py` (guards), `auth/session.py` (session store), `api/auth.py` (routes), `config.py` (whitelist) |
 | Add frontend component | `components/*.vue`, register in parent, add types to `types/index.ts`, add store logic if needed |
 | Change layout/pane system | `stores/terminalStore.ts`, `LayoutSelector.vue`, `TerminalGridView.vue` |
+| Change agent orchestration | `services/workspace/*.py`, `api/workspaces.py`, `stores/workspaceStore.ts` |
 
 ## Dev Pitfalls
 - **Pinia reactivity**: State (`ref`) and getters (`computed`) MUST use `storeToRefs()`. Actions can be destructured directly.
@@ -159,29 +182,3 @@ Key notes:
 - CDP `Input.dispatchTouchEvent` simulates real touch events (unlike `dispatchEvent`)
 - `document.body` is null when injected scripts run — use `document.documentElement`
 - Playwright headless doesn't simulate browser inertial scroll — real device testing still needed for inertia verification
-
-## gstack
-Use /browse from gstack for all web browsing. Never use mcp__claude-in-chrome__* tools.
-Available skills: /office-hours, /plan-ceo-review, /plan-eng-review, /plan-design-review,
-/design-consultation, /design-shotgun, /design-html, /review, /ship, /land-and-deploy,
-/canary, /benchmark, /browse, /connect-chrome, /qa, /qa-only, /design-review,
-/setup-browser-cookies, /setup-deploy, /retro, /investigate, /document-release, /codex,
-/cso, /autoplan, /careful, /freeze, /guard, /unfreeze, /gstack-upgrade, /learn.
-
-## Skill routing
-
-When the user's request matches an available skill, ALWAYS invoke it using the Skill
-tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
-The skill has specialized workflows that produce better results than ad-hoc answers.
-
-Key routing rules:
-- Product ideas, "is this worth building", brainstorming → invoke office-hours
-- Bugs, errors, "why is this broken", 500 errors → invoke investigate
-- Ship, deploy, push, create PR → invoke ship
-- QA, test the site, find bugs → invoke qa
-- Code review, check my diff → invoke review
-- Update docs after shipping → invoke document-release
-- Weekly retro → invoke retro
-- Design system, brand → invoke design-consultation
-- Visual audit, design polish → invoke design-review
-- Architecture review → invoke plan-eng-review
