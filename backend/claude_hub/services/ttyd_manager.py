@@ -151,6 +151,8 @@ def get_default_command() -> str:
 def get_agent_command(agent_type: AgentType) -> str:
     if agent_type == AgentType.CODEX:
         return "codex"
+    if agent_type == AgentType.CURSOR:
+        return "agent"
     return get_default_command()
 
 
@@ -197,7 +199,7 @@ class TTYDProcess:
         # For terminal tabs, use the user's shell instead of an agent command.
         if shell:
             self.shell = shell
-        elif agent_type == AgentType.CURSOR:
+        elif agent_type == AgentType.TERMINAL:
             self.shell = os.environ.get("SHELL", "/bin/bash")
         else:
             self.shell = get_agent_command(agent_type)
@@ -207,6 +209,9 @@ class TTYDProcess:
             return "codex --ask-for-approval never --sandbox danger-full-access"
         if self.agent_type == AgentType.CLAUDE:
             return "IS_SANDBOX=1 claude --dangerously-skip-permissions"
+        if self.agent_type == AgentType.CURSOR:
+            # Cursor agent runs in yolo by default; solo_mode toggle is a no-op.
+            return "agent"
         return None
 
     def _tmux_shell_command(self, session_exists: bool) -> str:
@@ -243,6 +248,11 @@ class TTYDProcess:
         if self.target == ExecutionTarget.REMOTE:
             cmd.append(shlex.join(self._build_remote_launcher()))
         elif self.solo_mode and self.agent_type in {AgentType.CLAUDE, AgentType.CODEX}:
+            user_shell = os.environ.get("SHELL", "/bin/bash")
+            cmd.append(
+                shlex.join([user_shell, "-c", f"{self._agent_start_command()}; exec {user_shell}"])
+            )
+        elif self.agent_type == AgentType.CURSOR:
             user_shell = os.environ.get("SHELL", "/bin/bash")
             cmd.append(
                 shlex.join([user_shell, "-c", f"{self._agent_start_command()}; exec {user_shell}"])
@@ -349,6 +359,9 @@ class TTYDProcess:
         ):
             user_shell = os.environ.get("SHELL", "/bin/bash")
             cmd.extend([user_shell, "-c", f"{self._agent_start_command()}; exec {user_shell}"])
+        elif self.agent_type == AgentType.CURSOR and not session_exists:
+            user_shell = os.environ.get("SHELL", "/bin/bash")
+            cmd.extend([user_shell, "-c", f"{self._agent_start_command()}; exec {user_shell}"])
         else:
             cmd.append(self.shell)
 
@@ -360,6 +373,8 @@ class TTYDProcess:
                 return "codex --ask-for-approval never --sandbox danger-full-access"
             return "codex"
         if self.agent_type == AgentType.CURSOR:
+            return "agent"
+        if self.agent_type == AgentType.TERMINAL:
             return "${SHELL:-/bin/bash} -l"
         if self.solo_mode:
             return "IS_SANDBOX=1 claude --dangerously-skip-permissions"
@@ -1253,7 +1268,7 @@ class TTYDManager:
                     last_changed_at,
                 )
 
-        if foreground_command and foreground_command in {"claude", "codex"}:
+        if foreground_command and foreground_command in {"claude", "codex", "agent"}:
             return (
                 AgentRuntimeStatus.IDLE,
                 "Idle",

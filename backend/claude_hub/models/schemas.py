@@ -11,6 +11,7 @@ class AgentType(str, Enum):
     CLAUDE = "claude"
     CODEX = "codex"
     CURSOR = "cursor"
+    TERMINAL = "terminal"
 
 
 class ExecutionTarget(str, Enum):

@@ -246,6 +246,9 @@
                 Codex
               </option>
               <option value="cursor">
+                Cursor
+              </option>
+              <option value="terminal">
                 Terminal
               </option>
             </select>
