@@ -3,6 +3,12 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-05-22
+
+### fix: keep orchestrator agent reserved while task is in review
+- Stop releasing an orchestrator session's `task_id`/`current_task_id` when its task transitions to `REVIEW`, so the agent's context stays loaded for any review-failure retry instead of being dispatched to an unrelated task; new tasks are now queued behind a review-holding agent (or routed to another idle agent if available) until the reviewed task is marked `done`
+- **Files**: backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspaces.py, CHANGELOG.md
+
 ## 2026-05-21
 
 ### fix: replace yellow working badge with AI reviewing on task card
