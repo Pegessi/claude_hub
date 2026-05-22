@@ -35,6 +35,7 @@ from ..models import (
     WorkspaceTask,
     WorkspaceTaskCreate,
     WorkspaceTaskStatus,
+    WorkspaceTaskUpdate,
     WorkspaceUpdate,
 )
 from .remote_profiles import remote_profile_manager
@@ -63,7 +64,8 @@ AUTO_CONTINUE_MESSAGE = (
 )
 AUTO_REPORT_MISSING_MESSAGE = (
     "The task appears complete but no workspace report was recorded. Please immediately POST "
-    "the final ready_for_review or completed report with changed_files, validation, and risks; "
+    "the final ready_for_review or completed report with changed_files, validation, risks, "
+    "the stored Goal Packet if it has not been reported yet, and acceptance_check evidence; "
     "only continue work if you find it is actually unfinished."
 )
 AUTO_CONTINUE_INTERRUPTION_PATTERNS = (
@@ -187,7 +189,7 @@ class WorkspaceManager:
                     session = ManagedSession(**self._normalize_session_item(item))
                     self.sessions[session.id] = session
                 for item in data.get("reports", []):
-                    report = AgentReport(**item)
+                    report = AgentReport(**self._normalize_report_item(item))
                     self.reports[report.id] = report
         except Exception as e:
             logger.error(f"Failed to load nested workspace state: {e}")
@@ -207,7 +209,10 @@ class WorkspaceManager:
                 item["id"]: ManagedSession(**self._normalize_session_item(item))
                 for item in data.get("sessions", [])
             }
-            self.reports = {item["id"]: AgentReport(**item) for item in data.get("reports", [])}
+            self.reports = {
+                item["id"]: AgentReport(**self._normalize_report_item(item))
+                for item in data.get("reports", [])
+            }
             self._save_state()
         except Exception as e:
             logger.error(f"Failed to load legacy workspace state: {e}")
@@ -242,6 +247,68 @@ class WorkspaceManager:
         normalized.setdefault("started_at", None)
         normalized.setdefault("reviewed_at", None)
         normalized.setdefault("completed_at", None)
+        normalized["goal_packet"] = self._normalize_goal_packet(normalized.get("goal_packet"))
+        return normalized
+
+    def _normalize_report_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(item)
+        normalized["acceptance_check"] = self._normalize_acceptance_check(
+            normalized.get("acceptance_check")
+        )
+        return normalized
+
+    def _normalize_goal_packet(self, value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        objective = value.get("objective")
+        if not isinstance(objective, str) or not objective.strip():
+            return None
+        normalized = dict(value)
+        normalized["objective"] = objective.strip()
+        for field in (
+            "acceptance_criteria",
+            "validation_plan",
+            "assumptions",
+            "out_of_scope",
+            "handoff_requirements",
+        ):
+            items = normalized.get(field)
+            if isinstance(items, list):
+                normalized[field] = [str(item) for item in items if str(item).strip()]
+            elif isinstance(items, str) and items.strip():
+                normalized[field] = [items.strip()]
+            else:
+                normalized[field] = []
+        normalized.setdefault("source", "agent_generated")
+        if normalized.get("status") not in {"draft", "frozen", "superseded"}:
+            normalized["status"] = "draft"
+        normalized.setdefault("created_at", None)
+        normalized.setdefault("updated_at", None)
+        return normalized
+
+    def _normalize_acceptance_check(self, value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            criterion = item.get("criterion")
+            evidence = item.get("evidence")
+            if not isinstance(criterion, str) or not criterion.strip():
+                continue
+            if not isinstance(evidence, str) or not evidence.strip():
+                evidence = "No evidence provided."
+            status = item.get("status", "not_checked")
+            if status not in {"passed", "failed", "partial", "not_checked"}:
+                status = "not_checked"
+            normalized.append(
+                {
+                    "criterion": criterion.strip(),
+                    "status": status,
+                    "evidence": evidence.strip(),
+                }
+            )
         return normalized
 
     def _normalize_session_item(self, item: dict[str, Any]) -> dict[str, Any]:
@@ -485,6 +552,7 @@ class WorkspaceManager:
             title=payload.title,
             prompt=payload.prompt,
             attachments=attachments,
+            goal_packet=payload.goal_packet,
             agent_type=payload.agent_type,
             status=WorkspaceTaskStatus.TODO,
             related_task_id=payload.related_task_id,
@@ -578,20 +646,32 @@ class WorkspaceManager:
         task_id: str,
         status: WorkspaceTaskStatus,
     ) -> WorkspaceTask:
+        return await self.update_task(task_id, WorkspaceTaskUpdate(status=status))
+
+    async def update_task(
+        self,
+        task_id: str,
+        payload: WorkspaceTaskUpdate,
+    ) -> WorkspaceTask:
         task = self.tasks.get(task_id)
         if not task:
             raise KeyError(task_id)
 
         now = _now()
-        update: dict[str, Any] = {"status": status, "updated_at": now}
-        if status == WorkspaceTaskStatus.QUEUED:
-            update["queued_at"] = task.queued_at or now
-        elif status == WorkspaceTaskStatus.WORKING:
-            update["started_at"] = task.started_at or now
-        elif status == WorkspaceTaskStatus.REVIEW:
-            update["reviewed_at"] = now
-        elif status == WorkspaceTaskStatus.DONE:
-            update["completed_at"] = now
+        update: dict[str, Any] = {"updated_at": now}
+        if payload.goal_packet is not None:
+            update["goal_packet"] = payload.goal_packet
+        status = payload.status
+        if status is not None:
+            update["status"] = status
+            if status == WorkspaceTaskStatus.QUEUED:
+                update["queued_at"] = task.queued_at or now
+            elif status == WorkspaceTaskStatus.WORKING:
+                update["started_at"] = task.started_at or now
+            elif status == WorkspaceTaskStatus.REVIEW:
+                update["reviewed_at"] = now
+            elif status == WorkspaceTaskStatus.DONE:
+                update["completed_at"] = now
 
         self.tasks[task.id] = task.model_copy(update=update)
         if status == WorkspaceTaskStatus.DONE:
@@ -601,7 +681,8 @@ class WorkspaceManager:
             self._assign_current_task(task.session_id, task.id)
 
         self._save_state()
-        await self.dispatch_workspace(task.workspace_id)
+        if status is not None:
+            await self.dispatch_workspace(task.workspace_id)
         return self.tasks[task.id]
 
     def _write_task_record(self, task: WorkspaceTask) -> None:
@@ -1665,6 +1746,11 @@ class WorkspaceManager:
             "Start by reading the state snapshot. This workspace may contain many projects; "
             "use the task description to choose the correct directory before editing. "
             "Check for uncommitted file changes. "
+            "Before substantive implementation, derive a Goal Packet from the original task "
+            "prompt and include it in your first working report. The Goal Packet must preserve "
+            "the user's requested outcome, record assumptions instead of silently narrowing "
+            "ambiguous scope, and include concrete reviewer-checkable acceptance criteria, "
+            "a validation plan, out-of-scope boundaries, and final handoff requirements.\n\n"
             "Report state started, then report working as you make progress. "
             "If blocked or waiting for user input, report blocked or needs_input. "
             "When ready for human review, report ready_for_review. When you believe the task is "
@@ -1682,10 +1768,25 @@ class WorkspaceManager:
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"started",'
             '"message":"Started task","message_en":"Started task","message_zh":"已开始任务"}\'\n\n'
+            "Goal Packet report example:\n"
+            f"curl -sS -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
+            "-H 'Content-Type: application/json' "
+            f'-d \'{{"task_id":"{task.id}","state":"working",'
+            '"message":"Goal packet created; starting implementation.",'
+            '"message_en":"Goal packet created; starting implementation.",'
+            '"message_zh":"已创建目标包，开始实现。",'
+            '"goal_packet":{"objective":"Concrete task objective in your words.",'
+            '"acceptance_criteria":["Specific reviewer-checkable condition."],'
+            '"validation_plan":["Command, manual check, or evidence source."],'
+            '"assumptions":["Assumption made from ambiguity."],'
+            '"out_of_scope":["Explicitly excluded work."],'
+            '"handoff_requirements":["What final report must include."]}}\'\n\n'
             "Every report should include both message_en (concise English) and message_zh "
             "(concise 中文); keep the legacy message field as a short fallback. "
             "Final reports should include task_id, state, message, message_en, message_zh, "
-            "changed_files, validation, risks, review_decision, review_reason, and risk_level."
+            "changed_files, validation, risks, acceptance_check, review_decision, review_reason, "
+            "and risk_level. acceptance_check should map each Goal Packet acceptance criterion "
+            "to status passed, failed, partial, or not_checked with evidence."
         )
 
     def _build_review_prompt(
@@ -1708,6 +1809,9 @@ class WorkspaceManager:
                 "changed_files": report.changed_files,
                 "validation": report.validation,
                 "risks": report.risks,
+                "acceptance_check": [
+                    item.model_dump(mode="json") for item in report.acceptance_check
+                ],
                 "review_decision": report.review_decision.value,
                 "review_reason": report.review_reason,
                 "risk_level": report.risk_level,
@@ -1726,18 +1830,25 @@ class WorkspaceManager:
             f"State snapshot: {self.snapshot_path(workspace.id)}\n\n"
             "Task description:\n"
             f"{task.prompt}\n\n"
+            "Stored Goal Packet JSON:\n"
+            f"{task.goal_packet.model_dump_json() if task.goal_packet else 'null'}\n\n"
             "Review workflow:\n"
             "1. Stay read-only. Do not edit files, run formatters that write changes, or revert work.\n"
-            "2. Derive a task-specific acceptance checklist before judging the implementation. Use:\n"
+            "2. Check whether the stored Goal Packet faithfully preserves the original task prompt. "
+            "Fail the review if the packet narrowed or distorted the user's requested outcome.\n"
+            "3. Derive a task-specific acceptance checklist before judging the implementation. Use:\n"
             "   - the task title and description,\n"
+            "   - the stored Goal Packet objective, acceptance criteria, validation plan, assumptions, "
+            "out-of-scope boundaries, and handoff requirements,\n"
             "   - explicit user requirements and attachments,\n"
-            "   - changed_files, validation, and risks from the implementation reports,\n"
+            "   - changed_files, validation, risks, and acceptance_check evidence from the implementation reports,\n"
             "   - repository conventions and nearby behavior,\n"
             "   - any blocked/needs_input context from the trigger report.\n"
-            "3. Inspect changed files and related code paths enough to verify correctness and scope.\n"
-            "4. Evaluate validation evidence. Decide whether missing tests/checks are acceptable or blocking.\n"
-            "5. Produce one final verdict using the exit criteria below.\n\n"
+            "4. Inspect changed files and related code paths enough to verify correctness and scope.\n"
+            "5. Evaluate validation evidence. Decide whether missing tests/checks are acceptable or blocking.\n"
+            "6. Produce one final verdict using the exit criteria below.\n\n"
             "Acceptance standards:\n"
+            "- Goal fidelity: the Goal Packet preserves the original prompt and does not hide ambiguous scope.\n"
             "- Functional correctness: the requested behavior is implemented end to end.\n"
             "- Scope control: changes are limited to the task and do not introduce unrelated churn.\n"
             "- Integration fit: code follows local architecture, state flow, API contracts, and UI conventions.\n"
@@ -1899,6 +2010,7 @@ class WorkspaceManager:
             changed_files=payload.changed_files,
             validation=payload.validation,
             risks=payload.risks,
+            acceptance_check=payload.acceptance_check,
             review_decision=payload.review_decision,
             review_reason=payload.review_reason,
             risk_level=payload.risk_level,
@@ -1922,12 +2034,18 @@ class WorkspaceManager:
 
         if task_id and task_id in self.tasks:
             task_status = self._task_status_from_report(payload.state)
+            task_update: dict[str, Any] = {}
+            if payload.goal_packet is not None:
+                task_update["goal_packet"] = payload.goal_packet
             if task_status:
-                task_update: dict[str, Any] = {"status": task_status, "updated_at": now}
+                task_update.update({"status": task_status, "updated_at": now})
                 if task_status == WorkspaceTaskStatus.WORKING:
                     task_update["started_at"] = self.tasks[task_id].started_at or now
                 if task_status == WorkspaceTaskStatus.REVIEW:
                     task_update["reviewed_at"] = now
+            elif task_update:
+                task_update["updated_at"] = now
+            if task_update:
                 self.tasks[task_id] = self.tasks[task_id].model_copy(update=task_update)
 
         self._save_state()
@@ -1956,6 +2074,10 @@ class WorkspaceManager:
         }:
             return
         if task.review_requested_at and not task.review_completed_at:
+            return
+        evidence_gaps = self._completion_evidence_gaps(task, report)
+        if report.review_decision == ReviewDecision.SKIP and evidence_gaps:
+            await self._request_goal_packet_supplement(task, session, report, evidence_gaps)
             return
         should_review = await self._should_request_task_review(
             task,
@@ -1991,6 +2113,8 @@ class WorkspaceManager:
     async def _can_skip_task_review(self, task: WorkspaceTask, report: AgentReport) -> bool:
         if report.state != AgentReportState.COMPLETED:
             return False
+        if self._completion_evidence_gaps(task, report):
+            return False
         if report.changed_files:
             return False
         if (report.risk_level or "").strip().lower() not in {"", "low", "none"}:
@@ -2000,6 +2124,86 @@ class WorkspaceManager:
         if await self._workspace_has_tracked_changes(task.workspace_id):
             return False
         return True
+
+    def _completion_evidence_gaps(
+        self,
+        task: WorkspaceTask,
+        report: AgentReport,
+    ) -> list[str]:
+        if report.state not in {
+            AgentReportState.READY_FOR_REVIEW,
+            AgentReportState.COMPLETED,
+        }:
+            return []
+        gaps: list[str] = []
+        if task.goal_packet is None:
+            gaps.append("stored Goal Packet")
+        if not report.acceptance_check:
+            gaps.append("acceptance_check evidence")
+        return gaps
+
+    async def _request_goal_packet_supplement(
+        self,
+        task: WorkspaceTask,
+        session: ManagedSession,
+        report: AgentReport,
+        gaps: list[str],
+    ) -> None:
+        now = _now()
+        gap_text = ", ".join(gaps)
+        self.tasks[task.id] = task.model_copy(
+            update={
+                "status": WorkspaceTaskStatus.WORKING,
+                "reviewed_at": None,
+                "updated_at": now,
+            }
+        )
+        self.sessions[session.id] = session.model_copy(
+            update={
+                "status": ManagedSessionStatus.WORKING,
+                "runtime_status": AgentRuntimeStatus.WORKING,
+                "task_id": task.id,
+                "current_task_id": task.id,
+                "updated_at": now,
+                "last_activity_at": now,
+            }
+        )
+        self._save_state()
+        message = (
+            "Your latest completion-style workspace report is missing required Goal Packet "
+            f"audit evidence: {gap_text}.\n\n"
+            "Please supplement the task before review or review-skip can proceed. If a Goal "
+            "Packet has not been stored yet, include goal_packet with objective, "
+            "acceptance_criteria, validation_plan, assumptions, out_of_scope, and "
+            "handoff_requirements. Include acceptance_check mapping each acceptance criterion "
+            "to status passed, failed, partial, or not_checked with evidence. Then POST a new "
+            "ready_for_review or completed report.\n\n"
+            "Supplement report example:\n"
+            f"curl -sS -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
+            "-H 'Content-Type: application/json' "
+            f'-d \'{{"task_id":"{task.id}","state":"completed",'
+            '"message":"Supplemented Goal Packet evidence.",'
+            '"message_en":"Supplemented Goal Packet evidence.",'
+            '"message_zh":"已补充目标包验收证据。",'
+            '"goal_packet":{"objective":"Concrete task objective.",'
+            '"acceptance_criteria":["Reviewer-checkable criterion."],'
+            '"validation_plan":["Command or manual check."],'
+            '"assumptions":[],"out_of_scope":[],"handoff_requirements":[]},'
+            '"acceptance_check":[{"criterion":"Reviewer-checkable criterion.",'
+            '"status":"passed","evidence":"Command, file, or manual check evidence."}],'
+            '"changed_files":[],"validation":"Checks run.",'
+            '"risks":"Residual risk or none",'
+            '"review_decision":"request","review_reason":"Goal Packet evidence supplemented.",'
+            '"risk_level":"low"}\''
+        )
+        logger.info(
+            "Requesting Goal Packet supplement session_id=%s task_id=%s report_id=%s gaps=%s",
+            session.id,
+            task.id,
+            report.id,
+            gap_text,
+        )
+        await self.send_session_message(session.id, message)
 
     async def _workspace_has_tracked_changes(self, workspace_id: str) -> bool:
         workspace = self.workspaces.get(workspace_id)
@@ -2501,6 +2705,7 @@ class WorkspaceManager:
                     runtime_status == AgentRuntimeStatus.WORKING
                     and task
                     and task.status == WorkspaceTaskStatus.REVIEW
+                    and current_task_id is not None
                     and status.last_changed_at
                     and task.reviewed_at
                     and (status.last_changed_at - task.reviewed_at).total_seconds()

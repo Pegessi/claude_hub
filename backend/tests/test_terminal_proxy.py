@@ -1,7 +1,8 @@
 import asyncio
+from typing import cast
 
 import pytest
-from fastapi import WebSocketDisconnect
+from fastapi import WebSocket, WebSocketDisconnect
 
 from claude_hub.api import terminal as terminal_api
 from claude_hub.api.terminal import is_generated_terminal_probe_response, proxy_websocket
@@ -81,7 +82,7 @@ async def test_proxy_drops_generated_probe_responses_when_enabled(
     )
 
     await proxy_websocket(
-        client,
+        cast(WebSocket, client),
         "ws://example.invalid/ws",
         filter_terminal_probe_responses=True,
     )
@@ -102,7 +103,7 @@ async def test_proxy_forwards_probe_responses_when_filter_disabled(
     client = FakeClientWebSocket([{"type": "websocket.receive", "text": "0\x1b[>0;276;0c"}])
 
     await proxy_websocket(
-        client,
+        cast(WebSocket, client),
         "ws://example.invalid/ws",
         filter_terminal_probe_responses=False,
     )

@@ -202,6 +202,133 @@ def test_workspace_task_flow(tmp_path: Path) -> None:
     assert board["sessions"] == []
 
 
+def test_task_goal_packet_create_update_and_legacy_normalization(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Goal Repo", "path": str(repo), "session_prefix": "goal"},
+    ).json()
+    goal_packet = {
+        "objective": "Implement goal packet persistence.",
+        "acceptance_criteria": ["Task stores packet"],
+        "validation_plan": ["pytest tests/test_workspaces.py"],
+        "assumptions": ["Use optional task metadata"],
+        "out_of_scope": ["Goal editor"],
+        "handoff_requirements": ["Summarize changed files"],
+    }
+
+    create_response = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={
+            "title": "Goal task",
+            "prompt": "Add Goal Packet support",
+            "goal_packet": goal_packet,
+        },
+    )
+    assert create_response.status_code == 201
+    task = create_response.json()
+    assert task["goal_packet"]["objective"] == goal_packet["objective"]
+    assert task["goal_packet"]["status"] == "draft"
+
+    update_response = client.patch(
+        f"/api/workspaces/tasks/{task['id']}",
+        json={
+            "goal_packet": {
+                **goal_packet,
+                "objective": "Updated objective.",
+                "acceptance_criteria": ["Updated criterion"],
+            }
+        },
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["goal_packet"]["objective"] == "Updated objective."
+    assert workspace_manager.tasks[task["id"]].status == WorkspaceTaskStatus.TODO
+
+    normalized = workspace_manager._normalize_task_item(
+        {
+            **workspace_manager.tasks[task["id"]].model_dump(mode="json"),
+            "goal_packet": {"objective": "", "acceptance_criteria": "bad"},
+        }
+    )
+    assert normalized["goal_packet"] is None
+
+
+def test_agent_report_stores_goal_packet_and_acceptance_check(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="goal-report-tab",
+        port=12530,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Goal Report", "path": str(repo), "session_prefix": "goalr"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Goal report", "prompt": "Report a Goal Packet"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    assert "Goal Packet report example" in sent_messages[-1][1]
+    assert '"goal_packet"' in sent_messages[-1][1]
+    sent_messages.clear()
+
+    goal_packet = {
+        "objective": "Report structured task intent.",
+        "acceptance_criteria": ["Packet is stored"],
+        "validation_plan": ["Inspect task response"],
+        "assumptions": [],
+        "out_of_scope": [],
+        "handoff_requirements": ["Include acceptance evidence"],
+    }
+    response = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "completed",
+            "message": "Done",
+            "goal_packet": goal_packet,
+            "acceptance_check": [
+                {
+                    "criterion": "Packet is stored",
+                    "status": "passed",
+                    "evidence": "Task model has goal_packet",
+                }
+            ],
+            "changed_files": ["backend/claude_hub/models/schemas.py"],
+            "validation": "pytest tests/test_workspaces.py",
+            "risks": "none",
+            "review_decision": "request",
+            "review_reason": "Feature change needs review",
+        },
+    )
+
+    assert response.status_code == 201
+    report = response.json()
+    assert report["acceptance_check"][0]["status"] == "passed"
+    stored_goal_packet = workspace_manager.tasks[task["id"]].goal_packet
+    assert stored_goal_packet is not None
+    assert stored_goal_packet.objective == goal_packet["objective"]
+
+    reviewer_prompt = sent_messages[-1][1]
+    assert "Stored Goal Packet JSON" in reviewer_prompt
+    assert "Report structured task intent." in reviewer_prompt
+    assert "acceptance_check" in reviewer_prompt
+    assert "Goal fidelity" in reviewer_prompt
+
+
 def test_update_workspace_changes_path_and_remote_cwd(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -544,7 +671,18 @@ def test_completed_skip_review_marks_review_without_reviewer(
     ).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Analysis task", "prompt": "Analyze without editing"},
+        json={
+            "title": "Analysis task",
+            "prompt": "Analyze without editing",
+            "goal_packet": {
+                "objective": "Analyze without editing.",
+                "acceptance_criteria": ["Analysis is complete"],
+                "validation_plan": ["Review notes"],
+                "assumptions": [],
+                "out_of_scope": ["Code changes"],
+                "handoff_requirements": ["Summarize findings"],
+            },
+        },
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     sent_messages.clear()
@@ -555,6 +693,13 @@ def test_completed_skip_review_marks_review_without_reviewer(
             "task_id": task["id"],
             "state": "completed",
             "message": "Read-only analysis complete",
+            "acceptance_check": [
+                {
+                    "criterion": "Analysis is complete",
+                    "status": "passed",
+                    "evidence": "Report summarizes the findings",
+                }
+            ],
             "review_decision": "skip",
             "review_reason": "No files changed; analysis only.",
             "risk_level": "low",
@@ -570,6 +715,98 @@ def test_completed_skip_review_marks_review_without_reviewer(
     assert updated.review_skipped_at is not None
     assert updated.review_skip_reason == "No files changed; analysis only."
     assert sent_messages == []
+
+
+@pytest.mark.parametrize(
+    ("task_goal_packet", "acceptance_check", "expected_gap"),
+    [
+        (
+            None,
+            [
+                {
+                    "criterion": "Analysis is complete",
+                    "status": "passed",
+                    "evidence": "Report summarizes the findings",
+                }
+            ],
+            "stored Goal Packet",
+        ),
+        (
+            {
+                "objective": "Analyze without editing.",
+                "acceptance_criteria": ["Analysis is complete"],
+                "validation_plan": ["Review notes"],
+                "assumptions": [],
+                "out_of_scope": ["Code changes"],
+                "handoff_requirements": ["Summarize findings"],
+            },
+            [],
+            "acceptance_check evidence",
+        ),
+    ],
+)
+def test_completed_skip_review_requires_goal_packet_audit_evidence(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+    task_goal_packet: dict[str, object] | None,
+    acceptance_check: list[dict[str, str]],
+    expected_gap: str,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="skip-goal-required-tab",
+        port=12556,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Skip Goal Required", "path": str(repo), "session_prefix": "skipg"},
+    ).json()
+    task_payload: dict[str, object] = {
+        "title": "Analysis task",
+        "prompt": "Analyze without editing",
+    }
+    if task_goal_packet is not None:
+        task_payload["goal_packet"] = task_goal_packet
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json=task_payload,
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    sent_messages.clear()
+
+    response = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "completed",
+            "message": "Read-only analysis complete",
+            "acceptance_check": acceptance_check,
+            "review_decision": "skip",
+            "review_reason": "No files changed; analysis only.",
+            "risk_level": "low",
+        },
+    )
+
+    assert response.status_code == 201
+    updated = workspace_manager.tasks[task["id"]]
+    session = workspace_manager.sessions[started["session_id"]]
+    assert updated.status == WorkspaceTaskStatus.WORKING
+    assert updated.review_session_id is None
+    assert updated.review_skipped_at is None
+    assert session.status == ManagedSessionStatus.WORKING
+    assert session.runtime_status == AgentRuntimeStatus.WORKING
+    assert len(sent_messages) == 1
+    assert "completion-style workspace report is missing" in sent_messages[0][1]
+    assert expected_gap in sent_messages[0][1]
+    assert "acceptance_check" in sent_messages[0][1]
+    assert "goal_packet" in sent_messages[0][1]
 
 
 def test_completed_skip_review_is_denied_for_changed_files(
@@ -594,7 +831,18 @@ def test_completed_skip_review_is_denied_for_changed_files(
     ).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Code task", "prompt": "Change code"},
+        json={
+            "title": "Code task",
+            "prompt": "Change code",
+            "goal_packet": {
+                "objective": "Change code.",
+                "acceptance_criteria": ["Code change is complete"],
+                "validation_plan": ["Run tests"],
+                "assumptions": [],
+                "out_of_scope": [],
+                "handoff_requirements": ["List changed files"],
+            },
+        },
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     sent_messages.clear()
@@ -606,6 +854,13 @@ def test_completed_skip_review_is_denied_for_changed_files(
             "state": "completed",
             "message": "Code changed but requesting skip",
             "changed_files": ["backend/claude_hub/services/workspace_manager.py"],
+            "acceptance_check": [
+                {
+                    "criterion": "Code change is complete",
+                    "status": "passed",
+                    "evidence": "Implementation files changed",
+                }
+            ],
             "review_decision": "skip",
             "review_reason": "Agent thinks this is safe.",
             "risk_level": "low",
@@ -652,7 +907,18 @@ def test_completed_skip_review_is_denied_for_tracked_diff(
     ).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Dirty task", "prompt": "Change tracked files"},
+        json={
+            "title": "Dirty task",
+            "prompt": "Change tracked files",
+            "goal_packet": {
+                "objective": "Change tracked files.",
+                "acceptance_criteria": ["Tracked diff is complete"],
+                "validation_plan": ["Run tests"],
+                "assumptions": [],
+                "out_of_scope": [],
+                "handoff_requirements": ["List changed files"],
+            },
+        },
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     sent_messages.clear()
@@ -663,6 +929,13 @@ def test_completed_skip_review_is_denied_for_tracked_diff(
             "task_id": task["id"],
             "state": "completed",
             "message": "No changed_files reported but repo is dirty",
+            "acceptance_check": [
+                {
+                    "criterion": "Tracked diff is complete",
+                    "status": "passed",
+                    "evidence": "Repository has tracked changes",
+                }
+            ],
             "review_decision": "skip",
             "review_reason": "No changed_files in report.",
             "risk_level": "low",
@@ -798,6 +1071,7 @@ def test_review_passed_keeps_task_in_review(
         json={"task_id": task["id"], "state": "completed", "message": "Done"},
     )
     reviewer_id = workspace_manager.tasks[task["id"]].review_session_id
+    assert reviewer_id is not None
     stale_reviewer_id = "pass-reviewer-stale"
     workspace_manager.sessions[stale_reviewer_id] = workspace_manager.sessions[
         reviewer_id
@@ -2152,7 +2426,8 @@ def test_completed_idle_working_agent_is_prompted_to_report(
     assert len(sent_messages) == 1
     assert sent_messages[0][0] == "claude-hub-tab-repo"
     assert "no workspace report was recorded" in sent_messages[0][1]
-    assert "changed_files, validation, and risks" in sent_messages[0][1]
+    assert "changed_files, validation, risks" in sent_messages[0][1]
+    assert "acceptance_check evidence" in sent_messages[0][1]
     assert workspace_manager.tasks[started["id"]].status == WorkspaceTaskStatus.WORKING
     assert session.runtime_status == AgentRuntimeStatus.WORKING
     assert session.auto_continue_attempts == 1
