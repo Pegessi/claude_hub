@@ -172,7 +172,7 @@ async def websocket_endpoint(
     await websocket.accept(subprotocol="tty")
 
     ttyd_ws_uri = f"ws://127.0.0.1:{tab.port}/ws"
-    filter_probe_responses = tab.agent_type in {AgentType.CLAUDE, AgentType.CODEX}
+    filter_probe_responses = tab.agent_type in {AgentType.CLAUDE, AgentType.CODEX, AgentType.CURSOR}
 
     try:
         await proxy_websocket(
@@ -206,7 +206,7 @@ async def proxy_ttyd_websocket(
     await websocket.accept(subprotocol="tty")
 
     ttyd_ws_uri = f"ws://127.0.0.1:{tab.port}/ws"
-    filter_probe_responses = tab.agent_type in {AgentType.CLAUDE, AgentType.CODEX}
+    filter_probe_responses = tab.agent_type in {AgentType.CLAUDE, AgentType.CODEX, AgentType.CURSOR}
 
     try:
         await proxy_websocket(
@@ -355,7 +355,7 @@ async def proxy_terminal_request(
         const TAB_ID = {json.dumps(tab_id)};
         const AGENT_TYPE = {json.dumps(tab.agent_type.value)};
         const EXECUTION_TARGET = {json.dumps(tab.target.value)};
-        const IS_AGENT_TUI = AGENT_TYPE === 'claude' || AGENT_TYPE === 'codex';
+        const IS_AGENT_TUI = AGENT_TYPE === 'claude' || AGENT_TYPE === 'codex' || AGENT_TYPE === 'cursor';
         const IS_REMOTE_AGENT_TUI = EXECUTION_TARGET === 'remote' && IS_AGENT_TUI;
         const HISTORY_LINES = 100000;
         let historyText = '';
@@ -889,7 +889,7 @@ async def proxy_terminal_request(
         // Agent TUIs such as Claude/Codex redraw status panes with relative
         // cursor operations; replaying a plain tmux snapshot mid-redraw breaks
         // that cursor state and leaves stale/status fragments on screen.
-        const AUTO_HISTORY_REPLAY_ENABLED = AGENT_TYPE === 'cursor';
+        const AUTO_HISTORY_REPLAY_ENABLED = AGENT_TYPE === 'terminal';
         const AUTO_HISTORY_RESYNC_ENABLED = AUTO_HISTORY_REPLAY_ENABLED;
         const PROTECT_AGENT_HISTORY_VIEW = IS_AGENT_TUI;
         const RESYNC_IDLE_MS = 700;
