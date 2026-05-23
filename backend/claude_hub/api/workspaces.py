@@ -11,6 +11,7 @@ from ..models import (
     DispatchDecisionRequest,
     EnsureWorkspaceAgentRequest,
     ManagedSession,
+    RequestTaskReviewRequest,
     SendSessionMessageRequest,
     SpawnWorkerRequest,
     StartTaskRequest,
@@ -195,11 +196,12 @@ async def continue_task(
 @router.post("/tasks/{task_id}/request-review", response_model=WorkspaceTask)
 async def request_task_review(
     task_id: str,
+    payload: RequestTaskReviewRequest | None = None,
     current_user: User = Depends(get_current_user),
 ) -> WorkspaceTask:
     """Manually request reviewer checks for a task."""
     try:
-        return await workspace_manager.request_task_review(task_id)
+        return await workspace_manager.request_task_review(task_id, payload)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Task not found") from e
     except RuntimeError as e:

@@ -7,6 +7,7 @@ import type {
   ContinueTaskRequest,
   EnsureWorkspaceAgentRequest,
   ManagedSession,
+  RequestTaskReviewRequest,
   StartTaskRequest,
   Workspace,
   WorkspaceAttachmentCreate,
@@ -300,12 +301,17 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
-  async function requestTaskReview(taskId: string) {
+  async function requestTaskReview(
+    taskId: string,
+    payload: RequestTaskReviewRequest = {},
+  ) {
     isLoading.value = true
     error.value = null
     try {
       const response = await fetch(`${API_BASE}/workspaces/tasks/${taskId}/request-review`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
       })
       if (!response.ok) throw new Error(await readError(response))
       await fetchBoard()

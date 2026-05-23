@@ -14,8 +14,9 @@ Goal Packets are additive metadata on `WorkspaceTask`. Existing tasks without a 
 - Report payloads can include `acceptance_check`, which stays attached to the report as handoff evidence.
 - Reviewer prompts include the original task prompt, stored Goal Packet, trigger report, recent reports, changed files, validation, risks, and acceptance checks.
 - Completion reports that request `review_decision=skip` must have a stored Goal Packet and non-empty acceptance-check evidence; otherwise the backend sends a supplement prompt and keeps the task working.
-- `review_decision=skip` only bypasses AI reviewer assignment. It does not complete the task; the task stays in the review column awaiting human acceptance.
+- `review_decision=skip` only bypasses AI reviewer assignment. It does not complete the task; the task stays in the review column awaiting human completion.
 - `human_acceptance_requested_at` is set after AI review passes or AI review is skipped. `human_accepted_at` is set when a human marks the task done/accepted.
+- Manual Request review accepts a human note and sends it to the reviewer as the review trigger. It is not a duplicate path for sending implementation feedback to the original agent.
 - Request-changes only re-engages the original agent when that session is still safe to reuse. If the agent has already been dispatched to another active task, the backend rejects the continuation instead of overwriting the active assignment.
 - `frontend/src/components/AgentWorkspaceView.vue` renders a compact read-only Goal Packet section in task detail and shows acceptance-check evidence in report cards.
 
