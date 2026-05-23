@@ -429,13 +429,22 @@
                     Start
                   </LoadingButton>
                   <LoadingButton
-                    v-if="task.status === 'review'"
+                    v-if="canAcceptTask(task)"
                     type="button"
                     :loading="isPending(taskActionKey('mark-done', task.id))"
                     loading-label="Accepting"
                     @click.stop="markTask(task.id, 'done')"
                   >
                     Accept
+                  </LoadingButton>
+                  <LoadingButton
+                    v-if="canRequestChanges(task)"
+                    type="button"
+                    :loading="isPending(taskActionKey('request-changes', task.id))"
+                    loading-label="Requesting changes"
+                    @click.stop="requestChanges(task)"
+                  >
+                    Request changes
                   </LoadingButton>
                   <LoadingButton
                     v-if="task.status === 'review' && task.review_skipped_at"
@@ -765,7 +774,7 @@
                   Start
                 </LoadingButton>
                 <LoadingButton
-                  v-if="selectedTask.status === 'review'"
+                  v-if="canAcceptTask(selectedTask)"
                   type="button"
                   class="tool-button"
                   :loading="isPending(taskActionKey('mark-done', selectedTask.id))"
@@ -775,7 +784,7 @@
                   Accept
                 </LoadingButton>
                 <LoadingButton
-                  v-if="selectedTask.status === 'review' && selectedSession"
+                  v-if="canRequestChanges(selectedTask)"
                   type="button"
                   class="tool-button"
                   :loading="isPending(taskActionKey('request-changes', selectedTask.id))"
@@ -1719,17 +1728,21 @@ function latestReportForTask(task: WorkspaceTask) {
   return workspaceStore.latestReportForTask(task)
 }
 
-function reviewStatusLabel(task: WorkspaceTask) {
-  if (task.human_accepted_at) return 'Human accepted'
-  if (task.review_skipped_at) return 'AI review skipped, awaiting human acceptance'
+function latestReviewReportForTask(task: WorkspaceTask) {
   const reviewReports = workspaceStore
     .reportsForTask(task)
     .filter(report => report.state.startsWith('review_'))
-  const latestReviewReport = reviewReports[reviewReports.length - 1]
+  return reviewReports[reviewReports.length - 1] || null
+}
+
+function reviewStatusLabel(task: WorkspaceTask) {
+  if (task.human_accepted_at) return 'Human accepted'
+  const latestReviewReport = latestReviewReportForTask(task)
   if (latestReviewReport?.state === 'review_passed') return 'AI review passed, awaiting human acceptance'
   if (latestReviewReport?.state === 'review_failed') return 'Changes requested'
   if (latestReviewReport?.state === 'review_needs_input') return 'Review needs input'
   if (latestReviewReport?.state === 'review_started') return 'Reviewing'
+  if (task.review_skipped_at) return 'AI review skipped, awaiting human acceptance'
   if (task.review_requested_at && !task.review_completed_at) return 'Pending review'
   if (task.review_attempts > 0) return `Review attempts ${task.review_attempts}`
   return ''
@@ -1738,6 +1751,24 @@ function reviewStatusLabel(task: WorkspaceTask) {
 function activeReviewBadge(
   task: WorkspaceTask,
 ): { kind: 'active' | 'pending' | 'attention'; label: string; title: string } | null {
+  const latestReviewReport = latestReviewReportForTask(task)
+  if (latestReviewReport?.state === 'review_failed') {
+    return {
+      kind: 'attention',
+      label: 'Changes requested',
+      title: 'Reviewer requested changes before this task can be accepted',
+    }
+  }
+  if (latestReviewReport?.state === 'review_needs_input') {
+    const reviewerName = task.review_session_id
+      ? reviewerTitle(task.review_session_id)
+      : 'AI reviewer'
+    return {
+      kind: 'attention',
+      label: 'Review needs input',
+      title: `${reviewerName} needs input to continue the review`,
+    }
+  }
   if (awaitingHumanAcceptance(task)) {
     return {
       kind: 'pending',
@@ -1747,10 +1778,6 @@ function activeReviewBadge(
   }
   if (task.review_skipped_at) return null
   if (task.review_completed_at) return null
-  const reviewReports = workspaceStore
-    .reportsForTask(task)
-    .filter(report => report.state.startsWith('review_'))
-  const latestReviewReport = reviewReports[reviewReports.length - 1]
   const reviewerName = task.review_session_id
     ? reviewerTitle(task.review_session_id)
     : 'AI reviewer'
@@ -1759,13 +1786,6 @@ function activeReviewBadge(
       kind: 'active',
       label: 'AI reviewing',
       title: `${reviewerName} is reviewing this task`,
-    }
-  }
-  if (latestReviewReport?.state === 'review_needs_input') {
-    return {
-      kind: 'attention',
-      label: 'Review needs input',
-      title: `${reviewerName} needs input to continue the review`,
     }
   }
   if (task.review_requested_at) {
@@ -1779,13 +1799,28 @@ function activeReviewBadge(
 }
 
 function awaitingHumanAcceptance(task: WorkspaceTask) {
+  const latestReviewReport = latestReviewReportForTask(task)
   return task.status === 'review' && (
     Boolean(task.human_acceptance_requested_at) ||
     Boolean(task.review_skipped_at) ||
-    workspaceStore
-      .reportsForTask(task)
-      .some(report => report.state === 'review_passed')
+    latestReviewReport?.state === 'review_passed'
   )
+}
+
+function hasBlockingReviewResult(task: WorkspaceTask) {
+  const latestReviewReport = latestReviewReportForTask(task)
+  return latestReviewReport?.state === 'review_failed' ||
+    latestReviewReport?.state === 'review_needs_input'
+}
+
+function canAcceptTask(task: WorkspaceTask) {
+  return awaitingHumanAcceptance(task) && !hasBlockingReviewResult(task)
+}
+
+function canRequestChanges(task: WorkspaceTask) {
+  if (task.status !== 'review' || !sessionForTask(task)) return false
+  const latestReviewReport = latestReviewReportForTask(task)
+  return awaitingHumanAcceptance(task) || latestReviewReport?.state === 'review_failed'
 }
 
 function isLatestSelectedReport(report: AgentReport) {

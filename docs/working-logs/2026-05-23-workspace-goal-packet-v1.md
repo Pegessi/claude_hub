@@ -16,6 +16,7 @@ Goal Packets are additive metadata on `WorkspaceTask`. Existing tasks without a 
 - Completion reports that request `review_decision=skip` must have a stored Goal Packet and non-empty acceptance-check evidence; otherwise the backend sends a supplement prompt and keeps the task working.
 - `review_decision=skip` only bypasses AI reviewer assignment. It does not complete the task; the task stays in the review column awaiting human acceptance.
 - `human_acceptance_requested_at` is set after AI review passes or AI review is skipped. `human_accepted_at` is set when a human marks the task done/accepted.
+- Request-changes only re-engages the original agent when that session is still safe to reuse. If the agent has already been dispatched to another active task, the backend rejects the continuation instead of overwriting the active assignment.
 - `frontend/src/components/AgentWorkspaceView.vue` renders a compact read-only Goal Packet section in task detail and shows acceptance-check evidence in report cards.
 
 ## Key Issues/Pitfalls
@@ -25,4 +26,5 @@ Goal Packets are additive metadata on `WorkspaceTask`. Existing tasks without a 
 - Goal Packet and acceptance-check fields are optional to preserve old task and report records.
 - Optional storage does not mean optional evidence for review skip. Low-risk skips are only allowed after the agent supplies Goal Packet audit data and acceptance evidence.
 - The human acceptance gate is deliberately layered on the existing `review` column to avoid a broader task state-machine rewrite in v1.
+- The review column can represent both "awaiting human acceptance" and "reviewer blocked/failed" states. UI actions must be derived from the latest reviewer report, not from `status=review` alone.
 - Report-state compatibility is the boundary: `ready_for_review` and `completed` still drive review creation; `review_*` verdict states are unchanged.
