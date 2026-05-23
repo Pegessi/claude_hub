@@ -713,8 +713,17 @@ def test_completed_skip_review_marks_review_without_reviewer(
     assert updated.review_session_id is None
     assert updated.review_attempts == 0
     assert updated.review_skipped_at is not None
+    assert updated.human_acceptance_requested_at is not None
+    assert updated.human_accepted_at is None
     assert updated.review_skip_reason == "No files changed; analysis only."
     assert sent_messages == []
+
+    done_response = client.patch(
+        f"/api/workspaces/tasks/{task['id']}",
+        json={"status": "done"},
+    )
+    assert done_response.status_code == 200
+    assert done_response.json()["human_accepted_at"] is not None
 
 
 @pytest.mark.parametrize(
@@ -971,7 +980,18 @@ def test_manual_request_review_after_skipped_review(
     ).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Manual request", "prompt": "Maybe review later"},
+        json={
+            "title": "Manual request",
+            "prompt": "Maybe review later",
+            "goal_packet": {
+                "objective": "Maybe review later.",
+                "acceptance_criteria": ["Analysis is complete"],
+                "validation_plan": ["Read report"],
+                "assumptions": [],
+                "out_of_scope": [],
+                "handoff_requirements": ["Explain review routing"],
+            },
+        },
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     client.post(
@@ -980,6 +1000,13 @@ def test_manual_request_review_after_skipped_review(
             "task_id": task["id"],
             "state": "completed",
             "message": "Skipping review for now",
+            "acceptance_check": [
+                {
+                    "criterion": "Analysis is complete",
+                    "status": "passed",
+                    "evidence": "Report completed",
+                }
+            ],
             "review_decision": "skip",
             "review_reason": "No changes.",
             "risk_level": "low",
@@ -995,6 +1022,7 @@ def test_manual_request_review_after_skipped_review(
     assert updated.review_session_id is not None
     assert updated.review_attempts == 1
     assert updated.review_skipped_at is None
+    assert updated.human_acceptance_requested_at is None
     assert "Human requested reviewer checks" in list(workspace_manager.reports.values())[-1].message
     assert "Review workspace task" in sent_messages[-1][1]
 
@@ -1100,10 +1128,20 @@ def test_review_passed_keeps_task_in_review(
     assert reviewed_task.status == WorkspaceTaskStatus.REVIEW
     assert reviewed_task.completed_at is None
     assert reviewed_task.review_completed_at is not None
+    assert reviewed_task.human_acceptance_requested_at is not None
+    assert reviewed_task.human_accepted_at is None
     assert workspace_manager.sessions[started["session_id"]].current_task_id == task["id"]
     assert workspace_manager.sessions[reviewer_id].current_task_id is None
     assert workspace_manager.sessions[stale_reviewer_id].current_task_id is None
     assert workspace_manager.sessions[stale_reviewer_id].status == ManagedSessionStatus.IDLE
+
+    done_response = client.patch(
+        f"/api/workspaces/tasks/{task['id']}",
+        json={"status": "done"},
+    )
+    assert done_response.status_code == 200
+    assert done_response.json()["status"] == "done"
+    assert done_response.json()["human_accepted_at"] is not None
 
 
 def test_review_failed_returns_feedback_to_original_agent(

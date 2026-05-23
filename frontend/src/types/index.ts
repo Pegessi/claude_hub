@@ -191,6 +191,8 @@ export interface WorkspaceTask {
   review_completed_at?: string | null
   review_skipped_at?: string | null
   review_skip_reason?: string | null
+  human_acceptance_requested_at?: string | null
+  human_accepted_at?: string | null
   queued_at?: string | null
   started_at?: string | null
   reviewed_at?: string | null

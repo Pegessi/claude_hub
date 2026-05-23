@@ -299,6 +299,8 @@ class WorkspaceTask(BaseModel):
     review_completed_at: Optional[datetime] = None
     review_skipped_at: Optional[datetime] = None
     review_skip_reason: Optional[str] = None
+    human_acceptance_requested_at: Optional[datetime] = None
+    human_accepted_at: Optional[datetime] = None
     queued_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     reviewed_at: Optional[datetime] = None
