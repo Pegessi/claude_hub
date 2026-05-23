@@ -5,6 +5,11 @@
 
 ## 2026-05-23
 
+### docs: assess Agent Workspace state-machine boundaries
+- Document current terminal runtime detection, managed session lifecycle, task/report/review transitions, and frontend status derivation
+- Recommend a bounded state-policy/state-machine layer for Agent Workspace lifecycle events while keeping ttyd/tmux status classification as a separate heuristic observation source
+- **Files**: docs/working-logs/2026-05-23-state-machine-assessment.md, CHANGELOG.md
+
 ### feat: add workspace Goal Packet v1
 - Add optional task-level Goal Packets so workspace agents can record objective, acceptance criteria, validation plan, assumptions, out-of-scope boundaries, and handoff requirements directly on a task
 - Add report-level acceptance checks for ready-for-review/completed handoffs, and carry Goal Packet + acceptance evidence into reviewer prompts so reviewers audit both goal fidelity and delivery evidence
