@@ -222,6 +222,10 @@ export interface ContinueTaskRequest {
   attachments?: WorkspaceAttachmentCreate[]
 }
 
+export interface RequestTaskReviewRequest {
+  message?: string | null
+}
+
 export interface EnsureWorkspaceAgentRequest {
   agent_type: AgentType
   title?: string | null

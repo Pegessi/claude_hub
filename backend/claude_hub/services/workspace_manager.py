@@ -23,6 +23,7 @@ from ..models import (
     ExecutionTarget,
     ManagedSession,
     ManagedSessionStatus,
+    RequestTaskReviewRequest,
     ReviewDecision,
     StartTaskRequest,
     TerminalAgentStatus,
@@ -1365,7 +1366,12 @@ class WorkspaceManager:
                     "wait for that task to finish before requesting changes."
                 )
 
-    async def request_task_review(self, task_id: str) -> WorkspaceTask:
+    async def request_task_review(
+        self,
+        task_id: str,
+        payload: RequestTaskReviewRequest | None = None,
+    ) -> WorkspaceTask:
+        payload = payload or RequestTaskReviewRequest()
         task = self.tasks.get(task_id)
         if not task:
             raise KeyError(task_id)
@@ -1377,18 +1383,23 @@ class WorkspaceManager:
             raise RuntimeError("Task has no implementation agent")
 
         now = _now()
+        message = (
+            payload.message.strip()
+            if payload.message and payload.message.strip()
+            else "Human requested reviewer checks."
+        )
         report = AgentReport(
             id=str(uuid.uuid4()),
             workspace_id=task.workspace_id,
             task_id=task.id,
             session_id=task.session_id,
             state=AgentReportState.READY_FOR_REVIEW,
-            message="Human requested reviewer checks after review was skipped.",
+            message=message,
             changed_files=[],
             validation=None,
             risks=None,
             review_decision=ReviewDecision.REQUEST,
-            review_reason="Human requested reviewer checks.",
+            review_reason=message,
             risk_level=None,
             created_at=now,
         )

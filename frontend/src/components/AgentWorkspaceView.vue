@@ -429,29 +429,20 @@
                     Start
                   </LoadingButton>
                   <LoadingButton
-                    v-if="canAcceptTask(task)"
+                    v-if="canMarkDoneTask(task)"
                     type="button"
                     :loading="isPending(taskActionKey('mark-done', task.id))"
-                    loading-label="Accepting"
+                    loading-label="Marking done"
                     @click.stop="markTask(task.id, 'done')"
                   >
-                    Accept
+                    Done
                   </LoadingButton>
                   <LoadingButton
-                    v-if="canRequestChanges(task)"
-                    type="button"
-                    :loading="isPending(taskActionKey('request-changes', task.id))"
-                    loading-label="Requesting changes"
-                    @click.stop="requestChanges(task)"
-                  >
-                    Request changes
-                  </LoadingButton>
-                  <LoadingButton
-                    v-if="task.status === 'review' && task.review_skipped_at"
+                    v-if="canRequestReviewTask(task)"
                     type="button"
                     :loading="isPending(taskActionKey('request-review', task.id))"
                     loading-label="Requesting review"
-                    @click.stop="requestReview(task.id)"
+                    @click.stop="requestReview(task)"
                   >
                     Request review
                   </LoadingButton>
@@ -774,32 +765,22 @@
                   Start
                 </LoadingButton>
                 <LoadingButton
-                  v-if="canAcceptTask(selectedTask)"
+                  v-if="canMarkDoneTask(selectedTask)"
                   type="button"
                   class="tool-button"
                   :loading="isPending(taskActionKey('mark-done', selectedTask.id))"
-                  loading-label="Accepting"
+                  loading-label="Marking done"
                   @click="markTask(selectedTask.id, 'done')"
                 >
-                  Accept
+                  Done
                 </LoadingButton>
                 <LoadingButton
-                  v-if="canRequestChanges(selectedTask)"
-                  type="button"
-                  class="tool-button"
-                  :loading="isPending(taskActionKey('request-changes', selectedTask.id))"
-                  loading-label="Requesting changes"
-                  @click="requestChanges(selectedTask)"
-                >
-                  Request changes
-                </LoadingButton>
-                <LoadingButton
-                  v-if="selectedTask.status === 'review' && selectedTask.review_skipped_at"
+                  v-if="canRequestReviewTask(selectedTask)"
                   type="button"
                   class="tool-button"
                   :loading="isPending(taskActionKey('request-review', selectedTask.id))"
                   loading-label="Requesting review"
-                  @click="requestReview(selectedTask.id)"
+                  @click="requestReview(selectedTask)"
                 >
                   Request review
                 </LoadingButton>
@@ -1813,14 +1794,17 @@ function hasBlockingReviewResult(task: WorkspaceTask) {
     latestReviewReport?.state === 'review_needs_input'
 }
 
-function canAcceptTask(task: WorkspaceTask) {
+function canMarkDoneTask(task: WorkspaceTask) {
   return awaitingHumanAcceptance(task) && !hasBlockingReviewResult(task)
 }
 
-function canRequestChanges(task: WorkspaceTask) {
-  if (task.status !== 'review' || !sessionForTask(task)) return false
+function canRequestReviewTask(task: WorkspaceTask) {
+  if (task.status !== 'review') return false
   const latestReviewReport = latestReviewReportForTask(task)
-  return awaitingHumanAcceptance(task) || latestReviewReport?.state === 'review_failed'
+  return awaitingHumanAcceptance(task) ||
+    task.review_skipped_at ||
+    latestReviewReport?.state === 'review_failed' ||
+    latestReviewReport?.state === 'review_needs_input'
 }
 
 function isLatestSelectedReport(report: AgentReport) {
@@ -2594,21 +2578,15 @@ async function markTask(taskId: string, status: WorkspaceTaskStatus) {
   )
 }
 
-async function requestChanges(task: WorkspaceTask) {
+async function requestReview(task: WorkspaceTask) {
   const message = window.prompt(
-    'Describe the changes needed before accepting this task:',
+    'Tell the reviewer what to check:',
     detailMessage.value.trim(),
   )
   if (!message || !message.trim()) return
   detailMessage.value = ''
-  await runPending(taskActionKey('request-changes', task.id), () =>
-    workspaceStore.continueTask(task.id, { message: message.trim() })
-  )
-}
-
-async function requestReview(taskId: string) {
-  await runPending(taskActionKey('request-review', taskId), () =>
-    workspaceStore.requestTaskReview(taskId)
+  await runPending(taskActionKey('request-review', task.id), () =>
+    workspaceStore.requestTaskReview(task.id, { message: message.trim() })
   )
 }
 

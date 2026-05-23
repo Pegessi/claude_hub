@@ -1014,7 +1014,10 @@ def test_manual_request_review_after_skipped_review(
     )
     sent_messages.clear()
 
-    response = client.post(f"/api/workspaces/tasks/{task['id']}/request-review")
+    response = client.post(
+        f"/api/workspaces/tasks/{task['id']}/request-review",
+        json={"message": "Please check the no-change skip evidence."},
+    )
 
     assert response.status_code == 200
     updated = workspace_manager.tasks[task["id"]]
@@ -1023,8 +1026,12 @@ def test_manual_request_review_after_skipped_review(
     assert updated.review_attempts == 1
     assert updated.review_skipped_at is None
     assert updated.human_acceptance_requested_at is None
-    assert "Human requested reviewer checks" in list(workspace_manager.reports.values())[-1].message
+    assert (
+        "Please check the no-change skip evidence."
+        in list(workspace_manager.reports.values())[-1].message
+    )
     assert "Review workspace task" in sent_messages[-1][1]
+    assert "Please check the no-change skip evidence." in sent_messages[-1][1]
 
 
 def test_review_passed_keeps_task_in_review(

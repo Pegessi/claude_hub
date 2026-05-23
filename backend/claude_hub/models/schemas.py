@@ -428,6 +428,12 @@ class ContinueTaskRequest(BaseModel):
     attachments: List[WorkspaceAttachmentCreate] = Field(default_factory=list)
 
 
+class RequestTaskReviewRequest(BaseModel):
+    """Payload for manually requesting reviewer checks."""
+
+    message: Optional[str] = None
+
+
 class DispatchDecisionRequest(BaseModel):
     """Structured dispatch decision produced by a dispatcher agent."""
 
