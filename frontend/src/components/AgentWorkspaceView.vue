@@ -432,10 +432,10 @@
                     v-if="task.status === 'review'"
                     type="button"
                     :loading="isPending(taskActionKey('mark-done', task.id))"
-                    loading-label="Marking done"
+                    loading-label="Accepting"
                     @click.stop="markTask(task.id, 'done')"
                   >
-                    Done
+                    Accept
                   </LoadingButton>
                   <LoadingButton
                     v-if="task.status === 'review' && task.review_skipped_at"
@@ -612,6 +612,10 @@
                   <span>Review state</span>
                   <strong>{{ reviewStatusLabel(selectedTask) || 'not requested' }}</strong>
                 </div>
+                <div v-if="selectedTask.human_acceptance_requested_at">
+                  <span>Human acceptance</span>
+                  <strong>{{ selectedTask.human_accepted_at ? 'accepted' : 'awaiting' }}</strong>
+                </div>
                 <div v-if="selectedTask.review_skip_reason">
                   <span>Review reason</span>
                   <strong>{{ selectedTask.review_skip_reason }}</strong>
@@ -765,10 +769,20 @@
                   type="button"
                   class="tool-button"
                   :loading="isPending(taskActionKey('mark-done', selectedTask.id))"
-                  loading-label="Marking done"
+                  loading-label="Accepting"
                   @click="markTask(selectedTask.id, 'done')"
                 >
-                  Done
+                  Accept
+                </LoadingButton>
+                <LoadingButton
+                  v-if="selectedTask.status === 'review' && selectedSession"
+                  type="button"
+                  class="tool-button"
+                  :loading="isPending(taskActionKey('request-changes', selectedTask.id))"
+                  loading-label="Requesting changes"
+                  @click="requestChanges(selectedTask)"
+                >
+                  Request changes
                 </LoadingButton>
                 <LoadingButton
                   v-if="selectedTask.status === 'review' && selectedTask.review_skipped_at"
@@ -1706,12 +1720,13 @@ function latestReportForTask(task: WorkspaceTask) {
 }
 
 function reviewStatusLabel(task: WorkspaceTask) {
-  if (task.review_skipped_at) return 'Review skipped'
+  if (task.human_accepted_at) return 'Human accepted'
+  if (task.review_skipped_at) return 'AI review skipped, awaiting human acceptance'
   const reviewReports = workspaceStore
     .reportsForTask(task)
     .filter(report => report.state.startsWith('review_'))
   const latestReviewReport = reviewReports[reviewReports.length - 1]
-  if (latestReviewReport?.state === 'review_passed') return 'Review passed'
+  if (latestReviewReport?.state === 'review_passed') return 'AI review passed, awaiting human acceptance'
   if (latestReviewReport?.state === 'review_failed') return 'Changes requested'
   if (latestReviewReport?.state === 'review_needs_input') return 'Review needs input'
   if (latestReviewReport?.state === 'review_started') return 'Reviewing'
@@ -1723,6 +1738,13 @@ function reviewStatusLabel(task: WorkspaceTask) {
 function activeReviewBadge(
   task: WorkspaceTask,
 ): { kind: 'active' | 'pending' | 'attention'; label: string; title: string } | null {
+  if (awaitingHumanAcceptance(task)) {
+    return {
+      kind: 'pending',
+      label: 'Awaiting human acceptance',
+      title: 'AI review is complete or skipped; human acceptance is required',
+    }
+  }
   if (task.review_skipped_at) return null
   if (task.review_completed_at) return null
   const reviewReports = workspaceStore
@@ -1754,6 +1776,16 @@ function activeReviewBadge(
     }
   }
   return null
+}
+
+function awaitingHumanAcceptance(task: WorkspaceTask) {
+  return task.status === 'review' && (
+    Boolean(task.human_acceptance_requested_at) ||
+    Boolean(task.review_skipped_at) ||
+    workspaceStore
+      .reportsForTask(task)
+      .some(report => report.state === 'review_passed')
+  )
 }
 
 function isLatestSelectedReport(report: AgentReport) {
@@ -2524,6 +2556,18 @@ async function sendDetailMessage() {
 async function markTask(taskId: string, status: WorkspaceTaskStatus) {
   await runPending(taskActionKey(`mark-${status}`, taskId), () =>
     workspaceStore.updateTaskStatus(taskId, status)
+  )
+}
+
+async function requestChanges(task: WorkspaceTask) {
+  const message = window.prompt(
+    'Describe the changes needed before accepting this task:',
+    detailMessage.value.trim(),
+  )
+  if (!message || !message.trim()) return
+  detailMessage.value = ''
+  await runPending(taskActionKey('request-changes', task.id), () =>
+    workspaceStore.continueTask(task.id, { message: message.trim() })
   )
 }
 

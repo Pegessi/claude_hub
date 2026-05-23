@@ -243,6 +243,8 @@ class WorkspaceManager:
         normalized.setdefault("review_completed_at", None)
         normalized.setdefault("review_skipped_at", None)
         normalized.setdefault("review_skip_reason", None)
+        normalized.setdefault("human_acceptance_requested_at", None)
+        normalized.setdefault("human_accepted_at", None)
         normalized.setdefault("queued_at", None)
         normalized.setdefault("started_at", None)
         normalized.setdefault("reviewed_at", None)
@@ -668,10 +670,14 @@ class WorkspaceManager:
                 update["queued_at"] = task.queued_at or now
             elif status == WorkspaceTaskStatus.WORKING:
                 update["started_at"] = task.started_at or now
+                update["human_acceptance_requested_at"] = None
+                update["human_accepted_at"] = None
             elif status == WorkspaceTaskStatus.REVIEW:
                 update["reviewed_at"] = now
+                update["human_acceptance_requested_at"] = task.human_acceptance_requested_at or now
             elif status == WorkspaceTaskStatus.DONE:
                 update["completed_at"] = now
+                update["human_accepted_at"] = now
 
         self.tasks[task.id] = task.model_copy(update=update)
         if status == WorkspaceTaskStatus.DONE:
@@ -1296,6 +1302,8 @@ class WorkspaceManager:
                 "started_at": now,
                 "review_skipped_at": None,
                 "review_skip_reason": None,
+                "human_acceptance_requested_at": None,
+                "human_accepted_at": None,
                 "updated_at": now,
                 "dispatch_pending": False,
             }
@@ -1591,9 +1599,11 @@ class WorkspaceManager:
             "When you report completed, the workspace may assign an independent reviewer. "
             "If reviewer feedback is sent back to you, continue from that feedback and report "
             "completed again when the fixes are done. "
-            "Final reports may include review_decision: auto, request, or skip. Use request when "
-            "independent reviewer checks are needed, skip only for low-risk no-change analysis or "
-            "manual follow-up that does not need reviewer checks, and include review_reason. "
+            "Final reports may include review_decision: auto, request, or skip. This only controls "
+            "whether an independent AI reviewer is requested; every completed task still waits for "
+            "human acceptance before it is done. Use request when independent reviewer checks are "
+            "needed, skip only for low-risk no-change analysis or manual follow-up that does not "
+            "need AI reviewer checks, and include review_reason. "
             "Report progress to the workspace coordinator only after you receive a task, "
             "when you start, get blocked, need input, are ready for review, or complete the work. "
             "Every report should include both message_en (concise English) and message_zh "
@@ -1647,7 +1657,7 @@ class WorkspaceManager:
             "- Finish by reporting exactly one of review_passed, review_failed, or review_needs_input.\n\n"
             "Review exit rules:\n"
             "- Use review_passed only when all acceptance criteria are met, no blocking defects remain, "
-            "validation is adequate for the risk, and residual risks are acceptable for human review.\n"
+            "validation is adequate for the risk, and residual risks are acceptable for final human acceptance.\n"
             "- Use review_failed when the implementation agent can fix concrete defects or missing checks. "
             "Include required fixes specific enough for the implementation agent to follow.\n"
             "- Use review_needs_input only when a product, credential, environment, or requirement decision "
@@ -1754,11 +1764,11 @@ class WorkspaceManager:
             "Report state started, then report working as you make progress. "
             "If blocked or waiting for user input, report blocked or needs_input. "
             "When ready for human review, report ready_for_review. When you believe the task is "
-            "fully complete and ready for independent reviewer checks, report completed.\n\n"
+            "fully complete, report completed. The task is not finally done until a human accepts it.\n\n"
             "For completed reports, decide reviewer routing explicitly:\n"
-            "- review_decision=request when this should go to an independent reviewer.\n"
+            "- review_decision=request when this should go to an independent AI reviewer before human acceptance.\n"
             "- review_decision=skip only for low-risk no-change analysis or manual follow-up "
-            "where reviewer checks are unnecessary.\n"
+            "where AI reviewer checks are unnecessary; this still requires human acceptance.\n"
             "- review_decision=auto to use the workspace default reviewer policy.\n"
             "Always include review_reason when choosing request or skip. The backend may still "
             "force review for changed files, failed review follow-ups, blocked input, runtime "
@@ -1857,7 +1867,7 @@ class WorkspaceManager:
             "- Handoff quality: changed_files, validation, and risks are understandable for a human reviewer.\n\n"
             "Review exit criteria:\n"
             "- review_passed: every acceptance criterion is satisfied; no blocking defects remain; validation is "
-            "adequate or any gaps are explicitly non-blocking; residual risks are acceptable.\n"
+            "adequate or any gaps are explicitly non-blocking; residual risks are acceptable for final human acceptance.\n"
             "- review_failed: at least one blocking defect, regression, scope issue, or missing required validation "
             "can be fixed by the implementation agent. Include a Required fixes section.\n"
             "- review_needs_input: review cannot finish without user/product clarification, credentials, unavailable "
@@ -2244,6 +2254,8 @@ class WorkspaceManager:
                 "review_skip_reason": reason,
                 "reviewed_at": now,
                 "completed_at": None,
+                "human_acceptance_requested_at": now,
+                "human_accepted_at": None,
                 "updated_at": now,
             }
         )
@@ -2270,6 +2282,8 @@ class WorkspaceManager:
                 "review_skipped_at": None,
                 "review_skip_reason": None,
                 "completed_at": None,
+                "human_acceptance_requested_at": None,
+                "human_accepted_at": None,
                 "updated_at": now,
             }
         )
@@ -2360,6 +2374,10 @@ class WorkspaceManager:
             "review_skip_reason": None,
             "reviewed_at": task.reviewed_at or now,
             "completed_at": None,
+            "human_acceptance_requested_at": (
+                now if report.state == AgentReportState.REVIEW_PASSED else None
+            ),
+            "human_accepted_at": None,
             "updated_at": now,
         }
         self.tasks[task.id] = task.model_copy(
@@ -2943,6 +2961,10 @@ class WorkspaceManager:
                         "review_completed_at": task.review_completed_at or report.created_at,
                         "reviewed_at": task.reviewed_at or report.created_at,
                         "completed_at": None,
+                        "human_acceptance_requested_at": (
+                            task.human_acceptance_requested_at or report.created_at
+                        ),
+                        "human_accepted_at": None,
                         "updated_at": report.created_at,
                     }
                 )
