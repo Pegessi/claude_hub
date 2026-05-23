@@ -1235,6 +1235,74 @@ def test_review_failed_returns_feedback_to_original_agent(
     assert "add the missing assertion" in sent_messages[-1][1]
 
 
+def test_request_changes_rejects_busy_original_agent(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="busy-agent-tab",
+        port=12750,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Busy Agent", "path": str(repo), "session_prefix": "busy"},
+    ).json()
+    worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    first_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "First task", "prompt": "Implement first"},
+    ).json()
+    first_started = client.post(
+        f"/api/workspaces/tasks/{first_task['id']}/start",
+        json={"target_session_id": worker["id"]},
+    ).json()
+    client.post(
+        f"/api/workspaces/sessions/{first_started['session_id']}/reports",
+        json={
+            "task_id": first_task["id"],
+            "state": "completed",
+            "message": "First task done",
+        },
+    )
+    pass_response = pass_task_review(client, first_task["id"])
+    assert pass_response.status_code == 201
+
+    second_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Second task", "prompt": "Implement second"},
+    ).json()
+    second_started = client.post(
+        f"/api/workspaces/tasks/{second_task['id']}/start",
+        json={"target_session_id": worker["id"]},
+    )
+    assert second_started.status_code == 201
+    assert workspace_manager.tasks[second_task["id"]].status == WorkspaceTaskStatus.WORKING
+    assert (
+        workspace_manager.sessions[first_started["session_id"]].current_task_id == second_task["id"]
+    )
+
+    response = client.post(
+        f"/api/workspaces/tasks/{first_task['id']}/continue",
+        json={"message": "Please adjust before human acceptance."},
+    )
+
+    assert response.status_code == 400
+    assert "busy with another task" in response.json()["detail"]
+    assert workspace_manager.tasks[first_task["id"]].status == WorkspaceTaskStatus.REVIEW
+    assert (
+        workspace_manager.sessions[first_started["session_id"]].current_task_id == second_task["id"]
+    )
+    assert workspace_manager.tasks[second_task["id"]].status == WorkspaceTaskStatus.WORKING
+
+
 def test_start_task_dispatches_to_resident_agent(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,

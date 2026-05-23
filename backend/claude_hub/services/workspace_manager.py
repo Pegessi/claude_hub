@@ -1291,6 +1291,7 @@ class WorkspaceManager:
             raise RuntimeError("Review task has no original agent")
 
         now = _now()
+        self._ensure_session_can_continue_task(self.sessions[task.session_id], task)
         session = await self._rename_session_for_task(
             self.sessions[task.session_id],
             task,
@@ -1341,6 +1342,28 @@ class WorkspaceManager:
             self._build_continue_prompt(self.tasks[task.id], payload),
         )
         return self.tasks[task.id]
+
+    def _ensure_session_can_continue_task(
+        self,
+        session: ManagedSession,
+        task: WorkspaceTask,
+    ) -> None:
+        if session.role != WorkspaceSessionRole.ORCHESTRATOR:
+            raise RuntimeError("Review task original session is not a workspace agent")
+        if session.status == ManagedSessionStatus.STOPPED:
+            raise RuntimeError("Review task original agent is stopped")
+
+        assigned_ids = {
+            assigned_id for assigned_id in (session.task_id, session.current_task_id) if assigned_id
+        }
+        busy_ids = [assigned_id for assigned_id in assigned_ids if assigned_id != task.id]
+        for busy_id in busy_ids:
+            busy_task = self.tasks.get(busy_id)
+            if not busy_task or busy_task.status != WorkspaceTaskStatus.DONE:
+                raise RuntimeError(
+                    "Review task original agent is busy with another task; "
+                    "wait for that task to finish before requesting changes."
+                )
 
     async def request_task_review(self, task_id: str) -> WorkspaceTask:
         task = self.tasks.get(task_id)
