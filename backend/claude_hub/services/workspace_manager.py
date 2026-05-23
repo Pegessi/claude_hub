@@ -39,6 +39,7 @@ from ..models import (
     WorkspaceTaskUpdate,
     WorkspaceUpdate,
 )
+from . import workspace_state_policy as state_policy
 from .remote_profiles import remote_profile_manager
 from .ttyd_manager import ttyd_manager
 
@@ -68,41 +69,6 @@ AUTO_REPORT_MISSING_MESSAGE = (
     "the final ready_for_review or completed report with changed_files, validation, risks, "
     "the stored Goal Packet if it has not been reported yet, and acceptance_check evidence; "
     "only continue work if you find it is actually unfinished."
-)
-AUTO_CONTINUE_INTERRUPTION_PATTERNS = (
-    "api error",
-    "api_error",
-    "api request failed",
-    "api returned",
-    "failed to call api",
-    "provider returned error",
-    "unknown error",
-    "rate limit",
-    "429",
-    "400 unknown error",
-    "500 internal server error",
-    "502 bad gateway",
-    "503 service unavailable",
-    "504 gateway timeout",
-    "connection reset",
-    "connection aborted",
-    "stream error",
-    "network error",
-    "temporarily unavailable",
-    "overloaded",
-)
-AUTO_CONTINUE_COMPLETION_PATTERNS = (
-    "ready_for_review",
-    "ready for review",
-    "ready for human review",
-    "completed report",
-    "task complete",
-    "task is complete",
-    "work is complete",
-    "changed_files",
-    "changed files",
-    "validation:",
-    "risks:",
 )
 ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024
 IMAGE_ATTACHMENT_TYPES = {
@@ -2110,12 +2076,7 @@ class WorkspaceManager:
             return
         if session.role != WorkspaceSessionRole.ORCHESTRATOR:
             return
-        if report.state not in {
-            AgentReportState.READY_FOR_REVIEW,
-            AgentReportState.COMPLETED,
-            AgentReportState.BLOCKED,
-            AgentReportState.NEEDS_INPUT,
-        }:
+        if not state_policy.is_review_gate_state(report.state):
             return
         if task.review_requested_at and not task.review_completed_at:
             return
@@ -2142,49 +2103,43 @@ class WorkspaceManager:
     ) -> bool:
         if trigger_kind != "agent_report":
             return True
-        if report.review_decision == ReviewDecision.REQUEST:
-            return True
-        if report.state in {
-            AgentReportState.READY_FOR_REVIEW,
-            AgentReportState.BLOCKED,
-            AgentReportState.NEEDS_INPUT,
-        }:
-            return True
-        if report.review_decision != ReviewDecision.SKIP:
-            return True
-        return not await self._can_skip_task_review(task, report)
+        can_skip_review = False
+        if (
+            report.review_decision == ReviewDecision.SKIP
+            and report.state == AgentReportState.COMPLETED
+        ):
+            can_skip_review = await self._can_skip_task_review(task, report)
+        return state_policy.should_request_task_review(
+            trigger_kind=trigger_kind,
+            report_state=report.state,
+            review_decision=report.review_decision,
+            can_skip_review=can_skip_review,
+        )
 
     async def _can_skip_task_review(self, task: WorkspaceTask, report: AgentReport) -> bool:
-        if report.state != AgentReportState.COMPLETED:
-            return False
-        if self._completion_evidence_gaps(task, report):
-            return False
-        if report.changed_files:
-            return False
-        if (report.risk_level or "").strip().lower() not in {"", "low", "none"}:
-            return False
-        if self._latest_review_report_state(task.id) == AgentReportState.REVIEW_FAILED:
-            return False
-        if await self._workspace_has_tracked_changes(task.workspace_id):
-            return False
-        return True
+        return state_policy.can_skip_task_review(
+            state_policy.ReviewSkipContext(
+                report_state=report.state,
+                evidence_gaps=self._completion_evidence_gaps(task, report),
+                changed_files=report.changed_files,
+                risk_level=report.risk_level,
+                latest_review_state=self._latest_review_report_state(task.id),
+                workspace_has_tracked_changes=await self._workspace_has_tracked_changes(
+                    task.workspace_id
+                ),
+            )
+        )
 
     def _completion_evidence_gaps(
         self,
         task: WorkspaceTask,
         report: AgentReport,
     ) -> list[str]:
-        if report.state not in {
-            AgentReportState.READY_FOR_REVIEW,
-            AgentReportState.COMPLETED,
-        }:
-            return []
-        gaps: list[str] = []
-        if task.goal_packet is None:
-            gaps.append("stored Goal Packet")
-        if not report.acceptance_check:
-            gaps.append("acceptance_check evidence")
-        return gaps
+        return state_policy.completion_evidence_gaps(
+            report.state,
+            has_goal_packet=task.goal_packet is not None,
+            has_acceptance_check=bool(report.acceptance_check),
+        )
 
     async def _request_goal_packet_supplement(
         self,
@@ -2919,52 +2874,16 @@ class WorkspaceManager:
         }
 
     def _auto_continue_completion_reason(self, output: str) -> str | None:
-        tail = self._auto_continue_recent_output_segment(output).lower()
-        for pattern in AUTO_CONTINUE_COMPLETION_PATTERNS:
-            if pattern in tail:
-                return pattern
-        return None
+        return state_policy.auto_continue_completion_reason(output)
 
     def _auto_continue_interruption_reason(self, output: str) -> str | None:
-        tail = self._auto_continue_recent_output_segment(output).lower()
-        for pattern in AUTO_CONTINUE_INTERRUPTION_PATTERNS:
-            if pattern in tail:
-                return pattern
-        return None
+        return state_policy.auto_continue_interruption_reason(output)
 
     def _auto_continue_recent_output_segment(self, output: str) -> str:
-        lines = output.splitlines()
-        tail_start = max(0, len(lines) - 120)
-        tail = lines[tail_start:]
-        prompt_indices = [
-            index
-            for index, line in enumerate(tail)
-            if line.strip() in {"›", "❯"} or line.strip().startswith(("› ", "❯ "))
-        ]
-        if not prompt_indices:
-            return "\n".join(tail[-60:])
-
-        last_prompt_index = prompt_indices[-1]
-        last_prompt = tail[last_prompt_index].strip()
-        if last_prompt in {"›", "❯"}:
-            previous_prompt_index = prompt_indices[-2] if len(prompt_indices) >= 2 else -1
-            return "\n".join(tail[previous_prompt_index + 1 : last_prompt_index])
-        return "\n".join(tail[last_prompt_index + 1 :])
+        return state_policy.auto_continue_recent_output_segment(output)
 
     def _auto_continue_output_looks_busy(self, output: str) -> bool:
-        tail = "\n".join(output.lower().splitlines()[-12:])
-        if re.search(r"^[✻✢✶✳✷✸✹✺✽✦✧]\s+\S+…\s+\(", tail, re.MULTILINE):
-            return True
-        return any(
-            marker in tail
-            for marker in (
-                "esc to interrupt",
-                "ctrl+c to interrupt",
-                "ctrl-c to interrupt",
-                "running…",
-                "running...",
-            )
-        )
+        return state_policy.auto_continue_output_looks_busy(output)
 
     def _reconcile_task_report_statuses(self, workspace_id: str) -> None:
         changed = False
@@ -3054,13 +2973,7 @@ class WorkspaceManager:
         return reports[-1].state if reports else None
 
     def _map_runtime_status(self, status: TerminalAgentStatus) -> ManagedSessionStatus:
-        if status.status == AgentRuntimeStatus.ATTENTION:
-            return ManagedSessionStatus.NEEDS_INPUT
-        if status.status == AgentRuntimeStatus.WORKING:
-            return ManagedSessionStatus.WORKING
-        if status.status == AgentRuntimeStatus.OFFLINE:
-            return ManagedSessionStatus.STOPPED
-        return ManagedSessionStatus.IDLE
+        return state_policy.managed_status_from_runtime(status.status)
 
     def _is_spawn_grace_period(self, session: ManagedSession) -> bool:
         if session.status != ManagedSessionStatus.SPAWNING:
@@ -3072,66 +2985,17 @@ class WorkspaceManager:
         state: AgentReportState,
         session: ManagedSession,
     ) -> ManagedSessionStatus:
-        if session.role == WorkspaceSessionRole.ORCHESTRATOR:
-            if state in {AgentReportState.COMPLETED, AgentReportState.READY_FOR_REVIEW}:
-                return ManagedSessionStatus.IDLE
-            if state == AgentReportState.BLOCKED:
-                return ManagedSessionStatus.NEEDS_INPUT
-        if session.role == WorkspaceSessionRole.REVIEWER:
-            if state == AgentReportState.REVIEW_STARTED:
-                return ManagedSessionStatus.WORKING
-            if state in {AgentReportState.REVIEW_PASSED, AgentReportState.REVIEW_FAILED}:
-                return ManagedSessionStatus.IDLE
-            if state == AgentReportState.REVIEW_NEEDS_INPUT:
-                return ManagedSessionStatus.NEEDS_INPUT
-        if state == AgentReportState.BLOCKED:
-            return ManagedSessionStatus.ERROR
-        if state == AgentReportState.NEEDS_INPUT:
-            return ManagedSessionStatus.NEEDS_INPUT
-        if state == AgentReportState.COMPLETED:
-            return ManagedSessionStatus.DONE
-        if state in {
-            AgentReportState.STARTED,
-            AgentReportState.WORKING,
-            AgentReportState.READY_FOR_REVIEW,
-        }:
-            return ManagedSessionStatus.WORKING
-        return session.status
+        return state_policy.managed_status_from_report(state, session.role, session.status)
 
     def _runtime_from_report(
         self,
         state: AgentReportState,
         session: ManagedSession,
     ) -> AgentRuntimeStatus:
-        if state in {AgentReportState.BLOCKED, AgentReportState.NEEDS_INPUT}:
-            return AgentRuntimeStatus.ATTENTION
-        if state in {AgentReportState.STARTED, AgentReportState.WORKING}:
-            return AgentRuntimeStatus.WORKING
-        if state in {AgentReportState.READY_FOR_REVIEW, AgentReportState.COMPLETED}:
-            return AgentRuntimeStatus.IDLE
-        if state == AgentReportState.REVIEW_STARTED:
-            return AgentRuntimeStatus.WORKING
-        if state in {AgentReportState.REVIEW_PASSED, AgentReportState.REVIEW_FAILED}:
-            return AgentRuntimeStatus.IDLE
-        if state == AgentReportState.REVIEW_NEEDS_INPUT:
-            return AgentRuntimeStatus.ATTENTION
-        return session.runtime_status
+        return state_policy.runtime_status_from_report(state, session.runtime_status)
 
     def _task_status_from_report(self, state: AgentReportState) -> Optional[WorkspaceTaskStatus]:
-        if state in {AgentReportState.REVIEW_PASSED, AgentReportState.REVIEW_NEEDS_INPUT}:
-            return WorkspaceTaskStatus.REVIEW
-        if state in {
-            AgentReportState.STARTED,
-            AgentReportState.WORKING,
-            AgentReportState.BLOCKED,
-            AgentReportState.NEEDS_INPUT,
-            AgentReportState.READY_FOR_REVIEW,
-            AgentReportState.COMPLETED,
-            AgentReportState.REVIEW_STARTED,
-            AgentReportState.REVIEW_FAILED,
-        }:
-            return WorkspaceTaskStatus.WORKING
-        return None
+        return state_policy.task_status_from_report(state)
 
     def _release_task_session(self, task: WorkspaceTask) -> None:
         if not task.session_id:
