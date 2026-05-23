@@ -1,10 +1,12 @@
-# State Machine Assessment
+# State Machine Assessment And Policy Extraction
 
 ## System Overview
 
 Claude Hub already has state-machine-shaped behavior, but it is implemented as enums plus imperative transition logic rather than as an explicit state machine. The current design is functional and reasonably well covered by backend tests, especially around review routing, idle auto-prompts, reviewer verdicts, and queue dispatch. The main weakness is not missing state vocabulary; it is that state ownership is spread across several entry points in `WorkspaceManager`, plus frontend display derivations and terminal-output heuristics.
 
 The right next step is a bounded state-machine layer for Agent Workspace task/session/report policy. Do not fold low-level terminal runtime detection into the same machine. Treat terminal status as an observation source that can influence workspace state through explicit events.
+
+Implementation follow-up: the first safe refactor phase is implemented in `backend/claude_hub/services/workspace_state_policy.py`. `WorkspaceManager` still owns persistence and side effects, while pure policy helpers now own report/status mapping, review routing, review-skip eligibility, completion evidence gaps, and auto-continue output classification.
 
 ## Inventory
 
@@ -62,13 +64,14 @@ Current code landmarks:
 - `backend/claude_hub/models/schemas.py:53` defines `ManagedSessionStatus`.
 - `backend/claude_hub/models/schemas.py:64` defines `AgentReportState`.
 - `backend/claude_hub/services/ttyd_manager.py:1191` starts `_classify_agent_status`.
+- `backend/claude_hub/services/workspace_state_policy.py` owns pure state-policy helpers and auto-continue classification.
 - `backend/claude_hub/services/workspace_manager.py:647` starts manual `update_task` status mutation.
 - `backend/claude_hub/services/workspace_manager.py:1501` starts `_dispatch_task_to_session`.
 - `backend/claude_hub/services/workspace_manager.py:2031` starts `create_report`.
 - `backend/claude_hub/services/workspace_manager.py:2102` starts `_after_report_recorded`.
 - `backend/claude_hub/services/workspace_manager.py:2369` starts `_handle_review_report`.
 - `backend/claude_hub/services/workspace_manager.py:2680` starts `_refresh_session_statuses`.
-- `backend/claude_hub/services/workspace_manager.py:3056` starts report/runtime mapping helpers.
+- `backend/claude_hub/services/workspace_manager.py` keeps compatibility wrapper methods for report/runtime mapping and auto-continue helpers; those wrappers delegate to `workspace_state_policy.py`.
 - `frontend/src/components/AgentWorkspaceView.vue:1719` starts review display derivation helpers.
 - `frontend/src/components/AgentWorkspaceView.vue:2042` starts agent runtime display derivation helpers.
 
@@ -121,6 +124,16 @@ This is acceptable for display, but it means frontend action eligibility duplica
 
 Introduce an explicit state-machine layer for Agent Workspace lifecycle policy, but keep it small and event-driven.
 
+Implemented now:
+
+- `workspace_state_policy.managed_status_from_report` centralizes `AgentReportState` plus session role to `ManagedSessionStatus`.
+- `workspace_state_policy.runtime_status_from_report` centralizes report to runtime status mapping.
+- `workspace_state_policy.task_status_from_report` centralizes report to board-column task status mapping.
+- `workspace_state_policy.managed_status_from_runtime` centralizes terminal observation to managed session status mapping.
+- `workspace_state_policy.completion_evidence_gaps`, `ReviewSkipContext`, `can_skip_task_review`, and `should_request_task_review` centralize review routing and review-skip policy.
+- `workspace_state_policy.auto_continue_*` centralizes recent-output segmentation, interruption detection, completion detection, and busy-output checks.
+- `backend/tests/test_workspace_state_policy.py` covers these pure helpers directly, while `backend/tests/test_workspaces.py` remains the integration guard for current behavior.
+
 Do not introduce a broad "one machine for everything" abstraction. Terminal status detection, tmux process lifecycle, managed session lifecycle, task lifecycle, review lifecycle, and human acceptance are different layers with different evidence quality. The most useful design is a workspace lifecycle reducer that accepts explicit events and returns state patches plus side effects.
 
 Recommended event boundary:
@@ -169,6 +182,7 @@ Recommended state model:
 2. Extract pure mapping helpers.
    - Move `_status_from_report`, `_runtime_from_report`, `_task_status_from_report`, review-skip eligibility, and runtime-observation mapping into a small `workspace/state_policy.py`.
    - Add unit tests that call policy functions directly without FastAPI or tmux mocks.
+   - Status: implemented as `backend/claude_hub/services/workspace_state_policy.py`.
 
 3. Add transition-result objects.
    - Return explicit `TaskPatch`, `SessionPatch`, and `SideEffect` values from policy functions.
@@ -203,3 +217,5 @@ Keep `backend/tests/test_workspaces.py` as integration coverage, but add narrow 
 The current implementation is stable enough for the current feature set because it has explicit enums, defensive persistence, targeted guards, and substantial regression tests. It is not yet elegant as a lifecycle architecture. The behavior has grown into a state machine, but the machine is implicit.
 
 Making the Agent Workspace lifecycle explicit would improve maintainability and reviewer confidence. The refactor should be incremental and should avoid over-modeling ttyd/tmux runtime detection. Start with a pure state-policy module and report/review transitions, then use that as the place where new workflow behavior is added.
+
+The first refactor phase is now complete. The system still uses the existing persisted state schema, but the high-risk policy decisions have a dedicated pure module and focused tests. Remaining future work is to introduce transition-result objects, then optionally add backend-derived `task_phase`, `review_phase`, or `available_actions` fields after the policy boundary has proven stable.

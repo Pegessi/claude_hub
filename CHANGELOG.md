@@ -5,6 +5,12 @@
 
 ## 2026-05-23
 
+### refactor: extract Agent Workspace state policy
+- Add `workspace_state_policy.py` as a pure policy boundary for report/session/task status mapping, runtime observation mapping, review routing, review-skip eligibility, completion evidence gaps, and auto-continue output classification
+- Keep `WorkspaceManager` responsible for persistence and tmux/reviewer side effects while delegating transition decisions to the policy helpers
+- Add focused policy unit tests and keep workspace lifecycle integration coverage passing
+- **Files**: backend/claude_hub/services/workspace_state_policy.py, backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspace_state_policy.py, docs/working-logs/2026-05-23-state-machine-assessment.md, CHANGELOG.md
+
 ### docs: assess Agent Workspace state-machine boundaries
 - Document current terminal runtime detection, managed session lifecycle, task/report/review transitions, and frontend status derivation
 - Recommend a bounded state-policy/state-machine layer for Agent Workspace lifecycle events while keeping ttyd/tmux status classification as a separate heuristic observation source
