@@ -3,6 +3,8 @@ import pytest
 from claude_hub.models import (
     AgentReportState,
     AgentRuntimeStatus,
+    AutonomousRunPhase,
+    EvaluationDecision,
     ManagedSessionStatus,
     ReviewDecision,
     WorkspaceSessionRole,
@@ -273,6 +275,44 @@ def test_non_agent_report_triggers_request_review() -> None:
         report_state=AgentReportState.COMPLETED,
         review_decision=ReviewDecision.SKIP,
         can_skip_review=True,
+    )
+
+
+def test_autonomous_worker_report_moves_to_evaluation() -> None:
+    assert (
+        policy.autonomous_phase_after_worker_report(AgentReportState.COMPLETED)
+        == AutonomousRunPhase.EVALUATING
+    )
+    assert (
+        policy.autonomous_task_status_from_phase(AutonomousRunPhase.EVALUATING)
+        == WorkspaceTaskStatus.WORKING
+    )
+
+
+def test_autonomous_evaluation_decision_respects_iteration_budget() -> None:
+    assert (
+        policy.autonomous_phase_from_evaluation_decision(
+            decision=EvaluationDecision.REVISE,
+            current_iteration=1,
+            max_iterations=3,
+        )
+        == AutonomousRunPhase.REVISING
+    )
+    assert (
+        policy.autonomous_phase_from_evaluation_decision(
+            decision=EvaluationDecision.REVISE,
+            current_iteration=3,
+            max_iterations=3,
+        )
+        == AutonomousRunPhase.EXHAUSTED
+    )
+    assert (
+        policy.autonomous_phase_from_evaluation_decision(
+            decision=EvaluationDecision.PASS,
+            current_iteration=3,
+            max_iterations=3,
+        )
+        == AutonomousRunPhase.PASSED
     )
 
 

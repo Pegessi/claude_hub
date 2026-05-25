@@ -49,6 +49,57 @@ class WorkspaceTaskStatus(str, Enum):
     DONE = "done"
 
 
+class WorkspaceTaskMode(str, Enum):
+    """Automation mode for a workspace task."""
+
+    DIRECT = "direct"
+    REVIEWED = "reviewed"
+    AUTONOMOUS = "autonomous"
+
+
+class EvaluationStrictness(str, Enum):
+    """How strict autonomous evaluation should be."""
+
+    LENIENT = "lenient"
+    BALANCED = "balanced"
+    STRICT = "strict"
+
+
+class HumanCheckpointPolicy(str, Enum):
+    """When an autonomous run should stop for human input."""
+
+    FINAL_ONLY = "final_only"
+    AFTER_RUBRIC = "after_rubric"
+    EVERY_ITERATION = "every_iteration"
+
+
+class AutonomousRunPhase(str, Enum):
+    """Fine-grained state for an autonomous task run."""
+
+    INTAKE = "intake"
+    RUBRIC_RESEARCH = "rubric_research"
+    PLANNING = "planning"
+    DISPATCHING = "dispatching"
+    WORKING = "working"
+    EVALUATING = "evaluating"
+    REVISING = "revising"
+    WAITING_FOR_HUMAN = "waiting_for_human"
+    PASSED = "passed"
+    FAILED = "failed"
+    EXHAUSTED = "exhausted"
+    CANCELLED = "cancelled"
+
+
+class EvaluationDecision(str, Enum):
+    """Evaluator decision for one autonomous iteration."""
+
+    PASS = "pass"
+    REVISE = "revise"
+    NEEDS_INPUT = "needs_input"
+    FAIL = "fail"
+    ESCALATE = "escalate"
+
+
 class ManagedSessionStatus(str, Enum):
     """Lifecycle status for a managed workspace session."""
 
@@ -122,6 +173,94 @@ class AcceptanceCheck(BaseModel):
     criterion: str
     status: AcceptanceCheckStatus
     evidence: str
+
+
+class AutonomyPolicy(BaseModel):
+    """Task-level configuration for Autonomous Mode."""
+
+    max_iterations: int = 3
+    evaluation_strictness: EvaluationStrictness = EvaluationStrictness.BALANCED
+    allow_web_research: bool = False
+    require_artifact_review: bool = False
+    human_checkpoint_policy: HumanCheckpointPolicy = HumanCheckpointPolicy.FINAL_ONLY
+    allowed_agent_types: List[AgentType] = Field(default_factory=list)
+    stop_on_repeated_failure: bool = True
+
+
+class RubricCriterion(BaseModel):
+    """One criterion used by an autonomous evaluator."""
+
+    id: str
+    name: str
+    description: str = ""
+    weight: float = 1.0
+    pass_condition: str = ""
+    evaluation_method: str = ""
+    blocking_threshold: Optional[float] = None
+
+
+class CriterionResult(BaseModel):
+    """Evaluator result for one rubric or acceptance criterion."""
+
+    criterion_id: Optional[str] = None
+    criterion: str
+    score: Optional[float] = None
+    passed: Optional[bool] = None
+    evidence: str = ""
+
+
+class EvaluationReport(BaseModel):
+    """Structured autonomous evaluator output."""
+
+    id: str
+    run_id: Optional[str] = None
+    task_id: Optional[str] = None
+    iteration: int = 1
+    evaluator_session_id: Optional[str] = None
+    overall_score: Optional[float] = None
+    decision: EvaluationDecision
+    criterion_results: List[CriterionResult] = Field(default_factory=list)
+    blocking_issues: List[str] = Field(default_factory=list)
+    suggested_fixes: List[str] = Field(default_factory=list)
+    artifact_refs: List[str] = Field(default_factory=list)
+    validation_reviewed: Optional[str] = None
+    risks: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class AutonomousIteration(BaseModel):
+    """Audit trail for one autonomous loop iteration."""
+
+    iteration: int
+    worker_session_id: Optional[str] = None
+    evaluator_session_id: Optional[str] = None
+    worker_report_id: Optional[str] = None
+    evaluation_report_id: Optional[str] = None
+    revision_prompt: Optional[str] = None
+    controller_decision: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+
+class AutonomousRun(BaseModel):
+    """Persisted fine-grained run state for an autonomous task."""
+
+    id: str
+    task_id: Optional[str] = None
+    phase: AutonomousRunPhase = AutonomousRunPhase.INTAKE
+    iteration: int = 1
+    max_iterations: int = 3
+    status_summary: str = "Intake"
+    active_session_ids: List[str] = Field(default_factory=list)
+    pass_threshold: float = 0.8
+    current_score: Optional[float] = None
+    next_action: str = "Derive Goal Packet and begin work"
+    paused_at: Optional[datetime] = None
+    exhausted_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    rubric: List[RubricCriterion] = Field(default_factory=list)
+    evaluation_reports: List[EvaluationReport] = Field(default_factory=list)
+    iterations: List[AutonomousIteration] = Field(default_factory=list)
 
 
 class TerminalTabBase(BaseModel):
@@ -247,9 +386,11 @@ class WorkspaceTaskCreate(BaseModel):
     title: str
     prompt: str
     agent_type: AgentType = AgentType.CODEX
+    task_mode: WorkspaceTaskMode = WorkspaceTaskMode.REVIEWED
     related_task_id: Optional[str] = None
     attachments: List["WorkspaceAttachmentCreate"] = Field(default_factory=list)
     goal_packet: Optional[GoalPacket] = None
+    autonomy_policy: Optional[AutonomyPolicy] = None
 
 
 class WorkspaceAttachmentCreate(BaseModel):
@@ -275,6 +416,9 @@ class WorkspaceTaskUpdate(BaseModel):
 
     status: Optional[WorkspaceTaskStatus] = None
     goal_packet: Optional[GoalPacket] = None
+    task_mode: Optional[WorkspaceTaskMode] = None
+    autonomy_policy: Optional[AutonomyPolicy] = None
+    autonomous_run: Optional[AutonomousRun] = None
 
 
 class WorkspaceTask(BaseModel):
@@ -287,6 +431,9 @@ class WorkspaceTask(BaseModel):
     attachments: List[WorkspaceAttachment] = Field(default_factory=list)
     goal_packet: Optional[GoalPacket] = None
     agent_type: AgentType
+    task_mode: WorkspaceTaskMode = WorkspaceTaskMode.REVIEWED
+    autonomy_policy: Optional[AutonomyPolicy] = None
+    autonomous_run: Optional[AutonomousRun] = None
     status: WorkspaceTaskStatus
     session_id: Optional[str] = None
     related_task_id: Optional[str] = None
@@ -354,6 +501,7 @@ class AgentReportCreate(BaseModel):
     risks: Optional[str] = None
     acceptance_check: List[AcceptanceCheck] = Field(default_factory=list)
     goal_packet: Optional[GoalPacket] = None
+    evaluation_report: Optional[EvaluationReport] = None
     review_decision: ReviewDecision = ReviewDecision.AUTO
     review_reason: Optional[str] = None
     risk_level: Optional[str] = None
@@ -374,6 +522,7 @@ class AgentReport(BaseModel):
     validation: Optional[str] = None
     risks: Optional[str] = None
     acceptance_check: List[AcceptanceCheck] = Field(default_factory=list)
+    evaluation_report: Optional[EvaluationReport] = None
     review_decision: ReviewDecision = ReviewDecision.AUTO
     review_reason: Optional[str] = None
     risk_level: Optional[str] = None

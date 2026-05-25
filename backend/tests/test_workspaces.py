@@ -256,6 +256,200 @@ def test_task_goal_packet_create_update_and_legacy_normalization(tmp_path: Path)
     assert normalized["goal_packet"] is None
 
 
+def test_autonomous_task_create_defaults_and_legacy_normalization(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Auto Repo", "path": str(repo), "session_prefix": "auto"},
+    ).json()
+
+    response = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={
+            "title": "Auto task",
+            "prompt": "Iterate until evaluation passes",
+            "task_mode": "autonomous",
+            "autonomy_policy": {"max_iterations": 2, "require_artifact_review": True},
+        },
+    )
+
+    assert response.status_code == 201
+    task = response.json()
+    assert task["task_mode"] == "autonomous"
+    assert task["autonomy_policy"]["max_iterations"] == 2
+    assert task["autonomous_run"]["phase"] == "intake"
+    assert task["autonomous_run"]["max_iterations"] == 2
+
+    normalized = workspace_manager._normalize_task_item(
+        {
+            "id": "legacy-task",
+            "workspace_id": workspace["id"],
+            "title": "Legacy",
+            "prompt": "Old state",
+            "agent_type": "codex",
+            "status": "todo",
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+        }
+    )
+    assert normalized["task_mode"] == "reviewed"
+    assert normalized["autonomy_policy"] is None
+    assert normalized["autonomous_run"] is None
+
+
+def test_autonomous_task_passes_after_evaluator_review(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="auto-pass-tab",
+        port=12531,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Auto Pass", "path": str(repo), "session_prefix": "autop"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={
+            "title": "Auto pass",
+            "prompt": "Complete and evaluate",
+            "task_mode": "autonomous",
+        },
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    assert "Autonomous Mode V1 is enabled" in sent_messages[-1][1]
+
+    goal_packet = {
+        "objective": "Complete autonomous task.",
+        "acceptance_criteria": ["Evaluator passes"],
+        "validation_plan": ["Report inspection"],
+        "assumptions": [],
+        "out_of_scope": [],
+        "handoff_requirements": [],
+    }
+    report_response = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "completed",
+            "message": "Done",
+            "goal_packet": goal_packet,
+            "acceptance_check": [
+                {
+                    "criterion": "Evaluator passes",
+                    "status": "passed",
+                    "evidence": "Ready for evaluator",
+                }
+            ],
+            "review_decision": "skip",
+        },
+    )
+
+    assert report_response.status_code == 201
+    evaluating_task = workspace_manager.tasks[task["id"]]
+    assert evaluating_task.review_session_id is not None
+    assert evaluating_task.autonomous_run is not None
+    assert evaluating_task.autonomous_run.phase.value == "evaluating"
+    assert "Autonomous evaluation context" in sent_messages[-1][1]
+
+    response = client.post(
+        f"/api/workspaces/sessions/{evaluating_task.review_session_id}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "review_passed",
+            "message": "Evaluation passed",
+            "evaluation_report": {
+                "id": "eval-pass",
+                "decision": "pass",
+                "overall_score": 0.95,
+                "iteration": 1,
+            },
+        },
+    )
+
+    assert response.status_code == 201
+    passed_task = workspace_manager.tasks[task["id"]]
+    assert passed_task.status == WorkspaceTaskStatus.REVIEW
+    assert passed_task.human_acceptance_requested_at is not None
+    assert passed_task.autonomous_run is not None
+    assert passed_task.autonomous_run.phase.value == "passed"
+    assert passed_task.autonomous_run.current_score == 0.95
+    assert passed_task.autonomous_run.evaluation_reports[-1].decision.value == "pass"
+
+
+def test_autonomous_task_exhausts_iteration_budget(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="auto-exhaust-tab",
+        port=12532,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Auto Exhaust", "path": str(repo), "session_prefix": "autox"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={
+            "title": "Auto exhaust",
+            "prompt": "Use one iteration",
+            "task_mode": "autonomous",
+            "autonomy_policy": {"max_iterations": 1},
+        },
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "completed",
+            "message": "Ready for evaluation",
+        },
+    )
+    review_session_id = workspace_manager.tasks[task["id"]].review_session_id
+    assert review_session_id is not None
+    sent_before_failure = len(sent_messages)
+
+    response = client.post(
+        f"/api/workspaces/sessions/{review_session_id}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "review_failed",
+            "message": "Blocking issue remains",
+        },
+    )
+
+    assert response.status_code == 201
+    exhausted_task = workspace_manager.tasks[task["id"]]
+    assert exhausted_task.status == WorkspaceTaskStatus.REVIEW
+    assert exhausted_task.autonomous_run is not None
+    assert exhausted_task.autonomous_run.phase.value == "exhausted"
+    assert exhausted_task.autonomous_run.exhausted_at is not None
+    assert exhausted_task.autonomous_run.evaluation_reports[-1].decision.value == "revise"
+    assert len(sent_messages) == sent_before_failure
+
+
 def test_agent_report_stores_goal_packet_and_acceptance_check(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
