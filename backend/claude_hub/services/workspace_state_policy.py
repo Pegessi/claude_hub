@@ -5,6 +5,8 @@ from typing import Optional, Sequence
 from ..models import (
     AgentReportState,
     AgentRuntimeStatus,
+    AutonomousRunPhase,
+    EvaluationDecision,
     ManagedSessionStatus,
     ReviewDecision,
     WorkspaceSessionRole,
@@ -221,6 +223,76 @@ def should_request_task_review(
     if review_decision != ReviewDecision.SKIP:
         return True
     return not can_skip_review
+
+
+def autonomous_task_status_from_phase(
+    phase: AutonomousRunPhase,
+) -> WorkspaceTaskStatus:
+    """Map fine-grained autonomous run phase back to the coarse task board."""
+
+    if phase in {
+        AutonomousRunPhase.WAITING_FOR_HUMAN,
+        AutonomousRunPhase.PASSED,
+        AutonomousRunPhase.FAILED,
+        AutonomousRunPhase.EXHAUSTED,
+        AutonomousRunPhase.CANCELLED,
+    }:
+        return WorkspaceTaskStatus.REVIEW
+    if phase in {
+        AutonomousRunPhase.INTAKE,
+        AutonomousRunPhase.RUBRIC_RESEARCH,
+        AutonomousRunPhase.PLANNING,
+        AutonomousRunPhase.DISPATCHING,
+    }:
+        return WorkspaceTaskStatus.QUEUED
+    return WorkspaceTaskStatus.WORKING
+
+
+def autonomous_phase_after_worker_report(
+    report_state: AgentReportState,
+) -> AutonomousRunPhase | None:
+    """Return the autonomous phase implied by a worker report."""
+
+    if report_state in {AgentReportState.STARTED, AgentReportState.WORKING}:
+        return AutonomousRunPhase.WORKING
+    if report_state in {AgentReportState.READY_FOR_REVIEW, AgentReportState.COMPLETED}:
+        return AutonomousRunPhase.EVALUATING
+    if report_state in {AgentReportState.BLOCKED, AgentReportState.NEEDS_INPUT}:
+        return AutonomousRunPhase.WAITING_FOR_HUMAN
+    return None
+
+
+def autonomous_decision_from_review_state(
+    report_state: AgentReportState,
+) -> EvaluationDecision | None:
+    """Treat reviewer reports as evaluator decisions for Autonomous Mode V1."""
+
+    if report_state == AgentReportState.REVIEW_PASSED:
+        return EvaluationDecision.PASS
+    if report_state == AgentReportState.REVIEW_FAILED:
+        return EvaluationDecision.REVISE
+    if report_state == AgentReportState.REVIEW_NEEDS_INPUT:
+        return EvaluationDecision.NEEDS_INPUT
+    return None
+
+
+def autonomous_phase_from_evaluation_decision(
+    *,
+    decision: EvaluationDecision,
+    current_iteration: int,
+    max_iterations: int,
+) -> AutonomousRunPhase:
+    """Resolve evaluator decision into the next autonomous run phase."""
+
+    if decision == EvaluationDecision.PASS:
+        return AutonomousRunPhase.PASSED
+    if decision == EvaluationDecision.NEEDS_INPUT:
+        return AutonomousRunPhase.WAITING_FOR_HUMAN
+    if decision in {EvaluationDecision.FAIL, EvaluationDecision.ESCALATE}:
+        return AutonomousRunPhase.WAITING_FOR_HUMAN
+    if current_iteration >= max_iterations:
+        return AutonomousRunPhase.EXHAUSTED
+    return AutonomousRunPhase.REVISING
 
 
 def auto_continue_recent_output_segment(output: str) -> str:

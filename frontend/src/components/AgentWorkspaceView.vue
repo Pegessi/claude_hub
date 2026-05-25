@@ -326,6 +326,13 @@
                   <h3>{{ task.title }}</h3>
                   <span class="task-card-badges">
                     <span
+                      v-if="task.task_mode === 'autonomous'"
+                      class="autonomy-badge"
+                      :title="task.autonomous_run?.next_action || 'Autonomous run'"
+                    >
+                      Auto {{ task.autonomous_run?.iteration || 1 }}/{{ task.autonomous_run?.max_iterations || task.autonomy_policy?.max_iterations || 3 }}
+                    </span>
+                    <span
                       v-if="task.status === 'working' && activeReviewBadge(task)"
                       :class="[
                         'review-badge',
@@ -593,6 +600,10 @@
               </div>
               <div class="fact-grid">
                 <div>
+                  <span>Mode</span>
+                  <strong>{{ taskModeLabel(selectedTask.task_mode) }}</strong>
+                </div>
+                <div>
                   <span>Task stage</span>
                   <strong>{{ selectedTask.status }}</strong>
                 </div>
@@ -633,6 +644,69 @@
                   <strong>{{ board?.snapshot_path || 'none' }}</strong>
                 </div>
               </div>
+            </section>
+
+            <section
+              v-if="selectedTask.task_mode === 'autonomous'"
+              class="detail-section autonomous-run-panel"
+            >
+              <div class="detail-section-title">
+                Autonomous Run
+              </div>
+              <div
+                v-if="!selectedTask.autonomous_run"
+                class="empty-timeline"
+              >
+                No autonomous run recorded yet.
+              </div>
+              <template v-else>
+                <div class="fact-grid">
+                  <div>
+                    <span>Phase</span>
+                    <strong>{{ autonomousRunPhaseLabel(selectedTask.autonomous_run.phase) }}</strong>
+                  </div>
+                  <div>
+                    <span>Iteration</span>
+                    <strong>{{ selectedTask.autonomous_run.iteration }} / {{ selectedTask.autonomous_run.max_iterations }}</strong>
+                  </div>
+                  <div>
+                    <span>Score</span>
+                    <strong>{{ formatAutonomousScore(selectedTask.autonomous_run.current_score) }}</strong>
+                  </div>
+                  <div>
+                    <span>Threshold</span>
+                    <strong>{{ formatAutonomousScore(selectedTask.autonomous_run.pass_threshold) }}</strong>
+                  </div>
+                  <div>
+                    <span>Strictness</span>
+                    <strong>{{ selectedTask.autonomy_policy?.evaluation_strictness || 'balanced' }}</strong>
+                  </div>
+                  <div>
+                    <span>Artifacts</span>
+                    <strong>{{ selectedTask.autonomy_policy?.require_artifact_review ? 'required' : 'optional' }}</strong>
+                  </div>
+                </div>
+                <div class="autonomous-next-action">
+                  <span>Next action</span>
+                  <strong>{{ selectedTask.autonomous_run.next_action }}</strong>
+                </div>
+                <div
+                  v-if="(selectedTask.autonomous_run.evaluation_reports || []).length > 0"
+                  class="autonomous-evaluations"
+                >
+                  <strong>Evaluations</strong>
+                  <ol>
+                    <li
+                      v-for="evaluation in selectedTask.autonomous_run.evaluation_reports"
+                      :key="evaluation.id"
+                    >
+                      <span>{{ evaluation.decision }}</span>
+                      <span>round {{ evaluation.iteration }}</span>
+                      <span>{{ formatAutonomousScore(evaluation.overall_score) }}</span>
+                    </li>
+                  </ol>
+                </div>
+              </template>
             </section>
 
             <section class="detail-section">
@@ -1042,6 +1116,82 @@
             </div>
           </div>
           <div class="modal-field">
+            <label>Mode</label>
+            <div class="segmented-control segmented-control--three">
+              <button
+                type="button"
+                :class="['segment-button', { active: taskForm.task_mode === 'direct' }]"
+                @click="taskForm.task_mode = 'direct'"
+              >
+                Direct
+              </button>
+              <button
+                type="button"
+                :class="['segment-button', { active: taskForm.task_mode === 'reviewed' }]"
+                @click="taskForm.task_mode = 'reviewed'"
+              >
+                Reviewed
+              </button>
+              <button
+                type="button"
+                :class="['segment-button', { active: taskForm.task_mode === 'autonomous' }]"
+                @click="taskForm.task_mode = 'autonomous'"
+              >
+                Autonomous
+              </button>
+            </div>
+          </div>
+          <div
+            v-if="taskForm.task_mode === 'autonomous'"
+            class="autonomy-form"
+          >
+            <div class="form-row">
+              <div class="modal-field">
+                <label>Max iterations</label>
+                <input
+                  v-model.number="taskForm.max_iterations"
+                  type="number"
+                  min="1"
+                  max="10"
+                >
+              </div>
+              <div class="modal-field">
+                <label>Strictness</label>
+                <select v-model="taskForm.evaluation_strictness">
+                  <option value="lenient">
+                    Lenient
+                  </option>
+                  <option value="balanced">
+                    Balanced
+                  </option>
+                  <option value="strict">
+                    Strict
+                  </option>
+                </select>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="modal-field">
+                <label class="checkbox-label">
+                  <input
+                    v-model="taskForm.allow_web_research"
+                    type="checkbox"
+                  >
+                  Web research
+                </label>
+              </div>
+              <div class="modal-field">
+                <label class="checkbox-label">
+                  <input
+                    v-model="taskForm.require_artifact_review"
+                    type="checkbox"
+                  >
+                  Artifact review
+                </label>
+              </div>
+            </div>
+          </div>
+          <div class="modal-field">
             <label>Related task</label>
             <select
               v-model="taskForm.related_task_id"
@@ -1425,6 +1575,7 @@ import type {
   AgentRuntimeStatus,
   AgentType,
   AcceptanceCheck,
+  AutonomyPolicy,
   ExecutionTarget,
   GoalPacket,
   ManagedSession,
@@ -1434,6 +1585,7 @@ import type {
   WorkspaceAttachmentCreate,
   WorkspaceSessionRole,
   WorkspaceTask,
+  WorkspaceTaskMode,
   WorkspaceTaskStatus,
 } from '@/types'
 
@@ -1545,6 +1697,11 @@ const agentOptionsForm = reactive({
 const taskForm = reactive({
   title: '',
   prompt: '',
+  task_mode: 'reviewed' as WorkspaceTaskMode,
+  max_iterations: 3,
+  evaluation_strictness: 'balanced' as AutonomyPolicy['evaluation_strictness'],
+  allow_web_research: false,
+  require_artifact_review: false,
   related_task_id: '',
   attachments: [] as DraftAttachment[],
 })
@@ -1714,6 +1871,24 @@ function latestReviewReportForTask(task: WorkspaceTask) {
     .reportsForTask(task)
     .filter(report => report.state.startsWith('review_'))
   return reviewReports[reviewReports.length - 1] || null
+}
+
+function taskModeLabel(mode: WorkspaceTaskMode) {
+  if (mode === 'autonomous') return 'Autonomous'
+  if (mode === 'direct') return 'Direct'
+  return 'Reviewed'
+}
+
+function autonomousRunPhaseLabel(phase: string) {
+  return phase
+    .split('_')
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
+}
+
+function formatAutonomousScore(score: number | null | undefined) {
+  if (score === null || score === undefined) return 'none'
+  return `${Math.round(score * 100)}%`
 }
 
 function reviewStatusLabel(task: WorkspaceTask) {
@@ -2465,6 +2640,11 @@ function selectAgentCurrentDirectory() {
 function resetTaskForm() {
   taskForm.title = ''
   taskForm.prompt = ''
+  taskForm.task_mode = 'reviewed'
+  taskForm.max_iterations = 3
+  taskForm.evaluation_strictness = 'balanced'
+  taskForm.allow_web_research = false
+  taskForm.require_artifact_review = false
   taskForm.related_task_id = ''
   resetDraftAttachments(taskForm.attachments)
 }
@@ -2484,16 +2664,26 @@ async function handleCreateTask() {
     return
   }
   await runPending('task:create', async () => {
+    const autonomyPolicy: AutonomyPolicy | null = taskForm.task_mode === 'autonomous'
+      ? {
+          max_iterations: Math.max(1, Number(taskForm.max_iterations) || 3),
+          evaluation_strictness: taskForm.evaluation_strictness,
+          allow_web_research: taskForm.allow_web_research,
+          require_artifact_review: taskForm.require_artifact_review,
+          human_checkpoint_policy: 'final_only',
+          allowed_agent_types: [],
+          stop_on_repeated_failure: true,
+        }
+      : null
     await workspaceStore.createTask({
       title: taskForm.title.trim(),
       prompt: taskForm.prompt.trim(),
+      task_mode: taskForm.task_mode,
+      autonomy_policy: autonomyPolicy,
       related_task_id: taskForm.related_task_id || null,
       attachments: serializeDraftAttachments(taskForm.attachments),
     })
-    taskForm.title = ''
-    taskForm.prompt = ''
-    taskForm.related_task_id = ''
-    resetDraftAttachments(taskForm.attachments)
+    resetTaskForm()
     showTaskModal.value = false
   })
 }
@@ -3661,6 +3851,20 @@ onUnmounted(() => {
   border: 1px solid transparent;
 }
 
+.autonomy-badge {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid rgba(20, 184, 166, 0.34);
+  border-radius: var(--ch-radius-sm);
+  background: rgba(20, 184, 166, 0.12);
+  color: #5eead4;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 5px 7px;
+  white-space: nowrap;
+}
+
 .review-badge-dot {
   width: 6px;
   height: 6px;
@@ -4150,6 +4354,58 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
+.autonomous-run-panel .fact-grid {
+  margin-bottom: 10px;
+}
+
+.autonomous-next-action {
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-sunken);
+  padding: 10px 12px;
+}
+
+.autonomous-next-action span,
+.autonomous-evaluations > strong {
+  display: block;
+  color: var(--ch-color-text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  margin-bottom: 5px;
+  text-transform: uppercase;
+}
+
+.autonomous-next-action strong {
+  color: var(--ch-color-text);
+  font-size: 13px;
+}
+
+.autonomous-evaluations {
+  margin-top: 10px;
+}
+
+.autonomous-evaluations ol {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.autonomous-evaluations li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-sm);
+  padding: 8px 10px;
+}
+
+.autonomous-evaluations span {
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+}
+
 .timeline {
   list-style: none;
   margin: 12px 0 0;
@@ -4377,6 +4633,10 @@ onUnmounted(() => {
   padding: 4px;
 }
 
+.segmented-control--three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .segment-button {
   border: 1px solid transparent;
   border-radius: var(--ch-radius-sm);
@@ -4397,6 +4657,13 @@ onUnmounted(() => {
 .segment-button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+.autonomy-form {
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-sunken);
+  padding: 12px;
 }
 
 .path-input-row {

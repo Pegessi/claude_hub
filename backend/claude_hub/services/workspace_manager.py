@@ -17,9 +17,15 @@ from ..models import (
     AgentReportState,
     AgentRuntimeStatus,
     AgentType,
+    AutonomousIteration,
+    AutonomousRun,
+    AutonomousRunPhase,
+    AutonomyPolicy,
     ContinueTaskRequest,
     DispatchDecisionRequest,
     EnsureWorkspaceAgentRequest,
+    EvaluationDecision,
+    EvaluationReport,
     ExecutionTarget,
     ManagedSession,
     ManagedSessionStatus,
@@ -35,6 +41,7 @@ from ..models import (
     WorkspaceSessionRole,
     WorkspaceTask,
     WorkspaceTaskCreate,
+    WorkspaceTaskMode,
     WorkspaceTaskStatus,
     WorkspaceTaskUpdate,
     WorkspaceUpdate,
@@ -199,6 +206,8 @@ class WorkspaceManager:
         if normalized.get("status") == "assigned":
             normalized["status"] = WorkspaceTaskStatus.QUEUED.value
             normalized.setdefault("queued_at", normalized.get("updated_at"))
+        if normalized.get("task_mode") not in {"direct", "reviewed", "autonomous"}:
+            normalized["task_mode"] = WorkspaceTaskMode.REVIEWED.value
         normalized.setdefault("related_task_id", None)
         normalized.setdefault("attachments", [])
         normalized.setdefault("clear_context", None)
@@ -217,12 +226,27 @@ class WorkspaceManager:
         normalized.setdefault("reviewed_at", None)
         normalized.setdefault("completed_at", None)
         normalized["goal_packet"] = self._normalize_goal_packet(normalized.get("goal_packet"))
+        normalized["autonomy_policy"] = self._normalize_autonomy_policy(
+            normalized.get("autonomy_policy"),
+            task_mode=normalized["task_mode"],
+        )
+        normalized["autonomous_run"] = self._normalize_autonomous_run(
+            normalized.get("autonomous_run"),
+            task_id=normalized.get("id"),
+            task_mode=normalized["task_mode"],
+            policy=normalized["autonomy_policy"],
+        )
         return normalized
 
     def _normalize_report_item(self, item: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(item)
         normalized["acceptance_check"] = self._normalize_acceptance_check(
             normalized.get("acceptance_check")
+        )
+        normalized["evaluation_report"] = self._normalize_evaluation_report(
+            normalized.get("evaluation_report"),
+            task_id=normalized.get("task_id"),
+            session_id=normalized.get("session_id"),
         )
         return normalized
 
@@ -254,6 +278,130 @@ class WorkspaceManager:
         normalized.setdefault("created_at", None)
         normalized.setdefault("updated_at", None)
         return normalized
+
+    def _normalize_autonomy_policy(
+        self,
+        value: Any,
+        *,
+        task_mode: str,
+    ) -> dict[str, Any] | None:
+        if task_mode != WorkspaceTaskMode.AUTONOMOUS.value:
+            return None
+        if not isinstance(value, dict):
+            return AutonomyPolicy().model_dump(mode="json")
+        normalized = dict(value)
+        max_iterations = normalized.get("max_iterations", 3)
+        if not isinstance(max_iterations, int) or max_iterations < 1:
+            normalized["max_iterations"] = 3
+        if normalized.get("evaluation_strictness") not in {"lenient", "balanced", "strict"}:
+            normalized["evaluation_strictness"] = "balanced"
+        normalized.setdefault("allow_web_research", False)
+        normalized.setdefault("require_artifact_review", False)
+        if normalized.get("human_checkpoint_policy") not in {
+            "final_only",
+            "after_rubric",
+            "every_iteration",
+        }:
+            normalized["human_checkpoint_policy"] = "final_only"
+        allowed = normalized.get("allowed_agent_types")
+        normalized["allowed_agent_types"] = allowed if isinstance(allowed, list) else []
+        normalized.setdefault("stop_on_repeated_failure", True)
+        return normalized
+
+    def _normalize_evaluation_report(
+        self,
+        value: Any,
+        *,
+        task_id: str | None,
+        session_id: str | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        normalized = dict(value)
+        normalized.setdefault("id", str(uuid.uuid4()))
+        normalized.setdefault("run_id", None)
+        normalized.setdefault("task_id", task_id)
+        normalized.setdefault("iteration", 1)
+        normalized.setdefault("evaluator_session_id", session_id)
+        if normalized.get("decision") not in {"pass", "revise", "needs_input", "fail", "escalate"}:
+            normalized["decision"] = "needs_input"
+        for field in ("criterion_results", "blocking_issues", "suggested_fixes", "artifact_refs"):
+            if not isinstance(normalized.get(field), list):
+                normalized[field] = []
+        normalized.setdefault("overall_score", None)
+        normalized.setdefault("validation_reviewed", None)
+        normalized.setdefault("risks", None)
+        normalized.setdefault("created_at", None)
+        return normalized
+
+    def _normalize_autonomous_run(
+        self,
+        value: Any,
+        *,
+        task_id: str | None,
+        task_mode: str,
+        policy: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if task_mode != WorkspaceTaskMode.AUTONOMOUS.value:
+            return None
+        max_iterations_value = (policy or {}).get("max_iterations") or 3
+        max_iterations = max_iterations_value if isinstance(max_iterations_value, int) else 3
+        if not isinstance(value, dict):
+            return self._default_autonomous_run(task_id, max_iterations).model_dump(mode="json")
+        normalized = dict(value)
+        normalized.setdefault("id", str(uuid.uuid4()))
+        normalized.setdefault("task_id", task_id)
+        if normalized.get("phase") not in {phase.value for phase in AutonomousRunPhase}:
+            normalized["phase"] = AutonomousRunPhase.INTAKE.value
+        if not isinstance(normalized.get("iteration"), int) or normalized["iteration"] < 1:
+            normalized["iteration"] = 1
+        if (
+            not isinstance(normalized.get("max_iterations"), int)
+            or normalized["max_iterations"] < 1
+        ):
+            normalized["max_iterations"] = max_iterations
+        normalized.setdefault("status_summary", "Intake")
+        if not isinstance(normalized.get("active_session_ids"), list):
+            normalized["active_session_ids"] = []
+        normalized.setdefault("pass_threshold", 0.8)
+        normalized.setdefault("current_score", None)
+        normalized.setdefault("next_action", "Derive Goal Packet and begin work")
+        normalized.setdefault("paused_at", None)
+        normalized.setdefault("exhausted_at", None)
+        normalized.setdefault("completed_at", None)
+        if not isinstance(normalized.get("rubric"), list):
+            normalized["rubric"] = []
+        evaluation_reports = normalized.get("evaluation_reports", [])
+        if not isinstance(evaluation_reports, list):
+            evaluation_reports = []
+        normalized["evaluation_reports"] = [
+            item
+            for item in (
+                self._normalize_evaluation_report(
+                    item,
+                    task_id=task_id,
+                    session_id=item.get("evaluator_session_id") if isinstance(item, dict) else None,
+                )
+                for item in evaluation_reports
+            )
+            if item is not None
+        ]
+        if not isinstance(normalized.get("iterations"), list):
+            normalized["iterations"] = []
+        return normalized
+
+    def _default_autonomous_run(
+        self,
+        task_id: str | None,
+        max_iterations: int = 3,
+    ) -> AutonomousRun:
+        return AutonomousRun(
+            id=str(uuid.uuid4()),
+            task_id=task_id,
+            max_iterations=max_iterations,
+            status_summary="Intake",
+            next_action="Derive Goal Packet and begin work",
+        )
 
     def _normalize_acceptance_check(self, value: Any) -> list[dict[str, Any]]:
         if not isinstance(value, list):
@@ -383,10 +531,16 @@ class WorkspaceManager:
             lines.append("- No tasks yet.")
         for task in sorted(tasks, key=lambda item: item.created_at):
             target = task.session_id or "unassigned"
+            autonomy = (
+                f", autonomous_phase={task.autonomous_run.phase.value}"
+                if task.autonomous_run
+                else ""
+            )
             lines.append(
                 "- "
-                f"{task.id}: status={task.status.value}, title={task.title}, "
-                f"target_agent={target}, pending_dispatch={task.dispatch_pending}"
+                f"{task.id}: status={task.status.value}, mode={task.task_mode.value}, "
+                f"title={task.title}, target_agent={target}, "
+                f"pending_dispatch={task.dispatch_pending}{autonomy}"
             )
 
         lines.extend(
@@ -515,6 +669,11 @@ class WorkspaceManager:
         task_id = str(uuid.uuid4())
         now = _now()
         attachments = self._persist_attachments(workspace_id, task_id, payload.attachments)
+        autonomy_policy = (
+            payload.autonomy_policy or AutonomyPolicy()
+            if payload.task_mode == WorkspaceTaskMode.AUTONOMOUS
+            else None
+        )
         task = WorkspaceTask(
             id=task_id,
             workspace_id=workspace_id,
@@ -523,6 +682,13 @@ class WorkspaceManager:
             attachments=attachments,
             goal_packet=payload.goal_packet,
             agent_type=payload.agent_type,
+            task_mode=payload.task_mode,
+            autonomy_policy=autonomy_policy,
+            autonomous_run=(
+                self._default_autonomous_run(task_id, autonomy_policy.max_iterations)
+                if autonomy_policy
+                else None
+            ),
             status=WorkspaceTaskStatus.TODO,
             related_task_id=payload.related_task_id,
             created_at=now,
@@ -630,6 +796,27 @@ class WorkspaceManager:
         update: dict[str, Any] = {"updated_at": now}
         if payload.goal_packet is not None:
             update["goal_packet"] = payload.goal_packet
+        if payload.task_mode is not None:
+            update["task_mode"] = payload.task_mode
+            if payload.task_mode == WorkspaceTaskMode.AUTONOMOUS:
+                policy = payload.autonomy_policy or task.autonomy_policy or AutonomyPolicy()
+                update["autonomy_policy"] = policy
+                update["autonomous_run"] = (
+                    payload.autonomous_run
+                    or task.autonomous_run
+                    or self._default_autonomous_run(task.id, policy.max_iterations)
+                )
+            else:
+                update["autonomy_policy"] = None
+                update["autonomous_run"] = None
+        elif payload.autonomy_policy is not None:
+            update["autonomy_policy"] = payload.autonomy_policy
+            if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
+                update["autonomous_run"] = task.autonomous_run or self._default_autonomous_run(
+                    task.id, payload.autonomy_policy.max_iterations
+                )
+        elif payload.autonomous_run is not None:
+            update["autonomous_run"] = payload.autonomous_run
         status = payload.status
         if status is not None:
             update["status"] = status
@@ -1006,6 +1193,19 @@ class WorkspaceManager:
             "updated_at": _now(),
             "dispatch_pending": False,
         }
+        if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
+            run = task.autonomous_run or self._default_autonomous_run(
+                task.id,
+                task.autonomy_policy.max_iterations if task.autonomy_policy else 3,
+            )
+            phase = AutonomousRunPhase.DISPATCHING
+            base_update["autonomous_run"] = run.model_copy(
+                update={
+                    "phase": phase,
+                    "status_summary": self._autonomous_phase_label(phase),
+                    "next_action": self._autonomous_next_action(phase),
+                }
+            )
         if payload.agent_type:
             base_update["agent_type"] = payload.agent_type
         if payload.related_task_id:
@@ -1036,12 +1236,26 @@ class WorkspaceManager:
             return self.tasks[task.id]
 
         target, clear_context, reason = decision
+        autonomous_run = task.autonomous_run
+        if task.task_mode == WorkspaceTaskMode.AUTONOMOUS and autonomous_run is not None:
+            phase = AutonomousRunPhase.WORKING
+            autonomous_run = autonomous_run.model_copy(
+                update={
+                    "phase": phase,
+                    "status_summary": self._autonomous_phase_label(phase),
+                    "active_session_ids": list(
+                        dict.fromkeys([*autonomous_run.active_session_ids, target.id])
+                    ),
+                    "next_action": self._autonomous_next_action(phase),
+                }
+            )
         task = task.model_copy(
             update={
                 "session_id": target.id,
                 "clear_context": clear_context,
                 "dispatch_reason": reason,
                 "dispatch_pending": False,
+                "autonomous_run": autonomous_run,
                 "updated_at": _now(),
             }
         )
@@ -1264,6 +1478,23 @@ class WorkspaceManager:
             task,
             updated_at=now,
         )
+        autonomous_run = task.autonomous_run
+        if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
+            autonomous_run = autonomous_run or self._default_autonomous_run(
+                task.id,
+                task.autonomy_policy.max_iterations if task.autonomy_policy else 3,
+            )
+            phase = AutonomousRunPhase.WORKING
+            autonomous_run = autonomous_run.model_copy(
+                update={
+                    "phase": phase,
+                    "status_summary": self._autonomous_phase_label(phase),
+                    "active_session_ids": list(
+                        dict.fromkeys([*autonomous_run.active_session_ids, session.id])
+                    ),
+                    "next_action": self._autonomous_next_action(phase),
+                }
+            )
         self.tasks[task.id] = task.model_copy(
             update={
                 "status": WorkspaceTaskStatus.WORKING,
@@ -1272,6 +1503,7 @@ class WorkspaceManager:
                 "review_skip_reason": None,
                 "human_acceptance_requested_at": None,
                 "human_accepted_at": None,
+                "autonomous_run": autonomous_run,
                 "updated_at": now,
                 "dispatch_pending": False,
             }
@@ -1747,12 +1979,14 @@ class WorkspaceManager:
             f"Workspace: {workspace.name}\n"
             f"Task ID: {task.id}\n"
             f"Task title: {task.title}\n"
+            f"Task mode: {task.task_mode.value}\n"
             f"{self._session_environment_lines(workspace, session)}\n"
             f"State snapshot: {self.snapshot_path(workspace.id)}\n"
             f"Dispatch reason: {task.dispatch_reason or 'not specified'}\n\n"
             f"{clear_note}"
             f"Task description:\n{task.prompt}\n\n"
             f"{attachment_note}"
+            f"{self._autonomous_assignment_block(task)}"
             "Start by reading the state snapshot. This workspace may contain many projects; "
             "use the task description to choose the correct directory before editing. "
             "Check for uncommitted file changes. "
@@ -1799,6 +2033,25 @@ class WorkspaceManager:
             "to status passed, failed, partial, or not_checked with evidence."
         )
 
+    def _autonomous_assignment_block(self, task: WorkspaceTask) -> str:
+        if task.task_mode != WorkspaceTaskMode.AUTONOMOUS:
+            return ""
+        policy = task.autonomy_policy or AutonomyPolicy()
+        run = task.autonomous_run
+        return (
+            "Autonomous Mode V1 is enabled for this task.\n"
+            f"- Max iterations: {policy.max_iterations}\n"
+            f"- Evaluation strictness: {policy.evaluation_strictness.value}\n"
+            f"- Allow web research: {policy.allow_web_research}\n"
+            f"- Require artifact review: {policy.require_artifact_review}\n"
+            f"- Human checkpoints: {policy.human_checkpoint_policy.value}\n"
+            f"- Current autonomous phase: {run.phase.value if run else 'intake'}\n\n"
+            "Worker rules for Autonomous Mode:\n"
+            "- Do not decide final pass yourself; evaluator/reviewer routing is mandatory.\n"
+            "- Include concrete artifacts, changed files, validation, risks, and acceptance_check evidence.\n"
+            "- On revision, address only the evaluator's blocking issues and preserve passing work.\n\n"
+        )
+
     def _build_review_prompt(
         self,
         workspace: Workspace,
@@ -1834,6 +2087,7 @@ class WorkspaceManager:
             f"Workspace: {workspace.name}\n"
             f"Task ID: {task.id}\n"
             f"Task title: {task.title}\n"
+            f"Task mode: {task.task_mode.value}\n"
             f"Implementation agent session: {task.session_id or 'unknown'}\n"
             f"Reviewer session: {reviewer.id}\n"
             f"{self._session_environment_lines(workspace, reviewer)}\n"
@@ -1842,6 +2096,7 @@ class WorkspaceManager:
             f"{task.prompt}\n\n"
             "Stored Goal Packet JSON:\n"
             f"{task.goal_packet.model_dump_json() if task.goal_packet else 'null'}\n\n"
+            f"{self._autonomous_review_block(task)}"
             "Review workflow:\n"
             "1. Stay read-only. Do not edit files, run formatters that write changes, or revert work.\n"
             "2. Check whether the stored Goal Packet faithfully preserves the original task prompt. "
@@ -1897,6 +2152,25 @@ class WorkspaceManager:
             '"risks":"Residual risk or none"}}\'\n\n'
             "Use review_failed when fixes are required. Use review_needs_input only for genuine blockers "
             "outside the implementation agent's control."
+        )
+
+    def _autonomous_review_block(self, task: WorkspaceTask) -> str:
+        if task.task_mode != WorkspaceTaskMode.AUTONOMOUS:
+            return ""
+        policy = task.autonomy_policy or AutonomyPolicy()
+        run = task.autonomous_run
+        return (
+            "Autonomous evaluation context:\n"
+            f"- Run JSON: {run.model_dump_json() if run else 'null'}\n"
+            f"- Max iterations: {policy.max_iterations}\n"
+            f"- Evaluation strictness: {policy.evaluation_strictness.value}\n"
+            f"- Require artifact review: {policy.require_artifact_review}\n\n"
+            "For Autonomous Mode V1, act as the evaluator for this iteration. "
+            "Score against the Goal Packet, any rubric/run evidence, validation, artifacts, "
+            "and prior evaluation history. Use review_passed only when the run should move "
+            "to passed and await human acceptance. Use review_failed when targeted revision "
+            "is possible within budget. Use review_needs_input when product judgment, missing "
+            "credentials, unavailable artifacts, or unsafe scope prevents evaluation.\n\n"
         )
 
     def _build_continue_prompt(self, task: WorkspaceTask, payload: ContinueTaskRequest) -> str:
@@ -2021,6 +2295,7 @@ class WorkspaceManager:
             validation=payload.validation,
             risks=payload.risks,
             acceptance_check=payload.acceptance_check,
+            evaluation_report=payload.evaluation_report,
             review_decision=payload.review_decision,
             review_reason=payload.review_reason,
             risk_level=payload.risk_level,
@@ -2047,6 +2322,16 @@ class WorkspaceManager:
             task_update: dict[str, Any] = {}
             if payload.goal_packet is not None:
                 task_update["goal_packet"] = payload.goal_packet
+            current_task = self.tasks[task_id]
+            if current_task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
+                autonomous_run = self._autonomous_run_after_worker_report(
+                    current_task,
+                    session,
+                    report,
+                    now=now,
+                )
+                if autonomous_run is not None:
+                    task_update["autonomous_run"] = autonomous_run
             if task_status:
                 task_update.update({"status": task_status, "updated_at": now})
                 if task_status == WorkspaceTaskStatus.WORKING:
@@ -2083,6 +2368,9 @@ class WorkspaceManager:
         evidence_gaps = self._completion_evidence_gaps(task, report)
         if report.review_decision == ReviewDecision.SKIP and evidence_gaps:
             await self._request_goal_packet_supplement(task, session, report, evidence_gaps)
+            return
+        if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
+            await self._request_task_review(task, report)
             return
         should_review = await self._should_request_task_review(
             task,
@@ -2139,6 +2427,163 @@ class WorkspaceManager:
             report.state,
             has_goal_packet=task.goal_packet is not None,
             has_acceptance_check=bool(report.acceptance_check),
+        )
+
+    def _autonomous_run_after_worker_report(
+        self,
+        task: WorkspaceTask,
+        session: ManagedSession,
+        report: AgentReport,
+        *,
+        now: datetime,
+    ) -> AutonomousRun | None:
+        phase = state_policy.autonomous_phase_after_worker_report(report.state)
+        if phase is None:
+            return None
+        run = task.autonomous_run or self._default_autonomous_run(
+            task.id,
+            task.autonomy_policy.max_iterations if task.autonomy_policy else 3,
+        )
+        active_session_ids = list(dict.fromkeys([*run.active_session_ids, session.id]))
+        iterations = list(run.iterations)
+        if report.state in {AgentReportState.READY_FOR_REVIEW, AgentReportState.COMPLETED}:
+            iterations.append(
+                AutonomousIteration(
+                    iteration=run.iteration,
+                    worker_session_id=session.id,
+                    worker_report_id=report.id,
+                    controller_decision="worker_ready_for_evaluation",
+                    started_at=run.iterations[-1].started_at if run.iterations else task.started_at,
+                    completed_at=now,
+                )
+            )
+        return run.model_copy(
+            update={
+                "phase": phase,
+                "status_summary": self._autonomous_phase_label(phase),
+                "active_session_ids": active_session_ids,
+                "next_action": self._autonomous_next_action(phase),
+                "iterations": iterations,
+            }
+        )
+
+    def _autonomous_phase_label(self, phase: AutonomousRunPhase) -> str:
+        return phase.value.replace("_", " ").title()
+
+    def _autonomous_next_action(self, phase: AutonomousRunPhase) -> str:
+        return {
+            AutonomousRunPhase.INTAKE: "Derive Goal Packet and begin work",
+            AutonomousRunPhase.DISPATCHING: "Select or queue a workspace agent",
+            AutonomousRunPhase.WORKING: "Worker is executing the current iteration",
+            AutonomousRunPhase.EVALUATING: "Evaluator is reviewing the latest worker output",
+            AutonomousRunPhase.REVISING: "Send targeted revision feedback to the worker",
+            AutonomousRunPhase.WAITING_FOR_HUMAN: "Waiting for human input or product judgment",
+            AutonomousRunPhase.PASSED: "Autonomous evaluation passed; awaiting human acceptance",
+            AutonomousRunPhase.EXHAUSTED: "Iteration budget exhausted; awaiting human review",
+            AutonomousRunPhase.FAILED: "Autonomous run failed; awaiting human review",
+            AutonomousRunPhase.CANCELLED: "Autonomous run cancelled",
+        }.get(phase, "Continue autonomous run")
+
+    def _autonomous_run_after_evaluation(
+        self,
+        task: WorkspaceTask,
+        evaluator: ManagedSession,
+        report: AgentReport,
+        *,
+        now: datetime,
+    ) -> tuple[AutonomousRun | None, AutonomousRunPhase | None]:
+        decision = state_policy.autonomous_decision_from_review_state(report.state)
+        if decision is None:
+            return task.autonomous_run, None
+        run = task.autonomous_run or self._default_autonomous_run(
+            task.id,
+            task.autonomy_policy.max_iterations if task.autonomy_policy else 3,
+        )
+        evaluation_report = self._evaluation_report_from_review(
+            task=task,
+            run=run,
+            evaluator=evaluator,
+            report=report,
+            decision=decision,
+            now=now,
+        )
+        next_phase = state_policy.autonomous_phase_from_evaluation_decision(
+            decision=decision,
+            current_iteration=run.iteration,
+            max_iterations=run.max_iterations,
+        )
+        next_iteration = run.iteration
+        if next_phase == AutonomousRunPhase.REVISING:
+            next_iteration += 1
+        iterations = list(run.iterations)
+        iterations.append(
+            AutonomousIteration(
+                iteration=run.iteration,
+                worker_session_id=task.session_id,
+                evaluator_session_id=evaluator.id,
+                evaluation_report_id=evaluation_report.id,
+                controller_decision=next_phase.value,
+                completed_at=now,
+            )
+        )
+        return (
+            run.model_copy(
+                update={
+                    "phase": next_phase,
+                    "iteration": next_iteration,
+                    "status_summary": self._autonomous_phase_label(next_phase),
+                    "active_session_ids": list(
+                        dict.fromkeys([*run.active_session_ids, evaluator.id])
+                    ),
+                    "current_score": evaluation_report.overall_score,
+                    "next_action": self._autonomous_next_action(next_phase),
+                    "exhausted_at": now if next_phase == AutonomousRunPhase.EXHAUSTED else None,
+                    "completed_at": now if next_phase == AutonomousRunPhase.PASSED else None,
+                    "evaluation_reports": [*run.evaluation_reports, evaluation_report],
+                    "iterations": iterations,
+                }
+            ),
+            next_phase,
+        )
+
+    def _evaluation_report_from_review(
+        self,
+        *,
+        task: WorkspaceTask,
+        run: AutonomousRun,
+        evaluator: ManagedSession,
+        report: AgentReport,
+        decision: EvaluationDecision,
+        now: datetime,
+    ) -> EvaluationReport:
+        if report.evaluation_report is not None:
+            return report.evaluation_report.model_copy(
+                update={
+                    "run_id": report.evaluation_report.run_id or run.id,
+                    "task_id": report.evaluation_report.task_id or task.id,
+                    "iteration": report.evaluation_report.iteration or run.iteration,
+                    "evaluator_session_id": (
+                        report.evaluation_report.evaluator_session_id or evaluator.id
+                    ),
+                    "created_at": report.evaluation_report.created_at or now,
+                }
+            )
+        score = 1.0 if decision == EvaluationDecision.PASS else None
+        blocking_issues = [report.message] if decision == EvaluationDecision.REVISE else []
+        suggested_fixes = [report.message] if decision == EvaluationDecision.REVISE else []
+        return EvaluationReport(
+            id=str(uuid.uuid4()),
+            run_id=run.id,
+            task_id=task.id,
+            iteration=run.iteration,
+            evaluator_session_id=evaluator.id,
+            overall_score=score,
+            decision=decision,
+            blocking_issues=blocking_issues,
+            suggested_fixes=suggested_fixes,
+            validation_reviewed=report.validation,
+            risks=report.risks,
+            created_at=now,
         )
 
     async def _request_goal_packet_supplement(
@@ -2261,6 +2706,23 @@ class WorkspaceManager:
         reviewer = await self._select_or_create_reviewer(workspace, task)
         now = _now()
         reviewer = await self._rename_session_for_task(reviewer, task, updated_at=now)
+        autonomous_run = task.autonomous_run
+        if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
+            autonomous_run = autonomous_run or self._default_autonomous_run(
+                task.id,
+                task.autonomy_policy.max_iterations if task.autonomy_policy else 3,
+            )
+            phase = AutonomousRunPhase.EVALUATING
+            autonomous_run = autonomous_run.model_copy(
+                update={
+                    "phase": phase,
+                    "status_summary": self._autonomous_phase_label(phase),
+                    "active_session_ids": list(
+                        dict.fromkeys([*autonomous_run.active_session_ids, reviewer.id])
+                    ),
+                    "next_action": self._autonomous_next_action(phase),
+                }
+            )
         self.tasks[task.id] = task.model_copy(
             update={
                 "status": WorkspaceTaskStatus.WORKING,
@@ -2273,6 +2735,7 @@ class WorkspaceManager:
                 "completed_at": None,
                 "human_acceptance_requested_at": None,
                 "human_accepted_at": None,
+                "autonomous_run": autonomous_run,
                 "updated_at": now,
             }
         )
@@ -2369,6 +2832,19 @@ class WorkspaceManager:
             "human_accepted_at": None,
             "updated_at": now,
         }
+        autonomous_next_phase: AutonomousRunPhase | None = None
+        if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
+            autonomous_run, autonomous_next_phase = self._autonomous_run_after_evaluation(
+                task,
+                reviewer,
+                report,
+                now=now,
+            )
+            if autonomous_run is not None:
+                task_update["autonomous_run"] = autonomous_run
+                task_update["human_acceptance_requested_at"] = (
+                    now if autonomous_next_phase == AutonomousRunPhase.PASSED else None
+                )
         self.tasks[task.id] = task.model_copy(
             update={
                 **task_update,
@@ -2380,10 +2856,19 @@ class WorkspaceManager:
         if report.state != AgentReportState.REVIEW_FAILED:
             return
         updated_task = self.tasks[task.id]
+        if (
+            updated_task.task_mode == WorkspaceTaskMode.AUTONOMOUS
+            and autonomous_next_phase != AutonomousRunPhase.REVISING
+        ):
+            return
         if updated_task.review_attempts > MAX_AUTOMATED_REVIEW_FAILURES:
             return
         feedback = (
-            "Reviewer requested changes.\n\n"
+            "Autonomous evaluator requested changes.\n\n"
+            if updated_task.task_mode == WorkspaceTaskMode.AUTONOMOUS
+            else "Reviewer requested changes.\n\n"
+        )
+        feedback += (
             f"Reviewer session: {reviewer.id}\n"
             f"Review attempt: {updated_task.review_attempts}\n\n"
             f"{report.message}\n\n"

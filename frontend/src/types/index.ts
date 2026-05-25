@@ -4,6 +4,23 @@ export type AgentRuntimeStatus = 'idle' | 'working' | 'attention' | 'offline'
 export type AppMode = 'terminal' | 'workspace'
 export type ColorScheme = 'dark' | 'light'
 export type WorkspaceTaskStatus = 'todo' | 'queued' | 'working' | 'review' | 'done'
+export type WorkspaceTaskMode = 'direct' | 'reviewed' | 'autonomous'
+export type EvaluationStrictness = 'lenient' | 'balanced' | 'strict'
+export type HumanCheckpointPolicy = 'final_only' | 'after_rubric' | 'every_iteration'
+export type AutonomousRunPhase =
+  | 'intake'
+  | 'rubric_research'
+  | 'planning'
+  | 'dispatching'
+  | 'working'
+  | 'evaluating'
+  | 'revising'
+  | 'waiting_for_human'
+  | 'passed'
+  | 'failed'
+  | 'exhausted'
+  | 'cancelled'
+export type EvaluationDecision = 'pass' | 'revise' | 'needs_input' | 'fail' | 'escalate'
 export type ManagedSessionStatus =
   | 'spawning'
   | 'working'
@@ -171,6 +188,82 @@ export interface AcceptanceCheck {
   evidence: string
 }
 
+export interface AutonomyPolicy {
+  max_iterations: number
+  evaluation_strictness: EvaluationStrictness
+  allow_web_research: boolean
+  require_artifact_review: boolean
+  human_checkpoint_policy: HumanCheckpointPolicy
+  allowed_agent_types?: AgentType[]
+  stop_on_repeated_failure: boolean
+}
+
+export interface RubricCriterion {
+  id: string
+  name: string
+  description?: string
+  weight?: number
+  pass_condition?: string
+  evaluation_method?: string
+  blocking_threshold?: number | null
+}
+
+export interface CriterionResult {
+  criterion_id?: string | null
+  criterion: string
+  score?: number | null
+  passed?: boolean | null
+  evidence?: string
+}
+
+export interface EvaluationReport {
+  id: string
+  run_id?: string | null
+  task_id?: string | null
+  iteration: number
+  evaluator_session_id?: string | null
+  overall_score?: number | null
+  decision: EvaluationDecision
+  criterion_results?: CriterionResult[]
+  blocking_issues?: string[]
+  suggested_fixes?: string[]
+  artifact_refs?: string[]
+  validation_reviewed?: string | null
+  risks?: string | null
+  created_at?: string | null
+}
+
+export interface AutonomousIteration {
+  iteration: number
+  worker_session_id?: string | null
+  evaluator_session_id?: string | null
+  worker_report_id?: string | null
+  evaluation_report_id?: string | null
+  revision_prompt?: string | null
+  controller_decision?: string | null
+  started_at?: string | null
+  completed_at?: string | null
+}
+
+export interface AutonomousRun {
+  id: string
+  task_id?: string | null
+  phase: AutonomousRunPhase
+  iteration: number
+  max_iterations: number
+  status_summary: string
+  active_session_ids?: string[]
+  pass_threshold: number
+  current_score?: number | null
+  next_action: string
+  paused_at?: string | null
+  exhausted_at?: string | null
+  completed_at?: string | null
+  rubric?: RubricCriterion[]
+  evaluation_reports?: EvaluationReport[]
+  iterations?: AutonomousIteration[]
+}
+
 export interface WorkspaceTask {
   id: string
   workspace_id: string
@@ -179,6 +272,9 @@ export interface WorkspaceTask {
   attachments: WorkspaceAttachment[]
   goal_packet?: GoalPacket | null
   agent_type: AgentType
+  task_mode: WorkspaceTaskMode
+  autonomy_policy?: AutonomyPolicy | null
+  autonomous_run?: AutonomousRun | null
   status: WorkspaceTaskStatus
   session_id?: string | null
   related_task_id?: string | null
@@ -205,9 +301,11 @@ export interface WorkspaceTaskCreate {
   title: string
   prompt: string
   agent_type?: AgentType
+  task_mode?: WorkspaceTaskMode
   related_task_id?: string | null
   attachments?: WorkspaceAttachmentCreate[]
   goal_packet?: GoalPacket | null
+  autonomy_policy?: AutonomyPolicy | null
 }
 
 export interface StartTaskRequest {
@@ -280,6 +378,7 @@ export interface AgentReport {
   validation?: string | null
   risks?: string | null
   acceptance_check?: AcceptanceCheck[]
+  evaluation_report?: EvaluationReport | null
   review_decision: ReviewDecision
   review_reason?: string | null
   risk_level?: string | null
@@ -297,6 +396,7 @@ export interface AgentReportCreate {
   risks?: string | null
   acceptance_check?: AcceptanceCheck[]
   goal_packet?: GoalPacket | null
+  evaluation_report?: EvaluationReport | null
   review_decision?: ReviewDecision
   review_reason?: string | null
   risk_level?: string | null
