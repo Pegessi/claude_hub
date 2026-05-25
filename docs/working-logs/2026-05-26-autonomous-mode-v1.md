@@ -43,6 +43,11 @@ and strips autonomy state from direct/reviewed tasks.
 The manager keeps side effects such as reviewer creation, tmux messages,
 state persistence, and continuation prompts.
 
+Direct tasks bypass automatic AI-review routing. When a Direct task posts a
+review-gate report, the backend moves it to the existing Review/Done human gate
+without creating a reviewer unless the report explicitly sets
+`review_decision=request` or a human uses Request review.
+
 ### Report Flow
 
 For Autonomous Mode V1, existing reviewer sessions also act as evaluators.
@@ -76,6 +81,8 @@ history.
   autonomy fields.
 - Do not let autonomous workers self-skip evaluation. The backend forces an
   evaluator for autonomous review-gate reports.
+- Do not send Direct tasks through reviewed-task auto-review policy. Direct is
+  for optional, user-triggered review.
 - `passed` is not `done`. Autonomous pass only requests human acceptance.
 - Budget enforcement belongs in pure policy; tmux continuation remains a
   manager side effect.

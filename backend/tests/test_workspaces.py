@@ -450,6 +450,107 @@ def test_autonomous_task_exhausts_iteration_budget(
     assert len(sent_messages) == sent_before_failure
 
 
+def test_direct_task_completed_does_not_auto_request_ai_review(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="direct-complete-tab",
+        port=12533,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Direct Complete", "path": str(repo), "session_prefix": "directc"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={
+            "title": "Direct complete",
+            "prompt": "Complete without AI review",
+            "task_mode": "direct",
+        },
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    sent_messages.clear()
+
+    response = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "completed",
+            "message": "Done",
+            "changed_files": ["direct.txt"],
+        },
+    )
+
+    assert response.status_code == 201
+    direct_task = workspace_manager.tasks[task["id"]]
+    assert direct_task.status == WorkspaceTaskStatus.REVIEW
+    assert direct_task.review_session_id is None
+    assert direct_task.review_requested_at is None
+    assert direct_task.review_skipped_at is not None
+    assert direct_task.human_acceptance_requested_at is not None
+    assert sent_messages == []
+
+
+def test_direct_task_explicit_review_request_still_creates_reviewer(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="direct-review-tab",
+        port=12534,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Direct Review", "path": str(repo), "session_prefix": "directr"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={
+            "title": "Direct review",
+            "prompt": "Request review explicitly",
+            "task_mode": "direct",
+        },
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    sent_messages.clear()
+
+    response = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "completed",
+            "message": "Done, please review",
+            "review_decision": "request",
+            "review_reason": "Explicit Direct-mode review request",
+        },
+    )
+
+    assert response.status_code == 201
+    direct_task = workspace_manager.tasks[task["id"]]
+    assert direct_task.status == WorkspaceTaskStatus.WORKING
+    assert direct_task.review_session_id is not None
+    assert direct_task.review_requested_at is not None
+    assert "Review workspace task." in sent_messages[-1][1]
+
+
 def test_agent_report_stores_goal_packet_and_acceptance_check(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
@@ -4466,6 +4567,17 @@ def test_update_task_requires_status_and_persists_valid_status(tmp_path: Path) -
 
     empty_response = client.patch(f"/api/workspaces/tasks/{task['id']}", json={})
     assert empty_response.status_code == 400
+
+    mode_response = client.patch(
+        f"/api/workspaces/tasks/{task['id']}",
+        json={
+            "task_mode": "autonomous",
+            "autonomy_policy": {"max_iterations": 2},
+        },
+    )
+    assert mode_response.status_code == 200
+    assert mode_response.json()["task_mode"] == "autonomous"
+    assert mode_response.json()["autonomous_run"]["max_iterations"] == 2
 
     done_response = client.patch(f"/api/workspaces/tasks/{task['id']}", json={"status": "done"})
     assert done_response.status_code == 200

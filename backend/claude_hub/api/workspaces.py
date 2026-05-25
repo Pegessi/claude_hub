@@ -128,7 +128,13 @@ async def update_task(
     current_user: User = Depends(get_current_user),
 ) -> WorkspaceTask:
     """Update task metadata or status."""
-    if payload.status is None and payload.goal_packet is None:
+    if (
+        payload.status is None
+        and payload.goal_packet is None
+        and payload.task_mode is None
+        and payload.autonomy_policy is None
+        and payload.autonomous_run is None
+    ):
         raise HTTPException(status_code=400, detail="No task update provided")
     try:
         return await workspace_manager.update_task(task_id, payload)
