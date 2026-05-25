@@ -2365,6 +2365,12 @@ class WorkspaceManager:
             return
         if task.review_requested_at and not task.review_completed_at:
             return
+        if task.task_mode == WorkspaceTaskMode.DIRECT:
+            if report.review_decision == ReviewDecision.REQUEST:
+                await self._request_task_review(task, report)
+                return
+            self._mark_task_review_skipped(task, report)
+            return
         evidence_gaps = self._completion_evidence_gaps(task, report)
         if report.review_decision == ReviewDecision.SKIP and evidence_gaps:
             await self._request_goal_packet_supplement(task, session, report, evidence_gaps)
