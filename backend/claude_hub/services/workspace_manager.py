@@ -2369,7 +2369,11 @@ class WorkspaceManager:
             if report.review_decision == ReviewDecision.REQUEST:
                 await self._request_task_review(task, report)
                 return
-            self._mark_task_review_skipped(task, report)
+            if report.state in {
+                AgentReportState.COMPLETED,
+                AgentReportState.READY_FOR_REVIEW,
+            }:
+                self._mark_task_review_skipped(task, report)
             return
         evidence_gaps = self._completion_evidence_gaps(task, report)
         if report.review_decision == ReviewDecision.SKIP and evidence_gaps:

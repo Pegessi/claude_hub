@@ -501,6 +501,61 @@ def test_direct_task_completed_does_not_auto_request_ai_review(
     assert sent_messages == []
 
 
+@pytest.mark.parametrize("report_state", ["blocked", "needs_input"])
+def test_direct_task_waiting_reports_do_not_become_accept_ready(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+    report_state: str,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id=f"direct-{report_state}-tab",
+        port=12535,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Direct Waiting", "path": str(repo), "session_prefix": "directw"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={
+            "title": f"Direct {report_state}",
+            "prompt": "Report unfinished work without AI review",
+            "task_mode": "direct",
+        },
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    sent_messages.clear()
+
+    response = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": report_state,
+            "message": "Waiting on input",
+        },
+    )
+
+    assert response.status_code == 201
+    direct_task = workspace_manager.tasks[task["id"]]
+    direct_session = workspace_manager.sessions[started["session_id"]]
+    assert direct_task.status == WorkspaceTaskStatus.WORKING
+    assert direct_task.review_session_id is None
+    assert direct_task.review_requested_at is None
+    assert direct_task.review_skipped_at is None
+    assert direct_task.human_acceptance_requested_at is None
+    assert direct_session.status == ManagedSessionStatus.NEEDS_INPUT
+    assert direct_session.runtime_status == AgentRuntimeStatus.ATTENTION
+    assert sent_messages == []
+
+
 def test_direct_task_explicit_review_request_still_creates_reviewer(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,

@@ -45,8 +45,11 @@ state persistence, and continuation prompts.
 
 Direct tasks bypass automatic AI-review routing. When a Direct task posts a
 review-gate report, the backend moves it to the existing Review/Done human gate
-without creating a reviewer unless the report explicitly sets
-`review_decision=request` or a human uses Request review.
+without creating a reviewer only for acceptance-ready states (`completed` and
+`ready_for_review`). Direct `blocked` and `needs_input` reports stay in the
+working/attention path and do not set `human_acceptance_requested_at`.
+Explicit `review_decision=request` or a human Request review action can still
+create a reviewer.
 
 ### Report Flow
 
@@ -82,7 +85,8 @@ history.
 - Do not let autonomous workers self-skip evaluation. The backend forces an
   evaluator for autonomous review-gate reports.
 - Do not send Direct tasks through reviewed-task auto-review policy. Direct is
-  for optional, user-triggered review.
+  for optional, user-triggered review, but blocked/input-needed Direct tasks are
+  not acceptance-ready.
 - `passed` is not `done`. Autonomous pass only requests human acceptance.
 - Budget enforcement belongs in pure policy; tmux continuation remains a
   manager side effect.
