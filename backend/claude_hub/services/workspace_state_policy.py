@@ -7,9 +7,12 @@ from ..models import (
     AgentRuntimeStatus,
     AutonomousRunPhase,
     EvaluationDecision,
+    EvaluationStrictness,
     ManagedSessionStatus,
     ReviewDecision,
+    ReviewProfile,
     WorkspaceSessionRole,
+    WorkspaceTaskMode,
     WorkspaceTaskStatus,
 )
 
@@ -73,6 +76,165 @@ class ReviewSkipContext:
     risk_level: Optional[str]
     latest_review_state: Optional[AgentReportState]
     workspace_has_tracked_changes: bool
+
+
+@dataclass(frozen=True)
+class ReviewProfileContext:
+    """Inputs used to infer review profiles for one reviewer assignment."""
+
+    task_mode: WorkspaceTaskMode
+    report_state: AgentReportState
+    title: str = ""
+    prompt: str = ""
+    changed_files: Sequence[str] = ()
+    validation: Optional[str] = None
+    risks: Optional[str] = None
+    message: str = ""
+    explicit_profiles: Sequence[ReviewProfile] = ()
+    require_artifact_review: bool = False
+    evaluation_strictness: EvaluationStrictness = EvaluationStrictness.BALANCED
+    attachment_count: int = 0
+
+
+REVIEW_PROFILE_LABELS = {
+    ReviewProfile.GENERAL: "General",
+    ReviewProfile.CODE: "Code",
+    ReviewProfile.UI: "UI",
+    ReviewProfile.ARTIFACT: "Artifact",
+    ReviewProfile.DELIVERY: "Delivery",
+    ReviewProfile.BOUNDARY: "Boundary",
+}
+
+
+REVIEW_PROFILE_GUIDANCE = {
+    ReviewProfile.GENERAL: (
+        "Check goal fidelity, scope control, validation adequacy, regression risk, "
+        "and final handoff quality."
+    ),
+    ReviewProfile.CODE: (
+        "Inspect changed code paths, tests, typing/lint evidence, API contracts, "
+        "state migrations, concurrency, and compatibility with local architecture."
+    ),
+    ReviewProfile.UI: (
+        "Review UI behavior, responsive layout, console/browser evidence, interaction "
+        "states, accessibility basics, and whether screenshots or browser checks cover risk."
+    ),
+    ReviewProfile.ARTIFACT: (
+        "Inspect referenced artifacts such as images, screenshots, documents, logs, "
+        "or generated outputs. Do not rely only on text summaries when artifacts are required."
+    ),
+    ReviewProfile.DELIVERY: (
+        "Verify external delivery evidence such as target, message IDs, recipient/channel, "
+        "retry/failure state, and whether destination-side proof is sufficient."
+    ),
+    ReviewProfile.BOUNDARY: (
+        "Evaluate high-risk boundary actions such as credential use, destructive operations, "
+        "external sending, deployment, or cross-workspace writes. Escalate when approval is unclear."
+    ),
+}
+
+
+def _append_profile(
+    profiles: list[ReviewProfile],
+    profile: ReviewProfile,
+) -> None:
+    if profile not in profiles:
+        profiles.append(profile)
+
+
+def infer_review_profiles(context: ReviewProfileContext) -> list[ReviewProfile]:
+    """Infer review lenses for a reviewer assignment."""
+
+    profiles: list[ReviewProfile] = []
+    for profile in context.explicit_profiles:
+        _append_profile(profiles, profile)
+    _append_profile(profiles, ReviewProfile.GENERAL)
+
+    text = " ".join(
+        item
+        for item in (
+            context.title,
+            context.prompt,
+            context.message,
+            context.validation or "",
+            context.risks or "",
+        )
+        if item
+    ).lower()
+    changed_files = [str(item).lower() for item in context.changed_files]
+    has_changed_files = bool(changed_files)
+
+    if context.task_mode == WorkspaceTaskMode.REVIEWED or has_changed_files:
+        _append_profile(profiles, ReviewProfile.CODE)
+    if context.task_mode == WorkspaceTaskMode.AUTONOMOUS:
+        _append_profile(profiles, ReviewProfile.ARTIFACT)
+    if context.require_artifact_review or context.attachment_count > 0:
+        _append_profile(profiles, ReviewProfile.ARTIFACT)
+
+    if any(
+        marker in path
+        for path in changed_files
+        for marker in ("frontend/", ".vue", ".tsx", ".jsx", ".css", "playwright")
+    ) or any(marker in text for marker in ("ui", "screenshot", "browser", "responsive")):
+        _append_profile(profiles, ReviewProfile.UI)
+
+    if any(
+        marker in text
+        for marker in (
+            "artifact",
+            "image",
+            "screenshot",
+            "generated",
+            "wallpaper",
+            "document",
+            "pdf",
+            "output",
+        )
+    ):
+        _append_profile(profiles, ReviewProfile.ARTIFACT)
+
+    if any(
+        marker in text
+        for marker in (
+            "feishu",
+            "lark",
+            "send",
+            "sent",
+            "deliver",
+            "delivery",
+            "message id",
+            "recipient",
+            "channel",
+        )
+    ):
+        _append_profile(profiles, ReviewProfile.DELIVERY)
+
+    if context.evaluation_strictness == EvaluationStrictness.STRICT or any(
+        marker in text
+        for marker in (
+            "credential",
+            "secret",
+            "token",
+            "delete",
+            "deploy",
+            "production",
+            "external",
+            "destructive",
+            "permission",
+        )
+    ):
+        _append_profile(profiles, ReviewProfile.BOUNDARY)
+
+    return profiles
+
+
+def review_profile_prompt_lines(profiles: Sequence[ReviewProfile]) -> list[str]:
+    """Return reviewer prompt bullets for enabled review profiles."""
+
+    return [
+        f"- {REVIEW_PROFILE_LABELS[profile]} ({profile.value}): {REVIEW_PROFILE_GUIDANCE[profile]}"
+        for profile in profiles
+    ]
 
 
 def managed_status_from_runtime(runtime_status: AgentRuntimeStatus) -> ManagedSessionStatus:

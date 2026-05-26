@@ -31,6 +31,7 @@ from ..models import (
     ManagedSessionStatus,
     RequestTaskReviewRequest,
     ReviewDecision,
+    ReviewProfile,
     StartTaskRequest,
     TerminalAgentStatus,
     Workspace,
@@ -210,6 +211,9 @@ class WorkspaceManager:
             normalized["task_mode"] = WorkspaceTaskMode.REVIEWED.value
         normalized.setdefault("related_task_id", None)
         normalized.setdefault("attachments", [])
+        normalized["review_profiles"] = self._normalize_review_profiles(
+            normalized.get("review_profiles")
+        )
         normalized.setdefault("clear_context", None)
         normalized.setdefault("dispatch_reason", None)
         normalized.setdefault("dispatch_pending", False)
@@ -242,6 +246,18 @@ class WorkspaceManager:
         normalized = dict(item)
         normalized["acceptance_check"] = self._normalize_acceptance_check(
             normalized.get("acceptance_check")
+        )
+        normalized["review_profiles"] = self._normalize_review_profiles(
+            normalized.get("review_profiles")
+        )
+        normalized["profile_results"] = self._normalize_review_profile_results(
+            normalized.get("profile_results")
+        )
+        normalized["artifact_refs"] = self._normalize_string_list(normalized.get("artifact_refs"))
+        if not isinstance(normalized.get("confidence"), (int, float)):
+            normalized["confidence"] = None
+        normalized["requires_human_judgment"] = bool(
+            normalized.get("requires_human_judgment", False)
         )
         normalized["evaluation_report"] = self._normalize_evaluation_report(
             normalized.get("evaluation_report"),
@@ -297,6 +313,9 @@ class WorkspaceManager:
             normalized["evaluation_strictness"] = "balanced"
         normalized.setdefault("allow_web_research", False)
         normalized.setdefault("require_artifact_review", False)
+        normalized["review_profiles"] = self._normalize_review_profiles(
+            normalized.get("review_profiles")
+        )
         if normalized.get("human_checkpoint_policy") not in {
             "final_only",
             "after_rubric",
@@ -325,12 +344,21 @@ class WorkspaceManager:
         normalized.setdefault("evaluator_session_id", session_id)
         if normalized.get("decision") not in {"pass", "revise", "needs_input", "fail", "escalate"}:
             normalized["decision"] = "needs_input"
-        for field in ("criterion_results", "blocking_issues", "suggested_fixes", "artifact_refs"):
+        for field in ("criterion_results", "blocking_issues", "suggested_fixes"):
             if not isinstance(normalized.get(field), list):
                 normalized[field] = []
+        normalized["profile_results"] = self._normalize_review_profile_results(
+            normalized.get("profile_results")
+        )
+        normalized["artifact_refs"] = self._normalize_string_list(normalized.get("artifact_refs"))
         normalized.setdefault("overall_score", None)
         normalized.setdefault("validation_reviewed", None)
         normalized.setdefault("risks", None)
+        if not isinstance(normalized.get("confidence"), (int, float)):
+            normalized["confidence"] = None
+        normalized["requires_human_judgment"] = bool(
+            normalized.get("requires_human_judgment", False)
+        )
         normalized.setdefault("created_at", None)
         return normalized
 
@@ -427,6 +455,52 @@ class WorkspaceManager:
                 }
             )
         return normalized
+
+    def _normalize_string_list(self, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    def _normalize_review_profiles(self, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        profiles: list[str] = []
+        allowed = {profile.value for profile in ReviewProfile}
+        for item in value:
+            profile = item.value if isinstance(item, ReviewProfile) else str(item)
+            if profile in allowed and profile not in profiles:
+                profiles.append(profile)
+        return profiles
+
+    def _normalize_review_profile_results(self, value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        results: list[dict[str, Any]] = []
+        allowed_profiles = {profile.value for profile in ReviewProfile}
+        allowed_statuses = {"passed", "failed", "partial", "not_checked"}
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            profile = item.get("profile")
+            if isinstance(profile, ReviewProfile):
+                profile = profile.value
+            if profile not in allowed_profiles:
+                continue
+            status = item.get("status", "not_checked")
+            if status not in allowed_statuses:
+                status = "not_checked"
+            results.append(
+                {
+                    "profile": profile,
+                    "status": status,
+                    "evidence": str(item.get("evidence") or "").strip(),
+                    "blocking_findings": self._normalize_string_list(item.get("blocking_findings")),
+                    "non_blocking_findings": self._normalize_string_list(
+                        item.get("non_blocking_findings")
+                    ),
+                }
+            )
+        return results
 
     def _normalize_session_item(self, item: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(item)
@@ -681,6 +755,7 @@ class WorkspaceManager:
             prompt=payload.prompt,
             attachments=attachments,
             goal_packet=payload.goal_packet,
+            review_profiles=payload.review_profiles,
             agent_type=payload.agent_type,
             task_mode=payload.task_mode,
             autonomy_policy=autonomy_policy,
@@ -796,6 +871,8 @@ class WorkspaceManager:
         update: dict[str, Any] = {"updated_at": now}
         if payload.goal_packet is not None:
             update["goal_packet"] = payload.goal_packet
+        if payload.review_profiles is not None:
+            update["review_profiles"] = payload.review_profiles
         if payload.task_mode is not None:
             update["task_mode"] = payload.task_mode
             if payload.task_mode == WorkspaceTaskMode.AUTONOMOUS:
@@ -2052,6 +2129,109 @@ class WorkspaceManager:
             "- On revision, address only the evaluator's blocking issues and preserve passing work.\n\n"
         )
 
+    def _effective_review_profiles(
+        self,
+        task: WorkspaceTask,
+        trigger_report: AgentReport,
+    ) -> list[ReviewProfile]:
+        policy = task.autonomy_policy or AutonomyPolicy()
+        explicit_profiles = [
+            *task.review_profiles,
+            *trigger_report.review_profiles,
+            *(policy.review_profiles if task.task_mode == WorkspaceTaskMode.AUTONOMOUS else []),
+        ]
+        return state_policy.infer_review_profiles(
+            state_policy.ReviewProfileContext(
+                task_mode=task.task_mode,
+                report_state=trigger_report.state,
+                title=task.title,
+                prompt=task.prompt,
+                changed_files=trigger_report.changed_files,
+                validation=trigger_report.validation,
+                risks=trigger_report.risks,
+                message=trigger_report.message,
+                explicit_profiles=explicit_profiles,
+                require_artifact_review=(
+                    bool(policy.require_artifact_review)
+                    if task.task_mode == WorkspaceTaskMode.AUTONOMOUS
+                    else False
+                ),
+                evaluation_strictness=policy.evaluation_strictness,
+                attachment_count=len(task.attachments),
+            )
+        )
+
+    def _review_profile_prompt_block(self, profiles: list[ReviewProfile]) -> str:
+        return (
+            "Enabled review profiles JSON:\n"
+            f"{json.dumps([profile.value for profile in profiles])}\n\n"
+            "Review profile checklist:\n"
+            f"{chr(10).join(state_policy.review_profile_prompt_lines(profiles))}\n\n"
+        )
+
+    def _review_guidance_block(
+        self,
+        workspace: Workspace,
+        trigger_report: AgentReport,
+    ) -> str:
+        guidance = self._review_guidance_documents(workspace, trigger_report.changed_files)
+        if not guidance:
+            return ""
+        sections = [f"### {path}\n{text}" for path, text in guidance]
+        return "Repository review guidance:\n" + "\n\n".join(sections) + "\n\n"
+
+    def _review_guidance_documents(
+        self,
+        workspace: Workspace,
+        changed_files: list[str],
+    ) -> list[tuple[str, str]]:
+        if workspace.target != ExecutionTarget.LOCAL:
+            return []
+        try:
+            root = Path(workspace.path).expanduser().resolve()
+        except OSError:
+            return []
+        candidates: list[Path] = [root / "REVIEW.md"]
+        for changed_file in changed_files[:12]:
+            if not changed_file:
+                continue
+            candidate = Path(changed_file)
+            path = candidate if candidate.is_absolute() else root / candidate
+            try:
+                resolved = path.resolve(strict=False)
+                resolved.relative_to(root)
+            except (OSError, ValueError):
+                continue
+            directory = resolved if resolved.is_dir() else resolved.parent
+            while True:
+                candidates.append(directory / "REVIEW.md")
+                if directory == root:
+                    break
+                directory = directory.parent
+
+        seen: set[Path] = set()
+        documents: list[tuple[str, str]] = []
+        for candidate in candidates:
+            if candidate in seen or not candidate.exists() or not candidate.is_file():
+                continue
+            seen.add(candidate)
+            try:
+                text = candidate.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if not text:
+                continue
+            if len(text) > 4000:
+                text = text[:4000].rstrip() + "\n...[truncated]"
+            try:
+                display_path = str(candidate.relative_to(root))
+            except ValueError:
+                display_path = str(candidate)
+            documents.append((display_path, text))
+            if len(documents) >= 6:
+                break
+        return documents
+
     def _build_review_prompt(
         self,
         workspace: Workspace,
@@ -2075,6 +2255,13 @@ class WorkspaceManager:
                 "acceptance_check": [
                     item.model_dump(mode="json") for item in report.acceptance_check
                 ],
+                "review_profiles": [profile.value for profile in report.review_profiles],
+                "profile_results": [
+                    item.model_dump(mode="json") for item in report.profile_results
+                ],
+                "artifact_refs": report.artifact_refs,
+                "confidence": report.confidence,
+                "requires_human_judgment": report.requires_human_judgment,
                 "review_decision": report.review_decision.value,
                 "review_reason": report.review_reason,
                 "risk_level": report.risk_level,
@@ -2082,6 +2269,7 @@ class WorkspaceManager:
             }
             for report in task_reports
         ]
+        profiles = self._effective_review_profiles(task, trigger_report)
         return (
             "Review workspace task.\n\n"
             f"Workspace: {workspace.name}\n"
@@ -2097,6 +2285,8 @@ class WorkspaceManager:
             "Stored Goal Packet JSON:\n"
             f"{task.goal_packet.model_dump_json() if task.goal_packet else 'null'}\n\n"
             f"{self._autonomous_review_block(task)}"
+            f"{self._review_profile_prompt_block(profiles)}"
+            f"{self._review_guidance_block(workspace, trigger_report)}"
             "Review workflow:\n"
             "1. Stay read-only. Do not edit files, run formatters that write changes, or revert work.\n"
             "2. Check whether the stored Goal Packet faithfully preserves the original task prompt. "
@@ -2107,6 +2297,7 @@ class WorkspaceManager:
             "out-of-scope boundaries, and handoff requirements,\n"
             "   - explicit user requirements and attachments,\n"
             "   - changed_files, validation, risks, and acceptance_check evidence from the implementation reports,\n"
+            "   - enabled review profiles, profile-specific evidence, artifact_refs, and any REVIEW.md guidance,\n"
             "   - repository conventions and nearby behavior,\n"
             "   - any blocked/needs_input context from the trigger report.\n"
             "4. Inspect changed files and related code paths enough to verify correctness and scope.\n"
@@ -2135,6 +2326,10 @@ class WorkspaceManager:
             "- Severity, file/area, issue, evidence, required fix or why non-blocking\n"
             "Validation reviewed:\n"
             "- Commands/evidence reviewed; missing or weak checks; whether gaps block acceptance\n"
+            "Profile results:\n"
+            "- For each enabled profile: status, evidence, blocking findings, non-blocking findings\n"
+            "Artifact refs:\n"
+            "- Files, screenshots, logs, message IDs, or other artifacts inspected\n"
             "Required fixes:\n"
             "- Only for review_failed; concrete steps for the implementation agent\n"
             "Risks:\n"
@@ -2149,7 +2344,13 @@ class WorkspaceManager:
             f'-d \'{{"task_id":"{task.id}","state":"review_passed",'
             '"message":"Verdict, acceptance criteria checked, findings, validation reviewed, '
             'required fixes if any, and risks","validation":"Checks reviewed",'
-            '"risks":"Residual risk or none"}}\'\n\n'
+            '"risks":"Residual risk or none",'
+            '"review_profiles":["general"],'
+            '"profile_results":[{"profile":"general","status":"passed",'
+            '"evidence":"Evidence reviewed.","blocking_findings":[],'
+            '"non_blocking_findings":[]}],'
+            '"artifact_refs":[],"confidence":0.8,'
+            '"requires_human_judgment":false}}\'\n\n'
             "Use review_failed when fixes are required. Use review_needs_input only for genuine blockers "
             "outside the implementation agent's control."
         )
@@ -2296,6 +2497,11 @@ class WorkspaceManager:
             risks=payload.risks,
             acceptance_check=payload.acceptance_check,
             evaluation_report=payload.evaluation_report,
+            review_profiles=payload.review_profiles,
+            profile_results=payload.profile_results,
+            artifact_refs=payload.artifact_refs,
+            confidence=payload.confidence,
+            requires_human_judgment=payload.requires_human_judgment,
             review_decision=payload.review_decision,
             review_reason=payload.review_reason,
             risk_level=payload.risk_level,
@@ -2589,10 +2795,14 @@ class WorkspaceManager:
             evaluator_session_id=evaluator.id,
             overall_score=score,
             decision=decision,
+            profile_results=report.profile_results,
             blocking_issues=blocking_issues,
             suggested_fixes=suggested_fixes,
+            artifact_refs=report.artifact_refs,
             validation_reviewed=report.validation,
             risks=report.risks,
+            confidence=report.confidence,
+            requires_human_judgment=report.requires_human_judgment,
             created_at=now,
         )
 

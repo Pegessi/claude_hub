@@ -42,6 +42,8 @@ export type AgentReportState =
   | 'review_failed'
   | 'review_needs_input'
 export type ReviewDecision = 'auto' | 'request' | 'skip'
+export type ReviewProfile = 'general' | 'code' | 'ui' | 'artifact' | 'delivery' | 'boundary'
+export type ReviewProfileResultStatus = 'passed' | 'failed' | 'partial' | 'not_checked'
 
 export interface TerminalTab {
   id: string
@@ -188,11 +190,20 @@ export interface AcceptanceCheck {
   evidence: string
 }
 
+export interface ReviewProfileResult {
+  profile: ReviewProfile
+  status: ReviewProfileResultStatus
+  evidence?: string
+  blocking_findings?: string[]
+  non_blocking_findings?: string[]
+}
+
 export interface AutonomyPolicy {
   max_iterations: number
   evaluation_strictness: EvaluationStrictness
   allow_web_research: boolean
   require_artifact_review: boolean
+  review_profiles?: ReviewProfile[]
   human_checkpoint_policy: HumanCheckpointPolicy
   allowed_agent_types?: AgentType[]
   stop_on_repeated_failure: boolean
@@ -225,11 +236,14 @@ export interface EvaluationReport {
   overall_score?: number | null
   decision: EvaluationDecision
   criterion_results?: CriterionResult[]
+  profile_results?: ReviewProfileResult[]
   blocking_issues?: string[]
   suggested_fixes?: string[]
   artifact_refs?: string[]
   validation_reviewed?: string | null
   risks?: string | null
+  confidence?: number | null
+  requires_human_judgment?: boolean
   created_at?: string | null
 }
 
@@ -271,6 +285,7 @@ export interface WorkspaceTask {
   prompt: string
   attachments: WorkspaceAttachment[]
   goal_packet?: GoalPacket | null
+  review_profiles?: ReviewProfile[]
   agent_type: AgentType
   task_mode: WorkspaceTaskMode
   autonomy_policy?: AutonomyPolicy | null
@@ -305,6 +320,7 @@ export interface WorkspaceTaskCreate {
   related_task_id?: string | null
   attachments?: WorkspaceAttachmentCreate[]
   goal_packet?: GoalPacket | null
+  review_profiles?: ReviewProfile[]
   autonomy_policy?: AutonomyPolicy | null
 }
 
@@ -379,6 +395,11 @@ export interface AgentReport {
   risks?: string | null
   acceptance_check?: AcceptanceCheck[]
   evaluation_report?: EvaluationReport | null
+  review_profiles?: ReviewProfile[]
+  profile_results?: ReviewProfileResult[]
+  artifact_refs?: string[]
+  confidence?: number | null
+  requires_human_judgment?: boolean
   review_decision: ReviewDecision
   review_reason?: string | null
   risk_level?: string | null
@@ -397,6 +418,11 @@ export interface AgentReportCreate {
   acceptance_check?: AcceptanceCheck[]
   goal_packet?: GoalPacket | null
   evaluation_report?: EvaluationReport | null
+  review_profiles?: ReviewProfile[]
+  profile_results?: ReviewProfileResult[]
+  artifact_refs?: string[]
+  confidence?: number | null
+  requires_human_judgment?: boolean
   review_decision?: ReviewDecision
   review_reason?: string | null
   risk_level?: string | null
