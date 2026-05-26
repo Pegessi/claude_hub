@@ -3,6 +3,13 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-05-27
+
+### fix: align Agent Workspace review detail markers
+- Scope the report timeline marker pseudo-element to top-level timeline entries so nested review profile and acceptance-check lists no longer show stray blue dots
+- Align inline report metadata such as Confidence on a clean baseline with the label and value in one compact row
+- **Files**: frontend/src/components/AgentWorkspaceView.vue, CHANGELOG.md
+
 ## 2026-05-26
 
 ### feat: add workspace Review Profiles v1

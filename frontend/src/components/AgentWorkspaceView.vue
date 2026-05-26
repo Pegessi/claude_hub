@@ -4503,12 +4503,12 @@ onUnmounted(() => {
   border-left: 1px solid var(--ch-color-border-muted);
 }
 
-.timeline li {
+.timeline > li {
   position: relative;
   min-width: 0;
 }
 
-.timeline li::before {
+.timeline > li::before {
   content: '';
   position: absolute;
   top: 16px;
@@ -4613,7 +4613,17 @@ onUnmounted(() => {
 .report-note--inline {
   display: flex;
   flex-wrap: wrap;
+  align-items: baseline;
   gap: 8px;
+}
+
+.report-note--inline strong {
+  display: inline-flex;
+  margin: 0;
+}
+
+.report-note--inline > span {
+  line-height: 1;
 }
 
 .workspace-modal-overlay {
