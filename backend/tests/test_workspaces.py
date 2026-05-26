@@ -612,6 +612,9 @@ def test_agent_report_stores_goal_packet_and_acceptance_check(
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
+    (repo / "REVIEW.md").write_text(
+        "Always verify task-specific review profiles.", encoding="utf-8"
+    )
     sent_messages: list[tuple[str, str]] = []
     stub_workspace_terminal(
         monkeypatch,
@@ -677,6 +680,41 @@ def test_agent_report_stores_goal_packet_and_acceptance_check(
     assert "Report structured task intent." in reviewer_prompt
     assert "acceptance_check" in reviewer_prompt
     assert "Goal fidelity" in reviewer_prompt
+    assert "Enabled review profiles JSON" in reviewer_prompt
+    assert '"code"' in reviewer_prompt
+    assert "Repository review guidance" in reviewer_prompt
+    assert "Always verify task-specific review profiles." in reviewer_prompt
+
+    reviewer_id = workspace_manager.tasks[task["id"]].review_session_id
+    assert reviewer_id is not None
+    review_response = client.post(
+        f"/api/workspaces/sessions/{reviewer_id}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "review_passed",
+            "message": "Profile-aware review passed",
+            "review_profiles": ["general", "code"],
+            "profile_results": [
+                {
+                    "profile": "general",
+                    "status": "passed",
+                    "evidence": "Goal Packet and reports reviewed.",
+                },
+                {
+                    "profile": "code",
+                    "status": "passed",
+                    "evidence": "Changed schema path reviewed.",
+                },
+            ],
+            "artifact_refs": ["backend/claude_hub/models/schemas.py"],
+            "confidence": 0.9,
+        },
+    )
+    assert review_response.status_code == 201
+    review_report = review_response.json()
+    assert review_report["profile_results"][0]["profile"] == "general"
+    assert review_report["artifact_refs"] == ["backend/claude_hub/models/schemas.py"]
+    assert review_report["confidence"] == 0.9
 
 
 def test_update_workspace_changes_path_and_remote_cwd(tmp_path: Path) -> None:

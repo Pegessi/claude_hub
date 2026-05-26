@@ -623,6 +623,10 @@
                   <span>Review state</span>
                   <strong>{{ reviewStatusLabel(selectedTask) || 'not requested' }}</strong>
                 </div>
+                <div>
+                  <span>Review profiles</span>
+                  <strong>{{ taskReviewProfiles(selectedTask) }}</strong>
+                </div>
                 <div v-if="selectedTask.human_acceptance_requested_at">
                   <span>Human acceptance</span>
                   <strong>{{ selectedTask.human_accepted_at ? 'accepted' : 'awaiting' }}</strong>
@@ -703,6 +707,12 @@
                       <span>{{ evaluation.decision }}</span>
                       <span>round {{ evaluation.iteration }}</span>
                       <span>{{ formatAutonomousScore(evaluation.overall_score) }}</span>
+                      <span
+                        v-if="evaluation.profile_results?.length"
+                        class="profile-summary"
+                      >
+                        {{ profileResultSummary(evaluation.profile_results) }}
+                      </span>
                     </li>
                   </ol>
                 </div>
@@ -797,6 +807,46 @@
                           {{ check.criterion }} - {{ check.evidence }}
                         </li>
                       </ol>
+                    </div>
+                    <div
+                      v-if="profileResultsFor(report).length > 0"
+                      class="report-note"
+                    >
+                      <strong>Review Profiles</strong>
+                      <ol class="profile-result-list">
+                        <li
+                          v-for="result in profileResultsFor(report)"
+                          :key="`${result.profile}-${result.status}`"
+                        >
+                          <span>{{ result.status }}</span>
+                          {{ reviewProfileLabel(result.profile) }} - {{ result.evidence || 'No evidence recorded.' }}
+                          <template v-if="result.blocking_findings?.length">
+                            Blocking: {{ result.blocking_findings.join('; ') }}
+                          </template>
+                        </li>
+                      </ol>
+                    </div>
+                    <div
+                      v-if="report.artifact_refs?.length"
+                      class="report-note"
+                    >
+                      <strong>Artifact Refs</strong>
+                      <div class="report-files">
+                        <span
+                          v-for="artifact in report.artifact_refs"
+                          :key="artifact"
+                        >
+                          {{ artifact }}
+                        </span>
+                      </div>
+                    </div>
+                    <div
+                      v-if="report.confidence !== null && report.confidence !== undefined"
+                      class="report-note report-note--inline"
+                    >
+                      <strong>Confidence</strong>
+                      <span>{{ formatAutonomousScore(report.confidence) }}</span>
+                      <span v-if="report.requires_human_judgment">Human judgment required</span>
                     </div>
                     <div
                       v-if="report.risks"
@@ -1580,6 +1630,8 @@ import type {
   GoalPacket,
   ManagedSession,
   RemoteProfile,
+  ReviewProfile,
+  ReviewProfileResult,
   TerminalAgentStatus,
   WorkspaceAttachment,
   WorkspaceAttachmentCreate,
@@ -1772,6 +1824,36 @@ function goalPacketItems(items: string[] | undefined): string[] {
 
 function acceptanceChecksFor(report: AgentReport): AcceptanceCheck[] {
   return Array.isArray(report.acceptance_check) ? report.acceptance_check : []
+}
+
+function profileResultsFor(report: AgentReport): ReviewProfileResult[] {
+  return Array.isArray(report.profile_results) ? report.profile_results : []
+}
+
+function reviewProfileLabel(profile: ReviewProfile): string {
+  const labels: Record<ReviewProfile, string> = {
+    general: 'General',
+    code: 'Code',
+    ui: 'UI',
+    artifact: 'Artifact',
+    delivery: 'Delivery',
+    boundary: 'Boundary',
+  }
+  return labels[profile] || profile
+}
+
+function taskReviewProfiles(task: WorkspaceTask): string {
+  const profiles = Array.isArray(task.review_profiles) ? task.review_profiles : []
+  if (profiles.length > 0) return profiles.map(reviewProfileLabel).join(', ')
+  const policyProfiles = task.autonomy_policy?.review_profiles || []
+  if (policyProfiles.length > 0) return policyProfiles.map(reviewProfileLabel).join(', ')
+  return task.autonomy_policy?.require_artifact_review ? 'Inferred + Artifact' : 'Inferred'
+}
+
+function profileResultSummary(results: ReviewProfileResult[]): string {
+  return results
+    .map(result => `${reviewProfileLabel(result.profile)} ${result.status}`)
+    .join(' · ')
 }
 
 const reviewerSessions = computed<ManagedSession[]>(() => [
@@ -4406,6 +4488,11 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
+.autonomous-evaluations .profile-summary {
+  flex-basis: 100%;
+  color: var(--ch-color-text);
+}
+
 .timeline {
   list-style: none;
   margin: 12px 0 0;
@@ -4503,21 +4590,30 @@ onUnmounted(() => {
   text-transform: uppercase;
 }
 
-.acceptance-check-list {
+.acceptance-check-list,
+.profile-result-list {
   margin: 0;
   padding-left: 18px;
   font-size: 12px;
   line-height: 1.45;
 }
 
-.acceptance-check-list li {
+.acceptance-check-list li,
+.profile-result-list li {
   overflow-wrap: anywhere;
 }
 
-.acceptance-check-list span {
+.acceptance-check-list span,
+.profile-result-list span {
   margin-right: 5px;
   color: var(--ch-color-text);
   font-weight: 700;
+}
+
+.report-note--inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .workspace-modal-overlay {

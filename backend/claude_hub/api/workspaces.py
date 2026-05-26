@@ -132,6 +132,7 @@ async def update_task(
         payload.status is None
         and payload.goal_packet is None
         and payload.task_mode is None
+        and payload.review_profiles is None
         and payload.autonomy_policy is None
         and payload.autonomous_run is None
     ):

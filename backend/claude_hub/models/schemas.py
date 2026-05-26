@@ -135,6 +135,26 @@ class ReviewDecision(str, Enum):
     SKIP = "skip"
 
 
+class ReviewProfile(str, Enum):
+    """Review lens used by reviewer agents."""
+
+    GENERAL = "general"
+    CODE = "code"
+    UI = "ui"
+    ARTIFACT = "artifact"
+    DELIVERY = "delivery"
+    BOUNDARY = "boundary"
+
+
+class ReviewProfileResultStatus(str, Enum):
+    """Reviewer result for one review profile."""
+
+    PASSED = "passed"
+    FAILED = "failed"
+    PARTIAL = "partial"
+    NOT_CHECKED = "not_checked"
+
+
 class GoalPacketStatus(str, Enum):
     """Lifecycle status for a task-level Goal Packet."""
 
@@ -175,6 +195,16 @@ class AcceptanceCheck(BaseModel):
     evidence: str
 
 
+class ReviewProfileResult(BaseModel):
+    """Reviewer evidence for one enabled review profile."""
+
+    profile: ReviewProfile
+    status: ReviewProfileResultStatus = ReviewProfileResultStatus.NOT_CHECKED
+    evidence: str = ""
+    blocking_findings: List[str] = Field(default_factory=list)
+    non_blocking_findings: List[str] = Field(default_factory=list)
+
+
 class AutonomyPolicy(BaseModel):
     """Task-level configuration for Autonomous Mode."""
 
@@ -182,6 +212,7 @@ class AutonomyPolicy(BaseModel):
     evaluation_strictness: EvaluationStrictness = EvaluationStrictness.BALANCED
     allow_web_research: bool = False
     require_artifact_review: bool = False
+    review_profiles: List[ReviewProfile] = Field(default_factory=list)
     human_checkpoint_policy: HumanCheckpointPolicy = HumanCheckpointPolicy.FINAL_ONLY
     allowed_agent_types: List[AgentType] = Field(default_factory=list)
     stop_on_repeated_failure: bool = True
@@ -220,11 +251,14 @@ class EvaluationReport(BaseModel):
     overall_score: Optional[float] = None
     decision: EvaluationDecision
     criterion_results: List[CriterionResult] = Field(default_factory=list)
+    profile_results: List[ReviewProfileResult] = Field(default_factory=list)
     blocking_issues: List[str] = Field(default_factory=list)
     suggested_fixes: List[str] = Field(default_factory=list)
     artifact_refs: List[str] = Field(default_factory=list)
     validation_reviewed: Optional[str] = None
     risks: Optional[str] = None
+    confidence: Optional[float] = None
+    requires_human_judgment: bool = False
     created_at: Optional[datetime] = None
 
 
@@ -390,6 +424,7 @@ class WorkspaceTaskCreate(BaseModel):
     related_task_id: Optional[str] = None
     attachments: List["WorkspaceAttachmentCreate"] = Field(default_factory=list)
     goal_packet: Optional[GoalPacket] = None
+    review_profiles: List[ReviewProfile] = Field(default_factory=list)
     autonomy_policy: Optional[AutonomyPolicy] = None
 
 
@@ -417,6 +452,7 @@ class WorkspaceTaskUpdate(BaseModel):
     status: Optional[WorkspaceTaskStatus] = None
     goal_packet: Optional[GoalPacket] = None
     task_mode: Optional[WorkspaceTaskMode] = None
+    review_profiles: Optional[List[ReviewProfile]] = None
     autonomy_policy: Optional[AutonomyPolicy] = None
     autonomous_run: Optional[AutonomousRun] = None
 
@@ -430,6 +466,7 @@ class WorkspaceTask(BaseModel):
     prompt: str
     attachments: List[WorkspaceAttachment] = Field(default_factory=list)
     goal_packet: Optional[GoalPacket] = None
+    review_profiles: List[ReviewProfile] = Field(default_factory=list)
     agent_type: AgentType
     task_mode: WorkspaceTaskMode = WorkspaceTaskMode.REVIEWED
     autonomy_policy: Optional[AutonomyPolicy] = None
@@ -502,6 +539,11 @@ class AgentReportCreate(BaseModel):
     acceptance_check: List[AcceptanceCheck] = Field(default_factory=list)
     goal_packet: Optional[GoalPacket] = None
     evaluation_report: Optional[EvaluationReport] = None
+    review_profiles: List[ReviewProfile] = Field(default_factory=list)
+    profile_results: List[ReviewProfileResult] = Field(default_factory=list)
+    artifact_refs: List[str] = Field(default_factory=list)
+    confidence: Optional[float] = None
+    requires_human_judgment: bool = False
     review_decision: ReviewDecision = ReviewDecision.AUTO
     review_reason: Optional[str] = None
     risk_level: Optional[str] = None
@@ -523,6 +565,11 @@ class AgentReport(BaseModel):
     risks: Optional[str] = None
     acceptance_check: List[AcceptanceCheck] = Field(default_factory=list)
     evaluation_report: Optional[EvaluationReport] = None
+    review_profiles: List[ReviewProfile] = Field(default_factory=list)
+    profile_results: List[ReviewProfileResult] = Field(default_factory=list)
+    artifact_refs: List[str] = Field(default_factory=list)
+    confidence: Optional[float] = None
+    requires_human_judgment: bool = False
     review_decision: ReviewDecision = ReviewDecision.AUTO
     review_reason: Optional[str] = None
     risk_level: Optional[str] = None

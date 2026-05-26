@@ -7,7 +7,9 @@ from claude_hub.models import (
     EvaluationDecision,
     ManagedSessionStatus,
     ReviewDecision,
+    ReviewProfile,
     WorkspaceSessionRole,
+    WorkspaceTaskMode,
     WorkspaceTaskStatus,
 )
 from claude_hub.services import workspace_state_policy as policy
@@ -276,6 +278,45 @@ def test_non_agent_report_triggers_request_review() -> None:
         review_decision=ReviewDecision.SKIP,
         can_skip_review=True,
     )
+
+
+def test_infer_review_profiles_combines_task_and_evidence_lenses() -> None:
+    profiles = policy.infer_review_profiles(
+        policy.ReviewProfileContext(
+            task_mode=WorkspaceTaskMode.AUTONOMOUS,
+            report_state=AgentReportState.COMPLETED,
+            title="Ship wallpaper",
+            prompt="Generate image and send to Feishu.",
+            changed_files=["frontend/src/App.vue"],
+            validation="Playwright screenshot passed.",
+            require_artifact_review=True,
+        )
+    )
+
+    assert profiles == [
+        ReviewProfile.GENERAL,
+        ReviewProfile.CODE,
+        ReviewProfile.ARTIFACT,
+        ReviewProfile.UI,
+        ReviewProfile.DELIVERY,
+    ]
+
+
+def test_infer_review_profiles_honors_explicit_boundary_profile() -> None:
+    profiles = policy.infer_review_profiles(
+        policy.ReviewProfileContext(
+            task_mode=WorkspaceTaskMode.DIRECT,
+            report_state=AgentReportState.COMPLETED,
+            explicit_profiles=[ReviewProfile.BOUNDARY],
+            message="Used production credential for external delivery.",
+        )
+    )
+
+    assert profiles == [
+        ReviewProfile.BOUNDARY,
+        ReviewProfile.GENERAL,
+        ReviewProfile.DELIVERY,
+    ]
 
 
 def test_autonomous_worker_report_moves_to_evaluation() -> None:
