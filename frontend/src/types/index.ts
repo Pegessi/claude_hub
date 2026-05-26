@@ -5,6 +5,7 @@ export type AppMode = 'terminal' | 'workspace'
 export type ColorScheme = 'dark' | 'light'
 export type WorkspaceTaskStatus = 'todo' | 'queued' | 'working' | 'review' | 'done'
 export type WorkspaceTaskMode = 'direct' | 'reviewed' | 'autonomous'
+export type WorkspaceTaskExecutionComplexity = 'auto' | 'simple' | 'complex'
 export type EvaluationStrictness = 'lenient' | 'balanced' | 'strict'
 export type HumanCheckpointPolicy = 'final_only' | 'after_rubric' | 'every_iteration'
 export type AutonomousRunPhase =
@@ -288,6 +289,7 @@ export interface WorkspaceTask {
   review_profiles?: ReviewProfile[]
   agent_type: AgentType
   task_mode: WorkspaceTaskMode
+  execution_complexity: WorkspaceTaskExecutionComplexity
   autonomy_policy?: AutonomyPolicy | null
   autonomous_run?: AutonomousRun | null
   status: WorkspaceTaskStatus
@@ -317,6 +319,7 @@ export interface WorkspaceTaskCreate {
   prompt: string
   agent_type?: AgentType
   task_mode?: WorkspaceTaskMode
+  execution_complexity?: WorkspaceTaskExecutionComplexity
   related_task_id?: string | null
   attachments?: WorkspaceAttachmentCreate[]
   goal_packet?: GoalPacket | null

@@ -604,6 +604,10 @@
                   <strong>{{ taskModeLabel(selectedTask.task_mode) }}</strong>
                 </div>
                 <div>
+                  <span>Execution</span>
+                  <strong>{{ executionComplexityLabel(selectedTask.execution_complexity) }}</strong>
+                </div>
+                <div>
                   <span>Task stage</span>
                   <strong>{{ selectedTask.status }}</strong>
                 </div>
@@ -1191,6 +1195,32 @@
               </button>
             </div>
           </div>
+          <div class="modal-field">
+            <label>Execution</label>
+            <div class="segmented-control segmented-control--three">
+              <button
+                type="button"
+                :class="['segment-button', { active: taskForm.execution_complexity === 'auto' }]"
+                @click="taskForm.execution_complexity = 'auto'"
+              >
+                Auto
+              </button>
+              <button
+                type="button"
+                :class="['segment-button', { active: taskForm.execution_complexity === 'simple' }]"
+                @click="taskForm.execution_complexity = 'simple'"
+              >
+                Simple
+              </button>
+              <button
+                type="button"
+                :class="['segment-button', { active: taskForm.execution_complexity === 'complex' }]"
+                @click="taskForm.execution_complexity = 'complex'"
+              >
+                Complex
+              </button>
+            </div>
+          </div>
           <div
             v-if="taskForm.task_mode === 'autonomous'"
             class="autonomy-form"
@@ -1637,6 +1667,7 @@ import type {
   WorkspaceAttachmentCreate,
   WorkspaceSessionRole,
   WorkspaceTask,
+  WorkspaceTaskExecutionComplexity,
   WorkspaceTaskMode,
   WorkspaceTaskStatus,
 } from '@/types'
@@ -1750,6 +1781,7 @@ const taskForm = reactive({
   title: '',
   prompt: '',
   task_mode: 'reviewed' as WorkspaceTaskMode,
+  execution_complexity: 'auto' as WorkspaceTaskExecutionComplexity,
   max_iterations: 3,
   evaluation_strictness: 'balanced' as AutonomyPolicy['evaluation_strictness'],
   allow_web_research: false,
@@ -1959,6 +1991,12 @@ function taskModeLabel(mode: WorkspaceTaskMode) {
   if (mode === 'autonomous') return 'Autonomous'
   if (mode === 'direct') return 'Direct'
   return 'Reviewed'
+}
+
+function executionComplexityLabel(complexity: WorkspaceTaskExecutionComplexity) {
+  if (complexity === 'complex') return 'Complex'
+  if (complexity === 'simple') return 'Simple'
+  return 'Auto'
 }
 
 function autonomousRunPhaseLabel(phase: string) {
@@ -2723,6 +2761,7 @@ function resetTaskForm() {
   taskForm.title = ''
   taskForm.prompt = ''
   taskForm.task_mode = 'reviewed'
+  taskForm.execution_complexity = 'auto'
   taskForm.max_iterations = 3
   taskForm.evaluation_strictness = 'balanced'
   taskForm.allow_web_research = false
@@ -2761,6 +2800,7 @@ async function handleCreateTask() {
       title: taskForm.title.trim(),
       prompt: taskForm.prompt.trim(),
       task_mode: taskForm.task_mode,
+      execution_complexity: taskForm.execution_complexity,
       autonomy_policy: autonomyPolicy,
       related_task_id: taskForm.related_task_id || null,
       attachments: serializeDraftAttachments(taskForm.attachments),

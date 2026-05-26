@@ -57,6 +57,14 @@ class WorkspaceTaskMode(str, Enum):
     AUTONOMOUS = "autonomous"
 
 
+class WorkspaceTaskExecutionComplexity(str, Enum):
+    """Execution complexity hint for a workspace task."""
+
+    AUTO = "auto"
+    SIMPLE = "simple"
+    COMPLEX = "complex"
+
+
 class EvaluationStrictness(str, Enum):
     """How strict autonomous evaluation should be."""
 
@@ -421,6 +429,7 @@ class WorkspaceTaskCreate(BaseModel):
     prompt: str
     agent_type: AgentType = AgentType.CODEX
     task_mode: WorkspaceTaskMode = WorkspaceTaskMode.REVIEWED
+    execution_complexity: WorkspaceTaskExecutionComplexity = WorkspaceTaskExecutionComplexity.AUTO
     related_task_id: Optional[str] = None
     attachments: List["WorkspaceAttachmentCreate"] = Field(default_factory=list)
     goal_packet: Optional[GoalPacket] = None
@@ -452,6 +461,7 @@ class WorkspaceTaskUpdate(BaseModel):
     status: Optional[WorkspaceTaskStatus] = None
     goal_packet: Optional[GoalPacket] = None
     task_mode: Optional[WorkspaceTaskMode] = None
+    execution_complexity: Optional[WorkspaceTaskExecutionComplexity] = None
     review_profiles: Optional[List[ReviewProfile]] = None
     autonomy_policy: Optional[AutonomyPolicy] = None
     autonomous_run: Optional[AutonomousRun] = None
@@ -469,6 +479,7 @@ class WorkspaceTask(BaseModel):
     review_profiles: List[ReviewProfile] = Field(default_factory=list)
     agent_type: AgentType
     task_mode: WorkspaceTaskMode = WorkspaceTaskMode.REVIEWED
+    execution_complexity: WorkspaceTaskExecutionComplexity = WorkspaceTaskExecutionComplexity.AUTO
     autonomy_policy: Optional[AutonomyPolicy] = None
     autonomous_run: Optional[AutonomousRun] = None
     status: WorkspaceTaskStatus
