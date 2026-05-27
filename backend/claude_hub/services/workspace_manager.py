@@ -42,6 +42,7 @@ from ..models import (
     WorkspaceSessionRole,
     WorkspaceTask,
     WorkspaceTaskCreate,
+    WorkspaceTaskExecutionComplexity,
     WorkspaceTaskMode,
     WorkspaceTaskStatus,
     WorkspaceTaskUpdate,
@@ -209,6 +210,8 @@ class WorkspaceManager:
             normalized.setdefault("queued_at", normalized.get("updated_at"))
         if normalized.get("task_mode") not in {"direct", "reviewed", "autonomous"}:
             normalized["task_mode"] = WorkspaceTaskMode.REVIEWED.value
+        if normalized.get("execution_complexity") not in {"auto", "simple", "complex"}:
+            normalized["execution_complexity"] = WorkspaceTaskExecutionComplexity.AUTO.value
         normalized.setdefault("related_task_id", None)
         normalized.setdefault("attachments", [])
         normalized["review_profiles"] = self._normalize_review_profiles(
@@ -758,6 +761,7 @@ class WorkspaceManager:
             review_profiles=payload.review_profiles,
             agent_type=payload.agent_type,
             task_mode=payload.task_mode,
+            execution_complexity=payload.execution_complexity,
             autonomy_policy=autonomy_policy,
             autonomous_run=(
                 self._default_autonomous_run(task_id, autonomy_policy.max_iterations)
@@ -873,6 +877,8 @@ class WorkspaceManager:
             update["goal_packet"] = payload.goal_packet
         if payload.review_profiles is not None:
             update["review_profiles"] = payload.review_profiles
+        if payload.execution_complexity is not None:
+            update["execution_complexity"] = payload.execution_complexity
         if payload.task_mode is not None:
             update["task_mode"] = payload.task_mode
             if payload.task_mode == WorkspaceTaskMode.AUTONOMOUS:
@@ -2024,6 +2030,7 @@ class WorkspaceManager:
             f"Workspace: {workspace.name}\n"
             f"Task ID: {task.id}\n"
             f"Task title: {task.title}\n"
+            f"Task execution complexity: {task.execution_complexity.value}\n"
             f"Task description:\n{task.prompt}\n\n"
             f"Available agents JSON:\n{json.dumps(agents, indent=2)}\n\n"
             f"Recent tasks JSON:\n{json.dumps(recent_tasks, indent=2)}\n\n"
@@ -2057,12 +2064,14 @@ class WorkspaceManager:
             f"Task ID: {task.id}\n"
             f"Task title: {task.title}\n"
             f"Task mode: {task.task_mode.value}\n"
+            f"Task execution complexity: {task.execution_complexity.value}\n"
             f"{self._session_environment_lines(workspace, session)}\n"
             f"State snapshot: {self.snapshot_path(workspace.id)}\n"
             f"Dispatch reason: {task.dispatch_reason or 'not specified'}\n\n"
             f"{clear_note}"
             f"Task description:\n{task.prompt}\n\n"
             f"{attachment_note}"
+            f"{self._execution_complexity_assignment_block(task)}"
             f"{self._autonomous_assignment_block(task)}"
             "Start by reading the state snapshot. This workspace may contain many projects; "
             "use the task description to choose the correct directory before editing. "
@@ -2108,6 +2117,33 @@ class WorkspaceManager:
             "changed_files, validation, risks, acceptance_check, review_decision, review_reason, "
             "and risk_level. acceptance_check should map each Goal Packet acceptance criterion "
             "to status passed, failed, partial, or not_checked with evidence."
+        )
+
+    def _execution_complexity_assignment_block(self, task: WorkspaceTask) -> str:
+        if task.execution_complexity == WorkspaceTaskExecutionComplexity.SIMPLE:
+            guidance = (
+                "Treat this as a small task. Execute directly in this session, keep the plan compact, "
+                "and avoid spawning subagents unless you discover a concrete blocker that requires "
+                "specialist help."
+            )
+        elif task.execution_complexity == WorkspaceTaskExecutionComplexity.COMPLEX:
+            guidance = (
+                "Treat this as a complex task. Act as the task orchestrator: decompose the work, "
+                "delegate bounded implementation, testing, research, or review subtasks to subagents "
+                "when your runtime supports them, keep ownership and write scopes explicit, and "
+                "personally integrate, validate, and accept the final result before reporting completion."
+            )
+        else:
+            guidance = (
+                "Auto mode: before implementation, judge whether this task is simple or complex. "
+                "State the chosen execution strategy in your first working report. If complex, "
+                "orchestrate and delegate bounded subtasks where your runtime supports subagents; "
+                "if simple, execute directly."
+            )
+        return (
+            "Execution complexity guidance:\n"
+            f"- Selected complexity: {task.execution_complexity.value}\n"
+            f"- {guidance}\n\n"
         )
 
     def _autonomous_assignment_block(self, task: WorkspaceTask) -> str:
@@ -2276,12 +2312,14 @@ class WorkspaceManager:
             f"Task ID: {task.id}\n"
             f"Task title: {task.title}\n"
             f"Task mode: {task.task_mode.value}\n"
+            f"Task execution complexity: {task.execution_complexity.value}\n"
             f"Implementation agent session: {task.session_id or 'unknown'}\n"
             f"Reviewer session: {reviewer.id}\n"
             f"{self._session_environment_lines(workspace, reviewer)}\n"
             f"State snapshot: {self.snapshot_path(workspace.id)}\n\n"
             "Task description:\n"
             f"{task.prompt}\n\n"
+            f"{self._execution_complexity_review_block(task)}"
             "Stored Goal Packet JSON:\n"
             f"{task.goal_packet.model_dump_json() if task.goal_packet else 'null'}\n\n"
             f"{self._autonomous_review_block(task)}"
@@ -2353,6 +2391,17 @@ class WorkspaceManager:
             '"requires_human_judgment":false}}\'\n\n'
             "Use review_failed when fixes are required. Use review_needs_input only for genuine blockers "
             "outside the implementation agent's control."
+        )
+
+    def _execution_complexity_review_block(self, task: WorkspaceTask) -> str:
+        return (
+            "Execution complexity review context:\n"
+            f"- Selected complexity: {task.execution_complexity.value}\n"
+            "- Verify the implementation strategy matched the selected complexity. "
+            "For simple tasks, unnecessary delegation and process overhead are scope risks. "
+            "For complex tasks, lack of decomposition, delegated specialist work where available, "
+            "or missing integrator-level validation can be blocking. For auto tasks, verify the "
+            "agent explicitly chose and followed a simple or complex strategy.\n\n"
         )
 
     def _autonomous_review_block(self, task: WorkspaceTask) -> str:
