@@ -219,14 +219,24 @@
             :disabled="isPending(sessionActionKey('open', agent.id))"
             @click="openSession(agent)"
           >
-            <span
-              class="agent-status-dot"
-              :data-status="agentRuntimeStatus(agent)"
-            />
+            <span class="agent-status-avatar-wrap">
+              <AgentAvatar
+                :agent-type="agent.agent_type"
+                size="md"
+              />
+              <span
+                class="agent-status-dot"
+                :data-status="agentRuntimeStatus(agent)"
+              />
+            </span>
             <span class="agent-status-main">
               <span class="agent-status-line">
                 <span class="agent-status-name">{{ agent.title }}</span>
                 <span class="agent-status-kind">{{ agentRoleLabel(agent) }}</span>
+                <span
+                  class="agent-status-cli"
+                  :data-kind="agent.agent_type || 'terminal'"
+                >{{ agent.agent_type || 'terminal' }}</span>
               </span>
               <span class="agent-status-detail">
                 {{ agentRuntimeDetail(agent) }}
@@ -1643,6 +1653,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
+import AgentAvatar from '@/components/AgentAvatar.vue'
 import LoadingButton from '@/components/LoadingButton.vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import NetworkAccessMenu from '@/components/NetworkAccessMenu.vue'
@@ -3360,9 +3371,9 @@ onUnmounted(() => {
 .agent-status-card-main {
   min-width: 0;
   display: grid;
-  grid-template-columns: 12px minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   border: 0;
   background: transparent;
   color: inherit;
@@ -3389,6 +3400,23 @@ onUnmounted(() => {
 .agent-status-card-main:disabled {
   cursor: wait;
   opacity: 0.8;
+}
+
+.agent-status-avatar-wrap {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.agent-status-avatar-wrap .agent-status-dot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0 2px var(--ch-color-surface);
 }
 
 .agent-status-dot {
@@ -3425,6 +3453,40 @@ onUnmounted(() => {
   color: var(--ch-color-text-muted);
   font-size: 10px;
   text-transform: uppercase;
+}
+
+.agent-status-cli {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: var(--ch-color-chip-bg);
+  color: var(--ch-color-text);
+}
+
+.agent-status-cli[data-kind='claude'] {
+  background: rgba(217, 119, 87, 0.18);
+  color: #d97757;
+}
+
+.agent-status-cli[data-kind='codex'] {
+  background: rgba(16, 163, 127, 0.18);
+  color: #10a37f;
+}
+
+.agent-status-cli[data-kind='cursor'] {
+  background: rgba(120, 120, 120, 0.22);
+  color: var(--ch-color-text);
+}
+
+.agent-status-cli[data-kind='terminal'] {
+  background: rgba(126, 231, 135, 0.16);
+  color: #7ee787;
 }
 
 .agent-status-detail {
