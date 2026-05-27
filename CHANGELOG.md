@@ -5,6 +5,11 @@
 
 ## 2026-05-27
 
+### fix: detect Cursor agent Working state
+- Add Cursor-specific working signals to `_classify_agent_status`: the `ctrl+c to stop` tail hint and a strict `Running <N> tokens` regex, so Cursor tabs no longer show as Idle while actively running
+- Cover the new path with a pytest case mirroring the captured Cursor pane
+- **Files**: backend/claude_hub/services/ttyd_manager.py, backend/tests/test_ttyd_manager.py, CHANGELOG.md
+
 ### fix: align Agent Workspace review detail markers
 - Scope the report timeline marker pseudo-element to top-level timeline entries so nested review profile and acceptance-check lists no longer show stray blue dots
 - Align inline report metadata such as Confidence on a clean baseline with the label and value in one compact row
