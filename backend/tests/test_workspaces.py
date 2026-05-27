@@ -192,6 +192,7 @@ def test_workspace_task_flow(tmp_path: Path) -> None:
     task = response.json()
     assert task["status"] == "todo"
     assert task["agent_type"] == "codex"
+    assert task["execution_complexity"] == "auto"
 
     response = client.get(f"/api/workspaces/{workspace['id']}/board")
 
@@ -296,8 +297,94 @@ def test_autonomous_task_create_defaults_and_legacy_normalization(tmp_path: Path
         }
     )
     assert normalized["task_mode"] == "reviewed"
+    assert normalized["execution_complexity"] == "auto"
     assert normalized["autonomy_policy"] is None
     assert normalized["autonomous_run"] is None
+
+
+def test_task_execution_complexity_prompts_and_legacy_normalization(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="complexity-tab",
+        port=12542,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Complexity Repo", "path": str(repo), "session_prefix": "cx"},
+    ).json()
+
+    complex_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={
+            "title": "Complex task",
+            "prompt": "Implement a broad feature with tests",
+            "execution_complexity": "complex",
+        },
+    ).json()
+    assert complex_task["execution_complexity"] == "complex"
+
+    started = client.post(f"/api/workspaces/tasks/{complex_task['id']}/start", json={}).json()
+    assignment_prompt = sent_messages[-1][1]
+    assert "Task execution complexity: complex" in assignment_prompt
+    assert "Selected complexity: complex" in assignment_prompt
+    assert "Act as the task orchestrator" in assignment_prompt
+    sent_messages.clear()
+
+    report_response = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": complex_task["id"],
+            "state": "completed",
+            "message": "Done",
+            "goal_packet": {
+                "objective": "Implement a broad feature.",
+                "acceptance_criteria": ["Feature works"],
+                "validation_plan": ["pytest"],
+                "assumptions": [],
+                "out_of_scope": [],
+                "handoff_requirements": [],
+            },
+            "acceptance_check": [
+                {
+                    "criterion": "Feature works",
+                    "status": "passed",
+                    "evidence": "Focused checks passed",
+                }
+            ],
+            "changed_files": ["backend/claude_hub/models/schemas.py"],
+            "review_decision": "request",
+            "review_reason": "Verify complex orchestration prompt",
+        },
+    )
+    assert report_response.status_code == 201
+    reviewer_prompt = sent_messages[-1][1]
+    assert "Task execution complexity: complex" in reviewer_prompt
+    assert "Execution complexity review context" in reviewer_prompt
+    assert "lack of decomposition" in reviewer_prompt
+
+    auto_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Auto task", "prompt": "Judge the size"},
+    ).json()
+    assert auto_task["execution_complexity"] == "auto"
+
+    normalized = workspace_manager._normalize_task_item(
+        {
+            **workspace_manager.tasks[auto_task["id"]].model_dump(mode="json"),
+            "execution_complexity": "overspecified",
+        }
+    )
+    assert normalized["execution_complexity"] == "auto"
 
 
 def test_autonomous_task_passes_after_evaluator_review(

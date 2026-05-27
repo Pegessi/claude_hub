@@ -10,6 +10,14 @@
 - Align inline report metadata such as Confidence on a clean baseline with the label and value in one compact row
 - **Files**: frontend/src/components/AgentWorkspaceView.vue, CHANGELOG.md
 
+### feat: add workspace task execution complexity
+- Add task-level `execution_complexity` with `auto`, `simple`, and `complex` values, defaulting old and new tasks to `auto`
+- Inject concise complexity guidance into assignment prompts so simple tasks execute directly, complex tasks orchestrate/delegate bounded subwork where available, and auto tasks choose and state a strategy first
+- Carry execution complexity into dispatcher and reviewer prompts so reviewers can verify that the implementation strategy matched the selected complexity
+- Surface an Auto/Simple/Complex selector in the Add Task modal and show the selected execution style in task assignment details
+- Add focused backend coverage for persistence defaults, legacy normalization, assignment prompt guidance, and reviewer prompt visibility
+- **Files**: backend/claude_hub/models/schemas.py, backend/claude_hub/models/__init__.py, backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspaces.py, frontend/src/types/index.ts, frontend/src/components/AgentWorkspaceView.vue, docs/working-logs/2026-05-27-task-execution-flow.md
+
 ## 2026-05-26
 
 ### feat: add workspace Review Profiles v1
