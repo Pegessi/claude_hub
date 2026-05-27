@@ -113,7 +113,6 @@
             <span class="agent-main">
               <span class="agent-line">
                 <span class="agent-name">{{ row.tab.name }}</span>
-                <span class="agent-type">{{ getTabKindLabel(row.tab) }}</span>
                 <span
                   class="agent-cli"
                   :data-kind="row.tab.agent_type || 'terminal'"
@@ -362,15 +361,6 @@ function getRowStatus(row: AgentRow): AgentRuntimeStatus {
 
 function getRowStatusText(row: AgentRow): string {
   return row.status?.status_text ?? (row.tab.is_active ? 'Idle' : 'Offline')
-}
-
-function getTabKindLabel(tab: TerminalTab): string {
-  if (props.source === 'managed') {
-    if (tab.workspace_role === 'reviewer') return 'Reviewer'
-    if (tab.workspace_role === 'dispatcher') return 'Dispatcher'
-    return tab.workspace_role === 'worker' ? 'Worker' : 'Agent'
-  }
-  return tab.agent_type || 'terminal'
 }
 
 function isManagedAgentTab(tab: TerminalTab): boolean {
