@@ -60,6 +60,9 @@ _WORKING_TAIL_PATTERNS = (
     "esc to interrupt",
     "ctrl+c to interrupt",
     "ctrl-c to interrupt",
+    # Cursor CLI shows "ctrl+c to stop" while the agent is actively running.
+    "ctrl+c to stop",
+    "ctrl-c to stop",
     "running…",
     "running...",
 )
@@ -67,6 +70,11 @@ _WORKING_TAIL_PATTERNS = (
 # Claude Code also reports active work with spinner-style status lines such
 # as "✢ Gusting… (52s · ↑ 1.5k tokens · thought for 2s)".
 _CLAUDE_WORKING_STATUS_RE = re.compile(r"^[✻✢✶✳✷✸✹✺✽✦✧]\s+\S+…\s+\(", re.MULTILINE)
+
+# Cursor CLI reports active work with a status line like "Running 662 tokens"
+# (no ellipsis, capitalized). Match it as a strict regex to avoid false hits
+# from arbitrary "running" mentions in command output.
+_CURSOR_WORKING_STATUS_RE = re.compile(r"\brunning\s+\d[\d,\.]*\s+tokens?\b", re.IGNORECASE)
 
 # Bottom-of-UI hints emitted by Claude Code / Codex when idle and waiting for
 # user input. Presence of any of these means the agent UI is showing but no
@@ -1244,6 +1252,14 @@ class TTYDManager:
                 )
 
         if _CLAUDE_WORKING_STATUS_RE.search("\n".join(status_tail_lines)):
+            return (
+                AgentRuntimeStatus.WORKING,
+                "Working",
+                "agent is processing",
+                last_changed_at,
+            )
+
+        if _CURSOR_WORKING_STATUS_RE.search("\n".join(status_tail_lines)):
             return (
                 AgentRuntimeStatus.WORKING,
                 "Working",

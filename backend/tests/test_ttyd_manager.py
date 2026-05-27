@@ -402,6 +402,40 @@ def test_codex_running_tool_status_classifies_as_working(monkeypatch: MonkeyPatc
     assert detail == "agent is processing"
 
 
+def test_cursor_running_tokens_status_classifies_as_working(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._status_snapshots = {}
+    process = TTYDProcess(
+        tab_id="tab-cursor-running",
+        port=12354,
+        name="Cursor Running",
+        agent_type=AgentType.CURSOR,
+    )
+
+    status, status_text, detail, _last_changed_at = manager._classify_agent_status(
+        process,
+        "\n".join(
+            [
+                "  Read ...c634c238-083f-42d5-8dce-ec6929738d79/snapshot.md",
+                "  $ curl -sS -X POST http://localhost:8173/api/workspaces/...",
+                "  $ ssh merlin_dev_ff45d_16 'ls /opt/tiger/xperf_gpt_triton'",
+                "",
+                "  Running 662 tokens",
+                "› Add a follow-up",
+                "ctrl+c to stop",
+                "Opus 4.7 1M High Thinking · MAX · 4.2%   Auto-run",
+            ]
+        ),
+        "hash-cursor",
+        "agent",
+    )
+
+    assert status == AgentRuntimeStatus.WORKING
+    assert status_text == "Working"
+    assert detail == "agent is processing"
+
+
 def test_codex_selection_prompt_classifies_as_attention(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
     manager = TTYDManager.__new__(TTYDManager)
