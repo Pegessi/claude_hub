@@ -100,14 +100,23 @@
             :class="{ active: row.tab.id === activeTabId }"
             @click="selectTab(row.tab.id)"
           >
-            <span
-              class="status-dot"
-              :data-status="getRowStatus(row)"
-            />
+            <span class="agent-avatar-wrap">
+              <AgentAvatar
+                :agent-type="row.tab.agent_type"
+                size="sm"
+              />
+              <span
+                class="status-dot"
+                :data-status="getRowStatus(row)"
+              />
+            </span>
             <span class="agent-main">
               <span class="agent-line">
                 <span class="agent-name">{{ row.tab.name }}</span>
-                <span class="agent-type">{{ getTabKindLabel(row.tab) }}</span>
+                <span
+                  class="agent-cli"
+                  :data-kind="row.tab.agent_type || 'terminal'"
+                >{{ row.tab.agent_type || 'terminal' }}</span>
               </span>
               <span class="agent-detail">
                 {{ getRowDetail(row) }}
@@ -136,6 +145,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
+import AgentAvatar from '@/components/AgentAvatar.vue'
 import LoadingButton from '@/components/LoadingButton.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
@@ -353,15 +363,6 @@ function getRowStatusText(row: AgentRow): string {
   return row.status?.status_text ?? (row.tab.is_active ? 'Idle' : 'Offline')
 }
 
-function getTabKindLabel(tab: TerminalTab): string {
-  if (props.source === 'managed') {
-    if (tab.workspace_role === 'reviewer') return 'Reviewer'
-    if (tab.workspace_role === 'dispatcher') return 'Dispatcher'
-    return tab.workspace_role === 'worker' ? 'Worker' : 'Agent'
-  }
-  return tab.agent_type || 'terminal'
-}
-
 function isManagedAgentTab(tab: TerminalTab): boolean {
   return tab.workspace_role !== 'reviewer' && tab.workspace_role !== 'dispatcher'
 }
@@ -480,6 +481,21 @@ onUnmounted(() => {
   flex: 0 0 auto;
   border-radius: 50%;
   background: currentColor;
+}
+
+.agent-avatar-wrap {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.agent-avatar-wrap .status-dot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 9px;
+  height: 9px;
+  box-shadow: 0 0 0 2px var(--ch-color-surface);
 }
 
 .status-trigger[data-status='idle'],
@@ -689,7 +705,7 @@ onUnmounted(() => {
 .agent-row {
   width: 100%;
   display: grid;
-  grid-template-columns: 12px minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   border: 0;
@@ -736,6 +752,40 @@ onUnmounted(() => {
   color: var(--ch-color-text-muted);
   font-size: 10px;
   text-transform: uppercase;
+}
+
+.agent-cli {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: var(--ch-color-chip-bg);
+  color: var(--ch-color-text);
+}
+
+.agent-cli[data-kind='claude'] {
+  background: rgba(217, 119, 87, 0.18);
+  color: #d97757;
+}
+
+.agent-cli[data-kind='codex'] {
+  background: rgba(16, 163, 127, 0.18);
+  color: #10a37f;
+}
+
+.agent-cli[data-kind='cursor'] {
+  background: rgba(120, 120, 120, 0.22);
+  color: var(--ch-color-text);
+}
+
+.agent-cli[data-kind='terminal'] {
+  background: rgba(126, 231, 135, 0.16);
+  color: #7ee787;
 }
 
 .agent-detail {
