@@ -2515,6 +2515,8 @@ class WorkspaceManager:
                 "openai codex",
                 "claude code",
                 "permissions:",
+                "cursor agent",
+                "/auto-run",
             )
         )
 
@@ -3207,18 +3209,19 @@ class WorkspaceManager:
         lines = [line.rstrip() for line in output.splitlines()]
         first_line = message.strip().splitlines()[0][:80] if message.strip() else ""
         is_slash_command = message.strip().startswith("/")
+        prompt_markers = ("›", ">", "❯", "→")
         tail_start = max(0, len(lines) - 16)
         tail = lines[tail_start:]
         for index, line in enumerate(tail):
             stripped = line.strip()
-            if not stripped.startswith(("›", ">", "❯")):
+            if not stripped.startswith(prompt_markers):
                 continue
-            has_pasted_placeholder = "[Pasted Content" in stripped
+            has_pasted_placeholder = "[Pasted Content" in stripped or "[Pasted text" in stripped
             has_message_prefix = bool(first_line and first_line in stripped)
             if not has_pasted_placeholder and not has_message_prefix:
                 continue
             following_lines = tail[index + 1 :]
-            if any(next_line.strip().startswith(("›", ">", "❯")) for next_line in following_lines):
+            if any(next_line.strip().startswith(prompt_markers) for next_line in following_lines):
                 continue
             following = "\n".join(following_lines[:5]).lstrip()
             if following.startswith(("•", "⏺", "●")):

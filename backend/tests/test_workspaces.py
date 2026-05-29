@@ -2473,6 +2473,44 @@ def test_tmux_pending_input_detection_matches_codex_paste_prompt() -> None:
     )
 
 
+def test_tmux_pending_input_detection_matches_cursor_paste_prompt() -> None:
+    message = "New workspace task assigned.\n\nTask description"
+
+    cursor_paste_screen = (
+        "Cursor Agent\n"
+        "v2026.05.20-2b5dd59\n"
+        "Use /auto-run to skip all approvals.\n"
+        "\n"
+        "→ [Pasted text #1 +39 lines]\n"
+        "\n"
+        "Opus 4.7 1M High Thinking · MAX\n"
+        "~/Projects/codex_workspace · main\n"
+    )
+    assert workspace_manager._message_still_in_input(cursor_paste_screen, message)
+
+    cursor_message_prefix = (
+        "→ New workspace task assigned.\n"
+        "\n"
+        "  Task description\n"
+        "\n"
+        "Opus 4.7 1M High Thinking · MAX\n"
+    )
+    assert workspace_manager._message_still_in_input(cursor_message_prefix, message)
+
+    cursor_after_submit = (
+        "→ [Pasted text #1 +39 lines]\n" "\n" "● Working\n" "Opus 4.7 1M High Thinking · MAX\n"
+    )
+    assert not workspace_manager._message_still_in_input(cursor_after_submit, message)
+
+
+def test_agent_input_ready_recognizes_cursor_banner() -> None:
+    cursor_banner = (
+        "Cursor Agent\n" "v2026.05.20-2b5dd59\n" "Use /auto-run to skip all approvals.\n"
+    )
+    assert workspace_manager._agent_input_ready(cursor_banner)
+    assert not workspace_manager._agent_input_ready("loading...\nplease wait\n")
+
+
 def test_dispatch_workspace_serializes_concurrent_dispatches(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
