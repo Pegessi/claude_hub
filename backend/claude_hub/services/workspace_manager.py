@@ -1988,20 +1988,25 @@ class WorkspaceManager:
             "Include required fixes specific enough for the implementation agent to follow.\n"
             "- Use review_needs_input only when a product, credential, environment, or requirement decision "
             "is genuinely required before review can finish.\n\n"
-            "Final review message format:\n"
+            "Reporting style:\n"
+            "- The message field must be a SHORT scannable summary so a human can read it at a glance. "
+            "Do NOT dump every finding, validation log, or full criterion list into message. "
+            "Put detailed evidence into the structured fields (validation, risks, acceptance_check, "
+            "profile_results, artifact_refs) instead.\n"
+            "- Every report must include both message_en (concise English) and message_zh (concise 中文); "
+            "keep the legacy message field as a short fallback.\n\n"
+            "Final review message body (keep each section to 1-3 short bullets, total under ~12 lines):\n"
             "Verdict: review_passed | review_failed | review_needs_input\n"
-            "Acceptance criteria checked:\n"
-            "- ...\n"
-            "Findings:\n"
-            "- Severity, file/area, issue, evidence, required fix or reason non-blocking\n"
-            "Validation reviewed:\n"
-            "- Commands/evidence reviewed, gaps, and whether gaps block acceptance\n"
-            "Risks:\n"
-            "- Residual risks or none\n\n"
+            "Summary: one or two sentences describing what was actually delivered.\n"
+            "Acceptance criteria: rollup like \"3/4 passed (1 partial: <criterion>)\"; full per-criterion "
+            "evidence belongs in the acceptance_check field.\n"
+            "Required fixes: only for review_failed; the 1-3 highest-priority concrete fixes.\n"
+            "Notes: at most one line for residual risk or follow-up; deeper detail goes in risks.\n\n"
             "Report endpoint for assigned reviews:\n"
             f"curl -sS -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
-            '-d \'{"task_id":"TASK_ID","state":"review_started","message":"Started review"}\''
+            '-d \'{"task_id":"TASK_ID","state":"review_started",'
+            '"message":"Started review","message_en":"Started review","message_zh":"开始评审"}\''
         )
 
     def _build_dispatch_decision_prompt(
@@ -2368,21 +2373,24 @@ class WorkspaceManager:
             "- review_needs_input: review cannot finish without user/product clarification, credentials, unavailable "
             "environment, or another decision the implementation agent cannot safely infer.\n\n"
             "Required final report format:\n"
+            "Keep the message itself SHORT and human-scannable. Detailed evidence belongs in the "
+            "structured report fields (validation, risks, acceptance_check, profile_results, "
+            "artifact_refs), not duplicated in the message body. Aim for under ~12 lines total.\n\n"
+            "Message body sections:\n"
             "Verdict: review_passed | review_failed | review_needs_input\n"
-            "Acceptance criteria checked:\n"
-            "- [pass/fail/unclear] criterion and evidence\n"
-            "Findings:\n"
-            "- Severity, file/area, issue, evidence, required fix or why non-blocking\n"
-            "Validation reviewed:\n"
-            "- Commands/evidence reviewed; missing or weak checks; whether gaps block acceptance\n"
-            "Profile results:\n"
-            "- For each enabled profile: status, evidence, blocking findings, non-blocking findings\n"
-            "Artifact refs:\n"
-            "- Files, screenshots, logs, message IDs, or other artifacts inspected\n"
-            "Required fixes:\n"
-            "- Only for review_failed; concrete steps for the implementation agent\n"
-            "Risks:\n"
-            "- Residual risks or none\n\n"
+            "Summary: one or two sentences on what was actually delivered for this task.\n"
+            "Acceptance criteria: a short rollup, e.g. \"3/4 passed (1 partial: <criterion>)\"; full "
+            "per-criterion evidence belongs in the acceptance_check structured field.\n"
+            "Required fixes: only for review_failed; the 1-3 highest-priority concrete fixes.\n"
+            "Notes: at most one line on residual risk, gaps, or follow-up; deeper detail goes into "
+            "the risks/validation fields.\n\n"
+            "Bilingual reporting:\n"
+            "- Every review report must include message_en (concise English) and message_zh (concise 中文) "
+            "with the same structure as above. Keep the legacy message field as a short fallback "
+            "(English is fine).\n"
+            "- Acceptance criteria details, validation logs, profile results, findings, and required fixes "
+            "go into the structured fields — populate acceptance_check, validation, risks, profile_results, "
+            "and artifact_refs as before.\n\n"
             "Trigger report JSON:\n"
             f"{trigger_report.model_dump_json()}\n\n"
             "Recent task reports JSON:\n"
@@ -2391,8 +2399,10 @@ class WorkspaceManager:
             f"curl -sS -X POST {self._report_base_url(reviewer)}/api/workspaces/sessions/{reviewer.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"review_passed",'
-            '"message":"Verdict, acceptance criteria checked, findings, validation reviewed, '
-            'required fixes if any, and risks","validation":"Checks reviewed",'
+            '"message":"Verdict + 1-2 sentence summary + acceptance rollup + notes",'
+            '"message_en":"Verdict + 1-2 sentence summary + acceptance rollup + notes",'
+            '"message_zh":"结论 + 1-2 句任务摘要 + 验收标准汇总 + 备注",'
+            '"validation":"Checks reviewed",'
             '"risks":"Residual risk or none",'
             '"review_profiles":["general"],'
             '"profile_results":[{"profile":"general","status":"passed",'
