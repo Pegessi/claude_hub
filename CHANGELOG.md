@@ -3,6 +3,14 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-05-30
+
+### feat: concise bilingual reviewer reports
+- Tighten the reviewer prompts (`_build_reviewer_bootstrap_prompt`, `_build_review_prompt`) so the review report's `message` is a short scannable summary instead of a full dump of every section: Verdict + 1-2 sentence task summary + acceptance-criteria rollup + (only if failed) top required fixes + one-line notes
+- Move detailed evidence into the structured fields the UI already renders separately (`validation`, `risks`, `acceptance_check`, `profile_results`, `artifact_refs`), removing the duplicated long-form prose from the message body
+- Require reviewers to emit bilingual `message_en` / `message_zh` in addition to the legacy `message`, matching the contract already used by implementation agents; update curl example accordingly
+- **Files**: backend/claude_hub/services/workspace_manager.py, CHANGELOG.md
+
 ## 2026-05-29
 
 ### fix: clear reviewer context between unrelated review tasks
