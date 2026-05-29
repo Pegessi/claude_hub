@@ -1497,6 +1497,17 @@ class WorkspaceManager:
             for task in self.tasks.values()
         )
 
+    def _has_prior_review_history(
+        self, reviewer_id: str, *, exclude_task_id: Optional[str] = None
+    ) -> bool:
+        for task in self.tasks.values():
+            if task.review_session_id != reviewer_id:
+                continue
+            if exclude_task_id is not None and task.id == exclude_task_id:
+                continue
+            return True
+        return False
+
     async def _request_dispatch_decision(self, workspace: Workspace, task: WorkspaceTask) -> None:
         dispatcher = await self.ensure_workspace_agent(
             workspace.id,
@@ -3021,6 +3032,18 @@ class WorkspaceManager:
             }
         )
         self._save_state()
+        is_same_task_continuation = task.review_session_id == reviewer.id
+        should_clear_context = not is_same_task_continuation and self._has_prior_review_history(
+            reviewer.id, exclude_task_id=task.id
+        )
+        if should_clear_context:
+            logger.info(
+                "Clearing reviewer context before unrelated review task_id=%s reviewer_id=%s",
+                task.id,
+                reviewer.id,
+            )
+            await self.send_session_message(reviewer.id, "/clear")
+            await asyncio.sleep(0.5)
         await self.send_session_message(
             reviewer.id,
             self._build_review_prompt(

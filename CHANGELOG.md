@@ -5,6 +5,13 @@
 
 ## 2026-05-29
 
+### fix: clear reviewer context between unrelated review tasks
+- Send `/clear` to the reviewer session before assigning a new review when the reviewer has prior task history and the incoming task differs from its last reviewed task; this prevents the reviewer's conversation from accumulating across unrelated tasks and triggering Claude Code's auto-compact mid-review
+- Skip the clear when re-reviewing the same task on the same reviewer (e.g., review_failed → fix → completed loop) so the reviewer keeps the prior round's context for consistency
+- Skip the clear for the very first review on a fresh reviewer (no prior task history) so that no extra `/clear` round-trip is paid in the common case
+- Add focused tests covering the cross-task clear, the same-task continuation path, and confirming the existing first-review path still passes without `/clear`
+- **Files**: backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspaces.py, CHANGELOG.md
+
 ### fix: confirm pasted task input on Cursor agent dispatch
 - Recognize Cursor's `→` prompt indicator and `[Pasted text` placeholder in `_message_still_in_input`, so the workspace dispatch submit-verifier no longer reports a Cursor pane as already-submitted while the task content is still sitting in the input bar; the C-m retry loop now actually runs and pushes the paste through
 - Broaden the placeholder check from Codex-only `[Pasted Content` to also accept `[Pasted text +N lines]`, the format Claude Code and Cursor render for multi-line paste; this incidentally closes the same latent risk on Claude tabs (Codex's `›` + `[Pasted Content` was already covered)
