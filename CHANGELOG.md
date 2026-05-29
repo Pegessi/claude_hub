@@ -7,8 +7,9 @@
 
 ### fix: confirm pasted task input on Cursor agent dispatch
 - Recognize Cursor's `→` prompt indicator and `[Pasted text` placeholder in `_message_still_in_input`, so the workspace dispatch submit-verifier no longer reports a Cursor pane as already-submitted while the task content is still sitting in the input bar; the C-m retry loop now actually runs and pushes the paste through
+- Broaden the placeholder check from Codex-only `[Pasted Content` to also accept `[Pasted text +N lines]`, the format Claude Code and Cursor render for multi-line paste; this incidentally closes the same latent risk on Claude tabs (Codex's `›` + `[Pasted Content` was already covered)
 - Add Cursor banner markers (`Cursor Agent`, `/auto-run`) to `_agent_input_ready` so `send_session_message` no longer times out the 12 s pre-send wait against a fresh Cursor tab and proceeds with the load-buffer/paste flow promptly
-- Add focused pytest coverage for Cursor paste-pending detection, Cursor message-prefix detection, post-submit clearing, and Cursor banner readiness
+- Add focused pytest coverage for Cursor paste-pending detection, Cursor message-prefix detection, post-submit clearing, Cursor banner readiness, and Claude `[Pasted text` placeholder detection
 - **Files**: backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspaces.py, CHANGELOG.md
 
 ## 2026-05-27

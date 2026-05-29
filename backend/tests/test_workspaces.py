@@ -2511,6 +2511,31 @@ def test_agent_input_ready_recognizes_cursor_banner() -> None:
     assert not workspace_manager._agent_input_ready("loading...\nplease wait\n")
 
 
+def test_tmux_pending_input_detection_matches_claude_pasted_text_placeholder() -> None:
+    """Claude Code compresses multi-line paste into `[Pasted text +N lines]`.
+
+    The Codex-era placeholder check only matched `[Pasted Content`, so a
+    Claude paste that was still sitting in the input would be reported as
+    submitted and the C-m retry loop would not fire. Lock in coverage that
+    the broadened `[Pasted text` check now catches Claude's format too.
+    """
+    message = "New workspace task assigned.\n\nTask description"
+
+    claude_paste_pending = (
+        '  Try "create a util logging.py that..."\n'
+        "\n"
+        "> [Pasted text +57 lines]\n"
+        "\n"
+        "  ? for shortcuts\n"
+    )
+    assert workspace_manager._message_still_in_input(claude_paste_pending, message)
+
+    claude_after_submit = (
+        "> [Pasted text +57 lines]\n" "\n" "⏺ Working on it...\n" "  ? for shortcuts\n"
+    )
+    assert not workspace_manager._message_still_in_input(claude_after_submit, message)
+
+
 def test_dispatch_workspace_serializes_concurrent_dispatches(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
