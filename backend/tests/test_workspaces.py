@@ -1036,6 +1036,146 @@ def test_completed_report_creates_temporary_reviewer(
     assert "Review workspace task" in sent_messages[-1][1]
 
 
+def test_reviewer_clears_context_between_unrelated_tasks(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="rev-clear-tab",
+        port=12810,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Reviewer Clear", "path": str(repo), "session_prefix": "rc"},
+    ).json()
+    worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+
+    first_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "First", "prompt": "Implement first"},
+    ).json()
+    client.post(
+        f"/api/workspaces/tasks/{first_task['id']}/start",
+        json={"target_session_id": worker["id"]},
+    )
+    sent_messages.clear()
+    client.post(
+        f"/api/workspaces/sessions/{worker['id']}/reports",
+        json={"task_id": first_task["id"], "state": "completed", "message": "Done"},
+    )
+
+    first_reviewer_id = workspace_manager.tasks[first_task["id"]].review_session_id
+    assert first_reviewer_id is not None
+    first_review_messages = [m for _sess, m in sent_messages]
+    assert (
+        "/clear" not in first_review_messages
+    ), "Fresh reviewer with no prior history should not receive /clear"
+
+    pass_resp = pass_task_review(client, first_task["id"])
+    assert pass_resp.status_code == 201
+
+    second_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Second", "prompt": "Implement second"},
+    ).json()
+    client.post(
+        f"/api/workspaces/tasks/{second_task['id']}/start",
+        json={"target_session_id": worker["id"]},
+    )
+    sent_messages.clear()
+    client.post(
+        f"/api/workspaces/sessions/{worker['id']}/reports",
+        json={"task_id": second_task["id"], "state": "completed", "message": "Done"},
+    )
+
+    second_reviewer_id = workspace_manager.tasks[second_task["id"]].review_session_id
+    assert (
+        second_reviewer_id == first_reviewer_id
+    ), "Reviewer session should be reused across unrelated tasks"
+    second_messages = [m for _sess, m in sent_messages]
+    clear_index = next(
+        (i for i, m in enumerate(second_messages) if m == "/clear"),
+        None,
+    )
+    prompt_index = next(
+        (i for i, m in enumerate(second_messages) if "Review workspace task" in m),
+        None,
+    )
+    assert (
+        clear_index is not None
+    ), "Reviewer with prior task history should receive /clear before unrelated review"
+    assert prompt_index is not None
+    assert clear_index < prompt_index
+
+
+def test_reviewer_keeps_context_when_re_reviewing_same_task(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="rev-same-tab",
+        port=12820,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Reviewer Same", "path": str(repo), "session_prefix": "rs"},
+    ).json()
+    worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Same", "prompt": "Implement and revise"},
+    ).json()
+    client.post(
+        f"/api/workspaces/tasks/{task['id']}/start",
+        json={"target_session_id": worker["id"]},
+    )
+    client.post(
+        f"/api/workspaces/sessions/{worker['id']}/reports",
+        json={"task_id": task["id"], "state": "completed", "message": "v1"},
+    )
+
+    reviewer_id = workspace_manager.tasks[task["id"]].review_session_id
+    assert reviewer_id is not None
+    fail_resp = client.post(
+        f"/api/workspaces/sessions/{reviewer_id}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "review_failed",
+            "message": "Please address X.",
+        },
+    )
+    assert fail_resp.status_code == 201
+
+    sent_messages.clear()
+    client.post(
+        f"/api/workspaces/sessions/{worker['id']}/reports",
+        json={"task_id": task["id"], "state": "completed", "message": "v2"},
+    )
+
+    assert workspace_manager.tasks[task["id"]].review_session_id == reviewer_id
+    re_review_messages = [m for _sess, m in sent_messages]
+    assert (
+        "/clear" not in re_review_messages
+    ), "Re-reviewing the same task on the same reviewer must keep prior context"
+
+
 @pytest.mark.parametrize("report_state", ["ready_for_review", "blocked", "needs_input"])
 def test_agent_review_gate_states_trigger_reviewer(
     monkeypatch: MonkeyPatch,
