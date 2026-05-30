@@ -1750,18 +1750,12 @@ class WorkspaceManager:
         if session.task_id or session.current_task_id:
             current_id = session.task_id or session.current_task_id
             current = self.tasks.get(current_id) if current_id else None
-            if current and current.status not in {
-                WorkspaceTaskStatus.DONE,
-                WorkspaceTaskStatus.REVIEW,
-            }:
+            # Hold the implementation agent for as long as its task lives on
+            # the board. Only a DONE task (human-accepted) frees the agent,
+            # so a REVIEW-state task — even after review_passed — keeps its
+            # context locked for follow-up revisions or human rejection.
+            if current and current.status != WorkspaceTaskStatus.DONE:
                 return False
-            # While a task is in REVIEW we hold the original agent so that
-            # reviewer-failure feedback can re-engage the same context. Once
-            # the reviewer has approved the work, free the agent so the queue
-            # can advance without waiting for a manual "done" click.
-            if current and current.status == WorkspaceTaskStatus.REVIEW:
-                if not self._is_review_passed(current):
-                    return False
         return True
 
     def _is_review_passed(self, task: WorkspaceTask) -> bool:
@@ -1776,7 +1770,7 @@ class WorkspaceManager:
         current = self.tasks.get(current_id)
         if not current or current.status != WorkspaceTaskStatus.REVIEW:
             return False
-        return not self._is_review_passed(current)
+        return True
 
     def _next_queued_task(self, session_id: str) -> Optional[WorkspaceTask]:
         tasks = [
@@ -1998,7 +1992,7 @@ class WorkspaceManager:
             "Final review message body (keep each section to 1-3 short bullets, total under ~12 lines):\n"
             "Verdict: review_passed | review_failed | review_needs_input\n"
             "Summary: one or two sentences describing what was actually delivered.\n"
-            "Acceptance criteria: rollup like \"3/4 passed (1 partial: <criterion>)\"; full per-criterion "
+            'Acceptance criteria: rollup like "3/4 passed (1 partial: <criterion>)"; full per-criterion '
             "evidence belongs in the acceptance_check field.\n"
             "Required fixes: only for review_failed; the 1-3 highest-priority concrete fixes.\n"
             "Notes: at most one line for residual risk or follow-up; deeper detail goes in risks.\n\n"
@@ -2379,7 +2373,7 @@ class WorkspaceManager:
             "Message body sections:\n"
             "Verdict: review_passed | review_failed | review_needs_input\n"
             "Summary: one or two sentences on what was actually delivered for this task.\n"
-            "Acceptance criteria: a short rollup, e.g. \"3/4 passed (1 partial: <criterion>)\"; full "
+            'Acceptance criteria: a short rollup, e.g. "3/4 passed (1 partial: <criterion>)"; full '
             "per-criterion evidence belongs in the acceptance_check structured field.\n"
             "Required fixes: only for review_failed; the 1-3 highest-priority concrete fixes.\n"
             "Notes: at most one line on residual risk, gaps, or follow-up; deeper detail goes into "
@@ -3463,25 +3457,6 @@ class WorkspaceManager:
 
             if current_task_id:
                 task = self.tasks.get(current_task_id)
-                if (
-                    runtime_status == AgentRuntimeStatus.IDLE
-                    and task
-                    and task.status == WorkspaceTaskStatus.REVIEW
-                    and self._is_review_passed(task)
-                ):
-                    update.update(
-                        {
-                            "task_id": None,
-                            "current_task_id": None,
-                            "status": ManagedSessionStatus.IDLE,
-                            "runtime_status": AgentRuntimeStatus.IDLE,
-                            "auto_continue_task_id": None,
-                            "auto_continue_attempts": 0,
-                            "last_auto_continue_at": None,
-                        }
-                    )
-                    current_task_id = None
-                    changed = True
                 if (
                     run_auto_continue
                     and runtime_status == AgentRuntimeStatus.IDLE
