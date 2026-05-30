@@ -5,6 +5,13 @@
 
 ## 2026-05-30
 
+### fix: hold workspace agent through entire review until task is done
+- Tighten `_can_dispatch_to` so a session whose current task is in REVIEW status is no longer freed when `_is_review_passed` becomes true; the agent stays locked to the task across `ready_for_review` → `review_passed` → human-acceptance, only releasing when the task moves to DONE via `_release_task_session`
+- Drop the symmetric early-clear branch in `_refresh_session_statuses` that nulled `task_id`/`current_task_id` once an idle worker's task hit REVIEW + review_passed; status sweeps now respect the same lifetime contract
+- Update `_is_holding_unresolved_review_task` to treat any REVIEW-state task as still holding the agent so `_can_assign_or_queue_to` keeps allowing related/explicit queueing onto the same agent without preempting it
+- Replace the now-stale `test_idle_review_task_releases_agent_for_queued_dispatch` and `test_request_changes_rejects_busy_original_agent` cases with assertions that match the new lock-until-done semantics: the second task queues behind the held agent, the human PATCH→DONE transition releases it, and `continue` on the held REVIEW task now succeeds because the agent never lost context
+- **Files**: backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspaces.py, CHANGELOG.md
+
 ### feat: concise bilingual reviewer reports
 - Tighten the reviewer prompts (`_build_reviewer_bootstrap_prompt`, `_build_review_prompt`) so the review report's `message` is a short scannable summary instead of a full dump of every section: Verdict + 1-2 sentence task summary + acceptance-criteria rollup + (only if failed) top required fixes + one-line notes
 - Move detailed evidence into the structured fields the UI already renders separately (`validation`, `risks`, `acceptance_check`, `profile_results`, `artifact_refs`), removing the duplicated long-form prose from the message body

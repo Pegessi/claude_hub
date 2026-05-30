@@ -1857,7 +1857,7 @@ def test_review_failed_returns_feedback_to_original_agent(
     assert "add the missing assertion" in sent_messages[-1][1]
 
 
-def test_request_changes_rejects_busy_original_agent(
+def test_request_changes_succeeds_while_agent_holds_review_task(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1906,23 +1906,26 @@ def test_request_changes_rejects_busy_original_agent(
         json={"target_session_id": worker["id"]},
     )
     assert second_started.status_code == 201
-    assert workspace_manager.tasks[second_task["id"]].status == WorkspaceTaskStatus.WORKING
+    # The original agent stays locked to the first task while it remains in
+    # REVIEW. The second task may queue behind it but cannot preempt it.
+    assert workspace_manager.tasks[second_task["id"]].status == WorkspaceTaskStatus.QUEUED
     assert (
-        workspace_manager.sessions[first_started["session_id"]].current_task_id == second_task["id"]
+        workspace_manager.sessions[first_started["session_id"]].current_task_id == first_task["id"]
     )
 
+    # Because the agent still owns the first task's context, requesting changes
+    # works and re-engages the same session.
     response = client.post(
         f"/api/workspaces/tasks/{first_task['id']}/continue",
         json={"message": "Please adjust before human acceptance."},
     )
 
-    assert response.status_code == 400
-    assert "busy with another task" in response.json()["detail"]
-    assert workspace_manager.tasks[first_task["id"]].status == WorkspaceTaskStatus.REVIEW
+    assert response.status_code == 200
+    assert workspace_manager.tasks[first_task["id"]].status == WorkspaceTaskStatus.WORKING
     assert (
-        workspace_manager.sessions[first_started["session_id"]].current_task_id == second_task["id"]
+        workspace_manager.sessions[first_started["session_id"]].current_task_id == first_task["id"]
     )
-    assert workspace_manager.tasks[second_task["id"]].status == WorkspaceTaskStatus.WORKING
+    assert workspace_manager.tasks[second_task["id"]].status == WorkspaceTaskStatus.QUEUED
 
 
 def test_start_task_dispatches_to_resident_agent(
@@ -2084,7 +2087,7 @@ def test_start_task_dispatches_to_resident_agent(
     assert board_response.json()["tasks"][0]["status"] == "working"
 
 
-def test_idle_review_task_releases_agent_for_queued_dispatch(
+def test_review_task_keeps_agent_locked_until_done(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2164,7 +2167,7 @@ def test_idle_review_task_releases_agent_for_queued_dispatch(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
             "title": "Second task",
-            "prompt": "Run after the reviewed task releases the idle agent",
+            "prompt": "Run after the reviewed task is human-accepted",
         },
     ).json()
     second_start = client.post(
@@ -2172,15 +2175,27 @@ def test_idle_review_task_releases_agent_for_queued_dispatch(
         json={},
     )
 
-    # REVIEW_PASSED is treated as approval, so the agent should be freed for
-    # the queued task without waiting for a manual "done" click.
+    # REVIEW status (even after review_passed) holds the agent so the
+    # implementation context is preserved for revisions or human rejection.
+    # The new task gets queued onto the same agent without preempting it.
     assert second_start.status_code == 201
     started_second = second_start.json()
-    assert started_second["status"] == "working"
+    assert started_second["status"] == "queued"
     assert started_second["session_id"] == session_id
     assert workspace_manager.tasks[first_task["id"]].status == WorkspaceTaskStatus.REVIEW
+    assert workspace_manager.sessions[session_id].current_task_id == first_task["id"]
+
+    # Once the human accepts the first task it moves to DONE, releasing the
+    # agent and letting the queued second task start.
+    accept_response = client.patch(
+        f"/api/workspaces/tasks/{first_task['id']}",
+        json={"status": "done"},
+    )
+    assert accept_response.status_code == 200
+    assert workspace_manager.tasks[first_task["id"]].status == WorkspaceTaskStatus.DONE
+    assert workspace_manager.tasks[second_task["id"]].status == WorkspaceTaskStatus.WORKING
     assert workspace_manager.sessions[session_id].current_task_id == second_task["id"]
-    assert "Run after the reviewed task releases the idle agent" in sent_messages[-1][1]
+    assert "Run after the reviewed task is human-accepted" in sent_messages[-1][1]
 
 
 def test_dispatch_holds_agent_during_in_flight_review(
