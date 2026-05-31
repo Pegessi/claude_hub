@@ -3,6 +3,15 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-05-31
+
+### fix: avoid frontend freeze on terminal load with large scrollback
+- Tokenise tmux history in the injected replay script with a single `split(/\r\n|\n|\r/)` instead of two regex `replace` passes plus split, eliminating multi-pass scans of the multi-MB `historyText`
+- Skip building `replayPlainText` for plain-terminal tabs (it is only consumed by `isDuplicateInitialFrame` on agent TUI tabs) and cap the agent-TUI variant to the last 200 lines / 16 KB so duplicate-frame `indexOf` checks stay cheap
+- Lower `FULL_REPLAY_VERIFY_ATTEMPTS` from 20 to 4 (each retry re-pushes the whole replay payload through xterm) and bump `FULL_REPLAY_VERIFY_DELAY_MS` to 350 ms so a stuck buffer-expansion path no longer pumps tens of MB through the parser repeatedly
+- The `/api/terminal/proxy/{tab_id}/` iframe is same-origin with the parent app, so this previously freezing synchronous work was sharing the renderer event loop with the rest of the frontend; fixing it inside the injected JS keeps the entire UI responsive during terminal load
+- **Files**: backend/claude_hub/api/terminal.py, CHANGELOG.md
+
 ## 2026-05-30
 
 ### fix: hold workspace agent through entire review until task is done
