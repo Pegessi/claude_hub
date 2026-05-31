@@ -511,9 +511,13 @@ async def proxy_terminal_request(
           if (!term || replayed || typeof term.write !== 'function') return;
           replayed = true;
 
-          // The history API now returns the FULL terminal content
-          // (scrollback + visible screen) from tmux capture-pane.
-          const lines = normalizedHistoryText().replace(/\\r/g, '').split('\\n');
+          // The history API returns the FULL terminal content
+          // (scrollback + visible screen) from tmux capture-pane. Tokenise
+          // line endings in a single pass: the iframe is same-origin with
+          // the parent app, so multi-pass regexes over a tens-of-MB
+          // historyText would freeze the entire frontend during terminal
+          // load (the renderer event loop is shared with the parent).
+          const lines = (historyText || '').split(/\\r\\n|\\n|\\r/);
           // Drop the trailing empty string from split('foo\\n') → ['foo','']
           if (lines.length > 0 && lines[lines.length - 1] === '') {{
             lines.pop();
@@ -532,8 +536,11 @@ async def proxy_terminal_request(
           const FULL_REPLAY_MIN_HOLD_MS = isRemoteAgentReplay ? 250 : 2500;
           const FULL_REPLAY_QUIET_MS = isRemoteAgentReplay ? 150 : 750;
           const FULL_REPLAY_MAX_HOLD_MS = isRemoteAgentReplay ? 2000 : 8000;
-          const FULL_REPLAY_VERIFY_DELAY_MS = 250;
-          const FULL_REPLAY_VERIFY_ATTEMPTS = 20;
+          const FULL_REPLAY_VERIFY_DELAY_MS = 350;
+          // Each verify attempt re-pushes the whole multi-MB replayPayload
+          // through xterm's parser; cap retries so a buffer-expansion stall
+          // cannot freeze the (same-origin) parent for tens of seconds.
+          const FULL_REPLAY_VERIFY_ATTEMPTS = 4;
           const FULL_REPLAY_WATCH_MS = 8000;
           const FULL_REPLAY_WATCH_INTERVAL_MS = 100;
           let fullReplayHoldStartedAt = 0;
@@ -542,7 +549,21 @@ async def proxy_terminal_request(
           let fullReplayFinalizing = false;
           let fullReplayVerifyAttempts = 0;
           const replayPayload = '\\x1b[H\\x1b[2J\\x1b[3J' + lines.join('\\r\\n') + cursorSeq(historyCursorX, historyCursorY);
-          const replayPlainText = lines.join('\\n');
+          // replayPlainText is only consulted by isDuplicateInitialFrame,
+          // which runs only on agent TUI tabs (filterDuplicateFrames =
+          // fullReplay && !AUTO_HISTORY_REPLAY_ENABLED). Skip building it
+          // for plain-terminal tabs and cap the agent-TUI version to the
+          // visible-screen tail so .indexOf() stays cheap.
+          const REPLAY_PLAIN_TEXT_MAX_CHARS = 16384;
+          const needsReplayPlainText = fullReplay && !AUTO_HISTORY_REPLAY_ENABLED;
+          let replayPlainText = '';
+          if (needsReplayPlainText) {{
+            const tailLines = lines.length > 200 ? lines.slice(-200) : lines;
+            const joined = tailLines.join('\\n');
+            replayPlainText = joined.length > REPLAY_PLAIN_TEXT_MAX_CHARS
+              ? joined.slice(-REPLAY_PLAIN_TEXT_MAX_CHARS)
+              : joined;
+          }}
           let replayInputListenerRegistered = false;
           let replayReleasedForInput = false;
 
