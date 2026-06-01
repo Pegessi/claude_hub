@@ -3,6 +3,22 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-06-02
+
+### feat: Auto Mode orchestrator contract with CLI-native sub-agent delegation
+- Force autonomous tasks into orchestrator mode at the prompt layer: when `task_mode=autonomous` the worker now receives an Orchestrator Contract instructing it to decompose the task and delegate to sub-agents via the runtime's native sub-agent capability (Claude `Task` tool, Cursor sub-agent, Codex fan-out) instead of doing bulk implementation/test/review in its own context
+- Define six domain-agnostic role primitives (P-PLAN / P-EXECUTE / P-VALIDATE / P-JUDGE / P-INTEGRATE / P-RESEARCH) so the same contract covers coding, image generation, doc writing, data analysis, etc.; orchestrator must declare a `workflow:` block (roles + deps + notes) in its first working report
+- Pin models per primitive on the claude runtime (P-PLAN/P-EXECUTE/P-JUDGE/P-INTEGRATE = opus; P-VALIDATE/P-RESEARCH = sonnet); P-EXECUTE that calls an external API (e.g. T2I) records `model=external:<api>` instead of an LLM model. Users cannot override per task
+- Provide two worked few-shot examples in the contract (linear coding task; image generation with feedback loop + external API) so the orchestrator learns the shape without being locked into a fixed template enum
+- Standardize the subtask hand-off envelope (`{role.id, primitive, objective, success_criteria, inputs, output_schema, tools_allowed, context_budget, return_mode}`) and default `return_mode: final-only` so sub-agents do not flood the orchestrator's context with full transcripts (lesson from Anthropic multi-agent research system + LangGraph)
+- Require a textual `subagent-ledger:` summary in the worker's review-gate report; extend `_autonomous_review_block` so the external evaluator verifies the ledger is present, role.id matches the declared workflow, and key primitives ran on opus — wrong-tier or missing entries are flagged as contract violations
+- Surface the multi-agent cost trade-off where the decision is actually made: keep only the three orchestrator-mode criteria + a soft "expensive" anchor in the AI prompt; show the concrete ~10–15× token-cost figure as hover tooltips on the Add Task complexity buttons (Auto / Simple / Complex) in the frontend
+- Per-CLI capability hint helper (`_subagent_capability_hint`) emits runtime-specific invocation snippets for claude / cursor / codex and a graceful-degradation note for plain terminal sessions; cursor and codex sub-agent model pinning is acknowledged as version-dependent and deferred to a V1.1 spike
+- Revising prompts now include an orchestrator-mode reminder so the worker keeps dispatching new sub-agent subtasks (and appending to the existing ledger) instead of folding the fix into its own context
+- New `tests/test_workspace_orchestrator_contract.py` (16 cases) asserts the contract wording, per-CLI hint branches, ledger verification text, complexity-level enforcement, and revision reminder; full backend suite passes (excluding the pre-existing Playwright `test_terminal_replay.py` asyncio-teardown issue on `main`)
+- Companion design doc captures the proposal, the cross-framework survey (Anthropic, OpenAI Swarm/Agents SDK, AutoGen, LangGraph, CrewAI, MetaGPT, Cognition/Devin, multi-agent.wiki), the eight cross-cutting lessons, and the rationale for each design choice
+- **Files**: backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspace_orchestrator_contract.py, frontend/src/components/AgentWorkspaceView.vue, docs/working-logs/2026-06-01-auto-mode-cli-subagent-orchestration.md, CHANGELOG.md
+
 ## 2026-05-31
 
 ### fix: avoid frontend freeze on terminal load with large scrollback
