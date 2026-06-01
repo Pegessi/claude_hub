@@ -2151,9 +2151,7 @@ class WorkspaceManager:
                 "if simple, execute directly."
             )
         cost_guard = (
-            "Cost guardrail: multi-agent fan-out costs roughly 10-15x a single-agent baseline "
-            "(Anthropic multi-agent research system; Cognition 'Don't Build Multi-Agents'). "
-            "Pick orchestrator mode only when at least one of these holds: "
+            "Treat orchestrator mode as expensive. Pick it only when at least one of these holds: "
             "(1) the work is breadth-first parallel across >=3 independent threads, "
             "(2) a single context window cannot hold the needed material, or "
             "(3) subtasks are cleanly isolated so a sub-agent's mistake will not pollute the "
