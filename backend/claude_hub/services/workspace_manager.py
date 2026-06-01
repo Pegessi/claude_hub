@@ -2082,7 +2082,7 @@ class WorkspaceManager:
             f"Task description:\n{task.prompt}\n\n"
             f"{attachment_note}"
             f"{self._execution_complexity_assignment_block(task)}"
-            f"{self._autonomous_assignment_block(task)}"
+            f"{self._autonomous_assignment_block(task, session.agent_type)}"
             "Start by reading the state snapshot. This workspace may contain many projects; "
             "use the task description to choose the correct directory before editing. "
             "Check for uncommitted file changes. "
@@ -2150,18 +2150,63 @@ class WorkspaceManager:
                 "orchestrate and delegate bounded subtasks where your runtime supports subagents; "
                 "if simple, execute directly."
             )
+        cost_guard = (
+            "Treat orchestrator mode as expensive. Pick it only when at least one of these holds: "
+            "(1) the work is breadth-first parallel across >=3 independent threads, "
+            "(2) a single context window cannot hold the needed material, or "
+            "(3) subtasks are cleanly isolated so a sub-agent's mistake will not pollute the "
+            "main thread. Otherwise prefer a single linear agent."
+        )
         return (
             "Execution complexity guidance:\n"
             f"- Selected complexity: {task.execution_complexity.value}\n"
-            f"- {guidance}\n\n"
+            f"- {guidance}\n"
+            f"- {cost_guard}\n\n"
         )
 
-    def _autonomous_assignment_block(self, task: WorkspaceTask) -> str:
+    def _subagent_capability_hint(self, agent_type: AgentType) -> str:
+        """Per-CLI sub-agent invocation hints for the orchestrator contract."""
+        if agent_type == AgentType.CLAUDE:
+            return (
+                "Sub-agent invocation on claude runtime:\n"
+                "- Use the Task tool with subagent_type set to a built-in or repo-shipped agent "
+                "(general-purpose, Explore, Plan, code-reviewer, or any custom .claude/agents/*.md).\n"
+                "- Pass model explicitly per the Primitive->Model pinning below; do NOT rely on inheritance.\n"
+                '- Example: Task(subagent_type="general-purpose", model="opus", '
+                'description="<role.id>", prompt="<envelope>").\n'
+            )
+        if agent_type == AgentType.CURSOR:
+            return (
+                "Sub-agent invocation on cursor runtime:\n"
+                "- Use cursor's native sub-agent / spawn capability; YOLO is on by default.\n"
+                "- Per-role model overrides on cursor sub-agents are version-dependent; if your "
+                "version cannot pin a sub-agent model, run the parent at the highest available "
+                "tier and document the limitation in the workflow.notes.\n"
+            )
+        if agent_type == AgentType.CODEX:
+            return (
+                "Sub-agent invocation on codex runtime:\n"
+                "- Use codex's subtask / fan-out capability for bounded delegations.\n"
+                "- Per-role model pinning is version-dependent; document the limitation in "
+                "workflow.notes if unsupported.\n"
+            )
+        return (
+            "Sub-agent invocation:\n"
+            "- This runtime has no native sub-agent capability. Degrade gracefully to a single-agent "
+            "execution and record the degradation in your Goal Packet assumptions. Do NOT fabricate "
+            "a sub-agent ledger.\n"
+        )
+
+    def _autonomous_assignment_block(
+        self,
+        task: WorkspaceTask,
+        agent_type: AgentType = AgentType.CLAUDE,
+    ) -> str:
         if task.task_mode != WorkspaceTaskMode.AUTONOMOUS:
             return ""
         policy = task.autonomy_policy or AutonomyPolicy()
         run = task.autonomous_run
-        return (
+        header = (
             "Autonomous Mode V1 is enabled for this task.\n"
             f"- Max iterations: {policy.max_iterations}\n"
             f"- Evaluation strictness: {policy.evaluation_strictness.value}\n"
@@ -2173,6 +2218,124 @@ class WorkspaceManager:
             "- Do not decide final pass yourself; evaluator/reviewer routing is mandatory.\n"
             "- Include concrete artifacts, changed files, validation, risks, and acceptance_check evidence.\n"
             "- On revision, address only the evaluator's blocking issues and preserve passing work.\n\n"
+        )
+        contract = self._orchestrator_contract_block(task, agent_type)
+        return header + contract
+
+    def _orchestrator_contract_block(
+        self,
+        task: WorkspaceTask,
+        agent_type: AgentType,
+    ) -> str:
+        complexity = task.execution_complexity
+        if complexity == WorkspaceTaskExecutionComplexity.SIMPLE:
+            enforcement = (
+                "Enforcement (simple): you may execute directly, but you MUST still spawn one "
+                "P-JUDGE sub-agent to do an independent pre-flight review before posting the "
+                "review-gate report.\n"
+            )
+        elif complexity == WorkspaceTaskExecutionComplexity.COMPLEX:
+            enforcement = (
+                "Enforcement (complex): orchestrator mode is REQUIRED. Your workflow MUST include "
+                "at least one P-EXECUTE and one P-JUDGE sub-agent dispatch. Posting a review-gate "
+                "report without a complete subagent ledger is a contract violation.\n"
+            )
+        else:  # AUTO
+            enforcement = (
+                "Enforcement (auto): in your first working report declare orchestrator vs single-agent "
+                "mode and justify the choice in goal_packet.assumptions. If you pick orchestrator "
+                "mode, the contract below is mandatory; if you pick single-agent, you must still "
+                "spawn one P-JUDGE sub-agent before posting the review-gate report.\n"
+            )
+
+        capability_hint = self._subagent_capability_hint(agent_type)
+
+        return (
+            "## Orchestrator Contract (Auto Mode)\n\n"
+            "You are the orchestrator and the only voice the user hears for this task. You must NOT "
+            "do bulk execution, validation, or judging in your own context. Instead, decompose the "
+            "task into bounded subtasks and delegate them to sub-agents using your runtime's native "
+            "sub-agent capability.\n\n"
+            f"{capability_hint}\n"
+            "Role primitives (domain-agnostic responsibility shapes):\n"
+            "  P-PLAN      decompose, decide subtask graph, hold the spec.\n"
+            "  P-EXECUTE   produce the artifact (code, prompt, image, doc, query, ...).\n"
+            "  P-VALIDATE  mechanical/objective check (tests, lint, schema, hashes).\n"
+            "  P-JUDGE     qualitative critique vs acceptance (review, aesthetic judge, fact check).\n"
+            "  P-INTEGRATE combine partial outputs into the final deliverable.\n"
+            "  P-RESEARCH  fetch external knowledge / docs / references.\n\n"
+            "Primitive -> Model pinning (claude runtime; users CANNOT override):\n"
+            "  P-PLAN, P-EXECUTE, P-JUDGE, P-INTEGRATE -> opus\n"
+            "  P-VALIDATE, P-RESEARCH                  -> sonnet\n"
+            "  P-EXECUTE that calls an external API (image-gen, TTS, ...) records "
+            "model=external:<api-name> instead of an LLM model.\n\n"
+            "In your first working report you MUST declare a `workflow:` block listing the concrete "
+            "roles you allocated, the dependency edges between them, and a `notes:` line explaining "
+            "why this schema fits the task. There is NO fixed enum of templates; compose roles freely "
+            "from the primitives above. The two worked examples below are inspiration, not templates "
+            "to copy verbatim.\n\n"
+            "Any non-trivial workflow MUST contain at least one P-EXECUTE and one P-JUDGE; "
+            "P-VALIDATE is required when the task has any objectively-checkable success criterion. "
+            "P-VALIDATE and P-JUDGE are SEPARATE primitives. Do NOT fold either into your own "
+            "context.\n\n"
+            "Example 1 -- Coding task (linear, all in-context LLM calls):\n"
+            "  Task: Add a soft-delete endpoint to /api/orders; reject if shipped; cover with tests.\n"
+            "  workflow:\n"
+            "    roles:\n"
+            "      - id: planner            primitive: P-PLAN      model: opus\n"
+            "        duty: decompose, list acceptance, identify ORM/router blast radius\n"
+            "      - id: implementer        primitive: P-EXECUTE   model: opus\n"
+            "        duty: edit router + service + ORM, scoped to the orders module\n"
+            "      - id: tester             primitive: P-VALIDATE  model: sonnet\n"
+            "        duty: add unit + integration tests covering shipped vs unshipped\n"
+            "      - id: internal-reviewer  primitive: P-JUDGE     model: opus\n"
+            "        duty: independent review against acceptance + REVIEW.md\n"
+            "      - id: integrator         primitive: P-INTEGRATE model: opus\n"
+            "        duty: collect changed_files + ledger, decide ready_for_review\n"
+            "    deps: planner -> implementer -> tester -> internal-reviewer -> integrator\n"
+            "    notes: Pure code change, no external API; P-RESEARCH not needed.\n\n"
+            "Example 2 -- Image generation task (feedback loop + external API):\n"
+            "  Task: Generate a hero image for the launch page (cyberpunk street, cool neon, "
+            "1920x1080, no brand logos).\n"
+            "  workflow:\n"
+            "    roles:\n"
+            "      - id: director           primitive: P-PLAN      model: opus\n"
+            "        duty: translate aesthetic spec into controllable prompt dimensions\n"
+            "      - id: prompt-author      primitive: P-EXECUTE   model: opus\n"
+            "        duty: produce 3 candidate T2I prompts (with negative prompts)\n"
+            "      - id: image-generator    primitive: P-EXECUTE   model: external:t2i.v3\n"
+            "        duty: run each candidate, return S3 URIs (no LLM tokens spent)\n"
+            "      - id: safety-validator   primitive: P-VALIDATE  model: sonnet\n"
+            "        duty: call internal logo/NSFW detector; reject failing images\n"
+            "      - id: aesthetic-judge    primitive: P-JUDGE     model: opus\n"
+            "        duty: score on composition / palette / fit; <7 triggers loop\n"
+            "      - id: integrator         primitive: P-INTEGRATE model: opus\n"
+            "        duty: bundle final URI + critique + ledger\n"
+            "    deps: |\n"
+            "      director -> prompt-author -> image-generator -> safety-validator\n"
+            "                                                   -> aesthetic-judge\n"
+            "      aesthetic-judge --(score<7)--> prompt-author    # at most 2 retries\n"
+            "      aesthetic-judge --(score>=7)--> integrator\n"
+            "    notes: P-EXECUTE appears twice (prompt authoring vs T2I call); the authoring role\n"
+            "           uses opus, the API-only role uses external:. Loop guards against single-shot misses.\n\n"
+            "Subtask envelope (use this schema for EVERY dispatch, regardless of runtime):\n"
+            "  [subtask-envelope]\n"
+            "  role.id: <as declared in workflow.roles>\n"
+            "  primitive: <P-PLAN|P-EXECUTE|P-VALIDATE|P-JUDGE|P-INTEGRATE|P-RESEARCH>\n"
+            "  objective: <one sentence -- your contract with the sub-agent>\n"
+            "  success_criteria: <bullet list mapping to goal_packet.acceptance>\n"
+            "  inputs: <files / links / prior artifacts>\n"
+            "  output_schema: <patch summary | prompt string | image URI | lint report | ...>\n"
+            "  tools_allowed: <whitelist; deny everything else>\n"
+            "  context_budget: <approximate token / step budget>\n"
+            "  return_mode: final-only      # default; opt-in to full-transcript only when auditing.\n\n"
+            "Subagent ledger (REQUIRED in your final report's validation field):\n"
+            "  subagent-ledger:\n"
+            "    - role.id=<id> primitive=<P-*> agent=<runtime:tool#kind>\n"
+            "      model=<opus|sonnet|external:api> goal=<...>\n"
+            "      decision=<accepted|rejected|retried> evidence=<paths/uris/test-names>\n"
+            "    - ...\n\n"
+            f"{enforcement}\n"
         )
 
     def _effective_review_profiles(
@@ -2436,6 +2599,20 @@ class WorkspaceManager:
             "to passed and await human acceptance. Use review_failed when targeted revision "
             "is possible within budget. Use review_needs_input when product judgment, missing "
             "credentials, unavailable artifacts, or unsafe scope prevents evaluation.\n\n"
+            "Subagent ledger verification (orchestrator contract enforcement):\n"
+            "- For complex autonomous tasks the orchestrator MUST embed a `subagent-ledger:` "
+            "section in its review-gate report's validation field. A missing or empty ledger "
+            "on a complex task is a contract violation; recommend review_failed with a blocking "
+            "issue stating the ledger is required.\n"
+            "- Each ledger entry should carry role.id, primitive (P-PLAN/P-EXECUTE/P-VALIDATE/"
+            "P-JUDGE/P-INTEGRATE/P-RESEARCH), agent, model_or_api, decision, and evidence.\n"
+            "- Verify model pinning: P-PLAN, P-EXECUTE, P-JUDGE, and P-INTEGRATE roles must run "
+            "on opus on the claude runtime; P-VALIDATE and P-RESEARCH may run on sonnet. A "
+            "P-EXECUTE role that calls an external API may instead record model=external:<api>. "
+            "Wrong-tier model on a key primitive is a contract violation.\n"
+            "- Verify the workflow.roles declared in the first working report matches the ledger "
+            "and that at least one P-EXECUTE and one P-JUDGE actually ran. P-VALIDATE is required "
+            "when the task has any objectively-checkable success criterion.\n\n"
         )
 
     def _build_continue_prompt(self, task: WorkspaceTask, payload: ContinueTaskRequest) -> str:
@@ -2454,7 +2631,19 @@ class WorkspaceManager:
             f"Task ID: {task.id}\n"
             f"Task title: {task.title}\n"
             f"Follow-up instructions:\n{follow_up}\n\n"
+            f"{self._autonomous_continue_orchestrator_reminder(task)}"
             "The task is back in working state. Report progress with the same task_id."
+        )
+
+    def _autonomous_continue_orchestrator_reminder(self, task: WorkspaceTask) -> str:
+        if task.task_mode != WorkspaceTaskMode.AUTONOMOUS:
+            return ""
+        return (
+            "Orchestrator-mode reminder: if you ran in orchestrator mode for this task, stay in "
+            "orchestrator mode for this revision. Address the evaluator's blocking issues by "
+            "dispatching new sub-agent subtasks (P-EXECUTE for fixes, P-VALIDATE for re-tests, "
+            "P-JUDGE for re-review) rather than folding the work into your own context. Append "
+            "the new ledger entries to your existing subagent ledger; do not restart it.\n\n"
         )
 
     async def send_session_message(

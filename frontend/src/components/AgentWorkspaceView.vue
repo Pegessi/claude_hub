@@ -1211,6 +1211,7 @@
               <button
                 type="button"
                 :class="['segment-button', { active: taskForm.execution_complexity === 'auto' }]"
+                title="Agent self-judges. If it picks orchestrator mode, expect roughly 10–15× the token cost of a single-agent run (Anthropic multi-agent research system; Cognition “Don't Build Multi-Agents”)."
                 @click="taskForm.execution_complexity = 'auto'"
               >
                 Auto
@@ -1218,6 +1219,7 @@
               <button
                 type="button"
                 :class="['segment-button', { active: taskForm.execution_complexity === 'simple' }]"
+                title="Single linear agent; no sub-agent fan-out, no extra cost beyond a normal task."
                 @click="taskForm.execution_complexity = 'simple'"
               >
                 Simple
@@ -1225,6 +1227,7 @@
               <button
                 type="button"
                 :class="['segment-button', { active: taskForm.execution_complexity === 'complex' }]"
+                title="Forces orchestrator mode with sub-agent delegation. Expect roughly 10–15× the token cost of a single-agent run; pick this only when the task is breadth-parallel, exceeds one context window, or splits into cleanly isolated subtasks."
                 @click="taskForm.execution_complexity = 'complex'"
               >
                 Complex
