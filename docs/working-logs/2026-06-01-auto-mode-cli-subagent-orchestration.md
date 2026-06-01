@@ -172,6 +172,18 @@ the delegation.
 | `auto` (default) | 主 Agent 在第一次 working report 就要声明：将走 orchestrator 模式还是单 agent，并在 goal packet 的 assumptions 里说明理由。Hub 不强行；但如果它自报 orchestrator 模式，则必须满足契约（含 workflow 声明）。 |
 | `complex` | **强制** orchestrator 模式：必须声明 workflow + 至少包含一次 P-EXECUTE 与一次 P-JUDGE 的 sub-agent 调用；缺失则视为契约违约（见 §6 风险）。 |
 
+**成本闸门（来自 §9 业界共识）**：sub-agent fan-out 的 token 成本约
+**10–15×** 单 agent 基线（Anthropic 多智能体研究系统自报数据；Cognition
+亦警告）。`auto` 复杂度做模式自判时，orchestrator 必须按以下三条判据
+任选其一站得住才走 orchestrator 模式，否则退化为单 agent：
+
+1. **广度并行**：任务可拆成 ≥3 条互相独立、可并行展开的子线索。
+2. **超窗口**：单 agent 单上下文塞不下全部资料 / 历史，需要分包阅读。
+3. **可清晰隔离**：子任务边界明确，子代理失误不会污染主对话。
+
+仅靠「让一个 agent 多次自我提问 / 自我纠偏」不构成走 orchestrator 模式的
+理由（参见 Cognition *Don't Build Multi-Agents*）。
+
 ### 3.2 Primitive → 模型映射（per-CLI 强制，用户不可覆盖）
 
 模型钉死的对象是**角色原语**而非具体角色名，这样图像生成任务里的
@@ -312,10 +324,107 @@ ledger 自然升级成 `AgentTeam` 模型（见 2026-05-27 §4.1）。
 - [x] §5 给出无 schema 变更的观测与审计方案（workflow 声明 + subagent ledger 文本约定，含 model / external API 字段）
 - [x] §1.3 / §3.3 / §7 阐明与 2026-05-27 团队化方案的 V1 / V2 / V3 关系
 - [x] §3.2 给出按 primitive 钉死的模型映射（P-PLAN/P-EXECUTE/P-JUDGE/P-INTEGRATE = opus；P-VALIDATE/P-RESEARCH = sonnet；P-EXECUTE 走外部 API 时填 external:），用户不可覆盖
+- [x] §9 给出业界 7 个主流多 Agent 框架的对比 + 八条共识 + 落到本提案的 5 条修正建议（含派工 envelope 标准化、final-only 默认回程、P-VALIDATE/P-JUDGE 不可合并、CrewAI tuple 借鉴）
 - [x] §6 列出风险与开放问题；§7 给出阶段性路线
 
-## 9. 参考
+## 9. 业界 Multi-Agent 框架对比
 
+### 9.1 横向扫描
+
+下表是对主流多 Agent 框架就「角色 / 工作流 / 派工 / 模型 / 验证」五个维度
+的对比（细节出处见 §10 参考）：
+
+| 框架 | 角色形态 | 工作流声明 | 派工协议 | 角色级模型 | 验证 / 评审 |
+| --- | --- | --- | --- | --- | --- |
+| **Anthropic Building Effective Agents + 多智能体研究系统** | 单一 Agent 原语 + 角色 prompt | "workflows vs agents" 两分；workflow 在代码里固化 | 显式 task spec（objective / format / tools / bounds），子代理只回**最终答案** | **显式分层**：Opus 做 lead，Sonnet 做并行 worker | evaluator-optimizer 是独立 workflow；LLM-as-judge + 人工 |
+| **OpenAI Agents SDK / Swarm** | 单一 Agent 原语 | 涌现式（用代码组合 handoff） | 两种：handoff 转控制权；agent-as-tool 返回值 | 每个 Agent 一个 `model`，run 时可 `model_override` | **Guardrails** 一等公民（input/output 校验） |
+| **Microsoft AutoGen v0.4** | 单一 Agent + Team 容器 | 部分声明（团队类）+ 涌现选 turn | `AgentTool` 包装子代理；GroupChat 广播 | 每个 Agent 一个 `model_client` | termination conditions + 可选 critic |
+| **LangGraph supervisor** | 图节点（路由 = 一类节点） | **完全声明**：图结构在代码里 | `Command(goto=..., graph=parent)`；可选只回最终消息 | 每节点独立 model + role prompt | 通常加一个 critic 节点 + 条件边 |
+| **CrewAI** | 固定 tuple：role + goal + backstory + llm + tools | Crew + Tasks + Process（sequential / hierarchical） | Task 对象；hierarchical 时 manager 调子代理并验证 | 每个 Agent 一个 `llm` | hierarchical manager 自带 validate（有争议） |
+| **MetaGPT** | **固定** 软件团队角色（PM / Architect / Engineer / QA） | 硬编码 SOP | shared message pool；按消息类型订阅 | 角色配置文件支持每角色 LLM | QaEngineer 是独立验证角色 |
+| **Cognition / Devin** | 单条主线 + 偶尔派出**有界**子代理 | 不主张 multi-agent | — | — | "Don't Build Multi-Agents"：上下文碎片化是主要敌人 |
+
+### 9.2 跨框架共识（八条）
+
+1. **可组合的角色原语优于固定 taxonomy**——只有 MetaGPT 锁死编码角色；
+   其他全部走「单一 Agent 原语 + role prompt」。我们的 6 个 primitive 与
+   主流一致，避免了 MetaGPT 那种**只能做软件项目**的死路。
+2. **声明式 workflow 是生产主流**：LangGraph / CrewAI / Anthropic / MetaGPT
+   都把结构放在 LLM 之外固化下来；纯涌现式编排（Swarm 风格）只用于开放
+   性任务。我们提案要求 orchestrator 在第一条 working report 里**声明
+   workflow**，方向正确。
+3. **角色级模型 pinning 是行业标准，不是奇技**：Anthropic 研究系统就是
+   Opus lead + Sonnet worker；CrewAI / Swarm / AutoGen / LangGraph 全都按
+   Agent 配 model。我们按 primitive 钉死的方案与 Anthropic 一致。
+4. **派工信封要结构化，不要自由消息**：Anthropic task spec、LangGraph
+   `Command`、Swarm `Result`、CrewAI Task 都是结构化对象。自由文本派工
+   会漂移。
+5. **回程契约比派工契约更关键**：LangGraph 与 Anthropic 都警告——把子代理
+   完整 transcript 回吐给 orchestrator 会**烧爆**上下文预算。**默认只回
+   最终答案 / 结构化 artifact**，需要时才 opt-in 回完整历史。
+6. **验证通常是独立角色**：evaluator-optimizer (Anthropic) / Guardrails
+   (OpenAI) / QaEngineer (MetaGPT) / Generator-Critic (multi-agent.wiki)
+   三条独立线索都把 critique 与 orchestrator 拆开。CrewAI 的 hierarchical
+   manager 把 validate 揉进 manager 是少数派且有争议。
+7. **多 Agent 有 10–15× token 成本倍数**（Anthropic 研究系统自报；
+   Cognition 也警告）。仅在 (a) 任务可广度并行 / (b) 单窗口装不下 /
+   (c) 子任务可清晰隔离 时才用——这是 §3.1 「complexity 联动」要照抄的判据。
+8. **工具 / handoff description 是最高杠杆 prompt 表面**——Anthropic
+   团队仅靠改 MCP 工具描述就把子代理任务时间砍 40%。映射到我们提案：
+   `_subagent_capability_hint` 与 `.claude/agents/*.md` 的
+   `description:` 是最值得反复打磨的字段。
+
+### 9.3 对本提案的修正建议（已并入正文）
+
+下面 5 条直接落进了 §3 / §5（如有）：
+
+1. **借 CrewAI 的 role/goal/backstory tuple 作为 primitive 的 canonical 形态**，
+   并映射到 Claude Code 的 `.claude/agents/*.md` frontmatter（`name` /
+   `description` / `tools` / `model`）。这样用户写自定义 primitive 不需要
+   学新格式，框架原生承载。→ 落入 §3 contract 的 sub-agent 描述。
+2. **standardize 派工信封**：每个 subtask brief 用同一结构 `{objective,
+   success_criteria, inputs, output_schema, tools_allowed, context_budget}`，
+   无论 Claude `Task` 还是 cursor sub-agent。→ 修订 §3 contract 文本。
+3. **回程默认 final-only**：sub-agent 默认只回「最终答案 + artifact 路径」，
+   要完整 transcript 必须显式 opt-in。→ §3 contract 写明默认。
+4. **保留 P-VALIDATE 与 P-JUDGE 各自独立、不可合并**：呼应三条独立工业
+   传统；明确写「禁止把 validate/judge 合并到 orchestrator 自身」。→ §3 与 §5。
+5. **§3.1 cost-gating 文案显式标注 10–15× 成本倍数**，并把「广度并行 /
+   超窗口 / 子任务可隔离」三条判据抄进 simple/auto 分支的提示文本。→ §3.1。
+
+下面是把 (1)(2)(3)(4) 落到 §3 contract 文本里的修订片段（粘贴用，作为
+未来 Phase 1 实现的一部分）：
+
+```
+For each subtask you dispatch, hand the sub-agent a structured envelope
+(SAME schema across claude / cursor / codex):
+
+  [subtask-envelope]
+  role.id: <as declared in workflow.roles>
+  primitive: <P-PLAN|P-EXECUTE|P-VALIDATE|P-JUDGE|P-INTEGRATE|P-RESEARCH>
+  objective: <one sentence; this is your contract with the sub-agent>
+  success_criteria: <bullet list, must map onto goal_packet.acceptance>
+  inputs: <files / links / prior artifacts>
+  output_schema: <what the sub-agent must return — patch summary,
+                  prompt string, image URI, lint report, ...>
+  tools_allowed: <whitelist; deny everything else>
+  context_budget: <approximate token / step budget>
+  return_mode: final-only        # default; ask for `full-transcript`
+                                 # only when debugging or auditing.
+
+Validation (P-VALIDATE) and Judgment (P-JUDGE) are SEPARATE primitives.
+Do NOT fold either into the orchestrator's own context. P-VALIDATE is
+mechanical/objective (tests, lint, schema, hashes); P-JUDGE is qualitative
+(code review, aesthetic critique, fact check). At least one of each must
+appear in any non-trivial workflow.
+```
+
+这块在 Phase 1 落地时应直接覆盖 §3 contract 中的 `[subtask]` 段；为避免
+本期反复修订，目前先以 §9.3 的形式锚定。
+
+## 10. 参考
+
+### 内部
 - `backend/claude_hub/services/workspace_manager.py`
   - `_build_task_assignment_prompt`、`_execution_complexity_assignment_block`、
     `_autonomous_assignment_block`、`_autonomous_review_block`、
@@ -323,5 +432,18 @@ ledger 自然升级成 `AgentTeam` 模型（见 2026-05-27 §4.1）。
 - `backend/claude_hub/services/workspace_state_policy.py`（不动，仅引用）
 - `docs/working-logs/2026-05-26-autonomous-mode-v1.md`（autonomous V1 系统综述）
 - `docs/working-logs/2026-05-27-auto-mode-team-design.md`（V2 团队化方案，本提案的下一程）
-- multi-agent.wiki：Supervisor / Generator-Critic / Refinement Loop /
-  Clarification-at-edge / HITL / Blackboard
+
+### 外部 Multi-Agent 框架（§9 调研来源）
+- Anthropic — *Building Effective Agents* / 多智能体研究系统
+  （via <https://simonwillison.net/2025/Jun/14/multi-agent-research-system/>）
+- OpenAI Agents Python SDK — <https://openai.github.io/openai-agents-python/>
+- OpenAI Swarm — <https://github.com/openai/swarm>
+- Microsoft AutoGen — <https://github.com/microsoft/autogen>
+- LangGraph supervisor — <https://github.com/langchain-ai/langgraph-supervisor-py>
+- CrewAI — <https://github.com/crewAIInc/crewAI>
+- MetaGPT — <https://github.com/geekan/MetaGPT>
+- Cognition / Devin — *Don't Build Multi-Agents* (via Latent Space)
+  <https://www.latent.space/p/cognition>
+- multi-agent.wiki — <https://multi-agent.wiki/>
+  （Supervisor / Generator-Critic / Refinement Loop / Clarification-at-edge /
+   HITL / Blackboard）
