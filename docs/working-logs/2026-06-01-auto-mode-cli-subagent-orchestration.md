@@ -100,59 +100,105 @@ Role primitives (domain-agnostic responsibility shapes):
   P-INTEGRATE — combine partial outputs into the final deliverable.
   P-RESEARCH  — fetch external knowledge / docs / references.
 
-Domain templates (illustrative; pick one or compose your own):
+In your first working report you MUST declare a `workflow:` block listing
+the concrete roles you allocated for this task and the dependency edges
+between them. There is no fixed enum of templates; you compose roles from
+the primitives above. Include a `notes:` line explaining why this schema
+fits the task. The two worked examples below demonstrate the shape — they
+are illustrative, NOT a closed list. Any non-trivial workflow MUST contain
+at least one P-EXECUTE and one P-JUDGE; P-VALIDATE is required when the
+task has any objectively-checkable success criterion.
 
-  - Coding:
-      planner(P-PLAN) → implementer(P-EXECUTE) → tester(P-VALIDATE)
-      → internal-reviewer(P-JUDGE) → integrator(P-INTEGRATE)
+────────────────────────────────────────────────────────────────────────
+Example 1 — Coding task (linear, all-in-context LLM calls)
 
-  - Image generation (T2I / I2I):
-      director(P-PLAN) → prompt-author(P-EXECUTE)
-      → image-generator(P-EXECUTE, calls external T2I/I2I API)
-      → safety-validator(P-VALIDATE, NSFW/IP checks)
-      → aesthetic-judge(P-JUDGE) → integrator(P-INTEGRATE)
-
-  - Doc / report writing:
-      outliner(P-PLAN) → writer(P-EXECUTE) → fact-checker(P-VALIDATE)
-      → editor(P-JUDGE) → integrator(P-INTEGRATE)
-
-  - Data analysis:
-      planner(P-PLAN) → query-author(P-EXECUTE)
-      → result-validator(P-VALIDATE) → narrative-writer(P-EXECUTE)
-      → reviewer(P-JUDGE) → integrator(P-INTEGRATE)
-
-  - Research / synthesis:
-      planner(P-PLAN) → researcher(P-RESEARCH) → synthesizer(P-EXECUTE)
-      → fact-checker(P-VALIDATE) → reviewer(P-JUDGE)
-      → integrator(P-INTEGRATE)
-
-In your first working report you MUST declare a workflow block, e.g.:
+Task: "Add a soft-delete endpoint to /api/orders. Reject if the order
+       has shipped. Cover with tests."
 
   workflow:
-    template: image-generation        # or `custom`
     roles:
-      - id: director           primitive: P-PLAN     model: opus
-      - id: prompt-author      primitive: P-EXECUTE  model: opus
-      - id: image-generator    primitive: P-EXECUTE  external_api: t2i.v3
-      - id: aesthetic-judge    primitive: P-JUDGE    model: opus
-      - id: integrator         primitive: P-INTEGRATE model: opus
-    deps: sequential                  # or a small DAG description
-    notes: <why this schema fits the task>
+      - id: planner
+        primitive: P-PLAN     model: opus
+        duty: decompose, list acceptance, identify ORM/router blast radius
+      - id: implementer
+        primitive: P-EXECUTE  model: opus
+        duty: edit router + service + ORM, scoped to the orders module
+      - id: tester
+        primitive: P-VALIDATE model: sonnet
+        duty: add unit + integration tests covering shipped vs unshipped
+      - id: internal-reviewer
+        primitive: P-JUDGE    model: opus
+        duty: independent review against acceptance + REVIEW.md
+      - id: integrator
+        primitive: P-INTEGRATE model: opus
+        duty: collect changed_files + ledger, decide ready_for_review
+    deps: planner → implementer → tester → internal-reviewer → integrator
+    notes: Pure code change, no external API; P-RESEARCH not needed.
 
-For each subtask you dispatch, hand the sub-agent a brief of the form:
+────────────────────────────────────────────────────────────────────────
+Example 2 — Image generation task (feedback loop + external API)
 
-  [subtask]
+Task: "Generate a hero image for the launch page: cyberpunk street scene,
+       cool neon palette, 1920x1080, no brand logos."
+
+  workflow:
+    roles:
+      - id: director
+        primitive: P-PLAN     model: opus
+        duty: translate aesthetic spec into controllable prompt dimensions
+      - id: prompt-author
+        primitive: P-EXECUTE  model: opus
+        duty: produce 3 candidate T2I prompts (with negative prompts)
+      - id: image-generator
+        primitive: P-EXECUTE  model: external:t2i.v3
+        duty: run each candidate, return S3 URIs (no LLM tokens spent)
+      - id: safety-validator
+        primitive: P-VALIDATE model: sonnet
+        duty: call internal logo/NSFW detector; reject failing images
+      - id: aesthetic-judge
+        primitive: P-JUDGE    model: opus
+        duty: score on composition / palette / fit; <7 triggers loop back
+      - id: integrator
+        primitive: P-INTEGRATE model: opus
+        duty: bundle final URI + critique + ledger
+    deps: |
+      director → prompt-author → image-generator → safety-validator
+                                                  → aesthetic-judge
+      aesthetic-judge --(score<7)--> prompt-author    # at most 2 retries
+      aesthetic-judge --(score≥7)--> integrator
+    notes: P-EXECUTE appears twice (prompt authoring vs T2I call) — the
+           authoring role uses opus, the API-only role uses external:.
+           Loop guards against single-shot misses.
+────────────────────────────────────────────────────────────────────────
+
+The two examples are deliberately different shapes (linear vs branching +
+external API + repeated primitive). Use them as inspiration; do not pick
+either verbatim unless your task genuinely matches.
+
+For each subtask you dispatch, hand the sub-agent a STRUCTURED ENVELOPE
+(same schema across claude / cursor / codex):
+
+  [subtask-envelope]
   role.id: <as declared in workflow.roles>
   primitive: <P-PLAN|P-EXECUTE|P-VALIDATE|P-JUDGE|P-INTEGRATE|P-RESEARCH>
-  goal: <one sentence>
-  inputs: <files/links/prior artifacts>
-  expected_artifacts: <patch / prompt / image-uri / report / ...>
-  acceptance: <which goal_packet.acceptance_criteria items it must satisfy>
-  report-back: <return a short structured summary; do NOT post Hub reports>
+  objective: <one sentence — your contract with the sub-agent>
+  success_criteria: <bullet list, must map to goal_packet.acceptance>
+  inputs: <files / links / prior artifacts>
+  output_schema: <what the sub-agent must return — patch summary,
+                  prompt string, image URI, lint report, ...>
+  tools_allowed: <whitelist; deny everything else>
+  context_budget: <approximate token / step budget>
+  return_mode: final-only       # default; opt-in to `full-transcript`
+                                # only when debugging or auditing.
 
 Sub-agents return summaries to YOU; only YOU post AgentReports to the Hub.
 After integrating their outputs, your own validation step confirms the
 combined result before you transition to ready_for_review.
+
+P-VALIDATE and P-JUDGE are SEPARATE primitives. Do NOT fold either into
+your own context. P-VALIDATE is mechanical/objective (tests, lint, schema,
+hashes); P-JUDGE is qualitative (code review, aesthetic critique, fact
+check). At least one of each MUST appear in any non-trivial workflow.
 
 You MUST keep an in-context "subagent ledger" that records, for each
 subtask: {role.id, primitive, goal, agent_type, model_or_api, decision
@@ -254,9 +300,10 @@ terminal runtime：N/A。
 V1 不引入新的 schema 字段，但要求 orchestrator 在以下两个位置留痕：
 
 1. **首次 `state=working` 报告**：`message` 写明「orchestrator 模式 / 单 agent
-   模式」选择；以 `workflow:` 块声明本任务挑选的角色 schema（见 §3 contract
-   末尾的范例）。如果任务不属于 §3 列出的任一模板，必须 `template: custom`
-   并在 `notes` 里说明角色拆分理由。
+   模式」选择；以 `workflow:` 块声明本任务挑选的 roles + deps + notes（见
+   §3 contract 末尾的两个 worked example）。`workflow:` 没有 `template`
+   枚举字段——orchestrator 直接从 6 个 primitive 编排，并在 `notes:` 里说明
+   角色拆分理由。
 2. **`review-gate` 报告**：`validation` 字段（已存在自由文本）末尾追加一段：
 
    ```
@@ -290,7 +337,7 @@ ledger 自然升级成 `AgentTeam` 模型（见 2026-05-27 §4.1）。
 | R3 | Orchestrator 自报 ledger 但伪造 / 走过场 | 外部 reviewer 兜底 + ledger 含 evidence (changed_files / test names)；伪造 ledger 视为高风险，建议 `review_failed`。 |
 | R4 | sub-agent 输出不可见，长链路调试难 | claude `Task` 调用结果会出现在主 conversation 中，Hub terminal 仍可见；并要求 ledger 写明每个 subtask 的关键 evidence 字段。 |
 | R5 | Sub-agent 改文件，主 Agent 无法 attribute 给具体 role | V1 接受「同一 git 工作区」，attribution 靠 ledger；V2 才上 per-role worktree。 |
-| R6 | 非编码任务（图像 / 视频 / 文档 / 数据分析）选错 workflow 模板，角色拆分不合理 | §3 给出 5 个 starter 模板覆盖典型场景；orchestrator 可以 `template: custom` 自创但要在 `notes` 里说明；外部 reviewer 在 ledger 校验时同步检查 workflow.roles 与产出物匹配性。 |
+| R6 | 非编码任务（图像 / 视频 / 文档 / 数据分析）的角色拆分不合理 | §3 contract 用 2 个 worked example（编码 + 图像生成）做 few-shot 锚点；orchestrator 必须在 `workflow.notes` 里说明拆分理由；外部 reviewer 同步检查 workflow.roles 与产出物匹配性。 |
 | R7 | P-EXECUTE 走外部 API（图像生成等）的 evidence 不可机器校验 | ledger 强制带 `output_uris` / `external_api` 字段；外部 reviewer 至少做存在性与可访问性检查；deeper 的内容质量交给同 workflow 内的 P-JUDGE 做。 |
 | Q1 | 是否对 `auto` 复杂度也强制契约？ | 默认不强制，由 orchestrator 自判；仅 `complex` 强制。如果运行一段时间发现 `auto` 任务也频繁 confuse，再升级到强制。 |
 | Q2 | 内部 R4 reviewer 是否能取代外部 reviewer？ | V1 不取代；V2 团队化方案再讨论。 |
@@ -320,7 +367,7 @@ ledger 自然升级成 `AgentTeam` 模型（见 2026-05-27 §4.1）。
 
 - [x] 本文档落到 `docs/working-logs/2026-06-01-auto-mode-cli-subagent-orchestration.md`
 - [x] §1 / §3 / §4 明确定位现有 Auto mode prompt 链路与最小改动点位
-- [x] §3 给出 6 类 role primitives（P-PLAN/P-EXECUTE/P-VALIDATE/P-JUDGE/P-INTEGRATE/P-RESEARCH）+ 至少 4 个领域模板（coding / image-gen / doc / data analysis / research）+ per-CLI runtime 的调用建议与降级策略
+- [x] §3 给出 6 类 role primitives（P-PLAN/P-EXECUTE/P-VALIDATE/P-JUDGE/P-INTEGRATE/P-RESEARCH）+ 2 个 worked example（编码线性 / 图像生成带反馈环 + 外部 API）+ per-CLI runtime 的调用建议与降级策略；不预设领域模板枚举
 - [x] §5 给出无 schema 变更的观测与审计方案（workflow 声明 + subagent ledger 文本约定，含 model / external API 字段）
 - [x] §1.3 / §3.3 / §7 阐明与 2026-05-27 团队化方案的 V1 / V2 / V3 关系
 - [x] §3.2 给出按 primitive 钉死的模型映射（P-PLAN/P-EXECUTE/P-JUDGE/P-INTEGRATE = opus；P-VALIDATE/P-RESEARCH = sonnet；P-EXECUTE 走外部 API 时填 external:），用户不可覆盖
