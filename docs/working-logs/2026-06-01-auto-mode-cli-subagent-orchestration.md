@@ -128,7 +128,37 @@ or message body so the human reviewer can audit delegation.
 | `auto` (default) | 主 Agent 在第一次 working report 就要声明：将走 orchestrator 模式还是单 agent，并在 goal packet 的 assumptions 里说明理由。Hub 不强行；但如果它自报 orchestrator 模式，则必须满足契约。 |
 | `complex` | **强制** orchestrator 模式，至少 R2 implementer + R4 internal reviewer 各一次 sub-agent 调用；缺失则视为契约违约（见 §6 风险）。 |
 
-### 3.2 与外部 reviewer / evaluator 的关系
+### 3.2 角色 → 模型映射（per-CLI 强制，用户不可覆盖）
+
+不同角色对推理深度的要求不同；Hub 在 prompt 与（可选的）shipped agent
+定义里**钉死**每个角色的模型，用户无需也无法在前端覆盖。这样既保证质量
+下限，也避免用户为了省 token 把 implementer 降级。
+
+claude runtime（`Task` tool 的 `model` 参数 / `.claude/agents/*.md` 的
+`model:` frontmatter）：
+
+| Role | 默认模型 | 选型理由 |
+| --- | --- | --- |
+| R1 planner            | **opus**   | 任务拆解 / 子任务图 / 风险预判，长链推理。 |
+| R2 implementer        | **opus**   | 代码改动质量决定整轮成败；不在这一档省钱。 |
+| R3 tester             | sonnet     | 跑测试 / 写小测 / 复现，多为机械性产出。 |
+| R4 internal-reviewer  | **opus**   | 独立批评要打得动 implementer 的产出。 |
+| R5 researcher (opt)   | sonnet     | 外部文档摘要、API 调研。 |
+
+`_subagent_capability_hint(agent_type=claude)` 输出这张表的同时给出可粘贴
+的 `Task(subagent_type=..., model=opus, ...)` 调用范例。
+
+cursor / codex runtime：sub-agent 模型显式指定能力随版本变化，先要求
+orchestrator 把整条 task 跑在父模型下（任务创建时 Hub 会用与 claude
+implementer 同档的高阶模型），不强行做角色级模型分发；待 spike 验证后
+在 V1.1 补齐。
+
+terminal runtime：N/A。
+
+不开 schema、不开前端开关。如果将来需要按任务覆盖，再走 V2
+`AutonomyPolicy.model_overrides` 路线，本期不做。
+
+### 3.3 与外部 reviewer / evaluator 的关系
 
 - 外部 AI reviewer（独立 ManagedSession，跑 `_build_review_prompt` /
   `_autonomous_review_block`）**保留不动**。它仍然是「跨 session 的独立质量
@@ -167,15 +197,16 @@ V1 不引入新的 schema 字段，但要求 orchestrator 在以下两个位置�
 
    ```
    subagent-ledger:
-     - role=R2 implementer agent=claude:Task#general-purpose
+     - role=R2 implementer agent=claude:Task#general-purpose model=opus
        goal=... decision=accepted evidence=changed_files[a.py,b.py]
-     - role=R4 internal-reviewer agent=claude:Task#code-reviewer
+     - role=R4 internal-reviewer agent=claude:Task#code-reviewer model=opus
        goal=... decision=requested_minor_fix evidence=...
      ...
    ```
 
 3. 外部 reviewer (`_autonomous_review_block`) 在评分时，把「ledger 是否
-   完整 + 子任务是否真正达成 acceptance 子集」纳入 review_passed 判据。
+   完整 + 子任务是否真正达成 acceptance + 关键角色（R2/R4）是否使用了
+   §3.2 钉死的模型」纳入 review_passed 判据。
 
 这套观测在 V1 是**纯文本约定**；如果 V2 走 ManagedSession team 路线，
 ledger 自然升级成 `AgentTeam` 模型（见 2026-05-27 §4.1）。
@@ -219,7 +250,8 @@ ledger 自然升级成 `AgentTeam` 模型（见 2026-05-27 §4.1）。
 - [x] §1 / §3 / §4 明确定位现有 Auto mode prompt 链路与最小改动点位
 - [x] §3 给出 5 类 sub-agent 角色 + per-CLI runtime 的调用建议与降级策略
 - [x] §5 给出无 schema 变更的观测与审计方案（subagent ledger 文本约定）
-- [x] §1.3 / §3.2 / §7 阐明与 2026-05-27 团队化方案的 V1 / V2 / V3 关系
+- [x] §1.3 / §3.3 / §7 阐明与 2026-05-27 团队化方案的 V1 / V2 / V3 关系
+- [x] §3.2 给出每角色钉死的模型映射，用户不可覆盖
 - [x] §6 列出风险与开放问题；§7 给出阶段性路线
 
 ## 9. 参考
