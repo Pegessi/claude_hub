@@ -218,17 +218,25 @@ the delegation.
 | `auto` (default) | 主 Agent 在第一次 working report 就要声明：将走 orchestrator 模式还是单 agent，并在 goal packet 的 assumptions 里说明理由。Hub 不强行；但如果它自报 orchestrator 模式，则必须满足契约（含 workflow 声明）。 |
 | `complex` | **强制** orchestrator 模式：必须声明 workflow + 至少包含一次 P-EXECUTE 与一次 P-JUDGE 的 sub-agent 调用；缺失则视为契约违约（见 §6 风险）。 |
 
-**成本闸门（来自 §9 业界共识）**：sub-agent fan-out 的 token 成本约
-**10–15×** 单 agent 基线（Anthropic 多智能体研究系统自报数据；Cognition
-亦警告）。`auto` 复杂度做模式自判时，orchestrator 必须按以下三条判据
-任选其一站得住才走 orchestrator 模式，否则退化为单 agent：
+**成本闸门**：
 
-1. **广度并行**：任务可拆成 ≥3 条互相独立、可并行展开的子线索。
-2. **超窗口**：单 agent 单上下文塞不下全部资料 / 历史，需要分包阅读。
-3. **可清晰隔离**：子任务边界明确，子代理失误不会污染主对话。
+- **AI prompt 端**（`_execution_complexity_assignment_block`）只下发判据，
+  用 "treat orchestrator mode as expensive" 锚定语气，**不写具体成本倍数**——
+  AI 不付账单，对它有用的是决策规则。`auto` 复杂度做模式自判时，必须按以
+  下三条判据任选其一站得住才走 orchestrator 模式：
 
-仅靠「让一个 agent 多次自我提问 / 自我纠偏」不构成走 orchestrator 模式的
-理由（参见 Cognition *Don't Build Multi-Agents*）。
+  1. **广度并行**：任务可拆成 ≥3 条互相独立、可并行展开的子线索。
+  2. **超窗口**：单 agent 单上下文塞不下全部资料 / 历史，需要分包阅读。
+  3. **可清晰隔离**：子任务边界明确，子代理失误不会污染主对话。
+
+  仅靠「让一个 agent 多次自我提问 / 自我纠偏」不构成走 orchestrator 模式的
+  理由（参见 Cognition *Don't Build Multi-Agents*）。
+
+- **前端端**（建任务表单的 complexity 选择器）三个 button 各加一条
+  hover tooltip（`title=` 属性）：Auto / Complex 按钮显式写「~10–15×
+  单 agent token 成本」（来源：Anthropic 多智能体研究系统自报数据；
+  Cognition 亦警告），Simple 注明「单线性 agent，无 fan-out 成本」。
+  用户在挑选 complexity 那一刻就看到金钱后果，AI 不需要看见这个数字。
 
 ### 3.2 Primitive → 模型映射（per-CLI 强制，用户不可覆盖）
 

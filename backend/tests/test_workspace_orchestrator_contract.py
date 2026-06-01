@@ -56,7 +56,7 @@ def test_complexity_block_includes_cost_guardrail_for_all_levels():
     for level in WorkspaceTaskExecutionComplexity:
         task = _make_task(mode=WorkspaceTaskMode.AUTONOMOUS, complexity=level)
         block = workspace_manager._execution_complexity_assignment_block(task)
-        assert "10-15x" in block, f"missing cost multiplier on {level}"
+        assert "expensive" in block, f"missing cost anchor on {level}"
         assert "breadth-first parallel" in block
         assert "cleanly isolated" in block
 
