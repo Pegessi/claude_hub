@@ -73,37 +73,80 @@
 ## Orchestrator Contract (Auto Mode)
 
 You are the *orchestrator* and the *only* voice the user hears for this task.
-You must NOT do bulk implementation, testing, or reviewing in your own
-context. Instead, decompose the task into bounded subtasks and delegate them
-to sub-agents using your runtime's native sub-agent capability:
+You must NOT do bulk execution, validation, or judging in your own context.
+Instead, decompose the task into bounded subtasks and delegate them to
+sub-agents using your runtime's native sub-agent capability:
 
 - claude  → use the Task tool with appropriate subagent_type
             (general-purpose / Explore / Plan / code-reviewer / ...).
-- cursor  → use cursor's sub-agent / spawn capability for implementer and
-            reviewer subtasks; YOLO is on by default for cursor.
+- cursor  → use cursor's sub-agent / spawn capability; YOLO is on by default.
 - codex   → use codex's subtask / fan-out capability.
 - terminal/other → no native sub-agents available; degrade to single-agent
                     execution and document the degradation in your goal
                     packet's assumptions.
 
-Mandatory roles for a non-trivial autonomous task (you allocate, you can
-re-use one sub-agent across phases, but the role boundaries must hold):
+This task is NOT assumed to be a coding task. The Hub does not prescribe a
+fixed coding-shaped role list. Instead it gives you "role primitives"
+(responsibility shapes) and you declare the concrete role schema this task
+will use, in your first working report.
 
-  R1. planner       — derive goal packet, decompose, decide subtask graph.
-  R2. implementer   — write/modify code, narrow blast radius per subtask.
-  R3. tester        — write/run tests, validate behavior, capture evidence.
-  R4. internal      — independent code-review pass against goal packet
-       reviewer    acceptance criteria, BEFORE you post review-gate report.
-  R5. researcher    — (optional) external docs / API lookup when policy
-                     allows web research.
+Role primitives (domain-agnostic responsibility shapes):
+
+  P-PLAN      — decompose, decide subtask graph, hold the spec.
+  P-EXECUTE   — produce the artifact (code, prompt, image, doc, query, ...).
+  P-VALIDATE  — mechanical/objective check (tests, schema, hashes, lint).
+  P-JUDGE     — qualitative critique vs acceptance (review, aesthetic
+                judge, fact check, rubric scoring).
+  P-INTEGRATE — combine partial outputs into the final deliverable.
+  P-RESEARCH  — fetch external knowledge / docs / references.
+
+Domain templates (illustrative; pick one or compose your own):
+
+  - Coding:
+      planner(P-PLAN) → implementer(P-EXECUTE) → tester(P-VALIDATE)
+      → internal-reviewer(P-JUDGE) → integrator(P-INTEGRATE)
+
+  - Image generation (T2I / I2I):
+      director(P-PLAN) → prompt-author(P-EXECUTE)
+      → image-generator(P-EXECUTE, calls external T2I/I2I API)
+      → safety-validator(P-VALIDATE, NSFW/IP checks)
+      → aesthetic-judge(P-JUDGE) → integrator(P-INTEGRATE)
+
+  - Doc / report writing:
+      outliner(P-PLAN) → writer(P-EXECUTE) → fact-checker(P-VALIDATE)
+      → editor(P-JUDGE) → integrator(P-INTEGRATE)
+
+  - Data analysis:
+      planner(P-PLAN) → query-author(P-EXECUTE)
+      → result-validator(P-VALIDATE) → narrative-writer(P-EXECUTE)
+      → reviewer(P-JUDGE) → integrator(P-INTEGRATE)
+
+  - Research / synthesis:
+      planner(P-PLAN) → researcher(P-RESEARCH) → synthesizer(P-EXECUTE)
+      → fact-checker(P-VALIDATE) → reviewer(P-JUDGE)
+      → integrator(P-INTEGRATE)
+
+In your first working report you MUST declare a workflow block, e.g.:
+
+  workflow:
+    template: image-generation        # or `custom`
+    roles:
+      - id: director           primitive: P-PLAN     model: opus
+      - id: prompt-author      primitive: P-EXECUTE  model: opus
+      - id: image-generator    primitive: P-EXECUTE  external_api: t2i.v3
+      - id: aesthetic-judge    primitive: P-JUDGE    model: opus
+      - id: integrator         primitive: P-INTEGRATE model: opus
+    deps: sequential                  # or a small DAG description
+    notes: <why this schema fits the task>
 
 For each subtask you dispatch, hand the sub-agent a brief of the form:
 
   [subtask]
-  role: <R1..R5>
+  role.id: <as declared in workflow.roles>
+  primitive: <P-PLAN|P-EXECUTE|P-VALIDATE|P-JUDGE|P-INTEGRATE|P-RESEARCH>
   goal: <one sentence>
   inputs: <files/links/prior artifacts>
-  expected_artifacts: <patch summary / test names / review notes / ...>
+  expected_artifacts: <patch / prompt / image-uri / report / ...>
   acceptance: <which goal_packet.acceptance_criteria items it must satisfy>
   report-back: <return a short structured summary; do NOT post Hub reports>
 
@@ -111,10 +154,11 @@ Sub-agents return summaries to YOU; only YOU post AgentReports to the Hub.
 After integrating their outputs, your own validation step confirms the
 combined result before you transition to ready_for_review.
 
-You MUST keep an in-context "subagent ledger": for each subtask record
-{role, goal, agent_type, decision (accepted/rejected/retried), evidence}.
-Include a compact ledger summary in your final report's validation field
-or message body so the human reviewer can audit delegation.
+You MUST keep an in-context "subagent ledger" that records, for each
+subtask: {role.id, primitive, goal, agent_type, model_or_api, decision
+(accepted/rejected/retried), evidence}. Include a compact ledger summary
+in your final report's validation field so the human reviewer can audit
+the delegation.
 ```
 
 ### 3.1 复杂度联动
@@ -124,33 +168,37 @@ or message body so the human reviewer can audit delegation.
 
 | `execution_complexity` | autonomous 行为 |
 | --- | --- |
-| `simple` | 仍允许直接执行；orchestrator contract 给「精简版」（仅强制 R4 internal reviewer 走一次 sub-agent，其它可由主 Agent 自己干）。 |
-| `auto` (default) | 主 Agent 在第一次 working report 就要声明：将走 orchestrator 模式还是单 agent，并在 goal packet 的 assumptions 里说明理由。Hub 不强行；但如果它自报 orchestrator 模式，则必须满足契约。 |
-| `complex` | **强制** orchestrator 模式，至少 R2 implementer + R4 internal reviewer 各一次 sub-agent 调用；缺失则视为契约违约（见 §6 风险）。 |
+| `simple` | 仍允许直接执行；orchestrator contract 给「精简版」（仅强制走一次 P-JUDGE 子代理做内审，其它可由主 Agent 自己干）。 |
+| `auto` (default) | 主 Agent 在第一次 working report 就要声明：将走 orchestrator 模式还是单 agent，并在 goal packet 的 assumptions 里说明理由。Hub 不强行；但如果它自报 orchestrator 模式，则必须满足契约（含 workflow 声明）。 |
+| `complex` | **强制** orchestrator 模式：必须声明 workflow + 至少包含一次 P-EXECUTE 与一次 P-JUDGE 的 sub-agent 调用；缺失则视为契约违约（见 §6 风险）。 |
 
-### 3.2 角色 → 模型映射（per-CLI 强制，用户不可覆盖）
+### 3.2 Primitive → 模型映射（per-CLI 强制，用户不可覆盖）
 
-不同角色对推理深度的要求不同；Hub 在 prompt 与（可选的）shipped agent
-定义里**钉死**每个角色的模型，用户无需也无法在前端覆盖。这样既保证质量
-下限，也避免用户为了省 token 把 implementer 降级。
+模型钉死的对象是**角色原语**而非具体角色名，这样图像生成任务里的
+`prompt-author` 与编码任务里的 `implementer`（都属于 P-EXECUTE）能共用同
+一档质量底线。
 
 claude runtime（`Task` tool 的 `model` 参数 / `.claude/agents/*.md` 的
 `model:` frontmatter）：
 
-| Role | 默认模型 | 选型理由 |
+| Primitive | 默认模型 | 选型理由 |
 | --- | --- | --- |
-| R1 planner            | **opus**   | 任务拆解 / 子任务图 / 风险预判，长链推理。 |
-| R2 implementer        | **opus**   | 代码改动质量决定整轮成败；不在这一档省钱。 |
-| R3 tester             | sonnet     | 跑测试 / 写小测 / 复现，多为机械性产出。 |
-| R4 internal-reviewer  | **opus**   | 独立批评要打得动 implementer 的产出。 |
-| R5 researcher (opt)   | sonnet     | 外部文档摘要、API 调研。 |
+| P-PLAN      | **opus**   | 任务拆解 / workflow 选型 / 风险预判，长链推理。 |
+| P-EXECUTE   | **opus**   | 产出物（代码 / prompt / 文稿 / 查询）的质量决定整轮成败。 |
+| P-VALIDATE  | sonnet     | 跑测试 / lint / schema 校验，多为机械性产出。 |
+| P-JUDGE     | **opus**   | 独立批评要打得动 P-EXECUTE 的产出。 |
+| P-INTEGRATE | **opus**   | 合并子产出、解决冲突，需要全局视角。 |
+| P-RESEARCH  | sonnet     | 文档摘要、API 调研，有界检索。 |
 
-`_subagent_capability_hint(agent_type=claude)` 输出这张表的同时给出可粘贴
-的 `Task(subagent_type=..., model=opus, ...)` 调用范例。
+**P-EXECUTE 的特殊情况**：当一个 P-EXECUTE 子代理只是"调外部 API"
+（图像生成、视频生成、TTS、向量检索等），并不消耗 LLM token 做生成，
+此时 `model=` 字段填 `external:<api-name>`（例如 `external:t2i.v3`），
+不强制 opus。负责把 prompt 喂给 API 的那个 P-EXECUTE 角色（如
+prompt-author）才需要 opus。
 
 cursor / codex runtime：sub-agent 模型显式指定能力随版本变化，先要求
 orchestrator 把整条 task 跑在父模型下（任务创建时 Hub 会用与 claude
-implementer 同档的高阶模型），不强行做角色级模型分发；待 spike 验证后
+P-EXECUTE 同档的高阶模型），不强行做角色级模型分发；待 spike 验证后
 在 V1.1 补齐。
 
 terminal runtime：N/A。
@@ -163,9 +211,11 @@ terminal runtime：N/A。
 - 外部 AI reviewer（独立 ManagedSession，跑 `_build_review_prompt` /
   `_autonomous_review_block`）**保留不动**。它仍然是「跨 session 的独立质量
   闸」，用来防 orchestrator 自查自评的盲区。
-- 内部 reviewer (R4) 是 orchestrator 在自己上下文里 spawn 的子 agent，
+- 内部 P-JUDGE 子代理是 orchestrator 在自己上下文里 spawn 的子 agent，
   作用是 **post 报告之前** 拦截显然不合格的 iteration——降低外部 reviewer
-  收到劣质 review-gate 报告的频率，不取代它。
+  收到劣质 review-gate 报告的频率，不取代它。对图像类任务，内部 P-JUDGE
+  也可以是「美学评审」「prompt 合规检查」这类专业 judge，与外部代码型
+  reviewer 并不冲突。
 - 这一点和 2026-05-27 设计 §4.2 的「team 内 reviewer 取代外部 reviewer」
   是有意分歧的：V1 提案选择**保留外部 reviewer**，避免改动现有 review 路由。
   是否在 V2 把外部 reviewer 收口到 team，留待团队化方案落地时再决定。
@@ -192,21 +242,29 @@ terminal runtime：N/A。
 V1 不引入新的 schema 字段，但要求 orchestrator 在以下两个位置留痕：
 
 1. **首次 `state=working` 报告**：`message` 写明「orchestrator 模式 / 单 agent
-   模式」选择，并预告 subtask 切片（高层 bullet）。
+   模式」选择；以 `workflow:` 块声明本任务挑选的角色 schema（见 §3 contract
+   末尾的范例）。如果任务不属于 §3 列出的任一模板，必须 `template: custom`
+   并在 `notes` 里说明角色拆分理由。
 2. **`review-gate` 报告**：`validation` 字段（已存在自由文本）末尾追加一段：
 
    ```
    subagent-ledger:
-     - role=R2 implementer agent=claude:Task#general-purpose model=opus
+     - role.id=implementer        primitive=P-EXECUTE
+       agent=claude:Task#general-purpose model=opus
        goal=... decision=accepted evidence=changed_files[a.py,b.py]
-     - role=R4 internal-reviewer agent=claude:Task#code-reviewer model=opus
+     - role.id=internal-reviewer  primitive=P-JUDGE
+       agent=claude:Task#code-reviewer model=opus
        goal=... decision=requested_minor_fix evidence=...
+     - role.id=image-generator    primitive=P-EXECUTE
+       agent=claude:Task#general-purpose model=external:t2i.v3
+       goal=... decision=accepted evidence=output_uris[s3://...]
      ...
    ```
 
-3. 外部 reviewer (`_autonomous_review_block`) 在评分时，把「ledger 是否
-   完整 + 子任务是否真正达成 acceptance + 关键角色（R2/R4）是否使用了
-   §3.2 钉死的模型」纳入 review_passed 判据。
+3. 外部 reviewer (`_autonomous_review_block`) 在评分时，把以下三件事纳入
+   `review_passed` 判据：(a) ledger 是否完整且每条挂得上 workflow.roles；
+   (b) 子任务是否真正达成 acceptance；(c) **关键 primitive（P-EXECUTE 中
+   非 external 的、P-JUDGE、P-INTEGRATE）是否使用了 §3.2 钉死的 opus 模型**。
 
 这套观测在 V1 是**纯文本约定**；如果 V2 走 ManagedSession team 路线，
 ledger 自然升级成 `AgentTeam` 模型（见 2026-05-27 §4.1）。
@@ -220,6 +278,8 @@ ledger 自然升级成 `AgentTeam` 模型（见 2026-05-27 §4.1）。
 | R3 | Orchestrator 自报 ledger 但伪造 / 走过场 | 外部 reviewer 兜底 + ledger 含 evidence (changed_files / test names)；伪造 ledger 视为高风险，建议 `review_failed`。 |
 | R4 | sub-agent 输出不可见，长链路调试难 | claude `Task` 调用结果会出现在主 conversation 中，Hub terminal 仍可见；并要求 ledger 写明每个 subtask 的关键 evidence 字段。 |
 | R5 | Sub-agent 改文件，主 Agent 无法 attribute 给具体 role | V1 接受「同一 git 工作区」，attribution 靠 ledger；V2 才上 per-role worktree。 |
+| R6 | 非编码任务（图像 / 视频 / 文档 / 数据分析）选错 workflow 模板，角色拆分不合理 | §3 给出 5 个 starter 模板覆盖典型场景；orchestrator 可以 `template: custom` 自创但要在 `notes` 里说明；外部 reviewer 在 ledger 校验时同步检查 workflow.roles 与产出物匹配性。 |
+| R7 | P-EXECUTE 走外部 API（图像生成等）的 evidence 不可机器校验 | ledger 强制带 `output_uris` / `external_api` 字段；外部 reviewer 至少做存在性与可访问性检查；deeper 的内容质量交给同 workflow 内的 P-JUDGE 做。 |
 | Q1 | 是否对 `auto` 复杂度也强制契约？ | 默认不强制，由 orchestrator 自判；仅 `complex` 强制。如果运行一段时间发现 `auto` 任务也频繁 confuse，再升级到强制。 |
 | Q2 | 内部 R4 reviewer 是否能取代外部 reviewer？ | V1 不取代；V2 团队化方案再讨论。 |
 | Q3 | terminal / cursor 的 sub-agent 调用语法是否稳定？ | 提案落地前需要 spike：在最新 cursor / codex CLI 上验证 sub-agent 命令；prompt 里给出版本依赖的备注。 |
@@ -248,10 +308,10 @@ ledger 自然升级成 `AgentTeam` 模型（见 2026-05-27 §4.1）。
 
 - [x] 本文档落到 `docs/working-logs/2026-06-01-auto-mode-cli-subagent-orchestration.md`
 - [x] §1 / §3 / §4 明确定位现有 Auto mode prompt 链路与最小改动点位
-- [x] §3 给出 5 类 sub-agent 角色 + per-CLI runtime 的调用建议与降级策略
-- [x] §5 给出无 schema 变更的观测与审计方案（subagent ledger 文本约定）
+- [x] §3 给出 6 类 role primitives（P-PLAN/P-EXECUTE/P-VALIDATE/P-JUDGE/P-INTEGRATE/P-RESEARCH）+ 至少 4 个领域模板（coding / image-gen / doc / data analysis / research）+ per-CLI runtime 的调用建议与降级策略
+- [x] §5 给出无 schema 变更的观测与审计方案（workflow 声明 + subagent ledger 文本约定，含 model / external API 字段）
 - [x] §1.3 / §3.3 / §7 阐明与 2026-05-27 团队化方案的 V1 / V2 / V3 关系
-- [x] §3.2 给出每角色钉死的模型映射，用户不可覆盖
+- [x] §3.2 给出按 primitive 钉死的模型映射（P-PLAN/P-EXECUTE/P-JUDGE/P-INTEGRATE = opus；P-VALIDATE/P-RESEARCH = sonnet；P-EXECUTE 走外部 API 时填 external:），用户不可覆盖
 - [x] §6 列出风险与开放问题；§7 给出阶段性路线
 
 ## 9. 参考
