@@ -3,6 +3,13 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-06-03
+
+### fix: detect pending Codex task paste above blank viewport rows
+- Trim trailing blank rows from tmux capture output before checking whether a dispatched workspace prompt is still sitting in an agent input bar; this prevents Codex panes with large pasted task prompts and empty space below the prompt from being falsely treated as submitted
+- Add regression coverage for the failure shape shown in the task screenshot: `› Ne[Pasted Content ...]` followed by model/status text and many blank capture rows
+- **Files**: backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspaces.py, CHANGELOG.md
+
 ## 2026-06-02
 
 ### feat: Auto Mode orchestrator contract with CLI-native sub-agent delegation

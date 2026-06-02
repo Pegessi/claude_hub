@@ -3423,6 +3423,8 @@ class WorkspaceManager:
 
     def _message_still_in_input(self, output: str, message: str) -> bool:
         lines = [line.rstrip() for line in output.splitlines()]
+        while lines and not lines[-1].strip():
+            lines.pop()
         first_line = message.strip().splitlines()[0][:80] if message.strip() else ""
         is_slash_command = message.strip().startswith("/")
         prompt_markers = ("›", ">", "❯", "→")
