@@ -2626,6 +2626,10 @@ def test_tmux_pending_input_detection_matches_codex_paste_prompt() -> None:
         "\n› N[Pasted Content 1360 chars]\n\n  ⎿ \xa0(no content)\n",
         message,
     )
+    assert workspace_manager._message_still_in_input(
+        "\n› Ne[Pasted Content 10513 chars]\n\n  gpt-5.5 high · ~/repo\n" + ("\n" * 30),
+        message,
+    )
 
 
 def test_tmux_pending_input_detection_matches_cursor_paste_prompt() -> None:
