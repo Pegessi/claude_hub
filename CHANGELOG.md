@@ -5,6 +5,11 @@
 
 ## 2026-06-03
 
+### fix: parallelize tab startup to shrink post-reload Reconnecting window
+- Restart `start_all_tabs` with `asyncio.gather` so the FastAPI lifespan hook no longer reattaches saved tabs one-by-one. Each `process.start()` awaits a ~1 s settle sleep, so for ~24 tabs the previous serial loop blocked the lifespan for ~40 s before any HTTP/WS request could be served — every uvicorn `--reload` therefore showed a long "Reconnecting…" overlay across all open terminals
+- After the change, the startup window is dominated by the slowest single tab (~2 s on this host) instead of N × 1.6 s, dropping the front-end reconnect window roughly proportionally to tab count
+- **Files**: backend/claude_hub/services/ttyd_manager.py, CHANGELOG.md
+
 ### fix: make autonomous model ledger checks runtime-aware
 - Relax the Auto Mode orchestrator contract for non-Claude runtimes: Codex/Cursor workers now record `model_or_api` evidence such as an actual runtime model, `runtime-default`, `unsupported:<reason>`, or `external:<api>` instead of being forced to claim Claude opus/sonnet pinning
 - Keep strict primitive-to-model verification for Claude-runtime autonomous work while telling reviewers not to fail Codex/Cursor/terminal tasks solely because Claude pinning is unavailable
