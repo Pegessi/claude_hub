@@ -5,6 +5,12 @@
 
 ## 2026-06-03
 
+### fix: make autonomous model ledger checks runtime-aware
+- Relax the Auto Mode orchestrator contract for non-Claude runtimes: Codex/Cursor workers now record `model_or_api` evidence such as an actual runtime model, `runtime-default`, `unsupported:<reason>`, or `external:<api>` instead of being forced to claim Claude opus/sonnet pinning
+- Keep strict primitive-to-model verification for Claude-runtime autonomous work while telling reviewers not to fail Codex/Cursor/terminal tasks solely because Claude pinning is unavailable
+- Add regression coverage for Codex assignment and reviewer prompt wording so autonomous evaluation remains strict about ledger evidence without imposing runtime-inapplicable model rules
+- **Files**: backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspace_orchestrator_contract.py, CHANGELOG.md
+
 ### fix: detect pending Codex task paste above blank viewport rows
 - Trim trailing blank rows from tmux capture output before checking whether a dispatched workspace prompt is still sitting in an agent input bar; this prevents Codex panes with large pasted task prompts and empty space below the prompt from being falsely treated as submitted
 - Add regression coverage for the failure shape shown in the task screenshot: `› Ne[Pasted Content ...]` followed by model/status text and many blank capture rows

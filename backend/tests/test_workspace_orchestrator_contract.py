@@ -25,12 +25,13 @@ def _make_task(
     *,
     mode: WorkspaceTaskMode,
     complexity: WorkspaceTaskExecutionComplexity,
+    agent_type: AgentType = AgentType.CLAUDE,
 ) -> WorkspaceTask:
     now = datetime.utcnow()
     return WorkspaceTask(
         id="t-1",
         workspace_id="ws-1",
-        agent_type=AgentType.CLAUDE,
+        agent_type=agent_type,
         title="t",
         prompt="p",
         status=WorkspaceTaskStatus.WORKING,
@@ -186,6 +187,18 @@ def test_autonomous_block_swaps_capability_hint_per_runtime():
     assert "no native sub-agent capability" in terminal_block
 
 
+def test_autonomous_block_codex_does_not_require_claude_model_pinning():
+    task = _make_task(
+        mode=WorkspaceTaskMode.AUTONOMOUS,
+        complexity=WorkspaceTaskExecutionComplexity.COMPLEX,
+        agent_type=AgentType.CODEX,
+    )
+    block = workspace_manager._autonomous_assignment_block(task, AgentType.CODEX)
+    assert "Claude opus/sonnet pinning is NOT required" in block
+    assert "runtime-default" in block
+    assert "model_or_api" in block
+
+
 # ---------------------------------------------------------------------------
 # _autonomous_review_block
 # ---------------------------------------------------------------------------
@@ -211,6 +224,18 @@ def test_review_block_demands_ledger_verification():
     assert "external:" in block
     # Specific guidance to fail when ledger is missing
     assert "review_failed" in block
+
+
+def test_review_block_codex_model_pinning_is_runtime_aware():
+    task = _make_task(
+        mode=WorkspaceTaskMode.AUTONOMOUS,
+        complexity=WorkspaceTaskExecutionComplexity.COMPLEX,
+        agent_type=AgentType.CODEX,
+    )
+    block = workspace_manager._autonomous_review_block(task)
+    assert "Worker runtime: codex" in block
+    assert "Do NOT fail solely because Claude opus/sonnet pinning is absent" in block
+    assert "runtime-default" in block
 
 
 # ---------------------------------------------------------------------------
