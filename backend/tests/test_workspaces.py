@@ -5157,6 +5157,53 @@ def test_update_todo_task_title_and_prompt(tmp_path: Path) -> None:
     assert stored_task.status == WorkspaceTaskStatus.TODO
 
 
+def test_update_attachment_only_todo_task_title_without_prompt(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path / "state")
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Screenshot Repo",
+            "path": str(repo),
+        },
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={
+            "title": "Original screenshot task",
+            "prompt": "",
+            "agent_type": "codex",
+            "attachments": [
+                {
+                    "filename": "screen shot.png",
+                    "mime_type": "image/png",
+                    "data_url": PNG_DATA_URL,
+                }
+            ],
+        },
+    ).json()
+    assert task["prompt"] == ""
+    assert len(task["attachments"]) == 1
+
+    response = client.patch(
+        f"/api/workspaces/tasks/{task['id']}",
+        json={"title": "Updated screenshot task"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["title"] == "Updated screenshot task"
+    assert response.json()["prompt"] == ""
+    stored_task = workspace_manager.tasks[task["id"]]
+    assert stored_task.title == "Updated screenshot task"
+    assert stored_task.prompt == ""
+    assert len(stored_task.attachments) == 1
+
+
 def test_update_task_rejects_blank_title_or_prompt(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()

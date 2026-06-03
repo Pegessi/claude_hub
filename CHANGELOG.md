@@ -7,7 +7,7 @@
 
 ### feat: allow editing todo task title and description
 - Add PATCH support for workspace task `title` and `prompt`, trimming saved text and rejecting blank title/description updates
-- Restrict title/description edits to `todo` tasks so already dispatched or completed task context is not silently rewritten
+- Restrict title/description edits to `todo` tasks so already dispatched or completed task context is not silently rewritten; attachment-only todo tasks may still be renamed without adding prompt text
 - Surface Edit actions on todo task cards and detail views with a focused title/description modal that refreshes the board after save
 - Add backend regression coverage for successful todo edits, blank value rejection, and non-todo edit rejection
 - **Files**: backend/claude_hub/api/workspaces.py, backend/claude_hub/models/schemas.py, backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspaces.py, frontend/src/components/AgentWorkspaceView.vue, frontend/src/stores/workspaceStore.ts, frontend/src/types/index.ts, docs/working-logs/2026-06-04-edit-todo-task.md, CHANGELOG.md
