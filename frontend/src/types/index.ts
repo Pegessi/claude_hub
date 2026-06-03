@@ -329,6 +329,12 @@ export interface WorkspaceTaskCreate {
   autonomy_policy?: AutonomyPolicy | null
 }
 
+export interface WorkspaceTaskUpdate {
+  title?: string
+  prompt?: string
+  status?: WorkspaceTaskStatus
+}
+
 export interface StartTaskRequest {
   agent_type?: AgentType
   target_session_id?: string | null

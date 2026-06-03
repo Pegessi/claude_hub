@@ -5,6 +5,13 @@
 
 ## 2026-06-04
 
+### feat: allow editing todo task title and description
+- Add PATCH support for workspace task `title` and `prompt`, trimming saved text and rejecting blank title/description updates
+- Restrict title/description edits to `todo` tasks so already dispatched or completed task context is not silently rewritten
+- Surface Edit actions on todo task cards and detail views with a focused title/description modal that refreshes the board after save
+- Add backend regression coverage for successful todo edits, blank value rejection, and non-todo edit rejection
+- **Files**: backend/claude_hub/api/workspaces.py, backend/claude_hub/models/schemas.py, backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspaces.py, frontend/src/components/AgentWorkspaceView.vue, frontend/src/stores/workspaceStore.ts, frontend/src/types/index.ts, docs/working-logs/2026-06-04-edit-todo-task.md, CHANGELOG.md
+
 ### fix: make task abort confirmation send an audited default reason
 - Prefill the workspace task Abort prompt with a default operator reason and treat OK with a blank value as that default, so an explicit confirmation always reaches the backend abort route instead of silently doing nothing
 - Keep Cancel as the no-op path and preserve the backend requirement that every manual abort has an audit reason

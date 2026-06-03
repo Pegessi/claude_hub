@@ -27,9 +27,9 @@ from ..models import (
     EvaluationDecision,
     EvaluationReport,
     ExecutionTarget,
-    ManualTaskControlRequest,
     ManagedSession,
     ManagedSessionStatus,
+    ManualTaskControlRequest,
     RequestTaskReviewRequest,
     ReviewDecision,
     ReviewProfile,
@@ -743,6 +743,12 @@ class WorkspaceManager:
             raise KeyError(workspace_id)
         if payload.related_task_id and payload.related_task_id not in self.tasks:
             raise KeyError(payload.related_task_id)
+        title = payload.title.strip()
+        prompt = payload.prompt.strip()
+        if not title:
+            raise ValueError("Task title is required")
+        if not prompt and not payload.attachments:
+            raise ValueError("Task description is required")
 
         task_id = str(uuid.uuid4())
         now = _now()
@@ -755,8 +761,8 @@ class WorkspaceManager:
         task = WorkspaceTask(
             id=task_id,
             workspace_id=workspace_id,
-            title=payload.title,
-            prompt=payload.prompt,
+            title=title,
+            prompt=prompt,
             attachments=attachments,
             goal_packet=payload.goal_packet,
             review_profiles=payload.review_profiles,
@@ -874,6 +880,19 @@ class WorkspaceManager:
 
         now = _now()
         update: dict[str, Any] = {"updated_at": now}
+        if payload.title is not None or payload.prompt is not None:
+            if task.status != WorkspaceTaskStatus.TODO:
+                raise ValueError("Only todo tasks can be edited")
+            title = payload.title.strip() if payload.title is not None else task.title.strip()
+            prompt = payload.prompt.strip() if payload.prompt is not None else task.prompt.strip()
+            if not title:
+                raise ValueError("Task title is required")
+            if not prompt:
+                raise ValueError("Task description is required")
+            if payload.title is not None:
+                update["title"] = title
+            if payload.prompt is not None:
+                update["prompt"] = prompt
         if payload.goal_packet is not None:
             update["goal_packet"] = payload.goal_packet
         if payload.review_profiles is not None:
