@@ -10,8 +10,8 @@ from ..models import (
     ContinueTaskRequest,
     DispatchDecisionRequest,
     EnsureWorkspaceAgentRequest,
-    ManualTaskControlRequest,
     ManagedSession,
+    ManualTaskControlRequest,
     RequestTaskReviewRequest,
     SendSessionMessageRequest,
     SpawnWorkerRequest,
@@ -130,7 +130,9 @@ async def update_task(
 ) -> WorkspaceTask:
     """Update task metadata or status."""
     if (
-        payload.status is None
+        payload.title is None
+        and payload.prompt is None
+        and payload.status is None
         and payload.goal_packet is None
         and payload.task_mode is None
         and payload.review_profiles is None
@@ -142,6 +144,8 @@ async def update_task(
         return await workspace_manager.update_task(task_id, payload)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Task not found") from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.delete("/tasks/{task_id}", status_code=204)

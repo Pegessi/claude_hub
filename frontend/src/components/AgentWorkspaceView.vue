@@ -445,6 +445,14 @@
                   >
                     Start
                   </LoadingButton>
+                  <button
+                    v-if="canEditTask(task)"
+                    type="button"
+                    class="tool-button"
+                    @click.stop="openEditTaskModal(task)"
+                  >
+                    Edit
+                  </button>
                   <LoadingButton
                     v-if="canMarkDoneTask(task)"
                     type="button"
@@ -912,6 +920,14 @@
                 >
                   Start
                 </LoadingButton>
+                <button
+                  v-if="canEditTask(selectedTask)"
+                  type="button"
+                  class="tool-button"
+                  @click="openEditTaskModal(selectedTask)"
+                >
+                  Edit
+                </button>
                 <LoadingButton
                   v-if="canMarkDoneTask(selectedTask)"
                   type="button"
@@ -1345,6 +1361,47 @@
     </div>
 
     <div
+      v-if="showEditTaskModal"
+      class="workspace-modal-overlay"
+      @click.self="closeEditTaskModal"
+    >
+      <div class="workspace-modal">
+        <h3>Edit Task</h3>
+        <form @submit.prevent="handleUpdateTask">
+          <div class="modal-field">
+            <label>Title</label>
+            <input
+              v-model="editTaskForm.title"
+              autofocus
+            >
+          </div>
+          <div class="modal-field">
+            <label>Task description</label>
+            <textarea v-model="editTaskForm.prompt" />
+          </div>
+          <div class="modal-actions">
+            <button
+              type="button"
+              class="tool-button"
+              @click="closeEditTaskModal"
+            >
+              Cancel
+            </button>
+            <LoadingButton
+              type="submit"
+              class="primary-button"
+              :disabled="!editingTaskId || isLoading || !editTaskForm.title.trim() || !editTaskForm.prompt.trim()"
+              :loading="isPending(taskActionKey('edit', editingTaskId))"
+              loading-label="Saving task"
+            >
+              Save task
+            </LoadingButton>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div
       v-if="showAgentOptionsModal"
       class="workspace-modal-overlay"
       @click.self="closeAgentOptionsModal"
@@ -1762,6 +1819,8 @@ const editingWorkspaceId = ref<string | null>(null)
 const showAgentOptionsModal = ref(false)
 const showAgentFileBrowser = ref(false)
 const showTaskModal = ref(false)
+const showEditTaskModal = ref(false)
+const editingTaskId = ref<string | null>(null)
 const workspaceSessionView = ref<WorkspaceSessionView>('agents')
 const workspaceMobileMenuRef = ref<HTMLDetailsElement | null>(null)
 const remoteProfiles = ref<RemoteProfile[]>([])
@@ -1823,6 +1882,11 @@ const taskForm = reactive({
   require_artifact_review: false,
   related_task_id: '',
   attachments: [] as DraftAttachment[],
+})
+
+const editTaskForm = reactive({
+  title: '',
+  prompt: '',
 })
 
 const activeWorkspace = computed(() =>
@@ -2139,6 +2203,10 @@ function canRequestReviewTask(task: WorkspaceTask) {
 
 function canAbortTask(task: WorkspaceTask) {
   return task.status === 'queued' || task.status === 'working' || task.status === 'review'
+}
+
+function canEditTask(task: WorkspaceTask) {
+  return task.status === 'todo'
 }
 
 function isLatestSelectedReport(report: AgentReport) {
@@ -2819,6 +2887,21 @@ function closeTaskModal() {
   resetDraftAttachments(taskForm.attachments)
 }
 
+function openEditTaskModal(task: WorkspaceTask) {
+  if (!canEditTask(task)) return
+  editingTaskId.value = task.id
+  editTaskForm.title = task.title
+  editTaskForm.prompt = task.prompt
+  showEditTaskModal.value = true
+}
+
+function closeEditTaskModal() {
+  showEditTaskModal.value = false
+  editingTaskId.value = null
+  editTaskForm.title = ''
+  editTaskForm.prompt = ''
+}
+
 async function handleCreateTask() {
   if (!taskForm.title.trim() || (!taskForm.prompt.trim() && taskForm.attachments.length === 0)) {
     return
@@ -2846,6 +2929,20 @@ async function handleCreateTask() {
     })
     resetTaskForm()
     showTaskModal.value = false
+  })
+}
+
+async function handleUpdateTask() {
+  const taskId = editingTaskId.value
+  if (!taskId || !editTaskForm.title.trim() || !editTaskForm.prompt.trim()) {
+    return
+  }
+  await runPending(taskActionKey('edit', taskId), async () => {
+    await workspaceStore.updateTask(taskId, {
+      title: editTaskForm.title.trim(),
+      prompt: editTaskForm.prompt.trim(),
+    })
+    closeEditTaskModal()
   })
 }
 

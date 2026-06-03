@@ -458,6 +458,8 @@ class WorkspaceAttachment(BaseModel):
 class WorkspaceTaskUpdate(BaseModel):
     """Payload for updating a workspace task."""
 
+    title: Optional[str] = None
+    prompt: Optional[str] = None
     status: Optional[WorkspaceTaskStatus] = None
     goal_packet: Optional[GoalPacket] = None
     task_mode: Optional[WorkspaceTaskMode] = None

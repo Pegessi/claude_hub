@@ -5118,3 +5118,119 @@ def test_update_task_requires_status_and_persists_valid_status(tmp_path: Path) -
     done_response = client.patch(f"/api/workspaces/tasks/{task['id']}", json={"status": "done"})
     assert done_response.status_code == 200
     assert done_response.json()["status"] == "done"
+
+
+def test_update_todo_task_title_and_prompt(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Editable Repo",
+            "path": str(repo),
+        },
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={
+            "title": "Original task",
+            "prompt": "Original description",
+            "agent_type": "codex",
+        },
+    ).json()
+
+    response = client.patch(
+        f"/api/workspaces/tasks/{task['id']}",
+        json={
+            "title": "  Updated task  ",
+            "prompt": "  Updated description  ",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["title"] == "Updated task"
+    assert response.json()["prompt"] == "Updated description"
+    stored_task = workspace_manager.tasks[task["id"]]
+    assert stored_task.title == "Updated task"
+    assert stored_task.prompt == "Updated description"
+    assert stored_task.status == WorkspaceTaskStatus.TODO
+
+
+def test_update_task_rejects_blank_title_or_prompt(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Validation Repo",
+            "path": str(repo),
+        },
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={
+            "title": "Original task",
+            "prompt": "Original description",
+            "agent_type": "codex",
+        },
+    ).json()
+
+    title_response = client.patch(
+        f"/api/workspaces/tasks/{task['id']}",
+        json={"title": "   "},
+    )
+    prompt_response = client.patch(
+        f"/api/workspaces/tasks/{task['id']}",
+        json={"prompt": "   "},
+    )
+
+    assert title_response.status_code == 400
+    assert title_response.json()["detail"] == "Task title is required"
+    assert prompt_response.status_code == 400
+    assert prompt_response.json()["detail"] == "Task description is required"
+    stored_task = workspace_manager.tasks[task["id"]]
+    assert stored_task.title == "Original task"
+    assert stored_task.prompt == "Original description"
+
+
+def test_update_task_rejects_title_prompt_edit_after_todo(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Started Repo",
+            "path": str(repo),
+        },
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={
+            "title": "Original task",
+            "prompt": "Original description",
+            "agent_type": "codex",
+        },
+    ).json()
+    status_response = client.patch(
+        f"/api/workspaces/tasks/{task['id']}",
+        json={"status": "done"},
+    )
+    assert status_response.status_code == 200
+
+    response = client.patch(
+        f"/api/workspaces/tasks/{task['id']}",
+        json={
+            "title": "Changed after done",
+            "prompt": "Changed description",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Only todo tasks can be edited"
+    stored_task = workspace_manager.tasks[task["id"]]
+    assert stored_task.title == "Original task"
+    assert stored_task.prompt == "Original description"
+    assert stored_task.status == WorkspaceTaskStatus.DONE
