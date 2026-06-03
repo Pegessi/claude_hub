@@ -1444,7 +1444,15 @@ class TTYDManager:
         return process.to_schema()
 
     async def start_all_tabs(self) -> None:
-        """Start all saved tabs on startup. Tmux sessions survive backend restarts."""
+        """Start all saved tabs on startup. Tmux sessions survive backend restarts.
+
+        Tabs are started in parallel: each ``process.start()`` already awaits a
+        ~1s sleep after spawning ttyd, so a sequential loop took ~N seconds for
+        N tabs and blocked FastAPI's lifespan startup. Running them concurrently
+        keeps the post-restart unavailable window roughly constant regardless of
+        tab count, which directly reduces the duration of the front-end
+        "Reconnecting…" overlay after a backend reload.
+        """
         # Ensure tmux server is running before starting any tabs
         logger.info("Ensuring tmux server is running...")
         _ensure_tmux_server()
@@ -1456,8 +1464,10 @@ class TTYDManager:
         except Exception as e:
             logger.debug(f"Could not list tmux sessions: {e}")
 
-        logger.info(f"Starting {len(self.processes)} saved tabs...")
-        for process in self.processes.values():
+        processes = list(self.processes.values())
+        logger.info(f"Starting {len(processes)} saved tabs in parallel...")
+
+        async def _start_one(process: TTYDProcess) -> None:
             try:
                 await process.start()
                 session_status = (
@@ -1468,6 +1478,8 @@ class TTYDManager:
                 )
             except Exception as e:
                 logger.error(f"Failed to start tab {process.tab_id}: {e}")
+
+        await asyncio.gather(*(_start_one(p) for p in processes))
 
     async def cleanup(self) -> None:
         """Stop ttyd processes but keep tmux sessions alive for next startup."""
