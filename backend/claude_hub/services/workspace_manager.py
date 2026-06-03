@@ -2197,6 +2197,36 @@ class WorkspaceManager:
             "a sub-agent ledger.\n"
         )
 
+    def _model_evidence_contract_block(self, agent_type: AgentType) -> str:
+        """Runtime-aware model/API evidence rules for autonomous subtask ledgers."""
+        if agent_type == AgentType.CLAUDE:
+            return (
+                "Primitive -> Model pinning (claude runtime; users CANNOT override):\n"
+                "  P-PLAN, P-EXECUTE, P-JUDGE, P-INTEGRATE -> opus\n"
+                "  P-VALIDATE, P-RESEARCH                  -> sonnet\n"
+                "  P-EXECUTE that calls an external API (image-gen, TTS, ...) records "
+                "model_or_api=external:<api-name> instead of an LLM model.\n\n"
+            )
+        if agent_type in {AgentType.CURSOR, AgentType.CODEX}:
+            return (
+                f"Primitive -> Model/API evidence ({agent_type.value} runtime):\n"
+                "- Use this runtime's native model routing and sub-agent controls. Claude opus/sonnet "
+                "pinning is NOT required for this runtime.\n"
+                "- If per-role model pinning is available, record the actual model or tier used in "
+                "`model_or_api`.\n"
+                "- If per-role model pinning is unavailable, record `model_or_api=runtime-default` "
+                "or `model_or_api=unsupported:<short-reason>` and document the limitation in "
+                "workflow.notes. This is acceptable when the rest of the ledger evidence is complete.\n"
+                "- P-EXECUTE that calls an external API (image-gen, TTS, ...) records "
+                "`model_or_api=external:<api-name>`.\n\n"
+            )
+        return (
+            "Primitive -> Model/API evidence (terminal runtime):\n"
+            "- This runtime has no native sub-agent model pinning. If you execute directly, record "
+            "`model_or_api=runtime-default` and explain the single-agent degradation in assumptions "
+            "or workflow.notes. Do NOT claim Claude opus/sonnet pinning.\n\n"
+        )
+
     def _autonomous_assignment_block(
         self,
         task: WorkspaceTask,
@@ -2249,6 +2279,7 @@ class WorkspaceManager:
             )
 
         capability_hint = self._subagent_capability_hint(agent_type)
+        model_evidence = self._model_evidence_contract_block(agent_type)
 
         return (
             "## Orchestrator Contract (Auto Mode)\n\n"
@@ -2264,16 +2295,14 @@ class WorkspaceManager:
             "  P-JUDGE     qualitative critique vs acceptance (review, aesthetic judge, fact check).\n"
             "  P-INTEGRATE combine partial outputs into the final deliverable.\n"
             "  P-RESEARCH  fetch external knowledge / docs / references.\n\n"
-            "Primitive -> Model pinning (claude runtime; users CANNOT override):\n"
-            "  P-PLAN, P-EXECUTE, P-JUDGE, P-INTEGRATE -> opus\n"
-            "  P-VALIDATE, P-RESEARCH                  -> sonnet\n"
-            "  P-EXECUTE that calls an external API (image-gen, TTS, ...) records "
-            "model=external:<api-name> instead of an LLM model.\n\n"
+            f"{model_evidence}"
             "In your first working report you MUST declare a `workflow:` block listing the concrete "
             "roles you allocated, the dependency edges between them, and a `notes:` line explaining "
             "why this schema fits the task. There is NO fixed enum of templates; compose roles freely "
-            "from the primitives above. The two worked examples below are inspiration, not templates "
-            "to copy verbatim.\n\n"
+            "from the primitives above. The two worked examples below use Claude tier labels for "
+            "illustration; non-Claude runtimes should record actual runtime model/API evidence or "
+            "runtime-default in their ledger. Treat the examples as inspiration, not templates to "
+            "copy verbatim.\n\n"
             "Any non-trivial workflow MUST contain at least one P-EXECUTE and one P-JUDGE; "
             "P-VALIDATE is required when the task has any objectively-checkable success criterion. "
             "P-VALIDATE and P-JUDGE are SEPARATE primitives. Do NOT fold either into your own "
@@ -2332,7 +2361,8 @@ class WorkspaceManager:
             "Subagent ledger (REQUIRED in your final report's validation field):\n"
             "  subagent-ledger:\n"
             "    - role.id=<id> primitive=<P-*> agent=<runtime:tool#kind>\n"
-            "      model=<opus|sonnet|external:api> goal=<...>\n"
+            "      model_or_api=<opus|sonnet|actual-model|runtime-default|unsupported:reason|external:api>\n"
+            "      goal=<...>\n"
             "      decision=<accepted|rejected|retried> evidence=<paths/uris/test-names>\n"
             "    - ...\n\n"
             f"{enforcement}\n"
@@ -2587,9 +2617,32 @@ class WorkspaceManager:
             return ""
         policy = task.autonomy_policy or AutonomyPolicy()
         run = task.autonomous_run
+        if task.agent_type == AgentType.CLAUDE:
+            model_verification = (
+                "- Verify model pinning: P-PLAN, P-EXECUTE, P-JUDGE, and P-INTEGRATE roles must run "
+                "on opus on the claude runtime; P-VALIDATE and P-RESEARCH may run on sonnet. A "
+                "P-EXECUTE role that calls an external API may instead record model_or_api=external:<api>. "
+                "Wrong-tier model on a key primitive is a contract violation.\n"
+            )
+        elif task.agent_type in {AgentType.CURSOR, AgentType.CODEX}:
+            model_verification = (
+                f"- Verify model/API evidence for the {task.agent_type.value} runtime. Do NOT fail solely "
+                "because Claude opus/sonnet pinning is absent; this runtime may not expose Claude "
+                "pinning. Accept `model_or_api=runtime-default`, `model_or_api=unsupported:<reason>`, "
+                "an actual runtime model name, or `model_or_api=external:<api>` when the ledger and "
+                "workflow.notes explain the limitation. Treat missing model/API evidence as a ledger "
+                "quality issue, not as a Claude wrong-tier violation.\n"
+            )
+        else:
+            model_verification = (
+                "- Verify the terminal-runtime degradation honestly records direct execution or "
+                "`model_or_api=runtime-default`. Do NOT require Claude opus/sonnet pinning for a "
+                "plain terminal worker, and do not accept fabricated sub-agent/model claims.\n"
+            )
         return (
             "Autonomous evaluation context:\n"
             f"- Run JSON: {run.model_dump_json() if run else 'null'}\n"
+            f"- Worker runtime: {task.agent_type.value}\n"
             f"- Max iterations: {policy.max_iterations}\n"
             f"- Evaluation strictness: {policy.evaluation_strictness.value}\n"
             f"- Require artifact review: {policy.require_artifact_review}\n\n"
@@ -2606,10 +2659,7 @@ class WorkspaceManager:
             "issue stating the ledger is required.\n"
             "- Each ledger entry should carry role.id, primitive (P-PLAN/P-EXECUTE/P-VALIDATE/"
             "P-JUDGE/P-INTEGRATE/P-RESEARCH), agent, model_or_api, decision, and evidence.\n"
-            "- Verify model pinning: P-PLAN, P-EXECUTE, P-JUDGE, and P-INTEGRATE roles must run "
-            "on opus on the claude runtime; P-VALIDATE and P-RESEARCH may run on sonnet. A "
-            "P-EXECUTE role that calls an external API may instead record model=external:<api>. "
-            "Wrong-tier model on a key primitive is a contract violation.\n"
+            f"{model_verification}"
             "- Verify the workflow.roles declared in the first working report matches the ledger "
             "and that at least one P-EXECUTE and one P-JUDGE actually ran. P-VALIDATE is required "
             "when the task has any objectively-checkable success criterion.\n\n"
