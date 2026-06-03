@@ -10,6 +10,7 @@ from ..models import (
     ContinueTaskRequest,
     DispatchDecisionRequest,
     EnsureWorkspaceAgentRequest,
+    ManualTaskControlRequest,
     ManagedSession,
     RequestTaskReviewRequest,
     SendSessionMessageRequest,
@@ -215,6 +216,21 @@ async def request_task_review(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+@router.post("/tasks/{task_id}/abort", response_model=WorkspaceTask)
+async def abort_task(
+    task_id: str,
+    payload: ManualTaskControlRequest,
+    current_user: User = Depends(get_current_user),
+) -> WorkspaceTask:
+    """Manually abort an active task and return it to the todo column."""
+    try:
+        return await workspace_manager.abort_task(task_id, payload)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Task not found") from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 @router.post("/tasks/{task_id}/dispatch-decision", response_model=WorkspaceTask)
 async def apply_dispatch_decision(
     task_id: str,
@@ -286,3 +302,5 @@ async def create_session_report(
         return await workspace_manager.create_report(managed_session_id, payload)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Session not found") from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e

@@ -3,6 +3,15 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-06-04
+
+### feat: add manual abort for stuck workspace tasks
+- Add an explicit operator abort action for queued, working, and review tasks so abnormal states caused by unresponsive workers or reviewers can be recovered without marking reviewed work as done
+- The backend abort route records a blocked audit report, persists manual abort metadata, clears pending review/human-acceptance fields, releases worker and reviewer session assignments, and returns the task to `todo` with a manual abort reason
+- Reject late worker/reviewer reports for an aborted task until it is explicitly restarted or reassigned, preventing stale terminal output from resurrecting aborted tasks back into working/review states
+- Surface the action in workspace task cards and detail actions with a required reason prompt; add focused regression coverage for stuck active-review recovery, late worker/reviewer report rejection, restart acceptance, and done-task rejection
+- **Files**: backend/claude_hub/api/workspaces.py, backend/claude_hub/models/schemas.py, backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspaces.py, frontend/src/components/AgentWorkspaceView.vue, frontend/src/stores/workspaceStore.ts, frontend/src/types/index.ts, CHANGELOG.md
+
 ## 2026-06-03
 
 ### fix: parallelize tab startup to shrink post-reload Reconnecting window

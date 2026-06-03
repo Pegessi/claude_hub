@@ -4947,6 +4947,140 @@ def test_workspace_routes_validate_missing_resources(tmp_path: Path) -> None:
     assert delete_response.status_code == 404
 
 
+def test_abort_task_returns_active_review_to_todo_and_releases_sessions(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="abort-agent",
+        port=12610,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Abort Repo", "path": str(repo), "session_prefix": "abort"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Abortable task", "prompt": "Start and get stuck"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+
+    ready_response = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "ready_for_review",
+            "message": "Ready, but reviewer may hang",
+            "review_decision": "request",
+            "review_reason": "Need independent review",
+        },
+    )
+    assert ready_response.status_code == 201
+    reviewing_task = workspace_manager.tasks[task["id"]]
+    reviewer_id = reviewing_task.review_session_id
+    assert reviewer_id is not None
+    assert reviewing_task.status == WorkspaceTaskStatus.WORKING
+    assert workspace_manager.sessions[started["session_id"]].current_task_id == task["id"]
+    assert workspace_manager.sessions[reviewer_id].current_task_id == task["id"]
+
+    abort_response = client.post(
+        f"/api/workspaces/tasks/{task['id']}/abort",
+        json={"reason": "Reviewer did not respond"},
+    )
+
+    assert abort_response.status_code == 200
+    aborted = abort_response.json()
+    assert aborted["status"] == "todo"
+    assert aborted["session_id"] is None
+    assert aborted["review_session_id"] is None
+    assert aborted["review_requested_at"] is None
+    assert aborted["manual_aborted_at"] is not None
+    assert aborted["manual_abort_reason"] == "Reviewer did not respond"
+    assert aborted["dispatch_reason"] == "Manually aborted: Reviewer did not respond"
+    assert workspace_manager.sessions[started["session_id"]].current_task_id is None
+    assert workspace_manager.sessions[started["session_id"]].status == ManagedSessionStatus.IDLE
+    assert workspace_manager.sessions[reviewer_id].current_task_id is None
+    assert workspace_manager.sessions[reviewer_id].status == ManagedSessionStatus.IDLE
+    abort_report = list(workspace_manager.reports.values())[-1]
+    assert abort_report.state.value == "blocked"
+    assert "Reviewer did not respond" in abort_report.message
+    assert abort_report.review_decision.value == "skip"
+
+    late_worker_response = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "completed",
+            "message": "Late worker completion",
+        },
+    )
+    assert late_worker_response.status_code == 400
+    assert "manually aborted" in late_worker_response.json()["detail"]
+    assert workspace_manager.tasks[task["id"]].status == WorkspaceTaskStatus.TODO
+    assert workspace_manager.sessions[started["session_id"]].current_task_id is None
+
+    late_reviewer_response = client.post(
+        f"/api/workspaces/sessions/{reviewer_id}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "review_passed",
+            "message": "Late reviewer pass",
+        },
+    )
+    assert late_reviewer_response.status_code == 400
+    assert "manually aborted" in late_reviewer_response.json()["detail"]
+    assert workspace_manager.tasks[task["id"]].status == WorkspaceTaskStatus.TODO
+    assert workspace_manager.sessions[reviewer_id].current_task_id is None
+
+    restarted = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    restarted_task = workspace_manager.tasks[task["id"]]
+    assert restarted_task.manual_aborted_at is None
+    assert restarted_task.manual_abort_reason is None
+    restarted_report_response = client.post(
+        f"/api/workspaces/sessions/{restarted['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "working",
+            "message": "Explicit restart accepted",
+        },
+    )
+    assert restarted_report_response.status_code == 201
+    assert workspace_manager.tasks[task["id"]].status == WorkspaceTaskStatus.WORKING
+
+
+def test_abort_task_rejects_done_task(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Abort Guard Repo", "path": str(repo)},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Done task", "prompt": "Already complete"},
+    ).json()
+    done_response = client.patch(f"/api/workspaces/tasks/{task['id']}", json={"status": "done"})
+    assert done_response.status_code == 200
+
+    abort_response = client.post(
+        f"/api/workspaces/tasks/{task['id']}/abort",
+        json={"reason": "Should not be allowed"},
+    )
+
+    assert abort_response.status_code == 400
+    assert "Only queued, working, or review tasks" in abort_response.json()["detail"]
+    assert workspace_manager.tasks[task["id"]].status == WorkspaceTaskStatus.DONE
+
+
 def test_update_task_requires_status_and_persists_valid_status(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()

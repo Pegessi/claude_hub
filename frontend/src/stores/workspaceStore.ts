@@ -6,6 +6,7 @@ import type {
   AgentType,
   ContinueTaskRequest,
   EnsureWorkspaceAgentRequest,
+  ManualTaskControlRequest,
   ManagedSession,
   RequestTaskReviewRequest,
   StartTaskRequest,
@@ -323,6 +324,25 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
+  async function abortTask(taskId: string, payload: ManualTaskControlRequest) {
+    isLoading.value = true
+    error.value = null
+    try {
+      const response = await fetch(`${API_BASE}/workspaces/tasks/${taskId}/abort`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      await fetchBoard()
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Failed to abort task'
+      throw e
+    } finally {
+      isLoading.value = false
+    }
+  }
+
   async function dispatchWorkspace() {
     if (!activeWorkspaceId.value) return
     const response = await fetch(`${API_BASE}/workspaces/${activeWorkspaceId.value}/dispatch`, {
@@ -386,6 +406,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     startTask,
     continueTask,
     requestTaskReview,
+    abortTask,
     dispatchWorkspace,
     sendMessage,
     createReport,
