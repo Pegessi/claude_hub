@@ -1390,7 +1390,7 @@
             <LoadingButton
               type="submit"
               class="primary-button"
-              :disabled="!editingTaskId || isLoading || !editTaskForm.title.trim() || !editTaskForm.prompt.trim()"
+              :disabled="!editingTaskId || isLoading || !editTaskForm.title.trim() || (!editTaskForm.prompt.trim() && !editTaskForm.has_attachments)"
               :loading="isPending(taskActionKey('edit', editingTaskId))"
               loading-label="Saving task"
             >
@@ -1887,6 +1887,7 @@ const taskForm = reactive({
 const editTaskForm = reactive({
   title: '',
   prompt: '',
+  has_attachments: false,
 })
 
 const activeWorkspace = computed(() =>
@@ -2892,6 +2893,7 @@ function openEditTaskModal(task: WorkspaceTask) {
   editingTaskId.value = task.id
   editTaskForm.title = task.title
   editTaskForm.prompt = task.prompt
+  editTaskForm.has_attachments = task.attachments.length > 0
   showEditTaskModal.value = true
 }
 
@@ -2900,6 +2902,7 @@ function closeEditTaskModal() {
   editingTaskId.value = null
   editTaskForm.title = ''
   editTaskForm.prompt = ''
+  editTaskForm.has_attachments = false
 }
 
 async function handleCreateTask() {
@@ -2934,7 +2937,11 @@ async function handleCreateTask() {
 
 async function handleUpdateTask() {
   const taskId = editingTaskId.value
-  if (!taskId || !editTaskForm.title.trim() || !editTaskForm.prompt.trim()) {
+  if (
+    !taskId ||
+    !editTaskForm.title.trim() ||
+    (!editTaskForm.prompt.trim() && !editTaskForm.has_attachments)
+  ) {
     return
   }
   await runPending(taskActionKey('edit', taskId), async () => {

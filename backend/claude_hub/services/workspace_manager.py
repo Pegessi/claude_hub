@@ -887,7 +887,7 @@ class WorkspaceManager:
             prompt = payload.prompt.strip() if payload.prompt is not None else task.prompt.strip()
             if not title:
                 raise ValueError("Task title is required")
-            if not prompt:
+            if not prompt and not task.attachments:
                 raise ValueError("Task description is required")
             if payload.title is not None:
                 update["title"] = title

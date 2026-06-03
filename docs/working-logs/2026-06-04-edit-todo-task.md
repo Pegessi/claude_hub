@@ -16,8 +16,9 @@ rewritten silently.
 - `backend/claude_hub/models/schemas.py` extends `WorkspaceTaskUpdate` with
   optional `title` and `prompt` fields.
 - `backend/claude_hub/services/workspace_manager.py` trims task title/prompt
-  on create and edit, rejects blank title/description text, and rejects
-  title/prompt edits unless the task is still `todo`.
+  on create and edit, rejects blank titles, requires either description text
+  or existing attachments, and rejects title/prompt edits unless the task is
+  still `todo`.
 - `backend/claude_hub/api/workspaces.py` treats title/prompt as valid update
   payload fields and returns validation failures as HTTP 400 responses.
 - `frontend/src/stores/workspaceStore.ts` exposes `updateTask()` for the shared
@@ -33,5 +34,6 @@ rewritten silently.
 - The edit modal does not support attachments, task mode, execution complexity,
   related task, or autonomy settings. Those fields affect dispatch semantics and
   need separate review if they become editable.
-- API validation mirrors the UI's existing text requirements so direct API
-  clients cannot save an empty task title or description.
+- API validation mirrors the UI's existing task creation rule: a task needs a
+  title and either description text or attachments. Screenshot-only tasks can
+  be renamed without forcing placeholder description text.
