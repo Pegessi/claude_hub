@@ -464,6 +464,16 @@
                     Request review
                   </LoadingButton>
                   <LoadingButton
+                    v-if="canAbortTask(task)"
+                    type="button"
+                    class="danger-button"
+                    :loading="isPending(taskActionKey('abort', task.id))"
+                    loading-label="Aborting task"
+                    @click.stop="abortTask(task)"
+                  >
+                    Abort
+                  </LoadingButton>
+                  <LoadingButton
                     v-if="sessionForTask(task)"
                     type="button"
                     :loading="isPending(sessionActionKey('open', task.session_id))"
@@ -921,6 +931,16 @@
                   @click="requestReview(selectedTask)"
                 >
                   Request review
+                </LoadingButton>
+                <LoadingButton
+                  v-if="canAbortTask(selectedTask)"
+                  type="button"
+                  class="danger-button"
+                  :loading="isPending(taskActionKey('abort', selectedTask.id))"
+                  loading-label="Aborting task"
+                  @click="abortTask(selectedTask)"
+                >
+                  Abort
                 </LoadingButton>
                 <LoadingButton
                   v-if="selectedSession"
@@ -2116,6 +2136,10 @@ function canRequestReviewTask(task: WorkspaceTask) {
     latestReviewReport?.state === 'review_needs_input'
 }
 
+function canAbortTask(task: WorkspaceTask) {
+  return task.status === 'queued' || task.status === 'working' || task.status === 'review'
+}
+
 function isLatestSelectedReport(report: AgentReport) {
   return selectedReports.value[selectedReports.value.length - 1]?.id === report.id
 }
@@ -2914,6 +2938,19 @@ async function requestReview(task: WorkspaceTask) {
   await runPending(taskActionKey('request-review', task.id), () =>
     workspaceStore.requestTaskReview(task.id, { message: message.trim() })
   )
+}
+
+async function abortTask(task: WorkspaceTask) {
+  const reason = window.prompt(
+    `Abort task "${task.title}" and return it to todo? Enter a reason:`,
+  )
+  if (!reason || !reason.trim()) return
+  await runPending(taskActionKey('abort', task.id), async () => {
+    await workspaceStore.abortTask(task.id, { reason: reason.trim() })
+    if (selectedTaskId.value === task.id) {
+      closeTaskDetail()
+    }
+  })
 }
 
 async function deleteTask(task: WorkspaceTask) {

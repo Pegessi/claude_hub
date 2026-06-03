@@ -27,6 +27,7 @@ from ..models import (
     EvaluationDecision,
     EvaluationReport,
     ExecutionTarget,
+    ManualTaskControlRequest,
     ManagedSession,
     ManagedSessionStatus,
     RequestTaskReviewRequest,
@@ -1275,6 +1276,8 @@ class WorkspaceManager:
             "queued_at": task.queued_at or _now(),
             "updated_at": _now(),
             "dispatch_pending": False,
+            "manual_aborted_at": None,
+            "manual_abort_reason": None,
         }
         if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
             run = task.autonomous_run or self._default_autonomous_run(
@@ -1697,6 +1700,82 @@ class WorkspaceManager:
         )
         self.reports[report.id] = report
         await self._request_task_review(task, report)
+        return self.tasks[task.id]
+
+    async def abort_task(
+        self,
+        task_id: str,
+        payload: ManualTaskControlRequest,
+    ) -> WorkspaceTask:
+        task = self.tasks.get(task_id)
+        if not task:
+            raise KeyError(task_id)
+        if task.status not in {
+            WorkspaceTaskStatus.QUEUED,
+            WorkspaceTaskStatus.WORKING,
+            WorkspaceTaskStatus.REVIEW,
+        }:
+            raise RuntimeError("Only queued, working, or review tasks can be manually aborted")
+
+        reason = payload.reason.strip()
+        if not reason:
+            raise RuntimeError("Manual abort requires a reason")
+
+        now = _now()
+        report_session_id = task.session_id or task.review_session_id or "manual-control"
+        report = AgentReport(
+            id=str(uuid.uuid4()),
+            workspace_id=task.workspace_id,
+            task_id=task.id,
+            session_id=report_session_id,
+            state=AgentReportState.BLOCKED,
+            message=f"Task manually aborted by operator: {reason}",
+            message_en=f"Task manually aborted by operator: {reason}",
+            message_zh=f"操作员已手动终止任务：{reason}",
+            changed_files=[],
+            validation=None,
+            risks="Task state was manually recovered; prior worker/reviewer output may be incomplete.",
+            review_decision=ReviewDecision.SKIP,
+            review_reason="Manual abort is an exceptional recovery action, not task completion.",
+            risk_level="manual_control",
+            created_at=now,
+        )
+        self.reports[report.id] = report
+
+        task_before_release = task
+        self.tasks[task.id] = task.model_copy(
+            update={
+                "status": WorkspaceTaskStatus.TODO,
+                "session_id": None,
+                "clear_context": None,
+                "dispatch_reason": f"Manually aborted: {reason}",
+                "dispatch_pending": False,
+                "review_session_id": None,
+                "review_requested_at": None,
+                "review_completed_at": None,
+                "review_skipped_at": None,
+                "review_skip_reason": None,
+                "manual_aborted_at": now,
+                "manual_abort_reason": reason,
+                "human_acceptance_requested_at": None,
+                "human_accepted_at": None,
+                "queued_at": None,
+                "started_at": None,
+                "reviewed_at": None,
+                "completed_at": None,
+                "updated_at": now,
+            }
+        )
+        self._release_task_session(task_before_release)
+        self._release_reviewer_session(
+            task_before_release,
+            status=ManagedSessionStatus.IDLE,
+            runtime_status=AgentRuntimeStatus.IDLE,
+            updated_at=now,
+            include_stale_assignments=True,
+        )
+        self._save_state()
+        await self.dispatch_workspace(task.workspace_id)
         return self.tasks[task.id]
 
     async def dispatch_workspace(
@@ -2786,6 +2865,10 @@ class WorkspaceManager:
             task = self.tasks.get(task_id)
             if not task or task.workspace_id != session.workspace_id:
                 raise KeyError(task_id)
+            if self._is_stale_report_for_aborted_task(task, session):
+                raise RuntimeError(
+                    "Task was manually aborted; restart or reassign it before accepting reports."
+                )
             session = await self._rename_session_for_task(session, task, updated_at=now)
 
         report = AgentReport(
@@ -4002,6 +4085,15 @@ class WorkspaceManager:
 
     def _task_status_from_report(self, state: AgentReportState) -> Optional[WorkspaceTaskStatus]:
         return state_policy.task_status_from_report(state)
+
+    def _is_stale_report_for_aborted_task(
+        self,
+        task: WorkspaceTask,
+        session: ManagedSession,
+    ) -> bool:
+        if not task.manual_aborted_at:
+            return False
+        return task.session_id != session.id and task.review_session_id != session.id
 
     def _release_task_session(self, task: WorkspaceTask) -> None:
         if not task.session_id:

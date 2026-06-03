@@ -494,6 +494,8 @@ class WorkspaceTask(BaseModel):
     review_completed_at: Optional[datetime] = None
     review_skipped_at: Optional[datetime] = None
     review_skip_reason: Optional[str] = None
+    manual_aborted_at: Optional[datetime] = None
+    manual_abort_reason: Optional[str] = None
     human_acceptance_requested_at: Optional[datetime] = None
     human_accepted_at: Optional[datetime] = None
     queued_at: Optional[datetime] = None
@@ -639,6 +641,12 @@ class RequestTaskReviewRequest(BaseModel):
     """Payload for manually requesting reviewer checks."""
 
     message: Optional[str] = None
+
+
+class ManualTaskControlRequest(BaseModel):
+    """Payload for exceptional manual task state control."""
+
+    reason: str
 
 
 class DispatchDecisionRequest(BaseModel):

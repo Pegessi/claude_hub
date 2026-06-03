@@ -304,6 +304,8 @@ export interface WorkspaceTask {
   review_completed_at?: string | null
   review_skipped_at?: string | null
   review_skip_reason?: string | null
+  manual_aborted_at?: string | null
+  manual_abort_reason?: string | null
   human_acceptance_requested_at?: string | null
   human_accepted_at?: string | null
   queued_at?: string | null
@@ -341,6 +343,10 @@ export interface ContinueTaskRequest {
 
 export interface RequestTaskReviewRequest {
   message?: string | null
+}
+
+export interface ManualTaskControlRequest {
+  reason: string
 }
 
 export interface EnsureWorkspaceAgentRequest {
