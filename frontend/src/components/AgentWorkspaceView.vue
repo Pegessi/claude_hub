@@ -1684,6 +1684,7 @@ import { usePendingActions } from '@/composables/usePendingActions'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
+import { DEFAULT_ABORT_REASON, resolveAbortReason } from '@/utils/taskAbort'
 import type {
   AgentReport,
   AgentRuntimeStatus,
@@ -2943,10 +2944,12 @@ async function requestReview(task: WorkspaceTask) {
 async function abortTask(task: WorkspaceTask) {
   const reason = window.prompt(
     `Abort task "${task.title}" and return it to todo? Enter a reason:`,
+    DEFAULT_ABORT_REASON,
   )
-  if (!reason || !reason.trim()) return
+  const auditReason = resolveAbortReason(reason)
+  if (auditReason === null) return
   await runPending(taskActionKey('abort', task.id), async () => {
-    await workspaceStore.abortTask(task.id, { reason: reason.trim() })
+    await workspaceStore.abortTask(task.id, { reason: auditReason })
     if (selectedTaskId.value === task.id) {
       closeTaskDetail()
     }
