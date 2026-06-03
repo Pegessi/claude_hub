@@ -5,6 +5,12 @@
 
 ## 2026-06-04
 
+### fix: make task abort confirmation send an audited default reason
+- Prefill the workspace task Abort prompt with a default operator reason and treat OK with a blank value as that default, so an explicit confirmation always reaches the backend abort route instead of silently doing nothing
+- Keep Cancel as the no-op path and preserve the backend requirement that every manual abort has an audit reason
+- Add a focused frontend unit test for blank-OK default reason, Cancel no-op, and trimmed typed reasons
+- **Files**: frontend/package.json, frontend/src/components/AgentWorkspaceView.vue, frontend/src/utils/taskAbort.ts, frontend/tests/taskAbort.test.mjs, CHANGELOG.md
+
 ### feat: add manual abort for stuck workspace tasks
 - Add an explicit operator abort action for queued, working, and review tasks so abnormal states caused by unresponsive workers or reviewers can be recovered without marking reviewed work as done
 - The backend abort route records a blocked audit report, persists manual abort metadata, clears pending review/human-acceptance fields, releases worker and reviewer session assignments, and returns the task to `todo` with a manual abort reason
