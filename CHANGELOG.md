@@ -5,6 +5,13 @@
 
 ## 2026-06-04
 
+### fix: normalize workspace task card action buttons
+- Render task-card actions as a responsive grid with consistent button widths, height, typography, and truncation behavior so actions such as Abort, Open tab, and Delete no longer appear as uneven content-sized controls
+- Give Abort its own warning-color treatment so it remains visually distinct from the red Delete action on cards and task detail actions
+- Align task detail action typography with task-card actions and keep the follow-up input on the same compact UI text scale
+- Keep mobile task cards overflow-free by preserving full-width touch targets at narrow widths while leaving task status chips and detail-panel behavior unchanged
+- **Files**: frontend/src/components/AgentWorkspaceView.vue, CHANGELOG.md
+
 ### feat: allow editing todo task title and description
 - Add PATCH support for workspace task `title` and `prompt`, trimming saved text and rejecting blank title/description updates
 - Restrict title/description edits to `todo` tasks so already dispatched or completed task context is not silently rewritten; attachment-only todo tasks may still be renamed without adding prompt text
