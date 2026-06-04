@@ -721,6 +721,18 @@
                     <span>Artifacts</span>
                     <strong>{{ selectedTask.autonomy_policy?.require_artifact_review ? 'required' : 'optional' }}</strong>
                   </div>
+                  <div>
+                    <span>Total elapsed</span>
+                    <strong>{{ taskTotalElapsedLabel(selectedTask) }}</strong>
+                  </div>
+                  <div>
+                    <span>Working elapsed</span>
+                    <strong>{{ taskWorkingElapsedLabel(selectedTask) }}</strong>
+                  </div>
+                  <div>
+                    <span>Latest report age</span>
+                    <strong>{{ latestSelectedReportAgeLabel }}</strong>
+                  </div>
                 </div>
                 <div class="autonomous-next-action">
                   <span>Next action</span>
@@ -789,7 +801,7 @@
                 class="timeline"
               >
                 <li
-                  v-for="report in selectedReports"
+                  v-for="(report, reportIndex) in selectedReports"
                   :key="report.id"
                 >
                   <details
@@ -798,7 +810,15 @@
                   >
                     <summary>
                       <span class="report-state">{{ report.state }}</span>
-                      <span class="report-time">{{ formatTime(report.created_at) }}</span>
+                      <span class="report-summary-meta">
+                        <span class="report-time">{{ formatTime(report.created_at) }}</span>
+                        <span
+                          class="report-delta"
+                          :title="reportElapsedTitle(report, reportIndex)"
+                        >
+                          {{ reportElapsedLabel(report, reportIndex) }}
+                        </span>
+                      </span>
                     </summary>
                     <MarkdownContent
                       class="report-message"
@@ -1823,6 +1843,7 @@ const showEditTaskModal = ref(false)
 const editingTaskId = ref<string | null>(null)
 const workspaceSessionView = ref<WorkspaceSessionView>('agents')
 const workspaceMobileMenuRef = ref<HTMLDetailsElement | null>(null)
+const elapsedClockMs = ref(Date.now())
 const remoteProfiles = ref<RemoteProfile[]>([])
 const remoteProfilesLoading = ref(false)
 const agentBrowserCurrentPath = ref('')
@@ -1840,6 +1861,7 @@ const mobileCollapsedColumns = reactive<Record<WorkspaceTaskStatus, boolean>>({
 })
 const startOptions = reactive<Record<string, TaskStartOptions>>({})
 let boardPollTimer: number | null = null
+let elapsedClockTimer: number | null = null
 
 const columns: { status: WorkspaceTaskStatus; label: string }[] = [
   { status: 'todo', label: 'Todo' },
@@ -1919,6 +1941,14 @@ const selectedTaskSendKey = computed(() =>
 const selectedReports = computed<AgentReport[]>(() =>
   selectedTask.value ? workspaceStore.reportsForTask(selectedTask.value) : []
 )
+
+const latestSelectedReportAgeLabel = computed(() => {
+  const latestReport = selectedReports.value[selectedReports.value.length - 1]
+  if (!latestReport) return 'none'
+  const latestMs = parseTimestampMs(latestReport.created_at)
+  if (latestMs === null) return 'unknown'
+  return `${formatElapsedDuration(elapsedClockMs.value - latestMs)} ago`
+})
 
 function goalPacketSections(goalPacket: GoalPacket) {
   return [
@@ -2533,6 +2563,99 @@ function formatTime(value: string) {
     hour: '2-digit',
     minute: '2-digit',
   }).format(new Date(value))
+}
+
+function parseTimestampMs(value?: string | null): number | null {
+  if (!value) return null
+  const timestamp = new Date(value).getTime()
+  return Number.isFinite(timestamp) ? timestamp : null
+}
+
+function formatElapsedDuration(valueMs: number) {
+  const totalSeconds = Math.max(0, Math.floor(valueMs / 1000))
+  if (totalSeconds < 60) return `${totalSeconds}s`
+
+  const totalMinutes = Math.floor(totalSeconds / 60)
+  if (totalMinutes < 60) return `${totalMinutes}m`
+
+  const totalHours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  if (totalHours < 24) {
+    return minutes > 0 && totalHours < 12 ? `${totalHours}h ${minutes}m` : `${totalHours}h`
+  }
+
+  const days = Math.floor(totalHours / 24)
+  const hours = totalHours % 24
+  return hours > 0 && days < 14 ? `${days}d ${hours}h` : `${days}d`
+}
+
+function taskTimingEndMs(task: WorkspaceTask): number {
+  return (
+    parseTimestampMs(task.completed_at) ??
+    parseTimestampMs(task.manual_aborted_at) ??
+    (
+      task.status === 'queued' || task.status === 'working' || task.status === 'review'
+        ? elapsedClockMs.value
+        : parseTimestampMs(task.updated_at) ?? elapsedClockMs.value
+    )
+  )
+}
+
+function taskTotalElapsedLabel(task: WorkspaceTask) {
+  const startedMs = parseTimestampMs(task.created_at)
+  if (startedMs === null) return 'unknown'
+  return formatElapsedDuration(taskTimingEndMs(task) - startedMs)
+}
+
+function taskWorkingStartedMs(task: WorkspaceTask): number | null {
+  return (
+    parseTimestampMs(task.started_at) ??
+    parseTimestampMs(task.autonomous_run?.iterations?.[0]?.started_at) ??
+    parseTimestampMs(selectedReports.value[0]?.created_at)
+  )
+}
+
+function taskWorkingElapsedLabel(task: WorkspaceTask) {
+  const startedMs = taskWorkingStartedMs(task)
+  if (startedMs === null) return 'not started'
+  return formatElapsedDuration(taskTimingEndMs(task) - startedMs)
+}
+
+function reportReferenceForIndex(index: number): { label: string; timestampMs: number } | null {
+  const previousReportMs = parseTimestampMs(selectedReports.value[index - 1]?.created_at)
+  if (previousReportMs !== null) return { label: 'previous report', timestampMs: previousReportMs }
+
+  const task = selectedTask.value
+  const reportMs = parseTimestampMs(selectedReports.value[index]?.created_at)
+  if (!task || reportMs === null) return null
+
+  const startedMs = parseTimestampMs(task.started_at)
+  if (startedMs !== null && startedMs <= reportMs) return { label: 'start', timestampMs: startedMs }
+
+  const queuedMs = parseTimestampMs(task.queued_at)
+  if (queuedMs !== null && queuedMs <= reportMs) return { label: 'queue', timestampMs: queuedMs }
+
+  const createdMs = parseTimestampMs(task.created_at)
+  if (createdMs !== null) return { label: 'creation', timestampMs: createdMs }
+
+  return null
+}
+
+function reportElapsedLabel(report: AgentReport, index: number) {
+  const reportMs = parseTimestampMs(report.created_at)
+  const reference = reportReferenceForIndex(index)
+  if (reportMs === null || !reference) return ''
+
+  const elapsed = formatElapsedDuration(reportMs - reference.timestampMs)
+  return index === 0 ? `${reference.label} +${elapsed}` : `+${elapsed}`
+}
+
+function reportElapsedTitle(report: AgentReport, index: number) {
+  const reportMs = parseTimestampMs(report.created_at)
+  const reference = reportReferenceForIndex(index)
+  if (reportMs === null || !reference) return 'Elapsed time unavailable'
+
+  return `Elapsed since ${reference.label}: ${formatElapsedDuration(reportMs - reference.timestampMs)}`
 }
 
 const REPORT_LANG_STORAGE_KEY = 'claude-hub:report-lang'
@@ -3159,6 +3282,9 @@ onMounted(async () => {
   await workspaceStore.fetchWorkspaces()
   terminalStore.startAgentStatusPolling()
   boardPollTimer = window.setInterval(refreshBoard, 2500)
+  elapsedClockTimer = window.setInterval(() => {
+    elapsedClockMs.value = Date.now()
+  }, 30000)
 })
 
 onUnmounted(() => {
@@ -3166,6 +3292,10 @@ onUnmounted(() => {
   if (boardPollTimer !== null) {
     window.clearInterval(boardPollTimer)
     boardPollTimer = null
+  }
+  if (elapsedClockTimer !== null) {
+    window.clearInterval(elapsedClockTimer)
+    elapsedClockTimer = null
   }
   resetDraftAttachments(taskForm.attachments)
   resetDraftAttachments(detailAttachments.value)
@@ -4870,6 +5000,24 @@ onUnmounted(() => {
 .report-time {
   flex: 0 0 auto;
   color: var(--ch-color-text-subtle);
+}
+
+.report-summary-meta {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.report-delta {
+  border-radius: 999px;
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text-muted);
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 6px;
+  white-space: nowrap;
 }
 
 .report-message {
