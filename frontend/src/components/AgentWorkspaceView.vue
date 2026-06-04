@@ -474,7 +474,7 @@
                   <LoadingButton
                     v-if="canAbortTask(task)"
                     type="button"
-                    class="danger-button"
+                    class="abort-button"
                     :loading="isPending(taskActionKey('abort', task.id))"
                     loading-label="Aborting task"
                     @click.stop="abortTask(task)"
@@ -951,7 +951,7 @@
                 <LoadingButton
                   v-if="canAbortTask(selectedTask)"
                   type="button"
-                  class="danger-button"
+                  class="abort-button"
                   :loading="isPending(taskActionKey('abort', selectedTask.id))"
                   loading-label="Aborting task"
                   @click="abortTask(selectedTask)"
@@ -3764,6 +3764,7 @@ onUnmounted(() => {
 .workspace-select,
 .tool-button,
 .primary-button,
+.abort-button,
 .danger-button,
 .advanced-start select {
   border: 1px solid var(--ch-color-border-strong);
@@ -3775,6 +3776,7 @@ onUnmounted(() => {
 .workspace-select,
 .tool-button,
 .primary-button,
+.abort-button,
 .danger-button {
   height: 30px;
   padding: 0 10px;
@@ -3783,6 +3785,7 @@ onUnmounted(() => {
 
 .tool-button:hover,
 .primary-button:hover,
+.abort-button:hover,
 .danger-button:hover {
   border-color: var(--ch-color-border-hover);
 }
@@ -3820,6 +3823,7 @@ onUnmounted(() => {
 
 .tool-button,
 .primary-button,
+.abort-button,
 .danger-button,
 .task-actions button,
 .agent-row button {
@@ -3828,6 +3832,7 @@ onUnmounted(() => {
 
 .tool-button:disabled,
 .primary-button:disabled,
+.abort-button:disabled,
 .danger-button:disabled,
 .task-actions button:disabled,
 .agent-row button:disabled {
@@ -3851,6 +3856,18 @@ onUnmounted(() => {
   background: var(--ch-color-danger-bg);
   border-color: var(--ch-color-danger-border);
   color: var(--ch-color-danger-text);
+}
+
+.abort-button {
+  background: var(--ch-color-warning-bg);
+  border-color: color-mix(in srgb, var(--ch-color-warning-strong) 65%, var(--ch-color-border-strong));
+  color: var(--ch-color-warning);
+}
+
+.abort-button:hover {
+  background: color-mix(in srgb, var(--ch-color-warning-bg) 72%, var(--ch-color-warning-strong));
+  border-color: var(--ch-color-warning-strong);
+  color: var(--ch-color-text-strong);
 }
 
 .workspace-error {
@@ -4316,7 +4333,24 @@ onUnmounted(() => {
 }
 
 .task-actions {
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
+  gap: 6px;
+}
+
+.task-actions button {
+  width: 100%;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
 }
 
 .task-actions button,
@@ -4331,13 +4365,30 @@ onUnmounted(() => {
   -webkit-tap-highlight-color: var(--ch-color-accent-ring);
 }
 
+.task-actions button {
+  height: 30px;
+}
+
 .task-actions button:active,
 .agent-row button:active,
 .tool-button:active,
 .primary-button:active,
+.abort-button:active,
 .danger-button:active {
   transform: translateY(1px);
   background: var(--ch-color-surface-pressed);
+}
+
+.task-actions .abort-button {
+  background: var(--ch-color-warning-bg);
+  border-color: color-mix(in srgb, var(--ch-color-warning-strong) 65%, var(--ch-color-border-strong));
+  color: var(--ch-color-warning);
+}
+
+.task-actions .abort-button:hover {
+  background: color-mix(in srgb, var(--ch-color-warning-bg) 72%, var(--ch-color-warning-strong));
+  border-color: var(--ch-color-warning-strong);
+  color: var(--ch-color-text-strong);
 }
 
 .task-actions .danger-button,
@@ -4513,6 +4564,20 @@ onUnmounted(() => {
   gap: 8px;
 }
 
+.detail-actions button {
+  min-width: 86px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
 .detail-footer-toggle {
   display: none;
 }
@@ -4535,6 +4600,8 @@ onUnmounted(() => {
   border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
+  font-size: 13px;
+  line-height: 1.45;
   padding: 9px;
   resize: vertical;
 }
@@ -5642,7 +5709,12 @@ onUnmounted(() => {
     align-items: end;
   }
 
-  .detail-actions button,
+  .detail-actions button {
+    width: auto;
+    min-width: 0;
+    height: 34px;
+  }
+
   .send-form button {
     width: auto;
     min-width: 0;
@@ -5652,7 +5724,8 @@ onUnmounted(() => {
   .send-form textarea {
     min-height: 44px;
     max-height: 92px;
-    font-size: 16px;
+    font-size: 13px;
+    line-height: 1.45;
   }
 }
 
