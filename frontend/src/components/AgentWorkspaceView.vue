@@ -5054,7 +5054,7 @@ onUnmounted(() => {
 .progress-overview {
   margin-top: 10px;
   overflow-x: auto;
-  padding-bottom: 4px;
+  padding: 4px 0 6px;
 }
 
 .progress-overview-timeline {
@@ -5069,24 +5069,25 @@ onUnmounted(() => {
 .progress-overview-item {
   position: relative;
   display: grid;
-  grid-template-columns: auto auto;
+  grid-template-columns: auto minmax(0, 1fr);
   grid-template-areas:
-    "dot main"
-    "dot meta";
-  column-gap: 7px;
+    "dot dot"
+    "main main"
+    "time delta";
+  column-gap: 8px;
   row-gap: 2px;
-  min-width: 116px;
-  max-width: 170px;
-  padding: 0 14px 0 0;
+  min-width: 132px;
+  max-width: 184px;
+  padding: 0 18px 0 0;
   color: var(--ch-color-text-muted);
 }
 
 .progress-overview-item::after {
   content: '';
   position: absolute;
-  top: 7px;
+  top: 4px;
   right: 4px;
-  left: 18px;
+  left: 14px;
   height: 1px;
   background: var(--ch-color-border-muted);
 }
@@ -5101,7 +5102,6 @@ onUnmounted(() => {
   z-index: 1;
   width: 9px;
   height: 9px;
-  margin-top: 3px;
   border: 2px solid var(--ch-color-surface);
   border-radius: 999px;
   background: var(--ch-color-text-muted);
@@ -5128,12 +5128,12 @@ onUnmounted(() => {
 }
 
 .progress-overview-time {
-  grid-area: meta;
+  grid-area: time;
 }
 
 .progress-overview-delta {
-  grid-area: meta;
-  margin-left: 44px;
+  grid-area: delta;
+  min-width: 0;
   color: var(--ch-color-text-subtle);
 }
 
