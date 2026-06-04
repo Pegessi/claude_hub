@@ -791,6 +791,28 @@
                 </div>
               </div>
               <div
+                v-if="selectedProgressTimeline.length > 0"
+                class="progress-overview"
+              >
+                <ol class="progress-overview-timeline">
+                  <li
+                    v-for="item in selectedProgressTimeline"
+                    :key="item.id"
+                    :class="['progress-overview-item', `progress-overview-item--${item.tone}`]"
+                  >
+                    <span class="progress-overview-dot" />
+                    <span class="progress-overview-main">{{ item.label }}</span>
+                    <span class="progress-overview-time">{{ item.elapsedLabel }}</span>
+                    <span
+                      v-if="item.deltaLabel"
+                      class="progress-overview-delta"
+                    >
+                      +{{ item.deltaLabel }}
+                    </span>
+                  </li>
+                </ol>
+              </div>
+              <div
                 v-if="selectedReports.length === 0"
                 class="empty-timeline"
               >
@@ -1942,12 +1964,63 @@ const selectedReports = computed<AgentReport[]>(() =>
   selectedTask.value ? workspaceStore.reportsForTask(selectedTask.value) : []
 )
 
+interface ProgressTimelineItem {
+  id: string
+  label: string
+  timestampMs: number
+  elapsedLabel: string
+  deltaLabel: string
+  tone: 'task' | 'report' | 'terminal' | 'live'
+}
+
 const latestSelectedReportAgeLabel = computed(() => {
   const latestReport = selectedReports.value[selectedReports.value.length - 1]
   if (!latestReport) return 'none'
   const latestMs = parseTimestampMs(latestReport.created_at)
   if (latestMs === null) return 'unknown'
   return `${formatElapsedDuration(elapsedClockMs.value - latestMs)} ago`
+})
+
+const selectedProgressTimeline = computed<ProgressTimelineItem[]>(() => {
+  const task = selectedTask.value
+  if (!task) return []
+
+  const rawItems: Array<Omit<ProgressTimelineItem, 'elapsedLabel' | 'deltaLabel'>> = []
+  addTimelineItem(rawItems, 'task-created', 'Created', task.created_at, 'task')
+  addTimelineItem(rawItems, 'task-queued', 'Queued', task.queued_at, 'task')
+  addTimelineItem(rawItems, 'task-started', 'Started', task.started_at, 'task')
+  selectedReports.value.forEach((report) => {
+    addTimelineItem(
+      rawItems,
+      `report-${report.id}`,
+      report.state.replace(/_/g, ' '),
+      report.created_at,
+      'report',
+    )
+  })
+  addTimelineItem(rawItems, 'task-reviewed', 'Review', task.reviewed_at, 'task')
+  addTimelineItem(rawItems, 'task-done', 'Done', task.completed_at, 'terminal')
+  addTimelineItem(rawItems, 'task-aborted', 'Aborted', task.manual_aborted_at, 'terminal')
+
+  if (task.status === 'queued' || task.status === 'working' || task.status === 'review') {
+    rawItems.push({
+      id: 'task-now',
+      label: 'Now',
+      timestampMs: elapsedClockMs.value,
+      tone: 'live',
+    })
+  }
+
+  return rawItems
+    .sort((a, b) => a.timestampMs - b.timestampMs)
+    .map((item, index, items) => {
+      const previous = items[index - 1]
+      return {
+        ...item,
+        elapsedLabel: formatElapsedDuration(item.timestampMs - items[0].timestampMs),
+        deltaLabel: previous ? formatElapsedDuration(item.timestampMs - previous.timestampMs) : '',
+      }
+    })
 })
 
 function goalPacketSections(goalPacket: GoalPacket) {
@@ -2569,6 +2642,18 @@ function parseTimestampMs(value?: string | null): number | null {
   if (!value) return null
   const timestamp = new Date(value).getTime()
   return Number.isFinite(timestamp) ? timestamp : null
+}
+
+function addTimelineItem(
+  items: Array<Omit<ProgressTimelineItem, 'elapsedLabel' | 'deltaLabel'>>,
+  id: string,
+  label: string,
+  value: string | null | undefined,
+  tone: ProgressTimelineItem['tone'],
+) {
+  const timestampMs = parseTimestampMs(value)
+  if (timestampMs === null) return
+  items.push({ id, label, timestampMs, tone })
 }
 
 function formatElapsedDuration(valueMs: number) {
@@ -3284,7 +3369,7 @@ onMounted(async () => {
   boardPollTimer = window.setInterval(refreshBoard, 2500)
   elapsedClockTimer = window.setInterval(() => {
     elapsedClockMs.value = Date.now()
-  }, 30000)
+  }, 10000)
 })
 
 onUnmounted(() => {
@@ -4964,6 +5049,108 @@ onUnmounted(() => {
   border: 2px solid var(--ch-color-surface);
   border-radius: 999px;
   background: var(--ch-color-accent);
+}
+
+.progress-overview {
+  margin-top: 10px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.progress-overview-timeline {
+  list-style: none;
+  margin: 0;
+  min-width: max-content;
+  padding: 0;
+  display: flex;
+  align-items: stretch;
+}
+
+.progress-overview-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto auto;
+  grid-template-areas:
+    "dot main"
+    "dot meta";
+  column-gap: 7px;
+  row-gap: 2px;
+  min-width: 116px;
+  max-width: 170px;
+  padding: 0 14px 0 0;
+  color: var(--ch-color-text-muted);
+}
+
+.progress-overview-item::after {
+  content: '';
+  position: absolute;
+  top: 7px;
+  right: 4px;
+  left: 18px;
+  height: 1px;
+  background: var(--ch-color-border-muted);
+}
+
+.progress-overview-item:last-child::after {
+  display: none;
+}
+
+.progress-overview-dot {
+  grid-area: dot;
+  position: relative;
+  z-index: 1;
+  width: 9px;
+  height: 9px;
+  margin-top: 3px;
+  border: 2px solid var(--ch-color-surface);
+  border-radius: 999px;
+  background: var(--ch-color-text-muted);
+}
+
+.progress-overview-main {
+  grid-area: main;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ch-color-text);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.progress-overview-time,
+.progress-overview-delta {
+  font-size: 10px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.progress-overview-time {
+  grid-area: meta;
+}
+
+.progress-overview-delta {
+  grid-area: meta;
+  margin-left: 44px;
+  color: var(--ch-color-text-subtle);
+}
+
+.progress-overview-item--task .progress-overview-dot {
+  background: var(--ch-color-accent);
+}
+
+.progress-overview-item--report .progress-overview-dot {
+  background: var(--ch-color-warning);
+}
+
+.progress-overview-item--terminal .progress-overview-dot {
+  background: var(--ch-color-success);
+}
+
+.progress-overview-item--live .progress-overview-dot {
+  background: var(--ch-color-danger);
 }
 
 .report-card {
