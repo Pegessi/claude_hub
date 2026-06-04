@@ -21,8 +21,11 @@ claimed multi-agent execution.
   autonomous next action remains, and they must include blocker evidence and the
   exact required decision.
 - `AgentWorkspaceView.vue` derives live task timing from existing task/report
-  timestamps and surfaces total elapsed, working elapsed, latest report age, and
-  per-report progress deltas.
+  timestamps and surfaces total elapsed, working elapsed, latest report age, a
+  Progress overview timeline, and per-report progress deltas. The overview
+  updates when board polling receives new task/report data; active queued,
+  working, and review tasks also show a live `Now` endpoint that advances on a
+  local timer.
 
 ## Key Issues/Pitfalls
 

@@ -9,7 +9,7 @@
 - Tighten the Auto Mode orchestrator contract so long delegated, remote, or external image/API steps must emit working heartbeats with role, primitive, elapsed time, observed status/artifact, and next action instead of disappearing into prose-only ledgers
 - Treat bare autonomous `blocked` / `needs_input` placeholders such as "needs your response" as contract violations unless they include blocker evidence, attempted next action, and the exact required decision
 - Add elapsed and since-previous duration metadata to archived task-record timeline events so completed autonomous runs can be audited for where time was spent
-- Surface autonomous task timing in the Agent Workspace detail panel with total elapsed, working elapsed, latest report age, and per-report delta chips in the progress timeline
+- Surface autonomous task timing in the Agent Workspace detail panel with total elapsed, working elapsed, latest report age, a live Progress overview timeline, and per-report delta chips
 - **Files**: backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspace_orchestrator_contract.py, backend/tests/test_workspaces.py, frontend/src/components/AgentWorkspaceView.vue, docs/working-logs/2026-06-04-auto-mode-observability.md, CHANGELOG.md
 
 ### fix: normalize workspace task card action buttons
