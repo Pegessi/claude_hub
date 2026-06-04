@@ -3369,7 +3369,7 @@ onMounted(async () => {
   boardPollTimer = window.setInterval(refreshBoard, 2500)
   elapsedClockTimer = window.setInterval(() => {
     elapsedClockMs.value = Date.now()
-  }, 10000)
+  }, 30000)
 })
 
 onUnmounted(() => {
