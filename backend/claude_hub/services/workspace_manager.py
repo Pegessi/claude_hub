@@ -102,6 +102,17 @@ def _sort_time(task: WorkspaceTask) -> datetime:
     return task.queued_at or task.created_at
 
 
+def _format_duration(total_seconds: int) -> str:
+    total_seconds = max(0, total_seconds)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m {seconds}s"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
 def _safe_attachment_filename(value: str, suffix: str) -> str:
     stem = Path(value or "attachment").stem
     slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", stem).strip(".-")
@@ -979,7 +990,12 @@ class WorkspaceManager:
         reports: list[AgentReport],
     ) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = [
-            {"at": task.created_at.isoformat(), "type": "task_created", "title": task.title}
+            {
+                "_timestamp": task.created_at,
+                "at": task.created_at.isoformat(),
+                "type": "task_created",
+                "title": task.title,
+            }
         ]
         for field, event_type in (
             ("queued_at", "task_queued"),
@@ -989,10 +1005,11 @@ class WorkspaceManager:
         ):
             value = getattr(task, field)
             if value:
-                events.append({"at": value.isoformat(), "type": event_type})
+                events.append({"_timestamp": value, "at": value.isoformat(), "type": event_type})
         for report in reports:
             events.append(
                 {
+                    "_timestamp": report.created_at,
                     "at": report.created_at.isoformat(),
                     "type": "agent_report",
                     "state": report.state.value,
@@ -1002,7 +1019,20 @@ class WorkspaceManager:
                     "review_reason": report.review_reason,
                 }
             )
-        return sorted(events, key=lambda item: item["at"])
+        sorted_events = sorted(events, key=lambda item: item["_timestamp"])
+        previous_at: datetime | None = None
+        for event in sorted_events:
+            timestamp = event.pop("_timestamp")
+            elapsed_seconds = max(0, int((timestamp - task.created_at).total_seconds()))
+            event["elapsed_seconds"] = elapsed_seconds
+            event["elapsed"] = _format_duration(elapsed_seconds)
+            since_previous_seconds = (
+                0 if previous_at is None else max(0, int((timestamp - previous_at).total_seconds()))
+            )
+            event["duration_since_previous_seconds"] = since_previous_seconds
+            event["duration_since_previous"] = _format_duration(since_previous_seconds)
+            previous_at = timestamp
+        return sorted_events
 
     def _build_task_record_artifacts(self, reports: list[AgentReport]) -> dict[str, Any]:
         changed_files: list[str] = []
@@ -2405,6 +2435,18 @@ class WorkspaceManager:
             "P-VALIDATE is required when the task has any objectively-checkable success criterion. "
             "P-VALIDATE and P-JUDGE are SEPARATE primitives. Do NOT fold either into your own "
             "context.\n\n"
+            "Orchestrator observability requirements:\n"
+            "- For any delegated, remote, or external-API step expected to take more than a few "
+            "minutes or produce no immediate terminal output, post a working heartbeat before the "
+            "wait and then at each meaningful checkpoint. Include role.id, primitive, elapsed time, "
+            "last observed artifact/status, and the next check or next action.\n"
+            "- While a sub-agent, image/API job, remote command, or validation run is still in "
+            "progress, report working. Do NOT switch to needs_input or blocked merely because the "
+            "step is long-running.\n"
+            "- A blocked or needs_input report is allowed only when no autonomous next action remains. "
+            "It must name the blocker, include evidence for the blocker, list the next action already "
+            "attempted or ruled out, and specify the exact user/product/environment decision required. "
+            'Bare placeholders such as "needs your response" are contract violations.\n\n'
             "Example 1 -- Coding task (linear, all in-context LLM calls):\n"
             "  Task: Add a soft-delete endpoint to /api/orders; reject if shipped; cover with tests.\n"
             "  workflow:\n"

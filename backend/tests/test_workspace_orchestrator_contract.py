@@ -149,8 +149,30 @@ def test_autonomous_block_complex_includes_orchestrator_contract_and_examples():
     assert "P-PLAN, P-EXECUTE, P-JUDGE, P-INTEGRATE -> opus" in block
     # Hard enforcement on complex
     assert "REQUIRED" in block
+    # Opaque delegated/external work must remain observable.
+    assert "Orchestrator observability requirements" in block
+    assert "working heartbeat" in block
+    assert "role.id" in block and "elapsed time" in block
+    assert "image/API job" in block
+    assert "Bare placeholders" in block and "contract violations" in block
     # Per-CLI hint embedded
     assert "claude runtime" in block
+
+
+def test_autonomous_block_forbids_bare_blocked_or_needs_input_reports():
+    task = _make_task(
+        mode=WorkspaceTaskMode.AUTONOMOUS,
+        complexity=WorkspaceTaskExecutionComplexity.COMPLEX,
+    )
+    block = workspace_manager._autonomous_assignment_block(task, AgentType.CLAUDE)
+    assert (
+        "blocked or needs_input report is allowed only when no autonomous next action remains"
+        in block
+    )
+    assert "name the blocker" in block
+    assert "include evidence for the blocker" in block
+    assert "next action already attempted or ruled out" in block
+    assert "needs your response" in block
 
 
 def test_autonomous_block_simple_softens_enforcement():

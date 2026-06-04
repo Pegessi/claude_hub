@@ -4867,7 +4867,16 @@ def test_done_task_writes_delete_safe_task_record(
         },
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
-    client.post(
+    base_time = datetime(2026, 1, 2, 3, 0, 0)
+    workspace_manager.tasks[task["id"]] = workspace_manager.tasks[task["id"]].model_copy(
+        update={
+            "created_at": base_time,
+            "queued_at": base_time + timedelta(minutes=1),
+            "started_at": base_time + timedelta(minutes=2),
+            "updated_at": base_time + timedelta(minutes=2),
+        }
+    )
+    working_report = client.post(
         f"/api/workspaces/sessions/{started['session_id']}/reports",
         json={
             "task_id": task["id"],
@@ -4876,8 +4885,8 @@ def test_done_task_writes_delete_safe_task_record(
             "changed_files": ["backend/claude_hub/services/workspace_manager.py"],
             "validation": "pytest planned",
         },
-    )
-    client.post(
+    ).json()
+    completed_report = client.post(
         f"/api/workspaces/sessions/{started['session_id']}/reports",
         json={
             "task_id": task["id"],
@@ -4886,7 +4895,14 @@ def test_done_task_writes_delete_safe_task_record(
             "changed_files": ["backend/tests/test_workspaces.py"],
             "risks": "None",
         },
-    )
+    ).json()
+    workspace_manager.reports[working_report["id"]] = workspace_manager.reports[
+        working_report["id"]
+    ].model_copy(update={"created_at": base_time + timedelta(minutes=7)})
+    workspace_manager.reports[completed_report["id"]] = workspace_manager.reports[
+        completed_report["id"]
+    ].model_copy(update={"created_at": base_time + timedelta(minutes=12)})
+    monkeypatch.setattr(workspace_module, "_now", lambda: base_time + timedelta(minutes=15))
 
     done_response = client.patch(
         f"/api/workspaces/tasks/{task['id']}",
@@ -4911,6 +4927,28 @@ def test_done_task_writes_delete_safe_task_record(
     assert record["artifacts"]["commits"] == []
     assert record["final_summary"] == "Archive complete"
     assert [event["type"] for event in record["timeline"]].count("agent_report") == 2
+    assert [
+        (event["type"], event["elapsed"], event["duration_since_previous"])
+        for event in record["timeline"]
+    ] == [
+        ("task_created", "0s", "0s"),
+        ("task_queued", "1m 0s", "1m 0s"),
+        ("task_started", "2m 0s", "1m 0s"),
+        ("agent_report", "7m 0s", "5m 0s"),
+        ("agent_report", "12m 0s", "5m 0s"),
+        ("task_completed", "15m 0s", "3m 0s"),
+    ]
+    assert [
+        (event["type"], event["elapsed_seconds"], event["duration_since_previous_seconds"])
+        for event in record["timeline"]
+    ] == [
+        ("task_created", 0, 0),
+        ("task_queued", 60, 60),
+        ("task_started", 120, 60),
+        ("agent_report", 420, 300),
+        ("agent_report", 720, 300),
+        ("task_completed", 900, 180),
+    ]
 
     delete_response = client.delete(f"/api/workspaces/tasks/{task['id']}")
 
