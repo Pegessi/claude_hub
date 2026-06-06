@@ -624,81 +624,6 @@
               </div>
             </details>
 
-            <details class="detail-section detail-section--collapsible markdown-output-section">
-              <summary class="detail-section-title detail-section-title--with-count">
-                <span>Markdown Outputs</span>
-                <span>{{ selectedMarkdownDocuments.length }}</span>
-              </summary>
-              <div
-                v-if="selectedMarkdownDocuments.length === 0"
-                class="empty-timeline"
-              >
-                No Markdown outputs discovered yet. Agents can report artifact_refs, or Markdown changed_files will appear here automatically.
-              </div>
-              <div
-                v-else
-                class="markdown-output-list"
-              >
-                <article
-                  v-for="document in selectedMarkdownDocuments"
-                  :key="document.id"
-                  class="markdown-output-card"
-                >
-                  <div class="markdown-output-row">
-                    <div>
-                      <strong>{{ document.label }}</strong>
-                      <span>{{ markdownDocumentSourceLabel(document.source) }}</span>
-                      <code>{{ document.path }}</code>
-                    </div>
-                    <div class="markdown-output-actions">
-                      <span v-if="document.size_bytes">{{ formatAttachmentSize(document.size_bytes) }}</span>
-                      <button
-                        type="button"
-                        class="artifact-preview-button"
-                        :disabled="isMarkdownDocumentPreviewLoading(document)"
-                        @click="toggleMarkdownDocumentPreview(document)"
-                      >
-                        {{ markdownDocumentPreviewButtonLabel(document) }}
-                      </button>
-                    </div>
-                  </div>
-                  <div
-                    v-if="expandedArtifactKey === markdownDocumentPreviewKey(document)"
-                    class="artifact-preview markdown-output-preview"
-                  >
-                    <div
-                      v-if="artifactPreviewErrors[markdownDocumentPreviewKey(document)]"
-                      class="artifact-preview-status artifact-preview-error"
-                    >
-                      {{ artifactPreviewErrors[markdownDocumentPreviewKey(document)] }}
-                    </div>
-                    <div
-                      v-else-if="!artifactPreviews[markdownDocumentPreviewKey(document)]"
-                      class="artifact-preview-status"
-                    >
-                      Loading Markdown preview...
-                    </div>
-                    <template v-else>
-                      <div class="artifact-preview-header">
-                        <span>{{ artifactPreviews[markdownDocumentPreviewKey(document)].filename }}</span>
-                        <span>{{ formatAttachmentSize(artifactPreviews[markdownDocumentPreviewKey(document)].size_bytes) }}</span>
-                      </div>
-                      <MarkdownContent
-                        class="artifact-preview-content"
-                        :text="artifactPreviews[markdownDocumentPreviewKey(document)].content"
-                      />
-                      <div
-                        v-if="artifactPreviews[markdownDocumentPreviewKey(document)].truncated"
-                        class="artifact-preview-status"
-                      >
-                        Preview truncated to the first 512 KB.
-                      </div>
-                    </template>
-                  </div>
-                </article>
-              </div>
-            </details>
-
             <details class="detail-section detail-section--collapsible">
               <summary class="detail-section-title">
                 Assignment
@@ -1072,6 +997,81 @@
                   </details>
                 </li>
               </ol>
+            </details>
+
+            <details class="detail-section detail-section--collapsible markdown-output-section">
+              <summary class="detail-section-title detail-section-title--with-count">
+                <span>Markdown Outputs</span>
+                <span>{{ selectedMarkdownDocuments.length }}</span>
+              </summary>
+              <div
+                v-if="selectedMarkdownDocuments.length === 0"
+                class="empty-timeline"
+              >
+                No Markdown outputs discovered yet. Agents can report artifact_refs, or Markdown changed_files will appear here automatically.
+              </div>
+              <div
+                v-else
+                class="markdown-output-list"
+              >
+                <article
+                  v-for="document in selectedMarkdownDocuments"
+                  :key="document.id"
+                  class="markdown-output-card"
+                >
+                  <div class="markdown-output-row">
+                    <div>
+                      <strong>{{ document.label }}</strong>
+                      <span>{{ markdownDocumentSourceLabel(document.source) }}</span>
+                      <code>{{ document.path }}</code>
+                    </div>
+                    <div class="markdown-output-actions">
+                      <span v-if="document.size_bytes">{{ formatAttachmentSize(document.size_bytes) }}</span>
+                      <button
+                        type="button"
+                        class="artifact-preview-button"
+                        :disabled="isMarkdownDocumentPreviewLoading(document)"
+                        @click="toggleMarkdownDocumentPreview(document)"
+                      >
+                        {{ markdownDocumentPreviewButtonLabel(document) }}
+                      </button>
+                    </div>
+                  </div>
+                  <div
+                    v-if="expandedArtifactKey === markdownDocumentPreviewKey(document)"
+                    class="artifact-preview markdown-output-preview"
+                  >
+                    <div
+                      v-if="artifactPreviewErrors[markdownDocumentPreviewKey(document)]"
+                      class="artifact-preview-status artifact-preview-error"
+                    >
+                      {{ artifactPreviewErrors[markdownDocumentPreviewKey(document)] }}
+                    </div>
+                    <div
+                      v-else-if="!artifactPreviews[markdownDocumentPreviewKey(document)]"
+                      class="artifact-preview-status"
+                    >
+                      Loading Markdown preview...
+                    </div>
+                    <template v-else>
+                      <div class="artifact-preview-header">
+                        <span>{{ artifactPreviews[markdownDocumentPreviewKey(document)].filename }}</span>
+                        <span>{{ formatAttachmentSize(artifactPreviews[markdownDocumentPreviewKey(document)].size_bytes) }}</span>
+                      </div>
+                      <MarkdownContent
+                        class="artifact-preview-content"
+                        :text="artifactPreviews[markdownDocumentPreviewKey(document)].content"
+                      />
+                      <div
+                        v-if="artifactPreviews[markdownDocumentPreviewKey(document)].truncated"
+                        class="artifact-preview-status"
+                      >
+                        Preview truncated to the first 512 KB.
+                      </div>
+                    </template>
+                  </div>
+                </article>
+              </div>
             </details>
           </div>
 
