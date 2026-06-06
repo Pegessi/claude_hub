@@ -13,6 +13,7 @@
 - Surface feedback lessons in the Agent Workspace UI with an active-lesson summary, manual refresh, and task-detail matches so operators can see which lessons would be injected for a task
 - Record prompt-time feedback participation on each dispatched task via `feedback_lesson_ids` and a system audit report, making it visible when lessons were actually injected versus merely matching the current task text
 - Record AI reviewer prompt lesson injection with the same audit trail and show lesson IDs mentioned in agent/reviewer reports so older tasks can still reveal feedback evidence without pretending historical prompt injection was audited
+- Make lesson retrieval and UI matching Unicode/CJK-safe, and prevent non-empty un-tokenizable prompts from falling back to arbitrary active lessons
 - Add focused backend coverage for manual reaper storage/promotion and task assignment lesson injection
 - **Files**: backend/claude_hub/models/schemas.py, backend/claude_hub/models/__init__.py, backend/claude_hub/services/feedback_lessons.py, backend/claude_hub/services/workspace_manager.py, backend/claude_hub/api/workspaces.py, backend/tests/test_workspaces.py, frontend/src/components/AgentWorkspaceView.vue, frontend/src/stores/workspaceStore.ts, frontend/src/types/index.ts, docs/working-logs/2026-06-06-feedback-harness-plan.md, CHANGELOG.md
 

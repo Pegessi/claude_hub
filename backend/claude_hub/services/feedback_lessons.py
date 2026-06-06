@@ -30,7 +30,14 @@ def _slug(value: str) -> str:
 
 
 def _tokens(value: str) -> set[str]:
-    return {item for item in re.findall(r"[a-zA-Z0-9_\-.]+", value.lower()) if len(item) >= 2}
+    text = value.lower()
+    tokens = {item for item in re.findall(r"[a-zA-Z0-9_\-.]+", text) if len(item) >= 2}
+    for chunk in re.findall(r"[\u3400-\u9fff]+", text):
+        for size in (2, 3):
+            if len(chunk) < size:
+                continue
+            tokens.update(chunk[index : index + size] for index in range(len(chunk) - size + 1))
+    return tokens
 
 
 class FeedbackLessonStore:
@@ -160,6 +167,8 @@ class FeedbackLessonStore:
         query_tokens = _tokens(query)
         lessons = self.list_lessons(workspace_id)
         if not query_tokens:
+            if query.strip():
+                return []
             return lessons[:limit]
 
         scored: list[tuple[float, FeedbackLesson]] = []
