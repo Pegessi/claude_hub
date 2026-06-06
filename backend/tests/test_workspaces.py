@@ -3584,6 +3584,185 @@ def test_idle_working_agent_with_review_in_flight_is_not_prompted(
     assert session.auto_continue_attempts == 0
 
 
+def test_monitor_surfaces_worker_prompt_stuck_in_input(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    status_samples: list[TerminalAgentStatus] = []
+    sent_messages: list[tuple[str, str]] = []
+
+    async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
+        return status_samples
+
+    async def fake_capture_output(_tmux_session: str) -> str:
+        return "\n".join(
+            [
+                "› New workspace task assigned.",
+                "",
+                "Workspace: Stuck Worker Repo",
+                "Task ID: task-still-in-input",
+            ]
+        )
+
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="tab-worker-stuck",
+        port=12370,
+        sent_messages=sent_messages,
+    )
+    monkeypatch.setattr(
+        workspace_module.ttyd_manager,
+        "list_tab_agent_statuses",
+        fake_list_statuses,
+    )
+    monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture_output)
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Stuck Worker Repo", "path": str(repo), "session_prefix": "stuckw"},
+    ).json()
+    client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Worker stuck", "prompt": "Start this task"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    sent_messages.clear()
+
+    stale_started_at = datetime.now() - timedelta(seconds=30)
+    workspace_manager.tasks[started["id"]] = workspace_manager.tasks[started["id"]].model_copy(
+        update={"started_at": stale_started_at, "updated_at": stale_started_at}
+    )
+    session = workspace_manager.sessions[started["session_id"]]
+    sampled_at = datetime.now()
+    status_samples[:] = [
+        TerminalAgentStatus(
+            tab_id=session.tab_id,
+            tab_name="Stuck Worker Repo Agent 1",
+            agent_type=AgentType.CODEX,
+            status=AgentRuntimeStatus.WORKING,
+            status_text="Working",
+            detail="prompt pending",
+            tmux_session=session.tmux_session,
+            last_changed_at=sampled_at - timedelta(seconds=30),
+            sampled_at=sampled_at,
+        )
+    ]
+
+    asyncio.run(workspace_manager._refresh_session_statuses(workspace["id"]))
+
+    updated_task = workspace_manager.tasks[started["id"]]
+    updated_session = workspace_manager.sessions[started["session_id"]]
+    report = list(workspace_manager.reports.values())[-1]
+    assert updated_task.status == WorkspaceTaskStatus.REVIEW
+    assert updated_session.runtime_status == AgentRuntimeStatus.ATTENTION
+    assert report.state.value == "needs_input"
+    assert report.risk_level == "prompt_dispatch_stalled"
+    assert "terminal input box" in report.message
+    assert sent_messages == []
+
+
+def test_monitor_surfaces_reviewer_prompt_stuck_in_input(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    status_samples: list[TerminalAgentStatus] = []
+    sent_messages: list[tuple[str, str]] = []
+
+    async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
+        return status_samples
+
+    async def fake_capture_output(_tmux_session: str) -> str:
+        return "\n".join(
+            [
+                "› Review workspace task.",
+                "",
+                "Workspace: Stuck Reviewer Repo",
+                "Task ID: task-review-still-in-input",
+            ]
+        )
+
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="tab-reviewer-stuck",
+        port=12371,
+        sent_messages=sent_messages,
+    )
+    monkeypatch.setattr(
+        workspace_module.ttyd_manager,
+        "list_tab_agent_statuses",
+        fake_list_statuses,
+    )
+    monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture_output)
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Stuck Reviewer Repo", "path": str(repo), "session_prefix": "stuckr"},
+    ).json()
+    client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Reviewer stuck", "prompt": "Complete and review this task"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": started["id"],
+            "state": "completed",
+            "message": "Done; request review",
+            "review_decision": "request",
+            "review_reason": "Exercise reviewer dispatch",
+        },
+    )
+    sent_messages.clear()
+
+    review_session_id = workspace_manager.tasks[started["id"]].review_session_id
+    assert review_session_id is not None
+    stale_review_requested_at = datetime.now() - timedelta(seconds=30)
+    workspace_manager.tasks[started["id"]] = workspace_manager.tasks[started["id"]].model_copy(
+        update={
+            "review_requested_at": stale_review_requested_at,
+            "updated_at": stale_review_requested_at,
+        }
+    )
+    reviewer = workspace_manager.sessions[review_session_id]
+    sampled_at = datetime.now()
+    status_samples[:] = [
+        TerminalAgentStatus(
+            tab_id=reviewer.tab_id,
+            tab_name="Stuck Reviewer Repo Reviewer 1",
+            agent_type=AgentType.CODEX,
+            status=AgentRuntimeStatus.WORKING,
+            status_text="Working",
+            detail="review prompt pending",
+            tmux_session=reviewer.tmux_session,
+            last_changed_at=sampled_at - timedelta(seconds=30),
+            sampled_at=sampled_at,
+        )
+    ]
+
+    asyncio.run(workspace_manager._refresh_session_statuses(workspace["id"]))
+
+    updated_task = workspace_manager.tasks[started["id"]]
+    updated_reviewer = workspace_manager.sessions[review_session_id]
+    report = list(workspace_manager.reports.values())[-1]
+    assert updated_task.status == WorkspaceTaskStatus.REVIEW
+    assert updated_reviewer.runtime_status == AgentRuntimeStatus.ATTENTION
+    assert report.state.value == "review_needs_input"
+    assert report.risk_level == "prompt_dispatch_stalled"
+    assert "Review" in report.message or "review" in report.message
+    assert sent_messages == []
+
+
 def test_interrupted_idle_working_agent_auto_continue_stops_after_limit(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,

@@ -70,6 +70,8 @@ AUTO_CONTINUE_MIN_INTERVAL_SECONDS = 15
 AUTO_CONTINUE_IDLE_GRACE_SECONDS = 20
 REVIEW_RUNTIME_REOPEN_GRACE_SECONDS = 20
 MAX_AUTOMATED_REVIEW_FAILURES = 3
+PROMPT_DISPATCH_STALL_GRACE_SECONDS = 20
+PROMPT_STUCK_RISK_LEVEL = "prompt_dispatch_stalled"
 WORKSPACE_MONITOR_INTERVAL_SECONDS = 5
 AUTO_CONTINUE_MESSAGE = (
     "Please inspect the current task state. If the task was interrupted or is unfinished, "
@@ -3776,15 +3778,33 @@ class WorkspaceManager:
             )
             await self.send_session_message(reviewer.id, "/clear")
             await asyncio.sleep(0.5)
-        await self.send_session_message(
-            reviewer.id,
-            self._build_review_prompt(
-                workspace,
-                self.tasks[task.id],
-                self.sessions[reviewer.id],
-                trigger_report,
-            ),
-        )
+        try:
+            await self.send_session_message(
+                reviewer.id,
+                self._build_review_prompt(
+                    workspace,
+                    self.tasks[task.id],
+                    self.sessions[reviewer.id],
+                    trigger_report,
+                ),
+            )
+        except Exception as exc:
+            logger.exception(
+                "Failed to dispatch workspace review prompt task_id=%s reviewer_id=%s",
+                task.id,
+                reviewer.id,
+            )
+            self._mark_prompt_dispatch_stalled(
+                task_id=task.id,
+                session_id=reviewer.id,
+                message=(
+                    "Reviewer prompt could not be submitted to the terminal; "
+                    f"manual recovery is required. Error: {exc}"
+                ),
+                message_zh=("Reviewer prompt 未能提交到终端；需要手动恢复。" f"错误：{exc}"),
+                report_state=AgentReportState.REVIEW_NEEDS_INPUT,
+                sampled_at=_now(),
+            )
 
     async def _select_or_create_reviewer(
         self,
@@ -4188,6 +4208,18 @@ class WorkspaceManager:
 
             if current_task_id:
                 task = self.tasks.get(current_task_id)
+                if task and task.status == WorkspaceTaskStatus.WORKING:
+                    stalled_update = await self._detect_prompt_dispatch_stall(
+                        session,
+                        task,
+                        status.sampled_at,
+                    )
+                    if stalled_update:
+                        update.update(stalled_update)
+                        next_status = update["status"]
+                        runtime_status = update["runtime_status"]
+                        task = self.tasks.get(current_task_id)
+                        changed = True
                 if (
                     run_auto_continue
                     and runtime_status == AgentRuntimeStatus.IDLE
@@ -4256,6 +4288,145 @@ class WorkspaceManager:
             changed = True
         if changed:
             self._save_state()
+
+    async def _detect_prompt_dispatch_stall(
+        self,
+        session: ManagedSession,
+        task: WorkspaceTask,
+        sampled_at: datetime,
+    ) -> dict[str, Any] | None:
+        if self._prompt_dispatch_still_in_grace_period(session, task, sampled_at):
+            return None
+        try:
+            output = await self._capture_tmux_output(session.tmux_session)
+        except RuntimeError as exc:
+            logger.warning(
+                "Could not inspect workspace prompt dispatch for session_id=%s: %s",
+                session.id,
+                exc,
+            )
+            return None
+
+        if not self._message_still_in_input(
+            output,
+            self._expected_pending_prompt_prefix(session, task),
+        ):
+            return None
+        if self._latest_report_has_risk(task.id, PROMPT_STUCK_RISK_LEVEL):
+            return {
+                "status": ManagedSessionStatus.NEEDS_INPUT,
+                "runtime_status": AgentRuntimeStatus.ATTENTION,
+                "updated_at": sampled_at,
+            }
+
+        if session.role == WorkspaceSessionRole.REVIEWER:
+            message = (
+                "Reviewer prompt appears to still be sitting in the terminal input box; "
+                "review did not start and manual recovery is required."
+            )
+            message_zh = "Reviewer prompt 似乎仍停留在终端输入框；评审未启动，需要手动恢复。"
+            report_state = AgentReportState.REVIEW_NEEDS_INPUT
+        else:
+            message = (
+                "Workspace task prompt appears to still be sitting in the terminal input box; "
+                "the agent did not start executing and manual recovery is required."
+            )
+            message_zh = (
+                "Workspace task prompt 似乎仍停留在终端输入框；Agent 未开始执行，需要手动恢复。"
+            )
+            report_state = AgentReportState.NEEDS_INPUT
+
+        self._mark_prompt_dispatch_stalled(
+            task_id=task.id,
+            session_id=session.id,
+            message=message,
+            message_zh=message_zh,
+            report_state=report_state,
+            sampled_at=sampled_at,
+        )
+        return {
+            "status": ManagedSessionStatus.NEEDS_INPUT,
+            "runtime_status": AgentRuntimeStatus.ATTENTION,
+            "updated_at": sampled_at,
+        }
+
+    def _expected_pending_prompt_prefix(
+        self,
+        session: ManagedSession,
+        task: WorkspaceTask,
+    ) -> str:
+        if session.role == WorkspaceSessionRole.REVIEWER:
+            return "Review workspace task."
+        return "New workspace task assigned."
+
+    def _prompt_dispatch_still_in_grace_period(
+        self,
+        session: ManagedSession,
+        task: WorkspaceTask,
+        sampled_at: datetime,
+    ) -> bool:
+        dispatch_started_at = (
+            task.review_requested_at
+            if session.role == WorkspaceSessionRole.REVIEWER
+            else task.started_at
+        )
+        if not dispatch_started_at:
+            return False
+        return (
+            sampled_at - dispatch_started_at
+        ).total_seconds() < PROMPT_DISPATCH_STALL_GRACE_SECONDS
+
+    def _mark_prompt_dispatch_stalled(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        message: str,
+        message_zh: str,
+        report_state: AgentReportState,
+        sampled_at: datetime,
+    ) -> None:
+        task = self.tasks.get(task_id)
+        session = self.sessions.get(session_id)
+        if not task or not session:
+            return
+
+        report = AgentReport(
+            id=str(uuid.uuid4()),
+            workspace_id=task.workspace_id,
+            task_id=task.id,
+            session_id=session.id,
+            state=report_state,
+            message=message,
+            message_en=message,
+            message_zh=message_zh,
+            changed_files=[],
+            validation=None,
+            risks="Prompt dispatch stalled before execution; terminal input needs manual inspection.",
+            review_decision=ReviewDecision.SKIP,
+            review_reason="Prompt dispatch did not reach execution; independent review cannot run until recovered.",
+            risk_level=PROMPT_STUCK_RISK_LEVEL,
+            created_at=sampled_at,
+        )
+        self.reports[report.id] = report
+        self.tasks[task.id] = task.model_copy(
+            update={
+                "status": WorkspaceTaskStatus.REVIEW,
+                "reviewed_at": task.reviewed_at or sampled_at,
+                "updated_at": sampled_at,
+            }
+        )
+        self.sessions[session.id] = session.model_copy(
+            update={
+                "status": ManagedSessionStatus.NEEDS_INPUT,
+                "runtime_status": AgentRuntimeStatus.ATTENTION,
+                "task_id": task.id,
+                "current_task_id": task.id,
+                "last_activity_at": sampled_at,
+                "updated_at": sampled_at,
+            }
+        )
+        self._save_state()
 
     async def _auto_continue_stopped_task(
         self,
@@ -4456,6 +4627,13 @@ class WorkspaceManager:
             key=lambda report: report.created_at,
         )
         return reports[-1].state if reports else None
+
+    def _latest_report_has_risk(self, task_id: str, risk_level: str) -> bool:
+        reports = sorted(
+            [report for report in self.reports.values() if report.task_id == task_id],
+            key=lambda report: report.created_at,
+        )
+        return bool(reports and reports[-1].risk_level == risk_level)
 
     def _latest_review_report_state(self, task_id: str) -> AgentReportState | None:
         reports = sorted(
