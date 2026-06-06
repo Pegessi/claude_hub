@@ -155,6 +155,7 @@
         <span>{{ reviewerAgents.length + temporaryReviewers.length }} reviewers</span>
         <strong>{{ workspaceAgents.filter(agent => agent.runtime_status === 'working').length }} working</strong>
         <span>{{ tasksByStatus('queued').length }} queued</span>
+        <span>{{ activeFeedbackLessons.length }} lessons</span>
       </div>
       <div class="workspace-column-tabs">
         <span
@@ -165,6 +166,26 @@
         </span>
       </div>
     </div>
+
+    <section
+      v-if="activeWorkspaceId"
+      class="feedback-overview"
+      aria-label="Workspace feedback lessons"
+    >
+      <div class="feedback-overview-main">
+        <span class="feedback-overview-kicker">Feedback</span>
+        <strong>{{ activeFeedbackLessons.length }} active lessons</strong>
+        <span>{{ feedbackLessonMatchSummary }}</span>
+      </div>
+      <button
+        type="button"
+        class="feedback-refresh-button"
+        :disabled="isPending('feedback:refresh')"
+        @click="refreshFeedbackLessons"
+      >
+        Refresh
+      </button>
+    </section>
 
     <section
       v-if="activeWorkspaceId"
@@ -571,6 +592,64 @@
                   </div>
                 </div>
               </div>
+            </section>
+
+            <section class="detail-section feedback-detail-section">
+              <div class="detail-section-title">
+                Feedback Lessons
+              </div>
+              <div class="feedback-detail-meta">
+                <span>{{ activeFeedbackLessons.length }} active in workspace</span>
+                <strong>{{ selectedTaskFeedbackLessons.length }} matched for this task</strong>
+              </div>
+              <div
+                v-if="activeFeedbackLessons.length === 0"
+                class="empty-timeline"
+              >
+                No active feedback lessons for this workspace.
+              </div>
+              <div
+                v-else-if="selectedTaskFeedbackLessons.length === 0"
+                class="empty-timeline"
+              >
+                No active lessons matched this task.
+              </div>
+              <div
+                v-else
+                class="feedback-lesson-list"
+              >
+                <article
+                  v-for="lesson in selectedTaskFeedbackLessons"
+                  :key="lesson.id"
+                  class="feedback-lesson-card"
+                >
+                  <div class="feedback-lesson-header">
+                    <code>{{ lesson.id }}</code>
+                    <span>{{ lesson.scope }}</span>
+                  </div>
+                  <p>{{ lesson.summary }}</p>
+                  <dl>
+                    <div v-if="lesson.do">
+                      <dt>Do</dt>
+                      <dd>{{ lesson.do }}</dd>
+                    </div>
+                    <div v-if="lesson.avoid">
+                      <dt>Avoid</dt>
+                      <dd>{{ lesson.avoid }}</dd>
+                    </div>
+                    <div v-if="lesson.evidence_task_ids?.length">
+                      <dt>Evidence</dt>
+                      <dd>{{ lesson.evidence_task_ids.join(', ') }}</dd>
+                    </div>
+                  </dl>
+                </article>
+              </div>
+              <p
+                v-if="selectedTaskFeedbackLessons.length > 0"
+                class="feedback-injection-note"
+              >
+                Matched lessons are injected into the task assignment and reviewer prompts.
+              </p>
             </section>
 
             <section class="detail-section">
@@ -1791,6 +1870,7 @@ import type {
   AcceptanceCheck,
   AutonomyPolicy,
   ExecutionTarget,
+  FeedbackLesson,
   GoalPacket,
   ManagedSession,
   RemoteProfile,
@@ -1842,6 +1922,7 @@ const {
   activeWorkspaceId,
   board,
   tasks,
+  activeFeedbackLessons,
   workspaceAgents,
   reviewerAgents,
   temporaryReviewers,
@@ -1951,6 +2032,53 @@ const mobileWorkspaceSummary = computed(() => {
 const selectedTask = computed(() =>
   tasks.value.find(task => task.id === selectedTaskId.value) || null
 )
+
+function feedbackTokens(value: string): Set<string> {
+  return new Set((value.toLowerCase().match(/[a-z0-9_.-]{2,}/g) || []))
+}
+
+function feedbackLessonText(lesson: FeedbackLesson): string {
+  return [
+    lesson.id,
+    lesson.summary,
+    lesson.do || '',
+    lesson.avoid || '',
+    ...(lesson.applies_when || []),
+    ...(lesson.tags || []),
+  ].join(' ')
+}
+
+function feedbackLessonScore(lesson: FeedbackLesson, task: WorkspaceTask): number {
+  const queryTokens = feedbackTokens(`${task.title} ${task.prompt}`)
+  if (queryTokens.size === 0) return 0
+  const lessonTokens = feedbackTokens(feedbackLessonText(lesson))
+  let score = 0
+  queryTokens.forEach((token) => {
+    if (lessonTokens.has(token)) score += 1
+  })
+  return score
+}
+
+function matchingFeedbackLessons(task: WorkspaceTask | null): FeedbackLesson[] {
+  if (!task) return []
+  return activeFeedbackLessons.value
+    .map(lesson => ({ lesson, score: feedbackLessonScore(lesson, task) }))
+    .filter(item => item.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .map(item => item.lesson)
+    .slice(0, 6)
+}
+
+const selectedTaskFeedbackLessons = computed(() =>
+  matchingFeedbackLessons(selectedTask.value)
+)
+
+const feedbackLessonMatchSummary = computed(() => {
+  const matchedTaskCount = tasks.value.filter(task => matchingFeedbackLessons(task).length > 0).length
+  if (activeFeedbackLessons.value.length === 0) return 'No active lessons indexed'
+  if (matchedTaskCount === 0) return 'No current task matches'
+  return `${matchedTaskCount} current tasks match active lessons`
+})
 
 const selectedSession = computed(() =>
   selectedTask.value ? workspaceStore.sessionForTask(selectedTask.value) : null
@@ -3192,6 +3320,12 @@ async function refreshAgentStatusesFromMenu() {
   closeWorkspaceMobileMenu()
 }
 
+async function refreshFeedbackLessons() {
+  await runPending('feedback:refresh', async () => {
+    await workspaceStore.fetchFeedbackLessons()
+  })
+}
+
 async function startTask(task: WorkspaceTask) {
   await runPending(taskActionKey('start', task.id), async () => {
     const options = startOptionsFor(task)
@@ -3606,6 +3740,58 @@ onUnmounted(() => {
   color: var(--ch-color-text);
   font-size: 11px;
   padding: 4px 9px;
+}
+
+.feedback-overview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--ch-color-border-muted);
+  background: var(--ch-color-surface);
+}
+
+.feedback-overview-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+}
+
+.feedback-overview-main strong {
+  color: var(--ch-color-text);
+  white-space: nowrap;
+}
+
+.feedback-overview-kicker {
+  border-radius: 999px;
+  background: var(--ch-color-accent-soft);
+  color: var(--ch-color-accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0;
+  padding: 4px 8px;
+  text-transform: uppercase;
+}
+
+.feedback-refresh-button {
+  flex: 0 0 auto;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 10px;
+}
+
+.feedback-refresh-button:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 
 .workspace-agent-status {
@@ -4771,6 +4957,100 @@ onUnmounted(() => {
   color: var(--ch-color-text);
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+
+.feedback-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+}
+
+.feedback-detail-meta span,
+.feedback-detail-meta strong {
+  border-radius: 999px;
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  font-size: 11px;
+  padding: 4px 8px;
+}
+
+.feedback-lesson-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.feedback-lesson-card {
+  min-width: 0;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-soft);
+  padding: 10px;
+}
+
+.feedback-lesson-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.feedback-lesson-header code {
+  min-width: 0;
+  color: var(--ch-color-text);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.feedback-lesson-header span {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--ch-color-chip-bg-muted);
+  color: var(--ch-color-text-muted);
+  font-size: 10px;
+  padding: 3px 7px;
+}
+
+.feedback-lesson-card p {
+  margin: 0;
+  color: var(--ch-color-text);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.feedback-lesson-card dl {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0 0;
+}
+
+.feedback-lesson-card dl div {
+  min-width: 0;
+}
+
+.feedback-lesson-card dt {
+  color: var(--ch-color-text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.feedback-lesson-card dd {
+  margin: 2px 0 0;
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.feedback-injection-note {
+  margin: 10px 0 0;
+  color: var(--ch-color-text-subtle);
+  font-size: 12px;
 }
 
 .detail-actions {

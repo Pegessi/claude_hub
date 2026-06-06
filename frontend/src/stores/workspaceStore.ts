@@ -6,6 +6,7 @@ import type {
   AgentType,
   ContinueTaskRequest,
   EnsureWorkspaceAgentRequest,
+  FeedbackLesson,
   ManualTaskControlRequest,
   ManagedSession,
   RequestTaskReviewRequest,
@@ -37,6 +38,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const workspaces = ref<Workspace[]>([])
   const activeWorkspaceId = ref<string | null>(localStorage.getItem(STORAGE_KEY_ACTIVE_WORKSPACE))
   const board = ref<WorkspaceBoard | null>(null)
+  const feedbackLessons = ref<FeedbackLesson[]>([])
   const isLoading = ref(false)
   const error = ref<string | null>(null)
   const boardFetches = new Map<string, Promise<void>>()
@@ -47,6 +49,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const tasks = computed(() => board.value?.tasks || [])
   const sessions = computed(() => board.value?.sessions || [])
   const reports = computed(() => board.value?.reports || [])
+  const activeFeedbackLessons = computed(() =>
+    feedbackLessons.value.filter(lesson => lesson.status === 'active')
+  )
   const workspaceAgents = computed(() =>
     sessions.value.filter(session => session.role === 'orchestrator' || session.role === 'worker')
   )
@@ -118,6 +123,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       const response = await fetch(`${API_BASE}/workspaces/${workspaceId}/board`)
       if (!response.ok) throw new Error(await readError(response))
       board.value = await response.json()
+      await fetchFeedbackLessons(workspaceId)
       error.value = null
     })()
 
@@ -130,6 +136,16 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     } finally {
       boardFetches.delete(workspaceId)
     }
+  }
+
+  async function fetchFeedbackLessons(workspaceId = activeWorkspaceId.value) {
+    if (!workspaceId) {
+      feedbackLessons.value = []
+      return
+    }
+    const response = await fetch(`${API_BASE}/workspaces/${workspaceId}/lessons?limit=50`)
+    if (!response.ok) throw new Error(await readError(response))
+    feedbackLessons.value = await response.json()
   }
 
   async function createWorkspace(payload: WorkspaceCreate) {
@@ -400,6 +416,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     activeWorkspaceId,
     activeWorkspace,
     board,
+    feedbackLessons,
+    activeFeedbackLessons,
     tasks,
     sessions,
     reports,
@@ -416,6 +434,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     fetchWorkspaces,
     setActiveWorkspace,
     fetchBoard,
+    fetchFeedbackLessons,
     createWorkspace,
     updateWorkspace,
     createTask,
