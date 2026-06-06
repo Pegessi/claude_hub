@@ -5,6 +5,12 @@
 
 ## 2026-06-06
 
+### fix: rebalance queued workspace tasks when another agent frees up
+- Reassign automatically queued tasks away from an agent held by an unresolved Review task when another idle workspace agent becomes available, so work does not stay stuck behind a human-acceptance gate unnecessarily
+- Preserve explicit user-selected, related-task, and continuation assignments by only rebalancing tasks whose dispatch reason is the system-generated "Queued behind existing workspace agent"
+- Add regression coverage for the two-agent case where both agents are review-held when a task queues, then one agent is human-accepted and should immediately receive the queued task
+- **Files**: backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspaces.py, CHANGELOG.md
+
 ### docs: plan workspace feedback harness
 - Map OpenAI's harness-engineering feedback-loop ideas onto Claude Hub's current Goal Packet, reviewer/evaluator, task-record archive, and Auto Mode observability architecture
 - Propose a workspace-scoped Feedback Reaper that turns completed/failed task records into structured feedback for future prompt hints, review profiles, validation expectations, and eventual mechanical enforcement
