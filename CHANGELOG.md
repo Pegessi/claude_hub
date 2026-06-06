@@ -6,8 +6,8 @@
 ## 2026-06-06
 
 ### feat: preview Markdown workspace outputs in task details
-- Add a scoped workspace artifact preview API that safely serves local Markdown from official report `artifact_refs`, Markdown `changed_files`, workspace snapshots, and discovered top-level/docs workspace files
-- Surface a visible Markdown Outputs panel in task details, prioritizing agent-reported artifacts while also listing changed Markdown files, `snapshot.md`, and supplemental discovered documents with inline preview, loading, error, and truncation feedback
+- Add a scoped workspace artifact preview API that safely serves local Markdown from official report `artifact_refs`, Markdown `changed_files`, and workspace snapshots while keeping task-detail output lists task-associated
+- Surface a visible Markdown Outputs panel in task details, prioritizing agent-reported artifacts while listing only Markdown tied to the selected task or its reports with inline preview, loading, error, and truncation feedback
 - Link Markdown paths mentioned in task descriptions, report messages, validation notes, risks, and changed-file chips so clicking an inline path opens a scrollable preview modal
 - Support safe relative and absolute Markdown references by resolving them only under trusted workspace/session roots or the explicit workspace snapshot path
 - Add regression coverage for artifact, changed-file, and snapshot Markdown discovery plus preview path-boundary and unreadable-file handling
