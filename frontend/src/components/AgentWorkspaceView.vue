@@ -765,7 +765,10 @@
               </template>
             </details>
 
-            <details class="detail-section detail-section--collapsible">
+            <details
+              class="detail-section detail-section--collapsible"
+              open
+            >
               <summary class="detail-section-title">
                 Progress
               </summary>
@@ -5104,8 +5107,17 @@ onUnmounted(() => {
   padding: 14px;
 }
 
+.detail-section--collapsible {
+  transition: border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), background var(--ch-motion-fast);
+}
+
 .detail-section--collapsible > summary {
   cursor: pointer;
+}
+
+.detail-section--collapsible[open] {
+  border-color: var(--ch-color-accent);
+  box-shadow: inset 3px 0 0 var(--ch-color-accent);
 }
 
 .detail-section--collapsible[open] > summary {
