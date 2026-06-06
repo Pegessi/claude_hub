@@ -622,6 +622,81 @@
               </div>
             </section>
 
+            <section class="detail-section markdown-output-section">
+              <div class="detail-section-title detail-section-title--with-count">
+                <span>Markdown Outputs</span>
+                <span>{{ selectedMarkdownDocuments.length }}</span>
+              </div>
+              <div
+                v-if="selectedMarkdownDocuments.length === 0"
+                class="empty-timeline"
+              >
+                No Markdown outputs discovered yet. Agents can report artifact_refs, or Markdown changed_files will appear here automatically.
+              </div>
+              <div
+                v-else
+                class="markdown-output-list"
+              >
+                <article
+                  v-for="document in selectedMarkdownDocuments"
+                  :key="document.id"
+                  class="markdown-output-card"
+                >
+                  <div class="markdown-output-row">
+                    <div>
+                      <strong>{{ document.label }}</strong>
+                      <span>{{ markdownDocumentSourceLabel(document.source) }}</span>
+                      <code>{{ document.path }}</code>
+                    </div>
+                    <div class="markdown-output-actions">
+                      <span v-if="document.size_bytes">{{ formatAttachmentSize(document.size_bytes) }}</span>
+                      <button
+                        type="button"
+                        class="artifact-preview-button"
+                        :disabled="isMarkdownDocumentPreviewLoading(document)"
+                        @click="toggleMarkdownDocumentPreview(document)"
+                      >
+                        {{ markdownDocumentPreviewButtonLabel(document) }}
+                      </button>
+                    </div>
+                  </div>
+                  <div
+                    v-if="expandedArtifactKey === markdownDocumentPreviewKey(document)"
+                    class="artifact-preview markdown-output-preview"
+                  >
+                    <div
+                      v-if="artifactPreviewErrors[markdownDocumentPreviewKey(document)]"
+                      class="artifact-preview-status artifact-preview-error"
+                    >
+                      {{ artifactPreviewErrors[markdownDocumentPreviewKey(document)] }}
+                    </div>
+                    <div
+                      v-else-if="!artifactPreviews[markdownDocumentPreviewKey(document)]"
+                      class="artifact-preview-status"
+                    >
+                      Loading Markdown preview...
+                    </div>
+                    <template v-else>
+                      <div class="artifact-preview-header">
+                        <span>{{ artifactPreviews[markdownDocumentPreviewKey(document)].filename }}</span>
+                        <span>{{ formatAttachmentSize(artifactPreviews[markdownDocumentPreviewKey(document)].size_bytes) }}</span>
+                      </div>
+                      <MarkdownContent
+                        class="artifact-preview-content"
+                        :text="artifactPreviews[markdownDocumentPreviewKey(document)].content"
+                      />
+                      <div
+                        v-if="artifactPreviews[markdownDocumentPreviewKey(document)].truncated"
+                        class="artifact-preview-status"
+                      >
+                        Preview truncated to the first 512 KB.
+                      </div>
+                    </template>
+                  </div>
+                </article>
+              </div>
+            </section>
+
             <section class="detail-section">
               <div class="detail-section-title">
                 Assignment
@@ -1835,6 +1910,8 @@ import type {
   AgentRuntimeStatus,
   AgentType,
   WorkspaceArtifactPreview,
+  WorkspaceMarkdownDocument,
+  WorkspaceMarkdownDocumentSource,
   AcceptanceCheck,
   AutonomyPolicy,
   ExecutionTarget,
@@ -2015,6 +2092,18 @@ const selectedReports = computed<AgentReport[]>(() =>
   selectedTask.value ? workspaceStore.reportsForTask(selectedTask.value) : []
 )
 
+const selectedMarkdownDocuments = computed<WorkspaceMarkdownDocument[]>(() => {
+  const task = selectedTask.value
+  if (!task) return []
+  const documents = board.value?.markdown_documents || []
+  return documents.filter(document =>
+    document.source === 'snapshot' ||
+    document.source === 'discovered' ||
+    document.task_id === task.id ||
+    selectedReports.value.some(report => report.id === document.report_id)
+  )
+})
+
 interface ProgressTimelineItem {
   id: string
   label: string
@@ -2152,6 +2241,56 @@ function markdownArtifactRefs(report: AgentReport): string[] {
 
 function artifactPreviewKey(report: AgentReport, artifact: string): string {
   return `${report.id}:${artifact}`
+}
+
+function markdownDocumentPreviewKey(document: WorkspaceMarkdownDocument): string {
+  return `doc:${document.id}`
+}
+
+function markdownDocumentSourceLabel(source: WorkspaceMarkdownDocumentSource): string {
+  const labels: Record<WorkspaceMarkdownDocumentSource, string> = {
+    artifact: 'Official artifact',
+    changed_file: 'Changed Markdown',
+    snapshot: 'Workspace snapshot',
+    discovered: 'Discovered',
+  }
+  return labels[source]
+}
+
+function isMarkdownDocumentPreviewLoading(document: WorkspaceMarkdownDocument): boolean {
+  return Boolean(artifactPreviewLoading[markdownDocumentPreviewKey(document)])
+}
+
+function markdownDocumentPreviewButtonLabel(document: WorkspaceMarkdownDocument): string {
+  const key = markdownDocumentPreviewKey(document)
+  if (artifactPreviewLoading[key]) return 'Loading...'
+  return expandedArtifactKey.value === key ? 'Hide' : 'Open'
+}
+
+async function toggleMarkdownDocumentPreview(document: WorkspaceMarkdownDocument) {
+  const key = markdownDocumentPreviewKey(document)
+  if (expandedArtifactKey.value === key) {
+    expandedArtifactKey.value = null
+    return
+  }
+  expandedArtifactKey.value = key
+  if (artifactPreviews[key] || artifactPreviewLoading[key]) return
+
+  const workspaceId = selectedTask.value?.workspace_id || activeWorkspaceId.value
+  if (!workspaceId) return
+  artifactPreviewLoading[key] = true
+  delete artifactPreviewErrors[key]
+  try {
+    artifactPreviews[key] = await workspaceStore.fetchArtifactPreview(
+      workspaceId,
+      document.path,
+      document.report_id || undefined,
+    )
+  } catch (e) {
+    artifactPreviewErrors[key] = e instanceof Error ? e.message : 'Failed to load Markdown preview'
+  } finally {
+    artifactPreviewLoading[key] = false
+  }
 }
 
 function isArtifactPreviewLoading(report: AgentReport, artifact: string): boolean {
@@ -4765,11 +4904,20 @@ onUnmounted(() => {
   text-transform: uppercase;
 }
 
-.detail-section-title--with-controls {
+.detail-section-title--with-controls,
+.detail-section-title--with-count {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.detail-section-title--with-count > span:last-child {
+  border-radius: 999px;
+  background: var(--ch-color-surface-control-active);
+  color: var(--ch-color-text);
+  font-size: 10px;
+  padding: 2px 7px;
 }
 
 .lang-toggle {
@@ -5323,6 +5471,65 @@ onUnmounted(() => {
   color: var(--ch-color-text);
   font-size: 10px;
   padding: 3px 7px;
+}
+
+.markdown-output-section {
+  border-color: color-mix(in srgb, var(--ch-color-accent) 45%, var(--ch-color-border-muted));
+}
+
+.markdown-output-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.markdown-output-card {
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-soft);
+  padding: 9px;
+}
+
+.markdown-output-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.markdown-output-row > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.markdown-output-row strong {
+  color: var(--ch-color-text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.markdown-output-row span {
+  color: var(--ch-color-text-muted);
+  font-size: 11px;
+}
+
+.markdown-output-row code {
+  color: var(--ch-color-text-subtle);
+  font-size: 11px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.markdown-output-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.markdown-output-preview {
+  margin-top: 10px;
 }
 
 .report-artifacts {
