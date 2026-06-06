@@ -575,10 +575,10 @@
               </div>
             </section>
 
-            <section class="detail-section">
-              <div class="detail-section-title">
+            <details class="detail-section detail-section--collapsible">
+              <summary class="detail-section-title">
                 Goal Packet
-              </div>
+              </summary>
               <div
                 v-if="!selectedTask.goal_packet"
                 class="empty-timeline"
@@ -622,13 +622,13 @@
                   </span>
                 </div>
               </div>
-            </section>
+            </details>
 
-            <section class="detail-section markdown-output-section">
-              <div class="detail-section-title detail-section-title--with-count">
+            <details class="detail-section detail-section--collapsible markdown-output-section">
+              <summary class="detail-section-title detail-section-title--with-count">
                 <span>Markdown Outputs</span>
                 <span>{{ selectedMarkdownDocuments.length }}</span>
-              </div>
+              </summary>
               <div
                 v-if="selectedMarkdownDocuments.length === 0"
                 class="empty-timeline"
@@ -697,12 +697,12 @@
                   </div>
                 </article>
               </div>
-            </section>
+            </details>
 
-            <section class="detail-section">
-              <div class="detail-section-title">
+            <details class="detail-section detail-section--collapsible">
+              <summary class="detail-section-title">
                 Assignment
-              </div>
+              </summary>
               <div class="fact-grid">
                 <div>
                   <span>Mode</span>
@@ -757,15 +757,15 @@
                   <strong>{{ board?.snapshot_path || 'none' }}</strong>
                 </div>
               </div>
-            </section>
+            </details>
 
-            <section
+            <details
               v-if="selectedTask.task_mode === 'autonomous'"
-              class="detail-section autonomous-run-panel"
+              class="detail-section detail-section--collapsible autonomous-run-panel"
             >
-              <div class="detail-section-title">
+              <summary class="detail-section-title">
                 Autonomous Run
-              </div>
+              </summary>
               <div
                 v-if="!selectedTask.autonomous_run"
                 class="empty-timeline"
@@ -838,13 +838,17 @@
                   </ol>
                 </div>
               </template>
-            </section>
+            </details>
 
-            <section class="detail-section">
-              <div class="detail-section-title detail-section-title--with-controls">
-                <span>Progress</span>
+            <details class="detail-section detail-section--collapsible">
+              <summary class="detail-section-title">
+                Progress
+              </summary>
+              <div
+                v-if="selectedReports.length > 0 && hasBilingualReport"
+                class="detail-section-controls"
+              >
                 <div
-                  v-if="selectedReports.length > 0 && hasBilingualReport"
                   class="lang-toggle"
                   role="group"
                   aria-label="Report language"
@@ -1068,7 +1072,7 @@
                   </details>
                 </li>
               </ol>
-            </section>
+            </details>
           </div>
 
           <div class="detail-footer">
@@ -5098,6 +5102,18 @@ onUnmounted(() => {
   border-radius: var(--ch-radius-lg);
   background: var(--ch-color-surface);
   padding: 14px;
+}
+
+.detail-section--collapsible > summary {
+  cursor: pointer;
+}
+
+.detail-section--collapsible[open] > summary {
+  margin-bottom: 10px;
+}
+
+.detail-section-controls {
+  margin-bottom: 10px;
 }
 
 .detail-copy {
