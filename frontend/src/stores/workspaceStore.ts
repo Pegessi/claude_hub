@@ -11,6 +11,7 @@ import type {
   RequestTaskReviewRequest,
   StartTaskRequest,
   Workspace,
+  WorkspaceArtifactPreview,
   WorkspaceAttachmentCreate,
   WorkspaceBoard,
   WorkspaceCreate,
@@ -395,6 +396,18 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     await fetchBoard()
   }
 
+  async function fetchArtifactPreview(
+    workspaceId: string,
+    artifactPath: string,
+    reportId?: string,
+  ): Promise<WorkspaceArtifactPreview> {
+    const params = new URLSearchParams({ path: artifactPath })
+    if (reportId) params.set('report_id', reportId)
+    const response = await fetch(`${API_BASE}/workspaces/${workspaceId}/artifacts/preview?${params}`)
+    if (!response.ok) throw new Error(await readError(response))
+    return response.json()
+  }
+
   return {
     workspaces,
     activeWorkspaceId,
@@ -431,5 +444,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     dispatchWorkspace,
     sendMessage,
     createReport,
+    fetchArtifactPreview,
   }
 })

@@ -591,6 +591,16 @@ class AgentReport(BaseModel):
     created_at: datetime
 
 
+class WorkspaceArtifactPreview(BaseModel):
+    """Previewable Markdown artifact content from a workspace report."""
+
+    path: str
+    filename: str
+    content: str
+    size_bytes: int
+    truncated: bool = False
+
+
 class WorkspaceBoard(BaseModel):
     """Workspace board response for Agent Workspace mode."""
 

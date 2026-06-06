@@ -881,6 +881,81 @@ def test_create_task_persists_pasted_image_attachment(
     assert attachment_path.read_bytes().startswith(b"\x89PNG")
 
 
+async def test_preview_report_markdown_artifact_is_scoped_to_report(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "report.md").write_text("# Research\n\nFindings", encoding="utf-8")
+    (tmp_path / "outside.md").write_text("# Secret", encoding="utf-8")
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path / "state")
+
+    stub_workspace_terminal(monkeypatch, repo, tab_id="report-tab", port=18190)
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Report Repo",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "report",
+        },
+    ).json()
+    session = await workspace_manager.ensure_workspace_agent(
+        workspace["id"],
+        workspace_module.EnsureWorkspaceAgentRequest(agent_type="codex", reuse_existing=False),
+    )
+    report = client.post(
+        f"/api/workspaces/sessions/{session.id}/reports",
+        json={
+            "state": "completed",
+            "message": "Research report ready",
+            "artifact_refs": ["report.md", str(tmp_path / "outside.md")],
+        },
+    ).json()
+
+    response = client.get(
+        f"/api/workspaces/{workspace['id']}/artifacts/preview",
+        params={"path": "report.md", "report_id": report["id"]},
+    )
+
+    assert response.status_code == 200
+    preview = response.json()
+    assert preview["filename"] == "report.md"
+    assert preview["content"] == "# Research\n\nFindings"
+    assert preview["truncated"] is False
+
+    outside_response = client.get(
+        f"/api/workspaces/{workspace['id']}/artifacts/preview",
+        params={"path": str(tmp_path / "outside.md"), "report_id": report["id"]},
+    )
+    assert outside_response.status_code == 404
+
+    unknown_response = client.get(
+        f"/api/workspaces/{workspace['id']}/artifacts/preview",
+        params={"path": "missing.md", "report_id": report["id"]},
+    )
+    assert unknown_response.status_code == 404
+
+    unsupported_response = client.get(
+        f"/api/workspaces/{workspace['id']}/artifacts/preview",
+        params={"path": "notes.txt", "report_id": report["id"]},
+    )
+    assert unsupported_response.status_code == 404
+
+    def unreadable_file(_path: Path) -> bytes:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable_file)
+    unreadable_response = client.get(
+        f"/api/workspaces/{workspace['id']}/artifacts/preview",
+        params={"path": "report.md", "report_id": report["id"]},
+    )
+    assert unreadable_response.status_code == 400
+    assert unreadable_response.json()["detail"] == "Artifact could not be read"
+
+
 def test_spawn_worker_is_disabled(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()

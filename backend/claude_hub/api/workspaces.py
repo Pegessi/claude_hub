@@ -18,6 +18,7 @@ from ..models import (
     StartTaskRequest,
     User,
     Workspace,
+    WorkspaceArtifactPreview,
     WorkspaceBoard,
     WorkspaceCreate,
     WorkspaceTask,
@@ -105,6 +106,22 @@ async def get_attachment(
         )
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Attachment not found") from e
+
+
+@router.get("/{workspace_id}/artifacts/preview", response_model=WorkspaceArtifactPreview)
+async def preview_workspace_artifact(
+    workspace_id: str,
+    path: str,
+    report_id: str | None = None,
+    current_user: User = Depends(get_current_user),
+) -> WorkspaceArtifactPreview:
+    """Return previewable Markdown content for a report artifact."""
+    try:
+        return workspace_manager.preview_artifact(workspace_id, path, report_id=report_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Artifact not found") from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.post("/{workspace_id}/agent", response_model=ManagedSession, status_code=201)
