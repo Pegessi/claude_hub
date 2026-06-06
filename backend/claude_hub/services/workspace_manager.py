@@ -2060,6 +2060,7 @@ class WorkspaceManager:
                 task=self.tasks[task.id],
                 session=session,
                 lesson_ids=feedback_lesson_ids,
+                prompt_kind="assignment",
                 created_at=now,
             )
         self.sessions[session.id] = session.model_copy(
@@ -2406,6 +2407,7 @@ class WorkspaceManager:
         task: WorkspaceTask,
         session: ManagedSession,
         lesson_ids: list[str],
+        prompt_kind: str,
         created_at: datetime,
     ) -> None:
         lesson_list = ", ".join(lesson_ids)
@@ -2415,11 +2417,11 @@ class WorkspaceManager:
             task_id=task.id,
             session_id=session.id,
             state=AgentReportState.WORKING,
-            message=f"Feedback lessons injected into assignment prompt: {lesson_list}",
-            message_en=f"Feedback lessons injected into assignment prompt: {lesson_list}",
-            message_zh=f"已将 feedback lessons 注入任务派发 prompt：{lesson_list}",
+            message=f"Feedback lessons injected into {prompt_kind} prompt: {lesson_list}",
+            message_en=f"Feedback lessons injected into {prompt_kind} prompt: {lesson_list}",
+            message_zh=f"已将 feedback lessons 注入 {prompt_kind} prompt：{lesson_list}",
             changed_files=[],
-            validation="feedback_lesson_ids=" + json.dumps(lesson_ids),
+            validation=f"prompt_kind={prompt_kind}; feedback_lesson_ids=" + json.dumps(lesson_ids),
             risks=None,
             review_decision=ReviewDecision.SKIP,
             review_reason="System audit event for prompt-time feedback lesson injection.",
@@ -2788,6 +2790,7 @@ class WorkspaceManager:
         task: WorkspaceTask,
         reviewer: ManagedSession,
         trigger_report: AgentReport,
+        lesson_context: list[dict[str, Any]] | None = None,
     ) -> str:
         task_reports = [
             report
@@ -2820,9 +2823,13 @@ class WorkspaceManager:
             for report in task_reports
         ]
         profiles = self._effective_review_profiles(task, trigger_report)
-        lesson_context = self._lesson_context_block(
-            workspace,
-            f"{task.title}\n{task.prompt}\n{trigger_report.message}",
+        lesson_context_block = self._lesson_context_block_from_payload(
+            lesson_context
+            if lesson_context is not None
+            else self._lesson_context_payload(
+                workspace,
+                f"{task.title}\n{task.prompt}\n{trigger_report.message}",
+            )
         )
         return (
             "Review workspace task.\n\n"
@@ -2843,7 +2850,7 @@ class WorkspaceManager:
             f"{self._autonomous_review_block(task)}"
             f"{self._review_profile_prompt_block(profiles)}"
             f"{self._review_guidance_block(workspace, trigger_report)}"
-            f"{lesson_context}"
+            f"{lesson_context_block}"
             "Review workflow:\n"
             "1. Stay read-only. Do not edit files, run formatters that write changes, or revert work.\n"
             "2. Check whether the stored Goal Packet faithfully preserves the original task prompt. "
@@ -3550,6 +3557,14 @@ class WorkspaceManager:
             raise KeyError(task.workspace_id)
         reviewer = await self._select_or_create_reviewer(workspace, task)
         now = _now()
+        lesson_context = self._lesson_context_payload(
+            workspace,
+            f"{task.title}\n{task.prompt}\n{trigger_report.message}",
+        )
+        feedback_lesson_ids = [str(item["id"]) for item in lesson_context if item.get("id")]
+        task_feedback_lesson_ids = list(
+            dict.fromkeys([*task.feedback_lesson_ids, *feedback_lesson_ids])
+        )
         reviewer = await self._rename_session_for_task(reviewer, task, updated_at=now)
         autonomous_run = task.autonomous_run
         if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
@@ -3580,6 +3595,7 @@ class WorkspaceManager:
                 "completed_at": None,
                 "human_acceptance_requested_at": None,
                 "human_accepted_at": None,
+                "feedback_lesson_ids": task_feedback_lesson_ids,
                 "autonomous_run": autonomous_run,
                 "updated_at": now,
             }
@@ -3594,6 +3610,14 @@ class WorkspaceManager:
                 "last_activity_at": now,
             }
         )
+        if feedback_lesson_ids:
+            self._record_feedback_lesson_injection(
+                task=self.tasks[task.id],
+                session=self.sessions[reviewer.id],
+                lesson_ids=feedback_lesson_ids,
+                prompt_kind="reviewer",
+                created_at=now,
+            )
         self._save_state()
         is_same_task_continuation = task.review_session_id == reviewer.id
         should_clear_context = not is_same_task_continuation and self._has_prior_review_history(
@@ -3614,6 +3638,7 @@ class WorkspaceManager:
                 self.tasks[task.id],
                 self.sessions[reviewer.id],
                 trigger_report,
+                lesson_context=lesson_context,
             ),
         )
 
