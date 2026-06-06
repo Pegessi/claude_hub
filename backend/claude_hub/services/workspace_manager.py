@@ -240,6 +240,9 @@ class WorkspaceManager:
         normalized.setdefault("clear_context", None)
         normalized.setdefault("dispatch_reason", None)
         normalized.setdefault("dispatch_pending", False)
+        normalized["feedback_lesson_ids"] = self._normalize_string_list(
+            normalized.get("feedback_lesson_ids")
+        )
         normalized.setdefault("review_session_id", None)
         normalized.setdefault("review_attempts", 0)
         normalized.setdefault("review_requested_at", None)
@@ -2028,19 +2031,37 @@ class WorkspaceManager:
             task.related_task_id,
             task.dispatch_reason,
         )
+        now = _now()
+        lesson_context = self._lesson_context_payload(
+            workspace,
+            f"{task.title}\n{task.prompt}",
+        )
+        feedback_lesson_ids = [str(item["id"]) for item in lesson_context if item.get("id")]
         await self.send_session_message(
             session.id,
-            self._build_task_assignment_prompt(workspace, task, session),
+            self._build_task_assignment_prompt(
+                workspace,
+                task,
+                session,
+                lesson_context=lesson_context,
+            ),
         )
 
-        now = _now()
         self.tasks[task.id] = task.model_copy(
             update={
                 "status": WorkspaceTaskStatus.WORKING,
                 "started_at": now,
+                "feedback_lesson_ids": feedback_lesson_ids,
                 "updated_at": now,
             }
         )
+        if feedback_lesson_ids:
+            self._record_feedback_lesson_injection(
+                task=self.tasks[task.id],
+                session=session,
+                lesson_ids=feedback_lesson_ids,
+                created_at=now,
+            )
         self.sessions[session.id] = session.model_copy(
             update={
                 "task_id": task.id,
@@ -2278,6 +2299,8 @@ class WorkspaceManager:
         workspace: Workspace,
         task: WorkspaceTask,
         session: ManagedSession,
+        *,
+        lesson_context: list[dict[str, Any]] | None = None,
     ) -> str:
         clear_note = (
             "This task is unrelated to prior work. Treat prior conversation context as stale.\n\n"
@@ -2287,9 +2310,10 @@ class WorkspaceManager:
         attachment_note = (
             f"{self._attachment_prompt_block(task.attachments)}\n\n" if task.attachments else ""
         )
-        lesson_context = self._lesson_context_block(
-            workspace,
-            f"{task.title}\n{task.prompt}",
+        lesson_context_block = self._lesson_context_block_from_payload(
+            lesson_context
+            if lesson_context is not None
+            else self._lesson_context_payload(workspace, f"{task.title}\n{task.prompt}")
         )
         return (
             "New workspace task assigned.\n\n"
@@ -2304,7 +2328,7 @@ class WorkspaceManager:
             f"{clear_note}"
             f"Task description:\n{task.prompt}\n\n"
             f"{attachment_note}"
-            f"{lesson_context}"
+            f"{lesson_context_block}"
             f"{self._execution_complexity_assignment_block(task)}"
             f"{self._autonomous_assignment_block(task, session.agent_type)}"
             "Start by reading the state snapshot. This workspace may contain many projects; "
@@ -2353,12 +2377,19 @@ class WorkspaceManager:
             "to status passed, failed, partial, or not_checked with evidence."
         )
 
-    def _lesson_context_block(self, workspace: Workspace, query: str) -> str:
-        lessons = self._feedback_store().lesson_context_payload(
+    def _lesson_context_payload(self, workspace: Workspace, query: str) -> list[dict[str, Any]]:
+        return self._feedback_store().lesson_context_payload(
             workspace.id,
             query,
             limit=6,
         )
+
+    def _lesson_context_block(self, workspace: Workspace, query: str) -> str:
+        return self._lesson_context_block_from_payload(
+            self._lesson_context_payload(workspace, query)
+        )
+
+    def _lesson_context_block_from_payload(self, lessons: list[dict[str, Any]]) -> str:
         if not lessons:
             return ""
         return (
@@ -2368,6 +2399,34 @@ class WorkspaceManager:
             "irrelevant lessons. In the final validation or risks field, mention lesson IDs that "
             "materially affected the work or were intentionally ignored as not applicable.\n\n"
         )
+
+    def _record_feedback_lesson_injection(
+        self,
+        *,
+        task: WorkspaceTask,
+        session: ManagedSession,
+        lesson_ids: list[str],
+        created_at: datetime,
+    ) -> None:
+        lesson_list = ", ".join(lesson_ids)
+        report = AgentReport(
+            id=str(uuid.uuid4()),
+            workspace_id=task.workspace_id,
+            task_id=task.id,
+            session_id=session.id,
+            state=AgentReportState.WORKING,
+            message=f"Feedback lessons injected into assignment prompt: {lesson_list}",
+            message_en=f"Feedback lessons injected into assignment prompt: {lesson_list}",
+            message_zh=f"已将 feedback lessons 注入任务派发 prompt：{lesson_list}",
+            changed_files=[],
+            validation="feedback_lesson_ids=" + json.dumps(lesson_ids),
+            risks=None,
+            review_decision=ReviewDecision.SKIP,
+            review_reason="System audit event for prompt-time feedback lesson injection.",
+            risk_level="system_audit",
+            created_at=created_at,
+        )
+        self.reports[report.id] = report
 
     def _execution_complexity_assignment_block(self, task: WorkspaceTask) -> str:
         if task.execution_complexity == WorkspaceTaskExecutionComplexity.SIMPLE:

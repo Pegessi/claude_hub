@@ -1481,10 +1481,22 @@ def test_task_assignment_injects_relevant_feedback_lessons(
     start_response = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={})
 
     assert start_response.status_code == 201
+    started_task = start_response.json()
+    assert started_task["feedback_lesson_ids"] == ["cli-symbols-comma-separated"]
     assignment_prompt = sent_messages[-1][1]
     assert "Relevant workspace lessons JSON" in assignment_prompt
     assert "cli-symbols-comma-separated" in assignment_prompt
     assert "Use these lessons only when they apply" in assignment_prompt
+    task_reports = [
+        report
+        for report in workspace_manager.reports_for_workspace(workspace["id"])
+        if report.task_id == task["id"]
+    ]
+    assert len(task_reports) == 1
+    assert task_reports[0].message == (
+        "Feedback lessons injected into assignment prompt: cli-symbols-comma-separated"
+    )
+    assert task_reports[0].risk_level == "system_audit"
 
 
 @pytest.mark.parametrize(
