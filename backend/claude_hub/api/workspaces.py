@@ -1,6 +1,6 @@
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 
 from ..auth.dependencies import get_current_user
@@ -10,6 +10,10 @@ from ..models import (
     ContinueTaskRequest,
     DispatchDecisionRequest,
     EnsureWorkspaceAgentRequest,
+    FeedbackLesson,
+    FeedbackLessonCreate,
+    FeedbackReaperRequest,
+    FeedbackReaperRun,
     ManagedSession,
     ManualTaskControlRequest,
     RequestTaskReviewRequest,
@@ -90,6 +94,41 @@ async def create_task(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+@router.get("/{workspace_id}/lessons", response_model=List[FeedbackLesson])
+async def list_feedback_lessons(
+    workspace_id: str,
+    query: str = "",
+    limit: int = Query(20, ge=1, le=50),
+    include_inactive: bool = False,
+    current_user: User = Depends(get_current_user),
+) -> List[FeedbackLesson]:
+    """List or keyword-search active feedback lessons for a workspace."""
+    try:
+        return workspace_manager.feedback_lessons(
+            workspace_id,
+            query=query,
+            limit=limit,
+            include_inactive=include_inactive,
+        )
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Workspace not found") from e
+
+
+@router.post("/{workspace_id}/lessons", response_model=FeedbackLesson, status_code=201)
+async def create_feedback_lesson(
+    workspace_id: str,
+    payload: FeedbackLessonCreate,
+    current_user: User = Depends(get_current_user),
+) -> FeedbackLesson:
+    """Manually create or promote an active feedback lesson for a workspace."""
+    try:
+        return workspace_manager.create_feedback_lesson(workspace_id, payload)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Workspace not found") from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 @router.get("/attachments/{attachment_id}")
 async def get_attachment(
     attachment_id: str,
@@ -158,6 +197,21 @@ async def delete_task(
         workspace_manager.delete_task(task_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Task not found") from e
+
+
+@router.post("/tasks/{task_id}/feedback/reap", response_model=FeedbackReaperRun)
+async def reap_task_feedback(
+    task_id: str,
+    payload: FeedbackReaperRequest,
+    current_user: User = Depends(get_current_user),
+) -> FeedbackReaperRun:
+    """Manually collect task feedback evidence and optional lesson drafts."""
+    try:
+        return workspace_manager.reap_task_feedback(task_id, payload)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Task not found") from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.post("/tasks/{task_id}/spawn", response_model=ManagedSession, status_code=201)

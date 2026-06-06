@@ -27,6 +27,10 @@ from ..models import (
     EvaluationDecision,
     EvaluationReport,
     ExecutionTarget,
+    FeedbackLesson,
+    FeedbackLessonCreate,
+    FeedbackReaperRequest,
+    FeedbackReaperRun,
     ManagedSession,
     ManagedSessionStatus,
     ManualTaskControlRequest,
@@ -50,6 +54,7 @@ from ..models import (
     WorkspaceUpdate,
 )
 from . import workspace_state_policy as state_policy
+from .feedback_lessons import FeedbackLessonStore
 from .remote_profiles import remote_profile_manager
 from .ttyd_manager import ttyd_manager
 
@@ -142,6 +147,9 @@ class WorkspaceManager:
 
     def _workspace_attachments_dir(self, workspace_id: str) -> Path:
         return self._workspace_dir(workspace_id) / "attachments"
+
+    def _feedback_store(self) -> FeedbackLessonStore:
+        return FeedbackLessonStore(STATE_ROOT)
 
     def snapshot_path(self, workspace_id: str) -> Path:
         return self._workspace_dir(workspace_id) / "snapshot.md"
@@ -1061,6 +1069,49 @@ class WorkspaceManager:
             }:
                 return report.message
         return reports[-1].message if reports else ""
+
+    def reap_task_feedback(
+        self,
+        task_id: str,
+        payload: FeedbackReaperRequest,
+    ) -> FeedbackReaperRun:
+        task = self.tasks.get(task_id)
+        if not task:
+            raise KeyError(task_id)
+        workspace = self.workspaces.get(task.workspace_id)
+        if not workspace:
+            raise KeyError(task.workspace_id)
+        reports = [
+            report
+            for report in self.reports_for_workspace(task.workspace_id)
+            if report.task_id == task.id
+        ]
+        return self._feedback_store().reap_task_feedback(workspace, task, reports, payload)
+
+    def create_feedback_lesson(
+        self,
+        workspace_id: str,
+        payload: FeedbackLessonCreate,
+    ) -> FeedbackLesson:
+        if workspace_id not in self.workspaces:
+            raise KeyError(workspace_id)
+        return self._feedback_store().create_lesson(workspace_id, payload)
+
+    def feedback_lessons(
+        self,
+        workspace_id: str,
+        *,
+        query: str = "",
+        limit: int = 20,
+        include_inactive: bool = False,
+    ) -> list[FeedbackLesson]:
+        if workspace_id not in self.workspaces:
+            raise KeyError(workspace_id)
+        capped_limit = min(max(limit, 1), 50)
+        store = self._feedback_store()
+        if query.strip():
+            return store.search_lessons(workspace_id, query, limit=capped_limit)
+        return store.list_lessons(workspace_id, include_inactive=include_inactive)[:capped_limit]
 
     def delete_task(self, task_id: str) -> None:
         task = self.tasks.pop(task_id, None)
@@ -2236,6 +2287,10 @@ class WorkspaceManager:
         attachment_note = (
             f"{self._attachment_prompt_block(task.attachments)}\n\n" if task.attachments else ""
         )
+        lesson_context = self._lesson_context_block(
+            workspace,
+            f"{task.title}\n{task.prompt}",
+        )
         return (
             "New workspace task assigned.\n\n"
             f"Workspace: {workspace.name}\n"
@@ -2249,6 +2304,7 @@ class WorkspaceManager:
             f"{clear_note}"
             f"Task description:\n{task.prompt}\n\n"
             f"{attachment_note}"
+            f"{lesson_context}"
             f"{self._execution_complexity_assignment_block(task)}"
             f"{self._autonomous_assignment_block(task, session.agent_type)}"
             "Start by reading the state snapshot. This workspace may contain many projects; "
@@ -2295,6 +2351,22 @@ class WorkspaceManager:
             "changed_files, validation, risks, acceptance_check, review_decision, review_reason, "
             "and risk_level. acceptance_check should map each Goal Packet acceptance criterion "
             "to status passed, failed, partial, or not_checked with evidence."
+        )
+
+    def _lesson_context_block(self, workspace: Workspace, query: str) -> str:
+        lessons = self._feedback_store().lesson_context_payload(
+            workspace.id,
+            query,
+            limit=6,
+        )
+        if not lessons:
+            return ""
+        return (
+            "Relevant workspace lessons JSON:\n"
+            f"{json.dumps(lessons, indent=2, ensure_ascii=False)}\n\n"
+            "Use these lessons only when they apply to this task. Do not force-fit stale or "
+            "irrelevant lessons. In the final validation or risks field, mention lesson IDs that "
+            "materially affected the work or were intentionally ignored as not applicable.\n\n"
         )
 
     def _execution_complexity_assignment_block(self, task: WorkspaceTask) -> str:
@@ -2689,6 +2761,10 @@ class WorkspaceManager:
             for report in task_reports
         ]
         profiles = self._effective_review_profiles(task, trigger_report)
+        lesson_context = self._lesson_context_block(
+            workspace,
+            f"{task.title}\n{task.prompt}\n{trigger_report.message}",
+        )
         return (
             "Review workspace task.\n\n"
             f"Workspace: {workspace.name}\n"
@@ -2708,6 +2784,7 @@ class WorkspaceManager:
             f"{self._autonomous_review_block(task)}"
             f"{self._review_profile_prompt_block(profiles)}"
             f"{self._review_guidance_block(workspace, trigger_report)}"
+            f"{lesson_context}"
             "Review workflow:\n"
             "1. Stay read-only. Do not edit files, run formatters that write changes, or revert work.\n"
             "2. Check whether the stored Goal Packet faithfully preserves the original task prompt. "

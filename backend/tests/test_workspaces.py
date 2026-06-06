@@ -1341,6 +1341,152 @@ def test_completed_skip_review_marks_review_without_reviewer(
     assert done_response.json()["human_accepted_at"] is not None
 
 
+def test_manual_feedback_reaper_promotes_lesson(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    state_root = tmp_path / "state"
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", state_root)
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="feedback-reaper-tab",
+        port=12531,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Feedback Repo", "path": str(repo), "session_prefix": "feed"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "CLI symbols", "prompt": "Figure out the --symbols CLI format"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+
+    report_response = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "working",
+            "message": "--symbols expects comma-separated values.",
+            "validation": "Ran CLI probe",
+            "risks": "none",
+            "artifact_refs": ["artifacts/probe.log"],
+        },
+    )
+    assert report_response.status_code == 201
+
+    reap_response = client.post(
+        f"/api/workspaces/tasks/{task['id']}/feedback/reap",
+        json={
+            "source": "human",
+            "summary": "Human confirmed the reusable CLI symbols lesson.",
+            "tags": ["cli", "symbols"],
+            "lesson_drafts": [
+                {
+                    "summary": "--symbols expects comma-separated values.",
+                    "applies_when": ["CLI symbol lists", "market data probes"],
+                    "do": "Use --symbols AAPL,MSFT.",
+                    "avoid": "Do not pass --symbols AAPL MSFT.",
+                    "tags": ["cli", "symbols"],
+                    "scope": "workspace",
+                    "confidence": 0.9,
+                    "promote_to_active": True,
+                }
+            ],
+        },
+    )
+
+    assert reap_response.status_code == 200
+    run = reap_response.json()
+    assert run["record"]["source"] == "human"
+    assert run["record"]["artifact_refs"] == ["artifacts/probe.log"]
+    assert run["lesson_drafts"][0]["summary"] == "--symbols expects comma-separated values."
+    assert run["promoted_lessons"][0]["status"] == "active"
+    assert "You are an internal Feedback Reaper" in run["reaper_prompt"]
+
+    lessons_response = client.get(
+        f"/api/workspaces/{workspace['id']}/lessons",
+        params={"query": "symbols market data"},
+    )
+    assert lessons_response.status_code == 200
+    lessons = lessons_response.json()
+    assert len(lessons) == 1
+    assert lessons[0]["summary"] == "--symbols expects comma-separated values."
+
+    feedback_dir = state_root / workspace["id"] / "feedback"
+    assert list((feedback_dir / "records").glob("*.json"))
+    assert list((feedback_dir / "lesson-drafts").glob("*.json"))
+    assert (feedback_dir / "lesson-index.json").exists()
+
+    bad_lesson_response = client.post(
+        f"/api/workspaces/{workspace['id']}/lessons",
+        json={"summary": "   "},
+    )
+    assert bad_lesson_response.status_code == 400
+
+    bad_draft_response = client.post(
+        f"/api/workspaces/tasks/{task['id']}/feedback/reap",
+        json={"lesson_drafts": [{"summary": "   "}]},
+    )
+    assert bad_draft_response.status_code == 400
+
+
+def test_task_assignment_injects_relevant_feedback_lessons(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path / "state")
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="lesson-context-tab",
+        port=12532,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Lesson Repo", "path": str(repo), "session_prefix": "less"},
+    ).json()
+    lesson_response = client.post(
+        f"/api/workspaces/{workspace['id']}/lessons",
+        json={
+            "id": "cli-symbols-comma-separated",
+            "summary": "--symbols expects comma-separated values.",
+            "applies_when": ["CLI symbol lists"],
+            "do": "Use --symbols AAPL,MSFT.",
+            "avoid": "Do not pass --symbols AAPL MSFT.",
+            "tags": ["cli", "symbols"],
+            "scope": "workspace",
+            "confidence": 0.9,
+        },
+    )
+    assert lesson_response.status_code == 201
+
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Symbols CLI probe", "prompt": "Probe market data symbols via CLI"},
+    ).json()
+    start_response = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={})
+
+    assert start_response.status_code == 201
+    assignment_prompt = sent_messages[-1][1]
+    assert "Relevant workspace lessons JSON" in assignment_prompt
+    assert "cli-symbols-comma-separated" in assignment_prompt
+    assert "Use these lessons only when they apply" in assignment_prompt
+
+
 @pytest.mark.parametrize(
     ("task_goal_packet", "acceptance_check", "expected_gap"),
     [
