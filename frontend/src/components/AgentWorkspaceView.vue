@@ -904,14 +904,60 @@
                       v-if="report.artifact_refs?.length"
                       class="report-note"
                     >
-                      <strong>Artifact Refs</strong>
-                      <div class="report-files">
-                        <span
+                      <strong>Artifacts</strong>
+                      <div class="report-artifacts">
+                        <div
                           v-for="artifact in report.artifact_refs"
                           :key="artifact"
+                          class="report-artifact"
                         >
-                          {{ artifact }}
-                        </span>
+                          <span>{{ artifact }}</span>
+                          <button
+                            v-if="isMarkdownArtifact(artifact)"
+                            type="button"
+                            class="artifact-preview-button"
+                            :disabled="isArtifactPreviewLoading(report, artifact)"
+                            @click="toggleArtifactPreview(report, artifact)"
+                          >
+                            {{ artifactPreviewButtonLabel(report, artifact) }}
+                          </button>
+                        </div>
+                      </div>
+                      <div
+                        v-for="artifact in markdownArtifactRefs(report)"
+                        :key="`${artifact}-preview`"
+                        class="artifact-preview"
+                      >
+                        <template v-if="expandedArtifactKey === artifactPreviewKey(report, artifact)">
+                          <div
+                            v-if="artifactPreviewErrors[artifactPreviewKey(report, artifact)]"
+                            class="artifact-preview-status artifact-preview-error"
+                          >
+                            {{ artifactPreviewErrors[artifactPreviewKey(report, artifact)] }}
+                          </div>
+                          <div
+                            v-else-if="!artifactPreviews[artifactPreviewKey(report, artifact)]"
+                            class="artifact-preview-status"
+                          >
+                            Loading Markdown preview...
+                          </div>
+                          <template v-else>
+                            <div class="artifact-preview-header">
+                              <span>{{ artifactPreviews[artifactPreviewKey(report, artifact)].filename }}</span>
+                              <span>{{ formatAttachmentSize(artifactPreviews[artifactPreviewKey(report, artifact)].size_bytes) }}</span>
+                            </div>
+                            <MarkdownContent
+                              class="artifact-preview-content"
+                              :text="artifactPreviews[artifactPreviewKey(report, artifact)].content"
+                            />
+                            <div
+                              v-if="artifactPreviews[artifactPreviewKey(report, artifact)].truncated"
+                              class="artifact-preview-status"
+                            >
+                              Preview truncated to the first 512 KB.
+                            </div>
+                          </template>
+                        </template>
                       </div>
                     </div>
                     <div
@@ -1788,6 +1834,7 @@ import type {
   AgentReport,
   AgentRuntimeStatus,
   AgentType,
+  WorkspaceArtifactPreview,
   AcceptanceCheck,
   AutonomyPolicy,
   ExecutionTarget,
@@ -1874,6 +1921,10 @@ const agentBrowserParentPath = ref<string | null>(null)
 const agentBrowserItems = ref<FileInfo[]>([])
 const agentBrowserLoading = ref(false)
 const agentBrowserError = ref<string | null>(null)
+const expandedArtifactKey = ref<string | null>(null)
+const artifactPreviews = reactive<Record<string, WorkspaceArtifactPreview>>({})
+const artifactPreviewErrors = reactive<Record<string, string>>({})
+const artifactPreviewLoading = reactive<Record<string, boolean>>({})
 const mobileCollapsedColumns = reactive<Record<WorkspaceTaskStatus, boolean>>({
   todo: false,
   queued: false,
@@ -2089,6 +2140,52 @@ function profileResultSummary(results: ReviewProfileResult[]): string {
   return results
     .map(result => `${reviewProfileLabel(result.profile)} ${result.status}`)
     .join(' · ')
+}
+
+function isMarkdownArtifact(artifact: string): boolean {
+  return /\.(md|markdown|mdown|mkd)$/i.test(artifact.trim().split(/[?#]/)[0] || '')
+}
+
+function markdownArtifactRefs(report: AgentReport): string[] {
+  return (report.artifact_refs || []).filter(isMarkdownArtifact)
+}
+
+function artifactPreviewKey(report: AgentReport, artifact: string): string {
+  return `${report.id}:${artifact}`
+}
+
+function isArtifactPreviewLoading(report: AgentReport, artifact: string): boolean {
+  return Boolean(artifactPreviewLoading[artifactPreviewKey(report, artifact)])
+}
+
+function artifactPreviewButtonLabel(report: AgentReport, artifact: string): string {
+  const key = artifactPreviewKey(report, artifact)
+  if (artifactPreviewLoading[key]) return 'Loading...'
+  return expandedArtifactKey.value === key ? 'Hide preview' : 'Preview Markdown'
+}
+
+async function toggleArtifactPreview(report: AgentReport, artifact: string) {
+  const key = artifactPreviewKey(report, artifact)
+  if (expandedArtifactKey.value === key) {
+    expandedArtifactKey.value = null
+    return
+  }
+  expandedArtifactKey.value = key
+  if (artifactPreviews[key] || artifactPreviewLoading[key]) return
+
+  artifactPreviewLoading[key] = true
+  delete artifactPreviewErrors[key]
+  try {
+    artifactPreviews[key] = await workspaceStore.fetchArtifactPreview(
+      report.workspace_id,
+      artifact,
+      report.id,
+    )
+  } catch (e) {
+    artifactPreviewErrors[key] = e instanceof Error ? e.message : 'Failed to load Markdown preview'
+  } finally {
+    artifactPreviewLoading[key] = false
+  }
 }
 
 const reviewerSessions = computed<ManagedSession[]>(() => [
@@ -2606,6 +2703,7 @@ function selectTask(event: MouseEvent, taskId: string) {
     detailMessage.value = ''
     resetDraftAttachments(detailAttachments.value)
     isDetailActionsExpanded.value = false
+    expandedArtifactKey.value = null
   }
   selectedTaskId.value = taskId
 }
@@ -2627,6 +2725,7 @@ function closeTaskDetail() {
   detailMessage.value = ''
   resetDraftAttachments(detailAttachments.value)
   isDetailActionsExpanded.value = false
+  expandedArtifactKey.value = null
 }
 
 function formatTime(value: string) {
@@ -5224,6 +5323,81 @@ onUnmounted(() => {
   color: var(--ch-color-text);
   font-size: 10px;
   padding: 3px 7px;
+}
+
+.report-artifacts {
+  display: grid;
+  gap: 6px;
+}
+
+.report-artifact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.report-artifact > span {
+  overflow-wrap: anywhere;
+  color: var(--ch-color-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+}
+
+.artifact-preview-button {
+  border: 1px solid var(--ch-color-border);
+  border-radius: 999px;
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 3px 8px;
+}
+
+.artifact-preview-button:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.artifact-preview {
+  margin-top: 8px;
+}
+
+.artifact-preview-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
+  background: var(--ch-color-surface);
+  color: var(--ch-color-text-muted);
+  font-size: 11px;
+  padding: 7px 9px;
+}
+
+.artifact-preview-content {
+  max-height: 420px;
+  overflow: auto;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: 0 0 8px 8px;
+  background: var(--ch-color-surface);
+  padding: 10px;
+}
+
+.artifact-preview-status {
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: 8px;
+  background: var(--ch-color-surface);
+  color: var(--ch-color-text-subtle);
+  font-size: 12px;
+  padding: 8px 10px;
+}
+
+.artifact-preview-error {
+  border-color: var(--ch-color-danger);
+  color: var(--ch-color-danger);
 }
 
 .report-note {

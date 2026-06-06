@@ -5,6 +5,12 @@
 
 ## 2026-06-06
 
+### feat: preview Markdown report artifacts in workspace UI
+- Add a scoped workspace artifact preview API that only serves Markdown files referenced by report `artifact_refs` and located inside the local workspace path
+- Render Markdown report artifacts directly inside each task report card with loading, error, unsupported-file, and truncation feedback
+- Add regression coverage for successful report Markdown preview and path-boundary rejection
+- **Files**: backend/claude_hub/api/workspaces.py, backend/claude_hub/models/schemas.py, backend/claude_hub/models/__init__.py, backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspaces.py, frontend/src/components/AgentWorkspaceView.vue, frontend/src/stores/workspaceStore.ts, frontend/src/types/index.ts, CHANGELOG.md
+
 ### fix: rebalance queued workspace tasks when another agent frees up
 - Reassign automatically queued tasks away from an agent held by an unresolved Review task when another idle workspace agent becomes available, so work does not stay stuck behind a human-acceptance gate unnecessarily
 - Preserve explicit user-selected, related-task, and continuation assignments by only rebalancing tasks whose dispatch reason is the system-generated "Queued behind existing workspace agent"

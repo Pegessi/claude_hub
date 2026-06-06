@@ -36,6 +36,7 @@ from ..models import (
     StartTaskRequest,
     TerminalAgentStatus,
     Workspace,
+    WorkspaceArtifactPreview,
     WorkspaceAttachment,
     WorkspaceAttachmentCreate,
     WorkspaceBoard,
@@ -81,6 +82,8 @@ AUTO_REPORT_MISSING_MESSAGE = (
     "only continue work if you find it is actually unfinished."
 )
 ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024
+ARTIFACT_PREVIEW_MAX_BYTES = 512 * 1024
+MARKDOWN_ARTIFACT_SUFFIXES = {".md", ".markdown", ".mdown", ".mkd"}
 IMAGE_ATTACHMENT_TYPES = {
     "image/gif": ".gif",
     "image/jpeg": ".jpg",
@@ -872,6 +875,74 @@ class WorkspaceManager:
                 if attachment.id == attachment_id:
                     return attachment
         raise KeyError(attachment_id)
+
+    def preview_artifact(
+        self,
+        workspace_id: str,
+        artifact_ref: str,
+        report_id: str | None = None,
+    ) -> WorkspaceArtifactPreview:
+        workspace = self.workspaces.get(workspace_id)
+        if workspace is None:
+            raise KeyError(workspace_id)
+        if workspace.target != ExecutionTarget.LOCAL:
+            raise ValueError("Artifact previews are only available for local workspaces")
+
+        artifact_ref = artifact_ref.strip()
+        if not artifact_ref:
+            raise ValueError("Artifact path is required")
+        if not self._artifact_ref_belongs_to_workspace_report(
+            workspace_id, artifact_ref, report_id
+        ):
+            raise KeyError(artifact_ref)
+        if Path(artifact_ref).suffix.lower() not in MARKDOWN_ARTIFACT_SUFFIXES:
+            raise ValueError("Only Markdown artifact previews are supported")
+
+        root = Path(workspace.path).expanduser().resolve()
+        path = Path(artifact_ref).expanduser()
+        if not path.is_absolute():
+            path = root / path
+        try:
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise KeyError(artifact_ref) from exc
+        if not resolved.is_file():
+            raise KeyError(artifact_ref)
+
+        try:
+            size_bytes = resolved.stat().st_size
+            truncated = size_bytes > ARTIFACT_PREVIEW_MAX_BYTES
+            content = resolved.read_bytes()[:ARTIFACT_PREVIEW_MAX_BYTES].decode(
+                "utf-8",
+                errors="replace",
+            )
+        except OSError as exc:
+            raise ValueError("Artifact could not be read") from exc
+        return WorkspaceArtifactPreview(
+            path=artifact_ref,
+            filename=resolved.name,
+            content=content,
+            size_bytes=size_bytes,
+            truncated=truncated,
+        )
+
+    def _artifact_ref_belongs_to_workspace_report(
+        self,
+        workspace_id: str,
+        artifact_ref: str,
+        report_id: str | None,
+    ) -> bool:
+        reports = self.reports.values()
+        if report_id:
+            report = self.reports.get(report_id)
+            reports = [report] if report else []
+        return any(
+            report is not None
+            and report.workspace_id == workspace_id
+            and artifact_ref in report.artifact_refs
+            for report in reports
+        )
 
     async def update_task_status(
         self,

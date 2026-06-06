@@ -421,6 +421,14 @@ export interface AgentReport {
   created_at: string
 }
 
+export interface WorkspaceArtifactPreview {
+  path: string
+  filename: string
+  content: string
+  size_bytes: number
+  truncated: boolean
+}
+
 export interface AgentReportCreate {
   state: AgentReportState
   message: string
