@@ -391,6 +391,11 @@ export interface ManagedSession {
   solo_mode: boolean
   ephemeral: boolean
   remote_forward_port?: number | null
+  auto_continue_task_id?: string | null
+  auto_continue_attempts?: number
+  last_auto_continue_at?: string | null
+  prompt_retry_task_id?: string | null
+  prompt_retry_attempted_at?: string | null
   created_at: string
   updated_at: string
   last_activity_at?: string | null

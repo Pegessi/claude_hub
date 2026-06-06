@@ -3606,6 +3606,11 @@ def test_monitor_surfaces_worker_prompt_stuck_in_input(
             ]
         )
 
+    submitted_keys: list[tuple[str, ...]] = []
+
+    async def fake_run_tmux(*args: str) -> None:
+        submitted_keys.append(args)
+
     stub_workspace_terminal(
         monkeypatch,
         repo,
@@ -3619,6 +3624,7 @@ def test_monitor_surfaces_worker_prompt_stuck_in_input(
         fake_list_statuses,
     )
     monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture_output)
+    monkeypatch.setattr(workspace_manager, "_run_tmux", fake_run_tmux)
 
     client = TestClient(app)
     workspace = client.post(
@@ -3657,13 +3663,27 @@ def test_monitor_surfaces_worker_prompt_stuck_in_input(
 
     updated_task = workspace_manager.tasks[started["id"]]
     updated_session = workspace_manager.sessions[started["session_id"]]
+    assert updated_task.status == WorkspaceTaskStatus.WORKING
+    assert updated_session.runtime_status == AgentRuntimeStatus.WORKING
+    assert updated_session.prompt_retry_task_id == started["id"]
+    assert submitted_keys == [("send-keys", "-t", session.tmux_session, "C-m")]
+    assert sent_messages == []
+
+    retry_at = datetime.now() - timedelta(seconds=30)
+    workspace_manager.sessions[started["session_id"]] = updated_session.model_copy(
+        update={"prompt_retry_attempted_at": retry_at, "updated_at": retry_at}
+    )
+    asyncio.run(workspace_manager._refresh_session_statuses(workspace["id"]))
+
+    updated_task = workspace_manager.tasks[started["id"]]
+    updated_session = workspace_manager.sessions[started["session_id"]]
     report = list(workspace_manager.reports.values())[-1]
     assert updated_task.status == WorkspaceTaskStatus.REVIEW
     assert updated_session.runtime_status == AgentRuntimeStatus.ATTENTION
     assert report.state.value == "needs_input"
     assert report.risk_level == "prompt_dispatch_stalled"
     assert "terminal input box" in report.message
-    assert sent_messages == []
+    assert len(submitted_keys) == 1
 
 
 def test_monitor_surfaces_reviewer_prompt_stuck_in_input(
@@ -3688,6 +3708,11 @@ def test_monitor_surfaces_reviewer_prompt_stuck_in_input(
             ]
         )
 
+    submitted_keys: list[tuple[str, ...]] = []
+
+    async def fake_run_tmux(*args: str) -> None:
+        submitted_keys.append(args)
+
     stub_workspace_terminal(
         monkeypatch,
         repo,
@@ -3701,6 +3726,7 @@ def test_monitor_surfaces_reviewer_prompt_stuck_in_input(
         fake_list_statuses,
     )
     monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture_output)
+    monkeypatch.setattr(workspace_manager, "_run_tmux", fake_run_tmux)
 
     client = TestClient(app)
     workspace = client.post(
@@ -3754,13 +3780,27 @@ def test_monitor_surfaces_reviewer_prompt_stuck_in_input(
 
     updated_task = workspace_manager.tasks[started["id"]]
     updated_reviewer = workspace_manager.sessions[review_session_id]
+    assert updated_task.status == WorkspaceTaskStatus.WORKING
+    assert updated_reviewer.runtime_status == AgentRuntimeStatus.WORKING
+    assert updated_reviewer.prompt_retry_task_id == started["id"]
+    assert submitted_keys == [("send-keys", "-t", reviewer.tmux_session, "C-m")]
+    assert sent_messages == []
+
+    retry_at = datetime.now() - timedelta(seconds=30)
+    workspace_manager.sessions[review_session_id] = updated_reviewer.model_copy(
+        update={"prompt_retry_attempted_at": retry_at, "updated_at": retry_at}
+    )
+    asyncio.run(workspace_manager._refresh_session_statuses(workspace["id"]))
+
+    updated_task = workspace_manager.tasks[started["id"]]
+    updated_reviewer = workspace_manager.sessions[review_session_id]
     report = list(workspace_manager.reports.values())[-1]
     assert updated_task.status == WorkspaceTaskStatus.REVIEW
     assert updated_reviewer.runtime_status == AgentRuntimeStatus.ATTENTION
     assert report.state.value == "review_needs_input"
     assert report.risk_level == "prompt_dispatch_stalled"
     assert "Review" in report.message or "review" in report.message
-    assert sent_messages == []
+    assert len(submitted_keys) == 1
 
 
 def test_interrupted_idle_working_agent_auto_continue_stops_after_limit(

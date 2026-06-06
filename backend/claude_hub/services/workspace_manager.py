@@ -71,6 +71,7 @@ AUTO_CONTINUE_IDLE_GRACE_SECONDS = 20
 REVIEW_RUNTIME_REOPEN_GRACE_SECONDS = 20
 MAX_AUTOMATED_REVIEW_FAILURES = 3
 PROMPT_DISPATCH_STALL_GRACE_SECONDS = 20
+PROMPT_DISPATCH_RETRY_GRACE_SECONDS = 10
 PROMPT_STUCK_RISK_LEVEL = "prompt_dispatch_stalled"
 WORKSPACE_MONITOR_INTERVAL_SECONDS = 5
 AUTO_CONTINUE_MESSAGE = (
@@ -556,6 +557,8 @@ class WorkspaceManager:
         normalized.setdefault("auto_continue_task_id", None)
         normalized.setdefault("auto_continue_attempts", 0)
         normalized.setdefault("last_auto_continue_at", None)
+        normalized.setdefault("prompt_retry_task_id", None)
+        normalized.setdefault("prompt_retry_attempted_at", None)
         return normalized
 
     def _runtime_from_managed_status(self, item: dict[str, Any]) -> str:
@@ -1970,6 +1973,8 @@ class WorkspaceManager:
                 "auto_continue_task_id": task.id,
                 "auto_continue_attempts": 0,
                 "last_auto_continue_at": None,
+                "prompt_retry_task_id": None,
+                "prompt_retry_attempted_at": None,
                 "updated_at": now,
                 "last_activity_at": now,
             }
@@ -2306,6 +2311,8 @@ class WorkspaceManager:
                 "auto_continue_task_id": task.id,
                 "auto_continue_attempts": 0,
                 "last_auto_continue_at": None,
+                "prompt_retry_task_id": None,
+                "prompt_retry_attempted_at": None,
                 "last_activity_at": now,
                 "updated_at": now,
             }
@@ -3761,6 +3768,8 @@ class WorkspaceManager:
                 "current_task_id": task.id,
                 "status": ManagedSessionStatus.WORKING,
                 "runtime_status": AgentRuntimeStatus.WORKING,
+                "prompt_retry_task_id": None,
+                "prompt_retry_attempted_at": None,
                 "updated_at": now,
                 "last_activity_at": now,
             }
@@ -4318,6 +4327,22 @@ class WorkspaceManager:
                 "runtime_status": AgentRuntimeStatus.ATTENTION,
                 "updated_at": sampled_at,
             }
+        if session.prompt_retry_task_id != task.id:
+            await self._retry_pending_prompt_submit(session, task, sampled_at)
+            return {
+                "status": ManagedSessionStatus.WORKING,
+                "runtime_status": AgentRuntimeStatus.WORKING,
+                "prompt_retry_task_id": task.id,
+                "prompt_retry_attempted_at": sampled_at,
+                "updated_at": sampled_at,
+                "last_activity_at": sampled_at,
+            }
+        if self._prompt_dispatch_retry_still_in_grace_period(session, sampled_at):
+            return {
+                "status": ManagedSessionStatus.WORKING,
+                "runtime_status": AgentRuntimeStatus.WORKING,
+                "updated_at": sampled_at,
+            }
 
         if session.role == WorkspaceSessionRole.REVIEWER:
             message = (
@@ -4375,6 +4400,42 @@ class WorkspaceManager:
         return (
             sampled_at - dispatch_started_at
         ).total_seconds() < PROMPT_DISPATCH_STALL_GRACE_SECONDS
+
+    def _prompt_dispatch_retry_still_in_grace_period(
+        self,
+        session: ManagedSession,
+        sampled_at: datetime,
+    ) -> bool:
+        if not session.prompt_retry_attempted_at:
+            return False
+        return (
+            sampled_at - session.prompt_retry_attempted_at
+        ).total_seconds() < PROMPT_DISPATCH_RETRY_GRACE_SECONDS
+
+    async def _retry_pending_prompt_submit(
+        self,
+        session: ManagedSession,
+        task: WorkspaceTask,
+        sampled_at: datetime,
+    ) -> None:
+        logger.warning(
+            "Workspace prompt appears pending; retrying Enter submit session_id=%s task_id=%s role=%s",
+            session.id,
+            task.id,
+            session.role,
+        )
+        await self._run_tmux("send-keys", "-t", session.tmux_session, "C-m")
+        self.sessions[session.id] = session.model_copy(
+            update={
+                "status": ManagedSessionStatus.WORKING,
+                "runtime_status": AgentRuntimeStatus.WORKING,
+                "prompt_retry_task_id": task.id,
+                "prompt_retry_attempted_at": sampled_at,
+                "last_activity_at": sampled_at,
+                "updated_at": sampled_at,
+            }
+        )
+        self._save_state()
 
     def _mark_prompt_dispatch_stalled(
         self,
