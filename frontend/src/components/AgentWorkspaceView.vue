@@ -2173,8 +2173,10 @@ const selectedMarkdownDocuments = computed<WorkspaceMarkdownDocument[]>(() => {
   const documents = board.value?.markdown_documents || []
   const selectedReportIds = new Set(selectedReports.value.map(report => report.id))
   return documents.filter(document =>
-    document.task_id === task.id ||
-    (document.report_id ? selectedReportIds.has(document.report_id) : false)
+    !isWorkspaceMaintenanceMarkdown(document.path) && (
+      document.task_id === task.id ||
+      (document.report_id ? selectedReportIds.has(document.report_id) : false)
+    )
   )
 })
 
@@ -2308,6 +2310,10 @@ function profileResultSummary(results: ReviewProfileResult[]): string {
 function isMarkdownArtifact(artifact: string): boolean {
   const value = artifact.trim().split(/[?#]/)[0] || ''
   return /\.(md|markdown|mdown|mkd)(?::\d+)?$/i.test(value)
+}
+
+function isWorkspaceMaintenanceMarkdown(path: string): boolean {
+  return path.trim().split(/[?#]/)[0].split('/').pop()?.toLowerCase() === 'changelog.md'
 }
 
 function markdownArtifactRefs(report: AgentReport): string[] {
