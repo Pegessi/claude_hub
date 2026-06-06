@@ -429,6 +429,20 @@ export interface WorkspaceArtifactPreview {
   truncated: boolean
 }
 
+export type WorkspaceMarkdownDocumentSource = 'artifact' | 'changed_file' | 'snapshot' | 'discovered'
+
+export interface WorkspaceMarkdownDocument {
+  id: string
+  path: string
+  label: string
+  source: WorkspaceMarkdownDocumentSource
+  task_id?: string | null
+  report_id?: string | null
+  session_id?: string | null
+  size_bytes?: number | null
+  updated_at?: string | null
+}
+
 export interface AgentReportCreate {
   state: AgentReportState
   message: string
@@ -456,6 +470,7 @@ export interface WorkspaceBoard {
   tasks: WorkspaceTask[]
   sessions: ManagedSession[]
   reports: AgentReport[]
+  markdown_documents?: WorkspaceMarkdownDocument[]
   snapshot_path?: string | null
 }
 

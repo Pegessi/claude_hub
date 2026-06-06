@@ -601,6 +601,29 @@ class WorkspaceArtifactPreview(BaseModel):
     truncated: bool = False
 
 
+class WorkspaceMarkdownDocumentSource(str, Enum):
+    """Where a discoverable Markdown document came from."""
+
+    ARTIFACT = "artifact"
+    CHANGED_FILE = "changed_file"
+    SNAPSHOT = "snapshot"
+    DISCOVERED = "discovered"
+
+
+class WorkspaceMarkdownDocument(BaseModel):
+    """Discoverable local Markdown document for workspace tasks."""
+
+    id: str
+    path: str
+    label: str
+    source: WorkspaceMarkdownDocumentSource
+    task_id: Optional[str] = None
+    report_id: Optional[str] = None
+    session_id: Optional[str] = None
+    size_bytes: Optional[int] = None
+    updated_at: Optional[datetime] = None
+
+
 class WorkspaceBoard(BaseModel):
     """Workspace board response for Agent Workspace mode."""
 
@@ -608,6 +631,7 @@ class WorkspaceBoard(BaseModel):
     tasks: List[WorkspaceTask]
     sessions: List[ManagedSession]
     reports: List[AgentReport]
+    markdown_documents: List[WorkspaceMarkdownDocument] = Field(default_factory=list)
     snapshot_path: Optional[str] = None
 
 

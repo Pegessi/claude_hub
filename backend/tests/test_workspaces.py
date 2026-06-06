@@ -888,6 +888,7 @@ async def test_preview_report_markdown_artifact_is_scoped_to_report(
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "report.md").write_text("# Research\n\nFindings", encoding="utf-8")
+    (repo / "changed.md").write_text("# Changed\n\nNotes", encoding="utf-8")
     (tmp_path / "outside.md").write_text("# Secret", encoding="utf-8")
     monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path / "state")
 
@@ -911,9 +912,29 @@ async def test_preview_report_markdown_artifact_is_scoped_to_report(
         json={
             "state": "completed",
             "message": "Research report ready",
+            "changed_files": [str(repo / "changed.md")],
             "artifact_refs": ["report.md", str(tmp_path / "outside.md")],
         },
     ).json()
+
+    workspace_manager.snapshot_path(workspace["id"]).parent.mkdir(parents=True, exist_ok=True)
+    workspace_manager.snapshot_path(workspace["id"]).write_text(
+        "# Claude Hub Workspace State\n",
+        encoding="utf-8",
+    )
+
+    board_response = client.get(f"/api/workspaces/{workspace['id']}/board")
+    assert board_response.status_code == 200
+    markdown_documents = board_response.json()["markdown_documents"]
+    assert any(
+        document["source"] == "artifact" and document["path"] == "report.md"
+        for document in markdown_documents
+    )
+    assert any(
+        document["source"] == "changed_file" and document["path"] == str(repo / "changed.md")
+        for document in markdown_documents
+    )
+    assert any(document["source"] == "snapshot" for document in markdown_documents)
 
     response = client.get(
         f"/api/workspaces/{workspace['id']}/artifacts/preview",
@@ -925,6 +946,20 @@ async def test_preview_report_markdown_artifact_is_scoped_to_report(
     assert preview["filename"] == "report.md"
     assert preview["content"] == "# Research\n\nFindings"
     assert preview["truncated"] is False
+
+    changed_response = client.get(
+        f"/api/workspaces/{workspace['id']}/artifacts/preview",
+        params={"path": str(repo / "changed.md"), "report_id": report["id"]},
+    )
+    assert changed_response.status_code == 200
+    assert changed_response.json()["content"] == "# Changed\n\nNotes"
+
+    snapshot_response = client.get(
+        f"/api/workspaces/{workspace['id']}/artifacts/preview",
+        params={"path": str(workspace_manager.snapshot_path(workspace["id"]))},
+    )
+    assert snapshot_response.status_code == 200
+    assert "# Claude Hub Workspace State" in snapshot_response.json()["content"]
 
     outside_response = client.get(
         f"/api/workspaces/{workspace['id']}/artifacts/preview",
