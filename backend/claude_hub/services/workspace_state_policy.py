@@ -352,9 +352,10 @@ def can_skip_task_review(context: ReviewSkipContext) -> bool:
         return False
     if context.evidence_gaps:
         return False
-    if context.changed_files:
+    normalized_risk_level = (context.risk_level or "").strip().lower()
+    if normalized_risk_level not in {"", "low", "none", "trivial"}:
         return False
-    if (context.risk_level or "").strip().lower() not in {"", "low", "none"}:
+    if context.changed_files and normalized_risk_level != "trivial":
         return False
     if context.latest_review_state == AgentReportState.REVIEW_FAILED:
         return False
