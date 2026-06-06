@@ -170,12 +170,22 @@ def test_review_gate_states_are_explicit() -> None:
     assert not policy.is_review_gate_state(AgentReportState.REVIEW_STARTED)
 
 
-def test_can_skip_task_review_allows_only_low_risk_clean_completion() -> None:
+@pytest.mark.parametrize(
+    ("changed_files", "risk_level"),
+    [
+        ([], "low"),
+        (["backend/claude_hub/config.py"], "trivial"),
+    ],
+)
+def test_can_skip_task_review_allows_low_risk_completion(
+    changed_files: list[str],
+    risk_level: str,
+) -> None:
     context = policy.ReviewSkipContext(
         report_state=AgentReportState.COMPLETED,
         evidence_gaps=[],
-        changed_files=[],
-        risk_level="low",
+        changed_files=changed_files,
+        risk_level=risk_level,
         latest_review_state=None,
         workspace_has_tracked_changes=False,
     )

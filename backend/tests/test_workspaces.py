@@ -1543,6 +1543,75 @@ def test_completed_skip_review_requires_goal_packet_audit_evidence(
     assert "goal_packet" in sent_messages[0][1]
 
 
+def test_completed_skip_review_allows_explicit_trivial_changed_files(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="skip-trivial-tab",
+        port=12557,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Skip Trivial", "path": str(repo), "session_prefix": "skip-trivial"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={
+            "title": "Bind host",
+            "prompt": "Switch dev server host to 0.0.0.0",
+            "goal_packet": {
+                "objective": "Switch dev server host to 0.0.0.0.",
+                "acceptance_criteria": ["Host binding is updated"],
+                "validation_plan": ["Inspect config diff"],
+                "assumptions": [],
+                "out_of_scope": [],
+                "handoff_requirements": ["List changed files"],
+            },
+        },
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    sent_messages.clear()
+
+    response = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "completed",
+            "message": "Changed only the dev host bind address",
+            "changed_files": ["frontend/vite.config.ts"],
+            "acceptance_check": [
+                {
+                    "criterion": "Host binding is updated",
+                    "status": "passed",
+                    "evidence": "Config diff only changes the bind host",
+                }
+            ],
+            "review_decision": "skip",
+            "review_reason": "Trivial host bind change; no AI reviewer needed.",
+            "risk_level": "trivial",
+        },
+    )
+
+    assert response.status_code == 201
+    updated = workspace_manager.tasks[task["id"]]
+    assert updated.status == WorkspaceTaskStatus.REVIEW
+    assert updated.review_session_id is None
+    assert updated.review_attempts == 0
+    assert updated.review_skipped_at is not None
+    assert updated.human_acceptance_requested_at is not None
+    assert updated.review_skip_reason == "Trivial host bind change; no AI reviewer needed."
+    assert sent_messages == []
+
+
 def test_completed_skip_review_is_denied_for_changed_files(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
