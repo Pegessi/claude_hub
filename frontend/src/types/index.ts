@@ -451,6 +451,30 @@ export interface WorkspaceBoard {
   snapshot_path?: string | null
 }
 
+export type FeedbackLessonScope = 'workspace' | 'family' | 'global'
+export type FeedbackLessonStatus = 'draft' | 'active' | 'archived' | 'rejected'
+
+export interface FeedbackLesson {
+  id: string
+  workspace_id: string
+  scope: FeedbackLessonScope
+  status: FeedbackLessonStatus
+  summary: string
+  applies_when?: string[]
+  do?: string
+  avoid?: string
+  tags?: string[]
+  evidence_task_ids?: string[]
+  source_draft_ids?: string[]
+  hit_count?: number
+  success_count?: number
+  confidence?: number | null
+  last_used_at?: string | null
+  last_validated_at?: string | null
+  created_at: string
+  updated_at: string
+}
+
 export type LayoutType = '1x1' | '2x1' | '1x2' | '3x1' | '1x3' | '2x2' | '3x3'
 
 export interface Pane {
