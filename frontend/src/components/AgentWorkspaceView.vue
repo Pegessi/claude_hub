@@ -2171,11 +2171,10 @@ const selectedMarkdownDocuments = computed<WorkspaceMarkdownDocument[]>(() => {
   const task = selectedTask.value
   if (!task) return []
   const documents = board.value?.markdown_documents || []
+  const selectedReportIds = new Set(selectedReports.value.map(report => report.id))
   return documents.filter(document =>
-    document.source === 'snapshot' ||
-    document.source === 'discovered' ||
     document.task_id === task.id ||
-    selectedReports.value.some(report => report.id === document.report_id)
+    (document.report_id ? selectedReportIds.has(document.report_id) : false)
   )
 })
 
