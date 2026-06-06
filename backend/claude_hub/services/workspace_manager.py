@@ -1863,6 +1863,23 @@ class WorkspaceManager:
                     session.current_task_id,
                 )
                 continue
+            rebalanced_task = self._next_reassignable_queued_task(session.id, workspace_id)
+            if rebalanced_task:
+                logger.info(
+                    "Reassigning queued workspace task id=%s from session_id=%s to free "
+                    "session_id=%s",
+                    rebalanced_task.id,
+                    rebalanced_task.session_id,
+                    session.id,
+                )
+                self.tasks[rebalanced_task.id] = rebalanced_task.model_copy(
+                    update={
+                        "session_id": session.id,
+                        "clear_context": True,
+                        "dispatch_reason": "Reassigned to newly available workspace agent",
+                        "updated_at": _now(),
+                    }
+                )
             next_task = self._next_queued_task(session.id)
             if not next_task:
                 continue
@@ -1911,6 +1928,29 @@ class WorkspaceManager:
         if not tasks:
             return None
         return sorted(tasks, key=_sort_time)[0]
+
+    def _next_reassignable_queued_task(
+        self,
+        free_session_id: str,
+        workspace_id: str,
+    ) -> Optional[WorkspaceTask]:
+        candidates: list[WorkspaceTask] = []
+        for task in self.tasks.values():
+            if task.workspace_id != workspace_id:
+                continue
+            if task.status != WorkspaceTaskStatus.QUEUED or task.dispatch_pending:
+                continue
+            if task.session_id == free_session_id:
+                continue
+            if task.dispatch_reason != "Queued behind existing workspace agent":
+                continue
+            assigned = self.sessions.get(task.session_id or "")
+            if not assigned or not self._is_holding_unresolved_review_task(assigned):
+                continue
+            candidates.append(task)
+        if not candidates:
+            return None
+        return sorted(candidates, key=_sort_time)[0]
 
     async def _dispatch_task_to_session(
         self,

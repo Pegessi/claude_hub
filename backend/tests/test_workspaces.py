@@ -2198,6 +2198,111 @@ def test_review_task_keeps_agent_locked_until_done(
     assert "Run after the reviewed task is human-accepted" in sent_messages[-1][1]
 
 
+def test_reassigns_auto_queued_task_when_another_agent_becomes_free(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Auto-queued work should not stay stuck behind a held review if another agent frees up."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="queue-rebalance-tab",
+        port=12348,
+        sent_messages=sent_messages,
+    )
+
+    async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
+        return []
+
+    monkeypatch.setattr(
+        workspace_module.ttyd_manager,
+        "list_tab_agent_statuses",
+        fake_list_statuses,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Queue Rebalance Repo",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "queue-rebalance",
+        },
+    ).json()
+    first_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    second_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+
+    first_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "First review task", "prompt": "Hold first agent"},
+    ).json()
+    client.post(
+        f"/api/workspaces/tasks/{first_task['id']}/start",
+        json={"target_session_id": first_agent["id"]},
+    )
+    client.post(
+        f"/api/workspaces/sessions/{first_agent['id']}/reports",
+        json={
+            "task_id": first_task["id"],
+            "state": "ready_for_review",
+            "message": "Ready",
+        },
+    )
+    assert pass_task_review(client, first_task["id"]).status_code == 201
+
+    second_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Second review task", "prompt": "Hold second agent"},
+    ).json()
+    client.post(
+        f"/api/workspaces/tasks/{second_task['id']}/start",
+        json={"target_session_id": second_agent["id"]},
+    )
+    client.post(
+        f"/api/workspaces/sessions/{second_agent['id']}/reports",
+        json={
+            "task_id": second_task["id"],
+            "state": "ready_for_review",
+            "message": "Ready",
+        },
+    )
+    assert pass_task_review(client, second_task["id"]).status_code == 201
+
+    queued_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Queued task", "prompt": "Run on the next available agent"},
+    ).json()
+    queued_start = client.post(
+        f"/api/workspaces/tasks/{queued_task['id']}/start",
+        json={},
+    )
+
+    assert queued_start.status_code == 201
+    queued = queued_start.json()
+    assert queued["status"] == "queued"
+    assert queued["session_id"] == first_agent["id"]
+    assert queued["dispatch_reason"] == "Queued behind existing workspace agent"
+
+    accept_second = client.patch(
+        f"/api/workspaces/tasks/{second_task['id']}",
+        json={"status": "done"},
+    )
+
+    assert accept_second.status_code == 200
+    rebalanced = workspace_manager.tasks[queued_task["id"]]
+    assert rebalanced.status == WorkspaceTaskStatus.WORKING
+    assert rebalanced.session_id == second_agent["id"]
+    assert rebalanced.dispatch_reason == "Reassigned to newly available workspace agent"
+    assert workspace_manager.sessions[first_agent["id"]].current_task_id == first_task["id"]
+    assert workspace_manager.sessions[second_agent["id"]].current_task_id == queued_task["id"]
+    assert "Run on the next available agent" in sent_messages[-1][1]
+
+
 def test_dispatch_holds_agent_during_in_flight_review(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
