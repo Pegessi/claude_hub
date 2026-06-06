@@ -547,7 +547,9 @@
               </div>
               <MarkdownContent
                 class="detail-copy"
+                link-markdown-paths
                 :text="selectedTask.prompt"
+                @markdown-path-click="path => openMarkdownPreviewModal(path)"
               />
               <div
                 v-if="selectedTask.attachments.length > 0"
@@ -919,18 +921,24 @@
                     </summary>
                     <MarkdownContent
                       class="report-message"
+                      link-markdown-paths
                       :text="reportMessageForLang(report)"
+                      @markdown-path-click="path => openMarkdownPreviewModal(path, report)"
                     />
                     <div
                       v-if="report.changed_files.length > 0"
                       class="report-files"
                     >
-                      <span
+                      <button
                         v-for="file in report.changed_files"
                         :key="file"
+                        type="button"
+                        :class="['report-file-chip', { 'report-file-chip--clickable': isMarkdownArtifact(file) }]"
+                        :disabled="!isMarkdownArtifact(file)"
+                        @click="openMarkdownPreviewModal(file, report)"
                       >
                         {{ file }}
-                      </span>
+                      </button>
                     </div>
                     <div
                       v-if="report.validation"
@@ -939,7 +947,9 @@
                       <strong>Validation</strong>
                       <MarkdownContent
                         compact
+                        link-markdown-paths
                         :text="report.validation"
+                        @markdown-path-click="path => openMarkdownPreviewModal(path, report)"
                       />
                     </div>
                     <div
@@ -1050,7 +1060,9 @@
                       <strong>Risks</strong>
                       <MarkdownContent
                         compact
+                        link-markdown-paths
                         :text="report.risks"
+                        @markdown-path-click="path => openMarkdownPreviewModal(path, report)"
                       />
                     </div>
                   </details>
@@ -1193,6 +1205,64 @@
             </div>
           </div>
         </aside>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <div
+        v-if="markdownPreviewModalPath"
+        class="workspace-modal-overlay markdown-preview-modal-overlay"
+        @click.self="closeMarkdownPreviewModal"
+      >
+        <div
+          class="workspace-modal markdown-preview-modal"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="`Markdown preview: ${markdownPreviewModalPath}`"
+        >
+          <div class="markdown-preview-modal-header">
+            <div>
+              <span>Markdown Preview</span>
+              <strong>{{ markdownPreviewModalPath }}</strong>
+            </div>
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Close Markdown preview"
+              @click="closeMarkdownPreviewModal"
+            >
+              x
+            </button>
+          </div>
+          <div
+            v-if="markdownPreviewModalError"
+            class="artifact-preview-status artifact-preview-error"
+          >
+            {{ markdownPreviewModalError }}
+          </div>
+          <div
+            v-else-if="markdownPreviewModalLoading || !markdownPreviewModalContent"
+            class="artifact-preview-status"
+          >
+            Loading Markdown preview...
+          </div>
+          <template v-else>
+            <div class="artifact-preview-header">
+              <span>{{ markdownPreviewModalContent.filename }}</span>
+              <span>{{ formatAttachmentSize(markdownPreviewModalContent.size_bytes) }}</span>
+            </div>
+            <MarkdownContent
+              class="artifact-preview-content markdown-preview-modal-content"
+              :text="markdownPreviewModalContent.content"
+            />
+            <div
+              v-if="markdownPreviewModalContent.truncated"
+              class="artifact-preview-status"
+            >
+              Preview truncated to the first 512 KB.
+            </div>
+          </template>
+        </div>
       </div>
     </Teleport>
 
@@ -2002,6 +2072,11 @@ const expandedArtifactKey = ref<string | null>(null)
 const artifactPreviews = reactive<Record<string, WorkspaceArtifactPreview>>({})
 const artifactPreviewErrors = reactive<Record<string, string>>({})
 const artifactPreviewLoading = reactive<Record<string, boolean>>({})
+const markdownPreviewModalPath = ref<string | null>(null)
+const markdownPreviewModalReportId = ref<string | null>(null)
+const markdownPreviewModalContent = ref<WorkspaceArtifactPreview | null>(null)
+const markdownPreviewModalError = ref<string | null>(null)
+const markdownPreviewModalLoading = ref(false)
 const mobileCollapsedColumns = reactive<Record<WorkspaceTaskStatus, boolean>>({
   todo: false,
   queued: false,
@@ -2232,7 +2307,8 @@ function profileResultSummary(results: ReviewProfileResult[]): string {
 }
 
 function isMarkdownArtifact(artifact: string): boolean {
-  return /\.(md|markdown|mdown|mkd)$/i.test(artifact.trim().split(/[?#]/)[0] || '')
+  const value = artifact.trim().split(/[?#]/)[0] || ''
+  return /\.(md|markdown|mdown|mkd)(?::\d+)?$/i.test(value)
 }
 
 function markdownArtifactRefs(report: AgentReport): string[] {
@@ -2325,6 +2401,37 @@ async function toggleArtifactPreview(report: AgentReport, artifact: string) {
   } finally {
     artifactPreviewLoading[key] = false
   }
+}
+
+async function openMarkdownPreviewModal(path: string, report?: AgentReport) {
+  const workspaceId = report?.workspace_id || selectedTask.value?.workspace_id || activeWorkspaceId.value
+  const trimmedPath = path.trim()
+  if (!workspaceId || !trimmedPath) return
+
+  markdownPreviewModalPath.value = trimmedPath
+  markdownPreviewModalReportId.value = report?.id || null
+  markdownPreviewModalContent.value = null
+  markdownPreviewModalError.value = null
+  markdownPreviewModalLoading.value = true
+  try {
+    markdownPreviewModalContent.value = await workspaceStore.fetchArtifactPreview(
+      workspaceId,
+      trimmedPath,
+      report?.id,
+    )
+  } catch (e) {
+    markdownPreviewModalError.value = e instanceof Error ? e.message : 'Failed to load Markdown preview'
+  } finally {
+    markdownPreviewModalLoading.value = false
+  }
+}
+
+function closeMarkdownPreviewModal() {
+  markdownPreviewModalPath.value = null
+  markdownPreviewModalReportId.value = null
+  markdownPreviewModalContent.value = null
+  markdownPreviewModalError.value = null
+  markdownPreviewModalLoading.value = false
 }
 
 const reviewerSessions = computed<ManagedSession[]>(() => [
@@ -2865,6 +2972,7 @@ function closeTaskDetail() {
   resetDraftAttachments(detailAttachments.value)
   isDetailActionsExpanded.value = false
   expandedArtifactKey.value = null
+  closeMarkdownPreviewModal()
 }
 
 function formatTime(value: string) {
@@ -5465,12 +5573,23 @@ onUnmounted(() => {
   padding: 0 10px 10px;
 }
 
-.report-files span {
+.report-file-chip {
+  border: 0;
   border-radius: 999px;
   background: var(--ch-color-surface-control-active);
   color: var(--ch-color-text);
   font-size: 10px;
   padding: 3px 7px;
+}
+
+.report-file-chip--clickable {
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.report-file-chip:disabled:not(.report-file-chip--clickable) {
+  opacity: 1;
 }
 
 .markdown-output-section {
@@ -5600,6 +5719,45 @@ onUnmounted(() => {
   color: var(--ch-color-text-subtle);
   font-size: 12px;
   padding: 8px 10px;
+}
+
+.markdown-preview-modal-overlay {
+  z-index: 1400;
+}
+
+.markdown-preview-modal {
+  width: min(960px, 100%);
+}
+
+.markdown-preview-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.markdown-preview-modal-header > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.markdown-preview-modal-header span {
+  color: var(--ch-color-text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.markdown-preview-modal-header strong {
+  color: var(--ch-color-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.markdown-preview-modal-content {
+  max-height: min(70dvh, 720px);
 }
 
 .artifact-preview-error {
