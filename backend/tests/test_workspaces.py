@@ -620,7 +620,6 @@ def test_direct_task_waiting_reports_do_not_become_accept_ready(
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     sent_messages.clear()
-
     response = client.post(
         f"/api/workspaces/sessions/{started['session_id']}/reports",
         json={
@@ -673,6 +672,20 @@ def test_direct_task_explicit_review_request_still_creates_reviewer(
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     sent_messages.clear()
+    lesson_response = client.post(
+        f"/api/workspaces/{workspace['id']}/lessons",
+        json={
+            "id": "explicit-review-handoff",
+            "summary": "Explicit review requests need handoff evidence.",
+            "applies_when": ["explicit review", "review request"],
+            "do": "Check changed files, validation, risks, and acceptance evidence.",
+            "avoid": "Do not pass review based only on the completion message.",
+            "tags": ["review", "handoff"],
+            "scope": "workspace",
+            "confidence": 0.8,
+        },
+    )
+    assert lesson_response.status_code == 201
 
     response = client.post(
         f"/api/workspaces/sessions/{started['session_id']}/reports",
@@ -690,7 +703,19 @@ def test_direct_task_explicit_review_request_still_creates_reviewer(
     assert direct_task.status == WorkspaceTaskStatus.WORKING
     assert direct_task.review_session_id is not None
     assert direct_task.review_requested_at is not None
+    assert direct_task.feedback_lesson_ids == ["explicit-review-handoff"]
     assert "Review workspace task." in sent_messages[-1][1]
+    assert "explicit-review-handoff" in sent_messages[-1][1]
+    task_reports = [
+        report
+        for report in workspace_manager.reports_for_workspace(workspace["id"])
+        if report.task_id == task["id"]
+    ]
+    assert any(
+        report.message == "Feedback lessons injected into reviewer prompt: explicit-review-handoff"
+        and report.risk_level == "system_audit"
+        for report in task_reports
+    )
 
 
 def test_agent_report_stores_goal_packet_and_acceptance_check(

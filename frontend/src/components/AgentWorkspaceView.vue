@@ -607,7 +607,8 @@
               <div class="feedback-detail-meta">
                 <span>{{ activeFeedbackLessons.length }} active in workspace</span>
                 <strong>{{ selectedTaskFeedbackLessons.length }} matched for this task</strong>
-                <span>{{ injectedFeedbackLessonIds(selectedTask).length }} injected this run</span>
+                <span>{{ injectedFeedbackLessonIds(selectedTask).length }} injected in lifecycle</span>
+                <span>{{ selectedReportedFeedbackLessonIds.length }} mentioned in reports</span>
               </div>
               <div
                 v-if="injectedFeedbackLessonIds(selectedTask).length > 0"
@@ -618,6 +619,17 @@
                   :key="lessonId"
                 >
                   {{ lessonId }}
+                </span>
+              </div>
+              <div
+                v-if="selectedReportedFeedbackLessonIds.length > 0"
+                class="feedback-injected-list"
+              >
+                <span
+                  v-for="lessonId in selectedReportedFeedbackLessonIds"
+                  :key="`reported-${lessonId}`"
+                >
+                  report: {{ lessonId }}
                 </span>
               </div>
               <div
@@ -666,7 +678,7 @@
                 v-if="selectedTaskFeedbackLessons.length > 0"
                 class="feedback-injection-note"
               >
-                Matched lessons are injected into new task assignment and reviewer prompts. Already-running tasks only show lessons that were injected when they started.
+                Matched lessons are injected into agent assignment and AI reviewer prompts. Already-running tasks only show prompt injections recorded after this audit field existed; report mentions are extracted from agent/reviewer validation text.
               </p>
             </section>
 
@@ -2113,6 +2125,25 @@ const selectedTaskSendKey = computed(() =>
 const selectedReports = computed<AgentReport[]>(() =>
   selectedTask.value ? workspaceStore.reportsForTask(selectedTask.value) : []
 )
+
+const selectedReportedFeedbackLessonIds = computed(() => {
+  const reportText = selectedReports.value
+    .map(report => [
+      report.message,
+      report.message_en,
+      report.message_zh,
+      report.validation,
+      report.risks,
+      report.review_reason,
+    ].filter(Boolean).join('\n'))
+    .join('\n')
+    .toLowerCase()
+
+  if (!reportText) return []
+  return activeFeedbackLessons.value
+    .map(lesson => lesson.id)
+    .filter(id => reportText.includes(id.toLowerCase()))
+})
 
 interface ProgressTimelineItem {
   id: string
