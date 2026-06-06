@@ -5,6 +5,11 @@
 
 ## 2026-06-06
 
+### fix: collapse task detail secondary panels by default
+- Keep the top task description visible while rendering Goal Packet, Markdown Outputs, Assignment, Autonomous Run, and Progress as closed-by-default collapsible panels in the task detail drawer
+- Preserve the existing panel contents and report-card expand/collapse behavior once users open a section
+- **Files**: frontend/src/components/AgentWorkspaceView.vue, CHANGELOG.md
+
 ### fix: allow trivial workspace review skips
 - Allow completed reviewed workspace reports to skip independent AI review for explicitly trivial low-risk file changes, while keeping human acceptance and preserving forced review for nontrivial changes, dirty tracked workspaces, missing Goal Packet evidence, failed review follow-ups, blocked input, and higher-risk reports
 - Update the worker routing prompt to describe when `review_decision=skip` is appropriate and add regression coverage for trivial host-bind style changes
