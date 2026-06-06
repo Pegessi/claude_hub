@@ -5,6 +5,14 @@
 
 ## 2026-06-06
 
+### feat: add manual workspace feedback lessons MVP
+- Add structured feedback lesson models for raw feedback records, lesson drafts, active lessons, and manual reaper runs so task evidence can be condensed without stuffing AGENTS/CLAUDE with every lesson
+- Add manual backend APIs to reap a task's feedback evidence, create/promote active workspace lessons, and list/search the active lesson index; no scheduled curator or automatic external-AI call is enabled in this change
+- Persist workspace-local feedback under `~/.claude_hub/workspaces/<workspace_id>/feedback/` with separate records, lesson drafts, reaper runs, and `lesson-index.json`
+- Inject a bounded `Relevant workspace lessons JSON` block into task assignment and reviewer prompts when active lessons match the task keywords, while keeping the original prompt and Goal Packet authoritative
+- Add focused backend coverage for manual reaper storage/promotion and task assignment lesson injection
+- **Files**: backend/claude_hub/models/schemas.py, backend/claude_hub/models/__init__.py, backend/claude_hub/services/feedback_lessons.py, backend/claude_hub/services/workspace_manager.py, backend/claude_hub/api/workspaces.py, backend/tests/test_workspaces.py, docs/working-logs/2026-06-06-feedback-harness-plan.md, CHANGELOG.md
+
 ### fix: rebalance queued workspace tasks when another agent frees up
 - Reassign automatically queued tasks away from an agent held by an unresolved Review task when another idle workspace agent becomes available, so work does not stay stuck behind a human-acceptance gate unnecessarily
 - Preserve explicit user-selected, related-task, and continuation assignments by only rebalancing tasks whose dispatch reason is the system-generated "Queued behind existing workspace agent"
