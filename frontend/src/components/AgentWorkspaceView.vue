@@ -5117,7 +5117,8 @@ onUnmounted(() => {
 
 .detail-section--collapsible[open] {
   border-color: var(--ch-color-accent);
-  box-shadow: inset 3px 0 0 var(--ch-color-accent);
+  background: var(--ch-color-surface-raised);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ch-color-accent) 35%, transparent);
 }
 
 .detail-section--collapsible[open] > summary {
