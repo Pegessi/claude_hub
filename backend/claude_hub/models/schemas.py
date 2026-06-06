@@ -535,6 +535,8 @@ class ManagedSession(BaseModel):
     auto_continue_task_id: Optional[str] = None
     auto_continue_attempts: int = 0
     last_auto_continue_at: Optional[datetime] = None
+    prompt_retry_task_id: Optional[str] = None
+    prompt_retry_attempted_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
     last_activity_at: Optional[datetime] = None

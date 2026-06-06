@@ -6,10 +6,10 @@
 ## 2026-06-06
 
 ### fix: surface stuck workspace prompts
-- Detect worker and reviewer prompts that remain pasted in a terminal input box after dispatch, record a visible needs-input report with prompt-dispatch risk metadata, and move the task to review/attention instead of silently stalling
+- Detect worker and reviewer prompts that remain pasted in a terminal input box after dispatch, automatically send one Enter retry, then record a visible needs-input report with prompt-dispatch risk metadata if the prompt still does not execute
 - Keep existing auto-continue behavior for idle interrupted workers while covering reviewer prompts, which previously skipped auto-continue while a review was pending
-- Add backend regression coverage for both stuck worker task prompts and stuck reviewer review prompts
-- **Files**: backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspaces.py, CHANGELOG.md
+- Add retry metadata to managed sessions and regression coverage for both stuck worker task prompts and stuck reviewer review prompts
+- **Files**: backend/claude_hub/models/schemas.py, backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspaces.py, frontend/src/types/index.ts, CHANGELOG.md
 
 ### feat: preview Markdown workspace outputs in task details
 - Add a scoped workspace artifact preview API that safely serves local Markdown from official report `artifact_refs`, Markdown `changed_files`, and workspace snapshots while keeping task-detail output lists task-associated
