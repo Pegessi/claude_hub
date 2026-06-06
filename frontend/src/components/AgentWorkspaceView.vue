@@ -2064,7 +2064,18 @@ const selectedTask = computed(() =>
 )
 
 function feedbackTokens(value: string): Set<string> {
-  return new Set((value.toLowerCase().match(/[a-z0-9_.-]{2,}/g) || []))
+  const text = value.toLowerCase()
+  const tokens = new Set(text.match(/[a-z0-9_.-]{2,}/g) || [])
+  const cjkChunks = text.match(/\p{Script=Han}+/gu) || []
+  cjkChunks.forEach((chunk) => {
+    for (const size of [2, 3]) {
+      if (chunk.length < size) continue
+      for (let index = 0; index <= chunk.length - size; index += 1) {
+        tokens.add(chunk.slice(index, index + size))
+      }
+    }
+  })
+  return tokens
 }
 
 function feedbackLessonText(lesson: FeedbackLesson): string {

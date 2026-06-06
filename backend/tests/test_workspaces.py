@@ -1524,6 +1524,110 @@ def test_task_assignment_injects_relevant_feedback_lessons(
     assert task_reports[0].risk_level == "system_audit"
 
 
+def test_feedback_lesson_matching_is_cjk_safe_and_does_not_fallback_to_any_lesson(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path / "state")
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="cjk-lesson-tab",
+        port=12535,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    cjk_workspace = client.post(
+        "/api/workspaces",
+        json={"name": "CJK Lessons", "path": str(repo), "session_prefix": "cjkl"},
+    ).json()
+    client.post(
+        f"/api/workspaces/{cjk_workspace['id']}/lessons",
+        json={
+            "id": "image-workflow-docs-first",
+            "summary": "图片生成任务要先阅读工作流文档。",
+            "applies_when": ["图片生成", "写真任务", "工作流"],
+            "do": "先检查仓库工作流文档和已有运行记录。",
+            "avoid": "不要只看原始提示词就开始生成。",
+            "tags": ["图片", "工作流"],
+            "scope": "workspace",
+            "confidence": 0.8,
+        },
+    )
+    client.post(
+        f"/api/workspaces/{cjk_workspace['id']}/lessons",
+        json={
+            "id": "market-data-symbols",
+            "summary": "Market data CLI symbols must be comma-separated.",
+            "applies_when": ["market data"],
+            "do": "Use --symbols AAPL,MSFT.",
+            "avoid": "Do not pass symbols as separate arguments.",
+            "tags": ["market", "cli"],
+            "scope": "workspace",
+            "confidence": 0.8,
+        },
+    )
+
+    cjk_task = client.post(
+        f"/api/workspaces/{cjk_workspace['id']}/tasks",
+        json={
+            "title": "写真图片生成",
+            "prompt": "生成希希芙写真图片，先看仓库工作流。",
+        },
+    ).json()
+    cjk_start_response = client.post(
+        f"/api/workspaces/tasks/{cjk_task['id']}/start",
+        json={},
+    )
+
+    assert cjk_start_response.status_code == 201
+    cjk_started_task = cjk_start_response.json()
+    assert cjk_started_task["feedback_lesson_ids"] == ["image-workflow-docs-first"]
+    assert "image-workflow-docs-first" in sent_messages[-1][1]
+    assert "market-data-symbols" not in sent_messages[-1][1]
+
+    emoji_workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Emoji Lessons", "path": str(repo), "session_prefix": "emol"},
+    ).json()
+    client.post(
+        f"/api/workspaces/{emoji_workspace['id']}/lessons",
+        json={
+            "id": "should-not-fallback",
+            "summary": "This lesson should not be injected without query tokens.",
+            "applies_when": ["specific searchable text"],
+            "do": "Only inject when matched.",
+            "avoid": "Do not inject as a fallback.",
+            "tags": ["fallback"],
+            "scope": "workspace",
+            "confidence": 0.8,
+        },
+    )
+    emoji_task = client.post(
+        f"/api/workspaces/{emoji_workspace['id']}/tasks",
+        json={"title": "😀😀", "prompt": "🔥🔥"},
+    ).json()
+    emoji_start_response = client.post(
+        f"/api/workspaces/tasks/{emoji_task['id']}/start",
+        json={},
+    )
+
+    assert emoji_start_response.status_code == 201
+    emoji_started_task = emoji_start_response.json()
+    assert emoji_started_task["feedback_lesson_ids"] == []
+    assert "Relevant workspace lessons JSON" not in sent_messages[-1][1]
+    task_reports = [
+        report
+        for report in workspace_manager.reports_for_workspace(emoji_workspace["id"])
+        if report.task_id == emoji_task["id"]
+    ]
+    assert task_reports == []
+
+
 @pytest.mark.parametrize(
     ("task_goal_packet", "acceptance_check", "expected_gap"),
     [
