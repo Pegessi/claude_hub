@@ -412,6 +412,12 @@
                     reviewer {{ reviewerTitle(task.review_session_id) }}
                   </span>
                   <span v-if="reviewStatusLabel(task)">{{ reviewStatusLabel(task) }}</span>
+                  <span
+                    v-if="injectedFeedbackLessonIds(task).length > 0"
+                    class="feedback-meta-chip"
+                  >
+                    feedback {{ injectedFeedbackLessonIds(task).length }}
+                  </span>
                   <span v-if="sessionForTask(task)">
                     runtime {{ sessionForTask(task)?.runtime_status }}
                   </span>
@@ -601,6 +607,18 @@
               <div class="feedback-detail-meta">
                 <span>{{ activeFeedbackLessons.length }} active in workspace</span>
                 <strong>{{ selectedTaskFeedbackLessons.length }} matched for this task</strong>
+                <span>{{ injectedFeedbackLessonIds(selectedTask).length }} injected this run</span>
+              </div>
+              <div
+                v-if="injectedFeedbackLessonIds(selectedTask).length > 0"
+                class="feedback-injected-list"
+              >
+                <span
+                  v-for="lessonId in injectedFeedbackLessonIds(selectedTask)"
+                  :key="lessonId"
+                >
+                  {{ lessonId }}
+                </span>
               </div>
               <div
                 v-if="activeFeedbackLessons.length === 0"
@@ -648,7 +666,7 @@
                 v-if="selectedTaskFeedbackLessons.length > 0"
                 class="feedback-injection-note"
               >
-                Matched lessons are injected into the task assignment and reviewer prompts.
+                Matched lessons are injected into new task assignment and reviewer prompts. Already-running tasks only show lessons that were injected when they started.
               </p>
             </section>
 
@@ -2067,6 +2085,10 @@ function matchingFeedbackLessons(task: WorkspaceTask | null): FeedbackLesson[] {
     .sort((a, b) => b.score - a.score)
     .map(item => item.lesson)
     .slice(0, 6)
+}
+
+function injectedFeedbackLessonIds(task: WorkspaceTask | null): string[] {
+  return Array.isArray(task?.feedback_lesson_ids) ? task.feedback_lesson_ids : []
 }
 
 const selectedTaskFeedbackLessons = computed(() =>
@@ -4974,6 +4996,23 @@ onUnmounted(() => {
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
   font-size: 11px;
+  padding: 4px 8px;
+}
+
+.feedback-injected-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.feedback-injected-list span,
+.feedback-meta-chip {
+  border-radius: 999px;
+  background: var(--ch-color-accent-soft);
+  color: var(--ch-color-accent);
+  font-size: 11px;
+  font-weight: 700;
   padding: 4px 8px;
 }
 

@@ -518,6 +518,7 @@ class WorkspaceTask(BaseModel):
     clear_context: Optional[bool] = None
     dispatch_reason: Optional[str] = None
     dispatch_pending: bool = False
+    feedback_lesson_ids: List[str] = Field(default_factory=list)
     review_session_id: Optional[str] = None
     review_attempts: int = 0
     review_requested_at: Optional[datetime] = None
