@@ -6,7 +6,8 @@
 ## 2026-06-06
 
 ### fix: collapse task detail secondary panels by default
-- Keep the top task description visible while rendering Goal Packet, Markdown Outputs, Assignment, Autonomous Run, and Progress as closed-by-default collapsible panels in the task detail drawer
+- Keep the top task description visible while rendering Goal Packet, Assignment, Autonomous Run, Progress, and Markdown Outputs as closed-by-default collapsible panels in the task detail drawer
+- Place Markdown Outputs at the bottom of the task detail drawer so status and progress information appears before generated artifacts
 - Preserve the existing panel contents and report-card expand/collapse behavior once users open a section
 - **Files**: frontend/src/components/AgentWorkspaceView.vue, CHANGELOG.md
 
