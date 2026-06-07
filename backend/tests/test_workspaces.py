@@ -1226,6 +1226,66 @@ def test_reviewer_clears_context_between_unrelated_tasks(
     assert clear_index < prompt_index
 
 
+def test_failed_review_continues_reviewed_task_after_repeated_attempts(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="rev-repeat-tab",
+        port=12815,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Repeated Review", "path": str(repo), "session_prefix": "rr"},
+    ).json()
+    worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Keep iterating", "prompt": "Fix until review passes"},
+    ).json()
+    client.post(
+        f"/api/workspaces/tasks/{task['id']}/start",
+        json={"target_session_id": worker["id"]},
+    )
+    client.post(
+        f"/api/workspaces/sessions/{worker['id']}/reports",
+        json={"task_id": task["id"], "state": "completed", "message": "v1"},
+    )
+
+    prepared_task = workspace_manager.tasks[task["id"]]
+    reviewer_id = prepared_task.review_session_id
+    assert reviewer_id is not None
+    workspace_manager.tasks[task["id"]] = prepared_task.model_copy(
+        update={"review_attempts": workspace_module.MAX_AUTOMATED_REVIEW_FAILURES + 1}
+    )
+    sent_messages.clear()
+
+    fail_resp = client.post(
+        f"/api/workspaces/sessions/{reviewer_id}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "review_failed",
+            "message": "Please address another blocking issue.",
+        },
+    )
+
+    assert fail_resp.status_code == 201
+    updated = workspace_manager.tasks[task["id"]]
+    worker_session = workspace_manager.sessions[worker["id"]]
+    assert updated.status == WorkspaceTaskStatus.WORKING
+    assert worker_session.status == ManagedSessionStatus.WORKING
+    assert worker_session.runtime_status == AgentRuntimeStatus.WORKING
+    assert any("Reviewer requested changes" in message for _sess, message in sent_messages)
+
+
 def test_reviewer_keeps_context_when_re_reviewing_same_task(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,

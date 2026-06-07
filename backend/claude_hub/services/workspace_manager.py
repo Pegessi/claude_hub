@@ -3912,13 +3912,11 @@ class WorkspaceManager:
         if report.state != AgentReportState.REVIEW_FAILED:
             return
         updated_task = self.tasks[task.id]
-        if (
-            updated_task.task_mode == WorkspaceTaskMode.AUTONOMOUS
-            and autonomous_next_phase != AutonomousRunPhase.REVISING
-        ):
-            return
-        if updated_task.review_attempts > MAX_AUTOMATED_REVIEW_FAILURES:
-            return
+        if updated_task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
+            if autonomous_next_phase != AutonomousRunPhase.REVISING:
+                return
+            if updated_task.review_attempts > MAX_AUTOMATED_REVIEW_FAILURES:
+                return
         feedback = (
             "Autonomous evaluator requested changes.\n\n"
             if updated_task.task_mode == WorkspaceTaskMode.AUTONOMOUS
