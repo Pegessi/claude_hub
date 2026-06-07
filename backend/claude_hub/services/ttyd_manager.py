@@ -432,6 +432,20 @@ asyncio.run(_main())
         os.chmod(script_path, 0o600)
         return f"/bin/sh {shlex.quote(str(script_path))} {shlex.quote(command)}"
 
+    def _claude_settings_arg(self) -> str:
+        if self.agent_type != AgentType.CLAUDE or not self.env:
+            return ""
+        if self.target != ExecutionTarget.LOCAL:
+            return ""
+        LAUNCH_ENV_DIR.mkdir(parents=True, exist_ok=True)
+        settings_path = LAUNCH_ENV_DIR / f"{self.tab_id}.settings.json"
+        settings_path.write_text(
+            json.dumps({"env": self.env}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.chmod(settings_path, 0o600)
+        return f" --settings {shlex.quote(str(settings_path))}"
+
     def _claude_model_arg(self) -> str:
         if self.agent_type != AgentType.CLAUDE:
             return ""
@@ -444,7 +458,10 @@ asyncio.run(_main())
         if self.agent_type == AgentType.CODEX:
             return "codex --ask-for-approval never --sandbox danger-full-access"
         if self.agent_type == AgentType.CLAUDE:
-            return f"IS_SANDBOX=1 claude --dangerously-skip-permissions{self._claude_model_arg()}"
+            return (
+                "IS_SANDBOX=1 claude --dangerously-skip-permissions"
+                f"{self._claude_settings_arg()}{self._claude_model_arg()}"
+            )
         if self.agent_type == AgentType.CURSOR:
             # Cursor agent runs in yolo by default; solo_mode toggle is a no-op.
             return "agent"
@@ -649,8 +666,11 @@ asyncio.run(_main())
         if self.agent_type == AgentType.TERMINAL:
             return "${SHELL:-/bin/bash} -l"
         if self.solo_mode:
-            return f"IS_SANDBOX=1 claude --dangerously-skip-permissions{self._claude_model_arg()}"
-        return f"{get_default_command()}{self._claude_model_arg()}"
+            return (
+                "IS_SANDBOX=1 claude --dangerously-skip-permissions"
+                f"{self._claude_settings_arg()}{self._claude_model_arg()}"
+            )
+        return f"{get_default_command()}{self._claude_settings_arg()}{self._claude_model_arg()}"
 
     def _remote_ssh_target(self) -> tuple[str, int]:
         if not self.remote_profile_id:
