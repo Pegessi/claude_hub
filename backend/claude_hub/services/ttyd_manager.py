@@ -369,11 +369,19 @@ asyncio.run(_main())
     def _with_env(self, command: str) -> str:
         return f"{self._env_shell_prefix()}{command}"
 
+    def _claude_model_arg(self) -> str:
+        if self.agent_type != AgentType.CLAUDE:
+            return ""
+        model = self.env.get("ANTHROPIC_MODEL")
+        if not model:
+            return ""
+        return f" --model {shlex.quote(model)}"
+
     def _solo_command(self) -> Optional[str]:
         if self.agent_type == AgentType.CODEX:
             return "codex --ask-for-approval never --sandbox danger-full-access"
         if self.agent_type == AgentType.CLAUDE:
-            return "IS_SANDBOX=1 claude --dangerously-skip-permissions"
+            return f"IS_SANDBOX=1 claude --dangerously-skip-permissions{self._claude_model_arg()}"
         if self.agent_type == AgentType.CURSOR:
             # Cursor agent runs in yolo by default; solo_mode toggle is a no-op.
             return "agent"
@@ -393,6 +401,8 @@ asyncio.run(_main())
             solo_command = self._solo_command()
             if solo_command:
                 return f"{shlex.quote(user_shell)} -c {shlex.quote(f'{self._with_env(solo_command)}; exec {user_shell}')}"
+        if self.agent_type == AgentType.CLAUDE and not session_exists:
+            return self._with_env(self._agent_start_command())
         # Non-solo agent tabs still need env var injection.
         return self._with_env(self.shell)
 
@@ -435,6 +445,8 @@ asyncio.run(_main())
                     ]
                 )
             )
+        elif self.agent_type == AgentType.CLAUDE:
+            cmd.append(self._with_env(self._agent_start_command()))
         else:
             cmd.append(self._with_env(self.shell))
 
@@ -557,6 +569,8 @@ asyncio.run(_main())
                     f"{self._with_env(self._agent_start_command())}; exec {user_shell}",
                 ]
             )
+        elif self.agent_type == AgentType.CLAUDE and not session_exists:
+            cmd.append(self._with_env(self._agent_start_command()))
         else:
             cmd.append(self._with_env(self.shell))
 
@@ -572,8 +586,8 @@ asyncio.run(_main())
         if self.agent_type == AgentType.TERMINAL:
             return "${SHELL:-/bin/bash} -l"
         if self.solo_mode:
-            return "IS_SANDBOX=1 claude --dangerously-skip-permissions"
-        return get_default_command()
+            return f"IS_SANDBOX=1 claude --dangerously-skip-permissions{self._claude_model_arg()}"
+        return f"{get_default_command()}{self._claude_model_arg()}"
 
     def _remote_ssh_target(self) -> tuple[str, int]:
         if not self.remote_profile_id:

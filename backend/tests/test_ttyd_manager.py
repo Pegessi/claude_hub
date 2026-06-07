@@ -97,6 +97,46 @@ def test_custom_env_rejects_invalid_names() -> None:
         )
 
 
+def test_claude_env_model_is_passed_as_startup_model_flag() -> None:
+    process = TTYDProcess(
+        tab_id="tab-claude-model-env",
+        port=12349,
+        name="Claude Model Env",
+        agent_type=AgentType.CLAUDE,
+        env={"ANTHROPIC_MODEL": "claude-opus-4-8"},
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+
+    assert cmd[-1] == "env ANTHROPIC_MODEL=claude-opus-4-8 claude --model claude-opus-4-8"
+
+
+def test_claude_solo_env_model_is_passed_as_startup_model_flag(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    process = TTYDProcess(
+        tab_id="tab-claude-solo-model-env",
+        port=12350,
+        name="Claude Solo Model Env",
+        solo_mode=True,
+        agent_type=AgentType.CLAUDE,
+        env={"ANTHROPIC_MODEL": "gateway/model with space"},
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+
+    assert cmd[-3:] == [
+        "/bin/zsh",
+        "-c",
+        (
+            "env ANTHROPIC_MODEL='gateway/model with space' "
+            "IS_SANDBOX=1 claude --dangerously-skip-permissions "
+            "--model 'gateway/model with space'; exec /bin/zsh"
+        ),
+    ]
+
+
 def test_workspace_metadata_is_serialized_to_tab_schema_and_state() -> None:
     process = TTYDProcess(
         tab_id="tab-workspace-agent",
