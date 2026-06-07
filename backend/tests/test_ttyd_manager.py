@@ -14,7 +14,11 @@ from claude_hub.models import (
     RemoteProfile,
     WorkspaceSessionRole,
 )
-from claude_hub.services.ttyd_manager import TTYDManager, TTYDProcess
+from claude_hub.services.ttyd_manager import (
+    DEFAULT_CLAUDE_LAUNCH_ENV,
+    TTYDManager,
+    TTYDProcess,
+)
 
 ttyd_manager_module = importlib.import_module("claude_hub.services.ttyd_manager")
 
@@ -118,7 +122,7 @@ def test_local_env_wrapper_command_executes_without_executable_bit() -> None:
     )
 
     command = process._with_env(
-        "printf '%s' \"$CLAUDE_HUB_TEST_VALUE\"; test -n \"$CLAUDE_HUB_TEST_VALUE\""
+        'printf \'%s\' "$CLAUDE_HUB_TEST_VALUE"; test -n "$CLAUDE_HUB_TEST_VALUE"'
     )
     wrapper_path = _wrapper_path(command)
     wrapper_mode = stat.S_IMODE(os.stat(wrapper_path).st_mode)
@@ -161,6 +165,39 @@ def test_claude_env_model_is_passed_as_startup_model_flag() -> None:
     assert "ANTHROPIC_MODEL=claude-opus-4-8" not in cmd[-1]
     assert "claude --model claude-opus-4-8" in cmd[-1]
     assert "export ANTHROPIC_MODEL=claude-opus-4-8" in wrapper
+
+
+def test_claude_launch_defaults_to_volcengine_model_env() -> None:
+    process = TTYDProcess(
+        tab_id="tab-claude-default-model-env",
+        port=12356,
+        name="Claude Default Model Env",
+        agent_type=AgentType.CLAUDE,
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+    wrapper = _wrapper_script(cmd[-1])
+
+    for key, value in DEFAULT_CLAUDE_LAUNCH_ENV.items():
+        assert process.env[key] == value
+        assert f"export {key}={shlex.quote(value)}" in wrapper
+    assert "--model doubao-seed-2.0-code" in cmd[-1]
+
+
+def test_claude_explicit_env_overrides_default_model_env() -> None:
+    process = TTYDProcess(
+        tab_id="tab-claude-override-model-env",
+        port=12357,
+        name="Claude Override Model Env",
+        agent_type=AgentType.CLAUDE,
+        env={"ANTHROPIC_MODEL": "claude-opus-4-8"},
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+
+    assert "ANTHROPIC_BASE_URL" not in process.env
+    assert process.env["ANTHROPIC_MODEL"] == "claude-opus-4-8"
+    assert "--model claude-opus-4-8" in cmd[-1]
 
 
 def test_claude_solo_env_model_is_passed_as_startup_model_flag(

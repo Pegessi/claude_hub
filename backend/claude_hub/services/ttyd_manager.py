@@ -101,6 +101,15 @@ _MODEL_ENV_KEYS = (
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     "CLAUDE_CODE_SUBAGENT_MODEL",
 )
+DEFAULT_CLAUDE_LAUNCH_ENV: Dict[str, str] = {
+    "ANTHROPIC_BASE_URL": "https://ark.cn-beijing.volces.com/api/coding",
+    "ANTHROPIC_MODEL": "doubao-seed-2.0-code",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "doubao-seed-2.0-code",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "doubao-seed-2.0-code",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "doubao-seed-2.0-code",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "doubao-seed-2.0-code",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+}
 
 
 class CursorPosition(TypedDict):
@@ -215,7 +224,8 @@ class TTYDProcess:
         self.workspace_id = workspace_id
         self.workspace_name = workspace_name
         self.workspace_role = workspace_role
-        self.env = self._clean_env(env or {})
+        launch_env = env if env else self._default_env_for_agent(agent_type)
+        self.env = self._clean_env(launch_env)
         self._prepare_agent_env()
         self._setup_tunnel_env()
         self.process: Optional[asyncio.subprocess.Process] = None
@@ -252,16 +262,18 @@ class TTYDProcess:
         cleaned.update(additions)
         return cleaned
 
+    @staticmethod
+    def _default_env_for_agent(agent_type: AgentType) -> Dict[str, str]:
+        if agent_type != AgentType.CLAUDE:
+            return {}
+        return DEFAULT_CLAUDE_LAUNCH_ENV.copy()
+
     def _prepare_agent_env(self) -> None:
         if self.agent_type != AgentType.CLAUDE:
             return
         self._normalize_volcengine_coding_plan_model()
         model = self.env.get("ANTHROPIC_MODEL")
-        if (
-            model
-            and "/" in model
-            and "ANTHROPIC_CUSTOM_MODEL_OPTION" not in self.env
-        ):
+        if model and "/" in model and "ANTHROPIC_CUSTOM_MODEL_OPTION" not in self.env:
             self.env["ANTHROPIC_CUSTOM_MODEL_OPTION"] = model
 
     def _normalize_volcengine_coding_plan_model(self) -> None:
@@ -414,15 +426,8 @@ asyncio.run(_main())
     def _with_local_env_wrapper(self, command: str) -> str:
         LAUNCH_ENV_DIR.mkdir(parents=True, exist_ok=True)
         script_path = LAUNCH_ENV_DIR / f"{self.tab_id}.sh"
-        exports = "\n".join(
-            f"export {key}={shlex.quote(value)}" for key, value in self.env.items()
-        )
-        script = (
-            "#!/bin/sh\n"
-            "set -eu\n"
-            f"{exports}\n"
-            'exec "${SHELL:-/bin/bash}" -lc "$1"\n'
-        )
+        exports = "\n".join(f"export {key}={shlex.quote(value)}" for key, value in self.env.items())
+        script = "#!/bin/sh\n" "set -eu\n" f"{exports}\n" 'exec "${SHELL:-/bin/bash}" -lc "$1"\n'
         script_path.write_text(script, encoding="utf-8")
         os.chmod(script_path, 0o600)
         return f"/bin/sh {shlex.quote(str(script_path))} {shlex.quote(command)}"
