@@ -131,10 +131,30 @@ def test_claude_solo_env_model_is_passed_as_startup_model_flag(
         "-c",
         (
             "env ANTHROPIC_MODEL='gateway/model with space' "
+            "ANTHROPIC_CUSTOM_MODEL_OPTION='gateway/model with space' "
             "IS_SANDBOX=1 claude --dangerously-skip-permissions "
             "--model 'gateway/model with space'; exec /bin/zsh"
         ),
     ]
+    assert process.env["ANTHROPIC_CUSTOM_MODEL_OPTION"] == "gateway/model with space"
+
+
+def test_claude_custom_model_env_option_is_not_overwritten() -> None:
+    process = TTYDProcess(
+        tab_id="tab-claude-explicit-custom-model",
+        port=12351,
+        name="Claude Explicit Custom Model",
+        agent_type=AgentType.CLAUDE,
+        env={
+            "ANTHROPIC_MODEL": "ark/seed-code-0602[1m]",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION": "ark/seed-code-0602",
+        },
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+
+    assert process.env["ANTHROPIC_CUSTOM_MODEL_OPTION"] == "ark/seed-code-0602"
+    assert "--model 'ark/seed-code-0602[1m]'" in cmd[-1]
 
 
 def test_workspace_metadata_is_serialized_to_tab_schema_and_state() -> None:
