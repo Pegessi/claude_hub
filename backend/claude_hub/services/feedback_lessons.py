@@ -112,9 +112,11 @@ class FeedbackLessonStore:
             raise ValueError("Lesson summary is required")
         lessons = self.list_lessons(workspace_id, include_inactive=True)
         lesson_id = payload.id or self._unique_lesson_id(summary, lessons)
+        title = (payload.title or "").strip() or self._title_from_summary(summary)
         lesson = FeedbackLesson(
             id=lesson_id,
             workspace_id=workspace_id,
+            title=title,
             status=FeedbackLessonStatus.ACTIVE,
             scope=payload.scope,
             summary=summary,
@@ -132,6 +134,29 @@ class FeedbackLessonStore:
         merged.append(lesson)
         self._write_lesson_index(workspace_id, merged)
         return lesson
+
+    def archive_lesson(
+        self,
+        workspace_id: str,
+        lesson_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> FeedbackLesson:
+        now = now or _now()
+        lessons = self.list_lessons(workspace_id, include_inactive=True)
+        for index, lesson in enumerate(lessons):
+            if lesson.id != lesson_id:
+                continue
+            archived = lesson.model_copy(
+                update={
+                    "status": FeedbackLessonStatus.ARCHIVED,
+                    "updated_at": now,
+                }
+            )
+            lessons[index] = archived
+            self._write_lesson_index(workspace_id, lessons)
+            return archived
+        raise KeyError(lesson_id)
 
     def list_lessons(
         self,
@@ -176,6 +201,7 @@ class FeedbackLessonStore:
             haystack = " ".join(
                 [
                     lesson.id,
+                    lesson.title,
                     lesson.summary,
                     lesson.do,
                     lesson.avoid,
@@ -204,6 +230,7 @@ class FeedbackLessonStore:
         return [
             {
                 "id": lesson.id,
+                "title": lesson.title,
                 "scope": lesson.scope.value,
                 "summary": lesson.summary,
                 "applies_when": lesson.applies_when,
@@ -317,6 +344,7 @@ class FeedbackLessonStore:
     def _lesson_create_from_draft(self, draft: FeedbackLessonDraft) -> FeedbackLessonCreate:
         return FeedbackLessonCreate(
             id=self._unique_lesson_slug(draft.summary),
+            title=self._title_from_summary(draft.summary),
             summary=draft.summary,
             applies_when=draft.applies_when,
             do=draft.do,
@@ -372,6 +400,12 @@ class FeedbackLessonStore:
 
     def _unique_lesson_slug(self, summary: str) -> str:
         return _slug(summary)[:80].strip("-") or f"lesson-{uuid.uuid4().hex[:8]}"
+
+    def _title_from_summary(self, summary: str) -> str:
+        title = re.split(r"[。.!?]\s*", summary.strip(), maxsplit=1)[0].strip()
+        if len(title) > 80:
+            return f"{title[:77].rstrip()}..."
+        return title or "Workspace lesson"
 
     def _default_feedback_summary(
         self,

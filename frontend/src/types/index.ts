@@ -458,6 +458,7 @@ export type FeedbackLessonStatus = 'draft' | 'active' | 'archived' | 'rejected'
 export interface FeedbackLesson {
   id: string
   workspace_id: string
+  title?: string
   scope: FeedbackLessonScope
   status: FeedbackLessonStatus
   summary: string
@@ -474,6 +475,18 @@ export interface FeedbackLesson {
   last_validated_at?: string | null
   created_at: string
   updated_at: string
+}
+
+export interface FeedbackLessonCreate {
+  id?: string | null
+  title?: string | null
+  summary: string
+  applies_when?: string[]
+  do?: string
+  avoid?: string
+  tags?: string[]
+  scope?: FeedbackLessonScope
+  confidence?: number | null
 }
 
 export type LayoutType = '1x1' | '2x1' | '1x2' | '3x1' | '1x3' | '2x2' | '3x3'

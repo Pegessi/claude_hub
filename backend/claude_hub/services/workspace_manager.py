@@ -1100,6 +1100,11 @@ class WorkspaceManager:
             raise KeyError(workspace_id)
         return self._feedback_store().create_lesson(workspace_id, payload)
 
+    def delete_feedback_lesson(self, workspace_id: str, lesson_id: str) -> FeedbackLesson:
+        if workspace_id not in self.workspaces:
+            raise KeyError(workspace_id)
+        return self._feedback_store().archive_lesson(workspace_id, lesson_id)
+
     def feedback_lessons(
         self,
         workspace_id: str,
