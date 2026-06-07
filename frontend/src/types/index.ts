@@ -499,6 +499,13 @@ export interface FeedbackLessonCreate {
 
 export type FeedbackSummaryMode = 'incremental' | 'full'
 
+export interface FeedbackSummaryRequest {
+  mode?: FeedbackSummaryMode
+  limit?: number
+  force?: boolean
+  clear_context?: boolean
+}
+
 export interface FeedbackSummaryRun {
   id: string
   workspace_id: string

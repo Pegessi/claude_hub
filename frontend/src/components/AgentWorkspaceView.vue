@@ -1499,10 +1499,20 @@
             class="tool-button"
             :disabled="!activeWorkspaceId"
             :loading="isPending('feedback:summarize')"
-            loading-label="Queueing"
-            @click="handleSummarizeLessons"
+            loading-label="Checking"
+            @click="handleSummarizeLessons(false)"
           >
             AI summarize
+          </LoadingButton>
+          <LoadingButton
+            type="button"
+            class="tool-button"
+            :disabled="!activeWorkspaceId"
+            :loading="isPending('feedback:summarize:force')"
+            loading-label="Queueing"
+            @click="handleSummarizeLessons(true)"
+          >
+            Force AI run
           </LoadingButton>
           <LoadingButton
             type="button"
@@ -1513,6 +1523,24 @@
           >
             Refresh
           </LoadingButton>
+        </div>
+
+        <div
+          v-if="lastFeedbackSummaryRun"
+          :class="['summary-run-status', `summary-run-status--${feedbackSummaryTone(lastFeedbackSummaryRun)}`]"
+        >
+          <strong>{{ feedbackSummaryTitle(lastFeedbackSummaryRun) }}</strong>
+          <p>{{ feedbackSummaryDescription(lastFeedbackSummaryRun) }}</p>
+          <div class="summary-run-meta">
+            <span>{{ lastFeedbackSummaryRun.mode }}</span>
+            <span>{{ lastFeedbackSummaryRun.cache_hit ? 'cache hit' : 'AI queued' }}</span>
+            <span v-if="lastFeedbackSummaryRun.input_record_ids.length">
+              {{ lastFeedbackSummaryRun.input_record_ids.length }} records
+            </span>
+            <span v-if="lastFeedbackSummaryRun.task_id">
+              task {{ shortId(lastFeedbackSummaryRun.task_id) }}
+            </span>
+          </div>
         </div>
 
         <section class="modal-section modal-section--first">
@@ -1961,6 +1989,7 @@ import type {
   AutonomyPolicy,
   ExecutionTarget,
   FeedbackLesson,
+  FeedbackSummaryRun,
   GoalPacket,
   ManagedSession,
   RemoteProfile,
@@ -2031,6 +2060,7 @@ const workspaceModalMode = ref<'create' | 'edit'>('create')
 const editingWorkspaceId = ref<string | null>(null)
 const showAgentOptionsModal = ref(false)
 const showLessonsModal = ref(false)
+const lastFeedbackSummaryRun = ref<FeedbackSummaryRun | null>(null)
 const showAgentFileBrowser = ref(false)
 const showTaskModal = ref(false)
 const showEditTaskModal = ref(false)
@@ -2191,6 +2221,36 @@ function lessonDescription(lesson: FeedbackLesson): string {
 
 function lessonTags(lesson: FeedbackLesson): string[] {
   return (lesson.tags || []).slice(0, 4)
+}
+
+function shortId(value: string): string {
+  return value.slice(0, 8)
+}
+
+function feedbackSummaryTone(run: FeedbackSummaryRun): 'queued' | 'skipped' | 'done' {
+  if (run.task_id) return 'queued'
+  if (run.cache_hit || run.skipped_reason) return 'skipped'
+  return 'done'
+}
+
+function feedbackSummaryTitle(run: FeedbackSummaryRun): string {
+  if (run.task_id) return 'Internal AI summary queued'
+  if (run.skipped_reason === 'no_new_task_records') return 'No new task records'
+  if (run.skipped_reason) return 'Summary skipped'
+  return 'Summary recorded'
+}
+
+function feedbackSummaryDescription(run: FeedbackSummaryRun): string {
+  if (run.task_id) {
+    return 'A hidden Feedback Reaper task was started. It will update lessons and write audit evidence when it finishes.'
+  }
+  if (run.skipped_reason === 'no_new_task_records') {
+    return 'No completed task records are available or changed, so no internal AI task was started. Force AI run can reprocess cached records once this workspace has records.'
+  }
+  if (run.skipped_reason) {
+    return `No internal AI task was started: ${run.skipped_reason}.`
+  }
+  return 'The feedback summary run was recorded.'
 }
 
 const feedbackLessonMatchSummary = computed(() => {
@@ -3419,11 +3479,16 @@ async function deleteLesson(lesson: FeedbackLesson) {
   })
 }
 
-async function handleSummarizeLessons() {
+async function handleSummarizeLessons(force: boolean) {
   if (!activeWorkspaceId.value) return
-  await runPending('feedback:summarize', async () => {
-    await workspaceStore.summarizeFeedbackLessons()
-    closeLessonsModal()
+  const actionKey = force ? 'feedback:summarize:force' : 'feedback:summarize'
+  await runPending(actionKey, async () => {
+    const run = await workspaceStore.summarizeFeedbackLessons({
+      force,
+      limit: 5,
+      clear_context: true,
+    })
+    lastFeedbackSummaryRun.value = run || null
   })
 }
 
@@ -5681,7 +5746,52 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  margin-bottom: 12px;
+}
+
+.summary-run-status {
+  display: grid;
+  gap: 5px;
   margin-bottom: 16px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-soft);
+  padding: 10px 12px;
+}
+
+.summary-run-status--queued {
+  border-color: var(--ch-color-accent);
+}
+
+.summary-run-status--skipped {
+  border-color: var(--ch-color-warning);
+}
+
+.summary-run-status strong {
+  color: var(--ch-color-text);
+  font-size: 13px;
+}
+
+.summary-run-status p {
+  margin: 0;
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.summary-run-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.summary-run-meta span {
+  border-radius: 999px;
+  background: var(--ch-color-chip-bg-muted);
+  color: var(--ch-color-text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 7px;
 }
 
 .lessons-list {
