@@ -3710,11 +3710,20 @@ class WorkspaceManager:
                 if autonomous_run is not None:
                     task_update["autonomous_run"] = autonomous_run
             if task_status:
-                task_update.update({"status": task_status, "updated_at": now})
-                if task_status == WorkspaceTaskStatus.WORKING:
-                    task_update["started_at"] = self.tasks[task_id].started_at or now
-                if task_status == WorkspaceTaskStatus.REVIEW:
-                    task_update["reviewed_at"] = now
+                if (
+                    session.role == WorkspaceSessionRole.ORCHESTRATOR
+                    and task_status == WorkspaceTaskStatus.WORKING
+                    and self.tasks[task_id].status == WorkspaceTaskStatus.REVIEW
+                    and self.tasks[task_id].review_requested_at
+                    and not self.tasks[task_id].review_completed_at
+                ):
+                    task_update["updated_at"] = now
+                else:
+                    task_update.update({"status": task_status, "updated_at": now})
+                    if task_status == WorkspaceTaskStatus.WORKING:
+                        task_update["started_at"] = self.tasks[task_id].started_at or now
+                    if task_status == WorkspaceTaskStatus.REVIEW:
+                        task_update["reviewed_at"] = now
             elif task_update:
                 task_update["updated_at"] = now
             if task_update:
@@ -4183,7 +4192,7 @@ class WorkspaceManager:
             )
         self.tasks[task.id] = task.model_copy(
             update={
-                "status": WorkspaceTaskStatus.WORKING,
+                "status": WorkspaceTaskStatus.REVIEW,
                 "review_session_id": reviewer.id,
                 "review_attempts": task.review_attempts + 1,
                 "review_requested_at": now,
@@ -4673,7 +4682,10 @@ class WorkspaceManager:
 
             if current_task_id:
                 task = self.tasks.get(current_task_id)
-                if task and task.status == WorkspaceTaskStatus.WORKING:
+                if task and task.status in {
+                    WorkspaceTaskStatus.WORKING,
+                    WorkspaceTaskStatus.REVIEW,
+                }:
                     stalled_update = await self._detect_prompt_dispatch_stall(
                         session,
                         task,
@@ -4702,7 +4714,8 @@ class WorkspaceManager:
                         runtime_status = update["runtime_status"]
                         changed = True
                 if (
-                    runtime_status == AgentRuntimeStatus.WORKING
+                    session.role == WorkspaceSessionRole.ORCHESTRATOR
+                    and runtime_status == AgentRuntimeStatus.WORKING
                     and task
                     and task.status == WorkspaceTaskStatus.REVIEW
                     and current_task_id is not None
