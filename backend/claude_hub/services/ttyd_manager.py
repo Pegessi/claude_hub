@@ -93,6 +93,8 @@ _REMOTE_CAPTURE_TIMEOUT_SECONDS = 10.0
 _VOLCENGINE_CODING_PLAN_MODEL_ALIASES = {
     "ark/seed-code-0602": "doubao-seed-2.0-code",
     "ark/seed-code-0602[1m]": "doubao-seed-2.0-code",
+    "ark/seed-code-6062": "doubao-seed-2.0-code",
+    "ark/seed-code-6062[1m]": "doubao-seed-2.0-code",
 }
 _MODEL_ENV_KEYS = (
     "ANTHROPIC_MODEL",
@@ -227,7 +229,8 @@ class TTYDProcess:
         launch_env = env if env else self._default_env_for_agent(agent_type)
         self.env = self._clean_env(launch_env)
         self._prepare_agent_env()
-        self._setup_tunnel_env()
+        if agent_type != AgentType.CLAUDE:
+            self._setup_tunnel_env()
         self.process: Optional[asyncio.subprocess.Process] = None
         self.created_at = created_at or datetime.now()
         self.is_active = False
@@ -272,9 +275,6 @@ class TTYDProcess:
         if self.agent_type != AgentType.CLAUDE:
             return
         self._normalize_volcengine_coding_plan_model()
-        model = self.env.get("ANTHROPIC_MODEL")
-        if model and "/" in model and "ANTHROPIC_CUSTOM_MODEL_OPTION" not in self.env:
-            self.env["ANTHROPIC_CUSTOM_MODEL_OPTION"] = model
 
     def _normalize_volcengine_coding_plan_model(self) -> None:
         base_url = self.env.get("ANTHROPIC_BASE_URL", "")
@@ -1727,7 +1727,8 @@ class TTYDManager:
         if env is not None:
             process.env = TTYDProcess._clean_env(env)
             process._prepare_agent_env()
-            process._setup_tunnel_env()
+            if process.agent_type != AgentType.CLAUDE:
+                process._setup_tunnel_env()
             needs_restart = True
 
         if needs_restart:

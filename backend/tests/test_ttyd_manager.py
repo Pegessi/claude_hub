@@ -242,8 +242,8 @@ def test_claude_solo_env_model_is_passed_as_startup_model_flag(
     assert "ANTHROPIC_MODEL='gateway/model with space'" not in cmd[-1]
     assert "ANTHROPIC_CUSTOM_MODEL_OPTION='gateway/model with space'" not in cmd[-1]
     assert "export ANTHROPIC_MODEL='gateway/model with space'" in wrapper
-    assert "export ANTHROPIC_CUSTOM_MODEL_OPTION='gateway/model with space'" in wrapper
-    assert process.env["ANTHROPIC_CUSTOM_MODEL_OPTION"] == "gateway/model with space"
+    assert "ANTHROPIC_CUSTOM_MODEL_OPTION" not in wrapper
+    assert "ANTHROPIC_CUSTOM_MODEL_OPTION" not in process.env
 
 
 def test_claude_custom_model_env_option_is_not_overwritten() -> None:
@@ -290,6 +290,74 @@ def test_claude_volcengine_coding_plan_model_alias_is_normalized() -> None:
     assert process.env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "doubao-seed-2.0-code"
     assert process.env["CLAUDE_CODE_SUBAGENT_MODEL"] == "doubao-seed-2.0-code"
     assert "--model doubao-seed-2.0-code" in cmd[-1]
+
+
+def test_claude_volcengine_coding_plan_template_typo_alias_is_normalized() -> None:
+    process = TTYDProcess(
+        tab_id="tab-claude-volcengine-template-typo-model",
+        port=12353,
+        name="Claude Volcengine Template Typo Model",
+        agent_type=AgentType.CLAUDE,
+        env={
+            "ANTHROPIC_BASE_URL": "https://ark.cn-beijing.volces.com/api/coding",
+            "ANTHROPIC_MODEL": "ark/seed-code-6062",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "ark/seed-code-6062",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "ark/seed-code-6062",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "ark/seed-code-6062",
+            "CLAUDE_CODE_SUBAGENT_MODEL": "ark/seed-code-6062",
+        },
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+
+    assert process.env["ANTHROPIC_MODEL"] == "doubao-seed-2.0-code"
+    assert process.env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "doubao-seed-2.0-code"
+    assert process.env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "doubao-seed-2.0-code"
+    assert process.env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "doubao-seed-2.0-code"
+    assert process.env["CLAUDE_CODE_SUBAGENT_MODEL"] == "doubao-seed-2.0-code"
+    assert "ark/seed-code-6062" not in cmd[-1]
+    assert "--model doubao-seed-2.0-code" in cmd[-1]
+
+
+def test_claude_super_relay_launch_env_is_preserved_with_proxy() -> None:
+    process = TTYDProcess(
+        tab_id="tab-claude-super-relay",
+        port=12354,
+        name="Claude Super Relay",
+        agent_type=AgentType.CLAUDE,
+        env={
+            "ANTHROPIC_BASE_URL": "https://super-relay.byted.org",
+            "ANTHROPIC_AUTH_TOKEN": "token",
+            "ANTHROPIC_MODEL": "ark/seed-code-0602",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "ark/seed-code-0602",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "ark/seed-code-0602",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "ark/seed-code-0602",
+            "CLAUDE_CODE_SUBAGENT_MODEL": "ark/seed-code-0602",
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "140000",
+            "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+            "HTTP_PROXY": "http://127.0.0.1:23456",
+            "HTTPS_PROXY": "http://127.0.0.1:23456",
+        },
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+    wrapper = _wrapper_script(cmd[-1])
+    settings = json.load(open(_claude_settings_path(cmd[-1]), encoding="utf-8"))
+
+    assert process.env["ANTHROPIC_BASE_URL"] == "https://super-relay.byted.org"
+    assert process.env["ANTHROPIC_MODEL"] == "ark/seed-code-0602"
+    assert process.env["HTTP_PROXY"] == "http://127.0.0.1:23456"
+    assert process.env["HTTPS_PROXY"] == "http://127.0.0.1:23456"
+    assert "ANTHROPIC_CUSTOM_MODEL_OPTION" not in process.env
+    assert "NODE_TLS_REJECT_UNAUTHORIZED" not in process.env
+    assert "https://127.0.0.1:" not in json.dumps(settings)
+    assert "export ANTHROPIC_BASE_URL=https://super-relay.byted.org" in wrapper
+    assert "export ANTHROPIC_MODEL=ark/seed-code-0602" in wrapper
+    assert "export HTTP_PROXY=http://127.0.0.1:23456" in wrapper
+    assert "export HTTPS_PROXY=http://127.0.0.1:23456" in wrapper
+    assert settings["env"]["ANTHROPIC_BASE_URL"] == "https://super-relay.byted.org"
+    assert settings["env"]["ANTHROPIC_MODEL"] == "ark/seed-code-0602"
+    assert "--model ark/seed-code-0602" in cmd[-1]
 
 
 def test_workspace_metadata_is_serialized_to_tab_schema_and_state() -> None:

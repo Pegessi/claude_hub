@@ -7,10 +7,11 @@
 
 ### fix: honor Claude model env on new agent launch
 - Pass `ANTHROPIC_MODEL` through to Claude Code as a startup `--model` flag when creating new Claude-backed tabs or workspace agents, while preserving the injected environment for the process
-- Auto-register slash-style gateway model IDs such as `ark/...` as `ANTHROPIC_CUSTOM_MODEL_OPTION` when the user did not provide an explicit custom model option, so Claude Code treats them as selectable custom models instead of only applying normal model validation
-- Normalize the known Volcengine Coding Plan endpoint model id `ark/seed-code-0602` to the supported Claude Code model name `doubao-seed-2.0-code` and add a Volcengine Coding Plan launch preset using the working model variables
+- Preserve explicit slash-style gateway model IDs such as `ark/...` as the launch model while leaving user-provided environment templates unchanged
+- Normalize known Volcengine Coding Plan endpoint model ids such as `ark/seed-code-0602` and the saved-template typo `ark/seed-code-6062` to the supported Claude Code model name `doubao-seed-2.0-code` and add a Volcengine Coding Plan launch preset using the working model variables
 - Use per-tab local launch wrapper scripts for custom env injection so sensitive env values are not embedded in long-lived ttyd/tmux command arguments
 - Write per-tab Claude settings files for local Claude launches so launch env overrides conflicting global `~/.claude/settings.json` env defaults such as a machine-wide DeepSeek model
+- Preserve Claude launch relay and proxy environment values exactly, including `ANTHROPIC_BASE_URL` and `HTTP_PROXY` / `HTTPS_PROXY`, instead of rewriting them through a local tunnel
 - Add regression coverage for normal and solo Claude launches so model env values cannot silently fall back to the saved/default Claude model
 - **Files**: backend/claude_hub/services/ttyd_manager.py, backend/tests/test_ttyd_manager.py, CHANGELOG.md
 
