@@ -25,7 +25,7 @@ from ..models import (
 )
 
 FEEDBACK_INDEX_SCHEMA_VERSION = 1
-FEEDBACK_SUMMARY_PROMPT_VERSION = 1
+FEEDBACK_SUMMARY_PROMPT_VERSION = 2
 
 
 def _now() -> datetime:
@@ -322,7 +322,7 @@ class FeedbackLessonStore:
         now: datetime | None = None,
     ) -> dict[str, Any]:
         now = now or _now()
-        limit = min(max(limit, 1), 50)
+        limit = min(max(limit, 1), 200)
         index = self._read_feedback_index(workspace_id)
         existing_entries = {
             str(item.get("path") or ""): item
@@ -382,7 +382,8 @@ class FeedbackLessonStore:
             selected_entries = [
                 FeedbackProcessedTaskRecord(**item) for item in sorted_processed[-limit:]
             ]
-        selected_entries = selected_entries[-limit:]
+        if mode != FeedbackSummaryMode.INCREMENTAL:
+            selected_entries = selected_entries[-limit:]
         return {
             "run_id": str(uuid.uuid4()),
             "workspace_id": workspace_id,
@@ -687,11 +688,13 @@ class FeedbackLessonStore:
         task: dict[str, Any] = raw_task if isinstance(raw_task, dict) else {}
         artifacts: dict[str, Any] = raw_artifacts if isinstance(raw_artifacts, dict) else {}
         reports: list[Any] = raw_reports if isinstance(raw_reports, list) else []
-        report_states = [
+        report_state_sequence = [
             str(report.get("state"))
             for report in reports
             if isinstance(report, dict) and report.get("state")
         ]
+        review_failed_count = sum(1 for state in report_state_sequence if state == "review_failed")
+        needs_input_count = sum(1 for state in report_state_sequence if state == "needs_input")
         return FeedbackTaskDigest(
             task_id=str(task.get("id") or payload.get("task_id") or ""),
             title=str(task.get("title") or ""),
@@ -700,7 +703,11 @@ class FeedbackLessonStore:
             changed_files=self._list_value(artifacts.get("changed_files")),
             validation=self._list_value(artifacts.get("validation")),
             risks=self._list_value(artifacts.get("risks")),
-            report_states=self._unique_strings(report_states),
+            report_states=self._unique_strings(report_state_sequence),
+            report_state_sequence=report_state_sequence,
+            review_failed_count=review_failed_count,
+            needs_input_count=needs_input_count,
+            report_total=len(reports),
             completed_at=str(task.get("completed_at") or ""),
         )
 
@@ -751,10 +758,12 @@ class FeedbackLessonStore:
         value = self._extract_named_value(text, field)
         if not value:
             return []
-        return self._clean_list(re.split(r"[,\s]+", value.strip("[] ")))
+        tokens = self._clean_list(re.split(r"[,\s]+", value.strip("[] ")))
+        slug_re = re.compile(r"^[a-z0-9][a-z0-9_\-.]*$")
+        return [token for token in tokens if slug_re.match(token)]
 
     def _extract_named_value(self, text: str, field: str) -> str | None:
-        match = re.search(rf"{re.escape(field)}\s*[:=]\s*([^\n;]+)", text)
+        match = re.search(rf"{re.escape(field)}\s*[:=]\s*([^\n;|]+)", text)
         if not match:
             return None
         return match.group(1).strip().strip('"')
