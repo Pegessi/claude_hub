@@ -1,4 +1,7 @@
 import importlib
+import os
+import shlex
+import stat
 
 import pytest
 from pytest import MonkeyPatch
@@ -13,6 +16,11 @@ from claude_hub.models import (
 from claude_hub.services.ttyd_manager import TTYDManager, TTYDProcess
 
 ttyd_manager_module = importlib.import_module("claude_hub.services.ttyd_manager")
+
+
+def _wrapper_script(command: str) -> str:
+    wrapper_path = shlex.split(command)[0]
+    return open(wrapper_path, encoding="utf-8").read()
 
 
 def test_codex_tab_uses_codex_command() -> None:
@@ -71,7 +79,15 @@ def test_custom_env_is_injected_and_serialized() -> None:
     data = process.to_dict()
     schema = process.to_schema()
 
-    assert cmd[-1].startswith("env HTTP_PROXY=http://127.0.0.1:7890 NO_PROXY=localhost,127.0.0.1 ")
+    wrapper_path = shlex.split(cmd[-1])[0]
+    wrapper_mode = stat.S_IMODE(os.stat(wrapper_path).st_mode)
+    wrapper = _wrapper_script(cmd[-1])
+
+    assert "HTTP_PROXY=http://127.0.0.1:7890" not in cmd[-1]
+    assert "NO_PROXY=localhost,127.0.0.1" not in cmd[-1]
+    assert wrapper_mode == 0o600
+    assert "export HTTP_PROXY=http://127.0.0.1:7890" in wrapper
+    assert "export NO_PROXY=localhost,127.0.0.1" in wrapper
     assert data["env"] == {
         "HTTP_PROXY": "http://127.0.0.1:7890",
         "NO_PROXY": "localhost,127.0.0.1",
@@ -108,7 +124,11 @@ def test_claude_env_model_is_passed_as_startup_model_flag() -> None:
 
     cmd = process._build_ttyd_command(session_exists=False)
 
-    assert cmd[-1] == "env ANTHROPIC_MODEL=claude-opus-4-8 claude --model claude-opus-4-8"
+    wrapper = _wrapper_script(cmd[-1])
+
+    assert "ANTHROPIC_MODEL=claude-opus-4-8" not in cmd[-1]
+    assert "claude --model claude-opus-4-8" in cmd[-1]
+    assert "export ANTHROPIC_MODEL=claude-opus-4-8" in wrapper
 
 
 def test_claude_solo_env_model_is_passed_as_startup_model_flag(
@@ -126,16 +146,16 @@ def test_claude_solo_env_model_is_passed_as_startup_model_flag(
 
     cmd = process._build_ttyd_command(session_exists=False)
 
-    assert cmd[-3:] == [
-        "/bin/zsh",
-        "-c",
-        (
-            "env ANTHROPIC_MODEL='gateway/model with space' "
-            "ANTHROPIC_CUSTOM_MODEL_OPTION='gateway/model with space' "
-            "IS_SANDBOX=1 claude --dangerously-skip-permissions "
-            "--model 'gateway/model with space'; exec /bin/zsh"
-        ),
-    ]
+    assert cmd[-3:-1] == ["/bin/zsh", "-c"]
+    assert "tab-claude-solo-model-env.sh" in cmd[-1]
+    assert "IS_SANDBOX=1 claude --dangerously-skip-permissions" in cmd[-1]
+    assert "--model " in cmd[-1]
+    wrapper = _wrapper_script(cmd[-1])
+
+    assert "ANTHROPIC_MODEL='gateway/model with space'" not in cmd[-1]
+    assert "ANTHROPIC_CUSTOM_MODEL_OPTION='gateway/model with space'" not in cmd[-1]
+    assert "export ANTHROPIC_MODEL='gateway/model with space'" in wrapper
+    assert "export ANTHROPIC_CUSTOM_MODEL_OPTION='gateway/model with space'" in wrapper
     assert process.env["ANTHROPIC_CUSTOM_MODEL_OPTION"] == "gateway/model with space"
 
 
@@ -154,7 +174,8 @@ def test_claude_custom_model_env_option_is_not_overwritten() -> None:
     cmd = process._build_ttyd_command(session_exists=False)
 
     assert process.env["ANTHROPIC_CUSTOM_MODEL_OPTION"] == "ark/seed-code-0602"
-    assert "--model 'ark/seed-code-0602[1m]'" in cmd[-1]
+    assert "--model " in cmd[-1]
+    assert "export ANTHROPIC_MODEL='ark/seed-code-0602[1m]'" in _wrapper_script(cmd[-1])
 
 
 def test_claude_volcengine_coding_plan_model_alias_is_normalized() -> None:
