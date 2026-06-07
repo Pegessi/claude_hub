@@ -35,6 +35,38 @@ PNG_DATA_URL = (
 )
 
 
+def write_iteration_task_record_fixture(
+    state_root: Path,
+    workspace_id: str,
+    task_id: str,
+    *,
+    review_failed_count: int = 2,
+    needs_input_count: int = 0,
+) -> None:
+    """Write a minimal task_records fixture so the lesson validator sees a Signal A task."""
+    records_dir = state_root / workspace_id / "task_records"
+    records_dir.mkdir(parents=True, exist_ok=True)
+    states = (
+        ["started", "working"]
+        + ["review_failed"] * review_failed_count
+        + ["needs_input"] * needs_input_count
+        + ["completed"]
+    )
+    payload = {
+        "schema_version": 1,
+        "workspace_id": workspace_id,
+        "task": {"id": task_id, "title": "fixture", "status": "done"},
+        "session": {},
+        "reports": [{"state": state} for state in states],
+        "timeline": [],
+        "artifacts": {"changed_files": [], "validation": [], "risks": []},
+        "final_summary": "fixture",
+    }
+    (records_dir / f"2026-05-15T00-00-00-{task_id}.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+
 def pass_task_review(client: TestClient, task_id: str, message: str = "Review passed"):
     reviewer_id = workspace_manager.tasks[task_id].review_session_id
     assert reviewer_id is not None
@@ -648,6 +680,8 @@ def test_direct_task_explicit_review_request_still_creates_reviewer(
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
+    state_root = tmp_path / "state"
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", state_root)
     sent_messages: list[tuple[str, str]] = []
     stub_workspace_terminal(
         monkeypatch,
@@ -672,6 +706,7 @@ def test_direct_task_explicit_review_request_still_creates_reviewer(
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     sent_messages.clear()
+    write_iteration_task_record_fixture(state_root, workspace["id"], task["id"])
     lesson_response = client.post(
         f"/api/workspaces/{workspace['id']}/lessons",
         json={
@@ -682,6 +717,7 @@ def test_direct_task_explicit_review_request_still_creates_reviewer(
             "avoid": "Do not pass review based only on the completion message.",
             "tags": ["review", "handoff"],
             "scope": "workspace",
+            "evidence_task_ids": [task["id"]],
             "confidence": 0.8,
         },
     )
@@ -1616,11 +1652,15 @@ def test_manual_feedback_reaper_promotes_lesson(
     assert lessons[0]["title"] == "--symbols expects comma-separated values"
     assert lessons[0]["summary"] == "--symbols expects comma-separated values."
 
+    write_iteration_task_record_fixture(state_root, workspace["id"], task["id"])
     manual_lesson_response = client.post(
         f"/api/workspaces/{workspace['id']}/lessons",
         json={
             "title": "Use comma-separated symbols",
             "summary": "CLI symbol probes should pass one comma-separated --symbols value.",
+            "applies_when": ["CLI --symbols flag", "market data probes"],
+            "do": "Pass symbols comma-separated: --symbols AAPL,MSFT.",
+            "avoid": "Do not pass --symbols with whitespace separators.",
             "tags": ["cli", "symbols"],
             "scope": "workspace",
             "evidence_task_ids": [task["id"]],
@@ -1636,9 +1676,12 @@ def test_manual_feedback_reaper_promotes_lesson(
         json={
             "title": "Use comma-separated symbols",
             "summary": "CLI symbol probes should pass one comma-separated --symbols value.",
+            "applies_when": ["CLI --symbols flag", "market data probes"],
+            "do": "Pass symbols comma-separated: --symbols AAPL,MSFT.",
+            "avoid": "Do not pass --symbols with whitespace separators.",
             "tags": ["symbols", "cli"],
             "scope": "workspace",
-            "evidence_task_ids": ["task-two"],
+            "evidence_task_ids": [task["id"], "task-two"],
             "source_record_ids": ["record-2"],
             "confidence": 0.9,
         },
@@ -1648,7 +1691,7 @@ def test_manual_feedback_reaper_promotes_lesson(
     assert duplicate_lesson["id"] == manual_lesson["id"]
     assert duplicate_lesson["evidence_task_ids"] == [task["id"], "task-two"]
     assert duplicate_lesson["source_record_ids"] == ["record-1", "record-2"]
-    assert duplicate_lesson["confidence"] == 0.9
+    assert duplicate_lesson["confidence"] == 0.85
     assert duplicate_lesson["fingerprint"] == manual_lesson["fingerprint"]
     deduped_lessons_response = client.get(f"/api/workspaces/{workspace['id']}/lessons")
     assert deduped_lessons_response.status_code == 200
@@ -1687,7 +1730,8 @@ def test_task_assignment_injects_relevant_feedback_lessons(
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path / "state")
+    state_root = tmp_path / "state"
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", state_root)
     sent_messages: list[tuple[str, str]] = []
     stub_workspace_terminal(
         monkeypatch,
@@ -1702,6 +1746,7 @@ def test_task_assignment_injects_relevant_feedback_lessons(
         "/api/workspaces",
         json={"name": "Lesson Repo", "path": str(repo), "session_prefix": "less"},
     ).json()
+    write_iteration_task_record_fixture(state_root, workspace["id"], "evidence-task-cli")
     lesson_response = client.post(
         f"/api/workspaces/{workspace['id']}/lessons",
         json={
@@ -1712,6 +1757,7 @@ def test_task_assignment_injects_relevant_feedback_lessons(
             "avoid": "Do not pass --symbols AAPL MSFT.",
             "tags": ["cli", "symbols"],
             "scope": "workspace",
+            "evidence_task_ids": ["evidence-task-cli"],
             "confidence": 0.9,
         },
     )
@@ -1776,7 +1822,14 @@ def test_workspace_feedback_summary_uses_hidden_internal_reaper_task(
                     "status": "done",
                     "completed_at": "2026-06-07T12:00:00",
                 },
-                "reports": [{"state": "completed", "message": "Use comma symbols."}],
+                "reports": [
+                    {"state": "started"},
+                    {"state": "working"},
+                    {"state": "review_failed"},
+                    {"state": "working"},
+                    {"state": "review_failed"},
+                    {"state": "completed", "message": "Use comma symbols."},
+                ],
                 "artifacts": {
                     "changed_files": [],
                     "validation": ["CLI probe passed."],
@@ -1793,8 +1846,12 @@ def test_workspace_feedback_summary_uses_hidden_internal_reaper_task(
             "id": "cli-symbols-comma-separated",
             "title": "Use comma-separated symbols",
             "summary": "--symbols expects comma-separated values.",
+            "applies_when": ["CLI symbol lists"],
+            "do": "Use --symbols AAPL,MSFT.",
+            "avoid": "Do not pass --symbols AAPL MSFT.",
             "tags": ["cli", "symbols"],
             "scope": "workspace",
+            "evidence_task_ids": ["task-one"],
         },
     )
     assert lesson_response.status_code == 201
@@ -1895,7 +1952,8 @@ def test_feedback_lesson_matching_is_cjk_safe_and_does_not_fallback_to_any_lesso
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path / "state")
+    state_root = tmp_path / "state"
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", state_root)
     sent_messages: list[tuple[str, str]] = []
     stub_workspace_terminal(
         monkeypatch,
@@ -1910,6 +1968,8 @@ def test_feedback_lesson_matching_is_cjk_safe_and_does_not_fallback_to_any_lesso
         "/api/workspaces",
         json={"name": "CJK Lessons", "path": str(repo), "session_prefix": "cjkl"},
     ).json()
+    write_iteration_task_record_fixture(state_root, cjk_workspace["id"], "evidence-cjk-image")
+    write_iteration_task_record_fixture(state_root, cjk_workspace["id"], "evidence-cjk-market")
     client.post(
         f"/api/workspaces/{cjk_workspace['id']}/lessons",
         json={
@@ -1920,6 +1980,7 @@ def test_feedback_lesson_matching_is_cjk_safe_and_does_not_fallback_to_any_lesso
             "avoid": "不要只看原始提示词就开始生成。",
             "tags": ["图片", "工作流"],
             "scope": "workspace",
+            "evidence_task_ids": ["evidence-cjk-image"],
             "confidence": 0.8,
         },
     )
@@ -1933,6 +1994,7 @@ def test_feedback_lesson_matching_is_cjk_safe_and_does_not_fallback_to_any_lesso
             "avoid": "Do not pass symbols as separate arguments.",
             "tags": ["market", "cli"],
             "scope": "workspace",
+            "evidence_task_ids": ["evidence-cjk-market"],
             "confidence": 0.8,
         },
     )
@@ -1959,6 +2021,7 @@ def test_feedback_lesson_matching_is_cjk_safe_and_does_not_fallback_to_any_lesso
         "/api/workspaces",
         json={"name": "Emoji Lessons", "path": str(repo), "session_prefix": "emol"},
     ).json()
+    write_iteration_task_record_fixture(state_root, emoji_workspace["id"], "evidence-emoji")
     client.post(
         f"/api/workspaces/{emoji_workspace['id']}/lessons",
         json={
@@ -1969,6 +2032,7 @@ def test_feedback_lesson_matching_is_cjk_safe_and_does_not_fallback_to_any_lesso
             "avoid": "Do not inject as a fallback.",
             "tags": ["fallback"],
             "scope": "workspace",
+            "evidence_task_ids": ["evidence-emoji"],
             "confidence": 0.8,
         },
     )
