@@ -41,6 +41,19 @@ const builtInPresets: LaunchEnvPreset[] = [
       'NO_PROXY=localhost,127.0.0.1,::1',
     ].join('\n'),
   },
+  {
+    id: 'volcengine-coding-plan',
+    name: 'Volcengine Coding Plan',
+    text: [
+      'ANTHROPIC_BASE_URL=https://ark.cn-beijing.volces.com/api/coding',
+      'ANTHROPIC_MODEL=[redacted]',
+      'ANTHROPIC_DEFAULT_OPUS_MODEL=[redacted]',
+      'ANTHROPIC_DEFAULT_SONNET_MODEL=[redacted]',
+      'ANTHROPIC_DEFAULT_HAIKU_MODEL=[redacted]',
+      'CLAUDE_CODE_SUBAGENT_MODEL=[redacted]',
+      'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1',
+    ].join('\n'),
+  },
 ]
 
 const customPresets = ref<LaunchEnvPreset[]>(loadCustomPresets())
