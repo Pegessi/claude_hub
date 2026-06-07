@@ -1559,8 +1559,37 @@ class WorkspaceManager:
                 "read unrelated old task records unless a listed digest explicitly points to a "
                 "missing artifact you must inspect.",
                 "",
-                "Goal: condense recent completed task evidence into reusable workspace lessons. "
-                "Prefer concrete operational rules. Do not promote one-off noise.",
+                "Goal: extract reusable workspace lessons that help future tasks avoid known "
+                "pitfalls. Quality matters more than quantity. Emitting zero lessons is the "
+                "correct answer when no signal is present.",
+                "",
+                "Extraction signals — emit a lesson ONLY when at least one of these is supported "
+                "by the input_task_digests:",
+                "  Signal A — Iteration cost. A single task whose report_state_sequence shows "
+                "review_failed_count >= 1 OR needs_input_count >= 2, OR whose risks describe "
+                "rework. The lesson is the underlying issue that caused the extra rounds, NOT "
+                "the final fix recipe.",
+                "  Signal B — Cross-task recurrence. The same root problem (or a close variant) "
+                "appears in >= 2 distinct task digests. The lesson is the recurring pattern.",
+                "",
+                "Specific implementation-detail lessons (a particular file, function, error "
+                "message, or version-specific quirk) are allowed ONLY if Signal A or Signal B "
+                "applies AND the evidence makes the difficulty observable. A lesson whose only "
+                "support is a single task's final_summary with no review_failed / needs_input "
+                "trail is a fix recipe, not a lesson — skip it.",
+                "",
+                "Required fields per lesson:",
+                "  - title (short)",
+                "  - summary (one-to-two sentence description)",
+                "  - applies_when (>=1 condition: file glob, runtime, command, env, task shape)",
+                "  - do (recommended action; non-empty)",
+                "  - avoid (failure pattern to avoid; non-empty)",
+                "  - tags",
+                "  - scope (default 'workspace')",
+                "  - confidence (<=0.6 unless the citation set covers >=2 tasks OR a single task "
+                "with review_failed_count >= 2)",
+                "  - evidence_task_ids (cite the supporting input task_ids; for Signal A "
+                "single-task lessons cite that one task; for Signal B cite all supporting tasks)",
                 "",
                 "Deduplication rule: before creating a lesson, compare against active_lessons. "
                 "If the idea already exists, call the lesson API with matching title/summary/tags "
@@ -1570,13 +1599,15 @@ class WorkspaceManager:
                 f"POST /api/workspaces/{workspace.id}/lessons",
                 "Payload shape:",
                 '{"title":"short title","summary":"one-sentence description",'
-                '"tags":["tag"],"scope":"workspace","confidence":0.8,'
-                '"evidence_task_ids":["task-id"]}',
+                '"applies_when":["condition"],"do":"recommended action",'
+                '"avoid":"failure pattern","tags":["tag"],"scope":"workspace",'
+                '"confidence":0.6,"evidence_task_ids":["task-id"]}',
                 "",
                 "Completion report requirement:",
                 "POST a completed report for this internal task with changed_files=[], "
                 "review_decision=skip, risk_level=system_audit, and validation containing one "
-                "of these exact fields:",
+                "of these exact fields (do NOT append free prose after the value; if you need "
+                "commentary put it on a separate line):",
                 "- created_lesson_ids=<comma-separated ids>",
                 "- merged_lesson_ids=<comma-separated ids>",
                 "- skipped_reason=<reason>",
