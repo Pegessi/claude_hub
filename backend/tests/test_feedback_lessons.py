@@ -7,10 +7,61 @@ import pytest
 from claude_hub.models import (
     AgentReport,
     AgentReportState,
+    FeedbackLessonCreate,
+    FeedbackLessonScope,
     FeedbackSummaryMode,
     ReviewDecision,
 )
-from claude_hub.services.feedback_lessons import FeedbackLessonStore
+from claude_hub.services.feedback_lessons import (
+    FeedbackLessonStore,
+    FeedbackLessonValidationError,
+)
+
+
+def _write_iteration_record(
+    state_root: Path,
+    workspace_id: str,
+    task_id: str,
+    *,
+    review_failed_count: int = 2,
+    needs_input_count: int = 0,
+) -> None:
+    records_dir = state_root / workspace_id / "task_records"
+    records_dir.mkdir(parents=True, exist_ok=True)
+    states = (
+        ["started", "working"]
+        + ["review_failed"] * review_failed_count
+        + ["needs_input"] * needs_input_count
+        + ["completed"]
+    )
+    payload = {
+        "schema_version": 1,
+        "workspace_id": workspace_id,
+        "task": {"id": task_id, "title": "fixture", "status": "done"},
+        "session": {},
+        "reports": [{"state": state} for state in states],
+        "timeline": [],
+        "artifacts": {"changed_files": [], "validation": [], "risks": []},
+        "final_summary": "fixture",
+    }
+    (records_dir / f"2026-05-15T00-00-00-{task_id}.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+
+def _make_payload(**overrides) -> FeedbackLessonCreate:
+    base = {
+        "summary": "Always commit before reporting.",
+        "applies_when": ["any task delivering an MR"],
+        "do": "Verify git push before reporting completion.",
+        "avoid": "Do not call the task done while changes are local-only.",
+        "tags": ["delivery"],
+        "scope": FeedbackLessonScope.WORKSPACE,
+        "evidence_task_ids": ["task-a"],
+        "confidence": 0.9,
+    }
+    base.update(overrides)
+    return FeedbackLessonCreate(**base)
 
 
 @pytest.fixture
@@ -216,3 +267,86 @@ def test_prepare_summary_input_returns_only_new_records_on_subsequent_run(
     assert second["input_record_ids"] == ["task-09"]
     assert second["processed_count"] == 4
     assert second["first_scan"] is False
+
+
+def test_create_lesson_rejects_empty_required_fields(store: FeedbackLessonStore) -> None:
+    workspace_id = "ws"
+    with pytest.raises(FeedbackLessonValidationError, match="applies_when"):
+        store.create_lesson(workspace_id, _make_payload(applies_when=[]))
+    with pytest.raises(FeedbackLessonValidationError, match="^do is required"):
+        store.create_lesson(workspace_id, _make_payload(do="  "))
+    with pytest.raises(FeedbackLessonValidationError, match="^avoid is required"):
+        store.create_lesson(workspace_id, _make_payload(avoid=""))
+    with pytest.raises(FeedbackLessonValidationError, match="evidence_task_ids"):
+        store.create_lesson(workspace_id, _make_payload(evidence_task_ids=[]))
+
+
+def test_create_lesson_rejects_single_evidence_without_signal_a(
+    store: FeedbackLessonStore, tmp_path: Path
+) -> None:
+    workspace_id = "ws"
+    _write_iteration_record(
+        tmp_path, workspace_id, "task-a", review_failed_count=0, needs_input_count=0
+    )
+    with pytest.raises(FeedbackLessonValidationError, match="Signal A"):
+        store.create_lesson(workspace_id, _make_payload(evidence_task_ids=["task-a"]))
+
+
+def test_create_lesson_accepts_single_evidence_with_signal_a_and_caps_confidence(
+    store: FeedbackLessonStore, tmp_path: Path
+) -> None:
+    workspace_id = "ws"
+    _write_iteration_record(tmp_path, workspace_id, "task-a", review_failed_count=2)
+    lesson = store.create_lesson(
+        workspace_id,
+        _make_payload(evidence_task_ids=["task-a"], confidence=0.95),
+    )
+    assert lesson.confidence == 0.6
+
+
+def test_create_lesson_rejects_multi_evidence_without_any_iteration(
+    store: FeedbackLessonStore, tmp_path: Path
+) -> None:
+    workspace_id = "ws"
+    _write_iteration_record(tmp_path, workspace_id, "task-a", review_failed_count=0)
+    _write_iteration_record(tmp_path, workspace_id, "task-b", review_failed_count=0)
+    with pytest.raises(FeedbackLessonValidationError, match="multi-evidence"):
+        store.create_lesson(
+            workspace_id,
+            _make_payload(evidence_task_ids=["task-a", "task-b"]),
+        )
+
+
+def test_create_lesson_accepts_multi_evidence_with_any_iteration_and_caps_confidence(
+    store: FeedbackLessonStore, tmp_path: Path
+) -> None:
+    workspace_id = "ws"
+    _write_iteration_record(tmp_path, workspace_id, "task-a", review_failed_count=1)
+    _write_iteration_record(tmp_path, workspace_id, "task-b", review_failed_count=0)
+    lesson = store.create_lesson(
+        workspace_id,
+        _make_payload(evidence_task_ids=["task-a", "task-b"], confidence=0.95),
+    )
+    assert lesson.confidence == 0.85
+
+
+def test_create_lesson_skips_signal_check_when_enforce_disabled(
+    store: FeedbackLessonStore, tmp_path: Path
+) -> None:
+    workspace_id = "ws"
+    # No task_records on disk → would normally fail signal check
+    lesson = store.create_lesson(
+        workspace_id,
+        _make_payload(evidence_task_ids=["unrecorded-task"], confidence=0.9),
+        enforce_iteration_signal=False,
+    )
+    # Confidence cap still applied even when signal check is skipped
+    assert lesson.confidence == 0.6
+
+
+def test_create_lesson_rejects_single_evidence_with_missing_record(
+    store: FeedbackLessonStore, tmp_path: Path
+) -> None:
+    workspace_id = "ws"
+    with pytest.raises(FeedbackLessonValidationError, match="no task record was found"):
+        store.create_lesson(workspace_id, _make_payload(evidence_task_ids=["nonexistent"]))

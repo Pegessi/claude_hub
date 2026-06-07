@@ -1578,7 +1578,7 @@ class WorkspaceManager:
                 "support is a single task's final_summary with no review_failed / needs_input "
                 "trail is a fix recipe, not a lesson — skip it.",
                 "",
-                "Required fields per lesson:",
+                "Required fields per lesson (the backend rejects payloads that violate this):",
                 "  - title (short)",
                 "  - summary (one-to-two sentence description)",
                 "  - applies_when (>=1 condition: file glob, runtime, command, env, task shape)",
@@ -1586,10 +1586,22 @@ class WorkspaceManager:
                 "  - avoid (failure pattern to avoid; non-empty)",
                 "  - tags",
                 "  - scope (default 'workspace')",
-                "  - confidence (<=0.6 unless the citation set covers >=2 tasks OR a single task "
-                "with review_failed_count >= 2)",
+                "  - confidence: server-capped at 0.6 for single-evidence lessons and at 0.85 "
+                "for multi-evidence lessons; pick a value that already respects this.",
                 "  - evidence_task_ids (cite the supporting input task_ids; for Signal A "
                 "single-task lessons cite that one task; for Signal B cite all supporting tasks)",
+                "",
+                "Server-side enforcement (these rules are mechanically checked against "
+                "input_task_digests, NOT inferred from prose; lessons that fail are rejected "
+                "with HTTP 400 and you must move on rather than retrying with massaged text):",
+                "  - applies_when / do / avoid must be non-empty.",
+                "  - Single-evidence lessons must cite a task whose report_state_sequence has "
+                "review_failed_count >= 1 OR needs_input_count >= 2. If no input digest meets "
+                "this bar, do NOT submit a single-evidence lesson — emit a multi-evidence one "
+                "or skip the candidate.",
+                "  - Multi-evidence lessons must cite >=2 evidence_task_ids and at least one "
+                "cited task must show review_failed_count + needs_input_count >= 1. Pure "
+                "final_summary text similarity is NOT a substitute for iteration evidence.",
                 "",
                 "Deduplication rule: before creating a lesson, compare against active_lessons. "
                 "If the idea already exists, call the lesson API with matching title/summary/tags "

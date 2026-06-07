@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,7 @@ from ..models import (
 )
 
 FEEDBACK_INDEX_SCHEMA_VERSION = 1
-FEEDBACK_SUMMARY_PROMPT_VERSION = 2
+FEEDBACK_SUMMARY_PROMPT_VERSION = 3
 
 
 def _now() -> datetime:
@@ -46,6 +47,30 @@ def _tokens(value: str) -> set[str]:
                 continue
             tokens.update(chunk[index : index + size] for index in range(len(chunk) - size + 1))
     return tokens
+
+
+class FeedbackLessonValidationError(ValueError):
+    """Raised when a lesson payload fails the workspace lesson contract."""
+
+
+@dataclass(frozen=True)
+class _TaskIterationSignal:
+    task_id: str
+    review_failed_count: int
+    needs_input_count: int
+    report_total: int
+
+    @property
+    def has_signal_a(self) -> bool:
+        return self.review_failed_count >= 1 or self.needs_input_count >= 2
+
+    @property
+    def has_any_iteration(self) -> bool:
+        return self.review_failed_count + self.needs_input_count >= 1
+
+
+SINGLE_EVIDENCE_CONFIDENCE_CAP = 0.6
+MULTI_EVIDENCE_CONFIDENCE_CAP = 0.85
 
 
 class FeedbackLessonStore:
@@ -96,6 +121,7 @@ class FeedbackLessonStore:
                 workspace.id,
                 self._lesson_create_from_draft(draft),
                 now=now,
+                enforce_iteration_signal=False,
             )
             for draft, draft_payload in zip(drafts, payload.lesson_drafts)
             if draft_payload.promote_to_active
@@ -119,6 +145,7 @@ class FeedbackLessonStore:
         payload: FeedbackLessonCreate,
         *,
         now: datetime | None = None,
+        enforce_iteration_signal: bool = True,
     ) -> FeedbackLesson:
         now = now or _now()
         summary = payload.summary.strip()
@@ -130,6 +157,16 @@ class FeedbackLessonStore:
         tags = self._clean_list(payload.tags)
         do = payload.do.strip()
         avoid = payload.avoid.strip()
+        evidence_task_ids = self._clean_list(payload.evidence_task_ids)
+        capped_confidence = self._validate_lesson_payload(
+            workspace_id=workspace_id,
+            applies_when=applies_when,
+            do=do,
+            avoid=avoid,
+            evidence_task_ids=evidence_task_ids,
+            confidence=payload.confidence,
+            enforce_iteration_signal=enforce_iteration_signal,
+        )
         fingerprint = (payload.fingerprint or "").strip() or self._lesson_fingerprint(
             scope=payload.scope.value,
             title=title,
@@ -153,7 +190,7 @@ class FeedbackLessonStore:
             updated = existing.model_copy(
                 update={
                     "evidence_task_ids": self._unique_strings(
-                        [*existing.evidence_task_ids, *payload.evidence_task_ids]
+                        [*existing.evidence_task_ids, *evidence_task_ids]
                     ),
                     "source_draft_ids": self._unique_strings(
                         [*existing.source_draft_ids, *payload.source_draft_ids]
@@ -167,7 +204,7 @@ class FeedbackLessonStore:
                             *([payload.id] if payload.id and payload.id != existing.id else []),
                         ]
                     ),
-                    "confidence": self._max_confidence(existing.confidence, payload.confidence),
+                    "confidence": self._max_confidence(existing.confidence, capped_confidence),
                     "last_seen_at": now,
                     "updated_at": now,
                 }
@@ -191,10 +228,10 @@ class FeedbackLessonStore:
             do=do,
             avoid=avoid,
             tags=tags,
-            evidence_task_ids=self._clean_list(payload.evidence_task_ids),
+            evidence_task_ids=evidence_task_ids,
             source_draft_ids=self._clean_list(payload.source_draft_ids),
             source_record_ids=self._clean_list(payload.source_record_ids),
-            confidence=payload.confidence,
+            confidence=capped_confidence,
             last_seen_at=now,
             created_at=now,
             updated_at=now,
@@ -795,6 +832,119 @@ class FeedbackLessonStore:
             "risk_level": report.risk_level,
             "created_at": report.created_at.isoformat(),
         }
+
+    def _validate_lesson_payload(
+        self,
+        *,
+        workspace_id: str,
+        applies_when: list[str],
+        do: str,
+        avoid: str,
+        evidence_task_ids: list[str],
+        confidence: float | None,
+        enforce_iteration_signal: bool = True,
+    ) -> float | None:
+        """Enforce the workspace lesson contract; return a (possibly capped) confidence.
+
+        Always-on rules:
+        - applies_when must contain at least one condition.
+        - do and avoid must be non-empty after stripping.
+        - evidence_task_ids must cite at least one task.
+
+        Iteration-signal rules (skipped only when enforce_iteration_signal is False,
+        which is reserved for human-confirmed manual reaper flows):
+        - Single-evidence lessons must mechanically satisfy Signal A in the cited
+          task (review_failed_count >= 1 OR needs_input_count >= 2 in the task's
+          report state sequence).
+        - Multi-evidence (Signal B) lessons require at least one cited task with
+          rf+ni >= 1 so recurrence is not asserted from textual similarity alone.
+
+        Confidence cap (always on):
+        - Single-evidence lessons: capped at SINGLE_EVIDENCE_CONFIDENCE_CAP (0.6).
+        - Multi-evidence lessons: capped at MULTI_EVIDENCE_CONFIDENCE_CAP (0.85).
+        """
+        if not applies_when:
+            raise FeedbackLessonValidationError(
+                "applies_when must contain at least one condition (file glob, runtime, "
+                "command, env, or task shape)"
+            )
+        if not do:
+            raise FeedbackLessonValidationError("do is required and must be non-empty")
+        if not avoid:
+            raise FeedbackLessonValidationError("avoid is required and must be non-empty")
+        if not evidence_task_ids:
+            raise FeedbackLessonValidationError(
+                "evidence_task_ids must cite at least one task that supports the lesson"
+            )
+
+        if enforce_iteration_signal:
+            signals = [
+                self._task_iteration_signal(workspace_id, task_id) for task_id in evidence_task_ids
+            ]
+            observed_signals = [signal for signal in signals if signal is not None]
+
+            if len(evidence_task_ids) == 1:
+                signal = signals[0]
+                if signal is None:
+                    raise FeedbackLessonValidationError(
+                        f"single-evidence lesson cites task {evidence_task_ids[0]} but no task "
+                        "record was found on disk; lesson cannot be verified"
+                    )
+                if not signal.has_signal_a:
+                    raise FeedbackLessonValidationError(
+                        "single-evidence lesson requires Signal A "
+                        "(review_failed_count >= 1 OR needs_input_count >= 2) in the cited "
+                        f"task; task {signal.task_id} has rf={signal.review_failed_count}, "
+                        f"ni={signal.needs_input_count}"
+                    )
+            else:
+                if not any(signal.has_any_iteration for signal in observed_signals):
+                    raise FeedbackLessonValidationError(
+                        "multi-evidence Signal B lesson requires at least one cited task with "
+                        "review_failed_count + needs_input_count >= 1; cross-task recurrence "
+                        "cannot be asserted from final_summary similarity alone"
+                    )
+
+        cap = (
+            SINGLE_EVIDENCE_CONFIDENCE_CAP
+            if len(evidence_task_ids) == 1
+            else MULTI_EVIDENCE_CONFIDENCE_CAP
+        )
+        if confidence is None:
+            return None
+        return min(confidence, cap)
+
+    def _task_iteration_signal(
+        self,
+        workspace_id: str,
+        task_id: str,
+    ) -> _TaskIterationSignal | None:
+        records_dir = self.state_root / workspace_id / "task_records"
+        if not records_dir.exists():
+            return None
+        for path in records_dir.glob(f"*{task_id}*.json"):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            task_block = payload.get("task")
+            if not isinstance(task_block, dict):
+                continue
+            if str(task_block.get("id") or "") != task_id:
+                continue
+            reports = payload.get("reports") or []
+            states = [
+                str(report.get("state"))
+                for report in reports
+                if isinstance(report, dict) and report.get("state")
+            ]
+            return _TaskIterationSignal(
+                task_id=task_id,
+                review_failed_count=sum(1 for state in states if state == "review_failed"),
+                needs_input_count=sum(1 for state in states if state == "needs_input"),
+                report_total=len(reports),
+            )
+        return None
 
     def _clean_list(self, values: list[str]) -> list[str]:
         return self._unique_strings(str(value).strip() for value in values if str(value).strip())
