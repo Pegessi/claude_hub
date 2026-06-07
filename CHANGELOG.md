@@ -5,6 +5,11 @@
 
 ## 2026-06-07
 
+### fix: honor Claude model env on new agent launch
+- Pass `ANTHROPIC_MODEL` through to Claude Code as a startup `--model` flag when creating new Claude-backed tabs or workspace agents, while preserving the injected environment for the process
+- Add regression coverage for normal and solo Claude launches so model env values cannot silently fall back to the saved/default Claude model
+- **Files**: backend/claude_hub/services/ttyd_manager.py, backend/tests/test_ttyd_manager.py, CHANGELOG.md
+
 ### feat: customize launch environment variables
 - Add per-launch environment variable support for new terminal tabs and Agent Workspace agent/reviewer sessions, including backend validation and tmux/remote launch injection
 - Surface proxy-oriented and user-saved launch environment presets with a compact KEY=value text parser in the new tab and Add Agent dialogs without logging submitted values
