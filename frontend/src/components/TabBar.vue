@@ -286,54 +286,77 @@
             </label>
           </div>
           <div class="form-group env-editor">
-            <label>Environment Variables</label>
-            <select
-              v-model="form.env_preset"
-              class="select-input"
-              @change="applyEnvPreset(form.env_preset)"
-            >
-              <option
-                v-for="preset in envPresets"
-                :key="preset.id"
-                :value="preset.id"
+            <label>Environment Preset</label>
+            <div class="env-preset-row">
+              <select
+                v-model="form.env_preset"
+                class="select-input"
+                @change="applyEnvPreset(form.env_preset)"
               >
-                {{ preset.name }}
-              </option>
-            </select>
-            <div class="env-row env-row-header">
-              <span>Name</span>
-              <span>Value</span>
-            </div>
-            <div
-              v-for="(entry, index) in form.env_entries"
-              :key="index"
-              class="env-row"
-            >
-              <input
-                v-model="entry.name"
-                placeholder="HTTP_PROXY"
-              >
-              <input
-                v-model="entry.value"
-                placeholder="http://127.0.0.1:7890"
-              >
+                <option
+                  v-for="preset in envPresets"
+                  :key="preset.id"
+                  :value="preset.id"
+                >
+                  {{ preset.name }}
+                </option>
+              </select>
               <button
                 type="button"
-                class="env-remove-button"
-                @click="removeEnvEntry(index)"
+                class="btn btn-secondary env-action-button"
+                @click="startEnvPresetEdit"
               >
-                Remove
+                {{ selectedEnvPreset?.id !== 'none' ? 'Edit' : 'New' }}
+              </button>
+              <button
+                type="button"
+                class="btn btn-secondary env-action-button"
+                @click="deleteCurrentEnvPreset"
+              >
+                Delete
               </button>
             </div>
-            <button
-              type="button"
-              class="btn btn-secondary env-add-button"
-              @click="addEnvEntry"
+            <textarea
+              v-if="selectedEnvPreset && selectedEnvPreset.id !== 'none' && !form.env_editor_open"
+              class="env-textarea env-textarea-preview"
+              readonly
+              :value="selectedEnvPreset.text"
+            />
+            <div
+              v-if="form.env_editor_open"
+              class="env-template-panel"
             >
-              Add variable
-            </button>
+              <input
+                v-model="form.env_preset_name"
+                class="env-preset-name"
+                placeholder="Preset name"
+              >
+              <textarea
+                v-model="form.env_text"
+                class="env-textarea"
+                spellcheck="false"
+                placeholder="HTTP_PROXY=http://127.0.0.1:7890&#10;HTTPS_PROXY=http://127.0.0.1:7890&#10;NO_PROXY=localhost,127.0.0.1,::1"
+              />
+              <div class="env-editor-actions">
+                <button
+                  type="button"
+                  class="btn btn-secondary"
+                  @click="cancelEnvPresetEdit"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-secondary env-save-button"
+                  :disabled="!form.env_text.trim() || !form.env_preset_name.trim()"
+                  @click="saveCurrentEnvPreset"
+                >
+                  Save preset
+                </button>
+              </div>
+            </div>
             <p class="form-hint">
-              Values are sent only to the launched process and are not printed in backend logs.
+              Pick a preset for this launch, or create your own KEY=value template here. Values are not printed in backend logs.
             </p>
           </div>
           <div class="modal-actions">
@@ -509,6 +532,7 @@ import AgentStatusFloatingPanel from '@/components/AgentStatusFloatingPanel.vue'
 import LayoutSelector from '@/components/LayoutSelector.vue'
 import LoadingButton from '@/components/LoadingButton.vue'
 import NetworkAccessMenu from '@/components/NetworkAccessMenu.vue'
+import { parseLaunchEnv, useLaunchEnvPresets } from '@/composables/useLaunchEnvPresets'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
@@ -528,41 +552,9 @@ interface DirectoryListing {
   items: FileInfo[]
 }
 
-interface EnvEntry {
-  name: string
-  value: string
-}
-
-interface EnvPreset {
-  id: string
-  name: string
-  env: Record<string, string>
-}
-
-const envPresets: EnvPreset[] = [
-  { id: 'custom', name: 'Custom', env: {} },
-  {
-    id: 'local-proxy-7890',
-    name: 'Local proxy :7890',
-    env: {
-      HTTP_PROXY: 'http://127.0.0.1:7890',
-      HTTPS_PROXY: 'http://127.0.0.1:7890',
-      ALL_PROXY: 'socks5://127.0.0.1:7890',
-      NO_PROXY: 'localhost,127.0.0.1,::1',
-    },
-  },
-  {
-    id: 'local-proxy-1080',
-    name: 'SOCKS proxy :1080',
-    env: {
-      ALL_PROXY: 'socks5://127.0.0.1:1080',
-      NO_PROXY: 'localhost,127.0.0.1,::1',
-    },
-  },
-]
-
 const store = useTerminalStore()
 const appStore = useAppStore()
+const { envPresets, getPresetText, savePreset, deletePreset } = useLaunchEnvPresets()
 const { isPending, runPending } = usePendingActions()
 const { tabs, manualTabs, managedTabs, activeTabId, isLoading, agentStatuses } = storeToRefs(store)
 const { mode, colorScheme } = storeToRefs(appStore)
@@ -603,8 +595,10 @@ const form = reactive({
   target: 'local' as 'local' | 'remote',
   remote_profile_id: '',
   remote_reconnect: true,
-  env_preset: 'custom',
-  env_entries: [] as EnvEntry[],
+  env_preset: 'none',
+  env_preset_name: '',
+  env_text: '',
+  env_editor_open: false,
 })
 
 const supportsSoloMode = computed(() => form.agent_type === 'claude' || form.agent_type === 'codex')
@@ -629,6 +623,9 @@ const remoteProfilesError = ref<string | null>(null)
 const selectedRemoteProfile = computed(() =>
   remoteProfiles.value.find(profile => profile.id === form.remote_profile_id) || null
 )
+const selectedEnvPreset = computed(() =>
+  envPresets.value.find(preset => preset.id === form.env_preset) || null
+)
 const isCreateDisabled = computed(
   () =>
     isLoading.value ||
@@ -641,29 +638,41 @@ function tabActionKey(action: string, tabId: string | null | undefined) {
 }
 
 function applyEnvPreset(presetId: string) {
-  const preset = envPresets.find(item => item.id === presetId)
-  if (!preset || preset.id === 'custom') return
-  form.env_entries = Object.entries(preset.env).map(([name, value]) => ({ name, value }))
+  const text = getPresetText(presetId)
+  if (text === null) return
+  form.env_text = text
+  form.env_editor_open = false
 }
 
-function addEnvEntry() {
-  form.env_preset = 'custom'
-  form.env_entries.push({ name: '', value: '' })
+function startEnvPresetEdit() {
+  const preset = selectedEnvPreset.value
+  form.env_preset_name = preset && preset.id !== 'none' ? preset.name : ''
+  form.env_text = preset && preset.id !== 'none' ? preset.text : ''
+  form.env_editor_open = true
 }
 
-function removeEnvEntry(index: number) {
-  form.env_preset = 'custom'
-  form.env_entries.splice(index, 1)
+function cancelEnvPresetEdit() {
+  applyEnvPreset(form.env_preset)
+  form.env_preset_name = ''
+  form.env_editor_open = false
 }
 
-function buildEnv(entries: EnvEntry[]): Record<string, string> | undefined {
-  const env: Record<string, string> = {}
-  for (const entry of entries) {
-    const name = entry.name.trim()
-    if (!name) continue
-    env[name] = entry.value
-  }
-  return Object.keys(env).length ? env : undefined
+function saveCurrentEnvPreset() {
+  const preset = savePreset(form.env_preset_name, form.env_text, form.env_preset)
+  if (!preset) return
+  form.env_preset = preset.id
+  form.env_preset_name = ''
+  form.env_text = preset.text
+  form.env_editor_open = false
+}
+
+function deleteCurrentEnvPreset() {
+  if (!selectedEnvPreset.value || selectedEnvPreset.value.id === 'none') return
+  if (!deletePreset(form.env_preset)) return
+  form.env_preset = 'none'
+  form.env_preset_name = ''
+  form.env_text = ''
+  form.env_editor_open = false
 }
 
 function agentTypeLabel(agentType: AgentType): string {
@@ -956,8 +965,10 @@ watch(showModal, (newVal) => {
     form.target = 'local'
     form.remote_profile_id = remoteProfiles.value[0]?.id || ''
     form.remote_reconnect = true
-    form.env_preset = 'custom'
-    form.env_entries = []
+    form.env_preset = 'none'
+    form.env_preset_name = ''
+    form.env_text = ''
+    form.env_editor_open = false
     showFileBrowser.value = false
   }
 })
@@ -1034,7 +1045,7 @@ async function handleCreateTab() {
   const remote_profile_id = target === 'remote' ? form.remote_profile_id : undefined
   const remote_cwd = target === 'remote' ? cwd : undefined
   const remote_reconnect = target === 'remote' ? form.remote_reconnect : undefined
-  const env = buildEnv(form.env_entries)
+  const env = parseLaunchEnv(form.env_text)
 
   if (target === 'remote' && !selectedProfile) {
     remoteProfilesError.value = 'Select a remote server first'
@@ -1067,8 +1078,10 @@ async function handleCreateTab() {
     form.target = 'local'
     form.remote_profile_id = remoteProfiles.value[0]?.id || ''
     form.remote_reconnect = true
-    form.env_preset = 'custom'
-    form.env_entries = []
+    form.env_preset = 'none'
+    form.env_preset_name = ''
+    form.env_text = ''
+    form.env_editor_open = false
     showFileBrowser.value = false
     showModal.value = false
   })
@@ -1755,22 +1768,54 @@ async function handleCreateTab() {
   gap: 8px;
 }
 
-.env-row {
+.env-preset-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 8px;
-  align-items: center;
 }
 
-.env-row-header {
-  color: var(--ch-color-text-muted);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.env-remove-button,
-.env-add-button {
+.env-action-button,
+.env-save-button {
   white-space: nowrap;
+}
+
+.env-template-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-muted);
+  padding: 10px;
+}
+
+.env-preset-name {
+  width: 100%;
+}
+
+.env-textarea {
+  width: 100%;
+  min-height: 92px;
+  resize: vertical;
+  font-family: monospace !important;
+  line-height: 1.45;
+}
+
+.env-textarea-preview {
+  margin-top: 8px;
+  width: 100%;
+  resize: none;
+  min-height: 60px;
+  opacity: 0.75;
+  cursor: default;
+  white-space: pre-wrap;
+  font-family: monospace !important;
+}
+
+.env-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .modal-actions {

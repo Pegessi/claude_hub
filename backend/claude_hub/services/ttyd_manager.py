@@ -5,8 +5,10 @@ import logging
 import os
 import re
 import shlex
-import shutil
 import socket
+import subprocess
+import sys
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -202,6 +204,7 @@ class TTYDProcess:
         self.workspace_name = workspace_name
         self.workspace_role = workspace_role
         self.env = self._clean_env(env or {})
+        self._setup_tunnel_env()
         self.process: Optional[asyncio.subprocess.Process] = None
         self.created_at = created_at or datetime.now()
         self.is_active = False
@@ -222,7 +225,135 @@ class TTYDProcess:
             if not name or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
                 raise ValueError(f"Invalid environment variable name: {name or '<empty>'}")
             cleaned[name] = str(value)
+        # Normalize proxy env vars: add the opposite-case variant so both
+        # Node.js (uppercase HTTP_PROXY) and Unix tools (lowercase http_proxy)
+        # pick up the same setting regardless of what the user typed.
+        _PROXY_KEYS = frozenset({"http_proxy", "https_proxy", "all_proxy", "no_proxy"})
+        additions: dict[str, str] = {}
+        for key in list(cleaned):
+            lower = key.lower()
+            if lower in _PROXY_KEYS:
+                opposite = key.upper() if key.islower() else key.lower()
+                if opposite not in cleaned:
+                    additions[opposite] = cleaned[key]
+        cleaned.update(additions)
         return cleaned
+
+    # Tunnel registry: tunnel_key -> (local_port, process)
+    _tunnel_registry: dict[str, tuple[int, subprocess.Popen]] = {}
+    _TUNNEL_SCRIPT_TEMPLATE = """\
+import asyncio, sys
+
+async def _proxy(reader, writer):
+    try:
+        pr, pw = await asyncio.open_connection({proxy_host!r}, {proxy_port})
+        pw.write(f"CONNECT {target_host}:{target_port} HTTP/1.1\\r\\nHost: {target_host}:{target_port}\\r\\n\\r\\n".encode())
+        await pw.drain()
+        resp = await pr.readuntil(b"\\r\\n\\r\\n")
+        if b"200" not in resp.split(b"\\r\\n")[0]:
+            writer.close(); pw.close(); pr.close()
+            return
+        async def pipe(r, w):
+            try:
+                while True:
+                    data = await r.read(65536)
+                    if not data: break
+                    w.write(data); await w.drain()
+            except: pass
+        await asyncio.gather(pipe(reader, pw), pipe(pr, writer))
+    except: pass
+    finally:
+        writer.close(); pw.close(); pr.close()
+
+async def _main():
+    server = await asyncio.start_server(_proxy, "127.0.0.1", {local_port})
+    await server.serve_forever()
+
+asyncio.run(_main())
+"""
+
+    def _setup_tunnel_env(self) -> None:
+        """If proxy env vars + ANTHROPIC_BASE_URL are set, create a TCP
+        tunnel through the CONNECT proxy and rewrite the API URL to point
+        at the tunnel.
+
+        This works around Node.js undici/http not reading HTTP_PROXY.
+        """
+        if not self.env:
+            return
+
+        # Find proxy host:port from env (any case variant)
+        proxy_url: str | None = None
+        for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            val = self.env.get(key)
+            if val:
+                proxy_url = val
+                break
+        if not proxy_url:
+            return
+
+        # Parse proxy URL
+        m = re.match(r"^(https?://)?([^:/]+)(?::(\d+))?", proxy_url)
+        if not m:
+            return
+        proxy_host = m.group(2)
+        proxy_port = int(m.group(3) or (443 if m.group(1) == "https://" else 80))
+
+        # Find target API URL
+        api_key = next((k for k in ("ANTHROPIC_BASE_URL", "anthropic_base_url") if k in self.env), None)
+        if not api_key:
+            return
+        api_url = self.env[api_key]
+
+        # Parse target host:port from API URL
+        m = re.match(r"^https?://([^:/]+)(?::(\d+))?(/.*)?$", api_url)
+        if not m:
+            return
+        target_host = m.group(1)
+        target_port = int(m.group(2) or 443)
+        target_path = m.group(3) or ""
+
+        # Find a free port for the tunnel
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            local_port = s.getsockname()[1]
+
+        tunnel_key = f"{target_host}:{target_port}->{proxy_host}:{proxy_port}"
+
+        # Reuse existing tunnel
+        existing = self._tunnel_registry.get(tunnel_key)
+        if existing:
+            local_port, proc = existing
+            if proc.poll() is None:
+                # Still alive — just rewrite env
+                self.env[api_key] = f"https://127.0.0.1:{local_port}{target_path}"
+                self.env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
+                return
+            # Dead — remove and recreate
+            del self._tunnel_registry[tunnel_key]
+
+        # Start new tunnel
+        script = self._TUNNEL_SCRIPT_TEMPLATE.format(
+            proxy_host=proxy_host,
+            proxy_port=proxy_port,
+            target_host=target_host,
+            target_port=target_port,
+            local_port=local_port,
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        self._tunnel_registry[tunnel_key] = (local_port, proc)
+
+        # Wait briefly so the tunnel is ready
+        time.sleep(0.15)
+
+        # Rewrite env vars
+        self.env[api_key] = f"https://127.0.0.1:{local_port}{target_path}"
+        self.env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
 
     def _env_shell_prefix(self) -> str:
         if not self.env:
@@ -260,6 +391,7 @@ class TTYDProcess:
             solo_command = self._solo_command()
             if solo_command:
                 return f"{shlex.quote(user_shell)} -c {shlex.quote(f'{self._with_env(solo_command)}; exec {user_shell}')}"
+        # Non-solo agent tabs still need env var injection.
         return self._with_env(self.shell)
 
     async def ensure_tmux_session(self) -> bool:
