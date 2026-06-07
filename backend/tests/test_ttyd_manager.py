@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 import shlex
 import stat
@@ -31,6 +32,14 @@ def _wrapper_script(command: str) -> str:
 def _wrapper_path(command: str) -> str:
     parts = shlex.split(command)
     return parts[1] if parts[:1] == ["/bin/sh"] else parts[0]
+
+
+def _claude_settings_path(command: str) -> str:
+    parts = shlex.split(command)
+    if parts[:1] == ["/bin/sh"]:
+        parts = shlex.split(parts[2])
+    settings_index = parts.index("--settings")
+    return parts[settings_index + 1]
 
 
 def test_codex_tab_uses_codex_command() -> None:
@@ -163,7 +172,8 @@ def test_claude_env_model_is_passed_as_startup_model_flag() -> None:
     wrapper = _wrapper_script(cmd[-1])
 
     assert "ANTHROPIC_MODEL=claude-opus-4-8" not in cmd[-1]
-    assert "claude --model claude-opus-4-8" in cmd[-1]
+    assert "--model claude-opus-4-8" in cmd[-1]
+    assert "--settings " in cmd[-1]
     assert "export ANTHROPIC_MODEL=claude-opus-4-8" in wrapper
 
 
@@ -177,11 +187,17 @@ def test_claude_launch_defaults_to_volcengine_model_env() -> None:
 
     cmd = process._build_ttyd_command(session_exists=False)
     wrapper = _wrapper_script(cmd[-1])
+    settings_path = _claude_settings_path(cmd[-1])
+    settings_mode = stat.S_IMODE(os.stat(settings_path).st_mode)
+    settings = json.load(open(settings_path, encoding="utf-8"))
 
     for key, value in DEFAULT_CLAUDE_LAUNCH_ENV.items():
         assert process.env[key] == value
         assert f"export {key}={shlex.quote(value)}" in wrapper
+        assert settings["env"][key] == value
     assert "--model doubao-seed-2.0-code" in cmd[-1]
+    assert settings_mode == 0o600
+    assert "deepseek" not in json.dumps(settings)
 
 
 def test_claude_explicit_env_overrides_default_model_env() -> None:
@@ -194,9 +210,11 @@ def test_claude_explicit_env_overrides_default_model_env() -> None:
     )
 
     cmd = process._build_ttyd_command(session_exists=False)
+    settings = json.load(open(_claude_settings_path(cmd[-1]), encoding="utf-8"))
 
     assert "ANTHROPIC_BASE_URL" not in process.env
     assert process.env["ANTHROPIC_MODEL"] == "claude-opus-4-8"
+    assert settings["env"] == {"ANTHROPIC_MODEL": "claude-opus-4-8"}
     assert "--model claude-opus-4-8" in cmd[-1]
 
 
