@@ -89,6 +89,17 @@ _IDLE_TAIL_HINTS = (
 _STATUS_CACHE_TTL_SECONDS = 0.75
 _PORT_CHECK_TIMEOUT_SECONDS = 0.2
 _REMOTE_CAPTURE_TIMEOUT_SECONDS = 10.0
+_VOLCENGINE_CODING_PLAN_MODEL_ALIASES = {
+    "ark/seed-code-0602": "doubao-seed-2.0-code",
+    "ark/seed-code-0602[1m]": "doubao-seed-2.0-code",
+}
+_MODEL_ENV_KEYS = (
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+)
 
 
 class CursorPosition(TypedDict):
@@ -243,6 +254,7 @@ class TTYDProcess:
     def _prepare_agent_env(self) -> None:
         if self.agent_type != AgentType.CLAUDE:
             return
+        self._normalize_volcengine_coding_plan_model()
         model = self.env.get("ANTHROPIC_MODEL")
         if (
             model
@@ -250,6 +262,21 @@ class TTYDProcess:
             and "ANTHROPIC_CUSTOM_MODEL_OPTION" not in self.env
         ):
             self.env["ANTHROPIC_CUSTOM_MODEL_OPTION"] = model
+
+    def _normalize_volcengine_coding_plan_model(self) -> None:
+        base_url = self.env.get("ANTHROPIC_BASE_URL", "")
+        if "ark.cn-beijing.volces.com/api/coding" not in base_url:
+            return
+        model = self.env.get("ANTHROPIC_MODEL")
+        if not model:
+            return
+        normalized = _VOLCENGINE_CODING_PLAN_MODEL_ALIASES.get(model.strip().lower())
+        if not normalized:
+            return
+        for key in _MODEL_ENV_KEYS:
+            current = self.env.get(key)
+            if current is None or current.strip().lower() == model.strip().lower():
+                self.env[key] = normalized
 
     # Tunnel registry: tunnel_key -> (local_port, process)
     _tunnel_registry: dict[str, tuple[int, subprocess.Popen]] = {}

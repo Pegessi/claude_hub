@@ -157,6 +157,33 @@ def test_claude_custom_model_env_option_is_not_overwritten() -> None:
     assert "--model 'ark/seed-code-0602[1m]'" in cmd[-1]
 
 
+def test_claude_volcengine_coding_plan_model_alias_is_normalized() -> None:
+    process = TTYDProcess(
+        tab_id="tab-claude-volcengine-model",
+        port=12352,
+        name="Claude Volcengine Model",
+        agent_type=AgentType.CLAUDE,
+        env={
+            "ANTHROPIC_BASE_URL": "https://ark.cn-beijing.volces.com/api/coding",
+            "ANTHROPIC_AUTH_TOKEN": "token",
+            "ANTHROPIC_MODEL": "ark/seed-code-0602",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "ark/seed-code-0602",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "ark/seed-code-0602",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "ark/seed-code-0602",
+            "CLAUDE_CODE_SUBAGENT_MODEL": "ark/seed-code-0602",
+        },
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+
+    assert process.env["ANTHROPIC_MODEL"] == "doubao-seed-2.0-code"
+    assert process.env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "doubao-seed-2.0-code"
+    assert process.env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "doubao-seed-2.0-code"
+    assert process.env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "doubao-seed-2.0-code"
+    assert process.env["CLAUDE_CODE_SUBAGENT_MODEL"] == "doubao-seed-2.0-code"
+    assert "--model doubao-seed-2.0-code" in cmd[-1]
+
+
 def test_workspace_metadata_is_serialized_to_tab_schema_and_state() -> None:
     process = TTYDProcess(
         tab_id="tab-workspace-agent",

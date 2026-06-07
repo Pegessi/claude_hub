@@ -41,6 +41,19 @@ const builtInPresets: LaunchEnvPreset[] = [
       'NO_PROXY=localhost,127.0.0.1,::1',
     ].join('\n'),
   },
+  {
+    id: 'volcengine-coding-plan',
+    name: 'Volcengine Coding Plan',
+    text: [
+      'ANTHROPIC_BASE_URL=https://ark.cn-beijing.volces.com/api/coding',
+      'ANTHROPIC_MODEL=doubao-seed-2.0-code',
+      'ANTHROPIC_DEFAULT_OPUS_MODEL=doubao-seed-2.0-code',
+      'ANTHROPIC_DEFAULT_SONNET_MODEL=doubao-seed-2.0-code',
+      'ANTHROPIC_DEFAULT_HAIKU_MODEL=doubao-seed-2.0-code',
+      'CLAUDE_CODE_SUBAGENT_MODEL=doubao-seed-2.0-code',
+      'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1',
+    ].join('\n'),
+  },
 ]
 
 const customPresets = ref<LaunchEnvPreset[]>(loadCustomPresets())
