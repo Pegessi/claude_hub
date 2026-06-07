@@ -72,8 +72,18 @@ def test_custom_env_is_injected_and_serialized() -> None:
     schema = process.to_schema()
 
     assert cmd[-1].startswith("env HTTP_PROXY=http://127.0.0.1:7890 NO_PROXY=localhost,127.0.0.1 ")
-    assert data["env"] == {"HTTP_PROXY": "http://127.0.0.1:7890", "NO_PROXY": "localhost,127.0.0.1"}
-    assert schema.env == {"HTTP_PROXY": "http://127.0.0.1:7890", "NO_PROXY": "localhost,127.0.0.1"}
+    assert data["env"] == {
+        "HTTP_PROXY": "http://127.0.0.1:7890",
+        "NO_PROXY": "localhost,127.0.0.1",
+        "http_proxy": "http://127.0.0.1:7890",
+        "no_proxy": "localhost,127.0.0.1",
+    }
+    assert schema.env == {
+        "HTTP_PROXY": "http://127.0.0.1:7890",
+        "NO_PROXY": "localhost,127.0.0.1",
+        "http_proxy": "http://127.0.0.1:7890",
+        "no_proxy": "localhost,127.0.0.1",
+    }
 
 
 def test_custom_env_rejects_invalid_names() -> None:
