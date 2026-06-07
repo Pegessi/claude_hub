@@ -142,6 +142,20 @@ async def delete_feedback_lesson(
         raise HTTPException(status_code=404, detail="Feedback lesson not found") from e
 
 
+@router.post("/{workspace_id}/lessons/summarize", response_model=WorkspaceTask, status_code=201)
+async def summarize_feedback_lessons(
+    workspace_id: str,
+    current_user: User = Depends(get_current_user),
+) -> WorkspaceTask:
+    """Queue a system-internal Feedback Reaper task for workspace lesson summarization."""
+    try:
+        return await workspace_manager.summarize_workspace_feedback(workspace_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Workspace not found") from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 @router.get("/attachments/{attachment_id}")
 async def get_attachment(
     attachment_id: str,

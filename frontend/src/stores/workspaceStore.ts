@@ -187,6 +187,25 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
+  async function summarizeFeedbackLessons() {
+    if (!activeWorkspaceId.value) return
+    isLoading.value = true
+    error.value = null
+    try {
+      const response = await fetch(`${API_BASE}/workspaces/${activeWorkspaceId.value}/lessons/summarize`, {
+        method: 'POST',
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      await fetchBoard()
+      await fetchFeedbackLessons()
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Failed to summarize lessons'
+      throw e
+    } finally {
+      isLoading.value = false
+    }
+  }
+
   async function createWorkspace(payload: WorkspaceCreate) {
     isLoading.value = true
     error.value = null
@@ -476,6 +495,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     fetchFeedbackLessons,
     createFeedbackLesson,
     deleteFeedbackLesson,
+    summarizeFeedbackLessons,
     createWorkspace,
     updateWorkspace,
     createTask,

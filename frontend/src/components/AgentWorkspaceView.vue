@@ -3419,42 +3419,10 @@ async function deleteLesson(lesson: FeedbackLesson) {
   })
 }
 
-function buildFeedbackSummaryPrompt(): string {
-  const workspace = activeWorkspace.value
-  const lessonLines = activeFeedbackLessons.value
-    .map(lesson => `- ${lesson.id}: ${lessonTitle(lesson)} - ${lessonDescription(lesson)}`)
-    .join('\n') || '- No active lessons yet.'
-  return [
-    'You are the temporary Feedback Reaper for this Claude Hub workspace.',
-    '',
-    `Workspace: ${workspace?.name || 'current workspace'}`,
-    `Workspace ID: ${activeWorkspaceId.value}`,
-    `Workspace path: ${workspace?.path || ''}`,
-    '',
-    'Review the current workspace tasks, reports, review failures, human feedback, and existing lessons. Condense them into short reusable rules for future agents.',
-    '',
-    'Existing active lessons:',
-    lessonLines,
-    '',
-    'Output concise lesson suggestions with a title, one-sentence description, and tags. If you are confident a rule should become active, create it through the Claude Hub lessons API for this workspace; otherwise report it as a suggestion for a human to add in the Lessons manager.',
-    '',
-    `Lessons API: POST /api/workspaces/${activeWorkspaceId.value}/lessons`,
-    'Payload shape: {"title":"short title","summary":"one-sentence description","tags":["tag"],"scope":"workspace","confidence":0.8}',
-    '',
-    'Do not duplicate existing lessons. Prefer specific operational rules over broad advice.',
-  ].join('\n')
-}
-
 async function handleSummarizeLessons() {
   if (!activeWorkspaceId.value) return
   await runPending('feedback:summarize', async () => {
-    await workspaceStore.createTask({
-      title: 'Feedback Reaper: summarize workspace lessons',
-      prompt: buildFeedbackSummaryPrompt(),
-      task_mode: 'reviewed',
-      execution_complexity: 'auto',
-      attachments: [],
-    })
+    await workspaceStore.summarizeFeedbackLessons()
     closeLessonsModal()
   })
 }

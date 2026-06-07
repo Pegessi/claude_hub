@@ -1547,6 +1547,89 @@ def test_task_assignment_injects_relevant_feedback_lessons(
     assert task_reports[0].risk_level == "system_audit"
 
 
+def test_workspace_feedback_summary_uses_hidden_internal_reaper_task(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path / "state")
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="internal-reaper-tab",
+        port=12536,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Internal Reaper Repo", "path": str(repo), "session_prefix": "reap"},
+    ).json()
+    lesson_response = client.post(
+        f"/api/workspaces/{workspace['id']}/lessons",
+        json={
+            "id": "cli-symbols-comma-separated",
+            "title": "Use comma-separated symbols",
+            "summary": "--symbols expects comma-separated values.",
+            "tags": ["cli", "symbols"],
+            "scope": "workspace",
+        },
+    )
+    assert lesson_response.status_code == 201
+
+    response = client.post(f"/api/workspaces/{workspace['id']}/lessons/summarize")
+
+    assert response.status_code == 201
+    internal_task = response.json()
+    assert internal_task["system_internal"] is True
+    assert internal_task["internal_kind"] == "feedback_reaper"
+    assert internal_task["status"] == "working"
+    assert sent_messages
+    reaper_prompt = sent_messages[-1][1]
+    assert "internal Feedback Reaper" in reaper_prompt
+    assert "system-internal task" in reaper_prompt
+    assert "POST /api/workspaces/" in reaper_prompt
+
+    board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
+    assert internal_task["id"] not in {task["id"] for task in board["tasks"]}
+    assert workspace_manager.tasks[internal_task["id"]].system_internal is True
+    audit_reports = [
+        report
+        for report in workspace_manager.reports_for_workspace(workspace["id"])
+        if report.task_id == internal_task["id"] and report.risk_level == "system_audit"
+    ]
+    assert audit_reports
+
+    workspace_manager._write_snapshot(workspace["id"])
+    snapshot = workspace_manager.snapshot_path(workspace["id"]).read_text(encoding="utf-8")
+    assert internal_task["id"] not in snapshot
+    assert "Feedback Reaper: summarize workspace lessons" not in snapshot
+
+    completion_response = client.post(
+        f"/api/workspaces/sessions/{internal_task['session_id']}/reports",
+        json={
+            "task_id": internal_task["id"],
+            "state": "completed",
+            "message": "Internal reaper finished.",
+            "changed_files": [],
+            "validation": "No new lessons needed.",
+            "review_decision": "skip",
+            "review_reason": "System-internal Feedback Reaper audit.",
+            "risk_level": "system_audit",
+        },
+    )
+
+    assert completion_response.status_code == 201
+    completed = workspace_manager.tasks[internal_task["id"]]
+    assert completed.status == WorkspaceTaskStatus.DONE
+    assert completed.review_session_id is None
+    assert completed.review_skipped_at is not None
+    assert completed.review_skip_reason == "System-internal task completed without human review."
+
+
 def test_feedback_lesson_matching_is_cjk_safe_and_does_not_fallback_to_any_lesson(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
