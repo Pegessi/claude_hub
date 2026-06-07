@@ -401,91 +401,7 @@
                   {{ task.dispatch_reason }}
                 </div>
                 <div
-                  v-if="latestReportForTask(task) && isFinalReport(latestReportForTask(task)!)"
-                  class="latest-report latest-report--final"
-                >
-                  <div class="latest-report-head">
-                    <strong
-                      class="latest-report-state"
-                      :class="`latest-report-state--${latestReportForTask(task)?.state}`"
-                    >
-                      {{ latestReportForTask(task)?.state }}
-                    </strong>
-                    <span
-                      v-if="acceptanceSummary(latestReportForTask(task)!)"
-                      class="latest-report-acceptance"
-                    >
-                      {{ acceptanceSummary(latestReportForTask(task)!) }}
-                    </span>
-                    <span
-                      v-if="latestReportForTask(task)?.changed_files?.length"
-                      class="latest-report-files-count"
-                    >
-                      {{ latestReportForTask(task)?.changed_files.length }} file{{ latestReportForTask(task)?.changed_files.length === 1 ? '' : 's' }}
-                    </span>
-                  </div>
-                  <MarkdownContent
-                    class="latest-report-message"
-                    link-markdown-paths
-                    compact
-                    :text="reportMessageForLang(latestReportForTask(task)!)"
-                    @markdown-path-click="path => openMarkdownPreviewModal(path, latestReportForTask(task)!)"
-                  />
-                  <div
-                    v-if="latestReportForTask(task)?.changed_files?.length"
-                    class="report-files"
-                  >
-                    <button
-                      v-for="file in latestReportForTask(task)?.changed_files"
-                      :key="file"
-                      type="button"
-                      :class="['report-file-chip', { 'report-file-chip--clickable': isMarkdownArtifact(file) }]"
-                      :disabled="!isMarkdownArtifact(file)"
-                      @click.stop="openMarkdownPreviewModal(file, latestReportForTask(task)!)"
-                    >
-                      {{ file }}
-                    </button>
-                  </div>
-                  <div
-                    v-if="latestReportForTask(task)?.validation"
-                    class="report-note"
-                  >
-                    <strong>Validation</strong>
-                    <MarkdownContent
-                      compact
-                      link-markdown-paths
-                      :text="latestReportForTask(task)!.validation!"
-                      @markdown-path-click="path => openMarkdownPreviewModal(path, latestReportForTask(task)!)"
-                    />
-                  </div>
-                  <div
-                    v-if="acceptanceChecksFor(latestReportForTask(task)!).length > 0"
-                    class="report-note"
-                  >
-                    <strong>Acceptance Check</strong>
-                    <ol class="acceptance-check-list">
-                      <li
-                        v-for="check in acceptanceChecksFor(latestReportForTask(task)!)"
-                        :key="`${check.criterion}-${check.status}`"
-                      >
-                        <span>{{ check.status }}</span>
-                        {{ check.criterion }} - {{ check.evidence }}
-                      </li>
-                    </ol>
-                  </div>
-                  <div
-                    v-if="latestReportForTask(task)?.risks"
-                    class="report-note"
-                  >
-                    <strong>Risks</strong>
-                    <MarkdownContent
-                      compact
-                      :text="latestReportForTask(task)!.risks!"
-                    />
-                  </div>
-                </div>
-                <div
-                  v-else-if="latestReportForTask(task)"
+                  v-if="latestReportForTask(task)"
                   class="latest-report"
                 >
                   <strong>{{ latestReportForTask(task)?.state }}</strong>
@@ -954,6 +870,15 @@
                   >
                     <summary>
                       <span class="report-state">{{ report.state }}</span>
+                      <span
+                        v-if="reportSummaryLabel(report)"
+                        class="report-summary-label"
+                      >
+                        {{ reportSummaryLabel(report) }}
+                      </span>
+                      <span class="report-summary-message">
+                        {{ reportMessagePreview(report) }}
+                      </span>
                       <span class="report-summary-meta">
                         <span class="report-time">{{ formatTime(report.created_at) }}</span>
                         <span
@@ -2789,6 +2714,38 @@ function acceptanceSummary(report: AgentReport): string | null {
   return parts.join(' · ')
 }
 
+function isSubstantiveReport(report: AgentReport): boolean {
+  return Boolean(
+    (report.changed_files && report.changed_files.length > 0) ||
+    report.validation ||
+    (report.acceptance_check && report.acceptance_check.length > 0) ||
+    (report.profile_results && report.profile_results.length > 0) ||
+    (report.artifact_refs && report.artifact_refs.length > 0) ||
+    report.risks ||
+    report.evaluation_report
+  )
+}
+
+function reportSummaryLabel(report: AgentReport): string {
+  const parts: string[] = []
+  const acceptance = acceptanceSummary(report)
+  if (acceptance) parts.push(acceptance)
+  if (report.changed_files?.length) {
+    parts.push(`${report.changed_files.length} file${report.changed_files.length === 1 ? '' : 's'}`)
+  }
+  if (report.validation) parts.push('validated')
+  if (report.risks) parts.push('risks noted')
+  if (report.profile_results?.length) parts.push(`${report.profile_results.length} review profile${report.profile_results.length === 1 ? '' : 's'}`)
+  if (report.artifact_refs?.length) parts.push(`${report.artifact_refs.length} artifact${report.artifact_refs.length === 1 ? '' : 's'}`)
+  return parts.join(' · ')
+}
+
+function reportMessagePreview(report: AgentReport): string {
+  const text = reportMessageForLang(report).trim()
+  if (text.length <= 120) return text
+  return text.slice(0, 117) + '…'
+}
+
 function profileResultsFor(report: AgentReport): ReviewProfileResult[] {
   return Array.isArray(report.profile_results) ? report.profile_results : []
 }
@@ -3176,8 +3133,20 @@ function canEditTask(task: WorkspaceTask) {
   return task.status === 'todo'
 }
 
+function primaryExpandedReportId(): string | null {
+  const reports = selectedReports.value
+  if (reports.length === 0) return null
+  const finalSubstantive = [...reports].reverse().find(
+    (r) => isFinalReport(r) && isSubstantiveReport(r)
+  )
+  if (finalSubstantive) return finalSubstantive.id
+  const substantive = [...reports].reverse().find(isSubstantiveReport)
+  if (substantive) return substantive.id
+  return reports[reports.length - 1].id
+}
+
 function isLatestSelectedReport(report: AgentReport) {
-  return selectedReports.value[selectedReports.value.length - 1]?.id === report.id
+  return primaryExpandedReportId() === report.id
 }
 
 function agentTitle(sessionId?: string | null) {
@@ -5353,6 +5322,7 @@ onUnmounted(() => {
 }
 
 .task-card--done .task-card-description,
+.task-card--done .latest-report,
 .task-card--done .session-meta,
 .task-card--done .advanced-start,
 .task-card--done .task-actions {
@@ -5523,72 +5493,6 @@ onUnmounted(() => {
 
 .latest-report span {
   margin-left: 4px;
-}
-
-.latest-report--final {
-  display: block;
-  -webkit-line-clamp: unset;
-  overflow: visible;
-  border-left-color: var(--ch-color-success);
-  background: var(--ch-color-chip-bg);
-  padding: 10px 12px;
-}
-
-.latest-report--final:has(.latest-report-state--ready_for_review) {
-  border-left-color: var(--ch-color-attention);
-}
-
-.latest-report--final:has(.latest-report-state--review_failed) {
-  border-left-color: var(--ch-color-danger);
-}
-
-.latest-report--final:has(.latest-report-state--review_passed) {
-  border-left-color: var(--ch-color-success);
-}
-
-.latest-report--final .latest-report-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.latest-report--final .latest-report-state {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--ch-color-success-strong);
-  color: white;
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
-
-.latest-report--final .latest-report-state--ready_for_review {
-  background: var(--ch-color-attention-strong);
-}
-
-.latest-report--final .latest-report-state--review_passed {
-  background: var(--ch-color-success-strong);
-}
-
-.latest-report--final .latest-report-state--review_failed {
-  background: var(--ch-color-danger-strong);
-}
-
-.latest-report--final .latest-report-acceptance,
-.latest-report--final .latest-report-files-count {
-  font-size: 10px;
-  color: var(--ch-color-text-muted);
-  white-space: nowrap;
-}
-
-.latest-report--final .latest-report-message {
-  font-size: 12px;
-  line-height: 1.5;
-  margin-bottom: 8px;
 }
 
 .session-meta {
@@ -6311,6 +6215,26 @@ onUnmounted(() => {
   align-items: center;
   gap: 6px;
   min-width: 0;
+  margin-left: auto;
+}
+
+.report-summary-label {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--ch-color-text-muted);
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--ch-color-chip-bg);
+}
+
+.report-summary-message {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--ch-color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .report-delta {
