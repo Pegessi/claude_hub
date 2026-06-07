@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 STATE_FILE = Path.home() / ".claude_hub" / "tabs.json"
 ORDER_FILE = Path.home() / ".claude_hub" / "tab_order.json"
+LAUNCH_ENV_DIR = Path.home() / ".claude_hub" / "launch_env"
 TMUX_SESSION_PREFIX = "claude-hub-"
 
 # ANSI escape sequences (CSI, OSC, charset selection) — stripped before
@@ -406,7 +407,25 @@ asyncio.run(_main())
         return [f"export {key}={shlex.quote(value)}" for key, value in self.env.items()]
 
     def _with_env(self, command: str) -> str:
+        if self.env and self.target == ExecutionTarget.LOCAL:
+            return self._with_local_env_wrapper(command)
         return f"{self._env_shell_prefix()}{command}"
+
+    def _with_local_env_wrapper(self, command: str) -> str:
+        LAUNCH_ENV_DIR.mkdir(parents=True, exist_ok=True)
+        script_path = LAUNCH_ENV_DIR / f"{self.tab_id}.sh"
+        exports = "\n".join(
+            f"export {key}={shlex.quote(value)}" for key, value in self.env.items()
+        )
+        script = (
+            "#!/bin/sh\n"
+            "set -eu\n"
+            f"{exports}\n"
+            'exec "${SHELL:-/bin/bash}" -lc "$1"\n'
+        )
+        script_path.write_text(script, encoding="utf-8")
+        os.chmod(script_path, 0o600)
+        return f"{shlex.quote(str(script_path))} {shlex.quote(command)}"
 
     def _claude_model_arg(self) -> str:
         if self.agent_type != AgentType.CLAUDE:
