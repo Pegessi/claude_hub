@@ -58,6 +58,35 @@ def test_codex_solo_mode_reattaches_existing_tmux_session() -> None:
     assert process._build_ttyd_command(session_exists=True)[-1] == "codex"
 
 
+def test_custom_env_is_injected_and_serialized() -> None:
+    process = TTYDProcess(
+        tab_id="tab-env",
+        port=12348,
+        name="Env Tab",
+        agent_type=AgentType.TERMINAL,
+        env={"HTTP_PROXY": "http://127.0.0.1:7890", "NO_PROXY": "localhost,127.0.0.1"},
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+    data = process.to_dict()
+    schema = process.to_schema()
+
+    assert cmd[-1].startswith("env HTTP_PROXY=http://127.0.0.1:7890 NO_PROXY=localhost,127.0.0.1 ")
+    assert data["env"] == {"HTTP_PROXY": "http://127.0.0.1:7890", "NO_PROXY": "localhost,127.0.0.1"}
+    assert schema.env == {"HTTP_PROXY": "http://127.0.0.1:7890", "NO_PROXY": "localhost,127.0.0.1"}
+
+
+def test_custom_env_rejects_invalid_names() -> None:
+    with pytest.raises(ValueError, match="Invalid environment variable name"):
+        TTYDProcess(
+            tab_id="tab-invalid-env",
+            port=12348,
+            name="Invalid Env Tab",
+            agent_type=AgentType.TERMINAL,
+            env={"BAD-NAME": "value"},
+        )
+
+
 def test_workspace_metadata_is_serialized_to_tab_schema_and_state() -> None:
     process = TTYDProcess(
         tab_id="tab-workspace-agent",

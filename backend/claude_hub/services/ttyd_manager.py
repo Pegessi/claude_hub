@@ -185,6 +185,7 @@ class TTYDProcess:
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: Optional[WorkspaceSessionRole] = None,
+        env: Optional[Dict[str, str]] = None,
     ):
         self.tab_id = tab_id
         self.port = port
@@ -200,6 +201,7 @@ class TTYDProcess:
         self.workspace_id = workspace_id
         self.workspace_name = workspace_name
         self.workspace_role = workspace_role
+        self.env = self._clean_env(env or {})
         self.process: Optional[asyncio.subprocess.Process] = None
         self.created_at = created_at or datetime.now()
         self.is_active = False
@@ -211,6 +213,28 @@ class TTYDProcess:
             self.shell = os.environ.get("SHELL", "/bin/bash")
         else:
             self.shell = get_agent_command(agent_type)
+
+    @staticmethod
+    def _clean_env(env: Dict[str, str]) -> Dict[str, str]:
+        cleaned: Dict[str, str] = {}
+        for key, value in env.items():
+            name = str(key).strip()
+            if not name or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise ValueError(f"Invalid environment variable name: {name or '<empty>'}")
+            cleaned[name] = str(value)
+        return cleaned
+
+    def _env_shell_prefix(self) -> str:
+        if not self.env:
+            return ""
+        assignments = [f"{key}={shlex.quote(value)}" for key, value in self.env.items()]
+        return "env " + " ".join(assignments) + " "
+
+    def _env_export_commands(self) -> list[str]:
+        return [f"export {key}={shlex.quote(value)}" for key, value in self.env.items()]
+
+    def _with_env(self, command: str) -> str:
+        return f"{self._env_shell_prefix()}{command}"
 
     def _solo_command(self) -> Optional[str]:
         if self.agent_type == AgentType.CODEX:
@@ -235,8 +259,8 @@ class TTYDProcess:
             user_shell = os.environ.get("SHELL", "/bin/bash")
             solo_command = self._solo_command()
             if solo_command:
-                return f"{shlex.quote(user_shell)} -c {shlex.quote(f'{solo_command}; exec {user_shell}')}"
-        return self.shell
+                return f"{shlex.quote(user_shell)} -c {shlex.quote(f'{self._with_env(solo_command)}; exec {user_shell}')}"
+        return self._with_env(self.shell)
 
     async def ensure_tmux_session(self) -> bool:
         """Create the backing tmux session before ttyd gets a browser client.
@@ -258,15 +282,27 @@ class TTYDProcess:
         elif self.solo_mode and self.agent_type in {AgentType.CLAUDE, AgentType.CODEX}:
             user_shell = os.environ.get("SHELL", "/bin/bash")
             cmd.append(
-                shlex.join([user_shell, "-c", f"{self._agent_start_command()}; exec {user_shell}"])
+                shlex.join(
+                    [
+                        user_shell,
+                        "-c",
+                        f"{self._with_env(self._agent_start_command())}; exec {user_shell}",
+                    ]
+                )
             )
         elif self.agent_type == AgentType.CURSOR:
             user_shell = os.environ.get("SHELL", "/bin/bash")
             cmd.append(
-                shlex.join([user_shell, "-c", f"{self._agent_start_command()}; exec {user_shell}"])
+                shlex.join(
+                    [
+                        user_shell,
+                        "-c",
+                        f"{self._with_env(self._agent_start_command())}; exec {user_shell}",
+                    ]
+                )
             )
         else:
-            cmd.append(self.shell)
+            cmd.append(self._with_env(self.shell))
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -296,7 +332,12 @@ class TTYDProcess:
             logger.info(f"tmux session {self.tmux_session} does not exist, will create new")
 
         cmd = self._build_ttyd_command(session_exists=session_exists)
-        logger.info(f"Starting ttyd for tab {self.tab_id} on port {self.port}: {' '.join(cmd)}")
+        logger.info(
+            "Starting ttyd for tab %s on port %s with %s custom env vars",
+            self.tab_id,
+            self.port,
+            len(self.env),
+        )
 
         try:
             self.process = await asyncio.create_subprocess_exec(
@@ -366,12 +407,24 @@ class TTYDProcess:
             }
         ):
             user_shell = os.environ.get("SHELL", "/bin/bash")
-            cmd.extend([user_shell, "-c", f"{self._agent_start_command()}; exec {user_shell}"])
+            cmd.extend(
+                [
+                    user_shell,
+                    "-c",
+                    f"{self._with_env(self._agent_start_command())}; exec {user_shell}",
+                ]
+            )
         elif self.agent_type == AgentType.CURSOR and not session_exists:
             user_shell = os.environ.get("SHELL", "/bin/bash")
-            cmd.extend([user_shell, "-c", f"{self._agent_start_command()}; exec {user_shell}"])
+            cmd.extend(
+                [
+                    user_shell,
+                    "-c",
+                    f"{self._with_env(self._agent_start_command())}; exec {user_shell}",
+                ]
+            )
         else:
-            cmd.append(self.shell)
+            cmd.append(self._with_env(self.shell))
 
         return cmd
 
@@ -434,7 +487,7 @@ class TTYDProcess:
     def _build_remote_attach_command(self) -> str:
         remote_session = self.tmux_session
         cwd = self.remote_cwd or self.cwd or "~"
-        start_command = self._agent_start_command()
+        start_command = self._with_env(self._agent_start_command())
         quoted_session = shlex.quote(remote_session)
         quoted_start = shlex.quote(start_command)
         shell = "${SHELL:-/bin/bash}"
@@ -454,6 +507,7 @@ class TTYDProcess:
         script = "; ".join(
             [
                 bootstrap_path,
+                *self._env_export_commands(),
                 *checks,
                 self._remote_cwd_command(cwd, shell),
                 "if command -v tmux >/dev/null 2>&1; then "
@@ -799,6 +853,7 @@ class TTYDProcess:
             "remote_profile_id": self.remote_profile_id,
             "remote_cwd": self.remote_cwd,
             "remote_reconnect": self.remote_reconnect,
+            "env": self.env,
             "remote_forward_port": self.remote_forward_port,
             "workspace_id": self.workspace_id,
             "workspace_name": self.workspace_name,
@@ -823,6 +878,7 @@ class TTYDProcess:
             remote_profile_id=self.remote_profile_id,
             remote_cwd=self.remote_cwd,
             remote_reconnect=self.remote_reconnect,
+            env=self.env,
             port=self.port,
             created_at=self.created_at,
             is_active=self.is_active,
@@ -891,6 +947,7 @@ class TTYDManager:
                             remote_cwd=tab_data.get("remote_cwd"),
                             remote_reconnect=tab_data.get("remote_reconnect", True),
                             remote_forward_port=tab_data.get("remote_forward_port"),
+                            env=tab_data.get("env", {}),
                             workspace_id=tab_data.get("workspace_id"),
                             workspace_name=tab_data.get("workspace_name"),
                             workspace_role=workspace_role,
@@ -1040,6 +1097,7 @@ class TTYDManager:
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: Optional[WorkspaceSessionRole] = None,
+        env: Optional[Dict[str, str]] = None,
     ) -> TerminalTab:
         logger.info(
             f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}, target={target}, remote_profile_id={remote_profile_id}, remote_forward_port={remote_forward_port}, workspace_id={workspace_id}, workspace_role={workspace_role}"
@@ -1063,6 +1121,7 @@ class TTYDManager:
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            env=env,
         )
         logger.info(
             f"Created TTYDProcess with solo_mode={process.solo_mode}, agent_type={process.agent_type}"
@@ -1097,6 +1156,7 @@ class TTYDManager:
             remote_cwd=source.remote_cwd,
             remote_reconnect=source.remote_reconnect,
             remote_forward_port=source.remote_forward_port,
+            env=source.env,
         )
 
     async def delete_tab(self, tab_id: str) -> bool:
@@ -1396,6 +1456,7 @@ class TTYDManager:
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
         remote_reconnect: Optional[bool] = None,
+        env: Optional[Dict[str, str]] = None,
     ) -> Optional[TerminalTab]:
         """Update tab settings. Note: Changing shell/cwd/solo_mode/agent_type requires restarting
         the ttyd process, but the tmux session will be PRESERVED.
@@ -1431,6 +1492,9 @@ class TTYDManager:
             needs_restart = True
         if remote_reconnect is not None:
             process.remote_reconnect = remote_reconnect
+            needs_restart = True
+        if env is not None:
+            process.env = TTYDProcess._clean_env(env)
             needs_restart = True
 
         if needs_restart:
