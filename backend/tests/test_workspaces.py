@@ -1443,7 +1443,30 @@ def test_manual_feedback_reaper_promotes_lesson(
     assert lessons_response.status_code == 200
     lessons = lessons_response.json()
     assert len(lessons) == 1
+    assert lessons[0]["title"] == "--symbols expects comma-separated values"
     assert lessons[0]["summary"] == "--symbols expects comma-separated values."
+
+    manual_lesson_response = client.post(
+        f"/api/workspaces/{workspace['id']}/lessons",
+        json={
+            "title": "Use comma-separated symbols",
+            "summary": "CLI symbol probes should pass one comma-separated --symbols value.",
+            "tags": ["cli", "symbols"],
+            "scope": "workspace",
+        },
+    )
+    assert manual_lesson_response.status_code == 201
+    manual_lesson = manual_lesson_response.json()
+    assert manual_lesson["title"] == "Use comma-separated symbols"
+
+    delete_lesson_response = client.delete(
+        f"/api/workspaces/{workspace['id']}/lessons/{manual_lesson['id']}"
+    )
+    assert delete_lesson_response.status_code == 200
+    assert delete_lesson_response.json()["status"] == "archived"
+    active_lessons_response = client.get(f"/api/workspaces/{workspace['id']}/lessons")
+    assert active_lessons_response.status_code == 200
+    assert manual_lesson["id"] not in {lesson["id"] for lesson in active_lessons_response.json()}
 
     feedback_dir = state_root / workspace["id"] / "feedback"
     assert list((feedback_dir / "records").glob("*.json"))

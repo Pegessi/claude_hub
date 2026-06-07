@@ -680,6 +680,7 @@ class FeedbackLessonCreate(BaseModel):
     """Create or promote a reusable active lesson."""
 
     id: Optional[str] = None
+    title: Optional[str] = None
     summary: str
     applies_when: List[str] = Field(default_factory=list)
     do: str = ""
@@ -696,6 +697,7 @@ class FeedbackLesson(BaseModel):
 
     id: str
     workspace_id: str
+    title: str = ""
     scope: FeedbackLessonScope = FeedbackLessonScope.WORKSPACE
     status: FeedbackLessonStatus = FeedbackLessonStatus.ACTIVE
     summary: str

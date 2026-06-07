@@ -7,6 +7,7 @@ import type {
   ContinueTaskRequest,
   EnsureWorkspaceAgentRequest,
   FeedbackLesson,
+  FeedbackLessonCreate,
   ManualTaskControlRequest,
   ManagedSession,
   RequestTaskReviewRequest,
@@ -146,6 +147,44 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const response = await fetch(`${API_BASE}/workspaces/${workspaceId}/lessons?limit=50`)
     if (!response.ok) throw new Error(await readError(response))
     feedbackLessons.value = await response.json()
+  }
+
+  async function createFeedbackLesson(payload: FeedbackLessonCreate) {
+    if (!activeWorkspaceId.value) return
+    isLoading.value = true
+    error.value = null
+    try {
+      const response = await fetch(`${API_BASE}/workspaces/${activeWorkspaceId.value}/lessons`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      await fetchFeedbackLessons()
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Failed to create lesson'
+      throw e
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  async function deleteFeedbackLesson(lessonId: string) {
+    if (!activeWorkspaceId.value) return
+    isLoading.value = true
+    error.value = null
+    try {
+      const response = await fetch(`${API_BASE}/workspaces/${activeWorkspaceId.value}/lessons/${encodeURIComponent(lessonId)}`, {
+        method: 'DELETE',
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      await fetchFeedbackLessons()
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Failed to delete lesson'
+      throw e
+    } finally {
+      isLoading.value = false
+    }
   }
 
   async function createWorkspace(payload: WorkspaceCreate) {
@@ -435,6 +474,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     setActiveWorkspace,
     fetchBoard,
     fetchFeedbackLessons,
+    createFeedbackLesson,
+    deleteFeedbackLesson,
     createWorkspace,
     updateWorkspace,
     createTask,

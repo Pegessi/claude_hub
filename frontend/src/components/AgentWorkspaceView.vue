@@ -54,6 +54,14 @@
           type="button"
           class="tool-button workspace-desktop-action"
           :disabled="!activeWorkspaceId"
+          @click="openLessonsModal"
+        >
+          Lessons
+        </button>
+        <button
+          type="button"
+          class="tool-button workspace-desktop-action"
+          :disabled="!activeWorkspaceId"
           @click="openAgentOptionsModal"
         >
           Manage Agents
@@ -112,6 +120,14 @@
               type="button"
               class="workspace-mobile-menu-item"
               :disabled="!activeWorkspaceId"
+              @click="openLessonsModalFromMenu"
+            >
+              Lessons
+            </button>
+            <button
+              type="button"
+              class="workspace-mobile-menu-item"
+              :disabled="!activeWorkspaceId"
               @click="openAgentOptionsModalFromMenu"
             >
               Manage Agents
@@ -155,7 +171,13 @@
         <span>{{ reviewerAgents.length + temporaryReviewers.length }} reviewers</span>
         <strong>{{ workspaceAgents.filter(agent => agent.runtime_status === 'working').length }} working</strong>
         <span>{{ tasksByStatus('queued').length }} queued</span>
-        <span>{{ activeFeedbackLessons.length }} lessons</span>
+        <button
+          type="button"
+          class="summary-chip-button"
+          @click="openLessonsModal"
+        >
+          {{ activeFeedbackLessons.length }} lessons
+        </button>
       </div>
       <div class="workspace-column-tabs">
         <span
@@ -166,26 +188,6 @@
         </span>
       </div>
     </div>
-
-    <section
-      v-if="activeWorkspaceId"
-      class="feedback-overview"
-      aria-label="Workspace feedback lessons"
-    >
-      <div class="feedback-overview-main">
-        <span class="feedback-overview-kicker">Feedback</span>
-        <strong>{{ activeFeedbackLessons.length }} active lessons</strong>
-        <span>{{ feedbackLessonMatchSummary }}</span>
-      </div>
-      <button
-        type="button"
-        class="feedback-refresh-button"
-        :disabled="isPending('feedback:refresh')"
-        @click="refreshFeedbackLessons"
-      >
-        Refresh
-      </button>
-    </section>
 
     <section
       v-if="activeWorkspaceId"
@@ -598,88 +600,6 @@
                   </div>
                 </div>
               </div>
-            </section>
-
-            <section class="detail-section feedback-detail-section">
-              <div class="detail-section-title">
-                Feedback Lessons
-              </div>
-              <div class="feedback-detail-meta">
-                <span>{{ activeFeedbackLessons.length }} active in workspace</span>
-                <strong>{{ selectedTaskFeedbackLessons.length }} matched for this task</strong>
-                <span>{{ injectedFeedbackLessonIds(selectedTask).length }} injected in lifecycle</span>
-                <span>{{ selectedReportedFeedbackLessonIds.length }} mentioned in reports</span>
-              </div>
-              <div
-                v-if="injectedFeedbackLessonIds(selectedTask).length > 0"
-                class="feedback-injected-list"
-              >
-                <span
-                  v-for="lessonId in injectedFeedbackLessonIds(selectedTask)"
-                  :key="lessonId"
-                >
-                  {{ lessonId }}
-                </span>
-              </div>
-              <div
-                v-if="selectedReportedFeedbackLessonIds.length > 0"
-                class="feedback-injected-list"
-              >
-                <span
-                  v-for="lessonId in selectedReportedFeedbackLessonIds"
-                  :key="`reported-${lessonId}`"
-                >
-                  report: {{ lessonId }}
-                </span>
-              </div>
-              <div
-                v-if="activeFeedbackLessons.length === 0"
-                class="empty-timeline"
-              >
-                No active feedback lessons for this workspace.
-              </div>
-              <div
-                v-else-if="selectedTaskFeedbackLessons.length === 0"
-                class="empty-timeline"
-              >
-                No active lessons matched this task.
-              </div>
-              <div
-                v-else
-                class="feedback-lesson-list"
-              >
-                <article
-                  v-for="lesson in selectedTaskFeedbackLessons"
-                  :key="lesson.id"
-                  class="feedback-lesson-card"
-                >
-                  <div class="feedback-lesson-header">
-                    <code>{{ lesson.id }}</code>
-                    <span>{{ lesson.scope }}</span>
-                  </div>
-                  <p>{{ lesson.summary }}</p>
-                  <dl>
-                    <div v-if="lesson.do">
-                      <dt>Do</dt>
-                      <dd>{{ lesson.do }}</dd>
-                    </div>
-                    <div v-if="lesson.avoid">
-                      <dt>Avoid</dt>
-                      <dd>{{ lesson.avoid }}</dd>
-                    </div>
-                    <div v-if="lesson.evidence_task_ids?.length">
-                      <dt>Evidence</dt>
-                      <dd>{{ lesson.evidence_task_ids.join(', ') }}</dd>
-                    </div>
-                  </dl>
-                </article>
-              </div>
-              <p
-                v-if="selectedTaskFeedbackLessons.length > 0"
-                class="feedback-injection-note"
-              >
-                Matched lessons are injected into agent assignment and AI reviewer prompts. Already-running tasks only show prompt injections recorded after this audit field existed; report mentions are extracted from agent/reviewer validation text.
-              </p>
             </section>
 
             <section class="detail-section">
@@ -1553,6 +1473,146 @@
     </div>
 
     <div
+      v-if="showLessonsModal"
+      class="workspace-modal-overlay"
+      @click.self="closeLessonsModal"
+    >
+      <div class="workspace-modal lessons-manager-modal">
+        <div class="modal-heading-row">
+          <div>
+            <h3>Workspace Lessons</h3>
+            <p>{{ activeFeedbackLessons.length }} active rules for this workspace</p>
+          </div>
+          <button
+            type="button"
+            class="icon-button"
+            aria-label="Close lessons"
+            @click="closeLessonsModal"
+          >
+            x
+          </button>
+        </div>
+
+        <div class="lessons-toolbar">
+          <LoadingButton
+            type="button"
+            class="tool-button"
+            :disabled="!activeWorkspaceId"
+            :loading="isPending('feedback:summarize')"
+            loading-label="Queueing"
+            @click="handleSummarizeLessons"
+          >
+            AI summarize
+          </LoadingButton>
+          <LoadingButton
+            type="button"
+            class="tool-button"
+            :loading="isPending('feedback:refresh')"
+            loading-label="Refreshing"
+            @click="refreshFeedbackLessons"
+          >
+            Refresh
+          </LoadingButton>
+        </div>
+
+        <section class="modal-section modal-section--first">
+          <div class="modal-section-header">
+            <h4>Active Lessons</h4>
+            <span>{{ feedbackLessonMatchSummary }}</span>
+          </div>
+          <div class="lessons-list">
+            <article
+              v-for="lesson in activeFeedbackLessons"
+              :key="lesson.id"
+              class="lesson-row"
+            >
+              <div class="lesson-row-main">
+                <strong>{{ lessonTitle(lesson) }}</strong>
+                <p>{{ lessonDescription(lesson) }}</p>
+                <div class="lesson-tags">
+                  <span
+                    v-for="tag in lessonTags(lesson)"
+                    :key="`${lesson.id}-${tag}`"
+                  >
+                    {{ tag }}
+                  </span>
+                </div>
+              </div>
+              <div class="lesson-row-actions">
+                <span>{{ lesson.scope }}</span>
+                <LoadingButton
+                  type="button"
+                  class="danger-button"
+                  :loading="isPending(lessonActionKey('delete', lesson.id))"
+                  loading-label="Deleting"
+                  @click="deleteLesson(lesson)"
+                >
+                  Delete
+                </LoadingButton>
+              </div>
+            </article>
+            <div
+              v-if="activeFeedbackLessons.length === 0"
+              class="empty-inline"
+            >
+              No lessons yet.
+            </div>
+          </div>
+        </section>
+
+        <form
+          class="modal-section lesson-create-form"
+          @submit.prevent="handleCreateLesson"
+        >
+          <div class="modal-section-header">
+            <h4>Add Lesson</h4>
+          </div>
+          <div class="form-row">
+            <div class="modal-field">
+              <label>Title</label>
+              <input
+                v-model="lessonForm.title"
+                placeholder="Check workflow docs first"
+              >
+            </div>
+            <div class="modal-field">
+              <label>Tags</label>
+              <input
+                v-model="lessonForm.tags"
+                placeholder="workflow, review"
+              >
+            </div>
+          </div>
+          <div class="modal-field">
+            <label>Description</label>
+            <textarea
+              v-model="lessonForm.description"
+              placeholder="One sentence rule that future agents should reuse."
+            />
+          </div>
+          <div class="modal-actions">
+            <button
+              type="button"
+              class="tool-button"
+              @click="resetLessonForm"
+            >
+              Clear
+            </button>
+            <LoadingButton
+              type="submit"
+              class="primary-button"
+              :disabled="!lessonForm.title.trim() || !lessonForm.description.trim()"
+              :loading="isPending('feedback:create')"
+              loading-label="Adding lesson"
+            >
+              Add lesson
+            </LoadingButton>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div
       v-if="showAgentOptionsModal"
       class="workspace-modal-overlay"
       @click.self="closeAgentOptionsModal"
@@ -1970,6 +2030,7 @@ const showWorkspaceModal = ref(false)
 const workspaceModalMode = ref<'create' | 'edit'>('create')
 const editingWorkspaceId = ref<string | null>(null)
 const showAgentOptionsModal = ref(false)
+const showLessonsModal = ref(false)
 const showAgentFileBrowser = ref(false)
 const showTaskModal = ref(false)
 const showEditTaskModal = ref(false)
@@ -2045,6 +2106,12 @@ const editTaskForm = reactive({
   has_attachments: false,
 })
 
+const lessonForm = reactive({
+  title: '',
+  description: '',
+  tags: '',
+})
+
 const activeWorkspace = computed(() =>
   workspaces.value.find(workspace => workspace.id === activeWorkspaceId.value) || null
 )
@@ -2114,9 +2181,17 @@ function injectedFeedbackLessonIds(task: WorkspaceTask | null): string[] {
   return Array.isArray(task?.feedback_lesson_ids) ? task.feedback_lesson_ids : []
 }
 
-const selectedTaskFeedbackLessons = computed(() =>
-  matchingFeedbackLessons(selectedTask.value)
-)
+function lessonTitle(lesson: FeedbackLesson): string {
+  return lesson.title?.trim() || lesson.summary.split(/[。.!?]/)[0]?.trim() || lesson.id
+}
+
+function lessonDescription(lesson: FeedbackLesson): string {
+  return lesson.summary || lesson.do || lesson.avoid || lesson.id
+}
+
+function lessonTags(lesson: FeedbackLesson): string[] {
+  return (lesson.tags || []).slice(0, 4)
+}
 
 const feedbackLessonMatchSummary = computed(() => {
   const matchedTaskCount = tasks.value.filter(task => matchingFeedbackLessons(task).length > 0).length
@@ -2136,25 +2211,6 @@ const selectedTaskSendKey = computed(() =>
 const selectedReports = computed<AgentReport[]>(() =>
   selectedTask.value ? workspaceStore.reportsForTask(selectedTask.value) : []
 )
-
-const selectedReportedFeedbackLessonIds = computed(() => {
-  const reportText = selectedReports.value
-    .map(report => [
-      report.message,
-      report.message_en,
-      report.message_zh,
-      report.validation,
-      report.risks,
-      report.review_reason,
-    ].filter(Boolean).join('\n'))
-    .join('\n')
-    .toLowerCase()
-
-  if (!reportText) return []
-  return activeFeedbackLessons.value
-    .map(lesson => lesson.id)
-    .filter(id => reportText.includes(id.toLowerCase()))
-})
 
 interface ProgressTimelineItem {
   id: string
@@ -3104,6 +3160,11 @@ function openAgentOptionsModalFromMenu() {
   closeWorkspaceMobileMenu()
 }
 
+function openLessonsModalFromMenu() {
+  openLessonsModal()
+  closeWorkspaceMobileMenu()
+}
+
 function toggleThemeFromMenu() {
   appStore.toggleColorScheme()
   closeWorkspaceMobileMenu()
@@ -3303,6 +3364,99 @@ function closeEditTaskModal() {
   editTaskForm.title = ''
   editTaskForm.prompt = ''
   editTaskForm.has_attachments = false
+}
+
+function openLessonsModal() {
+  showLessonsModal.value = true
+  workspaceStore.fetchFeedbackLessons().catch(() => {
+    // Error state is owned by the workspace store.
+  })
+}
+
+function closeLessonsModal() {
+  showLessonsModal.value = false
+}
+
+function resetLessonForm() {
+  lessonForm.title = ''
+  lessonForm.description = ''
+  lessonForm.tags = ''
+}
+
+function parseLessonTags(value: string): string[] {
+  return value
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean)
+}
+
+function lessonActionKey(action: string, lessonId: string) {
+  return `lesson:${action}:${lessonId}`
+}
+
+async function handleCreateLesson() {
+  const title = lessonForm.title.trim()
+  const description = lessonForm.description.trim()
+  if (!title || !description) return
+  await runPending('feedback:create', async () => {
+    await workspaceStore.createFeedbackLesson({
+      title,
+      summary: description,
+      applies_when: parseLessonTags(lessonForm.tags),
+      tags: parseLessonTags(lessonForm.tags),
+      scope: 'workspace',
+      confidence: 0.8,
+    })
+    resetLessonForm()
+  })
+}
+
+async function deleteLesson(lesson: FeedbackLesson) {
+  const confirmed = window.confirm(`Delete lesson "${lessonTitle(lesson)}"?`)
+  if (!confirmed) return
+  await runPending(lessonActionKey('delete', lesson.id), async () => {
+    await workspaceStore.deleteFeedbackLesson(lesson.id)
+  })
+}
+
+function buildFeedbackSummaryPrompt(): string {
+  const workspace = activeWorkspace.value
+  const lessonLines = activeFeedbackLessons.value
+    .map(lesson => `- ${lesson.id}: ${lessonTitle(lesson)} - ${lessonDescription(lesson)}`)
+    .join('\n') || '- No active lessons yet.'
+  return [
+    'You are the temporary Feedback Reaper for this Claude Hub workspace.',
+    '',
+    `Workspace: ${workspace?.name || 'current workspace'}`,
+    `Workspace ID: ${activeWorkspaceId.value}`,
+    `Workspace path: ${workspace?.path || ''}`,
+    '',
+    'Review the current workspace tasks, reports, review failures, human feedback, and existing lessons. Condense them into short reusable rules for future agents.',
+    '',
+    'Existing active lessons:',
+    lessonLines,
+    '',
+    'Output concise lesson suggestions with a title, one-sentence description, and tags. If you are confident a rule should become active, create it through the Claude Hub lessons API for this workspace; otherwise report it as a suggestion for a human to add in the Lessons manager.',
+    '',
+    `Lessons API: POST /api/workspaces/${activeWorkspaceId.value}/lessons`,
+    'Payload shape: {"title":"short title","summary":"one-sentence description","tags":["tag"],"scope":"workspace","confidence":0.8}',
+    '',
+    'Do not duplicate existing lessons. Prefer specific operational rules over broad advice.',
+  ].join('\n')
+}
+
+async function handleSummarizeLessons() {
+  if (!activeWorkspaceId.value) return
+  await runPending('feedback:summarize', async () => {
+    await workspaceStore.createTask({
+      title: 'Feedback Reaper: summarize workspace lessons',
+      prompt: buildFeedbackSummaryPrompt(),
+      task_mode: 'reviewed',
+      execution_complexity: 'auto',
+      attachments: [],
+    })
+    closeLessonsModal()
+  })
 }
 
 async function handleCreateTask() {
@@ -3792,6 +3946,24 @@ onUnmounted(() => {
   color: var(--ch-color-text);
 }
 
+.summary-chip-button {
+  height: 24px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: 999px;
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.summary-chip-button:hover {
+  border-color: var(--ch-color-border-hover);
+  background: var(--ch-color-surface-control-hover);
+}
+
 .workspace-column-tabs {
   overflow-x: auto;
 }
@@ -3804,58 +3976,6 @@ onUnmounted(() => {
   color: var(--ch-color-text);
   font-size: 11px;
   padding: 4px 9px;
-}
-
-.feedback-overview {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 18px;
-  border-bottom: 1px solid var(--ch-color-border-muted);
-  background: var(--ch-color-surface);
-}
-
-.feedback-overview-main {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  color: var(--ch-color-text-muted);
-  font-size: 12px;
-}
-
-.feedback-overview-main strong {
-  color: var(--ch-color-text);
-  white-space: nowrap;
-}
-
-.feedback-overview-kicker {
-  border-radius: 999px;
-  background: var(--ch-color-accent-soft);
-  color: var(--ch-color-accent);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0;
-  padding: 4px 8px;
-  text-transform: uppercase;
-}
-
-.feedback-refresh-button {
-  flex: 0 0 auto;
-  border: 1px solid var(--ch-color-border);
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface-control);
-  color: var(--ch-color-text);
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 700;
-  padding: 6px 10px;
-}
-
-.feedback-refresh-button:disabled {
-  cursor: wait;
-  opacity: 0.65;
 }
 
 .workspace-agent-status {
@@ -5023,32 +5143,6 @@ onUnmounted(() => {
   overflow-wrap: anywhere;
 }
 
-.feedback-detail-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 8px;
-  color: var(--ch-color-text-muted);
-  font-size: 12px;
-}
-
-.feedback-detail-meta span,
-.feedback-detail-meta strong {
-  border-radius: 999px;
-  background: var(--ch-color-surface-control);
-  color: var(--ch-color-text);
-  font-size: 11px;
-  padding: 4px 8px;
-}
-
-.feedback-injected-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
-}
-
-.feedback-injected-list span,
 .feedback-meta-chip {
   border-radius: 999px;
   background: var(--ch-color-accent-soft);
@@ -5056,82 +5150,6 @@ onUnmounted(() => {
   font-size: 11px;
   font-weight: 700;
   padding: 4px 8px;
-}
-
-.feedback-lesson-list {
-  display: grid;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.feedback-lesson-card {
-  min-width: 0;
-  border: 1px solid var(--ch-color-border-muted);
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface-soft);
-  padding: 10px;
-}
-
-.feedback-lesson-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.feedback-lesson-header code {
-  min-width: 0;
-  color: var(--ch-color-text);
-  font-size: 11px;
-  overflow-wrap: anywhere;
-}
-
-.feedback-lesson-header span {
-  flex: 0 0 auto;
-  border-radius: 999px;
-  background: var(--ch-color-chip-bg-muted);
-  color: var(--ch-color-text-muted);
-  font-size: 10px;
-  padding: 3px 7px;
-}
-
-.feedback-lesson-card p {
-  margin: 0;
-  color: var(--ch-color-text);
-  font-size: 13px;
-  line-height: 1.4;
-}
-
-.feedback-lesson-card dl {
-  display: grid;
-  gap: 6px;
-  margin: 10px 0 0;
-}
-
-.feedback-lesson-card dl div {
-  min-width: 0;
-}
-
-.feedback-lesson-card dt {
-  color: var(--ch-color-text-muted);
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-}
-
-.feedback-lesson-card dd {
-  margin: 2px 0 0;
-  color: var(--ch-color-text-muted);
-  font-size: 12px;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-
-.feedback-injection-note {
-  margin: 10px 0 0;
-  color: var(--ch-color-text-subtle);
-  font-size: 12px;
 }
 
 .detail-actions {
@@ -5669,6 +5687,98 @@ onUnmounted(() => {
   width: min(720px, 100%);
 }
 
+.lessons-manager-modal {
+  width: min(760px, 100%);
+}
+
+.modal-heading-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.modal-heading-row h3 {
+  margin-bottom: 4px;
+}
+
+.modal-heading-row p {
+  margin: 0;
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+}
+
+.lessons-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.lessons-list {
+  display: grid;
+  gap: 8px;
+}
+
+.lesson-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-soft);
+  padding: 10px;
+}
+
+.lesson-row-main {
+  min-width: 0;
+}
+
+.lesson-row-main strong {
+  display: block;
+  color: var(--ch-color-text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.lesson-row-main p {
+  margin: 4px 0 0;
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.lesson-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.lesson-tags span,
+.lesson-row-actions > span {
+  border-radius: 999px;
+  background: var(--ch-color-chip-bg-muted);
+  color: var(--ch-color-text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 7px;
+}
+
+.lesson-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lesson-create-form textarea {
+  min-height: 84px;
+}
+
 .workspace-modal h3 {
   margin: 0 0 16px;
   color: var(--ch-color-text-strong);
@@ -5980,6 +6090,23 @@ onUnmounted(() => {
   .modal-actions .tool-button,
   .modal-actions .primary-button {
     flex: 1;
+  }
+
+  .modal-heading-row {
+    align-items: center;
+  }
+
+  .lessons-toolbar {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .lesson-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .lesson-row-actions {
+    justify-content: space-between;
   }
 
   .workspace-header {
