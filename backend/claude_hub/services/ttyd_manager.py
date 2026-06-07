@@ -300,7 +300,9 @@ asyncio.run(_main())
         proxy_port = int(m.group(3) or (443 if m.group(1) == "https://" else 80))
 
         # Find target API URL
-        api_key = next((k for k in ("ANTHROPIC_BASE_URL", "anthropic_base_url") if k in self.env), None)
+        api_key = next(
+            (k for k in ("ANTHROPIC_BASE_URL", "anthropic_base_url") if k in self.env), None
+        )
         if not api_key:
             return
         api_url = self.env[api_key]
