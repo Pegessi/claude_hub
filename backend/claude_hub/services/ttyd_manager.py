@@ -204,6 +204,7 @@ class TTYDProcess:
         self.workspace_name = workspace_name
         self.workspace_role = workspace_role
         self.env = self._clean_env(env or {})
+        self._prepare_agent_env()
         self._setup_tunnel_env()
         self.process: Optional[asyncio.subprocess.Process] = None
         self.created_at = created_at or datetime.now()
@@ -238,6 +239,17 @@ class TTYDProcess:
                     additions[opposite] = cleaned[key]
         cleaned.update(additions)
         return cleaned
+
+    def _prepare_agent_env(self) -> None:
+        if self.agent_type != AgentType.CLAUDE:
+            return
+        model = self.env.get("ANTHROPIC_MODEL")
+        if (
+            model
+            and "/" in model
+            and "ANTHROPIC_CUSTOM_MODEL_OPTION" not in self.env
+        ):
+            self.env["ANTHROPIC_CUSTOM_MODEL_OPTION"] = model
 
     # Tunnel registry: tunnel_key -> (local_port, process)
     _tunnel_registry: dict[str, tuple[int, subprocess.Popen]] = {}
@@ -1643,6 +1655,8 @@ class TTYDManager:
             needs_restart = True
         if env is not None:
             process.env = TTYDProcess._clean_env(env)
+            process._prepare_agent_env()
+            process._setup_tunnel_env()
             needs_restart = True
 
         if needs_restart:
