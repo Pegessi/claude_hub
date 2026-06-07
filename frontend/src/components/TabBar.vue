@@ -532,7 +532,11 @@ import AgentStatusFloatingPanel from '@/components/AgentStatusFloatingPanel.vue'
 import LayoutSelector from '@/components/LayoutSelector.vue'
 import LoadingButton from '@/components/LoadingButton.vue'
 import NetworkAccessMenu from '@/components/NetworkAccessMenu.vue'
-import { parseLaunchEnv, useLaunchEnvPresets } from '@/composables/useLaunchEnvPresets'
+import {
+  defaultLaunchEnvPresetForAgent,
+  parseLaunchEnv,
+  useLaunchEnvPresets,
+} from '@/composables/useLaunchEnvPresets'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
@@ -554,7 +558,8 @@ interface DirectoryListing {
 
 const store = useTerminalStore()
 const appStore = useAppStore()
-const { envPresets, getPresetText, savePreset, deletePreset } = useLaunchEnvPresets()
+const { envPresets, getPresetText, defaultPresetTextForAgent, savePreset, deletePreset } =
+  useLaunchEnvPresets()
 const { isPending, runPending } = usePendingActions()
 const { tabs, manualTabs, managedTabs, activeTabId, isLoading, agentStatuses } = storeToRefs(store)
 const { mode, colorScheme } = storeToRefs(appStore)
@@ -595,9 +600,9 @@ const form = reactive({
   target: 'local' as 'local' | 'remote',
   remote_profile_id: '',
   remote_reconnect: true,
-  env_preset: 'none',
+  env_preset: defaultLaunchEnvPresetForAgent('claude'),
   env_preset_name: '',
-  env_text: '',
+  env_text: defaultPresetTextForAgent('claude'),
   env_editor_open: false,
 })
 
@@ -672,6 +677,13 @@ function deleteCurrentEnvPreset() {
   form.env_preset = 'none'
   form.env_preset_name = ''
   form.env_text = ''
+  form.env_editor_open = false
+}
+
+function resetEnvForAgentType(agentType: AgentType) {
+  form.env_preset = defaultLaunchEnvPresetForAgent(agentType)
+  form.env_preset_name = ''
+  form.env_text = defaultPresetTextForAgent(agentType)
   form.env_editor_open = false
 }
 
@@ -965,10 +977,7 @@ watch(showModal, (newVal) => {
     form.target = 'local'
     form.remote_profile_id = remoteProfiles.value[0]?.id || ''
     form.remote_reconnect = true
-    form.env_preset = 'none'
-    form.env_preset_name = ''
-    form.env_text = ''
-    form.env_editor_open = false
+    resetEnvForAgentType(form.agent_type)
     showFileBrowser.value = false
   }
 })
@@ -979,6 +988,7 @@ watch(
     if (agentType === 'cursor' || agentType === 'terminal') {
       form.solo_mode = false
     }
+    resetEnvForAgentType(agentType)
   }
 )
 
@@ -1078,10 +1088,7 @@ async function handleCreateTab() {
     form.target = 'local'
     form.remote_profile_id = remoteProfiles.value[0]?.id || ''
     form.remote_reconnect = true
-    form.env_preset = 'none'
-    form.env_preset_name = ''
-    form.env_text = ''
-    form.env_editor_open = false
+    resetEnvForAgentType(form.agent_type)
     showFileBrowser.value = false
     showModal.value = false
   })

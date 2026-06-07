@@ -2051,7 +2051,11 @@ import AgentAvatar from '@/components/AgentAvatar.vue'
 import LoadingButton from '@/components/LoadingButton.vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import NetworkAccessMenu from '@/components/NetworkAccessMenu.vue'
-import { parseLaunchEnv, useLaunchEnvPresets } from '@/composables/useLaunchEnvPresets'
+import {
+  defaultLaunchEnvPresetForAgent,
+  parseLaunchEnv,
+  useLaunchEnvPresets,
+} from '@/composables/useLaunchEnvPresets'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
@@ -2111,7 +2115,8 @@ type WorkspaceSessionView = 'agents' | 'reviewers'
 const appStore = useAppStore()
 const terminalStore = useTerminalStore()
 const workspaceStore = useWorkspaceStore()
-const { envPresets, getPresetText, savePreset, deletePreset } = useLaunchEnvPresets()
+const { envPresets, getPresetText, defaultPresetTextForAgent, savePreset, deletePreset } =
+  useLaunchEnvPresets()
 const { isPending, runPending } = usePendingActions()
 const { colorScheme } = storeToRefs(appStore)
 const {
@@ -2199,9 +2204,9 @@ const agentOptionsForm = reactive({
   solo_mode: true,
   remote_profile_id: '',
   remote_reconnect: true,
-  env_preset: 'none',
+  env_preset: defaultLaunchEnvPresetForAgent('codex'),
   env_preset_name: '',
-  env_text: '',
+  env_text: defaultPresetTextForAgent('codex'),
   env_editor_open: false,
 })
 
@@ -3405,6 +3410,13 @@ function deleteCurrentAgentEnvPreset() {
   agentOptionsForm.env_editor_open = false
 }
 
+function resetAgentEnvForType(agentType: AgentType) {
+  agentOptionsForm.env_preset = defaultLaunchEnvPresetForAgent(agentType)
+  agentOptionsForm.env_preset_name = ''
+  agentOptionsForm.env_text = defaultPresetTextForAgent(agentType)
+  agentOptionsForm.env_editor_open = false
+}
+
 function resetAgentOptionsForm() {
   const workspace = activeWorkspace.value
   agentOptionsForm.title = ''
@@ -3415,10 +3427,7 @@ function resetAgentOptionsForm() {
   agentOptionsForm.remote_reconnect = workspace?.remote_reconnect ?? true
   agentOptionsForm.remote_profile_id =
     workspace?.remote_profile_id || remoteProfiles.value[0]?.id || ''
-  agentOptionsForm.env_preset = 'none'
-  agentOptionsForm.env_preset_name = ''
-  agentOptionsForm.env_text = ''
-  agentOptionsForm.env_editor_open = false
+  resetAgentEnvForType(agentOptionsForm.agent_type)
   agentOptionsForm.cwd = workspaceDefaultCwd(agentOptionsForm.target)
 }
 
@@ -3472,9 +3481,7 @@ async function handleCreateAdvancedAgent() {
     })
     showAgentFileBrowser.value = false
     agentOptionsForm.title = ''
-    agentOptionsForm.env_preset = 'none'
-    agentOptionsForm.env_preset_name = ''
-    agentOptionsForm.env_text = ''
+    resetAgentEnvForType(agentOptionsForm.agent_type)
     await terminalStore.fetchTabs()
   })
 }
@@ -3817,6 +3824,7 @@ watch(
     } else if (!showAgentOptionsModal.value) {
       agentOptionsForm.solo_mode = true
     }
+    resetAgentEnvForType(agentType)
   }
 )
 

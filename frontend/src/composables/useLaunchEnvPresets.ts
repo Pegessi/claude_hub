@@ -1,4 +1,5 @@
 import { computed, ref } from 'vue'
+import type { AgentType } from '@/types'
 
 type LaunchEnv = Record<string, string>
 
@@ -16,6 +17,7 @@ interface StoredLaunchEnvPreset {
 
 const STORAGE_KEY = 'claude-hub.launch-env-presets'
 const HIDDEN_KEY = 'claude-hub.launch-env-hidden'
+export const DEFAULT_CLAUDE_ENV_PRESET_ID = 'volcengine-coding-plan'
 
 const builtInPresets: LaunchEnvPreset[] = [
   {
@@ -126,6 +128,10 @@ export function parseLaunchEnv(text: string): LaunchEnv | undefined {
   return Object.keys(env).length ? env : undefined
 }
 
+export function defaultLaunchEnvPresetForAgent(agentType: AgentType): string {
+  return agentType === 'claude' ? DEFAULT_CLAUDE_ENV_PRESET_ID : 'none'
+}
+
 export function useLaunchEnvPresets() {
   const envPresets = computed(() => {
     const all = [...builtInPresets, ...customPresets.value]
@@ -134,6 +140,11 @@ export function useLaunchEnvPresets() {
 
   function getPresetText(id: string): string | null {
     return envPresets.value.find(preset => preset.id === id)?.text ?? null
+  }
+
+  function defaultPresetTextForAgent(agentType: AgentType): string {
+    const presetId = defaultLaunchEnvPresetForAgent(agentType)
+    return getPresetText(presetId) ?? ''
   }
 
   function savePreset(name: string, text: string, id?: string): LaunchEnvPreset | null {
@@ -176,6 +187,7 @@ export function useLaunchEnvPresets() {
   return {
     envPresets,
     getPresetText,
+    defaultPresetTextForAgent,
     savePreset,
     deletePreset,
   }
