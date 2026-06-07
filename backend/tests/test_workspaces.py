@@ -700,7 +700,7 @@ def test_direct_task_explicit_review_request_still_creates_reviewer(
 
     assert response.status_code == 201
     direct_task = workspace_manager.tasks[task["id"]]
-    assert direct_task.status == WorkspaceTaskStatus.WORKING
+    assert direct_task.status == WorkspaceTaskStatus.REVIEW
     assert direct_task.review_session_id is not None
     assert direct_task.review_requested_at is not None
     assert direct_task.feedback_lesson_ids == ["explicit-review-handoff"]
@@ -1158,7 +1158,7 @@ def test_completed_report_creates_temporary_reviewer(
 
     assert response.status_code == 201
     updated = workspace_manager.tasks[task["id"]]
-    assert updated.status == WorkspaceTaskStatus.WORKING
+    assert updated.status == WorkspaceTaskStatus.REVIEW
     assert updated.review_attempts == 1
     assert updated.review_session_id is not None
     reviewer = workspace_manager.sessions[updated.review_session_id]
@@ -1452,7 +1452,7 @@ def test_agent_review_gate_states_trigger_reviewer(
 
     assert response.status_code == 201
     updated = workspace_manager.tasks[task["id"]]
-    assert updated.status == WorkspaceTaskStatus.WORKING
+    assert updated.status == WorkspaceTaskStatus.REVIEW
     assert updated.review_session_id is not None
     assert (
         workspace_manager.sessions[updated.review_session_id].role == WorkspaceSessionRole.REVIEWER
@@ -2214,7 +2214,7 @@ def test_completed_skip_review_is_denied_for_changed_files(
 
     assert response.status_code == 201
     updated = workspace_manager.tasks[task["id"]]
-    assert updated.status == WorkspaceTaskStatus.WORKING
+    assert updated.status == WorkspaceTaskStatus.REVIEW
     assert updated.review_session_id is not None
     assert updated.review_attempts == 1
     assert updated.review_skipped_at is None
@@ -2357,7 +2357,7 @@ def test_manual_request_review_after_skipped_review(
 
     assert response.status_code == 200
     updated = workspace_manager.tasks[task["id"]]
-    assert updated.status == WorkspaceTaskStatus.WORKING
+    assert updated.status == WorkspaceTaskStatus.REVIEW
     assert updated.review_session_id is not None
     assert updated.review_attempts == 1
     assert updated.review_skipped_at is None
@@ -4391,7 +4391,7 @@ def test_monitor_surfaces_reviewer_prompt_stuck_in_input(
 
     updated_task = workspace_manager.tasks[started["id"]]
     updated_reviewer = workspace_manager.sessions[review_session_id]
-    assert updated_task.status == WorkspaceTaskStatus.WORKING
+    assert updated_task.status == WorkspaceTaskStatus.REVIEW
     assert updated_reviewer.runtime_status == AgentRuntimeStatus.WORKING
     assert updated_reviewer.prompt_retry_task_id == started["id"]
     assert submitted_keys == [("send-keys", "-t", reviewer.tmux_session, "C-m")]
@@ -4535,7 +4535,7 @@ def test_interrupted_idle_working_agent_auto_continue_stops_after_limit(
     assert len(sent_messages) == 2
     assert "independent reviewer agent" in sent_messages[0][1]
     assert "Review workspace task" in sent_messages[1][1]
-    assert task_after_limit.status == WorkspaceTaskStatus.WORKING
+    assert task_after_limit.status == WorkspaceTaskStatus.REVIEW
     assert task_after_limit.session_id == started["session_id"]
     assert task_after_limit.review_session_id is not None
     assert session.runtime_status == AgentRuntimeStatus.ATTENTION
@@ -5947,6 +5947,12 @@ def test_done_task_writes_delete_safe_task_record(
     workspace_manager.reports[completed_report["id"]] = workspace_manager.reports[
         completed_report["id"]
     ].model_copy(update={"created_at": base_time + timedelta(minutes=12)})
+    workspace_manager.tasks[task["id"]] = workspace_manager.tasks[task["id"]].model_copy(
+        update={
+            "reviewed_at": base_time + timedelta(minutes=12),
+            "updated_at": base_time + timedelta(minutes=12),
+        }
+    )
     monkeypatch.setattr(workspace_module, "_now", lambda: base_time + timedelta(minutes=15))
 
     done_response = client.patch(
@@ -5980,7 +5986,8 @@ def test_done_task_writes_delete_safe_task_record(
         ("task_queued", "1m 0s", "1m 0s"),
         ("task_started", "2m 0s", "1m 0s"),
         ("agent_report", "7m 0s", "5m 0s"),
-        ("agent_report", "12m 0s", "5m 0s"),
+        ("task_reviewed", "12m 0s", "5m 0s"),
+        ("agent_report", "12m 0s", "0s"),
         ("task_completed", "15m 0s", "3m 0s"),
     ]
     assert [
@@ -5991,7 +5998,8 @@ def test_done_task_writes_delete_safe_task_record(
         ("task_queued", 60, 60),
         ("task_started", 120, 60),
         ("agent_report", 420, 300),
-        ("agent_report", 720, 300),
+        ("task_reviewed", 720, 300),
+        ("agent_report", 720, 0),
         ("task_completed", 900, 180),
     ]
 
@@ -6070,7 +6078,7 @@ def test_abort_task_returns_active_review_to_todo_and_releases_sessions(
     reviewing_task = workspace_manager.tasks[task["id"]]
     reviewer_id = reviewing_task.review_session_id
     assert reviewer_id is not None
-    assert reviewing_task.status == WorkspaceTaskStatus.WORKING
+    assert reviewing_task.status == WorkspaceTaskStatus.REVIEW
     assert workspace_manager.sessions[started["session_id"]].current_task_id == task["id"]
     assert workspace_manager.sessions[reviewer_id].current_task_id == task["id"]
 
