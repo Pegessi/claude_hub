@@ -1453,11 +1453,36 @@ def test_manual_feedback_reaper_promotes_lesson(
             "summary": "CLI symbol probes should pass one comma-separated --symbols value.",
             "tags": ["cli", "symbols"],
             "scope": "workspace",
+            "evidence_task_ids": [task["id"]],
+            "source_record_ids": ["record-1"],
+            "confidence": 0.6,
         },
     )
     assert manual_lesson_response.status_code == 201
     manual_lesson = manual_lesson_response.json()
     assert manual_lesson["title"] == "Use comma-separated symbols"
+    duplicate_lesson_response = client.post(
+        f"/api/workspaces/{workspace['id']}/lessons",
+        json={
+            "title": "Use comma-separated symbols",
+            "summary": "CLI symbol probes should pass one comma-separated --symbols value.",
+            "tags": ["symbols", "cli"],
+            "scope": "workspace",
+            "evidence_task_ids": ["task-two"],
+            "source_record_ids": ["record-2"],
+            "confidence": 0.9,
+        },
+    )
+    assert duplicate_lesson_response.status_code == 201
+    duplicate_lesson = duplicate_lesson_response.json()
+    assert duplicate_lesson["id"] == manual_lesson["id"]
+    assert duplicate_lesson["evidence_task_ids"] == [task["id"], "task-two"]
+    assert duplicate_lesson["source_record_ids"] == ["record-1", "record-2"]
+    assert duplicate_lesson["confidence"] == 0.9
+    assert duplicate_lesson["fingerprint"] == manual_lesson["fingerprint"]
+    deduped_lessons_response = client.get(f"/api/workspaces/{workspace['id']}/lessons")
+    assert deduped_lessons_response.status_code == 200
+    assert len(deduped_lessons_response.json()) == 2
 
     delete_lesson_response = client.delete(
         f"/api/workspaces/{workspace['id']}/lessons/{manual_lesson['id']}"
@@ -1568,6 +1593,30 @@ def test_workspace_feedback_summary_uses_hidden_internal_reaper_task(
         "/api/workspaces",
         json={"name": "Internal Reaper Repo", "path": str(repo), "session_prefix": "reap"},
     ).json()
+    record_dir = tmp_path / "state" / workspace["id"] / "task_records"
+    record_dir.mkdir(parents=True)
+    record_dir.joinpath("2026-06-07T12-00-00-task-one.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "workspace_id": workspace["id"],
+                "task": {
+                    "id": "task-one",
+                    "title": "Probe symbols",
+                    "status": "done",
+                    "completed_at": "2026-06-07T12:00:00",
+                },
+                "reports": [{"state": "completed", "message": "Use comma symbols."}],
+                "artifacts": {
+                    "changed_files": [],
+                    "validation": ["CLI probe passed."],
+                    "risks": [],
+                },
+                "final_summary": "Use comma-separated symbols for CLI probes.",
+            }
+        ),
+        encoding="utf-8",
+    )
     lesson_response = client.post(
         f"/api/workspaces/{workspace['id']}/lessons",
         json={
@@ -1583,39 +1632,50 @@ def test_workspace_feedback_summary_uses_hidden_internal_reaper_task(
     response = client.post(f"/api/workspaces/{workspace['id']}/lessons/summarize")
 
     assert response.status_code == 201
-    internal_task = response.json()
-    assert internal_task["system_internal"] is True
-    assert internal_task["internal_kind"] == "feedback_reaper"
-    assert internal_task["status"] == "working"
+    summary_run = response.json()
+    assert summary_run["cache_hit"] is False
+    assert summary_run["input_record_ids"] == ["task-one"]
+    internal_task = workspace_manager.tasks[summary_run["task_id"]]
+    assert internal_task.system_internal is True
+    assert internal_task.internal_kind == "feedback_reaper"
+    assert internal_task.status == WorkspaceTaskStatus.WORKING
     assert sent_messages
     reaper_prompt = sent_messages[-1][1]
     assert "internal Feedback Reaper" in reaper_prompt
     assert "system-internal task" in reaper_prompt
+    assert "input_task_digests" in reaper_prompt
+    assert "task-one" in reaper_prompt
     assert "POST /api/workspaces/" in reaper_prompt
 
     board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
-    assert internal_task["id"] not in {task["id"] for task in board["tasks"]}
-    assert workspace_manager.tasks[internal_task["id"]].system_internal is True
+    assert internal_task.id not in {task["id"] for task in board["tasks"]}
+    assert workspace_manager.tasks[internal_task.id].system_internal is True
     audit_reports = [
         report
         for report in workspace_manager.reports_for_workspace(workspace["id"])
-        if report.task_id == internal_task["id"] and report.risk_level == "system_audit"
+        if report.task_id == internal_task.id and report.risk_level == "system_audit"
     ]
     assert audit_reports
 
     workspace_manager._write_snapshot(workspace["id"])
     snapshot = workspace_manager.snapshot_path(workspace["id"]).read_text(encoding="utf-8")
-    assert internal_task["id"] not in snapshot
+    assert internal_task.id not in snapshot
     assert "Feedback Reaper: summarize workspace lessons" not in snapshot
+    feedback_index = json.loads(
+        (tmp_path / "state" / workspace["id"] / "feedback" / "index.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert feedback_index["processed_task_records"][0]["task_id"] == "task-one"
 
     completion_response = client.post(
-        f"/api/workspaces/sessions/{internal_task['session_id']}/reports",
+        f"/api/workspaces/sessions/{internal_task.session_id}/reports",
         json={
-            "task_id": internal_task["id"],
+            "task_id": internal_task.id,
             "state": "completed",
             "message": "Internal reaper finished.",
             "changed_files": [],
-            "validation": "No new lessons needed.",
+            "validation": "skipped_reason=no_new_lessons",
             "review_decision": "skip",
             "review_reason": "System-internal Feedback Reaper audit.",
             "risk_level": "system_audit",
@@ -1623,11 +1683,40 @@ def test_workspace_feedback_summary_uses_hidden_internal_reaper_task(
     )
 
     assert completion_response.status_code == 201
-    completed = workspace_manager.tasks[internal_task["id"]]
+    completed = workspace_manager.tasks[internal_task.id]
     assert completed.status == WorkspaceTaskStatus.DONE
     assert completed.review_session_id is None
     assert completed.review_skipped_at is not None
     assert completed.review_skip_reason == "System-internal task completed without human review."
+    summary_run_files = list(
+        (tmp_path / "state" / workspace["id"] / "feedback" / "summary-runs").glob("*.json")
+    )
+    completed_run = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in summary_run_files
+        if json.loads(path.read_text(encoding="utf-8"))["id"] == summary_run["id"]
+    ][0]
+    assert completed_run["skipped_reason"] == "no_new_lessons"
+
+    sent_messages.clear()
+    cache_response = client.post(f"/api/workspaces/{workspace['id']}/lessons/summarize")
+    assert cache_response.status_code == 201
+    cached_run = cache_response.json()
+    assert cached_run["cache_hit"] is True
+    assert cached_run["task_id"] is None
+    assert cached_run["skipped_reason"] == "no_new_task_records"
+    assert sent_messages == []
+
+    force_response = client.post(
+        f"/api/workspaces/{workspace['id']}/lessons/summarize",
+        json={"force": True, "limit": 1},
+    )
+    assert force_response.status_code == 201
+    force_run = force_response.json()
+    assert force_run["cache_hit"] is False
+    assert force_run["input_record_ids"] == ["task-one"]
+    assert force_run["task_id"] in workspace_manager.tasks
+    assert sent_messages
 
 
 def test_feedback_lesson_matching_is_cjk_safe_and_does_not_fallback_to_any_lesson(

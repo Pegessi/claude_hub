@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 import uuid
@@ -12,12 +13,19 @@ from ..models import (
     FeedbackLessonDraft,
     FeedbackLessonDraftCreate,
     FeedbackLessonStatus,
+    FeedbackProcessedTaskRecord,
     FeedbackReaperRequest,
     FeedbackReaperRun,
     FeedbackRecord,
+    FeedbackSummaryMode,
+    FeedbackSummaryRun,
+    FeedbackTaskDigest,
     Workspace,
     WorkspaceTask,
 )
+
+FEEDBACK_INDEX_SCHEMA_VERSION = 1
+FEEDBACK_SUMMARY_PROMPT_VERSION = 1
 
 
 def _now() -> datetime:
@@ -57,6 +65,12 @@ class FeedbackLessonStore:
 
     def _lesson_index_path(self, workspace_id: str) -> Path:
         return self._feedback_dir(workspace_id) / "lesson-index.json"
+
+    def _feedback_index_path(self, workspace_id: str) -> Path:
+        return self._feedback_dir(workspace_id) / "index.json"
+
+    def _summary_runs_dir(self, workspace_id: str) -> Path:
+        return self._feedback_dir(workspace_id) / "summary-runs"
 
     def reap_task_feedback(
         self,
@@ -111,22 +125,77 @@ class FeedbackLessonStore:
         if not summary:
             raise ValueError("Lesson summary is required")
         lessons = self.list_lessons(workspace_id, include_inactive=True)
-        lesson_id = payload.id or self._unique_lesson_id(summary, lessons)
         title = (payload.title or "").strip() or self._title_from_summary(summary)
+        applies_when = self._clean_list(payload.applies_when)
+        tags = self._clean_list(payload.tags)
+        do = payload.do.strip()
+        avoid = payload.avoid.strip()
+        fingerprint = (payload.fingerprint or "").strip() or self._lesson_fingerprint(
+            scope=payload.scope.value,
+            title=title,
+            summary=summary,
+            applies_when=applies_when,
+            do=do,
+            avoid=avoid,
+            tags=tags,
+        )
+        existing = next(
+            (
+                lesson
+                for lesson in lessons
+                if lesson.status == FeedbackLessonStatus.ACTIVE
+                and lesson.fingerprint
+                and lesson.fingerprint == fingerprint
+            ),
+            None,
+        )
+        if existing:
+            updated = existing.model_copy(
+                update={
+                    "evidence_task_ids": self._unique_strings(
+                        [*existing.evidence_task_ids, *payload.evidence_task_ids]
+                    ),
+                    "source_draft_ids": self._unique_strings(
+                        [*existing.source_draft_ids, *payload.source_draft_ids]
+                    ),
+                    "source_record_ids": self._unique_strings(
+                        [*existing.source_record_ids, *payload.source_record_ids]
+                    ),
+                    "merged_from_ids": self._unique_strings(
+                        [
+                            *existing.merged_from_ids,
+                            *([payload.id] if payload.id and payload.id != existing.id else []),
+                        ]
+                    ),
+                    "confidence": self._max_confidence(existing.confidence, payload.confidence),
+                    "last_seen_at": now,
+                    "updated_at": now,
+                }
+            )
+            self._write_lesson_index(
+                workspace_id,
+                [updated if lesson.id == existing.id else lesson for lesson in lessons],
+            )
+            return updated
+
+        lesson_id = payload.id or self._unique_lesson_id(summary, lessons)
         lesson = FeedbackLesson(
             id=lesson_id,
             workspace_id=workspace_id,
             title=title,
+            fingerprint=fingerprint,
             status=FeedbackLessonStatus.ACTIVE,
             scope=payload.scope,
             summary=summary,
-            applies_when=self._clean_list(payload.applies_when),
-            do=payload.do.strip(),
-            avoid=payload.avoid.strip(),
-            tags=self._clean_list(payload.tags),
+            applies_when=applies_when,
+            do=do,
+            avoid=avoid,
+            tags=tags,
             evidence_task_ids=self._clean_list(payload.evidence_task_ids),
             source_draft_ids=self._clean_list(payload.source_draft_ids),
+            source_record_ids=self._clean_list(payload.source_record_ids),
             confidence=payload.confidence,
+            last_seen_at=now,
             created_at=now,
             updated_at=now,
         )
@@ -241,6 +310,123 @@ class FeedbackLessonStore:
             }
             for lesson in self.search_lessons(workspace_id, query, limit=limit)
         ]
+
+    def prepare_summary_input(
+        self,
+        workspace_id: str,
+        task_records_dir: Path,
+        *,
+        mode: FeedbackSummaryMode,
+        limit: int,
+        force: bool,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        now = now or _now()
+        limit = min(max(limit, 1), 50)
+        index = self._read_feedback_index(workspace_id)
+        existing_entries = {
+            str(item.get("path") or ""): item
+            for item in index.get("processed_task_records", [])
+            if item.get("path")
+        }
+        record_paths = sorted(task_records_dir.glob("*.json")) if task_records_dir.exists() else []
+        selected_entries: list[FeedbackProcessedTaskRecord] = []
+        processed_entries: dict[str, dict[str, Any]] = dict(existing_entries)
+
+        first_scan = not existing_entries
+        for path in record_paths:
+            path_key = str(path)
+            digest_bytes = path.read_bytes()
+            sha256 = hashlib.sha256(digest_bytes).hexdigest()
+            cached = existing_entries.get(path_key)
+            should_read = (
+                force
+                or first_scan
+                or mode == FeedbackSummaryMode.FULL
+                or not cached
+                or cached.get("sha256") != sha256
+            )
+            if should_read:
+                try:
+                    record_payload = json.loads(digest_bytes.decode("utf-8"))
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                entry = FeedbackProcessedTaskRecord(
+                    task_id=str(record_payload.get("task", {}).get("id") or path.stem),
+                    path=path_key,
+                    sha256=sha256,
+                    digest=self._digest_task_record(record_payload),
+                    summarized_at=now,
+                )
+                processed_entries[path_key] = entry.model_dump(mode="json")
+                selected_entries.append(entry)
+
+        if first_scan and selected_entries:
+            index["last_full_scan_at"] = now.isoformat()
+        sorted_processed = [
+            processed_entries[key]
+            for key in sorted(processed_entries)
+            if key in {str(path) for path in record_paths}
+        ]
+        index.update(
+            {
+                "schema_version": FEEDBACK_INDEX_SCHEMA_VERSION,
+                "workspace_id": workspace_id,
+                "prompt_version": FEEDBACK_SUMMARY_PROMPT_VERSION,
+                "processed_task_records": sorted_processed,
+            }
+        )
+        self._write_feedback_index(workspace_id, index)
+
+        if not selected_entries and (force or mode == FeedbackSummaryMode.FULL):
+            selected_entries = [
+                FeedbackProcessedTaskRecord(**item) for item in sorted_processed[-limit:]
+            ]
+        selected_entries = selected_entries[-limit:]
+        return {
+            "run_id": str(uuid.uuid4()),
+            "workspace_id": workspace_id,
+            "mode": mode.value,
+            "force": force,
+            "limit": limit,
+            "cache_hit": not selected_entries,
+            "prompt_version": FEEDBACK_SUMMARY_PROMPT_VERSION,
+            "first_scan": first_scan,
+            "processed_count": len(sorted_processed),
+            "input_records": [entry.model_dump(mode="json") for entry in selected_entries],
+            "input_record_ids": [entry.task_id for entry in selected_entries],
+            "skipped_reason": "no_new_task_records" if not selected_entries else None,
+        }
+
+    def write_summary_run(self, workspace_id: str, run: FeedbackSummaryRun) -> None:
+        directory = self._summary_runs_dir(workspace_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{self._timestamp(run.created_at)}-{run.id}.json"
+        path.write_text(run.model_dump_json(indent=2), encoding="utf-8")
+
+    def complete_summary_run(
+        self,
+        workspace_id: str,
+        task_id: str,
+        report: AgentReport,
+        *,
+        now: datetime | None = None,
+    ) -> FeedbackSummaryRun | None:
+        now = now or _now()
+        run_path, run = self._find_summary_run_by_task(workspace_id, task_id)
+        if not run_path or not run:
+            return None
+        created_ids, merged_ids, skipped_reason = self._summary_outcome_from_report(report)
+        updated = run.model_copy(
+            update={
+                "created_lesson_ids": created_ids,
+                "merged_lesson_ids": merged_ids,
+                "skipped_reason": skipped_reason,
+                "completed_at": now,
+            }
+        )
+        run_path.write_text(updated.model_dump_json(indent=2), encoding="utf-8")
+        return updated
 
     def build_reaper_prompt(
         self,
@@ -383,6 +569,51 @@ class FeedbackLessonStore:
             "lessons": [lesson.model_dump(mode="json") for lesson in lessons],
         }
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self._sync_lesson_fingerprints(workspace_id, lessons)
+
+    def _read_feedback_index(self, workspace_id: str) -> dict[str, Any]:
+        path = self._feedback_index_path(workspace_id)
+        if not path.exists():
+            return {
+                "schema_version": FEEDBACK_INDEX_SCHEMA_VERSION,
+                "workspace_id": workspace_id,
+                "prompt_version": FEEDBACK_SUMMARY_PROMPT_VERSION,
+                "last_full_scan_at": None,
+                "processed_task_records": [],
+                "lesson_fingerprints": {},
+            }
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        data.setdefault("schema_version", FEEDBACK_INDEX_SCHEMA_VERSION)
+        data.setdefault("workspace_id", workspace_id)
+        data.setdefault("prompt_version", FEEDBACK_SUMMARY_PROMPT_VERSION)
+        data.setdefault("last_full_scan_at", None)
+        data.setdefault("processed_task_records", [])
+        data.setdefault("lesson_fingerprints", {})
+        return data
+
+    def _write_feedback_index(self, workspace_id: str, payload: dict[str, Any]) -> None:
+        path = self._feedback_index_path(workspace_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload["updated_at"] = _now().isoformat()
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def _sync_lesson_fingerprints(
+        self,
+        workspace_id: str,
+        lessons: list[FeedbackLesson],
+    ) -> None:
+        index = self._read_feedback_index(workspace_id)
+        index["lesson_fingerprints"] = {
+            lesson.fingerprint: lesson.id
+            for lesson in lessons
+            if lesson.status == FeedbackLessonStatus.ACTIVE and lesson.fingerprint
+        }
+        self._write_feedback_index(workspace_id, index)
 
     def _unique_lesson_id(
         self,
@@ -401,11 +632,132 @@ class FeedbackLessonStore:
     def _unique_lesson_slug(self, summary: str) -> str:
         return _slug(summary)[:80].strip("-") or f"lesson-{uuid.uuid4().hex[:8]}"
 
+    def _lesson_fingerprint(
+        self,
+        *,
+        scope: str,
+        title: str,
+        summary: str,
+        applies_when: list[str],
+        do: str,
+        avoid: str,
+        tags: list[str],
+    ) -> str:
+        normalized = self._normalize_for_fingerprint(
+            " ".join(
+                [
+                    title,
+                    summary,
+                    " ".join(applies_when),
+                    do,
+                    avoid,
+                    " ".join(sorted(tags)),
+                ]
+            )
+        )
+        digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:16]
+        return f"{scope}:{digest}"
+
+    def _normalize_for_fingerprint(self, value: str) -> str:
+        lowered = value.lower()
+        lowered = re.sub(r"[^\w\u3400-\u9fff]+", " ", lowered)
+        return re.sub(r"\s+", " ", lowered).strip()
+
+    def _max_confidence(
+        self,
+        current: float | None,
+        incoming: float | None,
+    ) -> float | None:
+        if current is None:
+            return incoming
+        if incoming is None:
+            return current
+        return max(current, incoming)
+
     def _title_from_summary(self, summary: str) -> str:
         title = re.split(r"[。.!?]\s*", summary.strip(), maxsplit=1)[0].strip()
         if len(title) > 80:
             return f"{title[:77].rstrip()}..."
         return title or "Workspace lesson"
+
+    def _digest_task_record(self, payload: dict[str, Any]) -> FeedbackTaskDigest:
+        raw_task = payload.get("task")
+        raw_artifacts = payload.get("artifacts")
+        raw_reports = payload.get("reports")
+        task: dict[str, Any] = raw_task if isinstance(raw_task, dict) else {}
+        artifacts: dict[str, Any] = raw_artifacts if isinstance(raw_artifacts, dict) else {}
+        reports: list[Any] = raw_reports if isinstance(raw_reports, list) else []
+        report_states = [
+            str(report.get("state"))
+            for report in reports
+            if isinstance(report, dict) and report.get("state")
+        ]
+        return FeedbackTaskDigest(
+            task_id=str(task.get("id") or payload.get("task_id") or ""),
+            title=str(task.get("title") or ""),
+            status=str(task.get("status") or ""),
+            final_summary=str(payload.get("final_summary") or ""),
+            changed_files=self._list_value(artifacts.get("changed_files")),
+            validation=self._list_value(artifacts.get("validation")),
+            risks=self._list_value(artifacts.get("risks")),
+            report_states=self._unique_strings(report_states),
+            completed_at=str(task.get("completed_at") or ""),
+        )
+
+    def _list_value(self, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item) for item in value if str(item).strip()]
+
+    def _find_summary_run_by_task(
+        self,
+        workspace_id: str,
+        task_id: str,
+    ) -> tuple[Path | None, FeedbackSummaryRun | None]:
+        directory = self._summary_runs_dir(workspace_id)
+        if not directory.exists():
+            return None, None
+        for path in sorted(directory.glob("*.json"), reverse=True):
+            try:
+                run = FeedbackSummaryRun(**json.loads(path.read_text(encoding="utf-8")))
+            except Exception:
+                continue
+            if run.task_id == task_id:
+                return path, run
+        return None, None
+
+    def _summary_outcome_from_report(
+        self,
+        report: AgentReport,
+    ) -> tuple[list[str], list[str], str | None]:
+        text = "\n".join(
+            item
+            for item in [
+                report.message,
+                report.validation or "",
+                report.risks or "",
+                report.review_reason or "",
+            ]
+            if item
+        )
+        created = self._extract_named_ids(text, "created_lesson_ids")
+        merged = self._extract_named_ids(text, "merged_lesson_ids")
+        skipped = self._extract_named_value(text, "skipped_reason")
+        if not created and not merged and not skipped:
+            skipped = "missing_summary_outcome"
+        return created, merged, skipped
+
+    def _extract_named_ids(self, text: str, field: str) -> list[str]:
+        value = self._extract_named_value(text, field)
+        if not value:
+            return []
+        return self._clean_list(re.split(r"[,\s]+", value.strip("[] ")))
+
+    def _extract_named_value(self, text: str, field: str) -> str | None:
+        match = re.search(rf"{re.escape(field)}\s*[:=]\s*([^\n;]+)", text)
+        if not match:
+            return None
+        return match.group(1).strip().strip('"')
 
     def _default_feedback_summary(
         self,

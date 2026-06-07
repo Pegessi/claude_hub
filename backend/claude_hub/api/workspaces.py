@@ -14,6 +14,8 @@ from ..models import (
     FeedbackLessonCreate,
     FeedbackReaperRequest,
     FeedbackReaperRun,
+    FeedbackSummaryRequest,
+    FeedbackSummaryRun,
     ManagedSession,
     ManualTaskControlRequest,
     RequestTaskReviewRequest,
@@ -142,14 +144,22 @@ async def delete_feedback_lesson(
         raise HTTPException(status_code=404, detail="Feedback lesson not found") from e
 
 
-@router.post("/{workspace_id}/lessons/summarize", response_model=WorkspaceTask, status_code=201)
+@router.post(
+    "/{workspace_id}/lessons/summarize",
+    response_model=FeedbackSummaryRun,
+    status_code=201,
+)
 async def summarize_feedback_lessons(
     workspace_id: str,
+    payload: FeedbackSummaryRequest | None = None,
     current_user: User = Depends(get_current_user),
-) -> WorkspaceTask:
+) -> FeedbackSummaryRun:
     """Queue a system-internal Feedback Reaper task for workspace lesson summarization."""
     try:
-        return await workspace_manager.summarize_workspace_feedback(workspace_id)
+        return await workspace_manager.summarize_workspace_feedback(
+            workspace_id,
+            payload or FeedbackSummaryRequest(),
+        )
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Workspace not found") from e
     except RuntimeError as e:
