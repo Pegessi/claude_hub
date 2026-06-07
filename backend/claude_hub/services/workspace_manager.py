@@ -31,6 +31,8 @@ from ..models import (
     FeedbackLessonCreate,
     FeedbackReaperRequest,
     FeedbackReaperRun,
+    FeedbackSummaryRequest,
+    FeedbackSummaryRun,
     ManagedSession,
     ManagedSessionStatus,
     ManualTaskControlRequest,
@@ -838,15 +840,46 @@ class WorkspaceManager:
         )
         return task
 
-    async def summarize_workspace_feedback(self, workspace_id: str) -> WorkspaceTask:
+    async def summarize_workspace_feedback(
+        self,
+        workspace_id: str,
+        payload: FeedbackSummaryRequest | None = None,
+    ) -> FeedbackSummaryRun:
+        payload = payload or FeedbackSummaryRequest()
         workspace = self.workspaces.get(workspace_id)
         if not workspace:
             raise KeyError(workspace_id)
+        now = _now()
+        store = self._feedback_store()
+        summary_input = store.prepare_summary_input(
+            workspace_id,
+            self._workspace_task_records_dir(workspace_id),
+            mode=payload.mode,
+            limit=payload.limit,
+            force=payload.force,
+            now=now,
+        )
+        if summary_input["cache_hit"]:
+            run = FeedbackSummaryRun(
+                id=summary_input["run_id"],
+                workspace_id=workspace_id,
+                task_id=None,
+                mode=payload.mode,
+                input_record_ids=[],
+                cache_hit=True,
+                prompt_version=summary_input["prompt_version"],
+                skipped_reason=summary_input["skipped_reason"],
+                created_at=now,
+                completed_at=now,
+            )
+            store.write_summary_run(workspace_id, run)
+            return run
+
         task = self._create_task(
             workspace_id,
             WorkspaceTaskCreate(
                 title="Feedback Reaper: summarize workspace lessons",
-                prompt=self._build_workspace_feedback_summary_prompt(workspace),
+                prompt=self._build_workspace_feedback_summary_prompt(workspace, summary_input),
                 task_mode=WorkspaceTaskMode.REVIEWED,
                 execution_complexity=WorkspaceTaskExecutionComplexity.AUTO,
             ),
@@ -857,9 +890,25 @@ class WorkspaceManager:
             task=task,
             message="Internal Feedback Reaper task created for workspace lesson summarization.",
             message_zh="已创建内部 Feedback Reaper 任务用于总结 workspace lessons。",
-            validation="system_internal=true; internal_kind=feedback_reaper; board_visible=false",
+            validation=(
+                "system_internal=true; internal_kind=feedback_reaper; board_visible=false; "
+                f"summary_run_id={summary_input['run_id']}; "
+                f"input_record_ids={json.dumps(summary_input['input_record_ids'])}"
+            ),
         )
-        return await self.start_task(task.id, StartTaskRequest(clear_context=True))
+        run = FeedbackSummaryRun(
+            id=summary_input["run_id"],
+            workspace_id=workspace_id,
+            task_id=task.id,
+            mode=payload.mode,
+            input_record_ids=summary_input["input_record_ids"],
+            cache_hit=False,
+            prompt_version=summary_input["prompt_version"],
+            created_at=now,
+        )
+        store.write_summary_run(workspace_id, run)
+        await self.start_task(task.id, StartTaskRequest(clear_context=payload.clear_context))
+        return run
 
     def _persist_attachments(
         self,
@@ -1152,12 +1201,43 @@ class WorkspaceManager:
             raise KeyError(workspace_id)
         return self._feedback_store().archive_lesson(workspace_id, lesson_id)
 
-    def _build_workspace_feedback_summary_prompt(self, workspace: Workspace) -> str:
+    def _build_workspace_feedback_summary_prompt(
+        self,
+        workspace: Workspace,
+        summary_input: dict[str, Any],
+    ) -> str:
         lessons = self.feedback_lessons(workspace.id, limit=50)
-        lesson_lines = [
-            f"- {lesson.id}: {lesson.title or lesson.summary} - {lesson.summary}"
+        lesson_payload = [
+            {
+                "id": lesson.id,
+                "title": lesson.title,
+                "fingerprint": lesson.fingerprint,
+                "summary": lesson.summary,
+                "tags": lesson.tags,
+                "confidence": lesson.confidence,
+            }
             for lesson in lessons
-        ] or ["- No active lessons yet."]
+        ]
+        package = {
+            "summary_run": {
+                "id": summary_input["run_id"],
+                "mode": summary_input["mode"],
+                "force": summary_input["force"],
+                "limit": summary_input["limit"],
+                "prompt_version": summary_input["prompt_version"],
+                "first_scan": summary_input["first_scan"],
+                "processed_count": summary_input["processed_count"],
+                "input_record_ids": summary_input["input_record_ids"],
+            },
+            "workspace": {
+                "id": workspace.id,
+                "name": workspace.name,
+                "target": workspace.target.value,
+                "path": workspace.path,
+            },
+            "active_lessons": lesson_payload,
+            "input_task_digests": summary_input["input_records"],
+        }
         return "\n".join(
             [
                 "You are the internal Feedback Reaper for this Claude Hub workspace.",
@@ -1165,30 +1245,34 @@ class WorkspaceManager:
                 "This is a system-internal task. Do not ask the human user for acceptance, and do "
                 "not treat this as an ordinary visible workspace task.",
                 "",
-                f"Workspace: {workspace.name}",
-                f"Workspace ID: {workspace.id}",
-                f"Workspace path: {workspace.path}",
+                "Use only the bounded input package below. Do not scan the entire workspace or "
+                "read unrelated old task records unless a listed digest explicitly points to a "
+                "missing artifact you must inspect.",
                 "",
-                "Review the current workspace tasks, reports, review failures, human feedback, "
-                "and existing lessons. Condense them into short reusable rules for future agents.",
+                "Goal: condense recent completed task evidence into reusable workspace lessons. "
+                "Prefer concrete operational rules. Do not promote one-off noise.",
                 "",
-                "Existing active lessons:",
-                *lesson_lines,
+                "Deduplication rule: before creating a lesson, compare against active_lessons. "
+                "If the idea already exists, call the lesson API with matching title/summary/tags "
+                "so the backend merges evidence by fingerprint instead of creating a duplicate.",
                 "",
-                "Output concise lesson suggestions with a title, one-sentence description, and "
-                "tags. If you are confident a rule should become active, create it through the "
-                "Claude Hub lessons API for this workspace; otherwise report it as a suggestion "
-                "for a human to add in the Lessons manager.",
+                "Lessons API:",
+                f"POST /api/workspaces/{workspace.id}/lessons",
+                "Payload shape:",
+                '{"title":"short title","summary":"one-sentence description",'
+                '"tags":["tag"],"scope":"workspace","confidence":0.8,'
+                '"evidence_task_ids":["task-id"]}',
                 "",
-                f"Lessons API: POST /api/workspaces/{workspace.id}/lessons",
-                'Payload shape: {"title":"short title","summary":"one-sentence description",'
-                '"tags":["tag"],"scope":"workspace","confidence":0.8}',
+                "Completion report requirement:",
+                "POST a completed report for this internal task with changed_files=[], "
+                "review_decision=skip, risk_level=system_audit, and validation containing one "
+                "of these exact fields:",
+                "- created_lesson_ids=<comma-separated ids>",
+                "- merged_lesson_ids=<comma-separated ids>",
+                "- skipped_reason=<reason>",
                 "",
-                "Do not duplicate existing lessons. Prefer specific operational rules over broad "
-                "advice. When finished, POST a completed report for this internal task with "
-                "changed_files=[], validation summarizing what was added or skipped, "
-                "review_decision=skip, review_reason explaining that this is a system-internal "
-                "Feedback Reaper audit, and risk_level=system_audit.",
+                "Input package JSON:",
+                json.dumps(package, indent=2, ensure_ascii=False),
             ]
         )
 
@@ -3376,6 +3460,14 @@ class WorkspaceManager:
             }
         )
         self.tasks[task.id] = updated
+        summary_run = None
+        if updated.internal_kind == "feedback_reaper":
+            summary_run = self._feedback_store().complete_summary_run(
+                updated.workspace_id,
+                updated.id,
+                report,
+                now=now,
+            )
         self._record_system_task_audit(
             task=updated,
             message=(
@@ -3385,6 +3477,14 @@ class WorkspaceManager:
             validation=(
                 f"completion_report_id={report.id}; session_id={session.id}; "
                 "review_gate=skipped_internal"
+                + (
+                    f"; summary_run_id={summary_run.id}; "
+                    f"created_lesson_ids={json.dumps(summary_run.created_lesson_ids)}; "
+                    f"merged_lesson_ids={json.dumps(summary_run.merged_lesson_ids)}; "
+                    f"skipped_reason={summary_run.skipped_reason}"
+                    if summary_run
+                    else ""
+                )
             ),
             session_id=session.id,
         )

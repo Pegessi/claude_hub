@@ -8,6 +8,7 @@ import type {
   EnsureWorkspaceAgentRequest,
   FeedbackLesson,
   FeedbackLessonCreate,
+  FeedbackSummaryRun,
   ManualTaskControlRequest,
   ManagedSession,
   RequestTaskReviewRequest,
@@ -187,17 +188,21 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
-  async function summarizeFeedbackLessons() {
+  async function summarizeFeedbackLessons(): Promise<FeedbackSummaryRun | undefined> {
     if (!activeWorkspaceId.value) return
     isLoading.value = true
     error.value = null
     try {
       const response = await fetch(`${API_BASE}/workspaces/${activeWorkspaceId.value}/lessons/summarize`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
       })
       if (!response.ok) throw new Error(await readError(response))
+      const run = await response.json() as FeedbackSummaryRun
       await fetchBoard()
       await fetchFeedbackLessons()
+      return run
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Failed to summarize lessons'
       throw e

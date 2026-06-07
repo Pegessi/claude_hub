@@ -171,6 +171,13 @@ class FeedbackLessonStatus(str, Enum):
     REJECTED = "rejected"
 
 
+class FeedbackSummaryMode(str, Enum):
+    """How much workspace history an internal feedback summary should scan."""
+
+    INCREMENTAL = "incremental"
+    FULL = "full"
+
+
 class ReviewProfile(str, Enum):
     """Review lens used by reviewer agents."""
 
@@ -644,6 +651,15 @@ class FeedbackReaperRequest(BaseModel):
     lesson_drafts: List[FeedbackLessonDraftCreate] = Field(default_factory=list)
 
 
+class FeedbackSummaryRequest(BaseModel):
+    """Manual trigger payload for a workspace-level internal feedback summary."""
+
+    mode: FeedbackSummaryMode = FeedbackSummaryMode.INCREMENTAL
+    limit: int = Field(default=5, ge=1, le=50)
+    force: bool = False
+    clear_context: bool = True
+
+
 class FeedbackRecord(BaseModel):
     """Append-only task feedback evidence captured before lesson condensation."""
 
@@ -683,6 +699,7 @@ class FeedbackLessonCreate(BaseModel):
 
     id: Optional[str] = None
     title: Optional[str] = None
+    fingerprint: Optional[str] = None
     summary: str
     applies_when: List[str] = Field(default_factory=list)
     do: str = ""
@@ -690,6 +707,7 @@ class FeedbackLessonCreate(BaseModel):
     tags: List[str] = Field(default_factory=list)
     scope: FeedbackLessonScope = FeedbackLessonScope.WORKSPACE
     source_draft_ids: List[str] = Field(default_factory=list)
+    source_record_ids: List[str] = Field(default_factory=list)
     evidence_task_ids: List[str] = Field(default_factory=list)
     confidence: Optional[float] = None
 
@@ -700,6 +718,7 @@ class FeedbackLesson(BaseModel):
     id: str
     workspace_id: str
     title: str = ""
+    fingerprint: str = ""
     scope: FeedbackLessonScope = FeedbackLessonScope.WORKSPACE
     status: FeedbackLessonStatus = FeedbackLessonStatus.ACTIVE
     summary: str
@@ -709,9 +728,13 @@ class FeedbackLesson(BaseModel):
     tags: List[str] = Field(default_factory=list)
     evidence_task_ids: List[str] = Field(default_factory=list)
     source_draft_ids: List[str] = Field(default_factory=list)
+    source_record_ids: List[str] = Field(default_factory=list)
+    merged_from_ids: List[str] = Field(default_factory=list)
+    superseded_by_id: Optional[str] = None
     hit_count: int = 0
     success_count: int = 0
     confidence: Optional[float] = None
+    last_seen_at: Optional[datetime] = None
     last_used_at: Optional[datetime] = None
     last_validated_at: Optional[datetime] = None
     created_at: datetime
@@ -729,6 +752,47 @@ class FeedbackReaperRun(BaseModel):
     promoted_lessons: List[FeedbackLesson] = Field(default_factory=list)
     reaper_prompt: str
     created_at: datetime
+
+
+class FeedbackTaskDigest(BaseModel):
+    """Compact reusable digest for a completed workspace task record."""
+
+    task_id: str
+    title: str = ""
+    status: str = ""
+    final_summary: str = ""
+    changed_files: List[str] = Field(default_factory=list)
+    validation: List[str] = Field(default_factory=list)
+    risks: List[str] = Field(default_factory=list)
+    report_states: List[str] = Field(default_factory=list)
+    completed_at: Optional[str] = None
+
+
+class FeedbackProcessedTaskRecord(BaseModel):
+    """Cache entry for a task record already reduced for feedback summarization."""
+
+    task_id: str
+    path: str
+    sha256: str
+    digest: FeedbackTaskDigest
+    summarized_at: datetime
+
+
+class FeedbackSummaryRun(BaseModel):
+    """Audit record for a workspace-level internal feedback summary trigger."""
+
+    id: str
+    workspace_id: str
+    task_id: Optional[str] = None
+    mode: FeedbackSummaryMode = FeedbackSummaryMode.INCREMENTAL
+    input_record_ids: List[str] = Field(default_factory=list)
+    cache_hit: bool = False
+    prompt_version: int = 1
+    created_lesson_ids: List[str] = Field(default_factory=list)
+    merged_lesson_ids: List[str] = Field(default_factory=list)
+    skipped_reason: Optional[str] = None
+    created_at: datetime
+    completed_at: Optional[datetime] = None
 
 
 class WorkspaceBoard(BaseModel):
