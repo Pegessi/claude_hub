@@ -3,6 +3,14 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-06-07
+
+### fix: keep reviewed tasks iterating after failed review
+- Keep normal reviewed-mode tasks cycling back to their implementation agent after `review_failed`, even after multiple review attempts, instead of stopping in the human review column
+- Preserve the automated failure cap for autonomous evaluator runs, where exhausted iteration budgets intentionally wait for human review
+- Add regression coverage for repeated reviewed-task review failures continuing back to working state
+- **Files**: backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspaces.py, CHANGELOG.md
+
 ## 2026-06-06
 
 ### fix: collapse task detail secondary panels by default
