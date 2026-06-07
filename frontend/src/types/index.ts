@@ -298,6 +298,8 @@ export interface WorkspaceTask {
   clear_context?: boolean | null
   dispatch_reason?: string | null
   dispatch_pending: boolean
+  system_internal?: boolean
+  internal_kind?: string | null
   feedback_lesson_ids?: string[]
   review_session_id?: string | null
   review_attempts: number
