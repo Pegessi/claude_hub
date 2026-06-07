@@ -2,6 +2,7 @@ import importlib
 import os
 import shlex
 import stat
+import subprocess
 
 import pytest
 from pytest import MonkeyPatch
@@ -19,8 +20,13 @@ ttyd_manager_module = importlib.import_module("claude_hub.services.ttyd_manager"
 
 
 def _wrapper_script(command: str) -> str:
-    wrapper_path = shlex.split(command)[0]
+    wrapper_path = _wrapper_path(command)
     return open(wrapper_path, encoding="utf-8").read()
+
+
+def _wrapper_path(command: str) -> str:
+    parts = shlex.split(command)
+    return parts[1] if parts[:1] == ["/bin/sh"] else parts[0]
 
 
 def test_codex_tab_uses_codex_command() -> None:
@@ -79,7 +85,7 @@ def test_custom_env_is_injected_and_serialized() -> None:
     data = process.to_dict()
     schema = process.to_schema()
 
-    wrapper_path = shlex.split(cmd[-1])[0]
+    wrapper_path = _wrapper_path(cmd[-1])
     wrapper_mode = stat.S_IMODE(os.stat(wrapper_path).st_mode)
     wrapper = _wrapper_script(cmd[-1])
 
@@ -100,6 +106,32 @@ def test_custom_env_is_injected_and_serialized() -> None:
         "http_proxy": "http://127.0.0.1:7890",
         "no_proxy": "localhost,127.0.0.1",
     }
+
+
+def test_local_env_wrapper_command_executes_without_executable_bit() -> None:
+    process = TTYDProcess(
+        tab_id="tab-env-exec",
+        port=12355,
+        name="Env Exec Tab",
+        agent_type=AgentType.TERMINAL,
+        env={"CLAUDE_HUB_TEST_VALUE": "wrapper ok"},
+    )
+
+    command = process._with_env(
+        "printf '%s' \"$CLAUDE_HUB_TEST_VALUE\"; test -n \"$CLAUDE_HUB_TEST_VALUE\""
+    )
+    wrapper_path = _wrapper_path(command)
+    wrapper_mode = stat.S_IMODE(os.stat(wrapper_path).st_mode)
+    result = subprocess.run(
+        shlex.split(command),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert command.startswith("/bin/sh ")
+    assert wrapper_mode == 0o600
+    assert result.stdout == "wrapper ok"
 
 
 def test_custom_env_rejects_invalid_names() -> None:

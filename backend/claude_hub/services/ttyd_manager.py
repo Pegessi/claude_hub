@@ -425,7 +425,7 @@ asyncio.run(_main())
         )
         script_path.write_text(script, encoding="utf-8")
         os.chmod(script_path, 0o600)
-        return f"{shlex.quote(str(script_path))} {shlex.quote(command)}"
+        return f"/bin/sh {shlex.quote(str(script_path))} {shlex.quote(command)}"
 
     def _claude_model_arg(self) -> str:
         if self.agent_type != AgentType.CLAUDE:
