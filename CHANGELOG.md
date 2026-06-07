@@ -29,6 +29,24 @@
 
 ## 2026-06-06
 
+### feat: add manual workspace feedback lessons MVP
+- Add structured feedback lesson models for raw feedback records, lesson drafts, active lessons, and manual reaper runs so task evidence can be condensed without stuffing AGENTS/CLAUDE with every lesson
+- Add manual backend APIs to reap a task's feedback evidence, create/promote active workspace lessons, and list/search the active lesson index; no scheduled curator or automatic external-AI call is enabled in this change
+- Persist workspace-local feedback under `~/.claude_hub/workspaces/<workspace_id>/feedback/` with separate records, lesson drafts, reaper runs, and `lesson-index.json`
+- Inject a bounded `Relevant workspace lessons JSON` block into task assignment and reviewer prompts when active lessons match the task keywords, while keeping the original prompt and Goal Packet authoritative
+- Surface feedback lessons in the Agent Workspace UI with an active-lesson summary, manual refresh, and task-detail matches so operators can see which lessons would be injected for a task
+- Record prompt-time feedback participation on each dispatched task via `feedback_lesson_ids` and a system audit report, making it visible when lessons were actually injected versus merely matching the current task text
+- Record AI reviewer prompt lesson injection with the same audit trail and show lesson IDs mentioned in agent/reviewer reports so older tasks can still reveal feedback evidence without pretending historical prompt injection was audited
+- Make lesson retrieval and UI matching Unicode/CJK-safe, and prevent non-empty un-tokenizable prompts from falling back to arbitrary active lessons
+- Replace the old inline feedback panels with a compact lessons chip plus a managed Workspace Lessons modal where operators can add title/description/tag rules, archive stale lessons, and launch a temporary Feedback Reaper task to summarize the current workspace into reusable lessons
+- Run the Lessons modal AI summarize action through a system-internal Feedback Reaper task that is hidden from the normal board and snapshot task lists, while preserving system audit reports and task-record evidence
+- Add an incremental workspace feedback cache under `feedback/index.json` so AI summarize digests task records once, reuses cached task summaries on later runs, and force-reruns only the requested recent records
+- Add lesson fingerprints and merge metadata so duplicate lessons are merged with additional evidence/source records instead of creating repeated active rules
+- Record workspace-level summary runs under `feedback/summary-runs/`, including cache-hit status, input task records, and created/merged/skipped outcomes from the internal reaper completion report
+- Keep the Lessons modal open after AI summarize, show whether the run queued an internal reaper or skipped because no task records changed, and expose a force-run action for manual reprocessing
+- Add focused backend coverage for manual reaper storage/promotion and task assignment lesson injection
+- **Files**: backend/claude_hub/models/schemas.py, backend/claude_hub/models/__init__.py, backend/claude_hub/services/feedback_lessons.py, backend/claude_hub/services/workspace_manager.py, backend/claude_hub/api/workspaces.py, backend/tests/test_workspaces.py, frontend/src/components/AgentWorkspaceView.vue, frontend/src/stores/workspaceStore.ts, frontend/src/types/index.ts, docs/working-logs/2026-06-06-feedback-harness-plan.md, CHANGELOG.md
+
 ### fix: collapse task detail secondary panels by default
 - Keep the top task description visible while rendering Goal Packet, Assignment, Autonomous Run, Progress, and Markdown Outputs as closed-by-default collapsible panels in the task detail drawer
 - Place Markdown Outputs at the bottom of the task detail drawer so status and progress information appears before generated artifacts

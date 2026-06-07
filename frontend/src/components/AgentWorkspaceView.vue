@@ -54,6 +54,14 @@
           type="button"
           class="tool-button workspace-desktop-action"
           :disabled="!activeWorkspaceId"
+          @click="openLessonsModal"
+        >
+          Lessons
+        </button>
+        <button
+          type="button"
+          class="tool-button workspace-desktop-action"
+          :disabled="!activeWorkspaceId"
           @click="openAgentOptionsModal"
         >
           Manage Agents
@@ -112,6 +120,14 @@
               type="button"
               class="workspace-mobile-menu-item"
               :disabled="!activeWorkspaceId"
+              @click="openLessonsModalFromMenu"
+            >
+              Lessons
+            </button>
+            <button
+              type="button"
+              class="workspace-mobile-menu-item"
+              :disabled="!activeWorkspaceId"
               @click="openAgentOptionsModalFromMenu"
             >
               Manage Agents
@@ -155,6 +171,13 @@
         <span>{{ reviewerAgents.length + temporaryReviewers.length }} reviewers</span>
         <strong>{{ workspaceAgents.filter(agent => agent.runtime_status === 'working').length }} working</strong>
         <span>{{ tasksByStatus('queued').length }} queued</span>
+        <button
+          type="button"
+          class="summary-chip-button"
+          @click="openLessonsModal"
+        >
+          {{ activeFeedbackLessons.length }} lessons
+        </button>
       </div>
       <div class="workspace-column-tabs">
         <span
@@ -391,6 +414,12 @@
                     reviewer {{ reviewerTitle(task.review_session_id) }}
                   </span>
                   <span v-if="reviewStatusLabel(task)">{{ reviewStatusLabel(task) }}</span>
+                  <span
+                    v-if="injectedFeedbackLessonIds(task).length > 0"
+                    class="feedback-meta-chip"
+                  >
+                    feedback {{ injectedFeedbackLessonIds(task).length }}
+                  </span>
                   <span v-if="sessionForTask(task)">
                     runtime {{ sessionForTask(task)?.runtime_status }}
                   </span>
@@ -1642,6 +1671,174 @@
     </div>
 
     <div
+      v-if="showLessonsModal"
+      class="workspace-modal-overlay"
+      @click.self="closeLessonsModal"
+    >
+      <div class="workspace-modal lessons-manager-modal">
+        <div class="modal-heading-row">
+          <div>
+            <h3>Workspace Lessons</h3>
+            <p>{{ activeFeedbackLessons.length }} active rules for this workspace</p>
+          </div>
+          <button
+            type="button"
+            class="icon-button"
+            aria-label="Close lessons"
+            @click="closeLessonsModal"
+          >
+            x
+          </button>
+        </div>
+
+        <div class="lessons-toolbar">
+          <LoadingButton
+            type="button"
+            class="tool-button"
+            :disabled="!activeWorkspaceId"
+            :loading="isPending('feedback:summarize')"
+            loading-label="Checking"
+            @click="handleSummarizeLessons(false)"
+          >
+            AI summarize
+          </LoadingButton>
+          <LoadingButton
+            type="button"
+            class="tool-button"
+            :disabled="!activeWorkspaceId"
+            :loading="isPending('feedback:summarize:force')"
+            loading-label="Queueing"
+            @click="handleSummarizeLessons(true)"
+          >
+            Force AI run
+          </LoadingButton>
+          <LoadingButton
+            type="button"
+            class="tool-button"
+            :loading="isPending('feedback:refresh')"
+            loading-label="Refreshing"
+            @click="refreshFeedbackLessons"
+          >
+            Refresh
+          </LoadingButton>
+        </div>
+
+        <div
+          v-if="lastFeedbackSummaryRun"
+          :class="['summary-run-status', `summary-run-status--${feedbackSummaryTone(lastFeedbackSummaryRun)}`]"
+        >
+          <strong>{{ feedbackSummaryTitle(lastFeedbackSummaryRun) }}</strong>
+          <p>{{ feedbackSummaryDescription(lastFeedbackSummaryRun) }}</p>
+          <div class="summary-run-meta">
+            <span>{{ lastFeedbackSummaryRun.mode }}</span>
+            <span>{{ lastFeedbackSummaryRun.cache_hit ? 'cache hit' : 'AI queued' }}</span>
+            <span v-if="lastFeedbackSummaryRun.input_record_ids.length">
+              {{ lastFeedbackSummaryRun.input_record_ids.length }} records
+            </span>
+            <span v-if="lastFeedbackSummaryRun.task_id">
+              task {{ shortId(lastFeedbackSummaryRun.task_id) }}
+            </span>
+          </div>
+        </div>
+
+        <section class="modal-section modal-section--first">
+          <div class="modal-section-header">
+            <h4>Active Lessons</h4>
+            <span>{{ feedbackLessonMatchSummary }}</span>
+          </div>
+          <div class="lessons-list">
+            <article
+              v-for="lesson in activeFeedbackLessons"
+              :key="lesson.id"
+              class="lesson-row"
+            >
+              <div class="lesson-row-main">
+                <strong>{{ lessonTitle(lesson) }}</strong>
+                <p>{{ lessonDescription(lesson) }}</p>
+                <div class="lesson-tags">
+                  <span
+                    v-for="tag in lessonTags(lesson)"
+                    :key="`${lesson.id}-${tag}`"
+                  >
+                    {{ tag }}
+                  </span>
+                </div>
+              </div>
+              <div class="lesson-row-actions">
+                <span>{{ lesson.scope }}</span>
+                <LoadingButton
+                  type="button"
+                  class="danger-button"
+                  :loading="isPending(lessonActionKey('delete', lesson.id))"
+                  loading-label="Deleting"
+                  @click="deleteLesson(lesson)"
+                >
+                  Delete
+                </LoadingButton>
+              </div>
+            </article>
+            <div
+              v-if="activeFeedbackLessons.length === 0"
+              class="empty-inline"
+            >
+              No lessons yet.
+            </div>
+          </div>
+        </section>
+
+        <form
+          class="modal-section lesson-create-form"
+          @submit.prevent="handleCreateLesson"
+        >
+          <div class="modal-section-header">
+            <h4>Add Lesson</h4>
+          </div>
+          <div class="form-row">
+            <div class="modal-field">
+              <label>Title</label>
+              <input
+                v-model="lessonForm.title"
+                placeholder="Check workflow docs first"
+              >
+            </div>
+            <div class="modal-field">
+              <label>Tags</label>
+              <input
+                v-model="lessonForm.tags"
+                placeholder="workflow, review"
+              >
+            </div>
+          </div>
+          <div class="modal-field">
+            <label>Description</label>
+            <textarea
+              v-model="lessonForm.description"
+              placeholder="One sentence rule that future agents should reuse."
+            />
+          </div>
+          <div class="modal-actions">
+            <button
+              type="button"
+              class="tool-button"
+              @click="resetLessonForm"
+            >
+              Clear
+            </button>
+            <LoadingButton
+              type="submit"
+              class="primary-button"
+              :disabled="!lessonForm.title.trim() || !lessonForm.description.trim()"
+              :loading="isPending('feedback:create')"
+              loading-label="Adding lesson"
+            >
+              Add lesson
+            </LoadingButton>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div
       v-if="showAgentOptionsModal"
       class="workspace-modal-overlay"
       @click.self="closeAgentOptionsModal"
@@ -2071,6 +2268,8 @@ import type {
   AcceptanceCheck,
   AutonomyPolicy,
   ExecutionTarget,
+  FeedbackLesson,
+  FeedbackSummaryRun,
   GoalPacket,
   ManagedSession,
   RemoteProfile,
@@ -2124,6 +2323,7 @@ const {
   activeWorkspaceId,
   board,
   tasks,
+  activeFeedbackLessons,
   workspaceAgents,
   reviewerAgents,
   temporaryReviewers,
@@ -2141,6 +2341,8 @@ const showWorkspaceModal = ref(false)
 const workspaceModalMode = ref<'create' | 'edit'>('create')
 const editingWorkspaceId = ref<string | null>(null)
 const showAgentOptionsModal = ref(false)
+const showLessonsModal = ref(false)
+const lastFeedbackSummaryRun = ref<FeedbackSummaryRun | null>(null)
 const showAgentFileBrowser = ref(false)
 const showTaskModal = ref(false)
 const showEditTaskModal = ref(false)
@@ -2229,6 +2431,12 @@ const editTaskForm = reactive({
   has_attachments: false,
 })
 
+const lessonForm = reactive({
+  title: '',
+  description: '',
+  tags: '',
+})
+
 const activeWorkspace = computed(() =>
   workspaces.value.find(workspace => workspace.id === activeWorkspaceId.value) || null
 )
@@ -2246,6 +2454,106 @@ const mobileWorkspaceSummary = computed(() => {
 const selectedTask = computed(() =>
   tasks.value.find(task => task.id === selectedTaskId.value) || null
 )
+
+function feedbackTokens(value: string): Set<string> {
+  const text = value.toLowerCase()
+  const tokens = new Set(text.match(/[a-z0-9_.-]{2,}/g) || [])
+  const cjkChunks = text.match(/\p{Script=Han}+/gu) || []
+  cjkChunks.forEach((chunk) => {
+    for (const size of [2, 3]) {
+      if (chunk.length < size) continue
+      for (let index = 0; index <= chunk.length - size; index += 1) {
+        tokens.add(chunk.slice(index, index + size))
+      }
+    }
+  })
+  return tokens
+}
+
+function feedbackLessonText(lesson: FeedbackLesson): string {
+  return [
+    lesson.id,
+    lesson.summary,
+    lesson.do || '',
+    lesson.avoid || '',
+    ...(lesson.applies_when || []),
+    ...(lesson.tags || []),
+  ].join(' ')
+}
+
+function feedbackLessonScore(lesson: FeedbackLesson, task: WorkspaceTask): number {
+  const queryTokens = feedbackTokens(`${task.title} ${task.prompt}`)
+  if (queryTokens.size === 0) return 0
+  const lessonTokens = feedbackTokens(feedbackLessonText(lesson))
+  let score = 0
+  queryTokens.forEach((token) => {
+    if (lessonTokens.has(token)) score += 1
+  })
+  return score
+}
+
+function matchingFeedbackLessons(task: WorkspaceTask | null): FeedbackLesson[] {
+  if (!task) return []
+  return activeFeedbackLessons.value
+    .map(lesson => ({ lesson, score: feedbackLessonScore(lesson, task) }))
+    .filter(item => item.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .map(item => item.lesson)
+    .slice(0, 6)
+}
+
+function injectedFeedbackLessonIds(task: WorkspaceTask | null): string[] {
+  return Array.isArray(task?.feedback_lesson_ids) ? task.feedback_lesson_ids : []
+}
+
+function lessonTitle(lesson: FeedbackLesson): string {
+  return lesson.title?.trim() || lesson.summary.split(/[。.!?]/)[0]?.trim() || lesson.id
+}
+
+function lessonDescription(lesson: FeedbackLesson): string {
+  return lesson.summary || lesson.do || lesson.avoid || lesson.id
+}
+
+function lessonTags(lesson: FeedbackLesson): string[] {
+  return (lesson.tags || []).slice(0, 4)
+}
+
+function shortId(value: string): string {
+  return value.slice(0, 8)
+}
+
+function feedbackSummaryTone(run: FeedbackSummaryRun): 'queued' | 'skipped' | 'done' {
+  if (run.task_id) return 'queued'
+  if (run.cache_hit || run.skipped_reason) return 'skipped'
+  return 'done'
+}
+
+function feedbackSummaryTitle(run: FeedbackSummaryRun): string {
+  if (run.task_id) return 'Internal AI summary queued'
+  if (run.skipped_reason === 'no_new_task_records') return 'No new task records'
+  if (run.skipped_reason) return 'Summary skipped'
+  return 'Summary recorded'
+}
+
+function feedbackSummaryDescription(run: FeedbackSummaryRun): string {
+  if (run.task_id) {
+    return 'A hidden Feedback Reaper task was started. It will update lessons and write audit evidence when it finishes.'
+  }
+  if (run.skipped_reason === 'no_new_task_records') {
+    return 'No completed task records are available or changed, so no internal AI task was started. Force AI run can reprocess cached records once this workspace has records.'
+  }
+  if (run.skipped_reason) {
+    return `No internal AI task was started: ${run.skipped_reason}.`
+  }
+  return 'The feedback summary run was recorded.'
+}
+
+const feedbackLessonMatchSummary = computed(() => {
+  const matchedTaskCount = tasks.value.filter(task => matchingFeedbackLessons(task).length > 0).length
+  if (activeFeedbackLessons.value.length === 0) return 'No active lessons indexed'
+  if (matchedTaskCount === 0) return 'No current task matches'
+  return `${matchedTaskCount} current tasks match active lessons`
+})
 
 const selectedSession = computed(() =>
   selectedTask.value ? workspaceStore.sessionForTask(selectedTask.value) : null
@@ -3358,6 +3666,11 @@ function openAgentOptionsModalFromMenu() {
   closeWorkspaceMobileMenu()
 }
 
+function openLessonsModalFromMenu() {
+  openLessonsModal()
+  closeWorkspaceMobileMenu()
+}
+
 function toggleThemeFromMenu() {
   appStore.toggleColorScheme()
   closeWorkspaceMobileMenu()
@@ -3608,6 +3921,72 @@ function closeEditTaskModal() {
   editTaskForm.has_attachments = false
 }
 
+function openLessonsModal() {
+  showLessonsModal.value = true
+  workspaceStore.fetchFeedbackLessons().catch(() => {
+    // Error state is owned by the workspace store.
+  })
+}
+
+function closeLessonsModal() {
+  showLessonsModal.value = false
+}
+
+function resetLessonForm() {
+  lessonForm.title = ''
+  lessonForm.description = ''
+  lessonForm.tags = ''
+}
+
+function parseLessonTags(value: string): string[] {
+  return value
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean)
+}
+
+function lessonActionKey(action: string, lessonId: string) {
+  return `lesson:${action}:${lessonId}`
+}
+
+async function handleCreateLesson() {
+  const title = lessonForm.title.trim()
+  const description = lessonForm.description.trim()
+  if (!title || !description) return
+  await runPending('feedback:create', async () => {
+    await workspaceStore.createFeedbackLesson({
+      title,
+      summary: description,
+      applies_when: parseLessonTags(lessonForm.tags),
+      tags: parseLessonTags(lessonForm.tags),
+      scope: 'workspace',
+      confidence: 0.8,
+    })
+    resetLessonForm()
+  })
+}
+
+async function deleteLesson(lesson: FeedbackLesson) {
+  const confirmed = window.confirm(`Delete lesson "${lessonTitle(lesson)}"?`)
+  if (!confirmed) return
+  await runPending(lessonActionKey('delete', lesson.id), async () => {
+    await workspaceStore.deleteFeedbackLesson(lesson.id)
+  })
+}
+
+async function handleSummarizeLessons(force: boolean) {
+  if (!activeWorkspaceId.value) return
+  const actionKey = force ? 'feedback:summarize:force' : 'feedback:summarize'
+  await runPending(actionKey, async () => {
+    const run = await workspaceStore.summarizeFeedbackLessons({
+      force,
+      limit: 5,
+      clear_context: true,
+    })
+    lastFeedbackSummaryRun.value = run || null
+  })
+}
+
 async function handleCreateTask() {
   if (!taskForm.title.trim() || (!taskForm.prompt.trim() && taskForm.attachments.length === 0)) {
     return
@@ -3685,6 +4064,12 @@ async function refreshAgentStatuses() {
 async function refreshAgentStatusesFromMenu() {
   await refreshAgentStatuses()
   closeWorkspaceMobileMenu()
+}
+
+async function refreshFeedbackLessons() {
+  await runPending('feedback:refresh', async () => {
+    await workspaceStore.fetchFeedbackLessons()
+  })
 }
 
 async function startTask(task: WorkspaceTask) {
@@ -4088,6 +4473,24 @@ onUnmounted(() => {
 
 .workspace-summary-primary strong {
   color: var(--ch-color-text);
+}
+
+.summary-chip-button {
+  height: 24px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: 999px;
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.summary-chip-button:hover {
+  border-color: var(--ch-color-border-hover);
+  background: var(--ch-color-surface-control-hover);
 }
 
 .workspace-column-tabs {
@@ -5300,6 +5703,15 @@ onUnmounted(() => {
   overflow-wrap: anywhere;
 }
 
+.feedback-meta-chip {
+  border-radius: 999px;
+  background: var(--ch-color-accent-soft);
+  color: var(--ch-color-accent);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 8px;
+}
+
 .detail-actions {
   display: flex;
   flex-wrap: wrap;
@@ -6019,6 +6431,143 @@ onUnmounted(() => {
   width: min(720px, 100%);
 }
 
+.lessons-manager-modal {
+  width: min(760px, 100%);
+}
+
+.modal-heading-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.modal-heading-row h3 {
+  margin-bottom: 4px;
+}
+
+.modal-heading-row p {
+  margin: 0;
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+}
+
+.lessons-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.summary-run-status {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 16px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-soft);
+  padding: 10px 12px;
+}
+
+.summary-run-status--queued {
+  border-color: var(--ch-color-accent);
+}
+
+.summary-run-status--skipped {
+  border-color: var(--ch-color-warning);
+}
+
+.summary-run-status strong {
+  color: var(--ch-color-text);
+  font-size: 13px;
+}
+
+.summary-run-status p {
+  margin: 0;
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.summary-run-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.summary-run-meta span {
+  border-radius: 999px;
+  background: var(--ch-color-chip-bg-muted);
+  color: var(--ch-color-text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 7px;
+}
+
+.lessons-list {
+  display: grid;
+  gap: 8px;
+}
+
+.lesson-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-soft);
+  padding: 10px;
+}
+
+.lesson-row-main {
+  min-width: 0;
+}
+
+.lesson-row-main strong {
+  display: block;
+  color: var(--ch-color-text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.lesson-row-main p {
+  margin: 4px 0 0;
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.lesson-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.lesson-tags span,
+.lesson-row-actions > span {
+  border-radius: 999px;
+  background: var(--ch-color-chip-bg-muted);
+  color: var(--ch-color-text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 7px;
+}
+
+.lesson-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lesson-create-form textarea {
+  min-height: 84px;
+}
+
 .workspace-modal h3 {
   margin: 0 0 16px;
   color: var(--ch-color-text-strong);
@@ -6386,6 +6935,23 @@ onUnmounted(() => {
   .modal-actions .tool-button,
   .modal-actions .primary-button {
     flex: 1;
+  }
+
+  .modal-heading-row {
+    align-items: center;
+  }
+
+  .lessons-toolbar {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .lesson-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .lesson-row-actions {
+    justify-content: space-between;
   }
 
   .workspace-header {
