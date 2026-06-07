@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -317,6 +317,10 @@ class TerminalTabBase(BaseModel):
     remote_profile_id: Optional[str] = Field(None, description="Remote profile ID for remote tabs")
     remote_cwd: Optional[str] = Field(None, description="Remote working directory")
     remote_reconnect: bool = Field(True, description="Reconnect SSH automatically for remote tabs")
+    env: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Environment variables to inject into the launched terminal or agent",
+    )
 
 
 class TerminalTabCreate(TerminalTabBase):
@@ -337,6 +341,7 @@ class TerminalTabUpdate(BaseModel):
     remote_profile_id: Optional[str] = None
     remote_cwd: Optional[str] = None
     remote_reconnect: Optional[bool] = None
+    env: Optional[Dict[str, str]] = None
 
 
 class TerminalTab(TerminalTabBase):
@@ -531,6 +536,7 @@ class ManagedSession(BaseModel):
     remote_reconnect: bool = True
     solo_mode: bool = True
     ephemeral: bool = False
+    env: Dict[str, str] = Field(default_factory=dict)
     remote_forward_port: Optional[int] = None
     auto_continue_task_id: Optional[str] = None
     auto_continue_attempts: int = 0
@@ -657,6 +663,7 @@ class EnsureWorkspaceAgentRequest(BaseModel):
     remote_cwd: Optional[str] = None
     remote_reconnect: Optional[bool] = None
     ephemeral: bool = False
+    env: Dict[str, str] = Field(default_factory=dict)
 
 
 class StartTaskRequest(BaseModel):

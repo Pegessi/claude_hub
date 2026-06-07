@@ -1482,20 +1482,23 @@ class WorkspaceManager:
         session_workspace_path = (
             (remote_cwd or local_cwd) if session_target == ExecutionTarget.REMOTE else local_cwd
         )
-        tab = await ttyd_manager.create_tab(
-            name=title,
-            cwd=local_cwd if session_target == ExecutionTarget.LOCAL else None,
-            solo_mode=payload.solo_mode,
-            agent_type=payload.agent_type,
-            target=session_target,
-            remote_profile_id=remote_profile_id,
-            remote_cwd=remote_cwd,
-            remote_reconnect=remote_reconnect,
-            remote_forward_port=remote_forward_port,
-            workspace_id=workspace.id,
-            workspace_name=workspace.name,
-            workspace_role=role,
-        )
+        create_tab_kwargs = {
+            "name": title,
+            "cwd": local_cwd if session_target == ExecutionTarget.LOCAL else None,
+            "solo_mode": payload.solo_mode,
+            "agent_type": payload.agent_type,
+            "target": session_target,
+            "remote_profile_id": remote_profile_id,
+            "remote_cwd": remote_cwd,
+            "remote_reconnect": remote_reconnect,
+            "remote_forward_port": remote_forward_port,
+            "workspace_id": workspace.id,
+            "workspace_name": workspace.name,
+            "workspace_role": role,
+        }
+        if payload.env:
+            create_tab_kwargs["env"] = payload.env
+        tab = await ttyd_manager.create_tab(**create_tab_kwargs)
         now = _now()
         session = ManagedSession(
             id=session_id,
@@ -1518,6 +1521,7 @@ class WorkspaceManager:
             remote_reconnect=remote_reconnect,
             solo_mode=payload.solo_mode,
             ephemeral=payload.ephemeral,
+            env=payload.env,
             remote_forward_port=remote_forward_port,
             created_at=now,
             updated_at=now,
@@ -2382,6 +2386,8 @@ class WorkspaceManager:
             )
         else:
             lines.append(f"Default working directory: {session.workspace_path}")
+        if session.env:
+            lines.append("Custom environment variables: " + ", ".join(sorted(session.env.keys())))
         return "\n".join(lines)
 
     def _build_workspace_agent_prompt(self, workspace: Workspace, session: ManagedSession) -> str:

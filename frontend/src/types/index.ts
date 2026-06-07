@@ -45,6 +45,7 @@ export type AgentReportState =
 export type ReviewDecision = 'auto' | 'request' | 'skip'
 export type ReviewProfile = 'general' | 'code' | 'ui' | 'artifact' | 'delivery' | 'boundary'
 export type ReviewProfileResultStatus = 'passed' | 'failed' | 'partial' | 'not_checked'
+export type LaunchEnv = Record<string, string>
 
 export interface TerminalTab {
   id: string
@@ -57,6 +58,7 @@ export interface TerminalTab {
   remote_profile_id?: string | null
   remote_cwd?: string | null
   remote_reconnect?: boolean
+  env?: LaunchEnv
   port: number
   created_at: string
   is_active: boolean
@@ -75,6 +77,7 @@ export interface TerminalTabCreate {
   remote_profile_id?: string | null
   remote_cwd?: string | null
   remote_reconnect?: boolean
+  env?: LaunchEnv
 }
 
 export interface TerminalTabUpdate {
@@ -87,6 +90,7 @@ export interface TerminalTabUpdate {
   remote_profile_id?: string | null
   remote_cwd?: string | null
   remote_reconnect?: boolean
+  env?: LaunchEnv
 }
 
 export interface RemoteProfile {
@@ -367,6 +371,7 @@ export interface EnsureWorkspaceAgentRequest {
   remote_cwd?: string | null
   remote_reconnect?: boolean | null
   ephemeral?: boolean
+  env?: LaunchEnv
 }
 
 export interface ManagedSession {
@@ -390,6 +395,7 @@ export interface ManagedSession {
   remote_reconnect: boolean
   solo_mode: boolean
   ephemeral: boolean
+  env?: LaunchEnv
   remote_forward_port?: number | null
   auto_continue_task_id?: string | null
   auto_continue_attempts?: number

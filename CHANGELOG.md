@@ -5,6 +5,12 @@
 
 ## 2026-06-07
 
+### feat: customize launch environment variables
+- Add per-launch environment variable support for new terminal tabs and Agent Workspace agent/reviewer sessions, including backend validation and tmux/remote launch injection
+- Surface proxy-oriented presets plus editable key/value rows in the new tab and Add Agent dialogs without logging submitted values
+- Echo only custom environment variable names in managed-session bootstrap context for observability
+- **Files**: backend/claude_hub/models/schemas.py, backend/claude_hub/api/tabs.py, backend/claude_hub/services/ttyd_manager.py, backend/claude_hub/services/workspace_manager.py, backend/tests/test_ttyd_manager.py, frontend/src/components/TabBar.vue, frontend/src/components/AgentWorkspaceView.vue, frontend/src/types/index.ts, CHANGELOG.md
+
 ### fix: keep reviewed tasks iterating after failed review
 - Keep normal reviewed-mode tasks cycling back to their implementation agent after `review_failed`, even after multiple review attempts, instead of stopping in the human review column
 - Preserve the automated failure cap for autonomous evaluator runs, where exhausted iteration budgets intentionally wait for human review

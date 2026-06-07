@@ -1846,6 +1846,57 @@
             </label>
           </div>
 
+          <div class="modal-field env-editor">
+            <label>Environment Variables</label>
+            <select
+              v-model="agentOptionsForm.env_preset"
+              @change="applyAgentEnvPreset(agentOptionsForm.env_preset)"
+            >
+              <option
+                v-for="preset in envPresets"
+                :key="preset.id"
+                :value="preset.id"
+              >
+                {{ preset.name }}
+              </option>
+            </select>
+            <div class="env-row env-row-header">
+              <span>Name</span>
+              <span>Value</span>
+            </div>
+            <div
+              v-for="(entry, index) in agentOptionsForm.env_entries"
+              :key="index"
+              class="env-row"
+            >
+              <input
+                v-model="entry.name"
+                placeholder="HTTP_PROXY"
+              >
+              <input
+                v-model="entry.value"
+                placeholder="http://127.0.0.1:7890"
+              >
+              <button
+                type="button"
+                class="tool-button"
+                @click="removeAgentEnvEntry(index)"
+              >
+                Remove
+              </button>
+            </div>
+            <button
+              type="button"
+              class="tool-button env-add-button"
+              @click="addAgentEnvEntry"
+            >
+              Add variable
+            </button>
+            <p class="modal-hint">
+              Applied only to this new agent/reviewer process; values are not printed in logs.
+            </p>
+          </div>
+
           <div class="modal-actions">
             <button
               type="button"
@@ -2031,6 +2082,39 @@ interface DraftAttachment extends WorkspaceAttachmentCreate {
   size_bytes: number
 }
 
+interface EnvEntry {
+  name: string
+  value: string
+}
+
+interface EnvPreset {
+  id: string
+  name: string
+  env: Record<string, string>
+}
+
+const envPresets: EnvPreset[] = [
+  { id: 'custom', name: 'Custom', env: {} },
+  {
+    id: 'local-proxy-7890',
+    name: 'Local proxy :7890',
+    env: {
+      HTTP_PROXY: 'http://127.0.0.1:7890',
+      HTTPS_PROXY: 'http://127.0.0.1:7890',
+      ALL_PROXY: 'socks5://127.0.0.1:7890',
+      NO_PROXY: 'localhost,127.0.0.1,::1',
+    },
+  },
+  {
+    id: 'local-proxy-1080',
+    name: 'SOCKS proxy :1080',
+    env: {
+      ALL_PROXY: 'socks5://127.0.0.1:1080',
+      NO_PROXY: 'localhost,127.0.0.1,::1',
+    },
+  },
+]
+
 type WorkspaceSessionView = 'agents' | 'reviewers'
 
 const appStore = useAppStore()
@@ -2123,6 +2207,8 @@ const agentOptionsForm = reactive({
   solo_mode: true,
   remote_profile_id: '',
   remote_reconnect: true,
+  env_preset: 'custom',
+  env_entries: [] as EnvEntry[],
 })
 
 const taskForm = reactive({
@@ -3284,6 +3370,32 @@ function workspaceDefaultCwd(target: ExecutionTarget): string {
   return workspace.path || ''
 }
 
+function applyAgentEnvPreset(presetId: string) {
+  const preset = envPresets.find(item => item.id === presetId)
+  if (!preset || preset.id === 'custom') return
+  agentOptionsForm.env_entries = Object.entries(preset.env).map(([name, value]) => ({ name, value }))
+}
+
+function addAgentEnvEntry() {
+  agentOptionsForm.env_preset = 'custom'
+  agentOptionsForm.env_entries.push({ name: '', value: '' })
+}
+
+function removeAgentEnvEntry(index: number) {
+  agentOptionsForm.env_preset = 'custom'
+  agentOptionsForm.env_entries.splice(index, 1)
+}
+
+function buildEnv(entries: EnvEntry[]): Record<string, string> | undefined {
+  const env: Record<string, string> = {}
+  for (const entry of entries) {
+    const name = entry.name.trim()
+    if (!name) continue
+    env[name] = entry.value
+  }
+  return Object.keys(env).length ? env : undefined
+}
+
 function resetAgentOptionsForm() {
   const workspace = activeWorkspace.value
   agentOptionsForm.title = ''
@@ -3294,6 +3406,8 @@ function resetAgentOptionsForm() {
   agentOptionsForm.remote_reconnect = workspace?.remote_reconnect ?? true
   agentOptionsForm.remote_profile_id =
     workspace?.remote_profile_id || remoteProfiles.value[0]?.id || ''
+  agentOptionsForm.env_preset = 'custom'
+  agentOptionsForm.env_entries = []
   agentOptionsForm.cwd = workspaceDefaultCwd(agentOptionsForm.target)
 }
 
@@ -3324,6 +3438,7 @@ function closeAgentOptionsModal() {
 
 async function handleCreateAdvancedAgent() {
   const cwd = agentOptionsForm.cwd.trim()
+  const env = buildEnv(agentOptionsForm.env_entries)
   await runPending('agent:create', async () => {
     await workspaceStore.ensureWorkspaceAgent({
       agent_type: agentOptionsForm.agent_type,
@@ -3342,9 +3457,12 @@ async function handleCreateAdvancedAgent() {
         agentOptionsForm.agent_type === 'terminal'
           ? false
           : agentOptionsForm.solo_mode,
+      env,
     })
     showAgentFileBrowser.value = false
     agentOptionsForm.title = ''
+    agentOptionsForm.env_preset = 'custom'
+    agentOptionsForm.env_entries = []
     await terminalStore.fetchTabs()
   })
 }
@@ -5951,6 +6069,29 @@ onUnmounted(() => {
   color: var(--ch-color-text-soft);
   font-size: 12px;
   line-height: 1.35;
+}
+
+.env-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.env-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.env-row-header {
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.env-add-button {
+  align-self: flex-start;
 }
 
 .segmented-control {

@@ -285,6 +285,57 @@
               <span class="checkbox-desc">Reconnect SSH automatically if the network drops</span>
             </label>
           </div>
+          <div class="form-group env-editor">
+            <label>Environment Variables</label>
+            <select
+              v-model="form.env_preset"
+              class="select-input"
+              @change="applyEnvPreset(form.env_preset)"
+            >
+              <option
+                v-for="preset in envPresets"
+                :key="preset.id"
+                :value="preset.id"
+              >
+                {{ preset.name }}
+              </option>
+            </select>
+            <div class="env-row env-row-header">
+              <span>Name</span>
+              <span>Value</span>
+            </div>
+            <div
+              v-for="(entry, index) in form.env_entries"
+              :key="index"
+              class="env-row"
+            >
+              <input
+                v-model="entry.name"
+                placeholder="HTTP_PROXY"
+              >
+              <input
+                v-model="entry.value"
+                placeholder="http://127.0.0.1:7890"
+              >
+              <button
+                type="button"
+                class="env-remove-button"
+                @click="removeEnvEntry(index)"
+              >
+                Remove
+              </button>
+            </div>
+            <button
+              type="button"
+              class="btn btn-secondary env-add-button"
+              @click="addEnvEntry"
+            >
+              Add variable
+            </button>
+            <p class="form-hint">
+              Values are sent only to the launched process and are not printed in backend logs.
+            </p>
+          </div>
           <div class="modal-actions">
             <button
               type="button"
@@ -477,6 +528,39 @@ interface DirectoryListing {
   items: FileInfo[]
 }
 
+interface EnvEntry {
+  name: string
+  value: string
+}
+
+interface EnvPreset {
+  id: string
+  name: string
+  env: Record<string, string>
+}
+
+const envPresets: EnvPreset[] = [
+  { id: 'custom', name: 'Custom', env: {} },
+  {
+    id: 'local-proxy-7890',
+    name: 'Local proxy :7890',
+    env: {
+      HTTP_PROXY: 'http://127.0.0.1:7890',
+      HTTPS_PROXY: 'http://127.0.0.1:7890',
+      ALL_PROXY: 'socks5://127.0.0.1:7890',
+      NO_PROXY: 'localhost,127.0.0.1,::1',
+    },
+  },
+  {
+    id: 'local-proxy-1080',
+    name: 'SOCKS proxy :1080',
+    env: {
+      ALL_PROXY: 'socks5://127.0.0.1:1080',
+      NO_PROXY: 'localhost,127.0.0.1,::1',
+    },
+  },
+]
+
 const store = useTerminalStore()
 const appStore = useAppStore()
 const { isPending, runPending } = usePendingActions()
@@ -519,6 +603,8 @@ const form = reactive({
   target: 'local' as 'local' | 'remote',
   remote_profile_id: '',
   remote_reconnect: true,
+  env_preset: 'custom',
+  env_entries: [] as EnvEntry[],
 })
 
 const supportsSoloMode = computed(() => form.agent_type === 'claude' || form.agent_type === 'codex')
@@ -552,6 +638,32 @@ const isCreateDisabled = computed(
 
 function tabActionKey(action: string, tabId: string | null | undefined) {
   return `tab:${tabId || 'none'}:${action}`
+}
+
+function applyEnvPreset(presetId: string) {
+  const preset = envPresets.find(item => item.id === presetId)
+  if (!preset || preset.id === 'custom') return
+  form.env_entries = Object.entries(preset.env).map(([name, value]) => ({ name, value }))
+}
+
+function addEnvEntry() {
+  form.env_preset = 'custom'
+  form.env_entries.push({ name: '', value: '' })
+}
+
+function removeEnvEntry(index: number) {
+  form.env_preset = 'custom'
+  form.env_entries.splice(index, 1)
+}
+
+function buildEnv(entries: EnvEntry[]): Record<string, string> | undefined {
+  const env: Record<string, string> = {}
+  for (const entry of entries) {
+    const name = entry.name.trim()
+    if (!name) continue
+    env[name] = entry.value
+  }
+  return Object.keys(env).length ? env : undefined
 }
 
 function agentTypeLabel(agentType: AgentType): string {
@@ -844,6 +956,8 @@ watch(showModal, (newVal) => {
     form.target = 'local'
     form.remote_profile_id = remoteProfiles.value[0]?.id || ''
     form.remote_reconnect = true
+    form.env_preset = 'custom'
+    form.env_entries = []
     showFileBrowser.value = false
   }
 })
@@ -920,6 +1034,7 @@ async function handleCreateTab() {
   const remote_profile_id = target === 'remote' ? form.remote_profile_id : undefined
   const remote_cwd = target === 'remote' ? cwd : undefined
   const remote_reconnect = target === 'remote' ? form.remote_reconnect : undefined
+  const env = buildEnv(form.env_entries)
 
   if (target === 'remote' && !selectedProfile) {
     remoteProfilesError.value = 'Select a remote server first'
@@ -942,6 +1057,7 @@ async function handleCreateTab() {
       remote_profile_id,
       remote_cwd,
       remote_reconnect,
+      env,
     })
 
     form.name = ''
@@ -951,6 +1067,8 @@ async function handleCreateTab() {
     form.target = 'local'
     form.remote_profile_id = remoteProfiles.value[0]?.id || ''
     form.remote_reconnect = true
+    form.env_preset = 'custom'
+    form.env_entries = []
     showFileBrowser.value = false
     showModal.value = false
   })
@@ -1631,6 +1749,28 @@ async function handleCreateTab() {
   color: var(--ch-color-text-soft);
   font-size: 12px;
   margin-left: 24px;
+}
+
+.env-editor {
+  gap: 8px;
+}
+
+.env-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.env-row-header {
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.env-remove-button,
+.env-add-button {
+  white-space: nowrap;
 }
 
 .modal-actions {
