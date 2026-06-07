@@ -27,6 +27,12 @@ from ..models import (
     EvaluationDecision,
     EvaluationReport,
     ExecutionTarget,
+    FeedbackLesson,
+    FeedbackLessonCreate,
+    FeedbackReaperRequest,
+    FeedbackReaperRun,
+    FeedbackSummaryRequest,
+    FeedbackSummaryRun,
     ManagedSession,
     ManagedSessionStatus,
     ManualTaskControlRequest,
@@ -53,6 +59,7 @@ from ..models import (
     WorkspaceUpdate,
 )
 from . import workspace_state_policy as state_policy
+from .feedback_lessons import FeedbackLessonStore
 from .remote_profiles import remote_profile_manager
 from .ttyd_manager import ttyd_manager
 
@@ -161,6 +168,9 @@ class WorkspaceManager:
     def _workspace_attachments_dir(self, workspace_id: str) -> Path:
         return self._workspace_dir(workspace_id) / "attachments"
 
+    def _feedback_store(self) -> FeedbackLessonStore:
+        return FeedbackLessonStore(STATE_ROOT)
+
     def snapshot_path(self, workspace_id: str) -> Path:
         return self._workspace_dir(workspace_id) / "snapshot.md"
 
@@ -250,6 +260,11 @@ class WorkspaceManager:
         normalized.setdefault("clear_context", None)
         normalized.setdefault("dispatch_reason", None)
         normalized.setdefault("dispatch_pending", False)
+        normalized.setdefault("system_internal", False)
+        normalized.setdefault("internal_kind", None)
+        normalized["feedback_lesson_ids"] = self._normalize_string_list(
+            normalized.get("feedback_lesson_ids")
+        )
         normalized.setdefault("review_session_id", None)
         normalized.setdefault("review_attempts", 0)
         normalized.setdefault("review_requested_at", None)
@@ -610,7 +625,11 @@ class WorkspaceManager:
             return
 
         sessions = self._sessions_for_workspace_raw(workspace_id)
-        tasks = [task for task in self.tasks.values() if task.workspace_id == workspace_id]
+        tasks = [
+            task
+            for task in self.tasks.values()
+            if task.workspace_id == workspace_id and not task.system_internal
+        ]
         lines = [
             "# Claude Hub Workspace State",
             "",
@@ -627,7 +646,13 @@ class WorkspaceManager:
         if not sessions:
             lines.append("- No managed agents yet.")
         for session in sorted(sessions, key=lambda item: item.created_at):
-            current = session.current_task_id or session.task_id or "none"
+            current_task_id = session.current_task_id or session.task_id
+            current_task = self.tasks.get(current_task_id or "")
+            current = (
+                "system-internal"
+                if current_task and current_task.system_internal
+                else current_task_id or "none"
+            )
             lines.append(
                 "- "
                 f"{session.id}: role={session.role.value}, type={session.agent_type.value}, "
@@ -770,6 +795,16 @@ class WorkspaceManager:
         return updated
 
     def create_task(self, workspace_id: str, payload: WorkspaceTaskCreate) -> WorkspaceTask:
+        return self._create_task(workspace_id, payload)
+
+    def _create_task(
+        self,
+        workspace_id: str,
+        payload: WorkspaceTaskCreate,
+        *,
+        system_internal: bool = False,
+        internal_kind: str | None = None,
+    ) -> WorkspaceTask:
         if workspace_id not in self.workspaces:
             raise KeyError(workspace_id)
         if payload.related_task_id and payload.related_task_id not in self.tasks:
@@ -808,6 +843,8 @@ class WorkspaceManager:
             ),
             status=WorkspaceTaskStatus.TODO,
             related_task_id=payload.related_task_id,
+            system_internal=system_internal,
+            internal_kind=internal_kind,
             created_at=now,
             updated_at=now,
         )
@@ -822,6 +859,76 @@ class WorkspaceManager:
             task.agent_type,
         )
         return task
+
+    async def summarize_workspace_feedback(
+        self,
+        workspace_id: str,
+        payload: FeedbackSummaryRequest | None = None,
+    ) -> FeedbackSummaryRun:
+        payload = payload or FeedbackSummaryRequest()
+        workspace = self.workspaces.get(workspace_id)
+        if not workspace:
+            raise KeyError(workspace_id)
+        now = _now()
+        store = self._feedback_store()
+        summary_input = store.prepare_summary_input(
+            workspace_id,
+            self._workspace_task_records_dir(workspace_id),
+            mode=payload.mode,
+            limit=payload.limit,
+            force=payload.force,
+            now=now,
+        )
+        if summary_input["cache_hit"]:
+            run = FeedbackSummaryRun(
+                id=summary_input["run_id"],
+                workspace_id=workspace_id,
+                task_id=None,
+                mode=payload.mode,
+                input_record_ids=[],
+                cache_hit=True,
+                prompt_version=summary_input["prompt_version"],
+                skipped_reason=summary_input["skipped_reason"],
+                created_at=now,
+                completed_at=now,
+            )
+            store.write_summary_run(workspace_id, run)
+            return run
+
+        task = self._create_task(
+            workspace_id,
+            WorkspaceTaskCreate(
+                title="Feedback Reaper: summarize workspace lessons",
+                prompt=self._build_workspace_feedback_summary_prompt(workspace, summary_input),
+                task_mode=WorkspaceTaskMode.REVIEWED,
+                execution_complexity=WorkspaceTaskExecutionComplexity.AUTO,
+            ),
+            system_internal=True,
+            internal_kind="feedback_reaper",
+        )
+        self._record_system_task_audit(
+            task=task,
+            message="Internal Feedback Reaper task created for workspace lesson summarization.",
+            message_zh="已创建内部 Feedback Reaper 任务用于总结 workspace lessons。",
+            validation=(
+                "system_internal=true; internal_kind=feedback_reaper; board_visible=false; "
+                f"summary_run_id={summary_input['run_id']}; "
+                f"input_record_ids={json.dumps(summary_input['input_record_ids'])}"
+            ),
+        )
+        run = FeedbackSummaryRun(
+            id=summary_input["run_id"],
+            workspace_id=workspace_id,
+            task_id=task.id,
+            mode=payload.mode,
+            input_record_ids=summary_input["input_record_ids"],
+            cache_hit=False,
+            prompt_version=summary_input["prompt_version"],
+            created_at=now,
+        )
+        store.write_summary_run(workspace_id, run)
+        await self.start_task(task.id, StartTaskRequest(clear_context=payload.clear_context))
+        return run
 
     def _persist_attachments(
         self,
@@ -954,7 +1061,7 @@ class WorkspaceManager:
         snapshot_ref = str(self.snapshot_path(workspace_id))
         if artifact_ref == snapshot_ref:
             return True
-        reports = self.reports.values()
+        reports = list(self.reports.values())
         if report_id:
             report = self.reports.get(report_id)
             reports = [report] if report else []
@@ -1372,6 +1479,129 @@ class WorkspaceManager:
                 return report.message
         return reports[-1].message if reports else ""
 
+    def reap_task_feedback(
+        self,
+        task_id: str,
+        payload: FeedbackReaperRequest,
+    ) -> FeedbackReaperRun:
+        task = self.tasks.get(task_id)
+        if not task:
+            raise KeyError(task_id)
+        workspace = self.workspaces.get(task.workspace_id)
+        if not workspace:
+            raise KeyError(task.workspace_id)
+        reports = [
+            report
+            for report in self.reports_for_workspace(task.workspace_id)
+            if report.task_id == task.id
+        ]
+        return self._feedback_store().reap_task_feedback(workspace, task, reports, payload)
+
+    def create_feedback_lesson(
+        self,
+        workspace_id: str,
+        payload: FeedbackLessonCreate,
+    ) -> FeedbackLesson:
+        if workspace_id not in self.workspaces:
+            raise KeyError(workspace_id)
+        return self._feedback_store().create_lesson(workspace_id, payload)
+
+    def delete_feedback_lesson(self, workspace_id: str, lesson_id: str) -> FeedbackLesson:
+        if workspace_id not in self.workspaces:
+            raise KeyError(workspace_id)
+        return self._feedback_store().archive_lesson(workspace_id, lesson_id)
+
+    def _build_workspace_feedback_summary_prompt(
+        self,
+        workspace: Workspace,
+        summary_input: dict[str, Any],
+    ) -> str:
+        lessons = self.feedback_lessons(workspace.id, limit=50)
+        lesson_payload = [
+            {
+                "id": lesson.id,
+                "title": lesson.title,
+                "fingerprint": lesson.fingerprint,
+                "summary": lesson.summary,
+                "tags": lesson.tags,
+                "confidence": lesson.confidence,
+            }
+            for lesson in lessons
+        ]
+        package = {
+            "summary_run": {
+                "id": summary_input["run_id"],
+                "mode": summary_input["mode"],
+                "force": summary_input["force"],
+                "limit": summary_input["limit"],
+                "prompt_version": summary_input["prompt_version"],
+                "first_scan": summary_input["first_scan"],
+                "processed_count": summary_input["processed_count"],
+                "input_record_ids": summary_input["input_record_ids"],
+            },
+            "workspace": {
+                "id": workspace.id,
+                "name": workspace.name,
+                "target": workspace.target.value,
+                "path": workspace.path,
+            },
+            "active_lessons": lesson_payload,
+            "input_task_digests": summary_input["input_records"],
+        }
+        return "\n".join(
+            [
+                "You are the internal Feedback Reaper for this Claude Hub workspace.",
+                "",
+                "This is a system-internal task. Do not ask the human user for acceptance, and do "
+                "not treat this as an ordinary visible workspace task.",
+                "",
+                "Use only the bounded input package below. Do not scan the entire workspace or "
+                "read unrelated old task records unless a listed digest explicitly points to a "
+                "missing artifact you must inspect.",
+                "",
+                "Goal: condense recent completed task evidence into reusable workspace lessons. "
+                "Prefer concrete operational rules. Do not promote one-off noise.",
+                "",
+                "Deduplication rule: before creating a lesson, compare against active_lessons. "
+                "If the idea already exists, call the lesson API with matching title/summary/tags "
+                "so the backend merges evidence by fingerprint instead of creating a duplicate.",
+                "",
+                "Lessons API:",
+                f"POST /api/workspaces/{workspace.id}/lessons",
+                "Payload shape:",
+                '{"title":"short title","summary":"one-sentence description",'
+                '"tags":["tag"],"scope":"workspace","confidence":0.8,'
+                '"evidence_task_ids":["task-id"]}',
+                "",
+                "Completion report requirement:",
+                "POST a completed report for this internal task with changed_files=[], "
+                "review_decision=skip, risk_level=system_audit, and validation containing one "
+                "of these exact fields:",
+                "- created_lesson_ids=<comma-separated ids>",
+                "- merged_lesson_ids=<comma-separated ids>",
+                "- skipped_reason=<reason>",
+                "",
+                "Input package JSON:",
+                json.dumps(package, indent=2, ensure_ascii=False),
+            ]
+        )
+
+    def feedback_lessons(
+        self,
+        workspace_id: str,
+        *,
+        query: str = "",
+        limit: int = 20,
+        include_inactive: bool = False,
+    ) -> list[FeedbackLesson]:
+        if workspace_id not in self.workspaces:
+            raise KeyError(workspace_id)
+        capped_limit = min(max(limit, 1), 50)
+        store = self._feedback_store()
+        if query.strip():
+            return store.search_lessons(workspace_id, query, limit=capped_limit)
+        return store.list_lessons(workspace_id, include_inactive=include_inactive)[:capped_limit]
+
     def delete_task(self, task_id: str) -> None:
         task = self.tasks.pop(task_id, None)
         if not task:
@@ -1482,23 +1712,37 @@ class WorkspaceManager:
         session_workspace_path = (
             (remote_cwd or local_cwd) if session_target == ExecutionTarget.REMOTE else local_cwd
         )
-        create_tab_kwargs = {
-            "name": title,
-            "cwd": local_cwd if session_target == ExecutionTarget.LOCAL else None,
-            "solo_mode": payload.solo_mode,
-            "agent_type": payload.agent_type,
-            "target": session_target,
-            "remote_profile_id": remote_profile_id,
-            "remote_cwd": remote_cwd,
-            "remote_reconnect": remote_reconnect,
-            "remote_forward_port": remote_forward_port,
-            "workspace_id": workspace.id,
-            "workspace_name": workspace.name,
-            "workspace_role": role,
-        }
         if payload.env:
-            create_tab_kwargs["env"] = payload.env
-        tab = await ttyd_manager.create_tab(**create_tab_kwargs)
+            tab = await ttyd_manager.create_tab(
+                name=title,
+                cwd=local_cwd if session_target == ExecutionTarget.LOCAL else None,
+                solo_mode=payload.solo_mode,
+                agent_type=payload.agent_type,
+                target=session_target,
+                remote_profile_id=remote_profile_id,
+                remote_cwd=remote_cwd,
+                remote_reconnect=remote_reconnect,
+                remote_forward_port=remote_forward_port,
+                workspace_id=workspace.id,
+                workspace_name=workspace.name,
+                workspace_role=role,
+                env=payload.env,
+            )
+        else:
+            tab = await ttyd_manager.create_tab(
+                name=title,
+                cwd=local_cwd if session_target == ExecutionTarget.LOCAL else None,
+                solo_mode=payload.solo_mode,
+                agent_type=payload.agent_type,
+                target=session_target,
+                remote_profile_id=remote_profile_id,
+                remote_cwd=remote_cwd,
+                remote_reconnect=remote_reconnect,
+                remote_forward_port=remote_forward_port,
+                workspace_id=workspace.id,
+                workspace_name=workspace.name,
+                workspace_role=role,
+            )
         now = _now()
         session = ManagedSession(
             id=session_id,
@@ -2293,19 +2537,38 @@ class WorkspaceManager:
             task.related_task_id,
             task.dispatch_reason,
         )
+        now = _now()
+        lesson_context = self._lesson_context_payload(
+            workspace,
+            f"{task.title}\n{task.prompt}",
+        )
+        feedback_lesson_ids = [str(item["id"]) for item in lesson_context if item.get("id")]
         await self.send_session_message(
             session.id,
-            self._build_task_assignment_prompt(workspace, task, session),
+            self._build_task_assignment_prompt(
+                workspace,
+                task,
+                session,
+                lesson_context=lesson_context,
+            ),
         )
 
-        now = _now()
         self.tasks[task.id] = task.model_copy(
             update={
                 "status": WorkspaceTaskStatus.WORKING,
                 "started_at": now,
+                "feedback_lesson_ids": feedback_lesson_ids,
                 "updated_at": now,
             }
         )
+        if feedback_lesson_ids:
+            self._record_feedback_lesson_injection(
+                task=self.tasks[task.id],
+                session=session,
+                lesson_ids=feedback_lesson_ids,
+                prompt_kind="assignment",
+                created_at=now,
+            )
         self.sessions[session.id] = session.model_copy(
             update={
                 "task_id": task.id,
@@ -2547,6 +2810,8 @@ class WorkspaceManager:
         workspace: Workspace,
         task: WorkspaceTask,
         session: ManagedSession,
+        *,
+        lesson_context: list[dict[str, Any]] | None = None,
     ) -> str:
         clear_note = (
             "This task is unrelated to prior work. Treat prior conversation context as stale.\n\n"
@@ -2555,6 +2820,11 @@ class WorkspaceManager:
         )
         attachment_note = (
             f"{self._attachment_prompt_block(task.attachments)}\n\n" if task.attachments else ""
+        )
+        lesson_context_block = self._lesson_context_block_from_payload(
+            lesson_context
+            if lesson_context is not None
+            else self._lesson_context_payload(workspace, f"{task.title}\n{task.prompt}")
         )
         return (
             "New workspace task assigned.\n\n"
@@ -2569,6 +2839,7 @@ class WorkspaceManager:
             f"{clear_note}"
             f"Task description:\n{task.prompt}\n\n"
             f"{attachment_note}"
+            f"{lesson_context_block}"
             f"{self._execution_complexity_assignment_block(task)}"
             f"{self._autonomous_assignment_block(task, session.agent_type)}"
             "Start by reading the state snapshot. This workspace may contain many projects; "
@@ -2617,6 +2888,86 @@ class WorkspaceManager:
             "and risk_level. acceptance_check should map each Goal Packet acceptance criterion "
             "to status passed, failed, partial, or not_checked with evidence."
         )
+
+    def _lesson_context_payload(self, workspace: Workspace, query: str) -> list[dict[str, Any]]:
+        return self._feedback_store().lesson_context_payload(
+            workspace.id,
+            query,
+            limit=6,
+        )
+
+    def _lesson_context_block(self, workspace: Workspace, query: str) -> str:
+        return self._lesson_context_block_from_payload(
+            self._lesson_context_payload(workspace, query)
+        )
+
+    def _lesson_context_block_from_payload(self, lessons: list[dict[str, Any]]) -> str:
+        if not lessons:
+            return ""
+        return (
+            "Relevant workspace lessons JSON:\n"
+            f"{json.dumps(lessons, indent=2, ensure_ascii=False)}\n\n"
+            "Use these lessons only when they apply to this task. Do not force-fit stale or "
+            "irrelevant lessons. In the final validation or risks field, mention lesson IDs that "
+            "materially affected the work or were intentionally ignored as not applicable.\n\n"
+        )
+
+    def _record_feedback_lesson_injection(
+        self,
+        *,
+        task: WorkspaceTask,
+        session: ManagedSession,
+        lesson_ids: list[str],
+        prompt_kind: str,
+        created_at: datetime,
+    ) -> None:
+        lesson_list = ", ".join(lesson_ids)
+        report = AgentReport(
+            id=str(uuid.uuid4()),
+            workspace_id=task.workspace_id,
+            task_id=task.id,
+            session_id=session.id,
+            state=AgentReportState.WORKING,
+            message=f"Feedback lessons injected into {prompt_kind} prompt: {lesson_list}",
+            message_en=f"Feedback lessons injected into {prompt_kind} prompt: {lesson_list}",
+            message_zh=f"已将 feedback lessons 注入 {prompt_kind} prompt：{lesson_list}",
+            changed_files=[],
+            validation=f"prompt_kind={prompt_kind}; feedback_lesson_ids=" + json.dumps(lesson_ids),
+            risks=None,
+            review_decision=ReviewDecision.SKIP,
+            review_reason="System audit event for prompt-time feedback lesson injection.",
+            risk_level="system_audit",
+            created_at=created_at,
+        )
+        self.reports[report.id] = report
+
+    def _record_system_task_audit(
+        self,
+        *,
+        task: WorkspaceTask,
+        message: str,
+        message_zh: str,
+        validation: str,
+        session_id: str = "system",
+    ) -> None:
+        report = AgentReport(
+            id=str(uuid.uuid4()),
+            workspace_id=task.workspace_id,
+            task_id=task.id,
+            session_id=session_id,
+            state=AgentReportState.WORKING,
+            message=message,
+            message_en=message,
+            message_zh=message_zh,
+            changed_files=[],
+            validation=validation,
+            risks=None,
+            review_decision=ReviewDecision.SKIP,
+            review_reason="System audit event for an internal workspace task.",
+            risk_level="system_audit",
+            created_at=_now(),
+        )
+        self.reports[report.id] = report
 
     def _execution_complexity_assignment_block(self, task: WorkspaceTask) -> str:
         if task.execution_complexity == WorkspaceTaskExecutionComplexity.SIMPLE:
@@ -2978,6 +3329,7 @@ class WorkspaceManager:
         task: WorkspaceTask,
         reviewer: ManagedSession,
         trigger_report: AgentReport,
+        lesson_context: list[dict[str, Any]] | None = None,
     ) -> str:
         task_reports = [
             report
@@ -3010,6 +3362,14 @@ class WorkspaceManager:
             for report in task_reports
         ]
         profiles = self._effective_review_profiles(task, trigger_report)
+        lesson_context_block = self._lesson_context_block_from_payload(
+            lesson_context
+            if lesson_context is not None
+            else self._lesson_context_payload(
+                workspace,
+                f"{task.title}\n{task.prompt}\n{trigger_report.message}",
+            )
+        )
         return (
             "Review workspace task.\n\n"
             f"Workspace: {workspace.name}\n"
@@ -3029,6 +3389,7 @@ class WorkspaceManager:
             f"{self._autonomous_review_block(task)}"
             f"{self._review_profile_prompt_block(profiles)}"
             f"{self._review_guidance_block(workspace, trigger_report)}"
+            f"{lesson_context_block}"
             "Review workflow:\n"
             "1. Stay read-only. Do not edit files, run formatters that write changes, or revert work.\n"
             "2. Check whether the stored Goal Packet faithfully preserves the original task prompt. "
@@ -3377,6 +3738,9 @@ class WorkspaceManager:
             return
         if session.role != WorkspaceSessionRole.ORCHESTRATOR:
             return
+        if task.system_internal:
+            await self._handle_internal_task_report(task, session, report)
+            return
         if not state_policy.is_review_gate_state(report.state):
             return
         if task.review_requested_at and not task.review_completed_at:
@@ -3407,6 +3771,62 @@ class WorkspaceManager:
             await self._request_task_review(task, report)
             return
         self._mark_task_review_skipped(task, report)
+
+    async def _handle_internal_task_report(
+        self,
+        task: WorkspaceTask,
+        session: ManagedSession,
+        report: AgentReport,
+    ) -> None:
+        if report.state not in {
+            AgentReportState.COMPLETED,
+            AgentReportState.READY_FOR_REVIEW,
+        }:
+            return
+        now = _now()
+        updated = self.tasks[task.id].model_copy(
+            update={
+                "status": WorkspaceTaskStatus.DONE,
+                "review_skipped_at": now,
+                "review_skip_reason": "System-internal task completed without human review.",
+                "completed_at": now,
+                "human_accepted_at": None,
+                "updated_at": now,
+            }
+        )
+        self.tasks[task.id] = updated
+        summary_run = None
+        if updated.internal_kind == "feedback_reaper":
+            summary_run = self._feedback_store().complete_summary_run(
+                updated.workspace_id,
+                updated.id,
+                report,
+                now=now,
+            )
+        self._record_system_task_audit(
+            task=updated,
+            message=(
+                "Internal Feedback Reaper completed and was archived without ordinary review."
+            ),
+            message_zh="内部 Feedback Reaper 已完成，并已跳过普通 review 归档。",
+            validation=(
+                f"completion_report_id={report.id}; session_id={session.id}; "
+                "review_gate=skipped_internal"
+                + (
+                    f"; summary_run_id={summary_run.id}; "
+                    f"created_lesson_ids={json.dumps(summary_run.created_lesson_ids)}; "
+                    f"merged_lesson_ids={json.dumps(summary_run.merged_lesson_ids)}; "
+                    f"skipped_reason={summary_run.skipped_reason}"
+                    if summary_run
+                    else ""
+                )
+            ),
+            session_id=session.id,
+        )
+        self._write_task_record(updated)
+        self._release_task_session(updated)
+        self._save_state()
+        await self.dispatch_workspace(updated.workspace_id)
 
     async def _should_request_task_review(
         self,
@@ -3735,6 +4155,14 @@ class WorkspaceManager:
             raise KeyError(task.workspace_id)
         reviewer = await self._select_or_create_reviewer(workspace, task)
         now = _now()
+        lesson_context = self._lesson_context_payload(
+            workspace,
+            f"{task.title}\n{task.prompt}\n{trigger_report.message}",
+        )
+        feedback_lesson_ids = [str(item["id"]) for item in lesson_context if item.get("id")]
+        task_feedback_lesson_ids = list(
+            dict.fromkeys([*task.feedback_lesson_ids, *feedback_lesson_ids])
+        )
         reviewer = await self._rename_session_for_task(reviewer, task, updated_at=now)
         autonomous_run = task.autonomous_run
         if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
@@ -3765,6 +4193,7 @@ class WorkspaceManager:
                 "completed_at": None,
                 "human_acceptance_requested_at": None,
                 "human_accepted_at": None,
+                "feedback_lesson_ids": task_feedback_lesson_ids,
                 "autonomous_run": autonomous_run,
                 "updated_at": now,
             }
@@ -3781,6 +4210,14 @@ class WorkspaceManager:
                 "last_activity_at": now,
             }
         )
+        if feedback_lesson_ids:
+            self._record_feedback_lesson_injection(
+                task=self.tasks[task.id],
+                session=self.sessions[reviewer.id],
+                lesson_ids=feedback_lesson_ids,
+                prompt_kind="reviewer",
+                created_at=now,
+            )
         self._save_state()
         is_same_task_continuation = task.review_session_id == reviewer.id
         should_clear_context = not is_same_task_continuation and self._has_prior_review_history(
@@ -3802,6 +4239,7 @@ class WorkspaceManager:
                     self.tasks[task.id],
                     self.sessions[reviewer.id],
                     trigger_report,
+                    lesson_context=lesson_context,
                 ),
             )
         except Exception as exc:
@@ -4133,15 +4571,24 @@ class WorkspaceManager:
             [
                 task
                 for task in self.tasks.values()
-                if task.session_id == session_id and task.status == WorkspaceTaskStatus.QUEUED
+                if task.session_id == session_id
+                and task.status == WorkspaceTaskStatus.QUEUED
+                and not task.system_internal
             ]
         )
 
     def _with_assignment_summary(self, session: ManagedSession) -> ManagedSession:
         current_task_id = session.current_task_id or session.task_id
+        current_task = self.tasks.get(current_task_id or "")
+        visible_current_task_id = (
+            None if current_task and current_task.system_internal else current_task_id
+        )
         return session.model_copy(
             update={
-                "current_task_id": current_task_id,
+                "task_id": (
+                    None if current_task and current_task.system_internal else session.task_id
+                ),
+                "current_task_id": visible_current_task_id,
                 "queued_count": self._queued_count(session.id),
             }
         )
@@ -4154,7 +4601,11 @@ class WorkspaceManager:
         await self._refresh_session_statuses(workspace_id)
         self._reconcile_task_report_statuses(workspace_id)
         self._sync_workspace_tab_metadata(workspace_id)
-        tasks = [task for task in self.tasks.values() if task.workspace_id == workspace_id]
+        tasks = [
+            task
+            for task in self.tasks.values()
+            if task.workspace_id == workspace_id and not task.system_internal
+        ]
         sessions = self.sessions_for_workspace(workspace_id)
         reports = self.reports_for_workspace(workspace_id)
         return WorkspaceBoard(

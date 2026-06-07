@@ -399,21 +399,45 @@ Validation:
 - manual review of dashboard against archived records,
 - compare before/after review-failure and rework rates.
 
-## Minimal First PR
+## Manual MVP Implementation
 
-The smallest valuable implementation PR should not change prompts yet. It
-should add:
+The first implementation keeps the learning loop manual and user-invisible:
 
-- `FeedbackRecord` schema and normalization,
-- feedback storage directory helpers,
-- a read-only generator from archived task record to feedback record,
-- AI reviewer feedback extraction from existing report records,
-- `lesson-index.json` writer with tags and source record IDs,
-- tests with a fixture task record,
-- one docs update explaining how to interpret records.
+- `POST /api/workspaces/tasks/{task_id}/feedback/reap` collects the task,
+  reports, validation, risks, acceptance evidence, and artifact refs into a
+  `FeedbackRecord`.
+- The same endpoint can accept manual or AI-produced `lesson_drafts`. A draft
+  with `promote_to_active=true` is immediately written into the workspace active
+  `lesson-index.json`.
+- `POST /api/workspaces/{workspace_id}/lessons` manually creates or promotes an
+  active lesson without needing a task reaper run.
+- `GET /api/workspaces/{workspace_id}/lessons?query=...` lists or keyword
+  searches active lessons for manual inspection.
+- Task assignment prompts and reviewer prompts query the workspace active
+  lesson index and inject a small `Relevant workspace lessons JSON` block when
+  there are keyword matches.
 
-This gives Claude Hub a real feedback artifact while keeping runtime behavior
-unchanged.
+Storage layout:
+
+- `~/.claude_hub/workspaces/<workspace_id>/feedback/records/*.json`
+- `~/.claude_hub/workspaces/<workspace_id>/feedback/lesson-drafts/*.json`
+- `~/.claude_hub/workspaces/<workspace_id>/feedback/runs/*.json`
+- `~/.claude_hub/workspaces/<workspace_id>/feedback/lesson-index.json`
+
+This is deliberately not a scheduler. There is no daily/weekly curator, no
+automatic background reaper on task completion, and no direct external LLM call
+inside the backend. The backend owns the orchestration and persistence path; a
+human or future internal AI worker can supply the condensed lesson drafts.
+
+Manual condensation flow:
+
+1. Run the reaper endpoint with no `lesson_drafts` to get the raw
+   `FeedbackRecord` plus `reaper_prompt`.
+2. Give `reaper_prompt` to a dedicated AI reaper worker or human reviewer.
+3. Call the same endpoint again with returned `lesson_drafts`, or call the
+   lesson creation endpoint directly for approved lessons.
+4. Future task/review prompts retrieve only active matching lessons from
+   `lesson-index.json`.
 
 ## Open Questions
 
