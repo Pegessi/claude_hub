@@ -696,7 +696,7 @@ class FeedbackSummaryRequest(BaseModel):
     """Manual trigger payload for a workspace-level internal feedback summary."""
 
     mode: FeedbackSummaryMode = FeedbackSummaryMode.INCREMENTAL
-    limit: int = Field(default=50, ge=1, le=200)
+    limit: int = Field(default=5, ge=1, le=50)
     force: bool = False
     clear_context: bool = True
 
@@ -806,10 +806,6 @@ class FeedbackTaskDigest(BaseModel):
     validation: List[str] = Field(default_factory=list)
     risks: List[str] = Field(default_factory=list)
     report_states: List[str] = Field(default_factory=list)
-    report_state_sequence: List[str] = Field(default_factory=list)
-    review_failed_count: int = 0
-    needs_input_count: int = 0
-    report_total: int = 0
     completed_at: Optional[str] = None
 
 
