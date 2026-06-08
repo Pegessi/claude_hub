@@ -79,6 +79,12 @@ REVIEW_RUNTIME_REOPEN_GRACE_SECONDS = 20
 MAX_AUTOMATED_REVIEW_FAILURES = 3
 PROMPT_DISPATCH_STALL_GRACE_SECONDS = 20
 PROMPT_DISPATCH_RETRY_GRACE_SECONDS = 10
+# How long the fallback reaper waits after a review_requested_at timestamp
+# (or after the reviewer's last terminal activity) before treating an
+# idle-looking reviewer as stuck. Covers the gap between dispatching a
+# review prompt and the reviewer actually emitting first tokens — without
+# this grace, a slow-to-start reviewer is repeatedly re-dispatched.
+REVIEW_REAPER_DISPATCH_GRACE_SECONDS = 60
 PROMPT_STUCK_RISK_LEVEL = "prompt_dispatch_stalled"
 WORKSPACE_MONITOR_INTERVAL_SECONDS = 5
 AUTO_CONTINUE_MESSAGE = (
@@ -4912,6 +4918,29 @@ class WorkspaceManager:
             changed = True
         return changed
 
+    def _review_dispatch_in_reaper_grace(self, task: WorkspaceTask, *, now: datetime) -> bool:
+        """Return True when a review dispatch is recent enough that the
+        reviewer may simply be slow to emit first tokens. The fallback
+        reaper should not redispatch in this window even when
+        ``_reviewer_is_active`` reports False, because the terminal
+        classifier briefly reports IDLE between bursts of model output.
+
+        We grant the grace based on whichever of the two timestamps is
+        more recent: when the review was last requested, or when the
+        assigned reviewer last had terminal activity recorded.
+        """
+        candidates: list[datetime] = []
+        if task.review_requested_at:
+            candidates.append(task.review_requested_at)
+        if task.review_session_id:
+            reviewer = self.sessions.get(task.review_session_id)
+            if reviewer and reviewer.last_activity_at:
+                candidates.append(reviewer.last_activity_at)
+        if not candidates:
+            return False
+        latest = max(candidates)
+        return (now - latest).total_seconds() < REVIEW_REAPER_DISPATCH_GRACE_SECONDS
+
     async def _reap_stuck_reviews(self, workspace_id: str) -> int:
         """Fallback reaper: find tasks whose review dispatch appears stuck
         (review-requested or REVIEW status with no active reviewer) and
@@ -4952,6 +4981,16 @@ class WorkspaceManager:
             if not task.session_id:
                 continue
             now = _now()
+            if self._review_dispatch_in_reaper_grace(task, now=now):
+                # Reviewer was just dispatched (or has very recent terminal
+                # activity). The terminal classifier can briefly report IDLE
+                # while the model produces its first tokens — wait the
+                # configured grace before declaring the dispatch stuck.
+                logger.debug(
+                    "Skipping fallback reaper for task_id=%s within dispatch grace",
+                    task.id,
+                )
+                continue
             latest_state = self._latest_report_state(task.id)
             trigger_state = (
                 latest_state
