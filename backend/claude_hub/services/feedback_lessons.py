@@ -348,6 +348,101 @@ class FeedbackLessonStore:
             for lesson in self.search_lessons(workspace_id, query, limit=limit)
         ]
 
+    def increment_lesson_usage(
+        self,
+        workspace_id: str,
+        lesson_ids: list[str],
+        *,
+        success: bool = False,
+        now: datetime | None = None,
+    ) -> None:
+        if not lesson_ids:
+            return
+        now = now or _now()
+        lessons = self.list_lessons(workspace_id, include_inactive=True)
+        id_set = {str(lid) for lid in lesson_ids if str(lid).strip()}
+        if not id_set:
+            return
+        changed = False
+        for lesson in lessons:
+            if lesson.id not in id_set:
+                continue
+            update: dict[str, Any] = {
+                "hit_count": (lesson.hit_count or 0) + 1,
+                "last_used_at": now,
+            }
+            if success:
+                update["success_count"] = (lesson.success_count or 0) + 1
+            lessons[lessons.index(lesson)] = lesson.model_copy(update=update)
+            changed = True
+        if changed:
+            self._write_lesson_index(workspace_id, lessons)
+
+    def render_lessons_catalog_md(
+        self,
+        workspace_id: str,
+        workspace_name: str | None = None,
+    ) -> str:
+        lessons = self.list_lessons(workspace_id, include_inactive=True)
+        active = [l for l in lessons if l.status == FeedbackLessonStatus.ACTIVE]
+        archived = [l for l in lessons if l.status == FeedbackLessonStatus.ARCHIVED]
+        lines: list[str] = []
+        title = f"Lessons Catalog — {workspace_name or workspace_id}"
+        lines.append(f"# {title}")
+        lines.append("")
+        lines.append(
+            f"Auto-generated from `feedback/lesson-index.json`. "
+            f"{len(active)} active, {len(archived)} archived."
+        )
+        lines.append("")
+        lines.append("## Active Lessons")
+        lines.append("")
+        if not active:
+            lines.append("_No active lessons yet._")
+            lines.append("")
+        for lesson in active:
+            confidence = lesson.confidence if lesson.confidence is not None else 0.0
+            lines.append(f"### {lesson.title}")
+            lines.append("")
+            lines.append(
+                f"- **id**: `{lesson.id}`  "
+                f"**scope**: `{lesson.scope.value}`  "
+                f"**confidence**: {confidence:.2f}  "
+                f"**hits**: {lesson.hit_count or 0}  "
+                f"**successes**: {lesson.success_count or 0}"
+            )
+            if lesson.last_used_at:
+                lines.append(f"- **last_used_at**: {lesson.last_used_at.isoformat()}")
+            if lesson.tags:
+                lines.append(f"- **tags**: {', '.join(f'`{t}`' for t in lesson.tags)}")
+            lines.append("")
+            lines.append(f"**Summary**: {lesson.summary}")
+            lines.append("")
+            if lesson.applies_when:
+                lines.append("**Applies when**:")
+                for item in lesson.applies_when:
+                    lines.append(f"- {item}")
+                lines.append("")
+            if lesson.do:
+                lines.append(f"**Do**: {lesson.do}")
+                lines.append("")
+            if lesson.avoid:
+                lines.append(f"**Avoid**: {lesson.avoid}")
+                lines.append("")
+            if lesson.evidence_task_ids:
+                lines.append(
+                    "**Evidence tasks**: "
+                    + ", ".join(f"`{tid}`" for tid in lesson.evidence_task_ids)
+                )
+                lines.append("")
+        if archived:
+            lines.append("## Archived Lessons")
+            lines.append("")
+            for lesson in archived:
+                lines.append(f"- `{lesson.id}` — {lesson.title}")
+            lines.append("")
+        return "\n".join(lines)
+
     def prepare_summary_input(
         self,
         workspace_id: str,
