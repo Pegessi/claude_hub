@@ -103,6 +103,7 @@ task.
 | Auto Mode sub-agent orchestration | `docs/working-logs/2026-06-01-auto-mode-cli-subagent-orchestration.md` |
 | Long-running autonomous timing / heartbeat | `docs/working-logs/2026-06-04-auto-mode-observability.md` |
 | Feedback harness / lesson retrieval plan | `docs/working-logs/2026-06-06-feedback-harness-plan.md` |
+| Active lessons / workspace feedback | `docs/working-logs/lessons-catalog.md` |
 | Terminal replay, ttyd, tmux, Playwright terminal debug | `docs/terminal-debugging.md` |
 | Deployment | `docs/DEPLOYMENT.md` |
 
