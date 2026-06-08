@@ -96,6 +96,13 @@ AUTO_REPORT_MISSING_MESSAGE = (
 ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024
 ARTIFACT_PREVIEW_MAX_BYTES = 512 * 1024
 MARKDOWN_ARTIFACT_SUFFIXES = {".md", ".markdown", ".mdown", ".mkd"}
+# macOS NAME_MAX = 255 bytes per path component; Linux NAME_MAX is typically 255 too.
+# Any changed_files / artifact_ref entry with a path component longer than this is
+# certainly not a real filesystem path (it is a descriptive string accidentally placed
+# in a changed_files slot). Rejecting these early avoids OSError(ENAMETOOLONG) deep
+# inside pathlib / syscalls when we later join the workspace root or call .resolve().
+_PATH_COMPONENT_NAME_MAX_BYTES = 255
+_PATH_TOTAL_MAX_BYTES = 1024
 MARKDOWN_DISCOVERY_LIMIT = 20
 MARKDOWN_DISCOVERY_EXCLUDED_DIRS = {
     ".git",
@@ -1052,6 +1059,69 @@ class WorkspaceManager:
             value = match.group(1)
         return value.strip()
 
+    @staticmethod
+    def _path_looks_like_real_file(raw: str) -> bool:
+        """Return True only if *raw* plausibly represents a real filesystem path.
+
+        Rejects entries that contain control characters, obviously descriptive
+        punctuation (e.g. full sentences embedded in changed_files), total length
+        or per-component length exceeding POSIX NAME_MAX / PATH_MAX, or ASCII
+        whitespace inside a path component. These guards keep downstream
+        ``Path``/``.resolve()`` calls from throwing ``OSError(ENAMETOOLONG)`` on
+        macOS when an agent report accidentally puts a prose string into
+        ``changed_files``.
+        """
+        if not raw:
+            return False
+        value = raw.strip()
+        if not value or len(value.encode("utf-8", "ignore")) > _PATH_TOTAL_MAX_BYTES:
+            return False
+        # Reject obvious control characters / NULs early.
+        if any(ord(ch) < 0x20 for ch in value):
+            return False
+        # Disallow NUL bytes.
+        if "\x00" in value:
+            return False
+        parts = value.split("/")
+        for part in parts:
+            if not part:
+                # Leading, trailing, or doubled slashes are fine (skip empty segment).
+                continue
+            part_bytes = len(part.encode("utf-8", "ignore"))
+            if part_bytes > _PATH_COMPONENT_NAME_MAX_BYTES:
+                return False
+            # A real path component does not contain parentheses, brackets,
+            # colons after the basename, semicolons, or multiple consecutive
+            # spaces — these strongly indicate prose rather than a filename.
+            if any(ch in part for ch in ("(", ")", "[", "]", ";", "{", "}")):
+                return False
+            if "  " in part:
+                return False
+        return True
+
+    @staticmethod
+    def _safe_lower_suffix(raw_ref: str) -> str:
+        """Return ``Path(raw_ref).suffix.lower()`` without propagating ``OSError``.
+
+        On macOS ``pathlib`` can raise ``OSError(63, 'File name too long')``
+        even for what look like pure string operations when a path component
+        exceeds ``NAME_MAX``. Callers that iterate report-provided
+        ``changed_files`` / ``artifact_refs`` must use this helper instead of
+        constructing a ``Path`` directly just to read the suffix.
+        """
+        if not raw_ref:
+            return ""
+        try:
+            return Path(raw_ref).suffix.lower()
+        except (OSError, ValueError):
+            pass
+        # Fallback: pure string suffix extraction from the last path segment.
+        basename = raw_ref.replace("\\", "/").rsplit("/", 1)[-1]
+        dot = basename.rfind(".")
+        if dot <= 0 or dot == len(basename) - 1:
+            return ""
+        return basename[dot:].lower()
+
     def _markdown_ref_belongs_to_workspace_report(
         self,
         workspace_id: str,
@@ -1082,7 +1152,7 @@ class WorkspaceManager:
             return False
         try:
             self._resolve_workspace_markdown_path(workspace, artifact_ref)
-        except (KeyError, ValueError):
+        except (KeyError, ValueError, OSError):
             return False
         return True
 
@@ -1092,11 +1162,23 @@ class WorkspaceManager:
         artifact_ref: str,
         report_id: str | None = None,
     ) -> Path:
-        if Path(artifact_ref).suffix.lower() not in MARKDOWN_ARTIFACT_SUFFIXES:
+        if not self._path_looks_like_real_file(artifact_ref):
+            raise KeyError(artifact_ref)
+        if self._safe_lower_suffix(artifact_ref) not in MARKDOWN_ARTIFACT_SUFFIXES:
             raise ValueError("Only Markdown artifact previews are supported")
-        snapshot_path = self.snapshot_path(workspace.id).resolve()
-        path = Path(artifact_ref).expanduser()
-        if path.is_absolute():
+        try:
+            snapshot_path = self.snapshot_path(workspace.id).resolve()
+        except OSError as exc:
+            raise KeyError(artifact_ref) from exc
+        try:
+            path = Path(artifact_ref).expanduser()
+        except (OSError, ValueError):
+            raise KeyError(artifact_ref)
+        try:
+            is_absolute = path.is_absolute()
+        except OSError:
+            is_absolute = False
+        if is_absolute:
             try:
                 resolved = path.resolve(strict=True)
             except OSError as exc:
@@ -1141,13 +1223,19 @@ class WorkspaceManager:
         workspace: Workspace,
         report_id: str | None = None,
     ) -> list[Path]:
-        roots = [Path(workspace.path).expanduser().resolve()]
+        try:
+            roots: list[Path] = [Path(workspace.path).expanduser().resolve()]
+        except (OSError, ValueError):
+            roots = []
         report = self.reports.get(report_id) if report_id else None
         if report:
             session = self.sessions.get(report.session_id)
             if session and session.workspace_path:
-                session_root = Path(session.workspace_path).expanduser().resolve()
-                if session_root not in roots:
+                try:
+                    session_root = Path(session.workspace_path).expanduser().resolve()
+                except (OSError, ValueError):
+                    session_root = None
+                if session_root is not None and session_root not in roots:
                     roots.append(session_root)
         return roots
 
@@ -1169,7 +1257,9 @@ class WorkspaceManager:
             ):
                 for raw_ref in refs:
                     artifact_ref = self._clean_markdown_ref(raw_ref)
-                    if Path(artifact_ref).suffix.lower() not in MARKDOWN_ARTIFACT_SUFFIXES:
+                    if not self._path_looks_like_real_file(artifact_ref):
+                        continue
+                    if self._safe_lower_suffix(artifact_ref) not in MARKDOWN_ARTIFACT_SUFFIXES:
                         continue
                     try:
                         resolved = self._resolve_workspace_markdown_path(
@@ -1177,7 +1267,7 @@ class WorkspaceManager:
                             artifact_ref,
                             report.id,
                         )
-                    except (KeyError, ValueError):
+                    except (KeyError, ValueError, OSError):
                         continue
                     self._add_markdown_document(
                         documents,
@@ -1190,12 +1280,16 @@ class WorkspaceManager:
                     )
 
         snapshot = self.snapshot_path(workspace_id)
-        if snapshot.exists():
+        try:
+            snapshot_resolved = snapshot.resolve() if snapshot.exists() else None
+        except OSError:
+            snapshot_resolved = None
+        if snapshot_resolved is not None:
             self._add_markdown_document(
                 documents,
                 source=WorkspaceMarkdownDocumentSource.SNAPSHOT,
                 artifact_ref=str(snapshot),
-                resolved=snapshot.resolve(),
+                resolved=snapshot_resolved,
                 task_id=None,
                 report_id=None,
                 session_id=None,
@@ -1246,15 +1340,22 @@ class WorkspaceManager:
         )
 
     def _display_markdown_path(self, artifact_ref: str, resolved: Path) -> str:
-        path = Path(artifact_ref)
-        if not path.is_absolute():
+        try:
+            path = Path(artifact_ref)
+            is_absolute = path.is_absolute()
+        except (OSError, ValueError):
+            is_absolute = False
+        if not is_absolute:
             return artifact_ref
         for workspace in self.workspaces.values():
             try:
                 return str(resolved.relative_to(Path(workspace.path).expanduser().resolve()))
-            except ValueError:
+            except (ValueError, OSError):
                 continue
-        return resolved.name
+        try:
+            return resolved.name
+        except OSError:
+            return artifact_ref
 
     def _add_discovered_markdown_documents(
         self,
@@ -1370,6 +1471,30 @@ class WorkspaceManager:
             self._release_task_session(self.tasks[task.id])
         elif status == WorkspaceTaskStatus.WORKING and task.session_id:
             self._assign_current_task(task.session_id, task.id)
+        elif status == WorkspaceTaskStatus.REVIEW and task.session_id:
+            # Manual REVIEW status transition must still trigger reviewer
+            # dispatch so the task does not sit unreviewed.
+            if not self._reviewer_is_active(self.tasks[task.id]):
+                self._release_stale_reviewer_for_task(self.tasks[task.id], updated_at=now)
+                review_report = AgentReport(
+                    id=str(uuid.uuid4()),
+                    workspace_id=task.workspace_id,
+                    task_id=task.id,
+                    session_id=task.session_id,
+                    state=AgentReportState.READY_FOR_REVIEW,
+                    message="Task manually moved to review status.",
+                    message_en="Task manually moved to review status.",
+                    message_zh="任务被手动移至 review 状态。",
+                    changed_files=[],
+                    validation=None,
+                    risks=None,
+                    review_decision=ReviewDecision.REQUEST,
+                    review_reason="Manual status transition to REVIEW.",
+                    risk_level=None,
+                    created_at=now,
+                )
+                self.reports[review_report.id] = review_report
+                await self._request_task_review(self.tasks[task.id], review_report)
 
         self._save_state()
         if status is not None:
@@ -2282,7 +2407,21 @@ class WorkspaceManager:
         if task.status == WorkspaceTaskStatus.DONE:
             raise RuntimeError("Done tasks cannot request review")
         if task.review_requested_at and not task.review_completed_at:
-            return task
+            # Only suppress re-dispatch when an assigned reviewer is actively
+            # working on this task. If the reviewer session is idle, stopped,
+            # or missing entirely, the prior review dispatch got stuck and we
+            # must allow re-dispatch so the task does not sit forever in
+            # "Awaiting AI review".
+            if self._reviewer_is_active(task):
+                return task
+            logger.info(
+                "Re-requesting review for stuck task_id=%s (review_requested_at=%s "
+                "review_session_id=%s)",
+                task.id,
+                task.review_requested_at,
+                task.review_session_id,
+            )
+            self._release_stale_reviewer_for_task(task, updated_at=_now())
         if not task.session_id:
             raise RuntimeError("Task has no implementation agent")
 
@@ -2411,6 +2550,15 @@ class WorkspaceManager:
     ) -> None:
         if refresh_sessions:
             await self._refresh_session_statuses(workspace_id)
+        # Review dispatch has no retry mechanism of its own:
+        # _request_task_review either succeeds or strands the task. Run the
+        # stale-review reaper and stale-reviewer assignment cleanup before
+        # every dispatch pass so a transient failure (prompt send error,
+        # reviewer crash, reconciler-only REVIEW status) does not permanently
+        # strand the task in "Awaiting AI review" with idle reviewers.
+        if self._cleanup_stale_reviewer_assignments(workspace_id):
+            self._save_state()
+        await self._reap_stuck_reviews(workspace_id)
         for session in self._workspace_agents(workspace_id, include_stopped=True):
             if not self._can_dispatch_to(session):
                 logger.info(
@@ -3286,14 +3434,27 @@ class WorkspaceManager:
         for changed_file in changed_files[:12]:
             if not changed_file:
                 continue
-            candidate = Path(changed_file)
-            path = candidate if candidate.is_absolute() else root / candidate
+            if not self._path_looks_like_real_file(changed_file):
+                continue
+            try:
+                candidate = Path(changed_file)
+            except (OSError, ValueError):
+                continue
+            try:
+                is_absolute = candidate.is_absolute()
+            except OSError:
+                is_absolute = False
+            path = candidate if is_absolute else root / candidate
             try:
                 resolved = path.resolve(strict=False)
                 resolved.relative_to(root)
             except (OSError, ValueError):
                 continue
-            directory = resolved if resolved.is_dir() else resolved.parent
+            try:
+                is_dir = resolved.is_dir()
+            except OSError:
+                is_dir = False
+            directory = resolved if is_dir else resolved.parent
             while True:
                 candidates.append(directory / "REVIEW.md")
                 if directory == root:
@@ -3736,7 +3897,10 @@ class WorkspaceManager:
         if session.role == WorkspaceSessionRole.REVIEWER:
             await self._handle_review_report(task, session, report)
             return
-        if session.role != WorkspaceSessionRole.ORCHESTRATOR:
+        if session.role not in {
+            WorkspaceSessionRole.ORCHESTRATOR,
+            WorkspaceSessionRole.WORKER,
+        }:
             return
         if task.system_internal:
             await self._handle_internal_task_report(task, session, report)
@@ -3744,7 +3908,19 @@ class WorkspaceManager:
         if not state_policy.is_review_gate_state(report.state):
             return
         if task.review_requested_at and not task.review_completed_at:
-            return
+            # Allow a new gate report to recover a stuck review: only skip if
+            # the previously-assigned reviewer session is still actively
+            # working on the review.
+            if self._reviewer_is_active(task):
+                return
+            logger.info(
+                "Recovering stuck review via agent report task_id=%s "
+                "report_state=%s review_session_id=%s",
+                task.id,
+                report.state.value,
+                task.review_session_id,
+            )
+            self._release_stale_reviewer_for_task(task, updated_at=_now())
         if task.task_mode == WorkspaceTaskMode.DIRECT:
             if report.review_decision == ReviewDecision.REQUEST:
                 await self._request_task_review(task, report)
@@ -4551,6 +4727,193 @@ class WorkspaceManager:
     def _first_available_workspace_agent(self, workspace_id: str) -> Optional[ManagedSession]:
         agents = self._workspace_agents(workspace_id)
         return agents[0] if agents else None
+
+    def _reviewer_is_active(self, task: WorkspaceTask) -> bool:
+        """Return True when the task has a reviewer session that is actively
+        working on its review. A missing, idle, or stopped reviewer means the
+        prior dispatch got stuck and re-dispatch is allowed."""
+        if not task.review_session_id:
+            return False
+        reviewer = self.sessions.get(task.review_session_id)
+        if not reviewer:
+            return False
+        if reviewer.status == ManagedSessionStatus.STOPPED:
+            return False
+        if reviewer.runtime_status == AgentRuntimeStatus.IDLE:
+            return False
+        if reviewer.task_id != task.id and reviewer.current_task_id != task.id:
+            return False
+        return True
+
+    def _release_stale_reviewer_for_task(
+        self, task: WorkspaceTask, *, updated_at: datetime
+    ) -> None:
+        """Clear the task's stale review_session_id reference and reset any
+        reviewer sessions whose task_id/current_task_id still point at this
+        task but are not actively working on it. Used to unstick review
+        dispatch after a prompt send failure or reviewer crash."""
+        # Release any reviewer session that still carries this task's id.
+        self._release_reviewer_session(
+            task,
+            status=ManagedSessionStatus.IDLE,
+            runtime_status=AgentRuntimeStatus.IDLE,
+            updated_at=updated_at,
+            include_stale_assignments=True,
+        )
+        # Clear the task's own stale reference so future dispatch succeeds.
+        current = self.tasks.get(task.id)
+        if not current:
+            return
+        if current.review_session_id and not self._reviewer_is_active(current):
+            self.tasks[current.id] = current.model_copy(
+                update={
+                    "review_session_id": None,
+                    "updated_at": updated_at,
+                }
+            )
+
+    def _cleanup_stale_reviewer_assignments(self, workspace_id: str) -> bool:
+        """Drop stale task_id/current_task_id values from REVIEWER sessions
+        where the referenced task no longer exists, is not awaiting review,
+        or does not list the session as its review_session_id. Returns True
+        if any session was modified."""
+        changed = False
+        now = _now()
+        for session in self._sessions_for_workspace_raw(workspace_id):
+            if session.role != WorkspaceSessionRole.REVIEWER:
+                continue
+            if not session.task_id and not session.current_task_id:
+                continue
+            candidate_id = session.task_id or session.current_task_id
+            if not candidate_id:
+                continue
+            task = self.tasks.get(candidate_id)
+            should_reset = False
+            if not task or task.workspace_id != workspace_id:
+                should_reset = True
+            elif task.status == WorkspaceTaskStatus.DONE:
+                should_reset = True
+            elif task.review_session_id != session.id:
+                # Session claims the task but the task does not reference this
+                # session as its reviewer — the assignment is stale.
+                should_reset = True
+            elif (
+                session.runtime_status == AgentRuntimeStatus.IDLE
+                and session.status == ManagedSessionStatus.IDLE
+            ):
+                # Session is idle while still holding task pointers —
+                # typically left over from a dispatch error.
+                should_reset = True
+            if not should_reset:
+                continue
+            logger.info(
+                "Cleaning stale reviewer assignment session_id=%s task_id=%s",
+                session.id,
+                candidate_id,
+            )
+            self.sessions[session.id] = session.model_copy(
+                update={
+                    "task_id": None,
+                    "current_task_id": None,
+                    "status": ManagedSessionStatus.IDLE,
+                    "runtime_status": AgentRuntimeStatus.IDLE,
+                    "updated_at": now,
+                    "last_activity_at": now,
+                }
+            )
+            changed = True
+        return changed
+
+    async def _reap_stuck_reviews(self, workspace_id: str) -> int:
+        """Fallback reaper: find tasks whose review dispatch appears stuck
+        (review-requested or REVIEW status with no active reviewer) and
+        trigger a fresh review dispatch. Called from the periodic
+        dispatch_workspace loop so transient failures do not permanently
+        strand tasks in "Awaiting AI review".
+
+        Returns the number of tasks that were re-dispatched."""
+        reaped = 0
+        for task in list(self.tasks.values()):
+            if task.workspace_id != workspace_id:
+                continue
+            if task.status == WorkspaceTaskStatus.DONE:
+                continue
+            if task.system_internal:
+                continue
+            needs_review_dispatch = False
+            if (
+                task.review_requested_at
+                and not task.review_completed_at
+                and not self._reviewer_is_active(task)
+            ):
+                # Review was requested but the assigned reviewer is idle,
+                # stopped, missing, or reassigned.
+                needs_review_dispatch = True
+            elif (
+                task.status == WorkspaceTaskStatus.REVIEW
+                and not task.review_completed_at
+                and not task.human_acceptance_requested_at
+                and not self._reviewer_is_active(task)
+            ):
+                # Task is in REVIEW state with no reviewer progress — a
+                # reconciler or manual status transition set REVIEW without
+                # actually dispatching a reviewer.
+                needs_review_dispatch = True
+            if not needs_review_dispatch:
+                continue
+            if not task.session_id:
+                continue
+            now = _now()
+            latest_state = self._latest_report_state(task.id)
+            trigger_state = (
+                latest_state
+                if latest_state
+                in {
+                    AgentReportState.READY_FOR_REVIEW,
+                    AgentReportState.COMPLETED,
+                    AgentReportState.BLOCKED,
+                    AgentReportState.NEEDS_INPUT,
+                }
+                else AgentReportState.READY_FOR_REVIEW
+            )
+            self._release_stale_reviewer_for_task(task, updated_at=now)
+            trigger_report = AgentReport(
+                id=str(uuid.uuid4()),
+                workspace_id=task.workspace_id,
+                task_id=task.id,
+                session_id=task.session_id,
+                state=trigger_state,
+                message=(
+                    "Re-dispatching stuck review task (fallback reaper); "
+                    "prior reviewer dispatch did not complete."
+                ),
+                message_en=(
+                    "Re-dispatching stuck review task (fallback reaper); "
+                    "prior reviewer dispatch did not complete."
+                ),
+                message_zh=(
+                    "重新分派卡住的 review 任务（fallback reaper）；" "之前的 reviewer 分派未完成。"
+                ),
+                changed_files=[],
+                validation=None,
+                risks=None,
+                review_decision=ReviewDecision.REQUEST,
+                review_reason="Stuck review recovered by background dispatcher.",
+                risk_level=None,
+                created_at=now,
+            )
+            self.reports[trigger_report.id] = trigger_report
+            logger.info(
+                "Reaping stuck review task_id=%s trigger_state=%s",
+                task.id,
+                trigger_state.value,
+            )
+            try:
+                await self._request_task_review(self.tasks[task.id], trigger_report)
+                reaped += 1
+            except Exception:
+                logger.exception("Failed to reap stuck review task_id=%s", task.id)
+        return reaped
 
     def _first_available_reviewer(self, workspace_id: str) -> Optional[ManagedSession]:
         reviewers = [
