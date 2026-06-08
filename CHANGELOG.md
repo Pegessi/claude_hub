@@ -27,6 +27,28 @@
   with idle reviewers visible in the UI
 - **Files**: backend/claude_hub/services/workspace_manager.py, CHANGELOG.md
 
+### fix: OSError(63, "File name too long") when building review prompt
+
+- Add `_path_looks_like_real_file()` guard that rejects `changed_files` /
+  `artifact_refs` entries whose per-component or total length exceeds POSIX
+  NAME_MAX / PATH_MAX, or that contain prose punctuation (parentheses,
+  brackets, semicolons, multiple spaces) — these indicate a descriptive
+  string was mistakenly placed into a `changed_files` slot by an agent
+- Add `_safe_lower_suffix()` helper that reads a path suffix without
+  propagating pathlib `OSError` raised by macOS when a path component
+  exceeds `NAME_MAX` (255 bytes)
+- Harden `_resolve_workspace_markdown_path`, `markdown_documents_for_workspace`,
+  `_markdown_allowed_roots`, `_markdown_ref_belongs_to_workspace_report`,
+  `_display_markdown_path`, and `_review_guidance_documents` against
+  `OSError`/`ValueError` from `Path.suffix`, `Path.resolve()`,
+  `Path.expanduser()`, and `Path.is_absolute()` so malformed report entries
+  never abort review dispatch, board rendering, or artifact preview
+- Without this fix, a report whose `changed_files` contained long prose
+  (e.g. `"backend/claude_hub/services/workspace_manager.py (+~250 lines: ...)"`)
+  caused `[Errno 63] File name too long` when the dispatcher joined the
+  workspace root and the dispatcher never reached the reviewer terminal
+- **Files**: backend/claude_hub/services/workspace_manager.py, CHANGELOG.md
+
 ## 2026-06-07
 
 ### fix: honor Claude model env on new agent launch

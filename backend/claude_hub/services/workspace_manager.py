@@ -96,6 +96,13 @@ AUTO_REPORT_MISSING_MESSAGE = (
 ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024
 ARTIFACT_PREVIEW_MAX_BYTES = 512 * 1024
 MARKDOWN_ARTIFACT_SUFFIXES = {".md", ".markdown", ".mdown", ".mkd"}
+# macOS NAME_MAX = 255 bytes per path component; Linux NAME_MAX is typically 255 too.
+# Any changed_files / artifact_ref entry with a path component longer than this is
+# certainly not a real filesystem path (it is a descriptive string accidentally placed
+# in a changed_files slot). Rejecting these early avoids OSError(ENAMETOOLONG) deep
+# inside pathlib / syscalls when we later join the workspace root or call .resolve().
+_PATH_COMPONENT_NAME_MAX_BYTES = 255
+_PATH_TOTAL_MAX_BYTES = 1024
 MARKDOWN_DISCOVERY_LIMIT = 20
 MARKDOWN_DISCOVERY_EXCLUDED_DIRS = {
     ".git",
@@ -1052,6 +1059,69 @@ class WorkspaceManager:
             value = match.group(1)
         return value.strip()
 
+    @staticmethod
+    def _path_looks_like_real_file(raw: str) -> bool:
+        """Return True only if *raw* plausibly represents a real filesystem path.
+
+        Rejects entries that contain control characters, obviously descriptive
+        punctuation (e.g. full sentences embedded in changed_files), total length
+        or per-component length exceeding POSIX NAME_MAX / PATH_MAX, or ASCII
+        whitespace inside a path component. These guards keep downstream
+        ``Path``/``.resolve()`` calls from throwing ``OSError(ENAMETOOLONG)`` on
+        macOS when an agent report accidentally puts a prose string into
+        ``changed_files``.
+        """
+        if not raw:
+            return False
+        value = raw.strip()
+        if not value or len(value.encode("utf-8", "ignore")) > _PATH_TOTAL_MAX_BYTES:
+            return False
+        # Reject obvious control characters / NULs early.
+        if any(ord(ch) < 0x20 for ch in value):
+            return False
+        # Disallow NUL bytes.
+        if "\x00" in value:
+            return False
+        parts = value.split("/")
+        for part in parts:
+            if not part:
+                # Leading, trailing, or doubled slashes are fine (skip empty segment).
+                continue
+            part_bytes = len(part.encode("utf-8", "ignore"))
+            if part_bytes > _PATH_COMPONENT_NAME_MAX_BYTES:
+                return False
+            # A real path component does not contain parentheses, brackets,
+            # colons after the basename, semicolons, or multiple consecutive
+            # spaces — these strongly indicate prose rather than a filename.
+            if any(ch in part for ch in ("(", ")", "[", "]", ";", "{", "}")):
+                return False
+            if "  " in part:
+                return False
+        return True
+
+    @staticmethod
+    def _safe_lower_suffix(raw_ref: str) -> str:
+        """Return ``Path(raw_ref).suffix.lower()`` without propagating ``OSError``.
+
+        On macOS ``pathlib`` can raise ``OSError(63, 'File name too long')``
+        even for what look like pure string operations when a path component
+        exceeds ``NAME_MAX``. Callers that iterate report-provided
+        ``changed_files`` / ``artifact_refs`` must use this helper instead of
+        constructing a ``Path`` directly just to read the suffix.
+        """
+        if not raw_ref:
+            return ""
+        try:
+            return Path(raw_ref).suffix.lower()
+        except (OSError, ValueError):
+            pass
+        # Fallback: pure string suffix extraction from the last path segment.
+        basename = raw_ref.replace("\\", "/").rsplit("/", 1)[-1]
+        dot = basename.rfind(".")
+        if dot <= 0 or dot == len(basename) - 1:
+            return ""
+        return basename[dot:].lower()
+
     def _markdown_ref_belongs_to_workspace_report(
         self,
         workspace_id: str,
@@ -1082,7 +1152,7 @@ class WorkspaceManager:
             return False
         try:
             self._resolve_workspace_markdown_path(workspace, artifact_ref)
-        except (KeyError, ValueError):
+        except (KeyError, ValueError, OSError):
             return False
         return True
 
@@ -1092,11 +1162,23 @@ class WorkspaceManager:
         artifact_ref: str,
         report_id: str | None = None,
     ) -> Path:
-        if Path(artifact_ref).suffix.lower() not in MARKDOWN_ARTIFACT_SUFFIXES:
+        if not self._path_looks_like_real_file(artifact_ref):
+            raise KeyError(artifact_ref)
+        if self._safe_lower_suffix(artifact_ref) not in MARKDOWN_ARTIFACT_SUFFIXES:
             raise ValueError("Only Markdown artifact previews are supported")
-        snapshot_path = self.snapshot_path(workspace.id).resolve()
-        path = Path(artifact_ref).expanduser()
-        if path.is_absolute():
+        try:
+            snapshot_path = self.snapshot_path(workspace.id).resolve()
+        except OSError as exc:
+            raise KeyError(artifact_ref) from exc
+        try:
+            path = Path(artifact_ref).expanduser()
+        except (OSError, ValueError):
+            raise KeyError(artifact_ref)
+        try:
+            is_absolute = path.is_absolute()
+        except OSError:
+            is_absolute = False
+        if is_absolute:
             try:
                 resolved = path.resolve(strict=True)
             except OSError as exc:
@@ -1141,13 +1223,19 @@ class WorkspaceManager:
         workspace: Workspace,
         report_id: str | None = None,
     ) -> list[Path]:
-        roots = [Path(workspace.path).expanduser().resolve()]
+        try:
+            roots: list[Path] = [Path(workspace.path).expanduser().resolve()]
+        except (OSError, ValueError):
+            roots = []
         report = self.reports.get(report_id) if report_id else None
         if report:
             session = self.sessions.get(report.session_id)
             if session and session.workspace_path:
-                session_root = Path(session.workspace_path).expanduser().resolve()
-                if session_root not in roots:
+                try:
+                    session_root = Path(session.workspace_path).expanduser().resolve()
+                except (OSError, ValueError):
+                    session_root = None
+                if session_root is not None and session_root not in roots:
                     roots.append(session_root)
         return roots
 
@@ -1169,7 +1257,9 @@ class WorkspaceManager:
             ):
                 for raw_ref in refs:
                     artifact_ref = self._clean_markdown_ref(raw_ref)
-                    if Path(artifact_ref).suffix.lower() not in MARKDOWN_ARTIFACT_SUFFIXES:
+                    if not self._path_looks_like_real_file(artifact_ref):
+                        continue
+                    if self._safe_lower_suffix(artifact_ref) not in MARKDOWN_ARTIFACT_SUFFIXES:
                         continue
                     try:
                         resolved = self._resolve_workspace_markdown_path(
@@ -1177,7 +1267,7 @@ class WorkspaceManager:
                             artifact_ref,
                             report.id,
                         )
-                    except (KeyError, ValueError):
+                    except (KeyError, ValueError, OSError):
                         continue
                     self._add_markdown_document(
                         documents,
@@ -1190,12 +1280,16 @@ class WorkspaceManager:
                     )
 
         snapshot = self.snapshot_path(workspace_id)
-        if snapshot.exists():
+        try:
+            snapshot_resolved = snapshot.resolve() if snapshot.exists() else None
+        except OSError:
+            snapshot_resolved = None
+        if snapshot_resolved is not None:
             self._add_markdown_document(
                 documents,
                 source=WorkspaceMarkdownDocumentSource.SNAPSHOT,
                 artifact_ref=str(snapshot),
-                resolved=snapshot.resolve(),
+                resolved=snapshot_resolved,
                 task_id=None,
                 report_id=None,
                 session_id=None,
@@ -1246,15 +1340,22 @@ class WorkspaceManager:
         )
 
     def _display_markdown_path(self, artifact_ref: str, resolved: Path) -> str:
-        path = Path(artifact_ref)
-        if not path.is_absolute():
+        try:
+            path = Path(artifact_ref)
+            is_absolute = path.is_absolute()
+        except (OSError, ValueError):
+            is_absolute = False
+        if not is_absolute:
             return artifact_ref
         for workspace in self.workspaces.values():
             try:
                 return str(resolved.relative_to(Path(workspace.path).expanduser().resolve()))
-            except ValueError:
+            except (ValueError, OSError):
                 continue
-        return resolved.name
+        try:
+            return resolved.name
+        except OSError:
+            return artifact_ref
 
     def _add_discovered_markdown_documents(
         self,
@@ -3333,14 +3434,27 @@ class WorkspaceManager:
         for changed_file in changed_files[:12]:
             if not changed_file:
                 continue
-            candidate = Path(changed_file)
-            path = candidate if candidate.is_absolute() else root / candidate
+            if not self._path_looks_like_real_file(changed_file):
+                continue
+            try:
+                candidate = Path(changed_file)
+            except (OSError, ValueError):
+                continue
+            try:
+                is_absolute = candidate.is_absolute()
+            except OSError:
+                is_absolute = False
+            path = candidate if is_absolute else root / candidate
             try:
                 resolved = path.resolve(strict=False)
                 resolved.relative_to(root)
             except (OSError, ValueError):
                 continue
-            directory = resolved if resolved.is_dir() else resolved.parent
+            try:
+                is_dir = resolved.is_dir()
+            except OSError:
+                is_dir = False
+            directory = resolved if is_dir else resolved.parent
             while True:
                 candidates.append(directory / "REVIEW.md")
                 if directory == root:
