@@ -405,7 +405,7 @@
                   class="latest-report"
                 >
                   <strong>{{ latestReportForTask(task)?.state }}</strong>
-                  <span>{{ latestReportForTask(task)?.message }}</span>
+                  <span>{{ reportMessageForLang(latestReportForTask(task)!) }}</span>
                 </div>
                 <div class="session-meta">
                   <span>task {{ task.status }}</span>
@@ -870,6 +870,15 @@
                   >
                     <summary>
                       <span class="report-state">{{ report.state }}</span>
+                      <span
+                        v-if="reportSummaryLabel(report)"
+                        class="report-summary-label"
+                      >
+                        {{ reportSummaryLabel(report) }}
+                      </span>
+                      <span class="report-summary-message">
+                        {{ reportMessagePreview(report) }}
+                      </span>
                       <span class="report-summary-meta">
                         <span class="report-time">{{ formatTime(report.created_at) }}</span>
                         <span
@@ -2266,6 +2275,8 @@ import type {
   WorkspaceMarkdownDocument,
   WorkspaceMarkdownDocumentSource,
   AcceptanceCheck,
+  AcceptanceCheckStatus,
+  AgentReportState,
   AutonomyPolicy,
   ExecutionTarget,
   FeedbackLesson,
@@ -2677,6 +2688,64 @@ function acceptanceChecksFor(report: AgentReport): AcceptanceCheck[] {
   return Array.isArray(report.acceptance_check) ? report.acceptance_check : []
 }
 
+const FINAL_REPORT_STATES = new Set<AgentReportState>([
+  'completed',
+  'ready_for_review',
+  'review_passed',
+  'review_failed',
+])
+
+function isFinalReport(report: AgentReport): boolean {
+  return FINAL_REPORT_STATES.has(report.state)
+}
+
+function acceptanceSummary(report: AgentReport): string | null {
+  const checks = acceptanceChecksFor(report)
+  if (checks.length === 0) return null
+  const counts: Record<string, number> = {}
+  for (const check of checks) {
+    counts[check.status] = (counts[check.status] || 0) + 1
+  }
+  const order: AcceptanceCheckStatus[] = ['passed', 'partial', 'failed', 'not_checked']
+  const parts: string[] = []
+  for (const status of order) {
+    if (counts[status]) parts.push(`${counts[status]} ${status}`)
+  }
+  return parts.join(' · ')
+}
+
+function isSubstantiveReport(report: AgentReport): boolean {
+  return Boolean(
+    (report.changed_files && report.changed_files.length > 0) ||
+    report.validation ||
+    (report.acceptance_check && report.acceptance_check.length > 0) ||
+    (report.profile_results && report.profile_results.length > 0) ||
+    (report.artifact_refs && report.artifact_refs.length > 0) ||
+    report.risks ||
+    report.evaluation_report
+  )
+}
+
+function reportSummaryLabel(report: AgentReport): string {
+  const parts: string[] = []
+  const acceptance = acceptanceSummary(report)
+  if (acceptance) parts.push(acceptance)
+  if (report.changed_files?.length) {
+    parts.push(`${report.changed_files.length} file${report.changed_files.length === 1 ? '' : 's'}`)
+  }
+  if (report.validation) parts.push('validated')
+  if (report.risks) parts.push('risks noted')
+  if (report.profile_results?.length) parts.push(`${report.profile_results.length} review profile${report.profile_results.length === 1 ? '' : 's'}`)
+  if (report.artifact_refs?.length) parts.push(`${report.artifact_refs.length} artifact${report.artifact_refs.length === 1 ? '' : 's'}`)
+  return parts.join(' · ')
+}
+
+function reportMessagePreview(report: AgentReport): string {
+  const text = reportMessageForLang(report).trim()
+  if (text.length <= 120) return text
+  return text.slice(0, 117) + '…'
+}
+
 function profileResultsFor(report: AgentReport): ReviewProfileResult[] {
   return Array.isArray(report.profile_results) ? report.profile_results : []
 }
@@ -3064,8 +3133,20 @@ function canEditTask(task: WorkspaceTask) {
   return task.status === 'todo'
 }
 
+function primaryExpandedReportId(): string | null {
+  const reports = selectedReports.value
+  if (reports.length === 0) return null
+  const finalSubstantive = [...reports].reverse().find(
+    (r) => isFinalReport(r) && isSubstantiveReport(r)
+  )
+  if (finalSubstantive) return finalSubstantive.id
+  const substantive = [...reports].reverse().find(isSubstantiveReport)
+  if (substantive) return substantive.id
+  return reports[reports.length - 1].id
+}
+
 function isLatestSelectedReport(report: AgentReport) {
-  return selectedReports.value[selectedReports.value.length - 1]?.id === report.id
+  return primaryExpandedReportId() === report.id
 }
 
 function agentTitle(sessionId?: string | null) {
@@ -6134,6 +6215,26 @@ onUnmounted(() => {
   align-items: center;
   gap: 6px;
   min-width: 0;
+  margin-left: auto;
+}
+
+.report-summary-label {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--ch-color-text-muted);
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--ch-color-chip-bg);
+}
+
+.report-summary-message {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--ch-color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .report-delta {
