@@ -132,6 +132,19 @@ async def create_feedback_lesson(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+@router.get("/{workspace_id}/lessons/{lesson_id}", response_model=FeedbackLesson)
+async def get_feedback_lesson(
+    workspace_id: str,
+    lesson_id: str,
+    current_user: User = Depends(get_current_user),
+) -> FeedbackLesson:
+    """Fetch a single feedback lesson by ID. Records a "take" (hit) for usage tracking."""
+    try:
+        return workspace_manager.get_feedback_lesson(workspace_id, lesson_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Feedback lesson not found") from e
+
+
 @router.delete("/{workspace_id}/lessons/{lesson_id}", response_model=FeedbackLesson)
 async def delete_feedback_lesson(
     workspace_id: str,

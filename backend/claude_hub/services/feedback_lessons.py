@@ -326,27 +326,48 @@ class FeedbackLessonStore:
             :limit
         ]
 
+    def get_lesson(
+        self,
+        workspace_id: str,
+        lesson_id: str,
+    ) -> FeedbackLesson:
+        lessons = self.list_lessons(workspace_id, include_inactive=True)
+        for lesson in lessons:
+            if lesson.id == lesson_id:
+                return lesson
+        raise KeyError(lesson_id)
+
     def lesson_context_payload(
         self,
         workspace_id: str,
         query: str,
         *,
-        limit: int = 6,
+        limit: int = 20,
     ) -> list[dict[str, Any]]:
-        return [
-            {
-                "id": lesson.id,
-                "title": lesson.title,
-                "scope": lesson.scope.value,
-                "summary": lesson.summary,
-                "applies_when": lesson.applies_when,
-                "do": lesson.do,
-                "avoid": lesson.avoid,
-                "evidence_task_ids": lesson.evidence_task_ids,
-                "confidence": lesson.confidence,
-            }
-            for lesson in self.search_lessons(workspace_id, query, limit=limit)
-        ]
+        lessons = self.list_lessons(workspace_id)
+        index: list[dict[str, Any]] = []
+        for lesson in lessons[:limit]:
+            index.append(
+                {
+                    "id": lesson.id,
+                    "title": lesson.title,
+                    "scope": lesson.scope.value,
+                    "tags": lesson.tags,
+                    "confidence": lesson.confidence,
+                    "hit_count": lesson.hit_count or 0,
+                    "success_count": lesson.success_count or 0,
+                }
+            )
+        return index
+
+    def record_lesson_take(
+        self,
+        workspace_id: str,
+        lesson_ids: list[str],
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        self.increment_lesson_usage(workspace_id, lesson_ids, success=False, now=now)
 
     def increment_lesson_usage(
         self,

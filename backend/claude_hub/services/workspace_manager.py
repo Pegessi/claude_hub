@@ -1643,6 +1643,13 @@ class WorkspaceManager:
             raise KeyError(workspace_id)
         return self._feedback_store().archive_lesson(workspace_id, lesson_id)
 
+    def get_feedback_lesson(self, workspace_id: str, lesson_id: str) -> FeedbackLesson:
+        if workspace_id not in self.workspaces:
+            raise KeyError(workspace_id)
+        store = self._feedback_store()
+        store.record_lesson_take(workspace_id, [lesson_id])
+        return store.get_lesson(workspace_id, lesson_id)
+
     def _build_workspace_feedback_summary_prompt(
         self,
         workspace: Workspace,
@@ -2740,7 +2747,6 @@ class WorkspaceManager:
             workspace,
             f"{task.title}\n{task.prompt}",
         )
-        feedback_lesson_ids = [str(item["id"]) for item in lesson_context if item.get("id")]
         await self.send_session_message(
             session.id,
             self._build_task_assignment_prompt(
@@ -2755,24 +2761,9 @@ class WorkspaceManager:
             update={
                 "status": WorkspaceTaskStatus.WORKING,
                 "started_at": now,
-                "feedback_lesson_ids": feedback_lesson_ids,
                 "updated_at": now,
             }
         )
-        if feedback_lesson_ids:
-            self._record_feedback_lesson_injection(
-                task=self.tasks[task.id],
-                session=session,
-                lesson_ids=feedback_lesson_ids,
-                prompt_kind="assignment",
-                created_at=now,
-            )
-            self._feedback_store().increment_lesson_usage(
-                workspace.id,
-                feedback_lesson_ids,
-                success=False,
-                now=now,
-            )
         self.sessions[session.id] = session.model_copy(
             update={
                 "task_id": task.id,
@@ -3026,9 +3017,12 @@ class WorkspaceManager:
             f"{self._attachment_prompt_block(task.attachments)}\n\n" if task.attachments else ""
         )
         lesson_context_block = self._lesson_context_block_from_payload(
-            lesson_context
-            if lesson_context is not None
-            else self._lesson_context_payload(workspace, f"{task.title}\n{task.prompt}")
+            (
+                lesson_context
+                if lesson_context is not None
+                else self._lesson_context_payload(workspace, f"{task.title}\n{task.prompt}")
+            ),
+            workspace_id=workspace.id,
         )
         return (
             "New workspace task assigned.\n\n"
@@ -3097,24 +3091,56 @@ class WorkspaceManager:
         return self._feedback_store().lesson_context_payload(
             workspace.id,
             query,
-            limit=6,
+            limit=20,
         )
 
     def _lesson_context_block(self, workspace: Workspace, query: str) -> str:
         return self._lesson_context_block_from_payload(
-            self._lesson_context_payload(workspace, query)
+            self._lesson_context_payload(workspace, query),
+            workspace_id=workspace.id,
         )
 
-    def _lesson_context_block_from_payload(self, lessons: list[dict[str, Any]]) -> str:
+    def _lesson_context_block_from_payload(
+        self,
+        lessons: list[dict[str, Any]],
+        *,
+        workspace_id: str | None = None,
+    ) -> str:
         if not lessons:
-            return ""
-        return (
-            "Relevant workspace lessons JSON:\n"
-            f"{json.dumps(lessons, indent=2, ensure_ascii=False)}\n\n"
-            "Use these lessons only when they apply to this task. Do not force-fit stale or "
-            "irrelevant lessons. In the final validation or risks field, mention lesson IDs that "
-            "materially affected the work or were intentionally ignored as not applicable.\n\n"
+            return (
+                "Workspace lessons index: no active lessons yet for this workspace.\n"
+                "You do not need to reference any lessons in your report.\n\n"
+            )
+        lines: list[str] = []
+        lines.append("Workspace lessons index (id, title, tags, confidence, hits, successes):")
+        for lesson in lessons:
+            tags = ", ".join(f"`{t}`" for t in lesson.get("tags", [])) or "—"
+            conf = lesson.get("confidence")
+            conf_str = f"{conf:.2f}" if isinstance(conf, (int, float)) else "?"
+            lines.append(
+                f"- `{lesson['id']}` — {lesson['title']}  "
+                f"[{tags}]  conf={conf_str}  "
+                f"hits={lesson.get('hit_count', 0)}  "
+                f"succ={lesson.get('success_count', 0)}"
+            )
+        lines.append("")
+        lines.append(
+            "Lessons catalog (human-readable): `docs/working-logs/lessons-catalog.md`  "
+            "(read this file for the full do/avoid/applies_when detail of each lesson)."
         )
+        lines.append(
+            "To inspect a specific lesson, call `GET /api/workspaces/<workspace_id>/lessons/<lesson_id>` "
+            "which returns the full lesson body (summary, do, avoid, applies_when, evidence)."
+        )
+        if workspace_id:
+            lines.append(f"This workspace ID: `{workspace_id}`.")
+        lines.append(
+            "Read lessons only when you judge they may apply to this task — do not "
+            "force-fit irrelevant lessons. In the final validation or risks field, "
+            "list the IDs of any lessons you read (or state 'no lessons needed')."
+        )
+        lines.append("")
+        return "\n".join(lines)
 
     def _record_feedback_lesson_injection(
         self,
@@ -3580,12 +3606,15 @@ class WorkspaceManager:
         ]
         profiles = self._effective_review_profiles(task, trigger_report)
         lesson_context_block = self._lesson_context_block_from_payload(
-            lesson_context
-            if lesson_context is not None
-            else self._lesson_context_payload(
-                workspace,
-                f"{task.title}\n{task.prompt}\n{trigger_report.message}",
-            )
+            (
+                lesson_context
+                if lesson_context is not None
+                else self._lesson_context_payload(
+                    workspace,
+                    f"{task.title}\n{task.prompt}\n{trigger_report.message}",
+                )
+            ),
+            workspace_id=workspace.id,
         )
         return (
             "Review workspace task.\n\n"
@@ -4407,10 +4436,6 @@ class WorkspaceManager:
             workspace,
             f"{task.title}\n{task.prompt}\n{trigger_report.message}",
         )
-        feedback_lesson_ids = [str(item["id"]) for item in lesson_context if item.get("id")]
-        task_feedback_lesson_ids = list(
-            dict.fromkeys([*task.feedback_lesson_ids, *feedback_lesson_ids])
-        )
         reviewer = await self._rename_session_for_task(reviewer, task, updated_at=now)
         autonomous_run = task.autonomous_run
         if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
@@ -4441,7 +4466,6 @@ class WorkspaceManager:
                 "completed_at": None,
                 "human_acceptance_requested_at": None,
                 "human_accepted_at": None,
-                "feedback_lesson_ids": task_feedback_lesson_ids,
                 "autonomous_run": autonomous_run,
                 "updated_at": now,
             }
@@ -4458,20 +4482,6 @@ class WorkspaceManager:
                 "last_activity_at": now,
             }
         )
-        if feedback_lesson_ids:
-            self._record_feedback_lesson_injection(
-                task=self.tasks[task.id],
-                session=self.sessions[reviewer.id],
-                lesson_ids=feedback_lesson_ids,
-                prompt_kind="reviewer",
-                created_at=now,
-            )
-            self._feedback_store().increment_lesson_usage(
-                task.workspace_id,
-                feedback_lesson_ids,
-                success=False,
-                now=now,
-            )
         self._save_state()
         is_same_task_continuation = task.review_session_id == reviewer.id
         should_clear_context = not is_same_task_continuation and self._has_prior_review_history(
