@@ -1684,8 +1684,49 @@ class WorkspaceManager:
                 "read unrelated old task records unless a listed digest explicitly points to a "
                 "missing artifact you must inspect.",
                 "",
-                "Goal: condense recent completed task evidence into reusable workspace lessons. "
-                "Prefer concrete operational rules. Do not promote one-off noise.",
+                "Goal: extract reusable workspace lessons that help future tasks avoid known "
+                "pitfalls. Quality matters more than quantity. Emitting zero lessons is the "
+                "correct answer when no signal is present.",
+                "",
+                "Extraction signals — emit a lesson ONLY when at least one of these is supported "
+                "by the input_task_digests:",
+                "  Signal A — Iteration cost. A single task whose report_state_sequence shows "
+                "review_failed_count >= 1 OR needs_input_count >= 2, OR whose risks describe "
+                "rework. The lesson is the underlying issue that caused the extra rounds, NOT "
+                "the final fix recipe.",
+                "  Signal B — Cross-task recurrence. The same root problem (or a close variant) "
+                "appears in >= 2 distinct task digests. The lesson is the recurring pattern.",
+                "",
+                "Specific implementation-detail lessons (a particular file, function, error "
+                "message, or version-specific quirk) are allowed ONLY if Signal A or Signal B "
+                "applies AND the evidence makes the difficulty observable. A lesson whose only "
+                "support is a single task's final_summary with no review_failed / needs_input "
+                "trail is a fix recipe, not a lesson — skip it.",
+                "",
+                "Required fields per lesson (the backend rejects payloads that violate this):",
+                "  - title (short)",
+                "  - summary (one-to-two sentence description)",
+                "  - applies_when (>=1 condition: file glob, runtime, command, env, task shape)",
+                "  - do (recommended action; non-empty)",
+                "  - avoid (failure pattern to avoid; non-empty)",
+                "  - tags",
+                "  - scope (default 'workspace')",
+                "  - confidence: server-capped at 0.6 for single-evidence lessons and at 0.85 "
+                "for multi-evidence lessons; pick a value that already respects this.",
+                "  - evidence_task_ids (cite the supporting input task_ids; for Signal A "
+                "single-task lessons cite that one task; for Signal B cite all supporting tasks)",
+                "",
+                "Server-side enforcement (these rules are mechanically checked against "
+                "input_task_digests, NOT inferred from prose; lessons that fail are rejected "
+                "with HTTP 400 and you must move on rather than retrying with massaged text):",
+                "  - applies_when / do / avoid must be non-empty.",
+                "  - Single-evidence lessons must cite a task whose report_state_sequence has "
+                "review_failed_count >= 1 OR needs_input_count >= 2. If no input digest meets "
+                "this bar, do NOT submit a single-evidence lesson — emit a multi-evidence one "
+                "or skip the candidate.",
+                "  - Multi-evidence lessons must cite >=2 evidence_task_ids and at least one "
+                "cited task must show review_failed_count + needs_input_count >= 1. Pure "
+                "final_summary text similarity is NOT a substitute for iteration evidence.",
                 "",
                 "Deduplication rule: before creating a lesson, compare against active_lessons. "
                 "If the idea already exists, call the lesson API with matching title/summary/tags "
@@ -1695,13 +1736,15 @@ class WorkspaceManager:
                 f"POST /api/workspaces/{workspace.id}/lessons",
                 "Payload shape:",
                 '{"title":"short title","summary":"one-sentence description",'
-                '"tags":["tag"],"scope":"workspace","confidence":0.8,'
-                '"evidence_task_ids":["task-id"]}',
+                '"applies_when":["condition"],"do":"recommended action",'
+                '"avoid":"failure pattern","tags":["tag"],"scope":"workspace",'
+                '"confidence":0.6,"evidence_task_ids":["task-id"]}',
                 "",
                 "Completion report requirement:",
                 "POST a completed report for this internal task with changed_files=[], "
                 "review_decision=skip, risk_level=system_audit, and validation containing one "
-                "of these exact fields:",
+                "of these exact fields (do NOT append free prose after the value; if you need "
+                "commentary put it on a separate line):",
                 "- created_lesson_ids=<comma-separated ids>",
                 "- merged_lesson_ids=<comma-separated ids>",
                 "- skipped_reason=<reason>",
@@ -3871,11 +3914,20 @@ class WorkspaceManager:
                 if autonomous_run is not None:
                     task_update["autonomous_run"] = autonomous_run
             if task_status:
-                task_update.update({"status": task_status, "updated_at": now})
-                if task_status == WorkspaceTaskStatus.WORKING:
-                    task_update["started_at"] = self.tasks[task_id].started_at or now
-                if task_status == WorkspaceTaskStatus.REVIEW:
-                    task_update["reviewed_at"] = now
+                if (
+                    session.role == WorkspaceSessionRole.ORCHESTRATOR
+                    and task_status == WorkspaceTaskStatus.WORKING
+                    and self.tasks[task_id].status == WorkspaceTaskStatus.REVIEW
+                    and self.tasks[task_id].review_requested_at
+                    and not self.tasks[task_id].review_completed_at
+                ):
+                    task_update["updated_at"] = now
+                else:
+                    task_update.update({"status": task_status, "updated_at": now})
+                    if task_status == WorkspaceTaskStatus.WORKING:
+                        task_update["started_at"] = self.tasks[task_id].started_at or now
+                    if task_status == WorkspaceTaskStatus.REVIEW:
+                        task_update["reviewed_at"] = now
             elif task_update:
                 task_update["updated_at"] = now
             if task_update:
@@ -4359,7 +4411,7 @@ class WorkspaceManager:
             )
         self.tasks[task.id] = task.model_copy(
             update={
-                "status": WorkspaceTaskStatus.WORKING,
+                "status": WorkspaceTaskStatus.REVIEW,
                 "review_session_id": reviewer.id,
                 "review_attempts": task.review_attempts + 1,
                 "review_requested_at": now,
@@ -5036,7 +5088,10 @@ class WorkspaceManager:
 
             if current_task_id:
                 task = self.tasks.get(current_task_id)
-                if task and task.status == WorkspaceTaskStatus.WORKING:
+                if task and task.status in {
+                    WorkspaceTaskStatus.WORKING,
+                    WorkspaceTaskStatus.REVIEW,
+                }:
                     stalled_update = await self._detect_prompt_dispatch_stall(
                         session,
                         task,
@@ -5065,7 +5120,8 @@ class WorkspaceManager:
                         runtime_status = update["runtime_status"]
                         changed = True
                 if (
-                    runtime_status == AgentRuntimeStatus.WORKING
+                    session.role == WorkspaceSessionRole.ORCHESTRATOR
+                    and runtime_status == AgentRuntimeStatus.WORKING
                     and task
                     and task.status == WorkspaceTaskStatus.REVIEW
                     and current_task_id is not None
