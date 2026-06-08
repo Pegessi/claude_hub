@@ -739,19 +739,20 @@ def test_direct_task_explicit_review_request_still_creates_reviewer(
     assert direct_task.status == WorkspaceTaskStatus.REVIEW
     assert direct_task.review_session_id is not None
     assert direct_task.review_requested_at is not None
-    assert direct_task.feedback_lesson_ids == ["explicit-review-handoff"]
+    assert direct_task.feedback_lesson_ids == []
     assert "Review workspace task." in sent_messages[-1][1]
     assert "explicit-review-handoff" in sent_messages[-1][1]
+    assert "Workspace lessons index" in sent_messages[-1][1]
+    assert (
+        "Check changed files, validation, risks, and acceptance evidence."
+        not in sent_messages[-1][1]
+    )
     task_reports = [
         report
         for report in workspace_manager.reports_for_workspace(workspace["id"])
-        if report.task_id == task["id"]
+        if report.task_id == task["id"] and report.risk_level == "system_audit"
     ]
-    assert any(
-        report.message == "Feedback lessons injected into reviewer prompt: explicit-review-handoff"
-        and report.risk_level == "system_audit"
-        for report in task_reports
-    )
+    assert task_reports == []
 
 
 def test_agent_report_stores_goal_packet_and_acceptance_check(
@@ -1724,7 +1725,7 @@ def test_manual_feedback_reaper_promotes_lesson(
     assert bad_draft_response.status_code == 400
 
 
-def test_task_assignment_injects_relevant_feedback_lessons(
+def test_task_assignment_injects_lessons_index_with_api_and_take_tracking(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1771,21 +1772,42 @@ def test_task_assignment_injects_relevant_feedback_lessons(
 
     assert start_response.status_code == 201
     started_task = start_response.json()
-    assert started_task["feedback_lesson_ids"] == ["cli-symbols-comma-separated"]
+    assert started_task["feedback_lesson_ids"] == []
     assignment_prompt = sent_messages[-1][1]
-    assert "Relevant workspace lessons JSON" in assignment_prompt
+    assert "Workspace lessons index" in assignment_prompt
     assert "cli-symbols-comma-separated" in assignment_prompt
-    assert "Use these lessons only when they apply" in assignment_prompt
+    assert "docs/working-logs/lessons-catalog.md" in assignment_prompt
+    assert "/api/workspaces/" in assignment_prompt
+    assert "/lessons/<lesson_id>" in assignment_prompt
+    assert "This workspace ID:" in assignment_prompt
+    assert workspace["id"] in assignment_prompt
+    assert "Read lessons only when you judge they may apply" in assignment_prompt
+    assert "Use --symbols AAPL,MSFT" not in assignment_prompt
     task_reports = [
         report
         for report in workspace_manager.reports_for_workspace(workspace["id"])
         if report.task_id == task["id"]
     ]
-    assert len(task_reports) == 1
-    assert task_reports[0].message == (
-        "Feedback lessons injected into assignment prompt: cli-symbols-comma-separated"
+    assert task_reports == []
+
+    fetch_response = client.get(
+        f"/api/workspaces/{workspace['id']}/lessons/cli-symbols-comma-separated"
     )
-    assert task_reports[0].risk_level == "system_audit"
+    assert fetch_response.status_code == 200
+    fetched = fetch_response.json()
+    assert fetched["id"] == "cli-symbols-comma-separated"
+    assert fetched["summary"] == "--symbols expects comma-separated values."
+    assert fetched["do"] == "Use --symbols AAPL,MSFT."
+    assert fetched["avoid"] == "Do not pass --symbols AAPL MSFT."
+    assert fetched["hit_count"] == 1
+
+    fetch_response2 = client.get(
+        f"/api/workspaces/{workspace['id']}/lessons/cli-symbols-comma-separated"
+    )
+    assert fetch_response2.json()["hit_count"] == 2
+
+    notfound_response = client.get(f"/api/workspaces/{workspace['id']}/lessons/nonexistent-lesson")
+    assert notfound_response.status_code == 404
 
 
 def test_workspace_feedback_summary_uses_hidden_internal_reaper_task(
@@ -1946,7 +1968,7 @@ def test_workspace_feedback_summary_uses_hidden_internal_reaper_task(
     assert sent_messages
 
 
-def test_feedback_lesson_matching_is_cjk_safe_and_does_not_fallback_to_any_lesson(
+def test_lessons_index_includes_all_active_lessons_without_full_body_leak(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1974,6 +1996,7 @@ def test_feedback_lesson_matching_is_cjk_safe_and_does_not_fallback_to_any_lesso
         f"/api/workspaces/{cjk_workspace['id']}/lessons",
         json={
             "id": "image-workflow-docs-first",
+            "title": "图片生成先读文档",
             "summary": "图片生成任务要先阅读工作流文档。",
             "applies_when": ["图片生成", "写真任务", "工作流"],
             "do": "先检查仓库工作流文档和已有运行记录。",
@@ -1988,6 +2011,7 @@ def test_feedback_lesson_matching_is_cjk_safe_and_does_not_fallback_to_any_lesso
         f"/api/workspaces/{cjk_workspace['id']}/lessons",
         json={
             "id": "market-data-symbols",
+            "title": "Market data CLI uses comma-separated symbols",
             "summary": "Market data CLI symbols must be comma-separated.",
             "applies_when": ["market data"],
             "do": "Use --symbols AAPL,MSFT.",
@@ -2013,9 +2037,19 @@ def test_feedback_lesson_matching_is_cjk_safe_and_does_not_fallback_to_any_lesso
 
     assert cjk_start_response.status_code == 201
     cjk_started_task = cjk_start_response.json()
-    assert cjk_started_task["feedback_lesson_ids"] == ["image-workflow-docs-first"]
-    assert "image-workflow-docs-first" in sent_messages[-1][1]
-    assert "market-data-symbols" not in sent_messages[-1][1]
+    assert cjk_started_task["feedback_lesson_ids"] == []
+    cjk_prompt = sent_messages[-1][1]
+    assert "Workspace lessons index" in cjk_prompt
+    assert "image-workflow-docs-first" in cjk_prompt
+    assert "market-data-symbols" in cjk_prompt
+    assert "图片生成先读文档" in cjk_prompt
+    assert "Market data CLI uses comma-separated symbols" in cjk_prompt
+    assert "先检查仓库工作流文档和已有运行记录。" not in cjk_prompt
+    assert "Use --symbols AAPL,MSFT." not in cjk_prompt
+    assert "Do not pass symbols as separate arguments." not in cjk_prompt
+    assert "不要只看原始提示词就开始生成。" not in cjk_prompt
+    assert "docs/working-logs/lessons-catalog.md" in cjk_prompt
+    assert "/api/workspaces/" in cjk_prompt
 
     emoji_workspace = client.post(
         "/api/workspaces",
@@ -2025,12 +2059,13 @@ def test_feedback_lesson_matching_is_cjk_safe_and_does_not_fallback_to_any_lesso
     client.post(
         f"/api/workspaces/{emoji_workspace['id']}/lessons",
         json={
-            "id": "should-not-fallback",
-            "summary": "This lesson should not be injected without query tokens.",
-            "applies_when": ["specific searchable text"],
-            "do": "Only inject when matched.",
-            "avoid": "Do not inject as a fallback.",
-            "tags": ["fallback"],
+            "id": "emoji-only-workspace-lesson",
+            "title": "Emoji-only workspace still gets index",
+            "summary": "All active lessons appear in the index regardless of query overlap.",
+            "applies_when": ["any task"],
+            "do": "Agent decides autonomously which lessons apply.",
+            "avoid": "Do not force-fit lessons.",
+            "tags": ["emoji"],
             "scope": "workspace",
             "evidence_task_ids": ["evidence-emoji"],
             "confidence": 0.8,
@@ -2048,7 +2083,10 @@ def test_feedback_lesson_matching_is_cjk_safe_and_does_not_fallback_to_any_lesso
     assert emoji_start_response.status_code == 201
     emoji_started_task = emoji_start_response.json()
     assert emoji_started_task["feedback_lesson_ids"] == []
-    assert "Relevant workspace lessons JSON" not in sent_messages[-1][1]
+    emoji_prompt = sent_messages[-1][1]
+    assert "Workspace lessons index" in emoji_prompt
+    assert "emoji-only-workspace-lesson" in emoji_prompt
+    assert "Agent decides autonomously which lessons apply." not in emoji_prompt
     task_reports = [
         report
         for report in workspace_manager.reports_for_workspace(emoji_workspace["id"])
