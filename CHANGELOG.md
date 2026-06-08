@@ -3,6 +3,52 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-06-08
+
+### fix: unstick review tasks when reviewers are idle
+
+- Replace blanket early-returns in `request_task_review()` and
+  `_after_report_recorded()` with an active-reviewer check, so a task with
+  `review_requested_at` set but no working reviewer can be re-dispatched
+  instead of sitting forever in "Awaiting AI review"
+- Route WORKER-role agent reports through the same review-gate logic as
+  ORCHESTRATOR reports, so implementation agents with the `worker` role can
+  still trigger review dispatch
+- Trigger a real reviewer dispatch (not just a timestamp update) when
+  `update_task()` manually moves a task to REVIEW status or when the state
+  reconciler repairs a task to REVIEW status
+- Add `_reviewer_is_active()`, `_release_stale_reviewer_for_task()`,
+  `_cleanup_stale_reviewer_assignments()`, and `_reap_stuck_reviews()`
+  helpers that run on every `dispatch_workspace` pass, releasing stale
+  reviewer `task_id`/`current_task_id` pointers and re-dispatching any
+  review task whose assigned reviewer is idle, stopped, or missing
+- This closes the class of bugs where a transient prompt-send failure,
+  reviewer crash, or manual REVIEW status transition left a task stranded
+  with idle reviewers visible in the UI
+- **Files**: backend/claude_hub/services/workspace_manager.py, CHANGELOG.md
+
+### fix: OSError(63, "File name too long") when building review prompt
+
+- Add `_path_looks_like_real_file()` guard that rejects `changed_files` /
+  `artifact_refs` entries whose per-component or total length exceeds POSIX
+  NAME_MAX / PATH_MAX, or that contain prose punctuation (parentheses,
+  brackets, semicolons, multiple spaces) — these indicate a descriptive
+  string was mistakenly placed into a `changed_files` slot by an agent
+- Add `_safe_lower_suffix()` helper that reads a path suffix without
+  propagating pathlib `OSError` raised by macOS when a path component
+  exceeds `NAME_MAX` (255 bytes)
+- Harden `_resolve_workspace_markdown_path`, `markdown_documents_for_workspace`,
+  `_markdown_allowed_roots`, `_markdown_ref_belongs_to_workspace_report`,
+  `_display_markdown_path`, and `_review_guidance_documents` against
+  `OSError`/`ValueError` from `Path.suffix`, `Path.resolve()`,
+  `Path.expanduser()`, and `Path.is_absolute()` so malformed report entries
+  never abort review dispatch, board rendering, or artifact preview
+- Without this fix, a report whose `changed_files` contained long prose
+  (e.g. `"backend/claude_hub/services/workspace_manager.py (+~250 lines: ...)"`)
+  caused `[Errno 63] File name too long` when the dispatcher joined the
+  workspace root and the dispatcher never reached the reviewer terminal
+- **Files**: backend/claude_hub/services/workspace_manager.py, CHANGELOG.md
+
 ## 2026-06-07
 
 ### fix: honor Claude model env on new agent launch
