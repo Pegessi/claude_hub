@@ -4516,6 +4516,120 @@ def test_monitor_surfaces_reviewer_prompt_stuck_in_input(
     assert len(submitted_keys) == 1
 
 
+def test_fallback_reaper_grace_skips_recently_dispatched_idle_reviewer(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reviewer just got the prompt but hasn't started typing yet — terminal
+    classifier briefly reports IDLE. The fallback reaper must not treat this
+    as a stuck dispatch and re-fire ``ready_for_review`` repeatedly. Once the
+    grace window elapses without activity, redispatch is allowed again."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    status_samples: list[TerminalAgentStatus] = []
+    sent_messages: list[tuple[str, str]] = []
+
+    async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
+        return status_samples
+
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="tab-reaper-grace",
+        port=12372,
+        sent_messages=sent_messages,
+    )
+    monkeypatch.setattr(
+        workspace_module.ttyd_manager,
+        "list_tab_agent_statuses",
+        fake_list_statuses,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Reaper Grace Repo", "path": str(repo), "session_prefix": "reapg"},
+    ).json()
+    client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Slow reviewer", "prompt": "Finish then request review"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": started["id"],
+            "state": "completed",
+            "message": "Done; please review",
+            "review_decision": "request",
+            "review_reason": "exercise reaper grace",
+        },
+    )
+
+    review_session_id = workspace_manager.tasks[started["id"]].review_session_id
+    assert review_session_id is not None
+    initial_attempts = workspace_manager.tasks[started["id"]].review_attempts
+    sent_messages.clear()
+
+    # Simulate "slow first token": reviewer was just dispatched (within grace)
+    # but the terminal classifier reports IDLE because no output has streamed
+    # yet. _reviewer_is_active returns False, so without the grace the
+    # fallback reaper would re-dispatch.
+    just_now = datetime.now()
+    workspace_manager.tasks[started["id"]] = workspace_manager.tasks[started["id"]].model_copy(
+        update={
+            "review_requested_at": just_now,
+            "updated_at": just_now,
+        }
+    )
+    reviewer = workspace_manager.sessions[review_session_id]
+    workspace_manager.sessions[review_session_id] = reviewer.model_copy(
+        update={
+            "runtime_status": AgentRuntimeStatus.IDLE,
+            "last_activity_at": just_now,
+            "updated_at": just_now,
+        }
+    )
+
+    asyncio.run(workspace_manager.dispatch_workspace(workspace["id"], refresh_sessions=False))
+
+    after_grace_task = workspace_manager.tasks[started["id"]]
+    assert (
+        after_grace_task.review_attempts == initial_attempts
+    ), "fallback reaper should not redispatch within grace window"
+    assert all(
+        "fallback reaper" not in msg.lower() for _, msg in sent_messages
+    ), "reviewer should not see a re-dispatched prompt during grace"
+
+    # Push the dispatch + last activity past the grace window — the reaper
+    # should now treat the reviewer as genuinely stuck and redispatch.
+    stale = datetime.now() - timedelta(
+        seconds=workspace_module.REVIEW_REAPER_DISPATCH_GRACE_SECONDS + 5
+    )
+    workspace_manager.tasks[started["id"]] = workspace_manager.tasks[started["id"]].model_copy(
+        update={"review_requested_at": stale, "updated_at": stale}
+    )
+    reviewer = workspace_manager.sessions[review_session_id]
+    workspace_manager.sessions[review_session_id] = reviewer.model_copy(
+        update={
+            "runtime_status": AgentRuntimeStatus.IDLE,
+            "status": ManagedSessionStatus.IDLE,
+            "task_id": None,
+            "current_task_id": None,
+            "last_activity_at": stale,
+            "updated_at": stale,
+        }
+    )
+
+    asyncio.run(workspace_manager.dispatch_workspace(workspace["id"], refresh_sessions=False))
+
+    redispatched_task = workspace_manager.tasks[started["id"]]
+    assert (
+        redispatched_task.review_attempts == initial_attempts + 1
+    ), "fallback reaper should redispatch once dispatch grace has elapsed"
+
+
 def test_interrupted_idle_working_agent_auto_continue_stops_after_limit(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,

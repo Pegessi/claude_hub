@@ -5,6 +5,22 @@
 
 ## 2026-06-08
 
+### fix: stop fallback reaper from re-dispatching slow-to-start reviewers
+
+- `_reap_stuck_reviews()` previously redispatched a review task whenever the
+  assigned reviewer briefly looked IDLE. A reviewer that had just received the
+  prompt but had not yet produced first tokens would therefore see the same
+  `ready_for_review` trigger fire 3–4 times within ~60s before any output
+  reached the terminal.
+- Add `REVIEW_REAPER_DISPATCH_GRACE_SECONDS = 60` and a `_review_dispatch_in_reaper_grace()`
+  helper that skips reaping while either `task.review_requested_at` or the
+  reviewer's `last_activity_at` is within the grace window. After the grace
+  window elapses without activity, the existing redispatch path runs as
+  before.
+- Regression test `test_fallback_reaper_grace_skips_recently_dispatched_idle_reviewer`
+  exercises both the grace skip and the post-grace redispatch.
+- **Files**: backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspaces.py, CHANGELOG.md
+
 ### feat: lessons usage tracking, catalog rendering, and H20 seed lessons
 
 - Refactor lesson injection from keyword-matching auto-body-injection to **index-only + agent-directed take**:
