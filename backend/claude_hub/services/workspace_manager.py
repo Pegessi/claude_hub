@@ -4943,7 +4943,9 @@ class WorkspaceManager:
                     "Re-dispatching stuck review task (fallback reaper); "
                     "prior reviewer dispatch did not complete."
                 ),
-                message_zh=("重新分派卡住的 review 任务（fallback reaper）；" "之前的 reviewer 分派未完成。"),
+                message_zh=(
+                    "重新分派卡住的 review 任务（fallback reaper）；" "之前的 reviewer 分派未完成。"
+                ),
                 changed_files=[],
                 validation=None,
                 risks=None,
@@ -5229,7 +5231,9 @@ class WorkspaceManager:
                 "Workspace task prompt appears to still be sitting in the terminal input box; "
                 "the agent did not start executing and manual recovery is required."
             )
-            message_zh = "Workspace task prompt 似乎仍停留在终端输入框；Agent 未开始执行，需要手动恢复。"
+            message_zh = (
+                "Workspace task prompt 似乎仍停留在终端输入框；Agent 未开始执行，需要手动恢复。"
+            )
             report_state = AgentReportState.NEEDS_INPUT
 
         self._mark_prompt_dispatch_stalled(
