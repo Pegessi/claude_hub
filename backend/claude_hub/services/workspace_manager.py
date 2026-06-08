@@ -1469,6 +1469,13 @@ class WorkspaceManager:
         if status == WorkspaceTaskStatus.DONE:
             self._write_task_record(self.tasks[task.id])
             self._release_task_session(self.tasks[task.id])
+            if task.feedback_lesson_ids:
+                self._feedback_store().increment_lesson_usage(
+                    task.workspace_id,
+                    list(task.feedback_lesson_ids),
+                    success=True,
+                    now=now,
+                )
         elif status == WorkspaceTaskStatus.WORKING and task.session_id:
             self._assign_current_task(task.session_id, task.id)
         elif status == WorkspaceTaskStatus.REVIEW and task.session_id:
@@ -2759,6 +2766,12 @@ class WorkspaceManager:
                 lesson_ids=feedback_lesson_ids,
                 prompt_kind="assignment",
                 created_at=now,
+            )
+            self._feedback_store().increment_lesson_usage(
+                workspace.id,
+                feedback_lesson_ids,
+                success=False,
+                now=now,
             )
         self.sessions[session.id] = session.model_copy(
             update={
@@ -4053,6 +4066,13 @@ class WorkspaceManager:
         )
         self._write_task_record(updated)
         self._release_task_session(updated)
+        if updated.feedback_lesson_ids:
+            self._feedback_store().increment_lesson_usage(
+                updated.workspace_id,
+                list(updated.feedback_lesson_ids),
+                success=True,
+                now=now,
+            )
         self._save_state()
         await self.dispatch_workspace(updated.workspace_id)
 
@@ -4445,6 +4465,12 @@ class WorkspaceManager:
                 lesson_ids=feedback_lesson_ids,
                 prompt_kind="reviewer",
                 created_at=now,
+            )
+            self._feedback_store().increment_lesson_usage(
+                task.workspace_id,
+                feedback_lesson_ids,
+                success=False,
+                now=now,
             )
         self._save_state()
         is_same_task_continuation = task.review_session_id == reviewer.id

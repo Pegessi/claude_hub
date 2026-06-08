@@ -5,6 +5,17 @@
 
 ## 2026-06-08
 
+### feat: lessons usage tracking, catalog rendering, and H20 seed lessons
+
+- Add `FeedbackLessonStore.increment_lesson_usage(workspace_id, lesson_ids, *, success, now)`: increments `hit_count` on every prompt injection and `success_count` when a task that cited those lessons passes review; also sets `last_used_at`
+- Add `FeedbackLessonStore.render_lessons_catalog_md(workspace_id, workspace_name)`: renders all active and archived lessons for a workspace as structured Markdown suitable for `docs/working-logs/lessons-catalog.md`
+- Wire hit_count tracking at two injection points: task dispatch to agent (`_dispatch_task_to_session`) and task dispatch to reviewer (`_request_task_review`)
+- Wire success_count tracking at two DONE-transition points: `update_task(status=DONE)` (human acceptance) and `_handle_internal_task_report` (internal reaper completion)
+- Add `docs/working-logs/lessons-catalog.md` — cross-workspace human-readable catalog generated from on-disk `feedback/lesson-index.json` state; prompt injection does not read this file (injection uses `lesson_context_payload` keyword overlap)
+- Add one Task Navigation index row to `AGENTS.md` and `CLAUDE.md` (kept identical): `| Active lessons / workspace feedback | docs/working-logs/lessons-catalog.md |`
+- Seed 4 new single-evidence H20 workspace lessons from iteration-signal tasks: revert-commit rationale, reproducer handoff paths, performance baseline measurement, Docker image HEAD/SHA labeling; archive 1 spurious test lesson; H20 now has 11 active / 7 archived
+- **Files**: backend/claude_hub/services/feedback_lessons.py, backend/claude_hub/services/workspace_manager.py, docs/working-logs/lessons-catalog.md, AGENTS.md, CLAUDE.md, CHANGELOG.md
+
 ### fix: unstick review tasks when reviewers are idle
 
 - Replace blanket early-returns in `request_task_review()` and
