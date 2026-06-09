@@ -357,7 +357,7 @@ let lastThemeKey: string | null = null
 
 const MOBILE_TERMINAL_BREAKPOINT_PX = 768
 const MOBILE_KEYBOARD_RESIZE_SETTLE_MS = 260
-const MAX_SINGLE_PANE_CACHED_TERMINALS = 2
+const MAX_SINGLE_PANE_CACHED_TERMINALS = 4
 
 function getTerminalState(): TerminalKeyState {
   if (!window.__claudeHubTerminalState) {
@@ -398,17 +398,14 @@ watch(
     requestAnimationFrame(() => {
       scheduleTerminalResize(newTabId)
       scheduleMobileTerminalActivation(newTabId)
-      // Desktop reactivation: plain terminals can refresh scrollback when
-      // switched back in. Agent TUIs keep their cursor-driven live screen and
-      // only scroll to bottom; tmux text snapshots can corrupt their redraws.
+      // Desktop reactivation should be a cheap viewport action. Full tmux
+      // history replay is still available through the manual refresh button,
+      // but doing it automatically on tab switch makes long-context tabs show
+      // a visible history replay before the bottom prompt is usable.
       if (oldTabId && oldTabId !== newTabId && !isMobileTerminalViewport()) {
-        if (shouldAutoRefreshHistory()) {
-          refreshTerminalHistory(newTabId)
-        } else {
-          postTerminalScrollBottom(newTabId)
-          window.setTimeout(() => postTerminalScrollBottom(newTabId), 120)
-          window.setTimeout(() => postTerminalScrollBottom(newTabId), 360)
-        }
+        postTerminalScrollBottom(newTabId)
+        window.setTimeout(() => postTerminalScrollBottom(newTabId), 120)
+        window.setTimeout(() => postTerminalScrollBottom(newTabId), 360)
       }
     })
   },
@@ -655,17 +652,12 @@ function isMobileTerminalViewport() {
   )
 }
 
-function shouldAutoRefreshHistory() {
-  return props.agentType === 'terminal'
-}
-
 function scheduleMobileTerminalActivation(tabId?: string) {
   if (!tabId || !isMobileTerminalViewport()) return
 
-  const refreshHistory = shouldAutoRefreshHistory()
   postTerminalMessage(tabId, {
     type: 'terminal-activate',
-    refreshHistory,
+    refreshHistory: false,
     scrollToBottom: true,
   })
   window.setTimeout(() => postTerminalScrollBottom(tabId), 120)

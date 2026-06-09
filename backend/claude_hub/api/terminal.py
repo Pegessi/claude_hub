@@ -41,6 +41,10 @@ from ..services import ttyd_manager
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/terminal", tags=["terminal"])
 
+FULL_HISTORY_LINES = 100000
+INITIAL_AGENT_HISTORY_LINES = 5000
+INITIAL_TERMINAL_HISTORY_LINES = 20000
+
 
 def _set_tcp_nodelay(sock: Optional[socket.socket]) -> None:
     """Enable TCP_NODELAY on a socket when possible.
@@ -327,7 +331,7 @@ async def proxy_ttyd_websocket(
 @router.get("/history/{tab_id}", response_model=TerminalHistoryResponse)
 async def get_terminal_history(
     tab_id: str,
-    lines: int = Query(100000, ge=100, le=100000),
+    lines: int = Query(FULL_HISTORY_LINES, ge=100, le=FULL_HISTORY_LINES),
     current_user: User = Depends(get_current_user),
 ) -> TerminalHistoryResponse:
     """Get captured tmux history for replaying terminal scrollback."""
@@ -460,7 +464,10 @@ async def proxy_terminal_request(
         const EXECUTION_TARGET = {json.dumps(tab.target.value)};
         const IS_AGENT_TUI = AGENT_TYPE === 'claude' || AGENT_TYPE === 'codex' || AGENT_TYPE === 'cursor';
         const IS_REMOTE_AGENT_TUI = EXECUTION_TARGET === 'remote' && IS_AGENT_TUI;
-        const HISTORY_LINES = 100000;
+        const FULL_HISTORY_LINES = {FULL_HISTORY_LINES};
+        const INITIAL_HISTORY_LINES = IS_AGENT_TUI
+          ? {INITIAL_AGENT_HISTORY_LINES}
+          : {INITIAL_TERMINAL_HISTORY_LINES};
         let historyText = '';
         let historyCursorX = null;
         let historyCursorY = null;
@@ -479,7 +486,7 @@ async def proxy_terminal_request(
           // manual refresh control.
           markHistoryLoaded();
         }} else {{
-          fetchHistorySnapshot()
+          fetchHistorySnapshot(INITIAL_HISTORY_LINES)
             .then(function(snapshot) {{
               historyText = snapshot.history;
               historyCursorX = snapshot.cursorX;
@@ -550,8 +557,9 @@ async def proxy_terminal_request(
           }};
         }}
 
-        async function fetchHistorySnapshot() {{
-          const response = await fetch(`/api/terminal/history/${{TAB_ID}}?lines=${{HISTORY_LINES}}`, {{
+        async function fetchHistorySnapshot(lines) {{
+          const requestedLines = Number.isInteger(lines) && lines > 0 ? lines : FULL_HISTORY_LINES;
+          const response = await fetch(`/api/terminal/history/${{TAB_ID}}?lines=${{requestedLines}}`, {{
             cache: 'no-store',
             credentials: 'same-origin',
           }});
@@ -614,7 +622,7 @@ async def proxy_terminal_request(
           if (!term || replayed || typeof term.write !== 'function') return;
           replayed = true;
 
-          // The history API returns the FULL terminal content
+          // The history API returns captured terminal content
           // (scrollback + visible screen) from tmux capture-pane. Tokenise
           // line endings in a single pass: the iframe is same-origin with
           // the parent app, so multi-pass regexes over a tens-of-MB

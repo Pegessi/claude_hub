@@ -5,6 +5,21 @@
 
 ## 2026-06-09
 
+### perf: make long-context terminal tab activation prompt-first
+
+- Terminal tab activation now scrolls cached terminals to the bottom instead
+  of automatically triggering a full tmux history replay. The manual refresh
+  button remains the explicit full-history recovery path.
+- Initial terminal iframe replay now requests a bounded tmux history tail
+  (smaller for Claude/Codex/Cursor agent TUIs, larger for plain terminals) so
+  selecting or reloading a long-context tab does not visibly stream old
+  scrollback for a long time before the prompt is usable.
+- Single-pane terminal caching keeps up to four recent terminal iframes alive,
+  reducing reload/replay frequency when switching among workspace agent tabs
+  while still avoiding hidden-pane resize work.
+- **Files**: TerminalView.vue, terminal.py, test_terminal_replay.py,
+  terminal-debugging.md
+
 ### feat: gate reviewed tasks on Goal Packet approval before implementation
 
 - Reviewed workspace tasks now treat the first worker `working` report with a
