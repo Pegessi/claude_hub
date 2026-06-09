@@ -626,7 +626,7 @@
                   />
                 </div>
                 <div class="goal-packet-meta">
-                  <span>{{ selectedTask.goal_packet.status || 'draft' }}</span>
+                  <span>{{ goalPacketStatusLabel(selectedTask.goal_packet.status) }}</span>
                   <span>{{ selectedTask.goal_packet.source || 'agent_generated' }}</span>
                 </div>
                 <div
@@ -685,6 +685,10 @@
                 <div>
                   <span>Review state</span>
                   <strong>{{ reviewStatusLabel(selectedTask) || 'not requested' }}</strong>
+                </div>
+                <div>
+                  <span>Goal Packet gate</span>
+                  <strong>{{ goalPacketGateLabel(selectedTask) }}</strong>
                 </div>
                 <div>
                   <span>Review profiles</span>
@@ -3022,6 +3026,30 @@ function executionComplexityLabel(complexity: WorkspaceTaskExecutionComplexity) 
   return 'Auto'
 }
 
+function goalPacketStatusLabel(status: GoalPacket['status']) {
+  if (status === 'pending_review') return 'Pending review'
+  if (status === 'approved') return 'Approved'
+  if (status === 'rejected') return 'Rejected'
+  if (status === 'frozen') return 'Frozen'
+  if (status === 'superseded') return 'Superseded'
+  return 'Draft'
+}
+
+function goalPacketGateLabel(task: WorkspaceTask) {
+  const status = task.goal_packet?.status
+  if (!status) return 'Not recorded'
+  if (status === 'pending_review') {
+    if (task.review_requested_at && !task.review_completed_at) {
+      return 'Awaiting Goal Packet approval'
+    }
+    if (task.review_completed_at) return 'Review needs input'
+    return 'Pending approval'
+  }
+  if (status === 'approved') return 'Approved for implementation'
+  if (status === 'rejected') return 'Changes requested before implementation'
+  return goalPacketStatusLabel(status)
+}
+
 function autonomousRunPhaseLabel(phase: string) {
   return phase
     .split('_')
@@ -3036,6 +3064,16 @@ function formatAutonomousScore(score: number | null | undefined) {
 
 function reviewStatusLabel(task: WorkspaceTask) {
   if (task.human_accepted_at) return 'Human accepted'
+  if (task.goal_packet?.status === 'pending_review') {
+    if (task.review_requested_at && !task.review_completed_at) return 'Pending Goal Packet approval'
+    if (task.review_completed_at) return 'Goal Packet review needs input'
+  }
+  if (task.goal_packet?.status === 'rejected' && task.status === 'working') {
+    return 'Goal Packet changes requested'
+  }
+  if (task.goal_packet?.status === 'approved' && task.status === 'working') {
+    return 'Goal Packet approved; implementation active'
+  }
   const latestReviewReport = latestReviewReportForTask(task)
   if (latestReviewReport?.state === 'review_passed') return 'AI review passed, awaiting human acceptance'
   if (latestReviewReport?.state === 'review_failed') return 'Changes requested'
@@ -3051,6 +3089,29 @@ function activeReviewBadge(
   task: WorkspaceTask,
 ): { kind: 'active' | 'pending' | 'attention'; label: string; title: string } | null {
   const latestReviewReport = latestReviewReportForTask(task)
+  if (
+    task.goal_packet?.status === 'pending_review' &&
+    task.review_requested_at &&
+    !task.review_completed_at
+  ) {
+    const reviewerName = task.review_session_id
+      ? reviewerTitle(task.review_session_id)
+      : 'AI reviewer'
+    return {
+      kind: latestReviewReport?.state === 'review_started' ? 'active' : 'pending',
+      label: latestReviewReport?.state === 'review_started'
+        ? 'Packet reviewing'
+        : 'Packet approval',
+      title: `${reviewerName} is reviewing the Goal Packet before implementation starts`,
+    }
+  }
+  if (task.goal_packet?.status === 'rejected' && task.status === 'working') {
+    return {
+      kind: 'attention',
+      label: 'Packet changes',
+      title: 'Goal Packet review requested changes before implementation can start',
+    }
+  }
   if (latestReviewReport?.state === 'review_failed') {
     return {
       kind: 'attention',
@@ -3099,6 +3160,12 @@ function activeReviewBadge(
 
 function awaitingHumanAcceptance(task: WorkspaceTask) {
   const latestReviewReport = latestReviewReportForTask(task)
+  if (
+    task.goal_packet?.status === 'pending_review' ||
+    task.goal_packet?.status === 'rejected'
+  ) {
+    return false
+  }
   return task.status === 'review' && (
     Boolean(task.human_acceptance_requested_at) ||
     Boolean(task.review_skipped_at) ||

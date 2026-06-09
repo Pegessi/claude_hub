@@ -866,6 +866,221 @@ def test_agent_report_stores_goal_packet_and_acceptance_check(
     assert review_report["confidence"] == 0.9
 
 
+def test_working_goal_packet_triggers_approval_review(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="goal-gate-tab",
+        port=12531,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Goal Gate", "path": str(repo), "session_prefix": "ggate"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Plan first", "prompt": "Implement after plan approval"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    sent_messages.clear()
+
+    response = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "working",
+            "message": "Goal Packet created; waiting for approval.",
+            "goal_packet": {
+                "objective": "Implement after plan approval.",
+                "acceptance_criteria": ["Plan is approved before coding"],
+                "validation_plan": ["Reviewer checks the packet"],
+                "assumptions": ["Reviewed mode requires a packet gate"],
+                "out_of_scope": ["Implementation before approval"],
+                "handoff_requirements": ["Report approval status"],
+            },
+        },
+    )
+
+    assert response.status_code == 201
+    updated = workspace_manager.tasks[task["id"]]
+    assert updated.status == WorkspaceTaskStatus.REVIEW
+    assert updated.goal_packet is not None
+    assert updated.goal_packet.status.value == "pending_review"
+    assert updated.review_session_id is not None
+    assert updated.human_acceptance_requested_at is None
+    reviewer_prompt = sent_messages[-1][1]
+    assert "Goal Packet approval review" in reviewer_prompt
+    assert "Do not judge implementation completeness" in reviewer_prompt
+    assert "review_passed means the implementation agent may begin development" in reviewer_prompt
+
+
+def test_goal_packet_review_pass_resumes_original_agent(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="goal-pass-tab",
+        port=12532,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Goal Pass", "path": str(repo), "session_prefix": "gpass"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Approve packet", "prompt": "Implement after approval"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "working",
+            "message": "Goal Packet created; waiting for approval.",
+            "goal_packet": {
+                "objective": "Implement after approval.",
+                "acceptance_criteria": ["Approval happens first"],
+                "validation_plan": ["Reviewer approval"],
+                "assumptions": [],
+                "out_of_scope": [],
+                "handoff_requirements": [],
+            },
+        },
+    )
+    reviewer_id = workspace_manager.tasks[task["id"]].review_session_id
+    assert reviewer_id is not None
+    sent_messages.clear()
+
+    response = client.post(
+        f"/api/workspaces/sessions/{reviewer_id}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "review_passed",
+            "message": "Goal Packet preserves the task and has checkable criteria.",
+        },
+    )
+
+    assert response.status_code == 201
+    updated = workspace_manager.tasks[task["id"]]
+    assert updated.status == WorkspaceTaskStatus.WORKING
+    assert updated.goal_packet is not None
+    assert updated.goal_packet.status.value == "approved"
+    assert updated.human_acceptance_requested_at is None
+    assert workspace_manager.sessions[started["session_id"]].status == ManagedSessionStatus.WORKING
+    assert "Goal Packet approved" in sent_messages[-1][1]
+    assert "Begin implementation" in sent_messages[-1][1]
+
+    sent_messages.clear()
+    final_response = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "completed",
+            "message": "Implementation complete.",
+            "acceptance_check": [
+                {
+                    "criterion": "Approval happens first",
+                    "status": "passed",
+                    "evidence": "Goal Packet review passed before this report.",
+                }
+            ],
+            "changed_files": ["backend/claude_hub/services/workspace_manager.py"],
+            "validation": "pytest backend/tests/test_workspaces.py",
+            "risks": "none",
+            "review_decision": "request",
+            "review_reason": "Implementation change needs normal review.",
+        },
+    )
+
+    assert final_response.status_code == 201
+    final_task = workspace_manager.tasks[task["id"]]
+    assert final_task.status == WorkspaceTaskStatus.REVIEW
+    assert final_task.goal_packet is not None
+    assert final_task.goal_packet.status.value == "approved"
+    assert "Review workspace task." in sent_messages[-1][1]
+    assert "Goal Packet approval review" not in sent_messages[-1][1]
+
+
+def test_goal_packet_review_failed_returns_revision_to_original_agent(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="goal-fail-tab",
+        port=12533,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Goal Fail", "path": str(repo), "session_prefix": "gfail"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Revise packet", "prompt": "Do the full task, not just docs"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "working",
+            "message": "Goal Packet created; waiting for approval.",
+            "goal_packet": {
+                "objective": "Only write docs.",
+                "acceptance_criteria": ["Docs exist"],
+                "validation_plan": ["Read docs"],
+                "assumptions": [],
+                "out_of_scope": ["Code changes"],
+                "handoff_requirements": [],
+            },
+        },
+    )
+    reviewer_id = workspace_manager.tasks[task["id"]].review_session_id
+    assert reviewer_id is not None
+    sent_messages.clear()
+
+    response = client.post(
+        f"/api/workspaces/sessions/{reviewer_id}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "review_failed",
+            "message": "Required fixes: preserve the code-change scope.",
+        },
+    )
+
+    assert response.status_code == 201
+    updated = workspace_manager.tasks[task["id"]]
+    assert updated.status == WorkspaceTaskStatus.WORKING
+    assert updated.goal_packet is not None
+    assert updated.goal_packet.status.value == "rejected"
+    assert "Goal Packet reviewer requested changes" in sent_messages[-1][1]
+    assert "Do not start implementation" in sent_messages[-1][1]
+
+
 def test_update_workspace_changes_path_and_remote_cwd(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()

@@ -33,6 +33,7 @@ from ..models import (
     FeedbackReaperRun,
     FeedbackSummaryRequest,
     FeedbackSummaryRun,
+    GoalPacketStatus,
     ManagedSession,
     ManagedSessionStatus,
     ManualTaskControlRequest,
@@ -350,7 +351,7 @@ class WorkspaceManager:
             else:
                 normalized[field] = []
         normalized.setdefault("source", "agent_generated")
-        if normalized.get("status") not in {"draft", "frozen", "superseded"}:
+        if normalized.get("status") not in {status.value for status in GoalPacketStatus}:
             normalized["status"] = "draft"
         normalized.setdefault("created_at", None)
         normalized.setdefault("updated_at", None)
@@ -3053,7 +3054,10 @@ class WorkspaceManager:
             "prompt and include it in your first working report. The Goal Packet must preserve "
             "the user's requested outcome, record assumptions instead of silently narrowing "
             "ambiguous scope, and include concrete reviewer-checkable acceptance criteria, "
-            "a validation plan, out-of-scope boundaries, and final handoff requirements.\n\n"
+            "a validation plan, out-of-scope boundaries, and final handoff requirements. "
+            "For reviewed tasks, that first Goal Packet report is an approval gate: after posting "
+            "it, stop and wait for reviewer approval or packet-change feedback. Do not begin "
+            "substantive implementation until the backend continues the task after review_passed.\n\n"
             "Report state started, then report working as you make progress. "
             "If blocked or waiting for user input, report blocked or needs_input. "
             "When ready for human review, report ready_for_review. When you believe the task is "
@@ -3076,9 +3080,9 @@ class WorkspaceManager:
             f"curl -sS -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"working",'
-            '"message":"Goal packet created; starting implementation.",'
-            '"message_en":"Goal packet created; starting implementation.",'
-            '"message_zh":"已创建目标包，开始实现。",'
+            '"message":"Goal Packet created; waiting for approval.",'
+            '"message_en":"Goal Packet created; waiting for approval.",'
+            '"message_zh":"已创建目标包，等待审核。",'
             '"goal_packet":{"objective":"Concrete task objective in your words.",'
             '"acceptance_criteria":["Specific reviewer-checkable condition."],'
             '"validation_plan":["Command, manual check, or evidence source."],'
@@ -3642,37 +3646,7 @@ class WorkspaceManager:
             f"{self._review_profile_prompt_block(profiles)}"
             f"{self._review_guidance_block(workspace, trigger_report)}"
             f"{lesson_context_block}"
-            "Review workflow:\n"
-            "1. Stay read-only. Do not edit files, run formatters that write changes, or revert work.\n"
-            "2. Check whether the stored Goal Packet faithfully preserves the original task prompt. "
-            "Fail the review if the packet narrowed or distorted the user's requested outcome.\n"
-            "3. Derive a task-specific acceptance checklist before judging the implementation. Use:\n"
-            "   - the task title and description,\n"
-            "   - the stored Goal Packet objective, acceptance criteria, validation plan, assumptions, "
-            "out-of-scope boundaries, and handoff requirements,\n"
-            "   - explicit user requirements and attachments,\n"
-            "   - changed_files, validation, risks, and acceptance_check evidence from the implementation reports,\n"
-            "   - enabled review profiles, profile-specific evidence, artifact_refs, and any REVIEW.md guidance,\n"
-            "   - repository conventions and nearby behavior,\n"
-            "   - any blocked/needs_input context from the trigger report.\n"
-            "4. Inspect changed files and related code paths enough to verify correctness and scope.\n"
-            "5. Evaluate validation evidence. Decide whether missing tests/checks are acceptable or blocking.\n"
-            "6. Produce one final verdict using the exit criteria below.\n\n"
-            "Acceptance standards:\n"
-            "- Goal fidelity: the Goal Packet preserves the original prompt and does not hide ambiguous scope.\n"
-            "- Functional correctness: the requested behavior is implemented end to end.\n"
-            "- Scope control: changes are limited to the task and do not introduce unrelated churn.\n"
-            "- Integration fit: code follows local architecture, state flow, API contracts, and UI conventions.\n"
-            "- Regression safety: existing user flows, persistence, concurrency, and error paths are not broken.\n"
-            "- Validation quality: reported checks match the risk level; missing checks are called out clearly.\n"
-            "- Handoff quality: changed_files, validation, and risks are understandable for a human reviewer.\n\n"
-            "Review exit criteria:\n"
-            "- review_passed: every acceptance criterion is satisfied; no blocking defects remain; validation is "
-            "adequate or any gaps are explicitly non-blocking; residual risks are acceptable for final human acceptance.\n"
-            "- review_failed: at least one blocking defect, regression, scope issue, or missing required validation "
-            "can be fixed by the implementation agent. Include a Required fixes section.\n"
-            "- review_needs_input: review cannot finish without user/product clarification, credentials, unavailable "
-            "environment, or another decision the implementation agent cannot safely infer.\n\n"
+            f"{self._review_workflow_block(task, trigger_report)}"
             "Required final report format:\n"
             "Keep the message itself SHORT and human-scannable. Detailed evidence belongs in the "
             "structured report fields (validation, risks, acceptance_check, profile_results, "
@@ -3713,6 +3687,78 @@ class WorkspaceManager:
             '"requires_human_judgment":false}}\'\n\n'
             "Use review_failed when fixes are required. Use review_needs_input only for genuine blockers "
             "outside the implementation agent's control."
+        )
+
+    def _review_workflow_block(
+        self,
+        task: WorkspaceTask,
+        trigger_report: AgentReport,
+    ) -> str:
+        if self._is_goal_packet_approval_review(task, trigger_report):
+            return (
+                "Goal Packet approval review:\n"
+                "1. Stay read-only. Do not edit files, run formatters that write changes, or revert work.\n"
+                "2. This is a pre-implementation plan gate. Do not judge implementation completeness; "
+                "there should be no substantive implementation yet.\n"
+                "3. Check whether the stored Goal Packet faithfully preserves the original task prompt, "
+                "attachments, ambiguity, and requested outcome. Fail the review if the packet narrowed "
+                "or distorted scope.\n"
+                "4. Verify the packet has reviewer-checkable acceptance criteria, a validation plan, "
+                "assumptions, out-of-scope boundaries, and final handoff requirements. Treat missing "
+                "editable/non-editable boundaries or vague validation as blocking.\n"
+                "5. Check the packet's execution order: the implementation agent must wait for this "
+                "approval before substantive development, then stay within the approved packet unless "
+                "it submits a revised packet for review.\n"
+                "6. Produce one final verdict using the exit criteria below.\n\n"
+                "Acceptance standards:\n"
+                "- Goal fidelity: the Goal Packet preserves the original prompt and does not hide ambiguous scope.\n"
+                "- Boundary quality: editable areas, non-goals, dependencies to avoid, and rejected approaches "
+                "are explicit enough to constrain implementation.\n"
+                "- Reviewability: acceptance criteria and validation plan are concrete enough for a reviewer "
+                "to check later without reconstructing intent.\n"
+                "- Handoff quality: final report requirements include changed files, validation evidence, "
+                "risks, and acceptance_check mapping.\n\n"
+                "Review exit criteria:\n"
+                "- review_passed means the implementation agent may begin development from the approved "
+                "Goal Packet. It does not mean the task implementation is complete or ready for human acceptance.\n"
+                "- review_failed means the implementation agent must revise only the Goal Packet and resubmit "
+                "it for approval before development. Include a Required fixes section.\n"
+                "- review_needs_input means the packet cannot be judged without user/product clarification, "
+                "credentials, unavailable environment, or another decision the implementation agent cannot "
+                "safely infer.\n\n"
+            )
+        return (
+            "Review workflow:\n"
+            "1. Stay read-only. Do not edit files, run formatters that write changes, or revert work.\n"
+            "2. Check whether the stored Goal Packet faithfully preserves the original task prompt. "
+            "Fail the review if the packet narrowed or distorted the user's requested outcome.\n"
+            "3. Derive a task-specific acceptance checklist before judging the implementation. Use:\n"
+            "   - the task title and description,\n"
+            "   - the stored Goal Packet objective, acceptance criteria, validation plan, assumptions, "
+            "out-of-scope boundaries, and handoff requirements,\n"
+            "   - explicit user requirements and attachments,\n"
+            "   - changed_files, validation, risks, and acceptance_check evidence from the implementation reports,\n"
+            "   - enabled review profiles, profile-specific evidence, artifact_refs, and any REVIEW.md guidance,\n"
+            "   - repository conventions and nearby behavior,\n"
+            "   - any blocked/needs_input context from the trigger report.\n"
+            "4. Inspect changed files and related code paths enough to verify correctness and scope.\n"
+            "5. Evaluate validation evidence. Decide whether missing tests/checks are acceptable or blocking.\n"
+            "6. Produce one final verdict using the exit criteria below.\n\n"
+            "Acceptance standards:\n"
+            "- Goal fidelity: the Goal Packet preserves the original prompt and does not hide ambiguous scope.\n"
+            "- Functional correctness: the requested behavior is implemented end to end.\n"
+            "- Scope control: changes are limited to the task and do not introduce unrelated churn.\n"
+            "- Integration fit: code follows local architecture, state flow, API contracts, and UI conventions.\n"
+            "- Regression safety: existing user flows, persistence, concurrency, and error paths are not broken.\n"
+            "- Validation quality: reported checks match the risk level; missing checks are called out clearly.\n"
+            "- Handoff quality: changed_files, validation, and risks are understandable for a human reviewer.\n\n"
+            "Review exit criteria:\n"
+            "- review_passed: every acceptance criterion is satisfied; no blocking defects remain; validation is "
+            "adequate or any gaps are explicitly non-blocking; residual risks are acceptable for final human acceptance.\n"
+            "- review_failed: at least one blocking defect, regression, scope issue, or missing required validation "
+            "can be fixed by the implementation agent. Include a Required fixes section.\n"
+            "- review_needs_input: review cannot finish without user/product clarification, credentials, unavailable "
+            "environment, or another decision the implementation agent cannot safely infer.\n\n"
         )
 
     def _execution_complexity_review_block(self, task: WorkspaceTask) -> str:
@@ -3888,6 +3934,34 @@ class WorkspaceManager:
             )
         )
 
+    def _should_route_goal_packet_for_approval(
+        self,
+        task: WorkspaceTask | None,
+        session: ManagedSession,
+        payload: AgentReportCreate,
+    ) -> bool:
+        """Return true for the plan-only Goal Packet report on reviewed tasks."""
+
+        if task is None or payload.goal_packet is None:
+            return False
+        if task.task_mode != WorkspaceTaskMode.REVIEWED:
+            return False
+        if session.role not in {
+            WorkspaceSessionRole.ORCHESTRATOR,
+            WorkspaceSessionRole.WORKER,
+        }:
+            return False
+        if payload.state != AgentReportState.WORKING:
+            return False
+        if task.review_requested_at and not task.review_completed_at:
+            return False
+        current_status = task.goal_packet.status if task.goal_packet else None
+        return current_status not in {
+            GoalPacketStatus.PENDING_REVIEW,
+            GoalPacketStatus.APPROVED,
+            GoalPacketStatus.FROZEN,
+        }
+
     async def create_report(self, session_id: str, payload: AgentReportCreate) -> AgentReport:
         session = self.sessions.get(session_id)
         if not session:
@@ -3905,6 +3979,20 @@ class WorkspaceManager:
                     "Task was manually aborted; restart or reassign it before accepting reports."
                 )
             session = await self._rename_session_for_task(session, task, updated_at=now)
+        goal_packet_for_task = payload.goal_packet
+        if self._should_route_goal_packet_for_approval(task, session, payload):
+            created_at = (
+                payload.goal_packet.created_at
+                or (task.goal_packet.created_at if task and task.goal_packet else None)
+                or now
+            )
+            goal_packet_for_task = payload.goal_packet.model_copy(
+                update={
+                    "status": GoalPacketStatus.PENDING_REVIEW,
+                    "created_at": created_at,
+                    "updated_at": now,
+                }
+            )
 
         report = AgentReport(
             id=str(uuid.uuid4()),
@@ -3949,8 +4037,8 @@ class WorkspaceManager:
         if task_id and task_id in self.tasks:
             task_status = self._task_status_from_report(payload.state)
             task_update: dict[str, Any] = {}
-            if payload.goal_packet is not None:
-                task_update["goal_packet"] = payload.goal_packet
+            if goal_packet_for_task is not None:
+                task_update["goal_packet"] = goal_packet_for_task
             current_task = self.tasks[task_id]
             if current_task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
                 autonomous_run = self._autonomous_run_after_worker_report(
@@ -4005,6 +4093,9 @@ class WorkspaceManager:
         if task.system_internal:
             await self._handle_internal_task_report(task, session, report)
             return
+        if self._is_goal_packet_approval_review(task, report):
+            await self._request_task_review(task, report)
+            return
         if not state_policy.is_review_gate_state(report.state):
             return
         if task.review_requested_at and not task.review_completed_at:
@@ -4047,6 +4138,18 @@ class WorkspaceManager:
             await self._request_task_review(task, report)
             return
         self._mark_task_review_skipped(task, report)
+
+    def _is_goal_packet_approval_review(
+        self,
+        task: WorkspaceTask,
+        report: AgentReport,
+    ) -> bool:
+        return (
+            task.task_mode == WorkspaceTaskMode.REVIEWED
+            and report.state == AgentReportState.WORKING
+            and task.goal_packet is not None
+            and task.goal_packet.status == GoalPacketStatus.PENDING_REVIEW
+        )
 
     async def _handle_internal_task_report(
         self,
@@ -4568,6 +4671,13 @@ class WorkspaceManager:
             AgentReportState.REVIEW_NEEDS_INPUT,
         }:
             return
+        if (
+            task.task_mode == WorkspaceTaskMode.REVIEWED
+            and task.goal_packet is not None
+            and task.goal_packet.status == GoalPacketStatus.PENDING_REVIEW
+        ):
+            await self._handle_goal_packet_review_report(task, reviewer, report)
+            return
 
         now = _now()
         reviewer_status = (
@@ -4643,6 +4753,83 @@ class WorkspaceManager:
             "Address the required fixes, rerun appropriate validation, and report completed again."
         )
         await self.continue_task(updated_task.id, ContinueTaskRequest(message=feedback))
+
+    async def _handle_goal_packet_review_report(
+        self,
+        task: WorkspaceTask,
+        reviewer: ManagedSession,
+        report: AgentReport,
+    ) -> None:
+        now = _now()
+        reviewer_status = (
+            ManagedSessionStatus.NEEDS_INPUT
+            if report.state == AgentReportState.REVIEW_NEEDS_INPUT
+            else ManagedSessionStatus.IDLE
+        )
+        reviewer_runtime_status = (
+            AgentRuntimeStatus.ATTENTION
+            if report.state == AgentReportState.REVIEW_NEEDS_INPUT
+            else AgentRuntimeStatus.IDLE
+        )
+        task_with_reviewer = task.model_copy(update={"review_session_id": reviewer.id})
+        self._release_reviewer_session(
+            task_with_reviewer,
+            status=reviewer_status,
+            runtime_status=reviewer_runtime_status,
+            updated_at=now,
+            include_stale_assignments=report.state != AgentReportState.REVIEW_NEEDS_INPUT,
+        )
+
+        packet_status = GoalPacketStatus.PENDING_REVIEW
+        if report.state == AgentReportState.REVIEW_PASSED:
+            packet_status = GoalPacketStatus.APPROVED
+        elif report.state == AgentReportState.REVIEW_FAILED:
+            packet_status = GoalPacketStatus.REJECTED
+        goal_packet = task.goal_packet.model_copy(
+            update={
+                "status": packet_status,
+                "updated_at": now,
+            }
+        )
+        self.tasks[task.id] = task.model_copy(
+            update={
+                "status": WorkspaceTaskStatus.REVIEW,
+                "goal_packet": goal_packet,
+                "review_session_id": reviewer.id,
+                "review_completed_at": now,
+                "review_skipped_at": None,
+                "review_skip_reason": None,
+                "reviewed_at": task.reviewed_at or now,
+                "completed_at": None,
+                "human_acceptance_requested_at": None,
+                "human_accepted_at": None,
+                "updated_at": now,
+            }
+        )
+        self._save_state()
+
+        if report.state == AgentReportState.REVIEW_PASSED:
+            feedback = (
+                "Goal Packet approved.\n\n"
+                f"Reviewer session: {reviewer.id}\n"
+                f"Review attempt: {self.tasks[task.id].review_attempts}\n\n"
+                f"{report.message}\n\n"
+                "The task is back in working state. Begin implementation now, stay within the "
+                "approved Goal Packet boundaries, run the validation plan, and map final "
+                "acceptance_check evidence to the approved criteria before requesting final review."
+            )
+            await self.continue_task(task.id, ContinueTaskRequest(message=feedback))
+            return
+        if report.state == AgentReportState.REVIEW_FAILED:
+            feedback = (
+                "Goal Packet reviewer requested changes.\n\n"
+                f"Reviewer session: {reviewer.id}\n"
+                f"Review attempt: {self.tasks[task.id].review_attempts}\n\n"
+                f"{report.message}\n\n"
+                "Revise the Goal Packet and POST a new working report with goal_packet. "
+                "Do not start implementation until a revised Goal Packet receives review_passed."
+            )
+            await self.continue_task(task.id, ContinueTaskRequest(message=feedback))
 
     def reports_for_workspace(self, workspace_id: str) -> list[AgentReport]:
         return sorted(

@@ -5,6 +5,23 @@
 
 ## 2026-06-09
 
+### feat: gate reviewed tasks on Goal Packet approval before implementation
+
+- Reviewed workspace tasks now treat the first worker `working` report with a
+  `goal_packet` as a pre-implementation approval gate. The packet is stored as
+  `pending_review`, an AI reviewer checks goal fidelity and boundaries, and the
+  original worker is continued only after packet `review_passed`.
+- Add Goal Packet statuses `pending_review`, `approved`, and `rejected`.
+  Packet `review_passed` unlocks implementation; packet `review_failed`
+  returns the worker to revise the packet without starting development.
+- Reviewer prompts now distinguish Goal Packet approval reviews from ordinary
+  implementation reviews, explicitly avoiding implementation-completeness
+  judgment during the plan gate.
+- Workspace UI now shows the Goal Packet gate separately from final review
+  state so packet approval does not appear as human acceptance readiness.
+- **Files**: schemas.py, workspace_manager.py, AgentWorkspaceView.vue,
+  types/index.ts, test_workspaces.py, workspace-goal-packet-v1.md, CHANGELOG.md
+
 ### perf: near-native terminal input responsiveness (SAB + WebGL + TCP_NODELAY)
 
 Second-round optimizations targeting sub-20 ms keystroke-to-glyph latency on
@@ -94,7 +111,6 @@ work from resize storms, iframe polling, and status-poll reactivity fan-out.
   colors) from the working tree.
 
 **Files**: `frontend/src/components/TerminalView.vue`, `frontend/src/components/TerminalPane.vue`, `frontend/src/components/TerminalGridView.vue`, `frontend/src/stores/terminalStore.ts`, `CHANGELOG.md`
-
 ## 2026-06-08
 
 ### fix: stop fallback reaper from re-dispatching slow-to-start reviewers

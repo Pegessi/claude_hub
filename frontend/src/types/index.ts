@@ -172,7 +172,13 @@ export interface WorkspaceAttachmentCreate {
   data_url: string
 }
 
-export type GoalPacketStatus = 'draft' | 'frozen' | 'superseded'
+export type GoalPacketStatus =
+  | 'draft'
+  | 'pending_review'
+  | 'approved'
+  | 'rejected'
+  | 'frozen'
+  | 'superseded'
 
 export type AcceptanceCheckStatus = 'passed' | 'failed' | 'partial' | 'not_checked'
 
