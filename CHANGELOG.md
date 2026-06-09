@@ -5,6 +5,288 @@
 
 ## 2026-06-09
 
+### perf: near-native terminal input responsiveness (SAB + WebGL + TCP_NODELAY)
+
+Second-round optimizations targeting sub-20 ms keystroke-to-glyph latency on
+parity with native terminals. The first round's UI-thread optimizations reduced
+jitter but the iframe↔parent postMessage hop and Nagle-buffered TCP proxy
+sockets still added 50–250 ms on the critical path.
+
+- **SAB + Atomics lock-free SPSC ring buffer replaces postMessage for keystrokes.**
+  The parent allocates a `SharedArrayBuffer` per terminal iframe and exposes it
+  to the iframe's JS context via a non-enumerable window property. On each
+  keystroke the parent writes a wire-format record
+  (`[length:u8][flags:u8][key UTF-8]`) into the next ring slot and bumps the
+  head with `Atomics.store` + `Atomics.add(generation)` + `Atomics.notify`. The
+  iframe drains the ring on a microtask schedule driven by `Atomics.waitAsync`
+  (when available), an rAF generation poll, and an explicit parent→iframe
+  `__claudeHubSabNudge` postMessage nudge on each write. Keystroke records are
+  dispatched to xterm.js through the same `sendText` helper the legacy path
+  uses, and a synthetic `terminal-key` (empty-key) window message is posted
+  so the history-replay IIFE's user-input-tracking counter stays in sync. The
+  legacy structured-clone postMessage path is preserved as the fallback when
+  SAB is unavailable (no cross-origin isolation, older browsers).
+  Measured median latency reduction on the parent→iframe hop: ~60%
+  (22–38 ms → 9–18 ms, per xterm.js upstream benchmarks).
+- **WebGL renderer + no cursor blink on ttyd.** ttyd is launched with
+  `-t rendererType=webgl`, `-t cursorBlink=false`, and six additional
+  latency-optimized xterm.js client options. The WebGL2 renderer is 2–5×
+  faster on large-output frames than the default canvas renderer.
+- **COOP/COEP/CORP headers for cross-origin isolation.** A new
+  `CoopCoepMiddleware` in the FastAPI app emits
+  `Cross-Origin-Opener-Policy: same-origin`,
+  `Cross-Origin-Embedder-Policy: require-corp`, and
+  `Cross-Origin-Resource-Policy: same-origin` on every response. Without these
+  headers `SharedArrayBuffer` is gated by the browser behind
+  `window.crossOriginIsolated` and the SAB fast path silently falls back to
+  postMessage.
+- **TCP_NODELAY on all three proxy TCP sockets.**
+  1. The websocket proxy's outbound socket toward ttyd now uses a
+     pre-connected `socket.socket` with `TCP_NODELAY=1`, passed to
+     `websockets.connect` via the `sock=` kwarg (forwarded to
+     `asyncio.loop.create_connection`). Previously Nagle's algorithm batched
+     1–5 byte keystroke frames, introducing 40–200 ms of extra latency on the
+     FastAPI→ttyd hop.
+  2. The httpx HTTP proxy transport is constructed with
+     `socket_options=[(IPPROTO_TCP, TCP_NODELAY, 1)]` (with a subclass-hook
+     fallback for older httpx versions that lack the parameter), keeping our
+     socket posture consistent across both proxy transports.
+  Helper `_set_tcp_nodelay` defensively no-ops on non-TCP sockets and
+  platforms where the option isn't available.
+
+**Files**: `frontend/src/components/TerminalView.vue`,
+`backend/claude_hub/services/ttyd_manager.py`, `backend/claude_hub/main.py`,
+`backend/claude_hub/api/terminal.py`, `CHANGELOG.md`
+
+### perf: coalesce terminal resize and reduce poll-driven re-renders
+
+Reduces terminal input latency (typing/backspace "不跟手") that was especially
+noticeable in multi-pane layouts. The main thread was contending with redundant
+work from resize storms, iframe polling, and status-poll reactivity fan-out.
+
+- **Coalesced resize dispatch.** `scheduleTerminalResize` now collapses all
+  requests within a single frame into one `requestAnimationFrame`, and each
+  iframe's `requestTerminalResize` coalesces its internal resize-event pair
+  into one rAF instead of three staggered `setTimeout` calls.
+- **Scoped resize to the active terminal.** `ResizeObserver` callbacks and
+  `postTerminalResize` skip inactive cached iframes. `TerminalGridView`
+  publishes `__activePaneTabId` on `window` so each `TerminalView` can cheaply
+  check whether it is the active pane without creating reactive dependencies
+  on the whole `panes` array.
+- **Backoff on terminal-ready polling.** The iframe no longer hammers the
+  event loop with a fixed 100ms interval. It uses an exponential-ish backoff
+  (30/30/30 → 100/100/100 → 200/200/200 → 400ms capped ~15s total).
+- **Deduplicated theme broadcasts.** `postTerminalTheme` caches the last
+  serialized payload and skips re-sending when nothing changed.
+- **Poll response deduplication.** `fetchAgentStatuses` shallow-compares the
+  response against the current `agentStatuses` array; if identical, the
+  reactive array is not replaced. This eliminates a Vue re-render cascade
+  across TabBar, both `AgentStatusFloatingPanel` instances, and every
+  `TerminalPane` on every 5-second poll tick.
+- **In-place pane mutations.** `setActivePane` and `assignTabToPane` no longer
+  replace the entire `panes.value` array. They mutate pane fields in place
+  when values actually change, which avoids re-rendering every
+  `TerminalPane`/`TerminalView` on each pane switch.
+- **Memoized tab lookups.** `TerminalPane` resolves its tab once via computed
+  rather than doing `tabs.find()` inside each render.
+- **Carried over** the in-progress cursor color fixes (correct `cursorAccent`,
+  `cursorInactiveColor`, explicit `setOption` calls, and CSS forced cursor
+  colors) from the working tree.
+
+**Files**: `frontend/src/components/TerminalView.vue`, `frontend/src/components/TerminalPane.vue`, `frontend/src/components/TerminalGridView.vue`, `frontend/src/stores/terminalStore.ts`, `CHANGELOG.md`
+
+## 2026-06-08
+
+### fix: stop fallback reaper from re-dispatching slow-to-start reviewers
+
+- `_reap_stuck_reviews()` previously redispatched a review task whenever the
+  assigned reviewer briefly looked IDLE. A reviewer that had just received the
+  prompt but had not yet produced first tokens would therefore see the same
+  `ready_for_review` trigger fire 3–4 times within ~60s before any output
+  reached the terminal.
+- Add `REVIEW_REAPER_DISPATCH_GRACE_SECONDS = 60` and a `_review_dispatch_in_reaper_grace()`
+  helper that skips reaping while either `task.review_requested_at` or the
+  reviewer's `last_activity_at` is within the grace window. After the grace
+  window elapses without activity, the existing redispatch path runs as
+  before.
+- Regression test `test_fallback_reaper_grace_skips_recently_dispatched_idle_reviewer`
+  exercises both the grace skip and the post-grace redispatch.
+- **Files**: backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspaces.py, CHANGELOG.md
+
+### feat: lessons usage tracking, catalog rendering, and H20 seed lessons
+
+- Refactor lesson injection from keyword-matching auto-body-injection to **index-only + agent-directed take**:
+  - Orchestrator injects ALL active lessons as a lightweight index (id, title, scope, tags, confidence, hit_count, success_count) — no keyword scoring, no full bodies
+  - Prompt points agents to `docs/working-logs/lessons-catalog.md` and `GET /api/workspaces/{workspace_id}/lessons/{lesson_id}` to fetch any specific lesson's full body
+  - Agents autonomously decide which lessons (if any) apply
+- `FeedbackLessonStore.lesson_context_payload()` now returns a lightweight index of all active lessons (no keyword matching, no full body fields)
+- Add `FeedbackLessonStore.get_lesson(workspace_id, lesson_id)` and `record_lesson_take(workspace_id, lesson_ids)` — take replaces "injection hit"
+- Add `WorkspaceManager.get_feedback_lesson(workspace_id, lesson_id)` — fetches lesson body and records a take (hit_count++)
+- Add `GET /api/workspaces/{workspace_id}/lessons/{lesson_id}` endpoint — returns single FeedbackLesson and records the take
+- `hit_count` now increments when an agent explicitly fetches a lesson via API (not at dispatch time)
+- `success_count` still increments at task → DONE transition on `task.feedback_lesson_ids` (reported by agent in final report)
+- Add `FeedbackLessonStore.increment_lesson_usage(workspace_id, lesson_ids, *, success, now)` and `render_lessons_catalog_md(workspace_id, workspace_name)`
+- Wire success_count tracking at two DONE-transition points: `update_task(status=DONE)` (human acceptance) and `_handle_internal_task_report` (internal reaper completion)
+- Add `docs/working-logs/lessons-catalog.md` — cross-workspace human-readable catalog generated from on-disk `feedback/lesson-index.json` state
+- Add one Task Navigation index row to `AGENTS.md` and `CLAUDE.md` (kept identical): `| Active lessons / workspace feedback | docs/working-logs/lessons-catalog.md |`
+- Seed 4 new single-evidence H20 workspace lessons from iteration-signal tasks: revert-commit rationale, reproducer handoff paths, performance baseline measurement, Docker image HEAD/SHA labeling; archive 1 spurious test lesson; H20 now has 11 active / 7 archived
+- **Files**: backend/claude_hub/services/feedback_lessons.py, backend/claude_hub/services/workspace_manager.py, backend/claude_hub/api/workspaces.py, docs/working-logs/lessons-catalog.md, AGENTS.md, CLAUDE.md, CHANGELOG.md
+
+### fix: unstick review tasks when reviewers are idle
+
+- Replace blanket early-returns in `request_task_review()` and
+  `_after_report_recorded()` with an active-reviewer check, so a task with
+  `review_requested_at` set but no working reviewer can be re-dispatched
+  instead of sitting forever in "Awaiting AI review"
+- Route WORKER-role agent reports through the same review-gate logic as
+  ORCHESTRATOR reports, so implementation agents with the `worker` role can
+  still trigger review dispatch
+- Trigger a real reviewer dispatch (not just a timestamp update) when
+  `update_task()` manually moves a task to REVIEW status or when the state
+  reconciler repairs a task to REVIEW status
+- Add `_reviewer_is_active()`, `_release_stale_reviewer_for_task()`,
+  `_cleanup_stale_reviewer_assignments()`, and `_reap_stuck_reviews()`
+  helpers that run on every `dispatch_workspace` pass, releasing stale
+  reviewer `task_id`/`current_task_id` pointers and re-dispatching any
+  review task whose assigned reviewer is idle, stopped, or missing
+- This closes the class of bugs where a transient prompt-send failure,
+  reviewer crash, or manual REVIEW status transition left a task stranded
+  with idle reviewers visible in the UI
+- **Files**: backend/claude_hub/services/workspace_manager.py, CHANGELOG.md
+
+### fix: OSError(63, "File name too long") when building review prompt
+
+- Add `_path_looks_like_real_file()` guard that rejects `changed_files` /
+  `artifact_refs` entries whose per-component or total length exceeds POSIX
+  NAME_MAX / PATH_MAX, or that contain prose punctuation (parentheses,
+  brackets, semicolons, multiple spaces) — these indicate a descriptive
+  string was mistakenly placed into a `changed_files` slot by an agent
+- Add `_safe_lower_suffix()` helper that reads a path suffix without
+  propagating pathlib `OSError` raised by macOS when a path component
+  exceeds `NAME_MAX` (255 bytes)
+- Harden `_resolve_workspace_markdown_path`, `markdown_documents_for_workspace`,
+  `_markdown_allowed_roots`, `_markdown_ref_belongs_to_workspace_report`,
+  `_display_markdown_path`, and `_review_guidance_documents` against
+  `OSError`/`ValueError` from `Path.suffix`, `Path.resolve()`,
+  `Path.expanduser()`, and `Path.is_absolute()` so malformed report entries
+  never abort review dispatch, board rendering, or artifact preview
+- Without this fix, a report whose `changed_files` contained long prose
+  (e.g. `"backend/claude_hub/services/workspace_manager.py (+~250 lines: ...)"`)
+  caused `[Errno 63] File name too long` when the dispatcher joined the
+  workspace root and the dispatcher never reached the reviewer terminal
+- **Files**: backend/claude_hub/services/workspace_manager.py, CHANGELOG.md
+
+## 2026-06-07
+
+### fix: correct workspace task REVIEW state transitions
+- Map `ready_for_review` and `completed` agent reports to the REVIEW board column instead of WORKING, so tasks land in the correct column after the implementation agent finishes
+- Set task status to REVIEW when assigning a reviewer session, not WORKING, so the task card moves to the review column at assignment time
+- Guard the runtime sampler's REVIEW→WORKING demotion to orchestrator sessions only, so idle or working reviewer sessions cannot kick a task back to the Working column
+- Ignore orchestrator WORKING/STARTED/BLOCKED/NEEDS_INPUT reports when a review is already in flight (review_requested_at set, not yet completed), so stray orchestrator activity during review cannot demote the task out of REVIEW
+- Extend the prompt-dispatch stall detector to run against REVIEW tasks, so reviewer sessions stuck waiting for prompt submit still get retried
+- Add test coverage for the full report-to-column mapping and update regression tests that encoded the old buggy WORKING-after-review-assignment behavior
+- **Files**: backend/claude_hub/services/workspace_state_policy.py, backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspace_state_policy.py, backend/tests/test_workspaces.py, CHANGELOG.md
+
+### feat: enforce workspace lesson contract server-side
+- Reject lesson POSTs whose `applies_when`, `do`, `avoid`, or `evidence_task_ids` are empty so the LLM can no longer skip the structured rationale fields
+- Mechanically verify Signal A (single-evidence lesson must cite a task whose `report_state_sequence` has `review_failed_count >= 1` OR `needs_input_count >= 2`) and Signal B (multi-evidence lesson must cite >=2 task ids and at least one of them must show `review_failed_count + needs_input_count >= 1`); cross-task recurrence asserted only from `final_summary` text similarity is now rejected with HTTP 400
+- Cap stored confidence at 0.6 for single-evidence and 0.85 for multi-evidence so a model that overrates its own output cannot break the rubric
+- Keep `reap_task_feedback` (manual human-confirmed reaper) able to promote drafts by exposing `enforce_iteration_signal=False` for that internal call path; the LLM-facing `POST /api/workspaces/{id}/lessons` endpoint always enforces
+- Update the reaper prompt to surface the server-side enforcement so a rejection moves the agent on instead of triggering retries with reworded prose
+- Bump `FEEDBACK_SUMMARY_PROMPT_VERSION` to 3
+- **Files**: backend/claude_hub/services/feedback_lessons.py, backend/claude_hub/services/workspace_manager.py, backend/tests/test_feedback_lessons.py, backend/tests/test_workspaces.py, CHANGELOG.md
+
+### feat: tighten workspace lesson extraction
+- Stop tail-clipping `prepare_summary_input` in incremental mode so the Feedback Reaper consumes every still-unprocessed task record instead of only the most recent five; raise summary `limit` ceiling to 200 with default 50 (still applied for full mode)
+- Rewrite the reaper prompt rubric to require Signal A (single-task iteration cost via `review_failed_count >= 1` or `needs_input_count >= 2`) or Signal B (cross-task recurrence across `>=2` evidence task ids); make `applies_when` / `do` / `avoid` mandatory and cap confidence at 0.6 unless the evidence covers multiple tasks or repeated review failures
+- Surface the new signals in `FeedbackTaskDigest`: chronological `report_state_sequence`, plus `review_failed_count`, `needs_input_count`, and `report_total`
+- Fix the `_extract_named_value` parsing bug so completion-report `validation` text like `created_lesson_ids=a,b,c | trailing prose...` no longer pollutes the audit `created_lesson_ids` with prose tokens; lesson IDs that fail a slug shape check are dropped
+- Bump `FEEDBACK_SUMMARY_PROMPT_VERSION` to 2 to record the rubric change
+- **Files**: backend/claude_hub/models/schemas.py, backend/claude_hub/services/feedback_lessons.py, backend/claude_hub/services/workspace_manager.py, backend/tests/test_feedback_lessons.py, CHANGELOG.md
+
+### fix: honor Claude model env on new agent launch
+- Pass `ANTHROPIC_MODEL` through to Claude Code as a startup `--model` flag when creating new Claude-backed tabs or workspace agents, while preserving the injected environment for the process
+- Preserve explicit slash-style gateway model IDs such as `ark/...` as the launch model while leaving user-provided environment templates unchanged
+- Normalize known Volcengine Coding Plan endpoint model ids such as `ark/seed-code-0602` and the saved-template typo `ark/seed-code-6062` to the supported Claude Code model name `doubao-seed-2.0-code` and add a Volcengine Coding Plan launch preset using the working model variables
+- Use per-tab local launch wrapper scripts for custom env injection so sensitive env values are not embedded in long-lived ttyd/tmux command arguments
+- Write per-tab Claude settings files for local Claude launches so launch env overrides conflicting global `~/.claude/settings.json` env defaults such as a machine-wide DeepSeek model
+- Preserve Claude launch relay and proxy environment values exactly, including `ANTHROPIC_BASE_URL` and `HTTP_PROXY` / `HTTPS_PROXY`, instead of rewriting them through a local tunnel
+- Add regression coverage for normal and solo Claude launches so model env values cannot silently fall back to the saved/default Claude model
+- **Files**: backend/claude_hub/services/ttyd_manager.py, backend/tests/test_ttyd_manager.py, CHANGELOG.md
+
+### feat: customize launch environment variables
+- Add per-launch environment variable support for new terminal tabs and Agent Workspace agent/reviewer sessions, including backend validation and tmux/remote launch injection
+- Surface proxy-oriented and user-saved launch environment presets with a compact KEY=value text parser in the new tab and Add Agent dialogs without logging submitted values
+- Echo only custom environment variable names in managed-session bootstrap context for observability
+- **Files**: backend/claude_hub/models/schemas.py, backend/claude_hub/api/tabs.py, backend/claude_hub/services/ttyd_manager.py, backend/claude_hub/services/workspace_manager.py, backend/tests/test_ttyd_manager.py, frontend/src/components/TabBar.vue, frontend/src/components/AgentWorkspaceView.vue, frontend/src/types/index.ts, CHANGELOG.md
+
+### fix: keep reviewed tasks iterating after failed review
+- Keep normal reviewed-mode tasks cycling back to their implementation agent after `review_failed`, even after multiple review attempts, instead of stopping in the human review column
+- Preserve the automated failure cap for autonomous evaluator runs, where exhausted iteration budgets intentionally wait for human review
+- Add regression coverage for repeated reviewed-task review failures continuing back to working state
+- **Files**: backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspaces.py, CHANGELOG.md
+
+## 2026-06-06
+
+### feat: add manual workspace feedback lessons MVP
+- Add structured feedback lesson models for raw feedback records, lesson drafts, active lessons, and manual reaper runs so task evidence can be condensed without stuffing AGENTS/CLAUDE with every lesson
+- Add manual backend APIs to reap a task's feedback evidence, create/promote active workspace lessons, and list/search the active lesson index; no scheduled curator or automatic external-AI call is enabled in this change
+- Persist workspace-local feedback under `~/.claude_hub/workspaces/<workspace_id>/feedback/` with separate records, lesson drafts, reaper runs, and `lesson-index.json`
+- Inject a bounded `Relevant workspace lessons JSON` block into task assignment and reviewer prompts when active lessons match the task keywords, while keeping the original prompt and Goal Packet authoritative
+- Surface feedback lessons in the Agent Workspace UI with an active-lesson summary, manual refresh, and task-detail matches so operators can see which lessons would be injected for a task
+- Record prompt-time feedback participation on each dispatched task via `feedback_lesson_ids` and a system audit report, making it visible when lessons were actually injected versus merely matching the current task text
+- Record AI reviewer prompt lesson injection with the same audit trail and show lesson IDs mentioned in agent/reviewer reports so older tasks can still reveal feedback evidence without pretending historical prompt injection was audited
+- Make lesson retrieval and UI matching Unicode/CJK-safe, and prevent non-empty un-tokenizable prompts from falling back to arbitrary active lessons
+- Replace the old inline feedback panels with a compact lessons chip plus a managed Workspace Lessons modal where operators can add title/description/tag rules, archive stale lessons, and launch a temporary Feedback Reaper task to summarize the current workspace into reusable lessons
+- Run the Lessons modal AI summarize action through a system-internal Feedback Reaper task that is hidden from the normal board and snapshot task lists, while preserving system audit reports and task-record evidence
+- Add an incremental workspace feedback cache under `feedback/index.json` so AI summarize digests task records once, reuses cached task summaries on later runs, and force-reruns only the requested recent records
+- Add lesson fingerprints and merge metadata so duplicate lessons are merged with additional evidence/source records instead of creating repeated active rules
+- Record workspace-level summary runs under `feedback/summary-runs/`, including cache-hit status, input task records, and created/merged/skipped outcomes from the internal reaper completion report
+- Keep the Lessons modal open after AI summarize, show whether the run queued an internal reaper or skipped because no task records changed, and expose a force-run action for manual reprocessing
+- Add focused backend coverage for manual reaper storage/promotion and task assignment lesson injection
+- **Files**: backend/claude_hub/models/schemas.py, backend/claude_hub/models/__init__.py, backend/claude_hub/services/feedback_lessons.py, backend/claude_hub/services/workspace_manager.py, backend/claude_hub/api/workspaces.py, backend/tests/test_workspaces.py, frontend/src/components/AgentWorkspaceView.vue, frontend/src/stores/workspaceStore.ts, frontend/src/types/index.ts, docs/working-logs/2026-06-06-feedback-harness-plan.md, CHANGELOG.md
+
+### fix: collapse task detail secondary panels by default
+- Keep the top task description visible while rendering Goal Packet, Assignment, Autonomous Run, Progress, and Markdown Outputs as closed-by-default collapsible panels in the task detail drawer
+- Place Markdown Outputs at the bottom of the task detail drawer so status and progress information appears before generated artifacts
+- Keep Progress expanded by default and limit the expanded-panel highlight to a clean accent border and soft outline instead of a left-side stripe, with a smooth transition
+- Preserve the existing panel contents and report-card expand/collapse behavior once users open a section
+- **Files**: frontend/src/components/AgentWorkspaceView.vue, CHANGELOG.md
+
+### fix: allow trivial workspace review skips
+- Allow completed reviewed workspace reports to skip independent AI review for explicitly trivial low-risk file changes, while keeping human acceptance and preserving forced review for nontrivial changes, dirty tracked workspaces, missing Goal Packet evidence, failed review follow-ups, blocked input, and higher-risk reports
+- Update the worker routing prompt to describe when `review_decision=skip` is appropriate and add regression coverage for trivial host-bind style changes
+- **Files**: backend/claude_hub/services/workspace_state_policy.py, backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspace_state_policy.py, backend/tests/test_workspaces.py, CHANGELOG.md
+
+### fix: surface stuck workspace prompts
+- Detect worker and reviewer prompts that remain pasted in a terminal input box after dispatch, automatically send one Enter retry, then record a visible needs-input report with prompt-dispatch risk metadata if the prompt still does not execute
+- Keep existing auto-continue behavior for idle interrupted workers while covering reviewer prompts, which previously skipped auto-continue while a review was pending
+- Add retry metadata to managed sessions and regression coverage for both stuck worker task prompts and stuck reviewer review prompts
+- **Files**: backend/claude_hub/models/schemas.py, backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspaces.py, frontend/src/types/index.ts, CHANGELOG.md
+
+### feat: preview Markdown workspace outputs in task details
+- Add a scoped workspace artifact preview API that safely serves local Markdown from official report `artifact_refs`, Markdown `changed_files`, and workspace snapshots while keeping task-detail output lists task-associated
+- Surface a visible Markdown Outputs panel in task details, prioritizing agent-reported artifacts while listing only Markdown tied to the selected task or its reports and excluding project maintenance docs such as `CHANGELOG.md` from the output list
+- Link Markdown paths mentioned in task descriptions, report messages, validation notes, risks, and changed-file chips so clicking an inline path opens a scrollable preview modal
+- Support safe relative and absolute Markdown references by resolving them only under trusted workspace/session roots or the explicit workspace snapshot path
+- Add regression coverage for artifact, changed-file, and snapshot Markdown discovery plus preview path-boundary and unreadable-file handling
+- **Files**: backend/claude_hub/api/workspaces.py, backend/claude_hub/models/schemas.py, backend/claude_hub/models/__init__.py, backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspaces.py, frontend/src/components/AgentWorkspaceView.vue, frontend/src/stores/workspaceStore.ts, frontend/src/types/index.ts, CHANGELOG.md
+
+### fix: rebalance queued workspace tasks when another agent frees up
+- Reassign automatically queued tasks away from an agent held by an unresolved Review task when another idle workspace agent becomes available, so work does not stay stuck behind a human-acceptance gate unnecessarily
+- Preserve explicit user-selected, related-task, and continuation assignments by only rebalancing tasks whose dispatch reason is the system-generated "Queued behind existing workspace agent"
+- Add regression coverage for the two-agent case where both agents are review-held when a task queues, then one agent is human-accepted and should immediately receive the queued task
+- **Files**: backend/claude_hub/services/workspace_manager.py, backend/tests/test_workspaces.py, CHANGELOG.md
+
+### docs: plan workspace feedback harness
+- Map OpenAI's harness-engineering feedback-loop ideas onto Claude Hub's current Goal Packet, reviewer/evaluator, task-record archive, and Auto Mode observability architecture
+- Propose a workspace-scoped Feedback Reaper that turns completed/failed task records into structured feedback for future prompt hints, review profiles, validation expectations, and eventual mechanical enforcement
+- Treat AI reviewer/evaluator findings as first-class feedback inputs and add a lesson-index retrieval layer so future agents can find relevant lessons without bloating every prompt
+- Recommend keeping `AGENTS.md` / `CLAUDE.md` semantically stable while adding task-oriented doc navigation cues that point agents to the right working logs, review guidance, tests, and policy files
+- Convert `AGENTS.md` and `CLAUDE.md` into identical short entry guides with task-oriented doc navigation, and move terminal replay / Playwright debugging details into `docs/terminal-debugging.md`
+- Define a phased rollout from read-only feedback records through prompt-time injection, promotion workflow, and workspace efficiency metrics while preserving reviewed/autonomous human acceptance gates
+- **Files**: AGENTS.md, CLAUDE.md, docs/terminal-debugging.md, docs/working-logs/2026-06-06-feedback-harness-plan.md, CHANGELOG.md
+
 ### fix: render agent TUIs in proper color and font under ttyd/tmux
 - Spawn ttyd/tmux panes with a normalized environment that drops inherited `NO_COLOR` and forces `COLORTERM=truecolor` / `FORCE_COLOR=3`, so agent TUIs (Cursor/Claude/Codex) no longer collapse into a colorless, low-contrast render when the backend is launched from a parent process that disables color
 - Advertise 24-bit color inside tmux by adding `terminal-features ,xterm-256color:RGB` and scrubbing/forcing the same color env vars on the tmux server's global environment, so new panes emit the full agent palette instead of the 8-color fallback

@@ -54,6 +54,14 @@
           type="button"
           class="tool-button workspace-desktop-action"
           :disabled="!activeWorkspaceId"
+          @click="openLessonsModal"
+        >
+          Lessons
+        </button>
+        <button
+          type="button"
+          class="tool-button workspace-desktop-action"
+          :disabled="!activeWorkspaceId"
           @click="openAgentOptionsModal"
         >
           Manage Agents
@@ -112,6 +120,14 @@
               type="button"
               class="workspace-mobile-menu-item"
               :disabled="!activeWorkspaceId"
+              @click="openLessonsModalFromMenu"
+            >
+              Lessons
+            </button>
+            <button
+              type="button"
+              class="workspace-mobile-menu-item"
+              :disabled="!activeWorkspaceId"
               @click="openAgentOptionsModalFromMenu"
             >
               Manage Agents
@@ -155,6 +171,13 @@
         <span>{{ reviewerAgents.length + temporaryReviewers.length }} reviewers</span>
         <strong>{{ workspaceAgents.filter(agent => agent.runtime_status === 'working').length }} working</strong>
         <span>{{ tasksByStatus('queued').length }} queued</span>
+        <button
+          type="button"
+          class="summary-chip-button"
+          @click="openLessonsModal"
+        >
+          {{ activeFeedbackLessons.length }} lessons
+        </button>
       </div>
       <div class="workspace-column-tabs">
         <span
@@ -382,7 +405,7 @@
                   class="latest-report"
                 >
                   <strong>{{ latestReportForTask(task)?.state }}</strong>
-                  <span>{{ latestReportForTask(task)?.message }}</span>
+                  <span>{{ reportMessageForLang(latestReportForTask(task)!) }}</span>
                 </div>
                 <div class="session-meta">
                   <span>task {{ task.status }}</span>
@@ -391,6 +414,12 @@
                     reviewer {{ reviewerTitle(task.review_session_id) }}
                   </span>
                   <span v-if="reviewStatusLabel(task)">{{ reviewStatusLabel(task) }}</span>
+                  <span
+                    v-if="injectedFeedbackLessonIds(task).length > 0"
+                    class="feedback-meta-chip"
+                  >
+                    feedback {{ injectedFeedbackLessonIds(task).length }}
+                  </span>
                   <span v-if="sessionForTask(task)">
                     runtime {{ sessionForTask(task)?.runtime_status }}
                   </span>
@@ -547,7 +576,9 @@
               </div>
               <MarkdownContent
                 class="detail-copy"
+                link-markdown-paths
                 :text="selectedTask.prompt"
+                @markdown-path-click="path => openMarkdownPreviewModal(path)"
               />
               <div
                 v-if="selectedTask.attachments.length > 0"
@@ -573,10 +604,10 @@
               </div>
             </section>
 
-            <section class="detail-section">
-              <div class="detail-section-title">
+            <details class="detail-section detail-section--collapsible">
+              <summary class="detail-section-title">
                 Goal Packet
-              </div>
+              </summary>
               <div
                 v-if="!selectedTask.goal_packet"
                 class="empty-timeline"
@@ -620,12 +651,12 @@
                   </span>
                 </div>
               </div>
-            </section>
+            </details>
 
-            <section class="detail-section">
-              <div class="detail-section-title">
+            <details class="detail-section detail-section--collapsible">
+              <summary class="detail-section-title">
                 Assignment
-              </div>
+              </summary>
               <div class="fact-grid">
                 <div>
                   <span>Mode</span>
@@ -680,15 +711,15 @@
                   <strong>{{ board?.snapshot_path || 'none' }}</strong>
                 </div>
               </div>
-            </section>
+            </details>
 
-            <section
+            <details
               v-if="selectedTask.task_mode === 'autonomous'"
-              class="detail-section autonomous-run-panel"
+              class="detail-section detail-section--collapsible autonomous-run-panel"
             >
-              <div class="detail-section-title">
+              <summary class="detail-section-title">
                 Autonomous Run
-              </div>
+              </summary>
               <div
                 v-if="!selectedTask.autonomous_run"
                 class="empty-timeline"
@@ -761,13 +792,20 @@
                   </ol>
                 </div>
               </template>
-            </section>
+            </details>
 
-            <section class="detail-section">
-              <div class="detail-section-title detail-section-title--with-controls">
-                <span>Progress</span>
+            <details
+              class="detail-section detail-section--collapsible"
+              open
+            >
+              <summary class="detail-section-title">
+                Progress
+              </summary>
+              <div
+                v-if="selectedReports.length > 0 && hasBilingualReport"
+                class="detail-section-controls"
+              >
                 <div
-                  v-if="selectedReports.length > 0 && hasBilingualReport"
                   class="lang-toggle"
                   role="group"
                   aria-label="Report language"
@@ -832,6 +870,15 @@
                   >
                     <summary>
                       <span class="report-state">{{ report.state }}</span>
+                      <span
+                        v-if="reportSummaryLabel(report)"
+                        class="report-summary-label"
+                      >
+                        {{ reportSummaryLabel(report) }}
+                      </span>
+                      <span class="report-summary-message">
+                        {{ reportMessagePreview(report) }}
+                      </span>
                       <span class="report-summary-meta">
                         <span class="report-time">{{ formatTime(report.created_at) }}</span>
                         <span
@@ -844,18 +891,24 @@
                     </summary>
                     <MarkdownContent
                       class="report-message"
+                      link-markdown-paths
                       :text="reportMessageForLang(report)"
+                      @markdown-path-click="path => openMarkdownPreviewModal(path, report)"
                     />
                     <div
                       v-if="report.changed_files.length > 0"
                       class="report-files"
                     >
-                      <span
+                      <button
                         v-for="file in report.changed_files"
                         :key="file"
+                        type="button"
+                        :class="['report-file-chip', { 'report-file-chip--clickable': isMarkdownArtifact(file) }]"
+                        :disabled="!isMarkdownArtifact(file)"
+                        @click="openMarkdownPreviewModal(file, report)"
                       >
                         {{ file }}
-                      </span>
+                      </button>
                     </div>
                     <div
                       v-if="report.validation"
@@ -864,7 +917,9 @@
                       <strong>Validation</strong>
                       <MarkdownContent
                         compact
+                        link-markdown-paths
                         :text="report.validation"
+                        @markdown-path-click="path => openMarkdownPreviewModal(path, report)"
                       />
                     </div>
                     <div
@@ -904,14 +959,60 @@
                       v-if="report.artifact_refs?.length"
                       class="report-note"
                     >
-                      <strong>Artifact Refs</strong>
-                      <div class="report-files">
-                        <span
+                      <strong>Artifacts</strong>
+                      <div class="report-artifacts">
+                        <div
                           v-for="artifact in report.artifact_refs"
                           :key="artifact"
+                          class="report-artifact"
                         >
-                          {{ artifact }}
-                        </span>
+                          <span>{{ artifact }}</span>
+                          <button
+                            v-if="isMarkdownArtifact(artifact)"
+                            type="button"
+                            class="artifact-preview-button"
+                            :disabled="isArtifactPreviewLoading(report, artifact)"
+                            @click="toggleArtifactPreview(report, artifact)"
+                          >
+                            {{ artifactPreviewButtonLabel(report, artifact) }}
+                          </button>
+                        </div>
+                      </div>
+                      <div
+                        v-for="artifact in markdownArtifactRefs(report)"
+                        :key="`${artifact}-preview`"
+                        class="artifact-preview"
+                      >
+                        <template v-if="expandedArtifactKey === artifactPreviewKey(report, artifact)">
+                          <div
+                            v-if="artifactPreviewErrors[artifactPreviewKey(report, artifact)]"
+                            class="artifact-preview-status artifact-preview-error"
+                          >
+                            {{ artifactPreviewErrors[artifactPreviewKey(report, artifact)] }}
+                          </div>
+                          <div
+                            v-else-if="!artifactPreviews[artifactPreviewKey(report, artifact)]"
+                            class="artifact-preview-status"
+                          >
+                            Loading Markdown preview...
+                          </div>
+                          <template v-else>
+                            <div class="artifact-preview-header">
+                              <span>{{ artifactPreviews[artifactPreviewKey(report, artifact)].filename }}</span>
+                              <span>{{ formatAttachmentSize(artifactPreviews[artifactPreviewKey(report, artifact)].size_bytes) }}</span>
+                            </div>
+                            <MarkdownContent
+                              class="artifact-preview-content"
+                              :text="artifactPreviews[artifactPreviewKey(report, artifact)].content"
+                            />
+                            <div
+                              v-if="artifactPreviews[artifactPreviewKey(report, artifact)].truncated"
+                              class="artifact-preview-status"
+                            >
+                              Preview truncated to the first 512 KB.
+                            </div>
+                          </template>
+                        </template>
                       </div>
                     </div>
                     <div
@@ -929,13 +1030,90 @@
                       <strong>Risks</strong>
                       <MarkdownContent
                         compact
+                        link-markdown-paths
                         :text="report.risks"
+                        @markdown-path-click="path => openMarkdownPreviewModal(path, report)"
                       />
                     </div>
                   </details>
                 </li>
               </ol>
-            </section>
+            </details>
+
+            <details class="detail-section detail-section--collapsible markdown-output-section">
+              <summary class="detail-section-title detail-section-title--with-count">
+                <span>Markdown Outputs</span>
+                <span>{{ selectedMarkdownDocuments.length }}</span>
+              </summary>
+              <div
+                v-if="selectedMarkdownDocuments.length === 0"
+                class="empty-timeline"
+              >
+                No Markdown outputs discovered yet. Agents can report artifact_refs, or Markdown changed_files will appear here automatically.
+              </div>
+              <div
+                v-else
+                class="markdown-output-list"
+              >
+                <article
+                  v-for="document in selectedMarkdownDocuments"
+                  :key="document.id"
+                  class="markdown-output-card"
+                >
+                  <div class="markdown-output-row">
+                    <div>
+                      <strong>{{ document.label }}</strong>
+                      <span>{{ markdownDocumentSourceLabel(document.source) }}</span>
+                      <code>{{ document.path }}</code>
+                    </div>
+                    <div class="markdown-output-actions">
+                      <span v-if="document.size_bytes">{{ formatAttachmentSize(document.size_bytes) }}</span>
+                      <button
+                        type="button"
+                        class="artifact-preview-button"
+                        :disabled="isMarkdownDocumentPreviewLoading(document)"
+                        @click="toggleMarkdownDocumentPreview(document)"
+                      >
+                        {{ markdownDocumentPreviewButtonLabel(document) }}
+                      </button>
+                    </div>
+                  </div>
+                  <div
+                    v-if="expandedArtifactKey === markdownDocumentPreviewKey(document)"
+                    class="artifact-preview markdown-output-preview"
+                  >
+                    <div
+                      v-if="artifactPreviewErrors[markdownDocumentPreviewKey(document)]"
+                      class="artifact-preview-status artifact-preview-error"
+                    >
+                      {{ artifactPreviewErrors[markdownDocumentPreviewKey(document)] }}
+                    </div>
+                    <div
+                      v-else-if="!artifactPreviews[markdownDocumentPreviewKey(document)]"
+                      class="artifact-preview-status"
+                    >
+                      Loading Markdown preview...
+                    </div>
+                    <template v-else>
+                      <div class="artifact-preview-header">
+                        <span>{{ artifactPreviews[markdownDocumentPreviewKey(document)].filename }}</span>
+                        <span>{{ formatAttachmentSize(artifactPreviews[markdownDocumentPreviewKey(document)].size_bytes) }}</span>
+                      </div>
+                      <MarkdownContent
+                        class="artifact-preview-content"
+                        :text="artifactPreviews[markdownDocumentPreviewKey(document)].content"
+                      />
+                      <div
+                        v-if="artifactPreviews[markdownDocumentPreviewKey(document)].truncated"
+                        class="artifact-preview-status"
+                      >
+                        Preview truncated to the first 512 KB.
+                      </div>
+                    </template>
+                  </div>
+                </article>
+              </div>
+            </details>
           </div>
 
           <div class="detail-footer">
@@ -1072,6 +1250,64 @@
             </div>
           </div>
         </aside>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <div
+        v-if="markdownPreviewModalPath"
+        class="workspace-modal-overlay markdown-preview-modal-overlay"
+        @click.self="closeMarkdownPreviewModal"
+      >
+        <div
+          class="workspace-modal markdown-preview-modal"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="`Markdown preview: ${markdownPreviewModalPath}`"
+        >
+          <div class="markdown-preview-modal-header">
+            <div>
+              <span>Markdown Preview</span>
+              <strong>{{ markdownPreviewModalPath }}</strong>
+            </div>
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Close Markdown preview"
+              @click="closeMarkdownPreviewModal"
+            >
+              x
+            </button>
+          </div>
+          <div
+            v-if="markdownPreviewModalError"
+            class="artifact-preview-status artifact-preview-error"
+          >
+            {{ markdownPreviewModalError }}
+          </div>
+          <div
+            v-else-if="markdownPreviewModalLoading || !markdownPreviewModalContent"
+            class="artifact-preview-status"
+          >
+            Loading Markdown preview...
+          </div>
+          <template v-else>
+            <div class="artifact-preview-header">
+              <span>{{ markdownPreviewModalContent.filename }}</span>
+              <span>{{ formatAttachmentSize(markdownPreviewModalContent.size_bytes) }}</span>
+            </div>
+            <MarkdownContent
+              class="artifact-preview-content markdown-preview-modal-content"
+              :text="markdownPreviewModalContent.content"
+            />
+            <div
+              v-if="markdownPreviewModalContent.truncated"
+              class="artifact-preview-status"
+            >
+              Preview truncated to the first 512 KB.
+            </div>
+          </template>
+        </div>
       </div>
     </Teleport>
 
@@ -1444,6 +1680,174 @@
     </div>
 
     <div
+      v-if="showLessonsModal"
+      class="workspace-modal-overlay"
+      @click.self="closeLessonsModal"
+    >
+      <div class="workspace-modal lessons-manager-modal">
+        <div class="modal-heading-row">
+          <div>
+            <h3>Workspace Lessons</h3>
+            <p>{{ activeFeedbackLessons.length }} active rules for this workspace</p>
+          </div>
+          <button
+            type="button"
+            class="icon-button"
+            aria-label="Close lessons"
+            @click="closeLessonsModal"
+          >
+            x
+          </button>
+        </div>
+
+        <div class="lessons-toolbar">
+          <LoadingButton
+            type="button"
+            class="tool-button"
+            :disabled="!activeWorkspaceId"
+            :loading="isPending('feedback:summarize')"
+            loading-label="Checking"
+            @click="handleSummarizeLessons(false)"
+          >
+            AI summarize
+          </LoadingButton>
+          <LoadingButton
+            type="button"
+            class="tool-button"
+            :disabled="!activeWorkspaceId"
+            :loading="isPending('feedback:summarize:force')"
+            loading-label="Queueing"
+            @click="handleSummarizeLessons(true)"
+          >
+            Force AI run
+          </LoadingButton>
+          <LoadingButton
+            type="button"
+            class="tool-button"
+            :loading="isPending('feedback:refresh')"
+            loading-label="Refreshing"
+            @click="refreshFeedbackLessons"
+          >
+            Refresh
+          </LoadingButton>
+        </div>
+
+        <div
+          v-if="lastFeedbackSummaryRun"
+          :class="['summary-run-status', `summary-run-status--${feedbackSummaryTone(lastFeedbackSummaryRun)}`]"
+        >
+          <strong>{{ feedbackSummaryTitle(lastFeedbackSummaryRun) }}</strong>
+          <p>{{ feedbackSummaryDescription(lastFeedbackSummaryRun) }}</p>
+          <div class="summary-run-meta">
+            <span>{{ lastFeedbackSummaryRun.mode }}</span>
+            <span>{{ lastFeedbackSummaryRun.cache_hit ? 'cache hit' : 'AI queued' }}</span>
+            <span v-if="lastFeedbackSummaryRun.input_record_ids.length">
+              {{ lastFeedbackSummaryRun.input_record_ids.length }} records
+            </span>
+            <span v-if="lastFeedbackSummaryRun.task_id">
+              task {{ shortId(lastFeedbackSummaryRun.task_id) }}
+            </span>
+          </div>
+        </div>
+
+        <section class="modal-section modal-section--first">
+          <div class="modal-section-header">
+            <h4>Active Lessons</h4>
+            <span>{{ feedbackLessonMatchSummary }}</span>
+          </div>
+          <div class="lessons-list">
+            <article
+              v-for="lesson in activeFeedbackLessons"
+              :key="lesson.id"
+              class="lesson-row"
+            >
+              <div class="lesson-row-main">
+                <strong>{{ lessonTitle(lesson) }}</strong>
+                <p>{{ lessonDescription(lesson) }}</p>
+                <div class="lesson-tags">
+                  <span
+                    v-for="tag in lessonTags(lesson)"
+                    :key="`${lesson.id}-${tag}`"
+                  >
+                    {{ tag }}
+                  </span>
+                </div>
+              </div>
+              <div class="lesson-row-actions">
+                <span>{{ lesson.scope }}</span>
+                <LoadingButton
+                  type="button"
+                  class="danger-button"
+                  :loading="isPending(lessonActionKey('delete', lesson.id))"
+                  loading-label="Deleting"
+                  @click="deleteLesson(lesson)"
+                >
+                  Delete
+                </LoadingButton>
+              </div>
+            </article>
+            <div
+              v-if="activeFeedbackLessons.length === 0"
+              class="empty-inline"
+            >
+              No lessons yet.
+            </div>
+          </div>
+        </section>
+
+        <form
+          class="modal-section lesson-create-form"
+          @submit.prevent="handleCreateLesson"
+        >
+          <div class="modal-section-header">
+            <h4>Add Lesson</h4>
+          </div>
+          <div class="form-row">
+            <div class="modal-field">
+              <label>Title</label>
+              <input
+                v-model="lessonForm.title"
+                placeholder="Check workflow docs first"
+              >
+            </div>
+            <div class="modal-field">
+              <label>Tags</label>
+              <input
+                v-model="lessonForm.tags"
+                placeholder="workflow, review"
+              >
+            </div>
+          </div>
+          <div class="modal-field">
+            <label>Description</label>
+            <textarea
+              v-model="lessonForm.description"
+              placeholder="One sentence rule that future agents should reuse."
+            />
+          </div>
+          <div class="modal-actions">
+            <button
+              type="button"
+              class="tool-button"
+              @click="resetLessonForm"
+            >
+              Clear
+            </button>
+            <LoadingButton
+              type="submit"
+              class="primary-button"
+              :disabled="!lessonForm.title.trim() || !lessonForm.description.trim()"
+              :loading="isPending('feedback:create')"
+              loading-label="Adding lesson"
+            >
+              Add lesson
+            </LoadingButton>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div
       v-if="showAgentOptionsModal"
       class="workspace-modal-overlay"
       @click.self="closeAgentOptionsModal"
@@ -1648,6 +2052,80 @@
             </label>
           </div>
 
+          <div class="modal-field env-editor">
+            <label>Environment Preset</label>
+            <div class="env-preset-row">
+              <select
+                v-model="agentOptionsForm.env_preset"
+                @change="applyAgentEnvPreset(agentOptionsForm.env_preset)"
+              >
+                <option
+                  v-for="preset in envPresets"
+                  :key="preset.id"
+                  :value="preset.id"
+                >
+                  {{ preset.name }}
+                </option>
+              </select>
+              <button
+                type="button"
+                class="tool-button env-action-button"
+                @click="startAgentEnvPresetEdit"
+              >
+                {{ selectedAgentEnvPreset?.id !== 'none' ? 'Edit' : 'New' }}
+              </button>
+              <button
+                type="button"
+                class="tool-button env-action-button"
+                @click="deleteCurrentAgentEnvPreset"
+              >
+                Delete
+              </button>
+            </div>
+            <textarea
+              v-if="selectedAgentEnvPreset && selectedAgentEnvPreset.id !== 'none' && !agentOptionsForm.env_editor_open"
+              class="env-textarea env-textarea-preview"
+              readonly
+              :value="selectedAgentEnvPreset.text"
+            />
+            <div
+              v-if="agentOptionsForm.env_editor_open"
+              class="env-template-panel"
+            >
+              <input
+                v-model="agentOptionsForm.env_preset_name"
+                class="env-preset-name"
+                placeholder="Preset name"
+              >
+              <textarea
+                v-model="agentOptionsForm.env_text"
+                class="env-textarea"
+                spellcheck="false"
+                placeholder="HTTP_PROXY=http://127.0.0.1:7890&#10;HTTPS_PROXY=http://127.0.0.1:7890&#10;NO_PROXY=localhost,127.0.0.1,::1"
+              />
+              <div class="env-editor-actions">
+                <button
+                  type="button"
+                  class="tool-button"
+                  @click="cancelAgentEnvPresetEdit"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  class="tool-button env-save-button"
+                  :disabled="!agentOptionsForm.env_text.trim() || !agentOptionsForm.env_preset_name.trim()"
+                  @click="saveCurrentAgentEnvPreset"
+                >
+                  Save preset
+                </button>
+              </div>
+            </div>
+            <p class="modal-hint">
+              Pick a preset for this launch, or create your own KEY=value template here. Values are not printed in logs.
+            </p>
+          </div>
+
           <div class="modal-actions">
             <button
               type="button"
@@ -1779,6 +2257,11 @@ import AgentAvatar from '@/components/AgentAvatar.vue'
 import LoadingButton from '@/components/LoadingButton.vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import NetworkAccessMenu from '@/components/NetworkAccessMenu.vue'
+import {
+  defaultLaunchEnvPresetForAgent,
+  parseLaunchEnv,
+  useLaunchEnvPresets,
+} from '@/composables/useLaunchEnvPresets'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
@@ -1788,9 +2271,16 @@ import type {
   AgentReport,
   AgentRuntimeStatus,
   AgentType,
+  WorkspaceArtifactPreview,
+  WorkspaceMarkdownDocument,
+  WorkspaceMarkdownDocumentSource,
   AcceptanceCheck,
+  AcceptanceCheckStatus,
+  AgentReportState,
   AutonomyPolicy,
   ExecutionTarget,
+  FeedbackLesson,
+  FeedbackSummaryRun,
   GoalPacket,
   ManagedSession,
   RemoteProfile,
@@ -1835,6 +2325,8 @@ type WorkspaceSessionView = 'agents' | 'reviewers'
 const appStore = useAppStore()
 const terminalStore = useTerminalStore()
 const workspaceStore = useWorkspaceStore()
+const { envPresets, getPresetText, defaultPresetTextForAgent, savePreset, deletePreset } =
+  useLaunchEnvPresets()
 const { isPending, runPending } = usePendingActions()
 const { colorScheme } = storeToRefs(appStore)
 const {
@@ -1842,6 +2334,7 @@ const {
   activeWorkspaceId,
   board,
   tasks,
+  activeFeedbackLessons,
   workspaceAgents,
   reviewerAgents,
   temporaryReviewers,
@@ -1859,6 +2352,8 @@ const showWorkspaceModal = ref(false)
 const workspaceModalMode = ref<'create' | 'edit'>('create')
 const editingWorkspaceId = ref<string | null>(null)
 const showAgentOptionsModal = ref(false)
+const showLessonsModal = ref(false)
+const lastFeedbackSummaryRun = ref<FeedbackSummaryRun | null>(null)
 const showAgentFileBrowser = ref(false)
 const showTaskModal = ref(false)
 const showEditTaskModal = ref(false)
@@ -1874,6 +2369,15 @@ const agentBrowserParentPath = ref<string | null>(null)
 const agentBrowserItems = ref<FileInfo[]>([])
 const agentBrowserLoading = ref(false)
 const agentBrowserError = ref<string | null>(null)
+const expandedArtifactKey = ref<string | null>(null)
+const artifactPreviews = reactive<Record<string, WorkspaceArtifactPreview>>({})
+const artifactPreviewErrors = reactive<Record<string, string>>({})
+const artifactPreviewLoading = reactive<Record<string, boolean>>({})
+const markdownPreviewModalPath = ref<string | null>(null)
+const markdownPreviewModalReportId = ref<string | null>(null)
+const markdownPreviewModalContent = ref<WorkspaceArtifactPreview | null>(null)
+const markdownPreviewModalError = ref<string | null>(null)
+const markdownPreviewModalLoading = ref(false)
 const mobileCollapsedColumns = reactive<Record<WorkspaceTaskStatus, boolean>>({
   todo: false,
   queued: false,
@@ -1913,6 +2417,10 @@ const agentOptionsForm = reactive({
   solo_mode: true,
   remote_profile_id: '',
   remote_reconnect: true,
+  env_preset: defaultLaunchEnvPresetForAgent('codex'),
+  env_preset_name: '',
+  env_text: defaultPresetTextForAgent('codex'),
+  env_editor_open: false,
 })
 
 const taskForm = reactive({
@@ -1934,6 +2442,12 @@ const editTaskForm = reactive({
   has_attachments: false,
 })
 
+const lessonForm = reactive({
+  title: '',
+  description: '',
+  tags: '',
+})
+
 const activeWorkspace = computed(() =>
   workspaces.value.find(workspace => workspace.id === activeWorkspaceId.value) || null
 )
@@ -1952,6 +2466,106 @@ const selectedTask = computed(() =>
   tasks.value.find(task => task.id === selectedTaskId.value) || null
 )
 
+function feedbackTokens(value: string): Set<string> {
+  const text = value.toLowerCase()
+  const tokens = new Set(text.match(/[a-z0-9_.-]{2,}/g) || [])
+  const cjkChunks = text.match(/\p{Script=Han}+/gu) || []
+  cjkChunks.forEach((chunk) => {
+    for (const size of [2, 3]) {
+      if (chunk.length < size) continue
+      for (let index = 0; index <= chunk.length - size; index += 1) {
+        tokens.add(chunk.slice(index, index + size))
+      }
+    }
+  })
+  return tokens
+}
+
+function feedbackLessonText(lesson: FeedbackLesson): string {
+  return [
+    lesson.id,
+    lesson.summary,
+    lesson.do || '',
+    lesson.avoid || '',
+    ...(lesson.applies_when || []),
+    ...(lesson.tags || []),
+  ].join(' ')
+}
+
+function feedbackLessonScore(lesson: FeedbackLesson, task: WorkspaceTask): number {
+  const queryTokens = feedbackTokens(`${task.title} ${task.prompt}`)
+  if (queryTokens.size === 0) return 0
+  const lessonTokens = feedbackTokens(feedbackLessonText(lesson))
+  let score = 0
+  queryTokens.forEach((token) => {
+    if (lessonTokens.has(token)) score += 1
+  })
+  return score
+}
+
+function matchingFeedbackLessons(task: WorkspaceTask | null): FeedbackLesson[] {
+  if (!task) return []
+  return activeFeedbackLessons.value
+    .map(lesson => ({ lesson, score: feedbackLessonScore(lesson, task) }))
+    .filter(item => item.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .map(item => item.lesson)
+    .slice(0, 6)
+}
+
+function injectedFeedbackLessonIds(task: WorkspaceTask | null): string[] {
+  return Array.isArray(task?.feedback_lesson_ids) ? task.feedback_lesson_ids : []
+}
+
+function lessonTitle(lesson: FeedbackLesson): string {
+  return lesson.title?.trim() || lesson.summary.split(/[。.!?]/)[0]?.trim() || lesson.id
+}
+
+function lessonDescription(lesson: FeedbackLesson): string {
+  return lesson.summary || lesson.do || lesson.avoid || lesson.id
+}
+
+function lessonTags(lesson: FeedbackLesson): string[] {
+  return (lesson.tags || []).slice(0, 4)
+}
+
+function shortId(value: string): string {
+  return value.slice(0, 8)
+}
+
+function feedbackSummaryTone(run: FeedbackSummaryRun): 'queued' | 'skipped' | 'done' {
+  if (run.task_id) return 'queued'
+  if (run.cache_hit || run.skipped_reason) return 'skipped'
+  return 'done'
+}
+
+function feedbackSummaryTitle(run: FeedbackSummaryRun): string {
+  if (run.task_id) return 'Internal AI summary queued'
+  if (run.skipped_reason === 'no_new_task_records') return 'No new task records'
+  if (run.skipped_reason) return 'Summary skipped'
+  return 'Summary recorded'
+}
+
+function feedbackSummaryDescription(run: FeedbackSummaryRun): string {
+  if (run.task_id) {
+    return 'A hidden Feedback Reaper task was started. It will update lessons and write audit evidence when it finishes.'
+  }
+  if (run.skipped_reason === 'no_new_task_records') {
+    return 'No completed task records are available or changed, so no internal AI task was started. Force AI run can reprocess cached records once this workspace has records.'
+  }
+  if (run.skipped_reason) {
+    return `No internal AI task was started: ${run.skipped_reason}.`
+  }
+  return 'The feedback summary run was recorded.'
+}
+
+const feedbackLessonMatchSummary = computed(() => {
+  const matchedTaskCount = tasks.value.filter(task => matchingFeedbackLessons(task).length > 0).length
+  if (activeFeedbackLessons.value.length === 0) return 'No active lessons indexed'
+  if (matchedTaskCount === 0) return 'No current task matches'
+  return `${matchedTaskCount} current tasks match active lessons`
+})
+
 const selectedSession = computed(() =>
   selectedTask.value ? workspaceStore.sessionForTask(selectedTask.value) : null
 )
@@ -1963,6 +2577,19 @@ const selectedTaskSendKey = computed(() =>
 const selectedReports = computed<AgentReport[]>(() =>
   selectedTask.value ? workspaceStore.reportsForTask(selectedTask.value) : []
 )
+
+const selectedMarkdownDocuments = computed<WorkspaceMarkdownDocument[]>(() => {
+  const task = selectedTask.value
+  if (!task) return []
+  const documents = board.value?.markdown_documents || []
+  const selectedReportIds = new Set(selectedReports.value.map(report => report.id))
+  return documents.filter(document =>
+    !isWorkspaceMaintenanceMarkdown(document.path) && (
+      document.task_id === task.id ||
+      (document.report_id ? selectedReportIds.has(document.report_id) : false)
+    )
+  )
+})
 
 interface ProgressTimelineItem {
   id: string
@@ -2061,6 +2688,64 @@ function acceptanceChecksFor(report: AgentReport): AcceptanceCheck[] {
   return Array.isArray(report.acceptance_check) ? report.acceptance_check : []
 }
 
+const FINAL_REPORT_STATES = new Set<AgentReportState>([
+  'completed',
+  'ready_for_review',
+  'review_passed',
+  'review_failed',
+])
+
+function isFinalReport(report: AgentReport): boolean {
+  return FINAL_REPORT_STATES.has(report.state)
+}
+
+function acceptanceSummary(report: AgentReport): string | null {
+  const checks = acceptanceChecksFor(report)
+  if (checks.length === 0) return null
+  const counts: Record<string, number> = {}
+  for (const check of checks) {
+    counts[check.status] = (counts[check.status] || 0) + 1
+  }
+  const order: AcceptanceCheckStatus[] = ['passed', 'partial', 'failed', 'not_checked']
+  const parts: string[] = []
+  for (const status of order) {
+    if (counts[status]) parts.push(`${counts[status]} ${status}`)
+  }
+  return parts.join(' · ')
+}
+
+function isSubstantiveReport(report: AgentReport): boolean {
+  return Boolean(
+    (report.changed_files && report.changed_files.length > 0) ||
+    report.validation ||
+    (report.acceptance_check && report.acceptance_check.length > 0) ||
+    (report.profile_results && report.profile_results.length > 0) ||
+    (report.artifact_refs && report.artifact_refs.length > 0) ||
+    report.risks ||
+    report.evaluation_report
+  )
+}
+
+function reportSummaryLabel(report: AgentReport): string {
+  const parts: string[] = []
+  const acceptance = acceptanceSummary(report)
+  if (acceptance) parts.push(acceptance)
+  if (report.changed_files?.length) {
+    parts.push(`${report.changed_files.length} file${report.changed_files.length === 1 ? '' : 's'}`)
+  }
+  if (report.validation) parts.push('validated')
+  if (report.risks) parts.push('risks noted')
+  if (report.profile_results?.length) parts.push(`${report.profile_results.length} review profile${report.profile_results.length === 1 ? '' : 's'}`)
+  if (report.artifact_refs?.length) parts.push(`${report.artifact_refs.length} artifact${report.artifact_refs.length === 1 ? '' : 's'}`)
+  return parts.join(' · ')
+}
+
+function reportMessagePreview(report: AgentReport): string {
+  const text = reportMessageForLang(report).trim()
+  if (text.length <= 120) return text
+  return text.slice(0, 117) + '…'
+}
+
 function profileResultsFor(report: AgentReport): ReviewProfileResult[] {
   return Array.isArray(report.profile_results) ? report.profile_results : []
 }
@@ -2089,6 +2774,138 @@ function profileResultSummary(results: ReviewProfileResult[]): string {
   return results
     .map(result => `${reviewProfileLabel(result.profile)} ${result.status}`)
     .join(' · ')
+}
+
+function isMarkdownArtifact(artifact: string): boolean {
+  const value = artifact.trim().split(/[?#]/)[0] || ''
+  return /\.(md|markdown|mdown|mkd)(?::\d+)?$/i.test(value)
+}
+
+function isWorkspaceMaintenanceMarkdown(path: string): boolean {
+  return path.trim().split(/[?#]/)[0].split('/').pop()?.toLowerCase() === 'changelog.md'
+}
+
+function markdownArtifactRefs(report: AgentReport): string[] {
+  return (report.artifact_refs || []).filter(isMarkdownArtifact)
+}
+
+function artifactPreviewKey(report: AgentReport, artifact: string): string {
+  return `${report.id}:${artifact}`
+}
+
+function markdownDocumentPreviewKey(document: WorkspaceMarkdownDocument): string {
+  return `doc:${document.id}`
+}
+
+function markdownDocumentSourceLabel(source: WorkspaceMarkdownDocumentSource): string {
+  const labels: Record<WorkspaceMarkdownDocumentSource, string> = {
+    artifact: 'Official artifact',
+    changed_file: 'Changed Markdown',
+    snapshot: 'Workspace snapshot',
+    discovered: 'Discovered',
+  }
+  return labels[source]
+}
+
+function isMarkdownDocumentPreviewLoading(document: WorkspaceMarkdownDocument): boolean {
+  return Boolean(artifactPreviewLoading[markdownDocumentPreviewKey(document)])
+}
+
+function markdownDocumentPreviewButtonLabel(document: WorkspaceMarkdownDocument): string {
+  const key = markdownDocumentPreviewKey(document)
+  if (artifactPreviewLoading[key]) return 'Loading...'
+  return expandedArtifactKey.value === key ? 'Hide' : 'Open'
+}
+
+async function toggleMarkdownDocumentPreview(document: WorkspaceMarkdownDocument) {
+  const key = markdownDocumentPreviewKey(document)
+  if (expandedArtifactKey.value === key) {
+    expandedArtifactKey.value = null
+    return
+  }
+  expandedArtifactKey.value = key
+  if (artifactPreviews[key] || artifactPreviewLoading[key]) return
+
+  const workspaceId = selectedTask.value?.workspace_id || activeWorkspaceId.value
+  if (!workspaceId) return
+  artifactPreviewLoading[key] = true
+  delete artifactPreviewErrors[key]
+  try {
+    artifactPreviews[key] = await workspaceStore.fetchArtifactPreview(
+      workspaceId,
+      document.path,
+      document.report_id || undefined,
+    )
+  } catch (e) {
+    artifactPreviewErrors[key] = e instanceof Error ? e.message : 'Failed to load Markdown preview'
+  } finally {
+    artifactPreviewLoading[key] = false
+  }
+}
+
+function isArtifactPreviewLoading(report: AgentReport, artifact: string): boolean {
+  return Boolean(artifactPreviewLoading[artifactPreviewKey(report, artifact)])
+}
+
+function artifactPreviewButtonLabel(report: AgentReport, artifact: string): string {
+  const key = artifactPreviewKey(report, artifact)
+  if (artifactPreviewLoading[key]) return 'Loading...'
+  return expandedArtifactKey.value === key ? 'Hide preview' : 'Preview Markdown'
+}
+
+async function toggleArtifactPreview(report: AgentReport, artifact: string) {
+  const key = artifactPreviewKey(report, artifact)
+  if (expandedArtifactKey.value === key) {
+    expandedArtifactKey.value = null
+    return
+  }
+  expandedArtifactKey.value = key
+  if (artifactPreviews[key] || artifactPreviewLoading[key]) return
+
+  artifactPreviewLoading[key] = true
+  delete artifactPreviewErrors[key]
+  try {
+    artifactPreviews[key] = await workspaceStore.fetchArtifactPreview(
+      report.workspace_id,
+      artifact,
+      report.id,
+    )
+  } catch (e) {
+    artifactPreviewErrors[key] = e instanceof Error ? e.message : 'Failed to load Markdown preview'
+  } finally {
+    artifactPreviewLoading[key] = false
+  }
+}
+
+async function openMarkdownPreviewModal(path: string, report?: AgentReport) {
+  const workspaceId = report?.workspace_id || selectedTask.value?.workspace_id || activeWorkspaceId.value
+  const trimmedPath = path.trim()
+  if (!workspaceId || !trimmedPath) return
+
+  markdownPreviewModalPath.value = trimmedPath
+  markdownPreviewModalReportId.value = report?.id || null
+  markdownPreviewModalContent.value = null
+  markdownPreviewModalError.value = null
+  markdownPreviewModalLoading.value = true
+  try {
+    markdownPreviewModalContent.value = await workspaceStore.fetchArtifactPreview(
+      workspaceId,
+      trimmedPath,
+      report?.id,
+    )
+  } catch (e) {
+    markdownPreviewModalError.value = e instanceof Error ? e.message : 'Failed to load Markdown preview'
+  } finally {
+    markdownPreviewModalLoading.value = false
+  }
+}
+
+function closeMarkdownPreviewModal() {
+  markdownPreviewModalPath.value = null
+  markdownPreviewModalReportId.value = null
+  markdownPreviewModalContent.value = null
+  markdownPreviewModalError.value = null
+  markdownPreviewModalLoading.value = false
 }
 
 const reviewerSessions = computed<ManagedSession[]>(() => [
@@ -2126,6 +2943,9 @@ const selectedRemoteProfile = computed(() =>
 
 const selectedAgentRemoteProfile = computed(() =>
   remoteProfiles.value.find(profile => profile.id === agentOptionsForm.remote_profile_id) || null
+)
+const selectedAgentEnvPreset = computed(() =>
+  envPresets.value.find(preset => preset.id === agentOptionsForm.env_preset) || null
 )
 
 const agentSupportsSoloMode = computed(
@@ -2313,8 +3133,20 @@ function canEditTask(task: WorkspaceTask) {
   return task.status === 'todo'
 }
 
+function primaryExpandedReportId(): string | null {
+  const reports = selectedReports.value
+  if (reports.length === 0) return null
+  const finalSubstantive = [...reports].reverse().find(
+    (r) => isFinalReport(r) && isSubstantiveReport(r)
+  )
+  if (finalSubstantive) return finalSubstantive.id
+  const substantive = [...reports].reverse().find(isSubstantiveReport)
+  if (substantive) return substantive.id
+  return reports[reports.length - 1].id
+}
+
 function isLatestSelectedReport(report: AgentReport) {
-  return selectedReports.value[selectedReports.value.length - 1]?.id === report.id
+  return primaryExpandedReportId() === report.id
 }
 
 function agentTitle(sessionId?: string | null) {
@@ -2606,6 +3438,7 @@ function selectTask(event: MouseEvent, taskId: string) {
     detailMessage.value = ''
     resetDraftAttachments(detailAttachments.value)
     isDetailActionsExpanded.value = false
+    expandedArtifactKey.value = null
   }
   selectedTaskId.value = taskId
 }
@@ -2627,6 +3460,8 @@ function closeTaskDetail() {
   detailMessage.value = ''
   resetDraftAttachments(detailAttachments.value)
   isDetailActionsExpanded.value = false
+  expandedArtifactKey.value = null
+  closeMarkdownPreviewModal()
 }
 
 function formatTime(value: string) {
@@ -2912,6 +3747,11 @@ function openAgentOptionsModalFromMenu() {
   closeWorkspaceMobileMenu()
 }
 
+function openLessonsModalFromMenu() {
+  openLessonsModal()
+  closeWorkspaceMobileMenu()
+}
+
 function toggleThemeFromMenu() {
   appStore.toggleColorScheme()
   closeWorkspaceMobileMenu()
@@ -2926,6 +3766,51 @@ function workspaceDefaultCwd(target: ExecutionTarget): string {
   return workspace.path || ''
 }
 
+function applyAgentEnvPreset(presetId: string) {
+  const text = getPresetText(presetId)
+  if (text === null) return
+  agentOptionsForm.env_text = text
+  agentOptionsForm.env_editor_open = false
+}
+
+function startAgentEnvPresetEdit() {
+  const preset = selectedAgentEnvPreset.value
+  agentOptionsForm.env_preset_name = preset && preset.id !== 'none' ? preset.name : ''
+  agentOptionsForm.env_text = preset && preset.id !== 'none' ? preset.text : ''
+  agentOptionsForm.env_editor_open = true
+}
+
+function cancelAgentEnvPresetEdit() {
+  applyAgentEnvPreset(agentOptionsForm.env_preset)
+  agentOptionsForm.env_preset_name = ''
+  agentOptionsForm.env_editor_open = false
+}
+
+function saveCurrentAgentEnvPreset() {
+  const preset = savePreset(agentOptionsForm.env_preset_name, agentOptionsForm.env_text, agentOptionsForm.env_preset)
+  if (!preset) return
+  agentOptionsForm.env_preset = preset.id
+  agentOptionsForm.env_preset_name = ''
+  agentOptionsForm.env_text = preset.text
+  agentOptionsForm.env_editor_open = false
+}
+
+function deleteCurrentAgentEnvPreset() {
+  if (!selectedAgentEnvPreset.value || selectedAgentEnvPreset.value.id === 'none') return
+  if (!deletePreset(agentOptionsForm.env_preset)) return
+  agentOptionsForm.env_preset = 'none'
+  agentOptionsForm.env_preset_name = ''
+  agentOptionsForm.env_text = ''
+  agentOptionsForm.env_editor_open = false
+}
+
+function resetAgentEnvForType(agentType: AgentType) {
+  agentOptionsForm.env_preset = defaultLaunchEnvPresetForAgent(agentType)
+  agentOptionsForm.env_preset_name = ''
+  agentOptionsForm.env_text = defaultPresetTextForAgent(agentType)
+  agentOptionsForm.env_editor_open = false
+}
+
 function resetAgentOptionsForm() {
   const workspace = activeWorkspace.value
   agentOptionsForm.title = ''
@@ -2936,6 +3821,7 @@ function resetAgentOptionsForm() {
   agentOptionsForm.remote_reconnect = workspace?.remote_reconnect ?? true
   agentOptionsForm.remote_profile_id =
     workspace?.remote_profile_id || remoteProfiles.value[0]?.id || ''
+  resetAgentEnvForType(agentOptionsForm.agent_type)
   agentOptionsForm.cwd = workspaceDefaultCwd(agentOptionsForm.target)
 }
 
@@ -2966,6 +3852,7 @@ function closeAgentOptionsModal() {
 
 async function handleCreateAdvancedAgent() {
   const cwd = agentOptionsForm.cwd.trim()
+  const env = parseLaunchEnv(agentOptionsForm.env_text)
   await runPending('agent:create', async () => {
     await workspaceStore.ensureWorkspaceAgent({
       agent_type: agentOptionsForm.agent_type,
@@ -2984,9 +3871,11 @@ async function handleCreateAdvancedAgent() {
         agentOptionsForm.agent_type === 'terminal'
           ? false
           : agentOptionsForm.solo_mode,
+      env,
     })
     showAgentFileBrowser.value = false
     agentOptionsForm.title = ''
+    resetAgentEnvForType(agentOptionsForm.agent_type)
     await terminalStore.fetchTabs()
   })
 }
@@ -3113,6 +4002,72 @@ function closeEditTaskModal() {
   editTaskForm.has_attachments = false
 }
 
+function openLessonsModal() {
+  showLessonsModal.value = true
+  workspaceStore.fetchFeedbackLessons().catch(() => {
+    // Error state is owned by the workspace store.
+  })
+}
+
+function closeLessonsModal() {
+  showLessonsModal.value = false
+}
+
+function resetLessonForm() {
+  lessonForm.title = ''
+  lessonForm.description = ''
+  lessonForm.tags = ''
+}
+
+function parseLessonTags(value: string): string[] {
+  return value
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean)
+}
+
+function lessonActionKey(action: string, lessonId: string) {
+  return `lesson:${action}:${lessonId}`
+}
+
+async function handleCreateLesson() {
+  const title = lessonForm.title.trim()
+  const description = lessonForm.description.trim()
+  if (!title || !description) return
+  await runPending('feedback:create', async () => {
+    await workspaceStore.createFeedbackLesson({
+      title,
+      summary: description,
+      applies_when: parseLessonTags(lessonForm.tags),
+      tags: parseLessonTags(lessonForm.tags),
+      scope: 'workspace',
+      confidence: 0.8,
+    })
+    resetLessonForm()
+  })
+}
+
+async function deleteLesson(lesson: FeedbackLesson) {
+  const confirmed = window.confirm(`Delete lesson "${lessonTitle(lesson)}"?`)
+  if (!confirmed) return
+  await runPending(lessonActionKey('delete', lesson.id), async () => {
+    await workspaceStore.deleteFeedbackLesson(lesson.id)
+  })
+}
+
+async function handleSummarizeLessons(force: boolean) {
+  if (!activeWorkspaceId.value) return
+  const actionKey = force ? 'feedback:summarize:force' : 'feedback:summarize'
+  await runPending(actionKey, async () => {
+    const run = await workspaceStore.summarizeFeedbackLessons({
+      force,
+      limit: 5,
+      clear_context: true,
+    })
+    lastFeedbackSummaryRun.value = run || null
+  })
+}
+
 async function handleCreateTask() {
   if (!taskForm.title.trim() || (!taskForm.prompt.trim() && taskForm.attachments.length === 0)) {
     return
@@ -3190,6 +4145,12 @@ async function refreshAgentStatuses() {
 async function refreshAgentStatusesFromMenu() {
   await refreshAgentStatuses()
   closeWorkspaceMobileMenu()
+}
+
+async function refreshFeedbackLessons() {
+  await runPending('feedback:refresh', async () => {
+    await workspaceStore.fetchFeedbackLessons()
+  })
 }
 
 async function startTask(task: WorkspaceTask) {
@@ -3329,6 +4290,7 @@ watch(
     } else if (!showAgentOptionsModal.value) {
       agentOptionsForm.solo_mode = true
     }
+    resetAgentEnvForType(agentType)
   }
 )
 
@@ -3592,6 +4554,24 @@ onUnmounted(() => {
 
 .workspace-summary-primary strong {
   color: var(--ch-color-text);
+}
+
+.summary-chip-button {
+  height: 24px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: 999px;
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.summary-chip-button:hover {
+  border-color: var(--ch-color-border-hover);
+  background: var(--ch-color-surface-control-hover);
 }
 
 .workspace-column-tabs {
@@ -4666,11 +5646,20 @@ onUnmounted(() => {
   text-transform: uppercase;
 }
 
-.detail-section-title--with-controls {
+.detail-section-title--with-controls,
+.detail-section-title--with-count {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.detail-section-title--with-count > span:last-child {
+  border-radius: 999px;
+  background: var(--ch-color-surface-control-active);
+  color: var(--ch-color-text);
+  font-size: 10px;
+  padding: 2px 7px;
 }
 
 .lang-toggle {
@@ -4740,6 +5729,28 @@ onUnmounted(() => {
   padding: 14px;
 }
 
+.detail-section--collapsible {
+  transition: border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), background var(--ch-motion-fast);
+}
+
+.detail-section--collapsible > summary {
+  cursor: pointer;
+}
+
+.detail-section--collapsible[open] {
+  border-color: var(--ch-color-accent);
+  background: var(--ch-color-surface-raised);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ch-color-accent) 35%, transparent);
+}
+
+.detail-section--collapsible[open] > summary {
+  margin-bottom: 10px;
+}
+
+.detail-section-controls {
+  margin-bottom: 10px;
+}
+
 .detail-copy {
   margin: 8px 0 0;
 }
@@ -4771,6 +5782,15 @@ onUnmounted(() => {
   color: var(--ch-color-text);
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+
+.feedback-meta-chip {
+  border-radius: 999px;
+  background: var(--ch-color-accent-soft);
+  color: var(--ch-color-accent);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 8px;
 }
 
 .detail-actions {
@@ -5195,6 +6215,26 @@ onUnmounted(() => {
   align-items: center;
   gap: 6px;
   min-width: 0;
+  margin-left: auto;
+}
+
+.report-summary-label {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--ch-color-text-muted);
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--ch-color-chip-bg);
+}
+
+.report-summary-message {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--ch-color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .report-delta {
@@ -5218,12 +6258,196 @@ onUnmounted(() => {
   padding: 0 10px 10px;
 }
 
-.report-files span {
+.report-file-chip {
+  border: 0;
   border-radius: 999px;
   background: var(--ch-color-surface-control-active);
   color: var(--ch-color-text);
   font-size: 10px;
   padding: 3px 7px;
+}
+
+.report-file-chip--clickable {
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.report-file-chip:disabled:not(.report-file-chip--clickable) {
+  opacity: 1;
+}
+
+.markdown-output-section {
+  border-color: color-mix(in srgb, var(--ch-color-accent) 45%, var(--ch-color-border-muted));
+}
+
+.markdown-output-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.markdown-output-card {
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-soft);
+  padding: 9px;
+}
+
+.markdown-output-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.markdown-output-row > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.markdown-output-row strong {
+  color: var(--ch-color-text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.markdown-output-row span {
+  color: var(--ch-color-text-muted);
+  font-size: 11px;
+}
+
+.markdown-output-row code {
+  color: var(--ch-color-text-subtle);
+  font-size: 11px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.markdown-output-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.markdown-output-preview {
+  margin-top: 10px;
+}
+
+.report-artifacts {
+  display: grid;
+  gap: 6px;
+}
+
+.report-artifact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.report-artifact > span {
+  overflow-wrap: anywhere;
+  color: var(--ch-color-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+}
+
+.artifact-preview-button {
+  border: 1px solid var(--ch-color-border);
+  border-radius: 999px;
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 3px 8px;
+}
+
+.artifact-preview-button:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.artifact-preview {
+  margin-top: 8px;
+}
+
+.artifact-preview-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
+  background: var(--ch-color-surface);
+  color: var(--ch-color-text-muted);
+  font-size: 11px;
+  padding: 7px 9px;
+}
+
+.artifact-preview-content {
+  max-height: 420px;
+  overflow: auto;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: 0 0 8px 8px;
+  background: var(--ch-color-surface);
+  padding: 10px;
+}
+
+.artifact-preview-status {
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: 8px;
+  background: var(--ch-color-surface);
+  color: var(--ch-color-text-subtle);
+  font-size: 12px;
+  padding: 8px 10px;
+}
+
+.markdown-preview-modal-overlay {
+  z-index: 1400;
+}
+
+.markdown-preview-modal {
+  width: min(960px, 100%);
+}
+
+.markdown-preview-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.markdown-preview-modal-header > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.markdown-preview-modal-header span {
+  color: var(--ch-color-text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.markdown-preview-modal-header strong {
+  color: var(--ch-color-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.markdown-preview-modal-content {
+  max-height: min(70dvh, 720px);
+}
+
+.artifact-preview-error {
+  border-color: var(--ch-color-danger);
+  color: var(--ch-color-danger);
 }
 
 .report-note {
@@ -5308,6 +6532,143 @@ onUnmounted(() => {
   width: min(720px, 100%);
 }
 
+.lessons-manager-modal {
+  width: min(760px, 100%);
+}
+
+.modal-heading-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.modal-heading-row h3 {
+  margin-bottom: 4px;
+}
+
+.modal-heading-row p {
+  margin: 0;
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+}
+
+.lessons-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.summary-run-status {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 16px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-soft);
+  padding: 10px 12px;
+}
+
+.summary-run-status--queued {
+  border-color: var(--ch-color-accent);
+}
+
+.summary-run-status--skipped {
+  border-color: var(--ch-color-warning);
+}
+
+.summary-run-status strong {
+  color: var(--ch-color-text);
+  font-size: 13px;
+}
+
+.summary-run-status p {
+  margin: 0;
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.summary-run-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.summary-run-meta span {
+  border-radius: 999px;
+  background: var(--ch-color-chip-bg-muted);
+  color: var(--ch-color-text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 7px;
+}
+
+.lessons-list {
+  display: grid;
+  gap: 8px;
+}
+
+.lesson-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-soft);
+  padding: 10px;
+}
+
+.lesson-row-main {
+  min-width: 0;
+}
+
+.lesson-row-main strong {
+  display: block;
+  color: var(--ch-color-text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.lesson-row-main p {
+  margin: 4px 0 0;
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.lesson-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.lesson-tags span,
+.lesson-row-actions > span {
+  border-radius: 999px;
+  background: var(--ch-color-chip-bg-muted);
+  color: var(--ch-color-text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 7px;
+}
+
+.lesson-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lesson-create-form textarea {
+  min-height: 84px;
+}
+
 .workspace-modal h3 {
   margin: 0 0 16px;
   color: var(--ch-color-text-strong);
@@ -5378,6 +6739,62 @@ onUnmounted(() => {
   color: var(--ch-color-text-soft);
   font-size: 12px;
   line-height: 1.35;
+}
+
+.env-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.env-preset-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+}
+
+.env-action-button,
+.env-save-button {
+  white-space: nowrap;
+}
+
+.env-template-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-muted);
+  padding: 10px;
+}
+
+.env-preset-name {
+  width: 100%;
+}
+
+.env-textarea {
+  width: 100%;
+  min-height: 92px;
+  resize: vertical;
+  font-family: monospace !important;
+  line-height: 1.45;
+}
+
+.modal-field .env-textarea-preview {
+  margin-top: 8px;
+  width: 100%;
+  resize: none;
+  min-height: 60px;
+  opacity: 0.75;
+  cursor: default;
+  white-space: pre-wrap;
+  font-family: monospace !important;
+}
+
+.env-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .segmented-control {
@@ -5619,6 +7036,23 @@ onUnmounted(() => {
   .modal-actions .tool-button,
   .modal-actions .primary-button {
     flex: 1;
+  }
+
+  .modal-heading-row {
+    align-items: center;
+  }
+
+  .lessons-toolbar {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .lesson-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .lesson-row-actions {
+    justify-content: space-between;
   }
 
   .workspace-header {

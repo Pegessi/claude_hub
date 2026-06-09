@@ -3,6 +3,7 @@
   <div
     class="markdown-content"
     :class="{ compact }"
+    @click="handleClick"
     v-html="safeHtml"
   />
 </template>
@@ -15,10 +16,18 @@ import { marked } from 'marked'
 const props = withDefaults(defineProps<{
   text?: string | null
   compact?: boolean
+  linkMarkdownPaths?: boolean
 }>(), {
   text: '',
   compact: false,
+  linkMarkdownPaths: false,
 })
+
+const emit = defineEmits<{
+  markdownPathClick: [path: string]
+}>()
+
+const markdownPathPattern = /((?:~|\.{1,2}|\/|[\w.-]+\/)?[\w./~@:+-]+\.(?:md|markdown|mdown|mkd)(?::\d+)?(?:[?#][^\s`"'<>)]*)?)/gi
 
 const safeHtml = computed(() => {
   const source = props.text?.trim() || ''
@@ -30,8 +39,70 @@ const safeHtml = computed(() => {
     gfm: true,
   })
 
-  return DOMPurify.sanitize(html)
+  const sanitized = DOMPurify.sanitize(html)
+  return props.linkMarkdownPaths ? linkPathMentions(sanitized) : sanitized
 })
+
+function linkPathMentions(html: string): string {
+  const template = document.createElement('template')
+  template.innerHTML = html
+  const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT)
+  const textNodes: Text[] = []
+  let node = walker.nextNode()
+  while (node) {
+    if (node instanceof Text && !hasLinkExcludedParent(node)) {
+      textNodes.push(node)
+    }
+    node = walker.nextNode()
+  }
+
+  textNodes.forEach(textNode => {
+    const text = textNode.nodeValue || ''
+    const matches = Array.from(text.matchAll(markdownPathPattern))
+    if (matches.length === 0) return
+
+    const fragment = document.createDocumentFragment()
+    let offset = 0
+    matches.forEach(match => {
+      const path = match[0]
+      const index = match.index ?? 0
+      if (index > offset) {
+        fragment.append(document.createTextNode(text.slice(offset, index)))
+      }
+      const link = document.createElement('a')
+      link.href = '#'
+      link.dataset.markdownPath = path
+      link.textContent = path
+      link.className = 'markdown-path-link'
+      fragment.append(link)
+      offset = index + path.length
+    })
+    if (offset < text.length) {
+      fragment.append(document.createTextNode(text.slice(offset)))
+    }
+    textNode.replaceWith(fragment)
+  })
+
+  return template.innerHTML
+}
+
+function hasLinkExcludedParent(node: Node): boolean {
+  let parent = node.parentElement
+  while (parent) {
+    if (['A', 'CODE', 'PRE', 'KBD', 'SAMP'].includes(parent.tagName)) return true
+    parent = parent.parentElement
+  }
+  return false
+}
+
+function handleClick(event: MouseEvent) {
+  const target = event.target instanceof Element
+    ? event.target.closest<HTMLAnchorElement>('a[data-markdown-path]')
+    : null
+  if (!target) return
+  event.preventDefault()
+  emit('markdownPathClick', target.dataset.markdownPath || target.textContent || '')
+}
 </script>
 
 <style scoped>

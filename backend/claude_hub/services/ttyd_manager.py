@@ -5,8 +5,10 @@ import logging
 import os
 import re
 import shlex
-import shutil
 import socket
+import subprocess
+import sys
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 STATE_FILE = Path.home() / ".claude_hub" / "tabs.json"
 ORDER_FILE = Path.home() / ".claude_hub" / "tab_order.json"
+LAUNCH_ENV_DIR = Path.home() / ".claude_hub" / "launch_env"
 TMUX_SESSION_PREFIX = "claude-hub-"
 
 # ANSI escape sequences (CSI, OSC, charset selection) — stripped before
@@ -87,6 +90,28 @@ _IDLE_TAIL_HINTS = (
 _STATUS_CACHE_TTL_SECONDS = 0.75
 _PORT_CHECK_TIMEOUT_SECONDS = 0.2
 _REMOTE_CAPTURE_TIMEOUT_SECONDS = 10.0
+_VOLCENGINE_CODING_PLAN_MODEL_ALIASES = {
+    "ark/seed-code-0602": "doubao-seed-2.0-code",
+    "ark/seed-code-0602[1m]": "doubao-seed-2.0-code",
+    "ark/seed-code-6062": "doubao-seed-2.0-code",
+    "ark/seed-code-6062[1m]": "doubao-seed-2.0-code",
+}
+_MODEL_ENV_KEYS = (
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+)
+DEFAULT_CLAUDE_LAUNCH_ENV: Dict[str, str] = {
+    "ANTHROPIC_BASE_URL": "https://ark.cn-beijing.volces.com/api/coding",
+    "ANTHROPIC_MODEL": "doubao-seed-2.0-code",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "doubao-seed-2.0-code",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "doubao-seed-2.0-code",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "doubao-seed-2.0-code",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "doubao-seed-2.0-code",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+}
 
 
 class CursorPosition(TypedDict):
@@ -208,6 +233,7 @@ class TTYDProcess:
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: Optional[WorkspaceSessionRole] = None,
+        env: Optional[Dict[str, str]] = None,
     ):
         self.tab_id = tab_id
         self.port = port
@@ -223,6 +249,11 @@ class TTYDProcess:
         self.workspace_id = workspace_id
         self.workspace_name = workspace_name
         self.workspace_role = workspace_role
+        launch_env = env if env else self._default_env_for_agent(agent_type)
+        self.env = self._clean_env(launch_env)
+        self._prepare_agent_env()
+        if agent_type != AgentType.CLAUDE:
+            self._setup_tunnel_env()
         self.process: Optional[asyncio.subprocess.Process] = None
         self.created_at = created_at or datetime.now()
         self.is_active = False
@@ -235,11 +266,225 @@ class TTYDProcess:
         else:
             self.shell = get_agent_command(agent_type)
 
+    @staticmethod
+    def _clean_env(env: Dict[str, str]) -> Dict[str, str]:
+        cleaned: Dict[str, str] = {}
+        for key, value in env.items():
+            name = str(key).strip()
+            if not name or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise ValueError(f"Invalid environment variable name: {name or '<empty>'}")
+            cleaned[name] = str(value)
+        # Normalize proxy env vars: add the opposite-case variant so both
+        # Node.js (uppercase HTTP_PROXY) and Unix tools (lowercase http_proxy)
+        # pick up the same setting regardless of what the user typed.
+        _PROXY_KEYS = frozenset({"http_proxy", "https_proxy", "all_proxy", "no_proxy"})
+        additions: dict[str, str] = {}
+        for key in list(cleaned):
+            lower = key.lower()
+            if lower in _PROXY_KEYS:
+                opposite = key.upper() if key.islower() else key.lower()
+                if opposite not in cleaned:
+                    additions[opposite] = cleaned[key]
+        cleaned.update(additions)
+        return cleaned
+
+    @staticmethod
+    def _default_env_for_agent(agent_type: AgentType) -> Dict[str, str]:
+        if agent_type != AgentType.CLAUDE:
+            return {}
+        return DEFAULT_CLAUDE_LAUNCH_ENV.copy()
+
+    def _prepare_agent_env(self) -> None:
+        if self.agent_type != AgentType.CLAUDE:
+            return
+        self._normalize_volcengine_coding_plan_model()
+
+    def _normalize_volcengine_coding_plan_model(self) -> None:
+        base_url = self.env.get("ANTHROPIC_BASE_URL", "")
+        if "ark.cn-beijing.volces.com/api/coding" not in base_url:
+            return
+        model = self.env.get("ANTHROPIC_MODEL")
+        if not model:
+            return
+        normalized = _VOLCENGINE_CODING_PLAN_MODEL_ALIASES.get(model.strip().lower())
+        if not normalized:
+            return
+        for key in _MODEL_ENV_KEYS:
+            current = self.env.get(key)
+            if current is None or current.strip().lower() == model.strip().lower():
+                self.env[key] = normalized
+
+    # Tunnel registry: tunnel_key -> (local_port, process)
+    _tunnel_registry: dict[str, tuple[int, subprocess.Popen]] = {}
+    _TUNNEL_SCRIPT_TEMPLATE = """\
+import asyncio, sys
+
+async def _proxy(reader, writer):
+    try:
+        pr, pw = await asyncio.open_connection({proxy_host!r}, {proxy_port})
+        pw.write(f"CONNECT {target_host}:{target_port} HTTP/1.1\\r\\nHost: {target_host}:{target_port}\\r\\n\\r\\n".encode())
+        await pw.drain()
+        resp = await pr.readuntil(b"\\r\\n\\r\\n")
+        if b"200" not in resp.split(b"\\r\\n")[0]:
+            writer.close(); pw.close(); pr.close()
+            return
+        async def pipe(r, w):
+            try:
+                while True:
+                    data = await r.read(65536)
+                    if not data: break
+                    w.write(data); await w.drain()
+            except: pass
+        await asyncio.gather(pipe(reader, pw), pipe(pr, writer))
+    except: pass
+    finally:
+        writer.close(); pw.close(); pr.close()
+
+async def _main():
+    server = await asyncio.start_server(_proxy, "127.0.0.1", {local_port})
+    await server.serve_forever()
+
+asyncio.run(_main())
+"""
+
+    def _setup_tunnel_env(self) -> None:
+        """If proxy env vars + ANTHROPIC_BASE_URL are set, create a TCP
+        tunnel through the CONNECT proxy and rewrite the API URL to point
+        at the tunnel.
+
+        This works around Node.js undici/http not reading HTTP_PROXY.
+        """
+        if not self.env:
+            return
+
+        # Find proxy host:port from env (any case variant)
+        proxy_url: str | None = None
+        for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            val = self.env.get(key)
+            if val:
+                proxy_url = val
+                break
+        if not proxy_url:
+            return
+
+        # Parse proxy URL
+        m = re.match(r"^(https?://)?([^:/]+)(?::(\d+))?", proxy_url)
+        if not m:
+            return
+        proxy_host = m.group(2)
+        proxy_port = int(m.group(3) or (443 if m.group(1) == "https://" else 80))
+
+        # Find target API URL
+        api_key = next(
+            (k for k in ("ANTHROPIC_BASE_URL", "anthropic_base_url") if k in self.env), None
+        )
+        if not api_key:
+            return
+        api_url = self.env[api_key]
+
+        # Parse target host:port from API URL
+        m = re.match(r"^https?://([^:/]+)(?::(\d+))?(/.*)?$", api_url)
+        if not m:
+            return
+        target_host = m.group(1)
+        target_port = int(m.group(2) or 443)
+        target_path = m.group(3) or ""
+
+        # Find a free port for the tunnel
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            local_port = s.getsockname()[1]
+
+        tunnel_key = f"{target_host}:{target_port}->{proxy_host}:{proxy_port}"
+
+        # Reuse existing tunnel
+        existing = self._tunnel_registry.get(tunnel_key)
+        if existing:
+            local_port, proc = existing
+            if proc.poll() is None:
+                # Still alive — just rewrite env
+                self.env[api_key] = f"https://127.0.0.1:{local_port}{target_path}"
+                self.env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
+                return
+            # Dead — remove and recreate
+            del self._tunnel_registry[tunnel_key]
+
+        # Start new tunnel
+        script = self._TUNNEL_SCRIPT_TEMPLATE.format(
+            proxy_host=proxy_host,
+            proxy_port=proxy_port,
+            target_host=target_host,
+            target_port=target_port,
+            local_port=local_port,
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        self._tunnel_registry[tunnel_key] = (local_port, proc)
+
+        # Wait briefly so the tunnel is ready
+        time.sleep(0.15)
+
+        # Rewrite env vars
+        self.env[api_key] = f"https://127.0.0.1:{local_port}{target_path}"
+        self.env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
+
+    def _env_shell_prefix(self) -> str:
+        if not self.env:
+            return ""
+        assignments = [f"{key}={shlex.quote(value)}" for key, value in self.env.items()]
+        return "env " + " ".join(assignments) + " "
+
+    def _env_export_commands(self) -> list[str]:
+        return [f"export {key}={shlex.quote(value)}" for key, value in self.env.items()]
+
+    def _with_env(self, command: str) -> str:
+        if self.env and self.target == ExecutionTarget.LOCAL:
+            return self._with_local_env_wrapper(command)
+        return f"{self._env_shell_prefix()}{command}"
+
+    def _with_local_env_wrapper(self, command: str) -> str:
+        LAUNCH_ENV_DIR.mkdir(parents=True, exist_ok=True)
+        script_path = LAUNCH_ENV_DIR / f"{self.tab_id}.sh"
+        exports = "\n".join(f"export {key}={shlex.quote(value)}" for key, value in self.env.items())
+        script = "#!/bin/sh\n" "set -eu\n" f"{exports}\n" 'exec "${SHELL:-/bin/bash}" -lc "$1"\n'
+        script_path.write_text(script, encoding="utf-8")
+        os.chmod(script_path, 0o600)
+        return f"/bin/sh {shlex.quote(str(script_path))} {shlex.quote(command)}"
+
+    def _claude_settings_arg(self) -> str:
+        if self.agent_type != AgentType.CLAUDE or not self.env:
+            return ""
+        if self.target != ExecutionTarget.LOCAL:
+            return ""
+        LAUNCH_ENV_DIR.mkdir(parents=True, exist_ok=True)
+        settings_path = LAUNCH_ENV_DIR / f"{self.tab_id}.settings.json"
+        settings_path.write_text(
+            json.dumps({"env": self.env}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.chmod(settings_path, 0o600)
+        return f" --settings {shlex.quote(str(settings_path))}"
+
+    def _claude_model_arg(self) -> str:
+        if self.agent_type != AgentType.CLAUDE:
+            return ""
+        model = self.env.get("ANTHROPIC_MODEL")
+        if not model:
+            return ""
+        return f" --model {shlex.quote(model)}"
+
     def _solo_command(self) -> Optional[str]:
         if self.agent_type == AgentType.CODEX:
             return "codex --ask-for-approval never --sandbox danger-full-access"
         if self.agent_type == AgentType.CLAUDE:
-            return "IS_SANDBOX=1 claude --dangerously-skip-permissions"
+            return (
+                "IS_SANDBOX=1 claude --dangerously-skip-permissions"
+                f"{self._claude_settings_arg()}{self._claude_model_arg()}"
+            )
         if self.agent_type == AgentType.CURSOR:
             # Cursor agent runs in yolo by default; solo_mode toggle is a no-op.
             return "agent"
@@ -258,8 +503,11 @@ class TTYDProcess:
             user_shell = os.environ.get("SHELL", "/bin/bash")
             solo_command = self._solo_command()
             if solo_command:
-                return f"{shlex.quote(user_shell)} -c {shlex.quote(f'{solo_command}; exec {user_shell}')}"
-        return self.shell
+                return f"{shlex.quote(user_shell)} -c {shlex.quote(f'{self._with_env(solo_command)}; exec {user_shell}')}"
+        if self.agent_type == AgentType.CLAUDE and not session_exists:
+            return self._with_env(self._agent_start_command())
+        # Non-solo agent tabs still need env var injection.
+        return self._with_env(self.shell)
 
     async def ensure_tmux_session(self) -> bool:
         """Create the backing tmux session before ttyd gets a browser client.
@@ -281,15 +529,29 @@ class TTYDProcess:
         elif self.solo_mode and self.agent_type in {AgentType.CLAUDE, AgentType.CODEX}:
             user_shell = os.environ.get("SHELL", "/bin/bash")
             cmd.append(
-                shlex.join([user_shell, "-c", f"{self._agent_start_command()}; exec {user_shell}"])
+                shlex.join(
+                    [
+                        user_shell,
+                        "-c",
+                        f"{self._with_env(self._agent_start_command())}; exec {user_shell}",
+                    ]
+                )
             )
         elif self.agent_type == AgentType.CURSOR:
             user_shell = os.environ.get("SHELL", "/bin/bash")
             cmd.append(
-                shlex.join([user_shell, "-c", f"{self._agent_start_command()}; exec {user_shell}"])
+                shlex.join(
+                    [
+                        user_shell,
+                        "-c",
+                        f"{self._with_env(self._agent_start_command())}; exec {user_shell}",
+                    ]
+                )
             )
+        elif self.agent_type == AgentType.CLAUDE:
+            cmd.append(self._with_env(self._agent_start_command()))
         else:
-            cmd.append(self.shell)
+            cmd.append(self._with_env(self.shell))
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -320,7 +582,12 @@ class TTYDProcess:
             logger.info(f"tmux session {self.tmux_session} does not exist, will create new")
 
         cmd = self._build_ttyd_command(session_exists=session_exists)
-        logger.info(f"Starting ttyd for tab {self.tab_id} on port {self.port}: {' '.join(cmd)}")
+        logger.info(
+            "Starting ttyd for tab %s on port %s with %s custom env vars",
+            self.tab_id,
+            self.port,
+            len(self.env),
+        )
 
         try:
             self.process = await asyncio.create_subprocess_exec(
@@ -353,41 +620,71 @@ class TTYDProcess:
             self.is_active = False
             raise
 
+    # xterm.js client options tuned for minimal input latency and maximum
+    # render throughput. These are forwarded to every ttyd instance via
+    # repeated ``-t key=value`` flags.
+    #
+    # Rationale:
+    #   cursorBlink=false        — each blink repaints the cursor cell; also
+    #                              makes the UI feel janky on repaint-heavy
+    #                              frames. Saves ~1 repaint/500ms and removes a
+    #                              common source of perceived typing jitter.
+    #   rendererType=webgl       — WebGL2 renderer is ~2–5× faster than the
+    #                              default canvas renderer under high output
+    #                              throughput; frees the main thread so key
+    #                              events are dispatched sooner.
+    #   allowProposedApi=true    — required for rendererType=webgl in some
+    #                              ttyd/xterm.js version combos.
+    #   drawBoldTextInBrightColors=false — avoids extra color map lookups.
+    #   minimumContrastRatio=1   — skip contrast adjustment work per glyph.
+    #   scrollback=100000        — kept from the previous baseline.
+    #   fastScrollModifier=alt   — kept from the previous baseline.
+    #   macOptionIsMeta=false    — kept from the previous baseline.
+    _TTYD_CLIENT_OPTIONS: tuple[tuple[str, str], ...] = (
+        ("scrollback", "100000"),
+        ("fastScrollModifier", "alt"),
+        ("macOptionIsMeta", "false"),
+        ("cursorBlink", "false"),
+        ("rendererType", "webgl"),
+        ("allowProposedApi", "true"),
+        ("drawBoldTextInBrightColors", "false"),
+        ("minimumContrastRatio", "1"),
+        # Match the native terminal's crisp monospace rendering. Without an
+        # explicit fontFamily, xterm.js falls back to a chunky Courier-style
+        # font that makes agent TUIs (Cursor/Claude/Codex) look ugly. ttyd
+        # parses each -t value as JSON, so this string must itself be
+        # double-quoted; inner double quotes around font names with spaces
+        # are escaped per JSON rules.
+        (
+            "fontFamily",
+            '"ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \\"Liberation Mono\\", monospace"',
+        ),
+        ("fontSize", "14"),
+        ("lineHeight", "1.2"),
+    )
+
     def _build_ttyd_command(self, session_exists: bool) -> list[str]:
         # tmux new-session -A: attach if exists, create if not.
         # This is the key to persistence across page refreshes.
-        cmd = [
+        cmd: list[str] = [
             settings.ttyd_path,
             "--port",
             str(self.port),
             "--interface",
             "127.0.0.1",
             "--writable",
-            # Improve scrolling behavior with xterm.js options
-            "-t",
-            "scrollback=100000",
-            "-t",
-            "fastScrollModifier=alt",
-            "-t",
-            "macOptionIsMeta=false",
-            # Match the native terminal's crisp monospace rendering. Without an
-            # explicit fontFamily, xterm.js falls back to a chunky Courier-style
-            # font that makes agent TUIs (Cursor/Claude/Codex) look ugly.
-            # ttyd parses each -t value as JSON, so string values must be
-            # wrapped in double quotes; inner double quotes (for font names
-            # with spaces) need to be escaped per JSON rules.
-            "-t",
-            'fontFamily="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \\"Liberation Mono\\", monospace"',
-            "-t",
-            "fontSize=14",
-            "-t",
-            "lineHeight=1.2",
-            "tmux",
-            "new-session",
-            "-A",
-            "-s",
-            self.tmux_session,
         ]
+        for key, value in self._TTYD_CLIENT_OPTIONS:
+            cmd.extend(["-t", f"{key}={value}"])
+        cmd.extend(
+            [
+                "tmux",
+                "new-session",
+                "-A",
+                "-s",
+                self.tmux_session,
+            ]
+        )
         if self.cwd and self.target == ExecutionTarget.LOCAL:
             cmd.extend(["-c", self.cwd])
 
@@ -403,12 +700,26 @@ class TTYDProcess:
             }
         ):
             user_shell = os.environ.get("SHELL", "/bin/bash")
-            cmd.extend([user_shell, "-c", f"{self._agent_start_command()}; exec {user_shell}"])
+            cmd.extend(
+                [
+                    user_shell,
+                    "-c",
+                    f"{self._with_env(self._agent_start_command())}; exec {user_shell}",
+                ]
+            )
         elif self.agent_type == AgentType.CURSOR and not session_exists:
             user_shell = os.environ.get("SHELL", "/bin/bash")
-            cmd.extend([user_shell, "-c", f"{self._agent_start_command()}; exec {user_shell}"])
+            cmd.extend(
+                [
+                    user_shell,
+                    "-c",
+                    f"{self._with_env(self._agent_start_command())}; exec {user_shell}",
+                ]
+            )
+        elif self.agent_type == AgentType.CLAUDE and not session_exists:
+            cmd.append(self._with_env(self._agent_start_command()))
         else:
-            cmd.append(self.shell)
+            cmd.append(self._with_env(self.shell))
 
         return cmd
 
@@ -422,8 +733,11 @@ class TTYDProcess:
         if self.agent_type == AgentType.TERMINAL:
             return "${SHELL:-/bin/bash} -l"
         if self.solo_mode:
-            return "IS_SANDBOX=1 claude --dangerously-skip-permissions"
-        return get_default_command()
+            return (
+                "IS_SANDBOX=1 claude --dangerously-skip-permissions"
+                f"{self._claude_settings_arg()}{self._claude_model_arg()}"
+            )
+        return f"{get_default_command()}{self._claude_settings_arg()}{self._claude_model_arg()}"
 
     def _remote_ssh_target(self) -> tuple[str, int]:
         if not self.remote_profile_id:
@@ -471,7 +785,7 @@ class TTYDProcess:
     def _build_remote_attach_command(self) -> str:
         remote_session = self.tmux_session
         cwd = self.remote_cwd or self.cwd or "~"
-        start_command = self._agent_start_command()
+        start_command = self._with_env(self._agent_start_command())
         quoted_session = shlex.quote(remote_session)
         quoted_start = shlex.quote(start_command)
         shell = "${SHELL:-/bin/bash}"
@@ -491,6 +805,7 @@ class TTYDProcess:
         script = "; ".join(
             [
                 bootstrap_path,
+                *self._env_export_commands(),
                 *checks,
                 self._remote_cwd_command(cwd, shell),
                 "if command -v tmux >/dev/null 2>&1; then "
@@ -848,6 +1163,7 @@ class TTYDProcess:
             "remote_profile_id": self.remote_profile_id,
             "remote_cwd": self.remote_cwd,
             "remote_reconnect": self.remote_reconnect,
+            "env": self.env,
             "remote_forward_port": self.remote_forward_port,
             "workspace_id": self.workspace_id,
             "workspace_name": self.workspace_name,
@@ -872,6 +1188,7 @@ class TTYDProcess:
             remote_profile_id=self.remote_profile_id,
             remote_cwd=self.remote_cwd,
             remote_reconnect=self.remote_reconnect,
+            env=self.env,
             port=self.port,
             created_at=self.created_at,
             is_active=self.is_active,
@@ -940,6 +1257,7 @@ class TTYDManager:
                             remote_cwd=tab_data.get("remote_cwd"),
                             remote_reconnect=tab_data.get("remote_reconnect", True),
                             remote_forward_port=tab_data.get("remote_forward_port"),
+                            env=tab_data.get("env", {}),
                             workspace_id=tab_data.get("workspace_id"),
                             workspace_name=tab_data.get("workspace_name"),
                             workspace_role=workspace_role,
@@ -1089,6 +1407,7 @@ class TTYDManager:
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: Optional[WorkspaceSessionRole] = None,
+        env: Optional[Dict[str, str]] = None,
     ) -> TerminalTab:
         logger.info(
             f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}, target={target}, remote_profile_id={remote_profile_id}, remote_forward_port={remote_forward_port}, workspace_id={workspace_id}, workspace_role={workspace_role}"
@@ -1112,6 +1431,7 @@ class TTYDManager:
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            env=env,
         )
         logger.info(
             f"Created TTYDProcess with solo_mode={process.solo_mode}, agent_type={process.agent_type}"
@@ -1146,6 +1466,7 @@ class TTYDManager:
             remote_cwd=source.remote_cwd,
             remote_reconnect=source.remote_reconnect,
             remote_forward_port=source.remote_forward_port,
+            env=source.env,
         )
 
     async def delete_tab(self, tab_id: str) -> bool:
@@ -1445,6 +1766,7 @@ class TTYDManager:
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
         remote_reconnect: Optional[bool] = None,
+        env: Optional[Dict[str, str]] = None,
     ) -> Optional[TerminalTab]:
         """Update tab settings. Note: Changing shell/cwd/solo_mode/agent_type requires restarting
         the ttyd process, but the tmux session will be PRESERVED.
@@ -1480,6 +1802,12 @@ class TTYDManager:
             needs_restart = True
         if remote_reconnect is not None:
             process.remote_reconnect = remote_reconnect
+            needs_restart = True
+        if env is not None:
+            process.env = TTYDProcess._clean_env(env)
+            process._prepare_agent_env()
+            if process.agent_type != AgentType.CLAUDE:
+                process._setup_tunnel_env()
             needs_restart = True
 
         if needs_restart:

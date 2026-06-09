@@ -27,6 +27,31 @@ const LAYOUT_CONFIGS: Record<LayoutType, { rows: number; cols: number }> = {
   '3x3': { rows: 3, cols: 3 },
 }
 
+// Shallow equality check for two status arrays. Returns true when both arrays have
+// the same length and each corresponding entries have identical serialized JSON.
+// Used to avoid triggering a reactivity cascade when a poll returns unchanged data.
+function statusesEqual(a: TerminalAgentStatus[], b: TerminalAgentStatus[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]
+    const y = b[i]
+    if (
+      x.tab_id !== y.tab_id ||
+      x.tab_name !== y.tab_name ||
+      x.agent_type !== y.agent_type ||
+      x.status !== y.status ||
+      x.status_text !== y.status_text ||
+      x.detail !== y.detail ||
+      x.tmux_session !== y.tmux_session ||
+      x.last_changed_at !== y.last_changed_at ||
+      x.sampled_at !== y.sampled_at
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
 export const useTerminalStore = defineStore('terminal', () => {
   const tabs = ref<TerminalTab[]>([])
   const agentStatuses = ref<TerminalAgentStatus[]>([])
@@ -93,11 +118,20 @@ export const useTerminalStore = defineStore('terminal', () => {
   }
 
   function setActivePane(paneId: string) {
-    // Create a new array to ensure reactivity
-    panes.value = panes.value.map(pane => ({
-      ...pane,
-      isActive: pane.id === paneId
-    }))
+    // Mutate pane state in-place instead of replacing the whole array.
+    // Creating a brand new array caused every TerminalPane and its TerminalView
+    // to fully re-render whenever the user switched panes.
+    let changed = false
+    for (const pane of panes.value) {
+      const shouldBeActive = pane.id === paneId
+      if (pane.isActive !== shouldBeActive) {
+        pane.isActive = shouldBeActive
+        changed = true
+      }
+    }
+    if (!changed && activePaneId.value === paneId) {
+      return
+    }
     activePaneId.value = paneId
 
     // If the pane has a tab, make it the active tab too
@@ -112,16 +146,17 @@ export const useTerminalStore = defineStore('terminal', () => {
     if (!targetPaneId) return
 
     let assigned = false
-    panes.value = panes.value.map(pane => {
+    for (const pane of panes.value) {
       if (pane.id === targetPaneId) {
+        if (pane.tabId !== tabId) {
+          pane.tabId = tabId
+        }
         assigned = true
-        return { ...pane, tabId }
+      } else if (pane.tabId === tabId) {
+        // Avoid assigning the same tab to two panes simultaneously
+        pane.tabId = null
       }
-      if (pane.tabId === tabId) {
-        return { ...pane, tabId: null }
-      }
-      return pane
-    })
+    }
 
     if (assigned) {
       activeTabId.value = tabId
@@ -170,7 +205,12 @@ export const useTerminalStore = defineStore('terminal', () => {
       const response = await fetch(`${API_BASE}/tabs/status`)
       if (!response.ok) throw new Error('Failed to fetch agent statuses')
       const statuses: TerminalAgentStatus[] = await response.json()
-      agentStatuses.value = statuses
+      // Only update when the data actually changed — this avoids a full Vue
+      // re-render cascade (TabBar, both AgentStatusFloatingPanels, all
+      // TerminalPanes) every 5 seconds when the poll returns identical data.
+      if (!statusesEqual(agentStatuses.value, statuses)) {
+        agentStatuses.value = statuses
+      }
       const knownTabIds = new Set(tabs.value.map(tab => tab.id))
       if (statuses.some(status => !knownTabIds.has(status.tab_id))) {
         void fetchTabs()

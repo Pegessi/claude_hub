@@ -35,6 +35,38 @@ PNG_DATA_URL = (
 )
 
 
+def write_iteration_task_record_fixture(
+    state_root: Path,
+    workspace_id: str,
+    task_id: str,
+    *,
+    review_failed_count: int = 2,
+    needs_input_count: int = 0,
+) -> None:
+    """Write a minimal task_records fixture so the lesson validator sees a Signal A task."""
+    records_dir = state_root / workspace_id / "task_records"
+    records_dir.mkdir(parents=True, exist_ok=True)
+    states = (
+        ["started", "working"]
+        + ["review_failed"] * review_failed_count
+        + ["needs_input"] * needs_input_count
+        + ["completed"]
+    )
+    payload = {
+        "schema_version": 1,
+        "workspace_id": workspace_id,
+        "task": {"id": task_id, "title": "fixture", "status": "done"},
+        "session": {},
+        "reports": [{"state": state} for state in states],
+        "timeline": [],
+        "artifacts": {"changed_files": [], "validation": [], "risks": []},
+        "final_summary": "fixture",
+    }
+    (records_dir / f"2026-05-15T00-00-00-{task_id}.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+
 def pass_task_review(client: TestClient, task_id: str, message: str = "Review passed"):
     reviewer_id = workspace_manager.tasks[task_id].review_session_id
     assert reviewer_id is not None
@@ -620,7 +652,6 @@ def test_direct_task_waiting_reports_do_not_become_accept_ready(
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     sent_messages.clear()
-
     response = client.post(
         f"/api/workspaces/sessions/{started['session_id']}/reports",
         json={
@@ -649,6 +680,8 @@ def test_direct_task_explicit_review_request_still_creates_reviewer(
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
+    state_root = tmp_path / "state"
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", state_root)
     sent_messages: list[tuple[str, str]] = []
     stub_workspace_terminal(
         monkeypatch,
@@ -673,6 +706,22 @@ def test_direct_task_explicit_review_request_still_creates_reviewer(
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     sent_messages.clear()
+    write_iteration_task_record_fixture(state_root, workspace["id"], task["id"])
+    lesson_response = client.post(
+        f"/api/workspaces/{workspace['id']}/lessons",
+        json={
+            "id": "explicit-review-handoff",
+            "summary": "Explicit review requests need handoff evidence.",
+            "applies_when": ["explicit review", "review request"],
+            "do": "Check changed files, validation, risks, and acceptance evidence.",
+            "avoid": "Do not pass review based only on the completion message.",
+            "tags": ["review", "handoff"],
+            "scope": "workspace",
+            "evidence_task_ids": [task["id"]],
+            "confidence": 0.8,
+        },
+    )
+    assert lesson_response.status_code == 201
 
     response = client.post(
         f"/api/workspaces/sessions/{started['session_id']}/reports",
@@ -687,10 +736,23 @@ def test_direct_task_explicit_review_request_still_creates_reviewer(
 
     assert response.status_code == 201
     direct_task = workspace_manager.tasks[task["id"]]
-    assert direct_task.status == WorkspaceTaskStatus.WORKING
+    assert direct_task.status == WorkspaceTaskStatus.REVIEW
     assert direct_task.review_session_id is not None
     assert direct_task.review_requested_at is not None
+    assert direct_task.feedback_lesson_ids == []
     assert "Review workspace task." in sent_messages[-1][1]
+    assert "explicit-review-handoff" in sent_messages[-1][1]
+    assert "Workspace lessons index" in sent_messages[-1][1]
+    assert (
+        "Check changed files, validation, risks, and acceptance evidence."
+        not in sent_messages[-1][1]
+    )
+    task_reports = [
+        report
+        for report in workspace_manager.reports_for_workspace(workspace["id"])
+        if report.task_id == task["id"] and report.risk_level == "system_audit"
+    ]
+    assert task_reports == []
 
 
 def test_agent_report_stores_goal_packet_and_acceptance_check(
@@ -881,6 +943,116 @@ def test_create_task_persists_pasted_image_attachment(
     assert attachment_path.read_bytes().startswith(b"\x89PNG")
 
 
+async def test_preview_report_markdown_artifact_is_scoped_to_report(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "report.md").write_text("# Research\n\nFindings", encoding="utf-8")
+    (repo / "changed.md").write_text("# Changed\n\nNotes", encoding="utf-8")
+    (tmp_path / "outside.md").write_text("# Secret", encoding="utf-8")
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path / "state")
+
+    stub_workspace_terminal(monkeypatch, repo, tab_id="report-tab", port=18190)
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Report Repo",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "report",
+        },
+    ).json()
+    session = await workspace_manager.ensure_workspace_agent(
+        workspace["id"],
+        workspace_module.EnsureWorkspaceAgentRequest(agent_type="codex", reuse_existing=False),
+    )
+    report = client.post(
+        f"/api/workspaces/sessions/{session.id}/reports",
+        json={
+            "state": "completed",
+            "message": "Research report ready",
+            "changed_files": [str(repo / "changed.md")],
+            "artifact_refs": ["report.md", str(tmp_path / "outside.md")],
+        },
+    ).json()
+
+    workspace_manager.snapshot_path(workspace["id"]).parent.mkdir(parents=True, exist_ok=True)
+    workspace_manager.snapshot_path(workspace["id"]).write_text(
+        "# Claude Hub Workspace State\n",
+        encoding="utf-8",
+    )
+
+    board_response = client.get(f"/api/workspaces/{workspace['id']}/board")
+    assert board_response.status_code == 200
+    markdown_documents = board_response.json()["markdown_documents"]
+    assert any(
+        document["source"] == "artifact" and document["path"] == "report.md"
+        for document in markdown_documents
+    )
+    assert any(
+        document["source"] == "changed_file" and document["path"] == str(repo / "changed.md")
+        for document in markdown_documents
+    )
+    assert any(document["source"] == "snapshot" for document in markdown_documents)
+
+    response = client.get(
+        f"/api/workspaces/{workspace['id']}/artifacts/preview",
+        params={"path": "report.md", "report_id": report["id"]},
+    )
+
+    assert response.status_code == 200
+    preview = response.json()
+    assert preview["filename"] == "report.md"
+    assert preview["content"] == "# Research\n\nFindings"
+    assert preview["truncated"] is False
+
+    changed_response = client.get(
+        f"/api/workspaces/{workspace['id']}/artifacts/preview",
+        params={"path": str(repo / "changed.md"), "report_id": report["id"]},
+    )
+    assert changed_response.status_code == 200
+    assert changed_response.json()["content"] == "# Changed\n\nNotes"
+
+    snapshot_response = client.get(
+        f"/api/workspaces/{workspace['id']}/artifacts/preview",
+        params={"path": str(workspace_manager.snapshot_path(workspace["id"]))},
+    )
+    assert snapshot_response.status_code == 200
+    assert "# Claude Hub Workspace State" in snapshot_response.json()["content"]
+
+    outside_response = client.get(
+        f"/api/workspaces/{workspace['id']}/artifacts/preview",
+        params={"path": str(tmp_path / "outside.md"), "report_id": report["id"]},
+    )
+    assert outside_response.status_code == 404
+
+    unknown_response = client.get(
+        f"/api/workspaces/{workspace['id']}/artifacts/preview",
+        params={"path": "missing.md", "report_id": report["id"]},
+    )
+    assert unknown_response.status_code == 404
+
+    unsupported_response = client.get(
+        f"/api/workspaces/{workspace['id']}/artifacts/preview",
+        params={"path": "notes.txt", "report_id": report["id"]},
+    )
+    assert unsupported_response.status_code == 404
+
+    def unreadable_file(_path: Path) -> bytes:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable_file)
+    unreadable_response = client.get(
+        f"/api/workspaces/{workspace['id']}/artifacts/preview",
+        params={"path": "report.md", "report_id": report["id"]},
+    )
+    assert unreadable_response.status_code == 400
+    assert unreadable_response.json()["detail"] == "Artifact could not be read"
+
+
 def test_spawn_worker_is_disabled(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1023,7 +1195,7 @@ def test_completed_report_creates_temporary_reviewer(
 
     assert response.status_code == 201
     updated = workspace_manager.tasks[task["id"]]
-    assert updated.status == WorkspaceTaskStatus.WORKING
+    assert updated.status == WorkspaceTaskStatus.REVIEW
     assert updated.review_attempts == 1
     assert updated.review_session_id is not None
     reviewer = workspace_manager.sessions[updated.review_session_id]
@@ -1114,6 +1286,66 @@ def test_reviewer_clears_context_between_unrelated_tasks(
     ), "Reviewer with prior task history should receive /clear before unrelated review"
     assert prompt_index is not None
     assert clear_index < prompt_index
+
+
+def test_failed_review_continues_reviewed_task_after_repeated_attempts(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="rev-repeat-tab",
+        port=12815,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Repeated Review", "path": str(repo), "session_prefix": "rr"},
+    ).json()
+    worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Keep iterating", "prompt": "Fix until review passes"},
+    ).json()
+    client.post(
+        f"/api/workspaces/tasks/{task['id']}/start",
+        json={"target_session_id": worker["id"]},
+    )
+    client.post(
+        f"/api/workspaces/sessions/{worker['id']}/reports",
+        json={"task_id": task["id"], "state": "completed", "message": "v1"},
+    )
+
+    prepared_task = workspace_manager.tasks[task["id"]]
+    reviewer_id = prepared_task.review_session_id
+    assert reviewer_id is not None
+    workspace_manager.tasks[task["id"]] = prepared_task.model_copy(
+        update={"review_attempts": workspace_module.MAX_AUTOMATED_REVIEW_FAILURES + 1}
+    )
+    sent_messages.clear()
+
+    fail_resp = client.post(
+        f"/api/workspaces/sessions/{reviewer_id}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "review_failed",
+            "message": "Please address another blocking issue.",
+        },
+    )
+
+    assert fail_resp.status_code == 201
+    updated = workspace_manager.tasks[task["id"]]
+    worker_session = workspace_manager.sessions[worker["id"]]
+    assert updated.status == WorkspaceTaskStatus.WORKING
+    assert worker_session.status == ManagedSessionStatus.WORKING
+    assert worker_session.runtime_status == AgentRuntimeStatus.WORKING
+    assert any("Reviewer requested changes" in message for _sess, message in sent_messages)
 
 
 def test_reviewer_keeps_context_when_re_reviewing_same_task(
@@ -1257,7 +1489,7 @@ def test_agent_review_gate_states_trigger_reviewer(
 
     assert response.status_code == 201
     updated = workspace_manager.tasks[task["id"]]
-    assert updated.status == WorkspaceTaskStatus.WORKING
+    assert updated.status == WorkspaceTaskStatus.REVIEW
     assert updated.review_session_id is not None
     assert (
         workspace_manager.sessions[updated.review_session_id].role == WorkspaceSessionRole.REVIEWER
@@ -1339,6 +1571,528 @@ def test_completed_skip_review_marks_review_without_reviewer(
     )
     assert done_response.status_code == 200
     assert done_response.json()["human_accepted_at"] is not None
+
+
+def test_manual_feedback_reaper_promotes_lesson(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    state_root = tmp_path / "state"
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", state_root)
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="feedback-reaper-tab",
+        port=12531,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Feedback Repo", "path": str(repo), "session_prefix": "feed"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "CLI symbols", "prompt": "Figure out the --symbols CLI format"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+
+    report_response = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "working",
+            "message": "--symbols expects comma-separated values.",
+            "validation": "Ran CLI probe",
+            "risks": "none",
+            "artifact_refs": ["artifacts/probe.log"],
+        },
+    )
+    assert report_response.status_code == 201
+
+    reap_response = client.post(
+        f"/api/workspaces/tasks/{task['id']}/feedback/reap",
+        json={
+            "source": "human",
+            "summary": "Human confirmed the reusable CLI symbols lesson.",
+            "tags": ["cli", "symbols"],
+            "lesson_drafts": [
+                {
+                    "summary": "--symbols expects comma-separated values.",
+                    "applies_when": ["CLI symbol lists", "market data probes"],
+                    "do": "Use --symbols AAPL,MSFT.",
+                    "avoid": "Do not pass --symbols AAPL MSFT.",
+                    "tags": ["cli", "symbols"],
+                    "scope": "workspace",
+                    "confidence": 0.9,
+                    "promote_to_active": True,
+                }
+            ],
+        },
+    )
+
+    assert reap_response.status_code == 200
+    run = reap_response.json()
+    assert run["record"]["source"] == "human"
+    assert run["record"]["artifact_refs"] == ["artifacts/probe.log"]
+    assert run["lesson_drafts"][0]["summary"] == "--symbols expects comma-separated values."
+    assert run["promoted_lessons"][0]["status"] == "active"
+    assert "You are an internal Feedback Reaper" in run["reaper_prompt"]
+
+    lessons_response = client.get(
+        f"/api/workspaces/{workspace['id']}/lessons",
+        params={"query": "symbols market data"},
+    )
+    assert lessons_response.status_code == 200
+    lessons = lessons_response.json()
+    assert len(lessons) == 1
+    assert lessons[0]["title"] == "--symbols expects comma-separated values"
+    assert lessons[0]["summary"] == "--symbols expects comma-separated values."
+
+    write_iteration_task_record_fixture(state_root, workspace["id"], task["id"])
+    manual_lesson_response = client.post(
+        f"/api/workspaces/{workspace['id']}/lessons",
+        json={
+            "title": "Use comma-separated symbols",
+            "summary": "CLI symbol probes should pass one comma-separated --symbols value.",
+            "applies_when": ["CLI --symbols flag", "market data probes"],
+            "do": "Pass symbols comma-separated: --symbols AAPL,MSFT.",
+            "avoid": "Do not pass --symbols with whitespace separators.",
+            "tags": ["cli", "symbols"],
+            "scope": "workspace",
+            "evidence_task_ids": [task["id"]],
+            "source_record_ids": ["record-1"],
+            "confidence": 0.6,
+        },
+    )
+    assert manual_lesson_response.status_code == 201
+    manual_lesson = manual_lesson_response.json()
+    assert manual_lesson["title"] == "Use comma-separated symbols"
+    duplicate_lesson_response = client.post(
+        f"/api/workspaces/{workspace['id']}/lessons",
+        json={
+            "title": "Use comma-separated symbols",
+            "summary": "CLI symbol probes should pass one comma-separated --symbols value.",
+            "applies_when": ["CLI --symbols flag", "market data probes"],
+            "do": "Pass symbols comma-separated: --symbols AAPL,MSFT.",
+            "avoid": "Do not pass --symbols with whitespace separators.",
+            "tags": ["symbols", "cli"],
+            "scope": "workspace",
+            "evidence_task_ids": [task["id"], "task-two"],
+            "source_record_ids": ["record-2"],
+            "confidence": 0.9,
+        },
+    )
+    assert duplicate_lesson_response.status_code == 201
+    duplicate_lesson = duplicate_lesson_response.json()
+    assert duplicate_lesson["id"] == manual_lesson["id"]
+    assert duplicate_lesson["evidence_task_ids"] == [task["id"], "task-two"]
+    assert duplicate_lesson["source_record_ids"] == ["record-1", "record-2"]
+    assert duplicate_lesson["confidence"] == 0.85
+    assert duplicate_lesson["fingerprint"] == manual_lesson["fingerprint"]
+    deduped_lessons_response = client.get(f"/api/workspaces/{workspace['id']}/lessons")
+    assert deduped_lessons_response.status_code == 200
+    assert len(deduped_lessons_response.json()) == 2
+
+    delete_lesson_response = client.delete(
+        f"/api/workspaces/{workspace['id']}/lessons/{manual_lesson['id']}"
+    )
+    assert delete_lesson_response.status_code == 200
+    assert delete_lesson_response.json()["status"] == "archived"
+    active_lessons_response = client.get(f"/api/workspaces/{workspace['id']}/lessons")
+    assert active_lessons_response.status_code == 200
+    assert manual_lesson["id"] not in {lesson["id"] for lesson in active_lessons_response.json()}
+
+    feedback_dir = state_root / workspace["id"] / "feedback"
+    assert list((feedback_dir / "records").glob("*.json"))
+    assert list((feedback_dir / "lesson-drafts").glob("*.json"))
+    assert (feedback_dir / "lesson-index.json").exists()
+
+    bad_lesson_response = client.post(
+        f"/api/workspaces/{workspace['id']}/lessons",
+        json={"summary": "   "},
+    )
+    assert bad_lesson_response.status_code == 400
+
+    bad_draft_response = client.post(
+        f"/api/workspaces/tasks/{task['id']}/feedback/reap",
+        json={"lesson_drafts": [{"summary": "   "}]},
+    )
+    assert bad_draft_response.status_code == 400
+
+
+def test_task_assignment_injects_lessons_index_with_api_and_take_tracking(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    state_root = tmp_path / "state"
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", state_root)
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="lesson-context-tab",
+        port=12532,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Lesson Repo", "path": str(repo), "session_prefix": "less"},
+    ).json()
+    write_iteration_task_record_fixture(state_root, workspace["id"], "evidence-task-cli")
+    lesson_response = client.post(
+        f"/api/workspaces/{workspace['id']}/lessons",
+        json={
+            "id": "cli-symbols-comma-separated",
+            "summary": "--symbols expects comma-separated values.",
+            "applies_when": ["CLI symbol lists"],
+            "do": "Use --symbols AAPL,MSFT.",
+            "avoid": "Do not pass --symbols AAPL MSFT.",
+            "tags": ["cli", "symbols"],
+            "scope": "workspace",
+            "evidence_task_ids": ["evidence-task-cli"],
+            "confidence": 0.9,
+        },
+    )
+    assert lesson_response.status_code == 201
+
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Symbols CLI probe", "prompt": "Probe market data symbols via CLI"},
+    ).json()
+    start_response = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={})
+
+    assert start_response.status_code == 201
+    started_task = start_response.json()
+    assert started_task["feedback_lesson_ids"] == []
+    assignment_prompt = sent_messages[-1][1]
+    assert "Workspace lessons index" in assignment_prompt
+    assert "cli-symbols-comma-separated" in assignment_prompt
+    assert "docs/working-logs/lessons-catalog.md" in assignment_prompt
+    assert "/api/workspaces/" in assignment_prompt
+    assert "/lessons/<lesson_id>" in assignment_prompt
+    assert "This workspace ID:" in assignment_prompt
+    assert workspace["id"] in assignment_prompt
+    assert "Read lessons only when you judge they may apply" in assignment_prompt
+    assert "Use --symbols AAPL,MSFT" not in assignment_prompt
+    task_reports = [
+        report
+        for report in workspace_manager.reports_for_workspace(workspace["id"])
+        if report.task_id == task["id"]
+    ]
+    assert task_reports == []
+
+    fetch_response = client.get(
+        f"/api/workspaces/{workspace['id']}/lessons/cli-symbols-comma-separated"
+    )
+    assert fetch_response.status_code == 200
+    fetched = fetch_response.json()
+    assert fetched["id"] == "cli-symbols-comma-separated"
+    assert fetched["summary"] == "--symbols expects comma-separated values."
+    assert fetched["do"] == "Use --symbols AAPL,MSFT."
+    assert fetched["avoid"] == "Do not pass --symbols AAPL MSFT."
+    assert fetched["hit_count"] == 1
+
+    fetch_response2 = client.get(
+        f"/api/workspaces/{workspace['id']}/lessons/cli-symbols-comma-separated"
+    )
+    assert fetch_response2.json()["hit_count"] == 2
+
+    notfound_response = client.get(f"/api/workspaces/{workspace['id']}/lessons/nonexistent-lesson")
+    assert notfound_response.status_code == 404
+
+
+def test_workspace_feedback_summary_uses_hidden_internal_reaper_task(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path / "state")
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="internal-reaper-tab",
+        port=12536,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Internal Reaper Repo", "path": str(repo), "session_prefix": "reap"},
+    ).json()
+    record_dir = tmp_path / "state" / workspace["id"] / "task_records"
+    record_dir.mkdir(parents=True)
+    record_dir.joinpath("2026-06-07T12-00-00-task-one.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "workspace_id": workspace["id"],
+                "task": {
+                    "id": "task-one",
+                    "title": "Probe symbols",
+                    "status": "done",
+                    "completed_at": "2026-06-07T12:00:00",
+                },
+                "reports": [
+                    {"state": "started"},
+                    {"state": "working"},
+                    {"state": "review_failed"},
+                    {"state": "working"},
+                    {"state": "review_failed"},
+                    {"state": "completed", "message": "Use comma symbols."},
+                ],
+                "artifacts": {
+                    "changed_files": [],
+                    "validation": ["CLI probe passed."],
+                    "risks": [],
+                },
+                "final_summary": "Use comma-separated symbols for CLI probes.",
+            }
+        ),
+        encoding="utf-8",
+    )
+    lesson_response = client.post(
+        f"/api/workspaces/{workspace['id']}/lessons",
+        json={
+            "id": "cli-symbols-comma-separated",
+            "title": "Use comma-separated symbols",
+            "summary": "--symbols expects comma-separated values.",
+            "applies_when": ["CLI symbol lists"],
+            "do": "Use --symbols AAPL,MSFT.",
+            "avoid": "Do not pass --symbols AAPL MSFT.",
+            "tags": ["cli", "symbols"],
+            "scope": "workspace",
+            "evidence_task_ids": ["task-one"],
+        },
+    )
+    assert lesson_response.status_code == 201
+
+    response = client.post(f"/api/workspaces/{workspace['id']}/lessons/summarize")
+
+    assert response.status_code == 201
+    summary_run = response.json()
+    assert summary_run["cache_hit"] is False
+    assert summary_run["input_record_ids"] == ["task-one"]
+    internal_task = workspace_manager.tasks[summary_run["task_id"]]
+    assert internal_task.system_internal is True
+    assert internal_task.internal_kind == "feedback_reaper"
+    assert internal_task.status == WorkspaceTaskStatus.WORKING
+    assert sent_messages
+    reaper_prompt = sent_messages[-1][1]
+    assert "internal Feedback Reaper" in reaper_prompt
+    assert "system-internal task" in reaper_prompt
+    assert "input_task_digests" in reaper_prompt
+    assert "task-one" in reaper_prompt
+    assert "POST /api/workspaces/" in reaper_prompt
+
+    board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
+    assert internal_task.id not in {task["id"] for task in board["tasks"]}
+    assert workspace_manager.tasks[internal_task.id].system_internal is True
+    audit_reports = [
+        report
+        for report in workspace_manager.reports_for_workspace(workspace["id"])
+        if report.task_id == internal_task.id and report.risk_level == "system_audit"
+    ]
+    assert audit_reports
+
+    workspace_manager._write_snapshot(workspace["id"])
+    snapshot = workspace_manager.snapshot_path(workspace["id"]).read_text(encoding="utf-8")
+    assert internal_task.id not in snapshot
+    assert "Feedback Reaper: summarize workspace lessons" not in snapshot
+    feedback_index = json.loads(
+        (tmp_path / "state" / workspace["id"] / "feedback" / "index.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert feedback_index["processed_task_records"][0]["task_id"] == "task-one"
+
+    completion_response = client.post(
+        f"/api/workspaces/sessions/{internal_task.session_id}/reports",
+        json={
+            "task_id": internal_task.id,
+            "state": "completed",
+            "message": "Internal reaper finished.",
+            "changed_files": [],
+            "validation": "skipped_reason=no_new_lessons",
+            "review_decision": "skip",
+            "review_reason": "System-internal Feedback Reaper audit.",
+            "risk_level": "system_audit",
+        },
+    )
+
+    assert completion_response.status_code == 201
+    completed = workspace_manager.tasks[internal_task.id]
+    assert completed.status == WorkspaceTaskStatus.DONE
+    assert completed.review_session_id is None
+    assert completed.review_skipped_at is not None
+    assert completed.review_skip_reason == "System-internal task completed without human review."
+    summary_run_files = list(
+        (tmp_path / "state" / workspace["id"] / "feedback" / "summary-runs").glob("*.json")
+    )
+    completed_run = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in summary_run_files
+        if json.loads(path.read_text(encoding="utf-8"))["id"] == summary_run["id"]
+    ][0]
+    assert completed_run["skipped_reason"] == "no_new_lessons"
+
+    sent_messages.clear()
+    cache_response = client.post(f"/api/workspaces/{workspace['id']}/lessons/summarize")
+    assert cache_response.status_code == 201
+    cached_run = cache_response.json()
+    assert cached_run["cache_hit"] is True
+    assert cached_run["task_id"] is None
+    assert cached_run["skipped_reason"] == "no_new_task_records"
+    assert sent_messages == []
+
+    force_response = client.post(
+        f"/api/workspaces/{workspace['id']}/lessons/summarize",
+        json={"force": True, "limit": 1},
+    )
+    assert force_response.status_code == 201
+    force_run = force_response.json()
+    assert force_run["cache_hit"] is False
+    assert force_run["input_record_ids"] == ["task-one"]
+    assert force_run["task_id"] in workspace_manager.tasks
+    assert sent_messages
+
+
+def test_lessons_index_includes_all_active_lessons_without_full_body_leak(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    state_root = tmp_path / "state"
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", state_root)
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="cjk-lesson-tab",
+        port=12535,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    cjk_workspace = client.post(
+        "/api/workspaces",
+        json={"name": "CJK Lessons", "path": str(repo), "session_prefix": "cjkl"},
+    ).json()
+    write_iteration_task_record_fixture(state_root, cjk_workspace["id"], "evidence-cjk-image")
+    write_iteration_task_record_fixture(state_root, cjk_workspace["id"], "evidence-cjk-market")
+    client.post(
+        f"/api/workspaces/{cjk_workspace['id']}/lessons",
+        json={
+            "id": "image-workflow-docs-first",
+            "title": "图片生成先读文档",
+            "summary": "图片生成任务要先阅读工作流文档。",
+            "applies_when": ["图片生成", "写真任务", "工作流"],
+            "do": "先检查仓库工作流文档和已有运行记录。",
+            "avoid": "不要只看原始提示词就开始生成。",
+            "tags": ["图片", "工作流"],
+            "scope": "workspace",
+            "evidence_task_ids": ["evidence-cjk-image"],
+            "confidence": 0.8,
+        },
+    )
+    client.post(
+        f"/api/workspaces/{cjk_workspace['id']}/lessons",
+        json={
+            "id": "market-data-symbols",
+            "title": "Market data CLI uses comma-separated symbols",
+            "summary": "Market data CLI symbols must be comma-separated.",
+            "applies_when": ["market data"],
+            "do": "Use --symbols AAPL,MSFT.",
+            "avoid": "Do not pass symbols as separate arguments.",
+            "tags": ["market", "cli"],
+            "scope": "workspace",
+            "evidence_task_ids": ["evidence-cjk-market"],
+            "confidence": 0.8,
+        },
+    )
+
+    cjk_task = client.post(
+        f"/api/workspaces/{cjk_workspace['id']}/tasks",
+        json={
+            "title": "写真图片生成",
+            "prompt": "生成希希芙写真图片，先看仓库工作流。",
+        },
+    ).json()
+    cjk_start_response = client.post(
+        f"/api/workspaces/tasks/{cjk_task['id']}/start",
+        json={},
+    )
+
+    assert cjk_start_response.status_code == 201
+    cjk_started_task = cjk_start_response.json()
+    assert cjk_started_task["feedback_lesson_ids"] == []
+    cjk_prompt = sent_messages[-1][1]
+    assert "Workspace lessons index" in cjk_prompt
+    assert "image-workflow-docs-first" in cjk_prompt
+    assert "market-data-symbols" in cjk_prompt
+    assert "图片生成先读文档" in cjk_prompt
+    assert "Market data CLI uses comma-separated symbols" in cjk_prompt
+    assert "先检查仓库工作流文档和已有运行记录。" not in cjk_prompt
+    assert "Use --symbols AAPL,MSFT." not in cjk_prompt
+    assert "Do not pass symbols as separate arguments." not in cjk_prompt
+    assert "不要只看原始提示词就开始生成。" not in cjk_prompt
+    assert "docs/working-logs/lessons-catalog.md" in cjk_prompt
+    assert "/api/workspaces/" in cjk_prompt
+
+    emoji_workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Emoji Lessons", "path": str(repo), "session_prefix": "emol"},
+    ).json()
+    write_iteration_task_record_fixture(state_root, emoji_workspace["id"], "evidence-emoji")
+    client.post(
+        f"/api/workspaces/{emoji_workspace['id']}/lessons",
+        json={
+            "id": "emoji-only-workspace-lesson",
+            "title": "Emoji-only workspace still gets index",
+            "summary": "All active lessons appear in the index regardless of query overlap.",
+            "applies_when": ["any task"],
+            "do": "Agent decides autonomously which lessons apply.",
+            "avoid": "Do not force-fit lessons.",
+            "tags": ["emoji"],
+            "scope": "workspace",
+            "evidence_task_ids": ["evidence-emoji"],
+            "confidence": 0.8,
+        },
+    )
+    emoji_task = client.post(
+        f"/api/workspaces/{emoji_workspace['id']}/tasks",
+        json={"title": "😀😀", "prompt": "🔥🔥"},
+    ).json()
+    emoji_start_response = client.post(
+        f"/api/workspaces/tasks/{emoji_task['id']}/start",
+        json={},
+    )
+
+    assert emoji_start_response.status_code == 201
+    emoji_started_task = emoji_start_response.json()
+    assert emoji_started_task["feedback_lesson_ids"] == []
+    emoji_prompt = sent_messages[-1][1]
+    assert "Workspace lessons index" in emoji_prompt
+    assert "emoji-only-workspace-lesson" in emoji_prompt
+    assert "Agent decides autonomously which lessons apply." not in emoji_prompt
+    task_reports = [
+        report
+        for report in workspace_manager.reports_for_workspace(emoji_workspace["id"])
+        if report.task_id == emoji_task["id"]
+    ]
+    assert task_reports == []
 
 
 @pytest.mark.parametrize(
@@ -1433,6 +2187,75 @@ def test_completed_skip_review_requires_goal_packet_audit_evidence(
     assert "goal_packet" in sent_messages[0][1]
 
 
+def test_completed_skip_review_allows_explicit_trivial_changed_files(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="skip-trivial-tab",
+        port=12557,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Skip Trivial", "path": str(repo), "session_prefix": "skip-trivial"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={
+            "title": "Bind host",
+            "prompt": "Switch dev server host to 0.0.0.0",
+            "goal_packet": {
+                "objective": "Switch dev server host to 0.0.0.0.",
+                "acceptance_criteria": ["Host binding is updated"],
+                "validation_plan": ["Inspect config diff"],
+                "assumptions": [],
+                "out_of_scope": [],
+                "handoff_requirements": ["List changed files"],
+            },
+        },
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    sent_messages.clear()
+
+    response = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "completed",
+            "message": "Changed only the dev host bind address",
+            "changed_files": ["frontend/vite.config.ts"],
+            "acceptance_check": [
+                {
+                    "criterion": "Host binding is updated",
+                    "status": "passed",
+                    "evidence": "Config diff only changes the bind host",
+                }
+            ],
+            "review_decision": "skip",
+            "review_reason": "Trivial host bind change; no AI reviewer needed.",
+            "risk_level": "trivial",
+        },
+    )
+
+    assert response.status_code == 201
+    updated = workspace_manager.tasks[task["id"]]
+    assert updated.status == WorkspaceTaskStatus.REVIEW
+    assert updated.review_session_id is None
+    assert updated.review_attempts == 0
+    assert updated.review_skipped_at is not None
+    assert updated.human_acceptance_requested_at is not None
+    assert updated.review_skip_reason == "Trivial host bind change; no AI reviewer needed."
+    assert sent_messages == []
+
+
 def test_completed_skip_review_is_denied_for_changed_files(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
@@ -1493,7 +2316,7 @@ def test_completed_skip_review_is_denied_for_changed_files(
 
     assert response.status_code == 201
     updated = workspace_manager.tasks[task["id"]]
-    assert updated.status == WorkspaceTaskStatus.WORKING
+    assert updated.status == WorkspaceTaskStatus.REVIEW
     assert updated.review_session_id is not None
     assert updated.review_attempts == 1
     assert updated.review_skipped_at is None
@@ -1636,7 +2459,7 @@ def test_manual_request_review_after_skipped_review(
 
     assert response.status_code == 200
     updated = workspace_manager.tasks[task["id"]]
-    assert updated.status == WorkspaceTaskStatus.WORKING
+    assert updated.status == WorkspaceTaskStatus.REVIEW
     assert updated.review_session_id is not None
     assert updated.review_attempts == 1
     assert updated.review_skipped_at is None
@@ -2196,6 +3019,111 @@ def test_review_task_keeps_agent_locked_until_done(
     assert workspace_manager.tasks[second_task["id"]].status == WorkspaceTaskStatus.WORKING
     assert workspace_manager.sessions[session_id].current_task_id == second_task["id"]
     assert "Run after the reviewed task is human-accepted" in sent_messages[-1][1]
+
+
+def test_reassigns_auto_queued_task_when_another_agent_becomes_free(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Auto-queued work should not stay stuck behind a held review if another agent frees up."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="queue-rebalance-tab",
+        port=12348,
+        sent_messages=sent_messages,
+    )
+
+    async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
+        return []
+
+    monkeypatch.setattr(
+        workspace_module.ttyd_manager,
+        "list_tab_agent_statuses",
+        fake_list_statuses,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Queue Rebalance Repo",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "queue-rebalance",
+        },
+    ).json()
+    first_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    second_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+
+    first_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "First review task", "prompt": "Hold first agent"},
+    ).json()
+    client.post(
+        f"/api/workspaces/tasks/{first_task['id']}/start",
+        json={"target_session_id": first_agent["id"]},
+    )
+    client.post(
+        f"/api/workspaces/sessions/{first_agent['id']}/reports",
+        json={
+            "task_id": first_task["id"],
+            "state": "ready_for_review",
+            "message": "Ready",
+        },
+    )
+    assert pass_task_review(client, first_task["id"]).status_code == 201
+
+    second_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Second review task", "prompt": "Hold second agent"},
+    ).json()
+    client.post(
+        f"/api/workspaces/tasks/{second_task['id']}/start",
+        json={"target_session_id": second_agent["id"]},
+    )
+    client.post(
+        f"/api/workspaces/sessions/{second_agent['id']}/reports",
+        json={
+            "task_id": second_task["id"],
+            "state": "ready_for_review",
+            "message": "Ready",
+        },
+    )
+    assert pass_task_review(client, second_task["id"]).status_code == 201
+
+    queued_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Queued task", "prompt": "Run on the next available agent"},
+    ).json()
+    queued_start = client.post(
+        f"/api/workspaces/tasks/{queued_task['id']}/start",
+        json={},
+    )
+
+    assert queued_start.status_code == 201
+    queued = queued_start.json()
+    assert queued["status"] == "queued"
+    assert queued["session_id"] == first_agent["id"]
+    assert queued["dispatch_reason"] == "Queued behind existing workspace agent"
+
+    accept_second = client.patch(
+        f"/api/workspaces/tasks/{second_task['id']}",
+        json={"status": "done"},
+    )
+
+    assert accept_second.status_code == 200
+    rebalanced = workspace_manager.tasks[queued_task["id"]]
+    assert rebalanced.status == WorkspaceTaskStatus.WORKING
+    assert rebalanced.session_id == second_agent["id"]
+    assert rebalanced.dispatch_reason == "Reassigned to newly available workspace agent"
+    assert workspace_manager.sessions[first_agent["id"]].current_task_id == first_task["id"]
+    assert workspace_manager.sessions[second_agent["id"]].current_task_id == queued_task["id"]
+    assert "Run on the next available agent" in sent_messages[-1][1]
 
 
 def test_dispatch_holds_agent_during_in_flight_review(
@@ -3369,6 +4297,339 @@ def test_idle_working_agent_with_review_in_flight_is_not_prompted(
     assert session.auto_continue_attempts == 0
 
 
+def test_monitor_surfaces_worker_prompt_stuck_in_input(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    status_samples: list[TerminalAgentStatus] = []
+    sent_messages: list[tuple[str, str]] = []
+
+    async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
+        return status_samples
+
+    async def fake_capture_output(_tmux_session: str) -> str:
+        return "\n".join(
+            [
+                "› New workspace task assigned.",
+                "",
+                "Workspace: Stuck Worker Repo",
+                "Task ID: task-still-in-input",
+            ]
+        )
+
+    submitted_keys: list[tuple[str, ...]] = []
+
+    async def fake_run_tmux(*args: str) -> None:
+        submitted_keys.append(args)
+
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="tab-worker-stuck",
+        port=12370,
+        sent_messages=sent_messages,
+    )
+    monkeypatch.setattr(
+        workspace_module.ttyd_manager,
+        "list_tab_agent_statuses",
+        fake_list_statuses,
+    )
+    monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture_output)
+    monkeypatch.setattr(workspace_manager, "_run_tmux", fake_run_tmux)
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Stuck Worker Repo", "path": str(repo), "session_prefix": "stuckw"},
+    ).json()
+    client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Worker stuck", "prompt": "Start this task"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    sent_messages.clear()
+
+    stale_started_at = datetime.now() - timedelta(seconds=30)
+    workspace_manager.tasks[started["id"]] = workspace_manager.tasks[started["id"]].model_copy(
+        update={"started_at": stale_started_at, "updated_at": stale_started_at}
+    )
+    session = workspace_manager.sessions[started["session_id"]]
+    sampled_at = datetime.now()
+    status_samples[:] = [
+        TerminalAgentStatus(
+            tab_id=session.tab_id,
+            tab_name="Stuck Worker Repo Agent 1",
+            agent_type=AgentType.CODEX,
+            status=AgentRuntimeStatus.WORKING,
+            status_text="Working",
+            detail="prompt pending",
+            tmux_session=session.tmux_session,
+            last_changed_at=sampled_at - timedelta(seconds=30),
+            sampled_at=sampled_at,
+        )
+    ]
+
+    asyncio.run(workspace_manager._refresh_session_statuses(workspace["id"]))
+
+    updated_task = workspace_manager.tasks[started["id"]]
+    updated_session = workspace_manager.sessions[started["session_id"]]
+    assert updated_task.status == WorkspaceTaskStatus.WORKING
+    assert updated_session.runtime_status == AgentRuntimeStatus.WORKING
+    assert updated_session.prompt_retry_task_id == started["id"]
+    assert submitted_keys == [("send-keys", "-t", session.tmux_session, "C-m")]
+    assert sent_messages == []
+
+    retry_at = datetime.now() - timedelta(seconds=30)
+    workspace_manager.sessions[started["session_id"]] = updated_session.model_copy(
+        update={"prompt_retry_attempted_at": retry_at, "updated_at": retry_at}
+    )
+    asyncio.run(workspace_manager._refresh_session_statuses(workspace["id"]))
+
+    updated_task = workspace_manager.tasks[started["id"]]
+    updated_session = workspace_manager.sessions[started["session_id"]]
+    report = list(workspace_manager.reports.values())[-1]
+    assert updated_task.status == WorkspaceTaskStatus.REVIEW
+    assert updated_session.runtime_status == AgentRuntimeStatus.ATTENTION
+    assert report.state.value == "needs_input"
+    assert report.risk_level == "prompt_dispatch_stalled"
+    assert "terminal input box" in report.message
+    assert len(submitted_keys) == 1
+
+
+def test_monitor_surfaces_reviewer_prompt_stuck_in_input(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    status_samples: list[TerminalAgentStatus] = []
+    sent_messages: list[tuple[str, str]] = []
+
+    async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
+        return status_samples
+
+    async def fake_capture_output(_tmux_session: str) -> str:
+        return "\n".join(
+            [
+                "› Review workspace task.",
+                "",
+                "Workspace: Stuck Reviewer Repo",
+                "Task ID: task-review-still-in-input",
+            ]
+        )
+
+    submitted_keys: list[tuple[str, ...]] = []
+
+    async def fake_run_tmux(*args: str) -> None:
+        submitted_keys.append(args)
+
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="tab-reviewer-stuck",
+        port=12371,
+        sent_messages=sent_messages,
+    )
+    monkeypatch.setattr(
+        workspace_module.ttyd_manager,
+        "list_tab_agent_statuses",
+        fake_list_statuses,
+    )
+    monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture_output)
+    monkeypatch.setattr(workspace_manager, "_run_tmux", fake_run_tmux)
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Stuck Reviewer Repo", "path": str(repo), "session_prefix": "stuckr"},
+    ).json()
+    client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Reviewer stuck", "prompt": "Complete and review this task"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": started["id"],
+            "state": "completed",
+            "message": "Done; request review",
+            "review_decision": "request",
+            "review_reason": "Exercise reviewer dispatch",
+        },
+    )
+    sent_messages.clear()
+
+    review_session_id = workspace_manager.tasks[started["id"]].review_session_id
+    assert review_session_id is not None
+    stale_review_requested_at = datetime.now() - timedelta(seconds=30)
+    workspace_manager.tasks[started["id"]] = workspace_manager.tasks[started["id"]].model_copy(
+        update={
+            "review_requested_at": stale_review_requested_at,
+            "updated_at": stale_review_requested_at,
+        }
+    )
+    reviewer = workspace_manager.sessions[review_session_id]
+    sampled_at = datetime.now()
+    status_samples[:] = [
+        TerminalAgentStatus(
+            tab_id=reviewer.tab_id,
+            tab_name="Stuck Reviewer Repo Reviewer 1",
+            agent_type=AgentType.CODEX,
+            status=AgentRuntimeStatus.WORKING,
+            status_text="Working",
+            detail="review prompt pending",
+            tmux_session=reviewer.tmux_session,
+            last_changed_at=sampled_at - timedelta(seconds=30),
+            sampled_at=sampled_at,
+        )
+    ]
+
+    asyncio.run(workspace_manager._refresh_session_statuses(workspace["id"]))
+
+    updated_task = workspace_manager.tasks[started["id"]]
+    updated_reviewer = workspace_manager.sessions[review_session_id]
+    assert updated_task.status == WorkspaceTaskStatus.REVIEW
+    assert updated_reviewer.runtime_status == AgentRuntimeStatus.WORKING
+    assert updated_reviewer.prompt_retry_task_id == started["id"]
+    assert submitted_keys == [("send-keys", "-t", reviewer.tmux_session, "C-m")]
+    assert sent_messages == []
+
+    retry_at = datetime.now() - timedelta(seconds=30)
+    workspace_manager.sessions[review_session_id] = updated_reviewer.model_copy(
+        update={"prompt_retry_attempted_at": retry_at, "updated_at": retry_at}
+    )
+    asyncio.run(workspace_manager._refresh_session_statuses(workspace["id"]))
+
+    updated_task = workspace_manager.tasks[started["id"]]
+    updated_reviewer = workspace_manager.sessions[review_session_id]
+    report = list(workspace_manager.reports.values())[-1]
+    assert updated_task.status == WorkspaceTaskStatus.REVIEW
+    assert updated_reviewer.runtime_status == AgentRuntimeStatus.ATTENTION
+    assert report.state.value == "review_needs_input"
+    assert report.risk_level == "prompt_dispatch_stalled"
+    assert "Review" in report.message or "review" in report.message
+    assert len(submitted_keys) == 1
+
+
+def test_fallback_reaper_grace_skips_recently_dispatched_idle_reviewer(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reviewer just got the prompt but hasn't started typing yet — terminal
+    classifier briefly reports IDLE. The fallback reaper must not treat this
+    as a stuck dispatch and re-fire ``ready_for_review`` repeatedly. Once the
+    grace window elapses without activity, redispatch is allowed again."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    status_samples: list[TerminalAgentStatus] = []
+    sent_messages: list[tuple[str, str]] = []
+
+    async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
+        return status_samples
+
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="tab-reaper-grace",
+        port=12372,
+        sent_messages=sent_messages,
+    )
+    monkeypatch.setattr(
+        workspace_module.ttyd_manager,
+        "list_tab_agent_statuses",
+        fake_list_statuses,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Reaper Grace Repo", "path": str(repo), "session_prefix": "reapg"},
+    ).json()
+    client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Slow reviewer", "prompt": "Finish then request review"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": started["id"],
+            "state": "completed",
+            "message": "Done; please review",
+            "review_decision": "request",
+            "review_reason": "exercise reaper grace",
+        },
+    )
+
+    review_session_id = workspace_manager.tasks[started["id"]].review_session_id
+    assert review_session_id is not None
+    initial_attempts = workspace_manager.tasks[started["id"]].review_attempts
+    sent_messages.clear()
+
+    # Simulate "slow first token": reviewer was just dispatched (within grace)
+    # but the terminal classifier reports IDLE because no output has streamed
+    # yet. _reviewer_is_active returns False, so without the grace the
+    # fallback reaper would re-dispatch.
+    just_now = datetime.now()
+    workspace_manager.tasks[started["id"]] = workspace_manager.tasks[started["id"]].model_copy(
+        update={
+            "review_requested_at": just_now,
+            "updated_at": just_now,
+        }
+    )
+    reviewer = workspace_manager.sessions[review_session_id]
+    workspace_manager.sessions[review_session_id] = reviewer.model_copy(
+        update={
+            "runtime_status": AgentRuntimeStatus.IDLE,
+            "last_activity_at": just_now,
+            "updated_at": just_now,
+        }
+    )
+
+    asyncio.run(workspace_manager.dispatch_workspace(workspace["id"], refresh_sessions=False))
+
+    after_grace_task = workspace_manager.tasks[started["id"]]
+    assert (
+        after_grace_task.review_attempts == initial_attempts
+    ), "fallback reaper should not redispatch within grace window"
+    assert all(
+        "fallback reaper" not in msg.lower() for _, msg in sent_messages
+    ), "reviewer should not see a re-dispatched prompt during grace"
+
+    # Push the dispatch + last activity past the grace window — the reaper
+    # should now treat the reviewer as genuinely stuck and redispatch.
+    stale = datetime.now() - timedelta(
+        seconds=workspace_module.REVIEW_REAPER_DISPATCH_GRACE_SECONDS + 5
+    )
+    workspace_manager.tasks[started["id"]] = workspace_manager.tasks[started["id"]].model_copy(
+        update={"review_requested_at": stale, "updated_at": stale}
+    )
+    reviewer = workspace_manager.sessions[review_session_id]
+    workspace_manager.sessions[review_session_id] = reviewer.model_copy(
+        update={
+            "runtime_status": AgentRuntimeStatus.IDLE,
+            "status": ManagedSessionStatus.IDLE,
+            "task_id": None,
+            "current_task_id": None,
+            "last_activity_at": stale,
+            "updated_at": stale,
+        }
+    )
+
+    asyncio.run(workspace_manager.dispatch_workspace(workspace["id"], refresh_sessions=False))
+
+    redispatched_task = workspace_manager.tasks[started["id"]]
+    assert (
+        redispatched_task.review_attempts == initial_attempts + 1
+    ), "fallback reaper should redispatch once dispatch grace has elapsed"
+
+
 def test_interrupted_idle_working_agent_auto_continue_stops_after_limit(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
@@ -3490,7 +4751,7 @@ def test_interrupted_idle_working_agent_auto_continue_stops_after_limit(
     assert len(sent_messages) == 2
     assert "independent reviewer agent" in sent_messages[0][1]
     assert "Review workspace task" in sent_messages[1][1]
-    assert task_after_limit.status == WorkspaceTaskStatus.WORKING
+    assert task_after_limit.status == WorkspaceTaskStatus.REVIEW
     assert task_after_limit.session_id == started["session_id"]
     assert task_after_limit.review_session_id is not None
     assert session.runtime_status == AgentRuntimeStatus.ATTENTION
@@ -4902,6 +6163,12 @@ def test_done_task_writes_delete_safe_task_record(
     workspace_manager.reports[completed_report["id"]] = workspace_manager.reports[
         completed_report["id"]
     ].model_copy(update={"created_at": base_time + timedelta(minutes=12)})
+    workspace_manager.tasks[task["id"]] = workspace_manager.tasks[task["id"]].model_copy(
+        update={
+            "reviewed_at": base_time + timedelta(minutes=12),
+            "updated_at": base_time + timedelta(minutes=12),
+        }
+    )
     monkeypatch.setattr(workspace_module, "_now", lambda: base_time + timedelta(minutes=15))
 
     done_response = client.patch(
@@ -4935,7 +6202,8 @@ def test_done_task_writes_delete_safe_task_record(
         ("task_queued", "1m 0s", "1m 0s"),
         ("task_started", "2m 0s", "1m 0s"),
         ("agent_report", "7m 0s", "5m 0s"),
-        ("agent_report", "12m 0s", "5m 0s"),
+        ("task_reviewed", "12m 0s", "5m 0s"),
+        ("agent_report", "12m 0s", "0s"),
         ("task_completed", "15m 0s", "3m 0s"),
     ]
     assert [
@@ -4946,7 +6214,8 @@ def test_done_task_writes_delete_safe_task_record(
         ("task_queued", 60, 60),
         ("task_started", 120, 60),
         ("agent_report", 420, 300),
-        ("agent_report", 720, 300),
+        ("task_reviewed", 720, 300),
+        ("agent_report", 720, 0),
         ("task_completed", 900, 180),
     ]
 
@@ -5025,7 +6294,7 @@ def test_abort_task_returns_active_review_to_todo_and_releases_sessions(
     reviewing_task = workspace_manager.tasks[task["id"]]
     reviewer_id = reviewing_task.review_session_id
     assert reviewer_id is not None
-    assert reviewing_task.status == WorkspaceTaskStatus.WORKING
+    assert reviewing_task.status == WorkspaceTaskStatus.REVIEW
     assert workspace_manager.sessions[started["session_id"]].current_task_id == task["id"]
     assert workspace_manager.sessions[reviewer_id].current_task_id == task["id"]
 

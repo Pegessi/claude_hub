@@ -1,4 +1,9 @@
 import importlib
+import json
+import os
+import shlex
+import stat
+import subprocess
 
 import pytest
 from pytest import MonkeyPatch
@@ -10,9 +15,31 @@ from claude_hub.models import (
     RemoteProfile,
     WorkspaceSessionRole,
 )
-from claude_hub.services.ttyd_manager import TTYDManager, TTYDProcess
+from claude_hub.services.ttyd_manager import (
+    DEFAULT_CLAUDE_LAUNCH_ENV,
+    TTYDManager,
+    TTYDProcess,
+)
 
 ttyd_manager_module = importlib.import_module("claude_hub.services.ttyd_manager")
+
+
+def _wrapper_script(command: str) -> str:
+    wrapper_path = _wrapper_path(command)
+    return open(wrapper_path, encoding="utf-8").read()
+
+
+def _wrapper_path(command: str) -> str:
+    parts = shlex.split(command)
+    return parts[1] if parts[:1] == ["/bin/sh"] else parts[0]
+
+
+def _claude_settings_path(command: str) -> str:
+    parts = shlex.split(command)
+    if parts[:1] == ["/bin/sh"]:
+        parts = shlex.split(parts[2])
+    settings_index = parts.index("--settings")
+    return parts[settings_index + 1]
 
 
 def test_codex_tab_uses_codex_command() -> None:
@@ -56,6 +83,281 @@ def test_codex_solo_mode_reattaches_existing_tmux_session() -> None:
     )
 
     assert process._build_ttyd_command(session_exists=True)[-1] == "codex"
+
+
+def test_custom_env_is_injected_and_serialized() -> None:
+    process = TTYDProcess(
+        tab_id="tab-env",
+        port=12348,
+        name="Env Tab",
+        agent_type=AgentType.TERMINAL,
+        env={"HTTP_PROXY": "http://127.0.0.1:7890", "NO_PROXY": "localhost,127.0.0.1"},
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+    data = process.to_dict()
+    schema = process.to_schema()
+
+    wrapper_path = _wrapper_path(cmd[-1])
+    wrapper_mode = stat.S_IMODE(os.stat(wrapper_path).st_mode)
+    wrapper = _wrapper_script(cmd[-1])
+
+    assert "HTTP_PROXY=http://127.0.0.1:7890" not in cmd[-1]
+    assert "NO_PROXY=localhost,127.0.0.1" not in cmd[-1]
+    assert wrapper_mode == 0o600
+    assert "export HTTP_PROXY=http://127.0.0.1:7890" in wrapper
+    assert "export NO_PROXY=localhost,127.0.0.1" in wrapper
+    assert data["env"] == {
+        "HTTP_PROXY": "http://127.0.0.1:7890",
+        "NO_PROXY": "localhost,127.0.0.1",
+        "http_proxy": "http://127.0.0.1:7890",
+        "no_proxy": "localhost,127.0.0.1",
+    }
+    assert schema.env == {
+        "HTTP_PROXY": "http://127.0.0.1:7890",
+        "NO_PROXY": "localhost,127.0.0.1",
+        "http_proxy": "http://127.0.0.1:7890",
+        "no_proxy": "localhost,127.0.0.1",
+    }
+
+
+def test_local_env_wrapper_command_executes_without_executable_bit() -> None:
+    process = TTYDProcess(
+        tab_id="tab-env-exec",
+        port=12355,
+        name="Env Exec Tab",
+        agent_type=AgentType.TERMINAL,
+        env={"CLAUDE_HUB_TEST_VALUE": "wrapper ok"},
+    )
+
+    command = process._with_env(
+        'printf \'%s\' "$CLAUDE_HUB_TEST_VALUE"; test -n "$CLAUDE_HUB_TEST_VALUE"'
+    )
+    wrapper_path = _wrapper_path(command)
+    wrapper_mode = stat.S_IMODE(os.stat(wrapper_path).st_mode)
+    result = subprocess.run(
+        shlex.split(command),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert command.startswith("/bin/sh ")
+    assert wrapper_mode == 0o600
+    assert result.stdout == "wrapper ok"
+
+
+def test_custom_env_rejects_invalid_names() -> None:
+    with pytest.raises(ValueError, match="Invalid environment variable name"):
+        TTYDProcess(
+            tab_id="tab-invalid-env",
+            port=12348,
+            name="Invalid Env Tab",
+            agent_type=AgentType.TERMINAL,
+            env={"BAD-NAME": "value"},
+        )
+
+
+def test_claude_env_model_is_passed_as_startup_model_flag() -> None:
+    process = TTYDProcess(
+        tab_id="tab-claude-model-env",
+        port=12349,
+        name="Claude Model Env",
+        agent_type=AgentType.CLAUDE,
+        env={"ANTHROPIC_MODEL": "claude-opus-4-8"},
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+
+    wrapper = _wrapper_script(cmd[-1])
+
+    assert "ANTHROPIC_MODEL=claude-opus-4-8" not in cmd[-1]
+    assert "--model claude-opus-4-8" in cmd[-1]
+    assert "--settings " in cmd[-1]
+    assert "export ANTHROPIC_MODEL=claude-opus-4-8" in wrapper
+
+
+def test_claude_launch_defaults_to_volcengine_model_env() -> None:
+    process = TTYDProcess(
+        tab_id="tab-claude-default-model-env",
+        port=12356,
+        name="Claude Default Model Env",
+        agent_type=AgentType.CLAUDE,
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+    wrapper = _wrapper_script(cmd[-1])
+    settings_path = _claude_settings_path(cmd[-1])
+    settings_mode = stat.S_IMODE(os.stat(settings_path).st_mode)
+    settings = json.load(open(settings_path, encoding="utf-8"))
+
+    for key, value in DEFAULT_CLAUDE_LAUNCH_ENV.items():
+        assert process.env[key] == value
+        assert f"export {key}={shlex.quote(value)}" in wrapper
+        assert settings["env"][key] == value
+    assert "--model doubao-seed-2.0-code" in cmd[-1]
+    assert settings_mode == 0o600
+    assert "deepseek" not in json.dumps(settings)
+
+
+def test_claude_explicit_env_overrides_default_model_env() -> None:
+    process = TTYDProcess(
+        tab_id="tab-claude-override-model-env",
+        port=12357,
+        name="Claude Override Model Env",
+        agent_type=AgentType.CLAUDE,
+        env={"ANTHROPIC_MODEL": "claude-opus-4-8"},
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+    settings = json.load(open(_claude_settings_path(cmd[-1]), encoding="utf-8"))
+
+    assert "ANTHROPIC_BASE_URL" not in process.env
+    assert process.env["ANTHROPIC_MODEL"] == "claude-opus-4-8"
+    assert settings["env"] == {"ANTHROPIC_MODEL": "claude-opus-4-8"}
+    assert "--model claude-opus-4-8" in cmd[-1]
+
+
+def test_claude_solo_env_model_is_passed_as_startup_model_flag(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    process = TTYDProcess(
+        tab_id="tab-claude-solo-model-env",
+        port=12350,
+        name="Claude Solo Model Env",
+        solo_mode=True,
+        agent_type=AgentType.CLAUDE,
+        env={"ANTHROPIC_MODEL": "gateway/model with space"},
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+
+    assert cmd[-3:-1] == ["/bin/zsh", "-c"]
+    assert "tab-claude-solo-model-env.sh" in cmd[-1]
+    assert "IS_SANDBOX=1 claude --dangerously-skip-permissions" in cmd[-1]
+    assert "--model " in cmd[-1]
+    wrapper = _wrapper_script(cmd[-1])
+
+    assert "ANTHROPIC_MODEL='gateway/model with space'" not in cmd[-1]
+    assert "ANTHROPIC_CUSTOM_MODEL_OPTION='gateway/model with space'" not in cmd[-1]
+    assert "export ANTHROPIC_MODEL='gateway/model with space'" in wrapper
+    assert "ANTHROPIC_CUSTOM_MODEL_OPTION" not in wrapper
+    assert "ANTHROPIC_CUSTOM_MODEL_OPTION" not in process.env
+
+
+def test_claude_custom_model_env_option_is_not_overwritten() -> None:
+    process = TTYDProcess(
+        tab_id="tab-claude-explicit-custom-model",
+        port=12351,
+        name="Claude Explicit Custom Model",
+        agent_type=AgentType.CLAUDE,
+        env={
+            "ANTHROPIC_MODEL": "ark/seed-code-0602[1m]",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION": "ark/seed-code-0602",
+        },
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+
+    assert process.env["ANTHROPIC_CUSTOM_MODEL_OPTION"] == "ark/seed-code-0602"
+    assert "--model " in cmd[-1]
+    assert "export ANTHROPIC_MODEL='ark/seed-code-0602[1m]'" in _wrapper_script(cmd[-1])
+
+
+def test_claude_volcengine_coding_plan_model_alias_is_normalized() -> None:
+    process = TTYDProcess(
+        tab_id="tab-claude-volcengine-model",
+        port=12352,
+        name="Claude Volcengine Model",
+        agent_type=AgentType.CLAUDE,
+        env={
+            "ANTHROPIC_BASE_URL": "https://ark.cn-beijing.volces.com/api/coding",
+            "ANTHROPIC_AUTH_TOKEN": "token",
+            "ANTHROPIC_MODEL": "ark/seed-code-0602",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "ark/seed-code-0602",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "ark/seed-code-0602",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "ark/seed-code-0602",
+            "CLAUDE_CODE_SUBAGENT_MODEL": "ark/seed-code-0602",
+        },
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+
+    assert process.env["ANTHROPIC_MODEL"] == "doubao-seed-2.0-code"
+    assert process.env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "doubao-seed-2.0-code"
+    assert process.env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "doubao-seed-2.0-code"
+    assert process.env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "doubao-seed-2.0-code"
+    assert process.env["CLAUDE_CODE_SUBAGENT_MODEL"] == "doubao-seed-2.0-code"
+    assert "--model doubao-seed-2.0-code" in cmd[-1]
+
+
+def test_claude_volcengine_coding_plan_template_typo_alias_is_normalized() -> None:
+    process = TTYDProcess(
+        tab_id="tab-claude-volcengine-template-typo-model",
+        port=12353,
+        name="Claude Volcengine Template Typo Model",
+        agent_type=AgentType.CLAUDE,
+        env={
+            "ANTHROPIC_BASE_URL": "https://ark.cn-beijing.volces.com/api/coding",
+            "ANTHROPIC_MODEL": "ark/seed-code-6062",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "ark/seed-code-6062",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "ark/seed-code-6062",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "ark/seed-code-6062",
+            "CLAUDE_CODE_SUBAGENT_MODEL": "ark/seed-code-6062",
+        },
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+
+    assert process.env["ANTHROPIC_MODEL"] == "doubao-seed-2.0-code"
+    assert process.env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "doubao-seed-2.0-code"
+    assert process.env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "doubao-seed-2.0-code"
+    assert process.env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "doubao-seed-2.0-code"
+    assert process.env["CLAUDE_CODE_SUBAGENT_MODEL"] == "doubao-seed-2.0-code"
+    assert "ark/seed-code-6062" not in cmd[-1]
+    assert "--model doubao-seed-2.0-code" in cmd[-1]
+
+
+def test_claude_super_relay_launch_env_is_preserved_with_proxy() -> None:
+    process = TTYDProcess(
+        tab_id="tab-claude-super-relay",
+        port=12354,
+        name="Claude Super Relay",
+        agent_type=AgentType.CLAUDE,
+        env={
+            "ANTHROPIC_BASE_URL": "https://super-relay.byted.org",
+            "ANTHROPIC_AUTH_TOKEN": "token",
+            "ANTHROPIC_MODEL": "ark/seed-code-0602",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "ark/seed-code-0602",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "ark/seed-code-0602",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "ark/seed-code-0602",
+            "CLAUDE_CODE_SUBAGENT_MODEL": "ark/seed-code-0602",
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "140000",
+            "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+            "HTTP_PROXY": "http://127.0.0.1:23456",
+            "HTTPS_PROXY": "http://127.0.0.1:23456",
+        },
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+    wrapper = _wrapper_script(cmd[-1])
+    settings = json.load(open(_claude_settings_path(cmd[-1]), encoding="utf-8"))
+
+    assert process.env["ANTHROPIC_BASE_URL"] == "https://super-relay.byted.org"
+    assert process.env["ANTHROPIC_MODEL"] == "ark/seed-code-0602"
+    assert process.env["HTTP_PROXY"] == "http://127.0.0.1:23456"
+    assert process.env["HTTPS_PROXY"] == "http://127.0.0.1:23456"
+    assert "ANTHROPIC_CUSTOM_MODEL_OPTION" not in process.env
+    assert "NODE_TLS_REJECT_UNAUTHORIZED" not in process.env
+    assert "https://127.0.0.1:" not in json.dumps(settings)
+    assert "export ANTHROPIC_BASE_URL=https://super-relay.byted.org" in wrapper
+    assert "export ANTHROPIC_MODEL=ark/seed-code-0602" in wrapper
+    assert "export HTTP_PROXY=http://127.0.0.1:23456" in wrapper
+    assert "export HTTPS_PROXY=http://127.0.0.1:23456" in wrapper
+    assert settings["env"]["ANTHROPIC_BASE_URL"] == "https://super-relay.byted.org"
+    assert settings["env"]["ANTHROPIC_MODEL"] == "ark/seed-code-0602"
+    assert "--model ark/seed-code-0602" in cmd[-1]
 
 
 def test_workspace_metadata_is_serialized_to_tab_schema_and_state() -> None:
