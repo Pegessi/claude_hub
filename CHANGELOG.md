@@ -3,6 +3,45 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-06-09
+
+### perf: coalesce terminal resize and reduce poll-driven re-renders
+
+Reduces terminal input latency (typing/backspace "不跟手") that was especially
+noticeable in multi-pane layouts. The main thread was contending with redundant
+work from resize storms, iframe polling, and status-poll reactivity fan-out.
+
+- **Coalesced resize dispatch.** `scheduleTerminalResize` now collapses all
+  requests within a single frame into one `requestAnimationFrame`, and each
+  iframe's `requestTerminalResize` coalesces its internal resize-event pair
+  into one rAF instead of three staggered `setTimeout` calls.
+- **Scoped resize to the active terminal.** `ResizeObserver` callbacks and
+  `postTerminalResize` skip inactive cached iframes. `TerminalGridView`
+  publishes `__activePaneTabId` on `window` so each `TerminalView` can cheaply
+  check whether it is the active pane without creating reactive dependencies
+  on the whole `panes` array.
+- **Backoff on terminal-ready polling.** The iframe no longer hammers the
+  event loop with a fixed 100ms interval. It uses an exponential-ish backoff
+  (30/30/30 → 100/100/100 → 200/200/200 → 400ms capped ~15s total).
+- **Deduplicated theme broadcasts.** `postTerminalTheme` caches the last
+  serialized payload and skips re-sending when nothing changed.
+- **Poll response deduplication.** `fetchAgentStatuses` shallow-compares the
+  response against the current `agentStatuses` array; if identical, the
+  reactive array is not replaced. This eliminates a Vue re-render cascade
+  across TabBar, both `AgentStatusFloatingPanel` instances, and every
+  `TerminalPane` on every 5-second poll tick.
+- **In-place pane mutations.** `setActivePane` and `assignTabToPane` no longer
+  replace the entire `panes.value` array. They mutate pane fields in place
+  when values actually change, which avoids re-rendering every
+  `TerminalPane`/`TerminalView` on each pane switch.
+- **Memoized tab lookups.** `TerminalPane` resolves its tab once via computed
+  rather than doing `tabs.find()` inside each render.
+- **Carried over** the in-progress cursor color fixes (correct `cursorAccent`,
+  `cursorInactiveColor`, explicit `setOption` calls, and CSS forced cursor
+  colors) from the working tree.
+
+**Files**: `frontend/src/components/TerminalView.vue`, `frontend/src/components/TerminalPane.vue`, `frontend/src/components/TerminalGridView.vue`, `frontend/src/stores/terminalStore.ts`, `CHANGELOG.md`
+
 ## 2026-06-08
 
 ### fix: stop fallback reaper from re-dispatching slow-to-start reviewers
