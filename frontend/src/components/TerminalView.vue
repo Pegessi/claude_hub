@@ -82,6 +82,12 @@ let keyboardResizeSettlesAt = 0
 let lastKeyboardOpenState = false
 let pendingKeyboardResizeAll = false
 const pendingKeyboardResizeTabIds = new Set<string>()
+// Single rAF-based resize coalescing
+let pendingResizeRafId: number | null = null
+const pendingResizeTabIds = new Set<string>()
+let pendingResizeAll = false
+// Last-sent theme payload cache to avoid duplicate theme messages
+let lastThemeKey: string | null = null
 
 const MOBILE_TERMINAL_BREAKPOINT_PX = 768
 const MOBILE_KEYBOARD_RESIZE_SETTLE_MS = 260
@@ -218,7 +224,8 @@ function terminalThemePayload(): TerminalThemePayload {
       background,
       foreground,
       cursor: cssVar('--ch-terminal-cursor'),
-      cursorAccent: background,
+      cursorAccent: cssVar('--ch-terminal-bg'),
+      cursorInactiveColor: cssVar('--ch-terminal-cursor'),
       selectionBackground: cssVar('--ch-terminal-selection'),
       black: cssVar('--ch-terminal-black'),
       red: cssVar('--ch-terminal-red'),
@@ -240,8 +247,24 @@ function terminalThemePayload(): TerminalThemePayload {
   }
 }
 
+// Build a compact stable string key used to skip identical theme payloads.
+function themePayloadKey(payload: TerminalThemePayload): string {
+  try {
+    return JSON.stringify(payload)
+  } catch {
+    return String(Math.random())
+  }
+}
+
 function postTerminalTheme(tabId?: string) {
   const payload = terminalThemePayload()
+  const key = themePayloadKey(payload)
+  // Skip posting identical theme if nothing changed and we're broadcasting.
+  if (key === lastThemeKey && !tabId) {
+    return
+  }
+  lastThemeKey = key
+
   const targetTabIds = tabId ? [tabId] : Object.keys(iframeRefs)
 
   for (const id of targetTabIds) {
@@ -258,11 +281,42 @@ function postTerminalResize(tabId?: string) {
   const targetTabIds = tabId ? [tabId] : Object.keys(iframeRefs)
 
   for (const id of targetTabIds) {
+    // Only dispatch resize to the currently active iframe in this TerminalView.
+    // Inactive (cached) iframes are visibility:hidden and do not need resize
+    // work until they become active again.
+    if (id !== props.tabId) continue
     const iframe = iframeRefs[id]
     if (!iframe?.contentWindow) continue
     iframe.contentWindow.postMessage({
       type: 'terminal-resize',
     }, '*')
+  }
+}
+
+function flushPendingResize() {
+  pendingResizeRafId = null
+  if (pendingResizeAll) {
+    pendingResizeAll = false
+    pendingResizeTabIds.clear()
+    postTerminalResize()
+    return
+  }
+  const tabIds = Array.from(pendingResizeTabIds)
+  pendingResizeTabIds.clear()
+  for (const id of tabIds) {
+    postTerminalResize(id)
+  }
+}
+
+function enqueueResize(tabId?: string) {
+  if (tabId) {
+    pendingResizeTabIds.add(tabId)
+  } else {
+    pendingResizeAll = true
+    pendingResizeTabIds.clear()
+  }
+  if (pendingResizeRafId === null) {
+    pendingResizeRafId = requestAnimationFrame(flushPendingResize)
   }
 }
 
@@ -377,6 +431,10 @@ function queueKeyboardSettledResize(tabId?: string) {
   keyboardResizeSettleTimer = window.setTimeout(flushKeyboardResizeQueue, MOBILE_KEYBOARD_RESIZE_SETTLE_MS)
 }
 
+// Coalesced, rAF-based resize scheduler. Previously this dispatched three separate
+// postMessage calls at 0/50/250ms for every caller; now we coalesce duplicate
+// requests within a single requestAnimationFrame and target only the active
+// iframe of this TerminalView.
 function scheduleTerminalResize(tabId?: string, options: { coalesceMobileKeyboard?: boolean } = {}) {
   if (typeof window === 'undefined') return
 
@@ -385,9 +443,7 @@ function scheduleTerminalResize(tabId?: string, options: { coalesceMobileKeyboar
     return
   }
 
-  postTerminalResize(tabId)
-  window.setTimeout(() => postTerminalResize(tabId), 50)
-  window.setTimeout(() => postTerminalResize(tabId), 250)
+  enqueueResize(tabId)
 }
 
 function onIframeLoad(event: Event, tabId: string) {
@@ -474,15 +530,22 @@ function onIframeLoad(event: Event, tabId: string) {
       }
 
       var pendingTerminalTheme = null;
+      var terminalReadyNotified = false;
+      var pendingResizeRaf = null;
 
+      // Single rAF-coalesced resize dispatch inside the iframe. Replaces the
+      // previous 3x sequential setTimeout pattern that forced xterm.js to
+      // re-measure layout three times per resize request.
       function requestTerminalResize() {
-        window.dispatchEvent(new Event('resize'));
-        setTimeout(function() {
+        if (pendingResizeRaf !== null) return;
+        pendingResizeRaf = requestAnimationFrame(function() {
+          pendingResizeRaf = null;
           window.dispatchEvent(new Event('resize'));
-        }, 50);
-        setTimeout(function() {
-          window.dispatchEvent(new Event('resize'));
-        }, 250);
+          // ttyd defers fit to a microtask internally; give it a short tail
+          setTimeout(function() {
+            window.dispatchEvent(new Event('resize'));
+          }, 0);
+        });
       }
 
       function ensureTerminalThemeStyle() {
@@ -544,7 +607,9 @@ function onIframeLoad(event: Event, tabId: string) {
           '.xterm-viewport { inset: 0 !important; width: 100% !important; height: 100% !important; background-color: ' + renderedBackground + ' !important; }' +
           '.xterm-screen { width: 100% !important; height: 100% !important; }' +
           '.xterm-screen canvas { width: 100% !important; height: 100% !important; filter: ' + page.canvasFilter + ' !important; }' +
-          '.xterm-selection div { background-color: ' + page.selection + ' !important; }';
+          '.xterm-selection div { background-color: ' + page.selection + ' !important; }' +
+          '.xterm-cursor, .xterm-cursor-block, .xterm-cursor-underscore, .xterm-cursor-bar { background-color: ' + payload.xterm.cursor + ' !important; border-color: ' + payload.xterm.cursor + ' !important; }' +
+          '.xterm.focus .xterm-cursor, .xterm.focus .xterm-cursor-block { background-color: ' + payload.xterm.cursor + ' !important; border-color: ' + payload.xterm.cursor + ' !important; color: ' + renderedBackground + ' !important; }';
 
         requestTerminalResize();
 
@@ -560,6 +625,18 @@ function onIframeLoad(event: Event, tabId: string) {
           }
           if (typeof term.setOption === 'function') {
             term.setOption('theme', payload.xterm);
+            if (typeof payload.xterm.cursor !== 'undefined') {
+              try { term.setOption('cursorColor', payload.xterm.cursor); } catch(e) {}
+            }
+            if (typeof payload.xterm.cursorAccent !== 'undefined') {
+              try { term.setOption('cursorAccentColor', payload.xterm.cursorAccent); } catch(e) {}
+            }
+            if (typeof payload.xterm.cursorInactiveColor !== 'undefined') {
+              try { term.setOption('cursorInactiveColor', payload.xterm.cursorInactiveColor); } catch(e) {}
+            }
+            if (typeof payload.xterm.cursorStyle !== 'undefined') {
+              try { term.setOption('cursorStyle', payload.xterm.cursorStyle); } catch(e) {}
+            }
             if (typeof payload.minimumContrastRatio === 'number') {
               try {
                 term.setOption('minimumContrastRatio', payload.minimumContrastRatio);
@@ -660,9 +737,9 @@ function onIframeLoad(event: Event, tabId: string) {
       }
 
       // Browser terminals do not forward image clipboard data to the TUI.
-      // Claude Code and Codex handle Ctrl+V by reading the macOS clipboard, so
-      // first sync the browser image data to the backend pasteboard and then
-      // trigger that key.
+      // Claude Code and Codex handle Ctrl+V by reading the macOS clipboard,
+      // so first sync the browser image data to the backend pasteboard and
+      // then trigger that key.
       document.addEventListener('paste', function(event) {
         if (CLAUDE_HUB_AGENT_TYPE !== 'codex' && CLAUDE_HUB_AGENT_TYPE !== 'claude' && CLAUDE_HUB_AGENT_TYPE !== 'cursor') return;
 
@@ -682,9 +759,10 @@ function onIframeLoad(event: Event, tabId: string) {
 
       // Signal parent when terminal is ready
       function notifyReady() {
+        if (terminalReadyNotified) return;
+        terminalReadyNotified = true;
         if (window.parent && window.parent !== window) {
           var tabId = null;
-          // Extract tabId from URL: /api/terminal/proxy/{tabId}/
           var match = window.location.pathname.match(/\\/proxy\\/([^/]+)\\//);
           if (match) tabId = match[1];
           window.parent.postMessage({
@@ -694,19 +772,36 @@ function onIframeLoad(event: Event, tabId: string) {
         }
       }
 
-      // Watch for terminal becoming available (ttyd sets it asynchronously)
-      var termCheckInterval = setInterval(function() {
+      // Watch for terminal becoming available (ttyd sets it asynchronously).
+      // Exponential-ish backoff — aggressive early, slower later.
+      function pollTerminalReady() {
         if (hasTerminalInputApi()) {
-          clearInterval(termCheckInterval);
           if (pendingTerminalTheme) applyTerminalTheme(pendingTerminalTheme);
           requestTerminalResize();
-          console.log('=== Terminal ready, notifying parent ===');
           notifyReady();
+          console.log('=== Terminal ready, notifying parent ===');
+          return;
         }
-      }, 100);
+        var attempt = 0;
+        var termCheckTimeout = setTimeout(function tick() {
+          attempt += 1;
+          if (hasTerminalInputApi()) {
+            clearTimeout(termCheckTimeout);
+            if (pendingTerminalTheme) applyTerminalTheme(pendingTerminalTheme);
+            requestTerminalResize();
+            notifyReady();
+            console.log('=== Terminal ready, notifying parent ===');
+            return;
+          }
+          if (attempt >= 18) {
+            return;
+          }
+          var delay = attempt < 3 ? 30 : (attempt < 6 ? 100 : (attempt < 10 ? 200 : 400));
+          termCheckTimeout = setTimeout(tick, delay);
+        }, 30);
+      }
 
-      // Safety: stop checking after 15 seconds
-      setTimeout(function() { clearInterval(termCheckInterval); }, 15000);
+      pollTerminalReady();
 
       // Handle key messages from parent (virtual keyboard)
       window.addEventListener('message', function(event) {
@@ -730,8 +825,6 @@ function onIframeLoad(event: Event, tabId: string) {
 
         var sent = false;
 
-        // Ctrl + letter: send control character
-        // Ctrl+A=\x01, Ctrl+B=\x02, ..., Ctrl+Z=\x1a
         if (ctrl && key.length === 1) {
           var code = key.toUpperCase().charCodeAt(0) - 64;
           if (code >= 1 && code <= 26) {
@@ -739,12 +832,10 @@ function onIframeLoad(event: Event, tabId: string) {
           }
         }
 
-        // Shift + Tab: \x1b[Z
         if (!sent && shift && key === 'Tab') {
           sent = sendText('\\x1b[Z');
         }
 
-        // Standard key mappings
         if (!sent) {
           if (key === 'Enter') sent = sendText('\\r');
           else if (key === 'Tab') sent = sendText('\\t');
@@ -757,8 +848,6 @@ function onIframeLoad(event: Event, tabId: string) {
           else if (key === 'End') sent = sendText('\\x1b[F');
         }
 
-        // If send failed, notify parent that terminal is not ready
-        // so it can re-queue the key
         if (!sent) {
           window.parent.postMessage({
             type: 'terminal-not-ready',
@@ -781,6 +870,8 @@ function onIframeLoad(event: Event, tabId: string) {
 }
 
 watch(colorScheme, () => {
+  // Reset cached theme key so the change propagates.
+  lastThemeKey = null
   requestAnimationFrame(() => {
     postTerminalTheme()
     scheduleTerminalResize()
@@ -795,7 +886,6 @@ function handleMessage(event: MessageEvent) {
     const tabId = event.data.tabId
     if (tabId) {
       getTerminalState().ready[tabId] = true
-      // Flush any queued keys for this tab
       flushKeyQueue(tabId)
       scheduleTerminalResize(tabId)
     }
@@ -814,10 +904,7 @@ function handleMessage(event: MessageEvent) {
     }))
   }
 
-  // Handle terminal-click for pane activation
-  if (event.data.type === 'terminal-click') {
-    // This is handled by TerminalPane.vue
-  }
+  // terminal-click is handled by TerminalPane.vue
 }
 
 onMounted(() => {
@@ -838,11 +925,9 @@ onMounted(() => {
       }
 
       if (state.iframes[targetTabId]) {
-        // Terminal exists but is not ready yet.
         queueTerminalKey(targetTabId, item)
       } else {
         console.warn('No iframe found for tab:', targetTabId)
-        // Queue for when iframe appears
         queueTerminalKey(targetTabId, item)
       }
     }
@@ -850,7 +935,14 @@ onMounted(() => {
     window.addEventListener('message', handleMessage)
     if (terminalContainer.value && typeof ResizeObserver !== 'undefined') {
       terminalResizeObserver = new ResizeObserver(() => {
-        scheduleTerminalResize(props.tabId, { coalesceMobileKeyboard: true })
+        // Only trigger a resize when this TerminalView hosts the active tab.
+        // ResizeObserver fires for all observed containers, including those in
+        // hidden panes — suppressing those avoids redundant work on inactive
+        // terminals.
+        const activeId = window.__activePaneTabId
+        if (activeId === props.tabId || activeId == null) {
+          scheduleTerminalResize(props.tabId, { coalesceMobileKeyboard: true })
+        }
       })
       terminalResizeObserver.observe(terminalContainer.value)
     }
@@ -865,12 +957,19 @@ onUnmounted(() => {
   }
   terminalResizeObserver?.disconnect()
   terminalResizeObserver = null
+  if (pendingResizeRafId !== null) {
+    cancelAnimationFrame(pendingResizeRafId)
+    pendingResizeRafId = null
+  }
+  pendingResizeAll = false
+  pendingResizeTabIds.clear()
   if (keyboardResizeSettleTimer !== null) {
     window.clearTimeout(keyboardResizeSettleTimer)
     keyboardResizeSettleTimer = null
   }
   pendingKeyboardResizeAll = false
   pendingKeyboardResizeTabIds.clear()
+  lastThemeKey = null
 })
 </script>
 
