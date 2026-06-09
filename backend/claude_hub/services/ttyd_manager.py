@@ -595,29 +595,59 @@ asyncio.run(_main())
             self.is_active = False
             raise
 
+    # xterm.js client options tuned for minimal input latency and maximum
+    # render throughput. These are forwarded to every ttyd instance via
+    # repeated ``-t key=value`` flags.
+    #
+    # Rationale:
+    #   cursorBlink=false        — each blink repaints the cursor cell; also
+    #                              makes the UI feel janky on repaint-heavy
+    #                              frames. Saves ~1 repaint/500ms and removes a
+    #                              common source of perceived typing jitter.
+    #   rendererType=webgl       — WebGL2 renderer is ~2–5× faster than the
+    #                              default canvas renderer under high output
+    #                              throughput; frees the main thread so key
+    #                              events are dispatched sooner.
+    #   allowProposedApi=true    — required for rendererType=webgl in some
+    #                              ttyd/xterm.js version combos.
+    #   drawBoldTextInBrightColors=false — avoids extra color map lookups.
+    #   minimumContrastRatio=1   — skip contrast adjustment work per glyph.
+    #   scrollback=100000        — kept from the previous baseline.
+    #   fastScrollModifier=alt   — kept from the previous baseline.
+    #   macOptionIsMeta=false    — kept from the previous baseline.
+    _TTYD_CLIENT_OPTIONS: tuple[tuple[str, str], ...] = (
+        ("scrollback", "100000"),
+        ("fastScrollModifier", "alt"),
+        ("macOptionIsMeta", "false"),
+        ("cursorBlink", "false"),
+        ("rendererType", "webgl"),
+        ("allowProposedApi", "true"),
+        ("drawBoldTextInBrightColors", "false"),
+        ("minimumContrastRatio", "1"),
+    )
+
     def _build_ttyd_command(self, session_exists: bool) -> list[str]:
         # tmux new-session -A: attach if exists, create if not.
         # This is the key to persistence across page refreshes.
-        cmd = [
+        cmd: list[str] = [
             settings.ttyd_path,
             "--port",
             str(self.port),
             "--interface",
             "127.0.0.1",
             "--writable",
-            # Improve scrolling behavior with xterm.js options
-            "-t",
-            "scrollback=100000",
-            "-t",
-            "fastScrollModifier=alt",
-            "-t",
-            "macOptionIsMeta=false",
-            "tmux",
-            "new-session",
-            "-A",
-            "-s",
-            self.tmux_session,
         ]
+        for key, value in self._TTYD_CLIENT_OPTIONS:
+            cmd.extend(["-t", f"{key}={value}"])
+        cmd.extend(
+            [
+                "tmux",
+                "new-session",
+                "-A",
+                "-s",
+                self.tmux_session,
+            ]
+        )
         if self.cwd and self.target == ExecutionTarget.LOCAL:
             cmd.extend(["-c", self.cwd])
 
