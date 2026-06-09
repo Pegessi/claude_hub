@@ -177,6 +177,29 @@ async def _tmux_kill_session(session_name: str) -> None:
     await proc.wait()
 
 
+def _agent_spawn_env() -> dict:
+    """Environment for ttyd/tmux-spawned agent panes.
+
+    Agent TUIs (Cursor/Claude/Codex) gate their styled rendering on color
+    support. Two things flatten them into a colorless, low-contrast UI here:
+
+    1. Inside tmux the inner TERM is ``tmux-256color`` with ``COLORTERM`` unset.
+    2. When the backend is launched from a parent process that disables color
+       (e.g. another agent CLI exports ``NO_COLOR=1`` / ``FORCE_COLOR=0``),
+       those flags are inherited all the way down to the agent panes and
+       suppress every escape sequence — so the input prompt, dimmed
+       placeholders and accent colors all collapse to one flat shade.
+
+    Normalize the environment so panes always render with their full palette,
+    regardless of how the backend itself was started.
+    """
+    env = dict(os.environ)
+    env.pop("NO_COLOR", None)
+    env["COLORTERM"] = "truecolor"
+    env["FORCE_COLOR"] = "3"
+    return env
+
+
 def get_default_command() -> str:
     return settings.default_command
 
@@ -534,6 +557,7 @@ asyncio.run(_main())
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
+            env=_agent_spawn_env(),
         )
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
@@ -570,6 +594,7 @@ asyncio.run(_main())
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=_agent_spawn_env(),
             )
             self.is_active = True
             logger.info(
@@ -624,6 +649,18 @@ asyncio.run(_main())
         ("allowProposedApi", "true"),
         ("drawBoldTextInBrightColors", "false"),
         ("minimumContrastRatio", "1"),
+        # Match the native terminal's crisp monospace rendering. Without an
+        # explicit fontFamily, xterm.js falls back to a chunky Courier-style
+        # font that makes agent TUIs (Cursor/Claude/Codex) look ugly. ttyd
+        # parses each -t value as JSON, so this string must itself be
+        # double-quoted; inner double quotes around font names with spaces
+        # are escaped per JSON rules.
+        (
+            "fontFamily",
+            '"ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \\"Liberation Mono\\", monospace"',
+        ),
+        ("fontSize", "14"),
+        ("lineHeight", "1.2"),
     )
 
     def _build_ttyd_command(self, session_exists: bool) -> list[str]:
@@ -862,6 +899,18 @@ asyncio.run(_main())
                 ["set", "-g", "mouse", "off"],
                 ["set", "-g", "history-limit", "100000"],
                 ["set", "-g", "terminal-overrides", "xterm*:smcup@:rmcup@"],
+                # Advertise 24-bit color so agent TUIs render their full palette
+                # instead of degrading to a flat, colorless UI under tmux. The
+                # tmux server inherits its global environment from whatever
+                # launched it; if that parent disabled color (NO_COLOR=1 /
+                # FORCE_COLOR=0, common when started from another agent CLI),
+                # tmux forces those onto every new pane and overrides the env we
+                # pass to new-session. Scrub them from the global environment so
+                # panes can emit color.
+                ["set", "-as", "terminal-features", ",xterm-256color:RGB"],
+                ["setenv", "-g", "-u", "NO_COLOR"],
+                ["setenv", "-g", "FORCE_COLOR", "3"],
+                ["setenv", "-g", "COLORTERM", "truecolor"],
                 # Allow scrolling without entering copy mode explicitly
                 ["set", "-g", "mode-keys", "vi"],
                 ["set", "-g", "status", "off"],
