@@ -202,6 +202,9 @@ class GoalPacketStatus(str, Enum):
     """Lifecycle status for a task-level Goal Packet."""
 
     DRAFT = "draft"
+    PENDING_REVIEW = "pending_review"
+    APPROVED = "approved"
+    REJECTED = "rejected"
     FROZEN = "frozen"
     SUPERSEDED = "superseded"
 
