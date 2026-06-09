@@ -17,6 +17,8 @@ from typing import Any
 import pytest
 from playwright.sync_api import Page
 
+from claude_hub.api.terminal import FULL_HISTORY_LINES, INITIAL_AGENT_HISTORY_LINES
+
 from .conftest import (
     BACKEND_URL,
     capture_pane_sync,
@@ -721,15 +723,15 @@ def test_agent_tui_tab_does_not_auto_resync_after_live_writes_or_activation(
     a plain tmux snapshot while those updates are still active corrupts xterm's
     screen state, so automatic idle history resync and scroll-only activation
     paths must avoid fetching history for agent tabs. The tab runs zsh for
-    determinism but is tagged as a Claude tab, which exercises the injected
-    agent-type gate without depending on a real Claude login in CI.
+    determinism but is tagged as a Codex tab, which exercises the injected
+    agent-type gate without depending on a real agent login in CI.
     """
     session = local_requests_session()
     resp = session.post(
         f"{BACKEND_URL}/api/tabs",
         json={
             "name": "test-agent-tui-no-auto-resync",
-            "agent_type": "claude",
+            "agent_type": "codex",
             "shell": "/bin/zsh",
         },
     )
@@ -755,6 +757,7 @@ def test_agent_tui_tab_does_not_auto_resync_after_live_writes_or_activation(
             "agent-tagged terminal performed implicit post-replay history refreshes: "
             f"{initial_history_fetches}"
         )
+        assert f"lines={INITIAL_AGENT_HISTORY_LINES}" in initial_history_fetches[0]
         agent_text = read_xterm_text(page)
         agent_history_numbers = {
             int(match.group(1)) for match in re.finditer(r"LINE_(\d{4})", agent_text)
@@ -832,7 +835,7 @@ def test_agent_tui_initial_replay_keeps_live_frames(backend_server: None, page: 
         f"{BACKEND_URL}/api/tabs",
         json={
             "name": "test-agent-tui-live-frames",
-            "agent_type": "claude",
+            "agent_type": "codex",
             "shell": "/bin/zsh",
         },
     )
@@ -910,7 +913,7 @@ def test_agent_tui_history_view_is_stable_during_live_redraws(
         f"{BACKEND_URL}/api/tabs",
         json={
             "name": "test-agent-tui-history-view-freeze",
-            "agent_type": "claude",
+            "agent_type": "codex",
             "shell": "/bin/zsh",
         },
     )
@@ -1004,6 +1007,15 @@ def test_manual_history_refresh_message_scrolls_to_latest(terminal_tab: dict, pa
     scroll_terminal_to_top(page)
 
     page.evaluate("""() => {
+            window.__claudeHubHistoryFetches = [];
+            const originalFetch = window.fetch.bind(window);
+            window.fetch = function(input, init) {
+                const url = typeof input === 'string' ? input : (input && input.url) || '';
+                if (url.indexOf('/api/terminal/history/') >= 0) {
+                    window.__claudeHubHistoryFetches.push(url);
+                }
+                return originalFetch(input, init);
+            };
             window.__claudeHubRefreshEvents = [];
             window.addEventListener('message', function(event) {
                 if (event.data && event.data.type === 'terminal-history-refresh-done') {
@@ -1025,6 +1037,10 @@ def test_manual_history_refresh_message_scrolls_to_latest(terminal_tab: dict, pa
         timeout=10000,
     )
     wait_for_xterm_buffer_lines(page, 260)
+    history_fetches = page.evaluate("() => window.__claudeHubHistoryFetches || []")
+    assert any(f"lines={FULL_HISTORY_LINES}" in url for url in history_fetches), (
+        "manual history refresh did not request the full tmux scrollback: " f"{history_fetches}"
+    )
 
     alignment = read_scroll_alignment(page)
     assert alignment is not None

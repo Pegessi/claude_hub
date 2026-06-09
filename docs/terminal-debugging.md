@@ -11,6 +11,10 @@ When modifying `backend/claude_hub/api/terminal.py` or
 `backend/claude_hub/services/ttyd_manager.py`, preserve the Phase A/B replay
 model:
 
+- **Initial preload is bounded**: automatic terminal attach should request a
+  bounded tmux snapshot (agent TUIs use a smaller tail than plain terminals) so
+  long-context tabs can show the bottom prompt promptly. Explicit manual
+  refresh remains the full `-100000` recovery path.
 - **Phase A**: `term.open()` has not been called. Write scrollback only, use SU
   escape to push bottom rows into scrollback, and leave the visible screen blank
   for ttyd WebSocket data.
