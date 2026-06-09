@@ -4,8 +4,10 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.responses import Response
 
 from .api import api_router
 from .config import settings
@@ -71,6 +73,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class CoopCoepMiddleware(BaseHTTPMiddleware):
+    """Emit COOP + COEP headers on every response.
+
+    These headers are required for ``SharedArrayBuffer`` to be available to
+    cross-origin-isolated browsing contexts (which includes our terminal
+    iframes and the main app). Without these headers, the fast SAB + Atomics
+    input ring buffer falls back to structured-clone ``postMessage``, which
+    adds 10–30 ms of latency per keystroke.
+    """
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        response = await call_next(request)
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+        response.headers["Cross-Origin-Embedder-Policy"] = "require-corp"
+        # Allow iframed ttyd (proxied from the same origin) to be loaded.
+        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+        return response
+
+
+app.add_middleware(CoopCoepMiddleware)
 
 # Include API routes
 app.include_router(api_router)
