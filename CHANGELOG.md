@@ -3,6 +3,14 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-06-09
+
+### fix: render agent TUIs in proper color and font under ttyd/tmux
+- Spawn ttyd/tmux panes with a normalized environment that drops inherited `NO_COLOR` and forces `COLORTERM=truecolor` / `FORCE_COLOR=3`, so agent TUIs (Cursor/Claude/Codex) no longer collapse into a colorless, low-contrast render when the backend is launched from a parent process that disables color
+- Advertise 24-bit color inside tmux by adding `terminal-features ,xterm-256color:RGB` and scrubbing/forcing the same color env vars on the tmux server's global environment, so new panes emit the full agent palette instead of the 8-color fallback
+- Pass an explicit monospace `fontFamily` plus `fontSize=14` / `lineHeight=1.2` to ttyd as JSON-encoded `-t` options (string values quoted per ttyd's JSON-parsing rule) so xterm.js renders crisp glyphs instead of the chunky Courier-style fallback
+- **Files**: backend/claude_hub/services/ttyd_manager.py, CHANGELOG.md
+
 ## 2026-06-04
 
 ### fix: make autonomous image workflow timing observable
