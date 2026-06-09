@@ -45,6 +45,7 @@ export type AgentReportState =
 export type ReviewDecision = 'auto' | 'request' | 'skip'
 export type ReviewProfile = 'general' | 'code' | 'ui' | 'artifact' | 'delivery' | 'boundary'
 export type ReviewProfileResultStatus = 'passed' | 'failed' | 'partial' | 'not_checked'
+export type LaunchEnv = Record<string, string>
 
 export interface TerminalTab {
   id: string
@@ -57,6 +58,7 @@ export interface TerminalTab {
   remote_profile_id?: string | null
   remote_cwd?: string | null
   remote_reconnect?: boolean
+  env?: LaunchEnv
   port: number
   created_at: string
   is_active: boolean
@@ -75,6 +77,7 @@ export interface TerminalTabCreate {
   remote_profile_id?: string | null
   remote_cwd?: string | null
   remote_reconnect?: boolean
+  env?: LaunchEnv
 }
 
 export interface TerminalTabUpdate {
@@ -87,6 +90,7 @@ export interface TerminalTabUpdate {
   remote_profile_id?: string | null
   remote_cwd?: string | null
   remote_reconnect?: boolean
+  env?: LaunchEnv
 }
 
 export interface RemoteProfile {
@@ -298,6 +302,9 @@ export interface WorkspaceTask {
   clear_context?: boolean | null
   dispatch_reason?: string | null
   dispatch_pending: boolean
+  system_internal?: boolean
+  internal_kind?: string | null
+  feedback_lesson_ids?: string[]
   review_session_id?: string | null
   review_attempts: number
   review_requested_at?: string | null
@@ -367,6 +374,7 @@ export interface EnsureWorkspaceAgentRequest {
   remote_cwd?: string | null
   remote_reconnect?: boolean | null
   ephemeral?: boolean
+  env?: LaunchEnv
 }
 
 export interface ManagedSession {
@@ -390,7 +398,13 @@ export interface ManagedSession {
   remote_reconnect: boolean
   solo_mode: boolean
   ephemeral: boolean
+  env?: LaunchEnv
   remote_forward_port?: number | null
+  auto_continue_task_id?: string | null
+  auto_continue_attempts?: number
+  last_auto_continue_at?: string | null
+  prompt_retry_task_id?: string | null
+  prompt_retry_attempted_at?: string | null
   created_at: string
   updated_at: string
   last_activity_at?: string | null
@@ -421,6 +435,28 @@ export interface AgentReport {
   created_at: string
 }
 
+export interface WorkspaceArtifactPreview {
+  path: string
+  filename: string
+  content: string
+  size_bytes: number
+  truncated: boolean
+}
+
+export type WorkspaceMarkdownDocumentSource = 'artifact' | 'changed_file' | 'snapshot' | 'discovered'
+
+export interface WorkspaceMarkdownDocument {
+  id: string
+  path: string
+  label: string
+  source: WorkspaceMarkdownDocumentSource
+  task_id?: string | null
+  report_id?: string | null
+  session_id?: string | null
+  size_bytes?: number | null
+  updated_at?: string | null
+}
+
 export interface AgentReportCreate {
   state: AgentReportState
   message: string
@@ -448,7 +484,75 @@ export interface WorkspaceBoard {
   tasks: WorkspaceTask[]
   sessions: ManagedSession[]
   reports: AgentReport[]
+  markdown_documents?: WorkspaceMarkdownDocument[]
   snapshot_path?: string | null
+}
+
+export type FeedbackLessonScope = 'workspace' | 'family' | 'global'
+export type FeedbackLessonStatus = 'draft' | 'active' | 'archived' | 'rejected'
+
+export interface FeedbackLesson {
+  id: string
+  workspace_id: string
+  title?: string
+  fingerprint?: string
+  scope: FeedbackLessonScope
+  status: FeedbackLessonStatus
+  summary: string
+  applies_when?: string[]
+  do?: string
+  avoid?: string
+  tags?: string[]
+  evidence_task_ids?: string[]
+  source_draft_ids?: string[]
+  source_record_ids?: string[]
+  merged_from_ids?: string[]
+  superseded_by_id?: string | null
+  hit_count?: number
+  success_count?: number
+  confidence?: number | null
+  last_seen_at?: string | null
+  last_used_at?: string | null
+  last_validated_at?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface FeedbackLessonCreate {
+  id?: string | null
+  title?: string | null
+  fingerprint?: string | null
+  summary: string
+  applies_when?: string[]
+  do?: string
+  avoid?: string
+  tags?: string[]
+  scope?: FeedbackLessonScope
+  confidence?: number | null
+}
+
+export type FeedbackSummaryMode = 'incremental' | 'full'
+
+export interface FeedbackSummaryRequest {
+  mode?: FeedbackSummaryMode
+  limit?: number
+  force?: boolean
+  clear_context?: boolean
+}
+
+export interface FeedbackSummaryRun {
+  id: string
+  workspace_id: string
+  task_id?: string | null
+  mode: FeedbackSummaryMode
+  input_record_ids: string[]
+  cache_hit: boolean
+  prompt_version: number
+  created_lesson_ids: string[]
+  merged_lesson_ids: string[]
+  skipped_reason?: string | null
+  created_at: string
+  completed_at?: string | null
 }
 
 export type LayoutType = '1x1' | '2x1' | '1x2' | '3x1' | '1x3' | '2x2' | '3x3'

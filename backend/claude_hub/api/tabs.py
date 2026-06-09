@@ -50,6 +50,7 @@ async def create_tab(
         tab.remote_profile_id,
         tab.remote_cwd,
         tab.remote_reconnect,
+        env=tab.env,
     )
 
 
@@ -107,6 +108,7 @@ async def update_tab(
         tab_update.remote_profile_id,
         tab_update.remote_cwd,
         tab_update.remote_reconnect,
+        tab_update.env,
     )
     if not tab:
         raise HTTPException(status_code=404, detail="Tab not found")

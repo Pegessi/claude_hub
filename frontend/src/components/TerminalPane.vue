@@ -54,7 +54,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useTerminalStore } from '@/stores/terminalStore'
 import TerminalView from '@/components/TerminalView.vue'
@@ -71,6 +71,14 @@ const emit = defineEmits<{
 const store = useTerminalStore()
 const { tabs } = storeToRefs(store)
 
+// Resolve the current tab once via computed so we don't do a tabs.find() on
+// every parent re-render (e.g. each agent-status poll tick).
+const paneTab = computed<TerminalTab | undefined>(() =>
+  props.pane.tabId ? tabs.value.find((t: TerminalTab) => t.id === props.pane.tabId) : undefined
+)
+const tabName = computed(() => paneTab.value?.name || '')
+const agentType = computed(() => paneTab.value?.agent_type)
+
 const isDragOver = ref(false)
 const isRefreshingHistory = ref(false)
 let refreshFeedbackTimer: number | null = null
@@ -80,15 +88,11 @@ type WindowWithTerminalHistory = Window & {
 }
 
 function getTabName(): string {
-  if (!props.pane.tabId) return ''
-  const tab = tabs.value.find((t: TerminalTab) => t.id === props.pane.tabId)
-  return tab?.name || ''
+  return tabName.value
 }
 
 function getAgentType() {
-  if (!props.pane.tabId) return undefined
-  const tab = tabs.value.find((t: TerminalTab) => t.id === props.pane.tabId)
-  return tab?.agent_type
+  return agentType.value
 }
 
 function handleClick() {

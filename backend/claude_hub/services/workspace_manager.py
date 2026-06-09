@@ -27,6 +27,12 @@ from ..models import (
     EvaluationDecision,
     EvaluationReport,
     ExecutionTarget,
+    FeedbackLesson,
+    FeedbackLessonCreate,
+    FeedbackReaperRequest,
+    FeedbackReaperRun,
+    FeedbackSummaryRequest,
+    FeedbackSummaryRun,
     ManagedSession,
     ManagedSessionStatus,
     ManualTaskControlRequest,
@@ -36,10 +42,13 @@ from ..models import (
     StartTaskRequest,
     TerminalAgentStatus,
     Workspace,
+    WorkspaceArtifactPreview,
     WorkspaceAttachment,
     WorkspaceAttachmentCreate,
     WorkspaceBoard,
     WorkspaceCreate,
+    WorkspaceMarkdownDocument,
+    WorkspaceMarkdownDocumentSource,
     WorkspaceSessionRole,
     WorkspaceTask,
     WorkspaceTaskCreate,
@@ -50,6 +59,7 @@ from ..models import (
     WorkspaceUpdate,
 )
 from . import workspace_state_policy as state_policy
+from .feedback_lessons import FeedbackLessonStore
 from .remote_profiles import remote_profile_manager
 from .ttyd_manager import ttyd_manager
 
@@ -67,6 +77,15 @@ AUTO_CONTINUE_MIN_INTERVAL_SECONDS = 15
 AUTO_CONTINUE_IDLE_GRACE_SECONDS = 20
 REVIEW_RUNTIME_REOPEN_GRACE_SECONDS = 20
 MAX_AUTOMATED_REVIEW_FAILURES = 3
+PROMPT_DISPATCH_STALL_GRACE_SECONDS = 20
+PROMPT_DISPATCH_RETRY_GRACE_SECONDS = 10
+# How long the fallback reaper waits after a review_requested_at timestamp
+# (or after the reviewer's last terminal activity) before treating an
+# idle-looking reviewer as stuck. Covers the gap between dispatching a
+# review prompt and the reviewer actually emitting first tokens — without
+# this grace, a slow-to-start reviewer is repeatedly re-dispatched.
+REVIEW_REAPER_DISPATCH_GRACE_SECONDS = 60
+PROMPT_STUCK_RISK_LEVEL = "prompt_dispatch_stalled"
 WORKSPACE_MONITOR_INTERVAL_SECONDS = 5
 AUTO_CONTINUE_MESSAGE = (
     "Please inspect the current task state. If the task was interrupted or is unfinished, "
@@ -81,6 +100,25 @@ AUTO_REPORT_MISSING_MESSAGE = (
     "only continue work if you find it is actually unfinished."
 )
 ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024
+ARTIFACT_PREVIEW_MAX_BYTES = 512 * 1024
+MARKDOWN_ARTIFACT_SUFFIXES = {".md", ".markdown", ".mdown", ".mkd"}
+# macOS NAME_MAX = 255 bytes per path component; Linux NAME_MAX is typically 255 too.
+# Any changed_files / artifact_ref entry with a path component longer than this is
+# certainly not a real filesystem path (it is a descriptive string accidentally placed
+# in a changed_files slot). Rejecting these early avoids OSError(ENAMETOOLONG) deep
+# inside pathlib / syscalls when we later join the workspace root or call .resolve().
+_PATH_COMPONENT_NAME_MAX_BYTES = 255
+_PATH_TOTAL_MAX_BYTES = 1024
+MARKDOWN_DISCOVERY_LIMIT = 20
+MARKDOWN_DISCOVERY_EXCLUDED_DIRS = {
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "dist",
+    "node_modules",
+}
 IMAGE_ATTACHMENT_TYPES = {
     "image/gif": ".gif",
     "image/jpeg": ".jpg",
@@ -142,6 +180,9 @@ class WorkspaceManager:
 
     def _workspace_attachments_dir(self, workspace_id: str) -> Path:
         return self._workspace_dir(workspace_id) / "attachments"
+
+    def _feedback_store(self) -> FeedbackLessonStore:
+        return FeedbackLessonStore(STATE_ROOT)
 
     def snapshot_path(self, workspace_id: str) -> Path:
         return self._workspace_dir(workspace_id) / "snapshot.md"
@@ -232,6 +273,11 @@ class WorkspaceManager:
         normalized.setdefault("clear_context", None)
         normalized.setdefault("dispatch_reason", None)
         normalized.setdefault("dispatch_pending", False)
+        normalized.setdefault("system_internal", False)
+        normalized.setdefault("internal_kind", None)
+        normalized["feedback_lesson_ids"] = self._normalize_string_list(
+            normalized.get("feedback_lesson_ids")
+        )
         normalized.setdefault("review_session_id", None)
         normalized.setdefault("review_attempts", 0)
         normalized.setdefault("review_requested_at", None)
@@ -539,6 +585,8 @@ class WorkspaceManager:
         normalized.setdefault("auto_continue_task_id", None)
         normalized.setdefault("auto_continue_attempts", 0)
         normalized.setdefault("last_auto_continue_at", None)
+        normalized.setdefault("prompt_retry_task_id", None)
+        normalized.setdefault("prompt_retry_attempted_at", None)
         return normalized
 
     def _runtime_from_managed_status(self, item: dict[str, Any]) -> str:
@@ -590,7 +638,11 @@ class WorkspaceManager:
             return
 
         sessions = self._sessions_for_workspace_raw(workspace_id)
-        tasks = [task for task in self.tasks.values() if task.workspace_id == workspace_id]
+        tasks = [
+            task
+            for task in self.tasks.values()
+            if task.workspace_id == workspace_id and not task.system_internal
+        ]
         lines = [
             "# Claude Hub Workspace State",
             "",
@@ -607,7 +659,13 @@ class WorkspaceManager:
         if not sessions:
             lines.append("- No managed agents yet.")
         for session in sorted(sessions, key=lambda item: item.created_at):
-            current = session.current_task_id or session.task_id or "none"
+            current_task_id = session.current_task_id or session.task_id
+            current_task = self.tasks.get(current_task_id or "")
+            current = (
+                "system-internal"
+                if current_task and current_task.system_internal
+                else current_task_id or "none"
+            )
             lines.append(
                 "- "
                 f"{session.id}: role={session.role.value}, type={session.agent_type.value}, "
@@ -750,6 +808,16 @@ class WorkspaceManager:
         return updated
 
     def create_task(self, workspace_id: str, payload: WorkspaceTaskCreate) -> WorkspaceTask:
+        return self._create_task(workspace_id, payload)
+
+    def _create_task(
+        self,
+        workspace_id: str,
+        payload: WorkspaceTaskCreate,
+        *,
+        system_internal: bool = False,
+        internal_kind: str | None = None,
+    ) -> WorkspaceTask:
         if workspace_id not in self.workspaces:
             raise KeyError(workspace_id)
         if payload.related_task_id and payload.related_task_id not in self.tasks:
@@ -788,6 +856,8 @@ class WorkspaceManager:
             ),
             status=WorkspaceTaskStatus.TODO,
             related_task_id=payload.related_task_id,
+            system_internal=system_internal,
+            internal_kind=internal_kind,
             created_at=now,
             updated_at=now,
         )
@@ -802,6 +872,76 @@ class WorkspaceManager:
             task.agent_type,
         )
         return task
+
+    async def summarize_workspace_feedback(
+        self,
+        workspace_id: str,
+        payload: FeedbackSummaryRequest | None = None,
+    ) -> FeedbackSummaryRun:
+        payload = payload or FeedbackSummaryRequest()
+        workspace = self.workspaces.get(workspace_id)
+        if not workspace:
+            raise KeyError(workspace_id)
+        now = _now()
+        store = self._feedback_store()
+        summary_input = store.prepare_summary_input(
+            workspace_id,
+            self._workspace_task_records_dir(workspace_id),
+            mode=payload.mode,
+            limit=payload.limit,
+            force=payload.force,
+            now=now,
+        )
+        if summary_input["cache_hit"]:
+            run = FeedbackSummaryRun(
+                id=summary_input["run_id"],
+                workspace_id=workspace_id,
+                task_id=None,
+                mode=payload.mode,
+                input_record_ids=[],
+                cache_hit=True,
+                prompt_version=summary_input["prompt_version"],
+                skipped_reason=summary_input["skipped_reason"],
+                created_at=now,
+                completed_at=now,
+            )
+            store.write_summary_run(workspace_id, run)
+            return run
+
+        task = self._create_task(
+            workspace_id,
+            WorkspaceTaskCreate(
+                title="Feedback Reaper: summarize workspace lessons",
+                prompt=self._build_workspace_feedback_summary_prompt(workspace, summary_input),
+                task_mode=WorkspaceTaskMode.REVIEWED,
+                execution_complexity=WorkspaceTaskExecutionComplexity.AUTO,
+            ),
+            system_internal=True,
+            internal_kind="feedback_reaper",
+        )
+        self._record_system_task_audit(
+            task=task,
+            message="Internal Feedback Reaper task created for workspace lesson summarization.",
+            message_zh="已创建内部 Feedback Reaper 任务用于总结 workspace lessons。",
+            validation=(
+                "system_internal=true; internal_kind=feedback_reaper; board_visible=false; "
+                f"summary_run_id={summary_input['run_id']}; "
+                f"input_record_ids={json.dumps(summary_input['input_record_ids'])}"
+            ),
+        )
+        run = FeedbackSummaryRun(
+            id=summary_input["run_id"],
+            workspace_id=workspace_id,
+            task_id=task.id,
+            mode=payload.mode,
+            input_record_ids=summary_input["input_record_ids"],
+            cache_hit=False,
+            prompt_version=summary_input["prompt_version"],
+            created_at=now,
+        )
+        store.write_summary_run(workspace_id, run)
+        await self.start_task(task.id, StartTaskRequest(clear_context=payload.clear_context))
+        return run
 
     def _persist_attachments(
         self,
@@ -872,6 +1012,390 @@ class WorkspaceManager:
                 if attachment.id == attachment_id:
                     return attachment
         raise KeyError(attachment_id)
+
+    def preview_artifact(
+        self,
+        workspace_id: str,
+        artifact_ref: str,
+        report_id: str | None = None,
+    ) -> WorkspaceArtifactPreview:
+        workspace = self.workspaces.get(workspace_id)
+        if workspace is None:
+            raise KeyError(workspace_id)
+        if workspace.target != ExecutionTarget.LOCAL:
+            raise ValueError("Artifact previews are only available for local workspaces")
+
+        artifact_ref = self._clean_markdown_ref(artifact_ref)
+        if not artifact_ref:
+            raise ValueError("Artifact path is required")
+        if not self._markdown_ref_belongs_to_workspace_report(
+            workspace_id, artifact_ref, report_id
+        ):
+            raise KeyError(artifact_ref)
+        path = self._resolve_workspace_markdown_path(workspace, artifact_ref, report_id)
+        return self._read_markdown_preview(artifact_ref, path)
+
+    def _read_markdown_preview(
+        self,
+        artifact_ref: str,
+        resolved: Path,
+    ) -> WorkspaceArtifactPreview:
+        try:
+            size_bytes = resolved.stat().st_size
+            truncated = size_bytes > ARTIFACT_PREVIEW_MAX_BYTES
+            content = resolved.read_bytes()[:ARTIFACT_PREVIEW_MAX_BYTES].decode(
+                "utf-8",
+                errors="replace",
+            )
+        except OSError as exc:
+            raise ValueError("Artifact could not be read") from exc
+        return WorkspaceArtifactPreview(
+            path=artifact_ref,
+            filename=resolved.name,
+            content=content,
+            size_bytes=size_bytes,
+            truncated=truncated,
+        )
+
+    def _clean_markdown_ref(self, artifact_ref: str) -> str:
+        value = artifact_ref.strip()
+        value = value.split("#", 1)[0].split("?", 1)[0]
+        match = re.match(r"^(.+\.(?:md|markdown|mdown|mkd)):\d+$", value, re.IGNORECASE)
+        if match:
+            value = match.group(1)
+        return value.strip()
+
+    @staticmethod
+    def _path_looks_like_real_file(raw: str) -> bool:
+        """Return True only if *raw* plausibly represents a real filesystem path.
+
+        Rejects entries that contain control characters, obviously descriptive
+        punctuation (e.g. full sentences embedded in changed_files), total length
+        or per-component length exceeding POSIX NAME_MAX / PATH_MAX, or ASCII
+        whitespace inside a path component. These guards keep downstream
+        ``Path``/``.resolve()`` calls from throwing ``OSError(ENAMETOOLONG)`` on
+        macOS when an agent report accidentally puts a prose string into
+        ``changed_files``.
+        """
+        if not raw:
+            return False
+        value = raw.strip()
+        if not value or len(value.encode("utf-8", "ignore")) > _PATH_TOTAL_MAX_BYTES:
+            return False
+        # Reject obvious control characters / NULs early.
+        if any(ord(ch) < 0x20 for ch in value):
+            return False
+        # Disallow NUL bytes.
+        if "\x00" in value:
+            return False
+        parts = value.split("/")
+        for part in parts:
+            if not part:
+                # Leading, trailing, or doubled slashes are fine (skip empty segment).
+                continue
+            part_bytes = len(part.encode("utf-8", "ignore"))
+            if part_bytes > _PATH_COMPONENT_NAME_MAX_BYTES:
+                return False
+            # A real path component does not contain parentheses, brackets,
+            # colons after the basename, semicolons, or multiple consecutive
+            # spaces — these strongly indicate prose rather than a filename.
+            if any(ch in part for ch in ("(", ")", "[", "]", ";", "{", "}")):
+                return False
+            if "  " in part:
+                return False
+        return True
+
+    @staticmethod
+    def _safe_lower_suffix(raw_ref: str) -> str:
+        """Return ``Path(raw_ref).suffix.lower()`` without propagating ``OSError``.
+
+        On macOS ``pathlib`` can raise ``OSError(63, 'File name too long')``
+        even for what look like pure string operations when a path component
+        exceeds ``NAME_MAX``. Callers that iterate report-provided
+        ``changed_files`` / ``artifact_refs`` must use this helper instead of
+        constructing a ``Path`` directly just to read the suffix.
+        """
+        if not raw_ref:
+            return ""
+        try:
+            return Path(raw_ref).suffix.lower()
+        except (OSError, ValueError):
+            pass
+        # Fallback: pure string suffix extraction from the last path segment.
+        basename = raw_ref.replace("\\", "/").rsplit("/", 1)[-1]
+        dot = basename.rfind(".")
+        if dot <= 0 or dot == len(basename) - 1:
+            return ""
+        return basename[dot:].lower()
+
+    def _markdown_ref_belongs_to_workspace_report(
+        self,
+        workspace_id: str,
+        artifact_ref: str,
+        report_id: str | None,
+    ) -> bool:
+        snapshot_ref = str(self.snapshot_path(workspace_id))
+        if artifact_ref == snapshot_ref:
+            return True
+        reports = list(self.reports.values())
+        if report_id:
+            report = self.reports.get(report_id)
+            reports = [report] if report else []
+        if any(
+            report is not None
+            and report.workspace_id == workspace_id
+            and (
+                artifact_ref in {self._clean_markdown_ref(ref) for ref in report.artifact_refs}
+                or artifact_ref in {self._clean_markdown_ref(ref) for ref in report.changed_files}
+            )
+            for report in reports
+        ):
+            return True
+        if report_id:
+            return False
+        workspace = self.workspaces.get(workspace_id)
+        if workspace is None:
+            return False
+        try:
+            self._resolve_workspace_markdown_path(workspace, artifact_ref)
+        except (KeyError, ValueError, OSError):
+            return False
+        return True
+
+    def _resolve_workspace_markdown_path(
+        self,
+        workspace: Workspace,
+        artifact_ref: str,
+        report_id: str | None = None,
+    ) -> Path:
+        if not self._path_looks_like_real_file(artifact_ref):
+            raise KeyError(artifact_ref)
+        if self._safe_lower_suffix(artifact_ref) not in MARKDOWN_ARTIFACT_SUFFIXES:
+            raise ValueError("Only Markdown artifact previews are supported")
+        try:
+            snapshot_path = self.snapshot_path(workspace.id).resolve()
+        except OSError as exc:
+            raise KeyError(artifact_ref) from exc
+        try:
+            path = Path(artifact_ref).expanduser()
+        except (OSError, ValueError):
+            raise KeyError(artifact_ref)
+        try:
+            is_absolute = path.is_absolute()
+        except OSError:
+            is_absolute = False
+        if is_absolute:
+            try:
+                resolved = path.resolve(strict=True)
+            except OSError as exc:
+                raise KeyError(artifact_ref) from exc
+            if resolved == snapshot_path:
+                return resolved
+            self._ensure_path_under_roots(
+                resolved,
+                self._markdown_allowed_roots(workspace, report_id),
+                artifact_ref,
+            )
+            return resolved
+
+        roots = self._markdown_allowed_roots(workspace, report_id)
+        for root in roots:
+            try:
+                resolved = (root / path).resolve(strict=True)
+                self._ensure_path_under_roots(resolved, [root], artifact_ref)
+            except (OSError, KeyError):
+                continue
+            return resolved
+        raise KeyError(artifact_ref)
+
+    def _ensure_path_under_roots(
+        self,
+        resolved: Path,
+        roots: list[Path],
+        artifact_ref: str,
+    ) -> None:
+        if not resolved.is_file():
+            raise KeyError(artifact_ref)
+        for root in roots:
+            try:
+                resolved.relative_to(root)
+                return
+            except ValueError:
+                continue
+        raise KeyError(artifact_ref)
+
+    def _markdown_allowed_roots(
+        self,
+        workspace: Workspace,
+        report_id: str | None = None,
+    ) -> list[Path]:
+        try:
+            roots: list[Path] = [Path(workspace.path).expanduser().resolve()]
+        except (OSError, ValueError):
+            roots = []
+        report = self.reports.get(report_id) if report_id else None
+        if report:
+            session = self.sessions.get(report.session_id)
+            if session and session.workspace_path:
+                try:
+                    session_root = Path(session.workspace_path).expanduser().resolve()
+                except (OSError, ValueError):
+                    session_root = None
+                if session_root is not None and session_root not in roots:
+                    roots.append(session_root)
+        return roots
+
+    def markdown_documents_for_workspace(
+        self,
+        workspace_id: str,
+    ) -> list[WorkspaceMarkdownDocument]:
+        workspace = self.workspaces.get(workspace_id)
+        if workspace is None:
+            raise KeyError(workspace_id)
+        if workspace.target != ExecutionTarget.LOCAL:
+            return []
+
+        documents: dict[tuple[str, str, str | None], WorkspaceMarkdownDocument] = {}
+        for report in self.reports_for_workspace(workspace_id):
+            for source, refs in (
+                (WorkspaceMarkdownDocumentSource.ARTIFACT, report.artifact_refs),
+                (WorkspaceMarkdownDocumentSource.CHANGED_FILE, report.changed_files),
+            ):
+                for raw_ref in refs:
+                    artifact_ref = self._clean_markdown_ref(raw_ref)
+                    if not self._path_looks_like_real_file(artifact_ref):
+                        continue
+                    if self._safe_lower_suffix(artifact_ref) not in MARKDOWN_ARTIFACT_SUFFIXES:
+                        continue
+                    try:
+                        resolved = self._resolve_workspace_markdown_path(
+                            workspace,
+                            artifact_ref,
+                            report.id,
+                        )
+                    except (KeyError, ValueError, OSError):
+                        continue
+                    self._add_markdown_document(
+                        documents,
+                        source=source,
+                        artifact_ref=artifact_ref,
+                        resolved=resolved,
+                        task_id=report.task_id,
+                        report_id=report.id,
+                        session_id=report.session_id,
+                    )
+
+        snapshot = self.snapshot_path(workspace_id)
+        try:
+            snapshot_resolved = snapshot.resolve() if snapshot.exists() else None
+        except OSError:
+            snapshot_resolved = None
+        if snapshot_resolved is not None:
+            self._add_markdown_document(
+                documents,
+                source=WorkspaceMarkdownDocumentSource.SNAPSHOT,
+                artifact_ref=str(snapshot),
+                resolved=snapshot_resolved,
+                task_id=None,
+                report_id=None,
+                session_id=None,
+                label="Workspace snapshot",
+            )
+
+        self._add_discovered_markdown_documents(workspace, documents)
+        return sorted(
+            documents.values(),
+            key=lambda item: (
+                item.source != WorkspaceMarkdownDocumentSource.ARTIFACT,
+                item.source != WorkspaceMarkdownDocumentSource.CHANGED_FILE,
+                item.source != WorkspaceMarkdownDocumentSource.SNAPSHOT,
+                item.label.lower(),
+            ),
+        )
+
+    def _add_markdown_document(
+        self,
+        documents: dict[tuple[str, str, str | None], WorkspaceMarkdownDocument],
+        *,
+        source: WorkspaceMarkdownDocumentSource,
+        artifact_ref: str,
+        resolved: Path,
+        task_id: str | None,
+        report_id: str | None,
+        session_id: str | None,
+        label: str | None = None,
+    ) -> None:
+        try:
+            stat = resolved.stat()
+        except OSError:
+            stat = None
+        key = (source.value, artifact_ref, report_id)
+        documents.setdefault(
+            key,
+            WorkspaceMarkdownDocument(
+                id="::".join(part for part in key if part),
+                path=artifact_ref,
+                label=label or self._display_markdown_path(artifact_ref, resolved),
+                source=source,
+                task_id=task_id,
+                report_id=report_id,
+                session_id=session_id,
+                size_bytes=stat.st_size if stat else None,
+                updated_at=datetime.fromtimestamp(stat.st_mtime) if stat else None,
+            ),
+        )
+
+    def _display_markdown_path(self, artifact_ref: str, resolved: Path) -> str:
+        try:
+            path = Path(artifact_ref)
+            is_absolute = path.is_absolute()
+        except (OSError, ValueError):
+            is_absolute = False
+        if not is_absolute:
+            return artifact_ref
+        for workspace in self.workspaces.values():
+            try:
+                return str(resolved.relative_to(Path(workspace.path).expanduser().resolve()))
+            except (ValueError, OSError):
+                continue
+        try:
+            return resolved.name
+        except OSError:
+            return artifact_ref
+
+    def _add_discovered_markdown_documents(
+        self,
+        workspace: Workspace,
+        documents: dict[tuple[str, str, str | None], WorkspaceMarkdownDocument],
+    ) -> None:
+        root = Path(workspace.path).expanduser().resolve()
+        if not root.exists():
+            return
+        candidates: list[Path] = []
+        for pattern in ("*.md", "docs/**/*.md"):
+            for path in root.glob(pattern):
+                if len(candidates) >= MARKDOWN_DISCOVERY_LIMIT:
+                    break
+                if any(part in MARKDOWN_DISCOVERY_EXCLUDED_DIRS for part in path.parts):
+                    continue
+                if not path.is_file():
+                    continue
+                candidates.append(path)
+        for path in candidates[:MARKDOWN_DISCOVERY_LIMIT]:
+            try:
+                resolved = path.resolve(strict=True)
+                artifact_ref = str(resolved.relative_to(root))
+            except (OSError, ValueError):
+                continue
+            self._add_markdown_document(
+                documents,
+                source=WorkspaceMarkdownDocumentSource.DISCOVERED,
+                artifact_ref=artifact_ref,
+                resolved=resolved,
+                task_id=None,
+                report_id=None,
+                session_id=None,
+            )
 
     async def update_task_status(
         self,
@@ -951,8 +1475,39 @@ class WorkspaceManager:
         if status == WorkspaceTaskStatus.DONE:
             self._write_task_record(self.tasks[task.id])
             self._release_task_session(self.tasks[task.id])
+            if task.feedback_lesson_ids:
+                self._feedback_store().increment_lesson_usage(
+                    task.workspace_id,
+                    list(task.feedback_lesson_ids),
+                    success=True,
+                    now=now,
+                )
         elif status == WorkspaceTaskStatus.WORKING and task.session_id:
             self._assign_current_task(task.session_id, task.id)
+        elif status == WorkspaceTaskStatus.REVIEW and task.session_id:
+            # Manual REVIEW status transition must still trigger reviewer
+            # dispatch so the task does not sit unreviewed.
+            if not self._reviewer_is_active(self.tasks[task.id]):
+                self._release_stale_reviewer_for_task(self.tasks[task.id], updated_at=now)
+                review_report = AgentReport(
+                    id=str(uuid.uuid4()),
+                    workspace_id=task.workspace_id,
+                    task_id=task.id,
+                    session_id=task.session_id,
+                    state=AgentReportState.READY_FOR_REVIEW,
+                    message="Task manually moved to review status.",
+                    message_en="Task manually moved to review status.",
+                    message_zh="任务被手动移至 review 状态。",
+                    changed_files=[],
+                    validation=None,
+                    risks=None,
+                    review_decision=ReviewDecision.REQUEST,
+                    review_reason="Manual status transition to REVIEW.",
+                    risk_level=None,
+                    created_at=now,
+                )
+                self.reports[review_report.id] = review_report
+                await self._request_task_review(self.tasks[task.id], review_report)
 
         self._save_state()
         if status is not None:
@@ -1061,6 +1616,179 @@ class WorkspaceManager:
             }:
                 return report.message
         return reports[-1].message if reports else ""
+
+    def reap_task_feedback(
+        self,
+        task_id: str,
+        payload: FeedbackReaperRequest,
+    ) -> FeedbackReaperRun:
+        task = self.tasks.get(task_id)
+        if not task:
+            raise KeyError(task_id)
+        workspace = self.workspaces.get(task.workspace_id)
+        if not workspace:
+            raise KeyError(task.workspace_id)
+        reports = [
+            report
+            for report in self.reports_for_workspace(task.workspace_id)
+            if report.task_id == task.id
+        ]
+        return self._feedback_store().reap_task_feedback(workspace, task, reports, payload)
+
+    def create_feedback_lesson(
+        self,
+        workspace_id: str,
+        payload: FeedbackLessonCreate,
+    ) -> FeedbackLesson:
+        if workspace_id not in self.workspaces:
+            raise KeyError(workspace_id)
+        return self._feedback_store().create_lesson(workspace_id, payload)
+
+    def delete_feedback_lesson(self, workspace_id: str, lesson_id: str) -> FeedbackLesson:
+        if workspace_id not in self.workspaces:
+            raise KeyError(workspace_id)
+        return self._feedback_store().archive_lesson(workspace_id, lesson_id)
+
+    def get_feedback_lesson(self, workspace_id: str, lesson_id: str) -> FeedbackLesson:
+        if workspace_id not in self.workspaces:
+            raise KeyError(workspace_id)
+        store = self._feedback_store()
+        store.record_lesson_take(workspace_id, [lesson_id])
+        return store.get_lesson(workspace_id, lesson_id)
+
+    def _build_workspace_feedback_summary_prompt(
+        self,
+        workspace: Workspace,
+        summary_input: dict[str, Any],
+    ) -> str:
+        lessons = self.feedback_lessons(workspace.id, limit=50)
+        lesson_payload = [
+            {
+                "id": lesson.id,
+                "title": lesson.title,
+                "fingerprint": lesson.fingerprint,
+                "summary": lesson.summary,
+                "tags": lesson.tags,
+                "confidence": lesson.confidence,
+            }
+            for lesson in lessons
+        ]
+        package = {
+            "summary_run": {
+                "id": summary_input["run_id"],
+                "mode": summary_input["mode"],
+                "force": summary_input["force"],
+                "limit": summary_input["limit"],
+                "prompt_version": summary_input["prompt_version"],
+                "first_scan": summary_input["first_scan"],
+                "processed_count": summary_input["processed_count"],
+                "input_record_ids": summary_input["input_record_ids"],
+            },
+            "workspace": {
+                "id": workspace.id,
+                "name": workspace.name,
+                "target": workspace.target.value,
+                "path": workspace.path,
+            },
+            "active_lessons": lesson_payload,
+            "input_task_digests": summary_input["input_records"],
+        }
+        return "\n".join(
+            [
+                "You are the internal Feedback Reaper for this Claude Hub workspace.",
+                "",
+                "This is a system-internal task. Do not ask the human user for acceptance, and do "
+                "not treat this as an ordinary visible workspace task.",
+                "",
+                "Use only the bounded input package below. Do not scan the entire workspace or "
+                "read unrelated old task records unless a listed digest explicitly points to a "
+                "missing artifact you must inspect.",
+                "",
+                "Goal: extract reusable workspace lessons that help future tasks avoid known "
+                "pitfalls. Quality matters more than quantity. Emitting zero lessons is the "
+                "correct answer when no signal is present.",
+                "",
+                "Extraction signals — emit a lesson ONLY when at least one of these is supported "
+                "by the input_task_digests:",
+                "  Signal A — Iteration cost. A single task whose report_state_sequence shows "
+                "review_failed_count >= 1 OR needs_input_count >= 2, OR whose risks describe "
+                "rework. The lesson is the underlying issue that caused the extra rounds, NOT "
+                "the final fix recipe.",
+                "  Signal B — Cross-task recurrence. The same root problem (or a close variant) "
+                "appears in >= 2 distinct task digests. The lesson is the recurring pattern.",
+                "",
+                "Specific implementation-detail lessons (a particular file, function, error "
+                "message, or version-specific quirk) are allowed ONLY if Signal A or Signal B "
+                "applies AND the evidence makes the difficulty observable. A lesson whose only "
+                "support is a single task's final_summary with no review_failed / needs_input "
+                "trail is a fix recipe, not a lesson — skip it.",
+                "",
+                "Required fields per lesson (the backend rejects payloads that violate this):",
+                "  - title (short)",
+                "  - summary (one-to-two sentence description)",
+                "  - applies_when (>=1 condition: file glob, runtime, command, env, task shape)",
+                "  - do (recommended action; non-empty)",
+                "  - avoid (failure pattern to avoid; non-empty)",
+                "  - tags",
+                "  - scope (default 'workspace')",
+                "  - confidence: server-capped at 0.6 for single-evidence lessons and at 0.85 "
+                "for multi-evidence lessons; pick a value that already respects this.",
+                "  - evidence_task_ids (cite the supporting input task_ids; for Signal A "
+                "single-task lessons cite that one task; for Signal B cite all supporting tasks)",
+                "",
+                "Server-side enforcement (these rules are mechanically checked against "
+                "input_task_digests, NOT inferred from prose; lessons that fail are rejected "
+                "with HTTP 400 and you must move on rather than retrying with massaged text):",
+                "  - applies_when / do / avoid must be non-empty.",
+                "  - Single-evidence lessons must cite a task whose report_state_sequence has "
+                "review_failed_count >= 1 OR needs_input_count >= 2. If no input digest meets "
+                "this bar, do NOT submit a single-evidence lesson — emit a multi-evidence one "
+                "or skip the candidate.",
+                "  - Multi-evidence lessons must cite >=2 evidence_task_ids and at least one "
+                "cited task must show review_failed_count + needs_input_count >= 1. Pure "
+                "final_summary text similarity is NOT a substitute for iteration evidence.",
+                "",
+                "Deduplication rule: before creating a lesson, compare against active_lessons. "
+                "If the idea already exists, call the lesson API with matching title/summary/tags "
+                "so the backend merges evidence by fingerprint instead of creating a duplicate.",
+                "",
+                "Lessons API:",
+                f"POST /api/workspaces/{workspace.id}/lessons",
+                "Payload shape:",
+                '{"title":"short title","summary":"one-sentence description",'
+                '"applies_when":["condition"],"do":"recommended action",'
+                '"avoid":"failure pattern","tags":["tag"],"scope":"workspace",'
+                '"confidence":0.6,"evidence_task_ids":["task-id"]}',
+                "",
+                "Completion report requirement:",
+                "POST a completed report for this internal task with changed_files=[], "
+                "review_decision=skip, risk_level=system_audit, and validation containing one "
+                "of these exact fields (do NOT append free prose after the value; if you need "
+                "commentary put it on a separate line):",
+                "- created_lesson_ids=<comma-separated ids>",
+                "- merged_lesson_ids=<comma-separated ids>",
+                "- skipped_reason=<reason>",
+                "",
+                "Input package JSON:",
+                json.dumps(package, indent=2, ensure_ascii=False),
+            ]
+        )
+
+    def feedback_lessons(
+        self,
+        workspace_id: str,
+        *,
+        query: str = "",
+        limit: int = 20,
+        include_inactive: bool = False,
+    ) -> list[FeedbackLesson]:
+        if workspace_id not in self.workspaces:
+            raise KeyError(workspace_id)
+        capped_limit = min(max(limit, 1), 50)
+        store = self._feedback_store()
+        if query.strip():
+            return store.search_lessons(workspace_id, query, limit=capped_limit)
+        return store.list_lessons(workspace_id, include_inactive=include_inactive)[:capped_limit]
 
     def delete_task(self, task_id: str) -> None:
         task = self.tasks.pop(task_id, None)
@@ -1172,20 +1900,37 @@ class WorkspaceManager:
         session_workspace_path = (
             (remote_cwd or local_cwd) if session_target == ExecutionTarget.REMOTE else local_cwd
         )
-        tab = await ttyd_manager.create_tab(
-            name=title,
-            cwd=local_cwd if session_target == ExecutionTarget.LOCAL else None,
-            solo_mode=payload.solo_mode,
-            agent_type=payload.agent_type,
-            target=session_target,
-            remote_profile_id=remote_profile_id,
-            remote_cwd=remote_cwd,
-            remote_reconnect=remote_reconnect,
-            remote_forward_port=remote_forward_port,
-            workspace_id=workspace.id,
-            workspace_name=workspace.name,
-            workspace_role=role,
-        )
+        if payload.env:
+            tab = await ttyd_manager.create_tab(
+                name=title,
+                cwd=local_cwd if session_target == ExecutionTarget.LOCAL else None,
+                solo_mode=payload.solo_mode,
+                agent_type=payload.agent_type,
+                target=session_target,
+                remote_profile_id=remote_profile_id,
+                remote_cwd=remote_cwd,
+                remote_reconnect=remote_reconnect,
+                remote_forward_port=remote_forward_port,
+                workspace_id=workspace.id,
+                workspace_name=workspace.name,
+                workspace_role=role,
+                env=payload.env,
+            )
+        else:
+            tab = await ttyd_manager.create_tab(
+                name=title,
+                cwd=local_cwd if session_target == ExecutionTarget.LOCAL else None,
+                solo_mode=payload.solo_mode,
+                agent_type=payload.agent_type,
+                target=session_target,
+                remote_profile_id=remote_profile_id,
+                remote_cwd=remote_cwd,
+                remote_reconnect=remote_reconnect,
+                remote_forward_port=remote_forward_port,
+                workspace_id=workspace.id,
+                workspace_name=workspace.name,
+                workspace_role=role,
+            )
         now = _now()
         session = ManagedSession(
             id=session_id,
@@ -1208,6 +1953,7 @@ class WorkspaceManager:
             remote_reconnect=remote_reconnect,
             solo_mode=payload.solo_mode,
             ephemeral=payload.ephemeral,
+            env=payload.env,
             remote_forward_port=remote_forward_port,
             created_at=now,
             updated_at=now,
@@ -1663,6 +2409,8 @@ class WorkspaceManager:
                 "auto_continue_task_id": task.id,
                 "auto_continue_attempts": 0,
                 "last_auto_continue_at": None,
+                "prompt_retry_task_id": None,
+                "prompt_retry_attempted_at": None,
                 "updated_at": now,
                 "last_activity_at": now,
             }
@@ -1722,7 +2470,21 @@ class WorkspaceManager:
         if task.status == WorkspaceTaskStatus.DONE:
             raise RuntimeError("Done tasks cannot request review")
         if task.review_requested_at and not task.review_completed_at:
-            return task
+            # Only suppress re-dispatch when an assigned reviewer is actively
+            # working on this task. If the reviewer session is idle, stopped,
+            # or missing entirely, the prior review dispatch got stuck and we
+            # must allow re-dispatch so the task does not sit forever in
+            # "Awaiting AI review".
+            if self._reviewer_is_active(task):
+                return task
+            logger.info(
+                "Re-requesting review for stuck task_id=%s (review_requested_at=%s "
+                "review_session_id=%s)",
+                task.id,
+                task.review_requested_at,
+                task.review_session_id,
+            )
+            self._release_stale_reviewer_for_task(task, updated_at=_now())
         if not task.session_id:
             raise RuntimeError("Task has no implementation agent")
 
@@ -1851,6 +2613,15 @@ class WorkspaceManager:
     ) -> None:
         if refresh_sessions:
             await self._refresh_session_statuses(workspace_id)
+        # Review dispatch has no retry mechanism of its own:
+        # _request_task_review either succeeds or strands the task. Run the
+        # stale-review reaper and stale-reviewer assignment cleanup before
+        # every dispatch pass so a transient failure (prompt send error,
+        # reviewer crash, reconciler-only REVIEW status) does not permanently
+        # strand the task in "Awaiting AI review" with idle reviewers.
+        if self._cleanup_stale_reviewer_assignments(workspace_id):
+            self._save_state()
+        await self._reap_stuck_reviews(workspace_id)
         for session in self._workspace_agents(workspace_id, include_stopped=True):
             if not self._can_dispatch_to(session):
                 logger.info(
@@ -1863,6 +2634,23 @@ class WorkspaceManager:
                     session.current_task_id,
                 )
                 continue
+            rebalanced_task = self._next_reassignable_queued_task(session.id, workspace_id)
+            if rebalanced_task:
+                logger.info(
+                    "Reassigning queued workspace task id=%s from session_id=%s to free "
+                    "session_id=%s",
+                    rebalanced_task.id,
+                    rebalanced_task.session_id,
+                    session.id,
+                )
+                self.tasks[rebalanced_task.id] = rebalanced_task.model_copy(
+                    update={
+                        "session_id": session.id,
+                        "clear_context": True,
+                        "dispatch_reason": "Reassigned to newly available workspace agent",
+                        "updated_at": _now(),
+                    }
+                )
             next_task = self._next_queued_task(session.id)
             if not next_task:
                 continue
@@ -1912,6 +2700,29 @@ class WorkspaceManager:
             return None
         return sorted(tasks, key=_sort_time)[0]
 
+    def _next_reassignable_queued_task(
+        self,
+        free_session_id: str,
+        workspace_id: str,
+    ) -> Optional[WorkspaceTask]:
+        candidates: list[WorkspaceTask] = []
+        for task in self.tasks.values():
+            if task.workspace_id != workspace_id:
+                continue
+            if task.status != WorkspaceTaskStatus.QUEUED or task.dispatch_pending:
+                continue
+            if task.session_id == free_session_id:
+                continue
+            if task.dispatch_reason != "Queued behind existing workspace agent":
+                continue
+            assigned = self.sessions.get(task.session_id or "")
+            if not assigned or not self._is_holding_unresolved_review_task(assigned):
+                continue
+            candidates.append(task)
+        if not candidates:
+            return None
+        return sorted(candidates, key=_sort_time)[0]
+
     async def _dispatch_task_to_session(
         self,
         task: WorkspaceTask,
@@ -1937,12 +2748,21 @@ class WorkspaceManager:
             task.related_task_id,
             task.dispatch_reason,
         )
+        now = _now()
+        lesson_context = self._lesson_context_payload(
+            workspace,
+            f"{task.title}\n{task.prompt}",
+        )
         await self.send_session_message(
             session.id,
-            self._build_task_assignment_prompt(workspace, task, session),
+            self._build_task_assignment_prompt(
+                workspace,
+                task,
+                session,
+                lesson_context=lesson_context,
+            ),
         )
 
-        now = _now()
         self.tasks[task.id] = task.model_copy(
             update={
                 "status": WorkspaceTaskStatus.WORKING,
@@ -1959,6 +2779,8 @@ class WorkspaceManager:
                 "auto_continue_task_id": task.id,
                 "auto_continue_attempts": 0,
                 "last_auto_continue_at": None,
+                "prompt_retry_task_id": None,
+                "prompt_retry_attempted_at": None,
                 "last_activity_at": now,
                 "updated_at": now,
             }
@@ -2028,6 +2850,8 @@ class WorkspaceManager:
             )
         else:
             lines.append(f"Default working directory: {session.workspace_path}")
+        if session.env:
+            lines.append("Custom environment variables: " + ", ".join(sorted(session.env.keys())))
         return "\n".join(lines)
 
     def _build_workspace_agent_prompt(self, workspace: Workspace, session: ManagedSession) -> str:
@@ -2050,8 +2874,8 @@ class WorkspaceManager:
             "Final reports may include review_decision: auto, request, or skip. This only controls "
             "whether an independent AI reviewer is requested; every completed task still waits for "
             "human acceptance before it is done. Use request when independent reviewer checks are "
-            "needed, skip only for low-risk no-change analysis or manual follow-up that does not "
-            "need AI reviewer checks, and include review_reason. "
+            "needed, skip only for no-change analysis, manual follow-up, or explicitly trivial "
+            "low-risk changes that do not need AI reviewer checks, and include review_reason. "
             "Report progress to the workspace coordinator only after you receive a task, "
             "when you start, get blocked, need input, are ready for review, or complete the work. "
             "Every report should include both message_en (concise English) and message_zh "
@@ -2187,6 +3011,8 @@ class WorkspaceManager:
         workspace: Workspace,
         task: WorkspaceTask,
         session: ManagedSession,
+        *,
+        lesson_context: list[dict[str, Any]] | None = None,
     ) -> str:
         clear_note = (
             "This task is unrelated to prior work. Treat prior conversation context as stale.\n\n"
@@ -2195,6 +3021,14 @@ class WorkspaceManager:
         )
         attachment_note = (
             f"{self._attachment_prompt_block(task.attachments)}\n\n" if task.attachments else ""
+        )
+        lesson_context_block = self._lesson_context_block_from_payload(
+            (
+                lesson_context
+                if lesson_context is not None
+                else self._lesson_context_payload(workspace, f"{task.title}\n{task.prompt}")
+            ),
+            workspace_id=workspace.id,
         )
         return (
             "New workspace task assigned.\n\n"
@@ -2209,6 +3043,7 @@ class WorkspaceManager:
             f"{clear_note}"
             f"Task description:\n{task.prompt}\n\n"
             f"{attachment_note}"
+            f"{lesson_context_block}"
             f"{self._execution_complexity_assignment_block(task)}"
             f"{self._autonomous_assignment_block(task, session.agent_type)}"
             "Start by reading the state snapshot. This workspace may contain many projects; "
@@ -2225,12 +3060,13 @@ class WorkspaceManager:
             "fully complete, report completed. The task is not finally done until a human accepts it.\n\n"
             "For completed reports, decide reviewer routing explicitly:\n"
             "- review_decision=request when this should go to an independent AI reviewer before human acceptance.\n"
-            "- review_decision=skip only for low-risk no-change analysis or manual follow-up "
-            "where AI reviewer checks are unnecessary; this still requires human acceptance.\n"
+            "- review_decision=skip only for no-change analysis, manual follow-up, or "
+            "explicitly trivial low-risk changes where AI reviewer checks are unnecessary; "
+            "this still requires human acceptance.\n"
             "- review_decision=auto to use the workspace default reviewer policy.\n"
             "Always include review_reason when choosing request or skip. The backend may still "
-            "force review for changed files, failed review follow-ups, blocked input, runtime "
-            "attention, or other higher-risk work.\n\n"
+            "force review for nontrivial changed files, failed review follow-ups, blocked input, "
+            "runtime attention, or other higher-risk work.\n\n"
             "Report endpoint example:\n"
             f"curl -sS -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
@@ -2256,6 +3092,118 @@ class WorkspaceManager:
             "and risk_level. acceptance_check should map each Goal Packet acceptance criterion "
             "to status passed, failed, partial, or not_checked with evidence."
         )
+
+    def _lesson_context_payload(self, workspace: Workspace, query: str) -> list[dict[str, Any]]:
+        return self._feedback_store().lesson_context_payload(
+            workspace.id,
+            query,
+            limit=20,
+        )
+
+    def _lesson_context_block(self, workspace: Workspace, query: str) -> str:
+        return self._lesson_context_block_from_payload(
+            self._lesson_context_payload(workspace, query),
+            workspace_id=workspace.id,
+        )
+
+    def _lesson_context_block_from_payload(
+        self,
+        lessons: list[dict[str, Any]],
+        *,
+        workspace_id: str | None = None,
+    ) -> str:
+        if not lessons:
+            return (
+                "Workspace lessons index: no active lessons yet for this workspace.\n"
+                "You do not need to reference any lessons in your report.\n\n"
+            )
+        lines: list[str] = []
+        lines.append("Workspace lessons index (id, title, tags, confidence, hits, successes):")
+        for lesson in lessons:
+            tags = ", ".join(f"`{t}`" for t in lesson.get("tags", [])) or "—"
+            conf = lesson.get("confidence")
+            conf_str = f"{conf:.2f}" if isinstance(conf, (int, float)) else "?"
+            lines.append(
+                f"- `{lesson['id']}` — {lesson['title']}  "
+                f"[{tags}]  conf={conf_str}  "
+                f"hits={lesson.get('hit_count', 0)}  "
+                f"succ={lesson.get('success_count', 0)}"
+            )
+        lines.append("")
+        lines.append(
+            "Lessons catalog (human-readable): `docs/working-logs/lessons-catalog.md`  "
+            "(read this file for the full do/avoid/applies_when detail of each lesson)."
+        )
+        lines.append(
+            "To inspect a specific lesson, call `GET /api/workspaces/<workspace_id>/lessons/<lesson_id>` "
+            "which returns the full lesson body (summary, do, avoid, applies_when, evidence)."
+        )
+        if workspace_id:
+            lines.append(f"This workspace ID: `{workspace_id}`.")
+        lines.append(
+            "Read lessons only when you judge they may apply to this task — do not "
+            "force-fit irrelevant lessons. In the final validation or risks field, "
+            "list the IDs of any lessons you read (or state 'no lessons needed')."
+        )
+        lines.append("")
+        return "\n".join(lines)
+
+    def _record_feedback_lesson_injection(
+        self,
+        *,
+        task: WorkspaceTask,
+        session: ManagedSession,
+        lesson_ids: list[str],
+        prompt_kind: str,
+        created_at: datetime,
+    ) -> None:
+        lesson_list = ", ".join(lesson_ids)
+        report = AgentReport(
+            id=str(uuid.uuid4()),
+            workspace_id=task.workspace_id,
+            task_id=task.id,
+            session_id=session.id,
+            state=AgentReportState.WORKING,
+            message=f"Feedback lessons injected into {prompt_kind} prompt: {lesson_list}",
+            message_en=f"Feedback lessons injected into {prompt_kind} prompt: {lesson_list}",
+            message_zh=f"已将 feedback lessons 注入 {prompt_kind} prompt：{lesson_list}",
+            changed_files=[],
+            validation=f"prompt_kind={prompt_kind}; feedback_lesson_ids=" + json.dumps(lesson_ids),
+            risks=None,
+            review_decision=ReviewDecision.SKIP,
+            review_reason="System audit event for prompt-time feedback lesson injection.",
+            risk_level="system_audit",
+            created_at=created_at,
+        )
+        self.reports[report.id] = report
+
+    def _record_system_task_audit(
+        self,
+        *,
+        task: WorkspaceTask,
+        message: str,
+        message_zh: str,
+        validation: str,
+        session_id: str = "system",
+    ) -> None:
+        report = AgentReport(
+            id=str(uuid.uuid4()),
+            workspace_id=task.workspace_id,
+            task_id=task.id,
+            session_id=session_id,
+            state=AgentReportState.WORKING,
+            message=message,
+            message_en=message,
+            message_zh=message_zh,
+            changed_files=[],
+            validation=validation,
+            risks=None,
+            review_decision=ReviewDecision.SKIP,
+            review_reason="System audit event for an internal workspace task.",
+            risk_level="system_audit",
+            created_at=_now(),
+        )
+        self.reports[report.id] = report
 
     def _execution_complexity_assignment_block(self, task: WorkspaceTask) -> str:
         if task.execution_complexity == WorkspaceTaskExecutionComplexity.SIMPLE:
@@ -2574,14 +3522,27 @@ class WorkspaceManager:
         for changed_file in changed_files[:12]:
             if not changed_file:
                 continue
-            candidate = Path(changed_file)
-            path = candidate if candidate.is_absolute() else root / candidate
+            if not self._path_looks_like_real_file(changed_file):
+                continue
+            try:
+                candidate = Path(changed_file)
+            except (OSError, ValueError):
+                continue
+            try:
+                is_absolute = candidate.is_absolute()
+            except OSError:
+                is_absolute = False
+            path = candidate if is_absolute else root / candidate
             try:
                 resolved = path.resolve(strict=False)
                 resolved.relative_to(root)
             except (OSError, ValueError):
                 continue
-            directory = resolved if resolved.is_dir() else resolved.parent
+            try:
+                is_dir = resolved.is_dir()
+            except OSError:
+                is_dir = False
+            directory = resolved if is_dir else resolved.parent
             while True:
                 candidates.append(directory / "REVIEW.md")
                 if directory == root:
@@ -2617,6 +3578,7 @@ class WorkspaceManager:
         task: WorkspaceTask,
         reviewer: ManagedSession,
         trigger_report: AgentReport,
+        lesson_context: list[dict[str, Any]] | None = None,
     ) -> str:
         task_reports = [
             report
@@ -2649,6 +3611,17 @@ class WorkspaceManager:
             for report in task_reports
         ]
         profiles = self._effective_review_profiles(task, trigger_report)
+        lesson_context_block = self._lesson_context_block_from_payload(
+            (
+                lesson_context
+                if lesson_context is not None
+                else self._lesson_context_payload(
+                    workspace,
+                    f"{task.title}\n{task.prompt}\n{trigger_report.message}",
+                )
+            ),
+            workspace_id=workspace.id,
+        )
         return (
             "Review workspace task.\n\n"
             f"Workspace: {workspace.name}\n"
@@ -2668,6 +3641,7 @@ class WorkspaceManager:
             f"{self._autonomous_review_block(task)}"
             f"{self._review_profile_prompt_block(profiles)}"
             f"{self._review_guidance_block(workspace, trigger_report)}"
+            f"{lesson_context_block}"
             "Review workflow:\n"
             "1. Stay read-only. Do not edit files, run formatters that write changes, or revert work.\n"
             "2. Check whether the stored Goal Packet faithfully preserves the original task prompt. "
@@ -2988,11 +3962,20 @@ class WorkspaceManager:
                 if autonomous_run is not None:
                     task_update["autonomous_run"] = autonomous_run
             if task_status:
-                task_update.update({"status": task_status, "updated_at": now})
-                if task_status == WorkspaceTaskStatus.WORKING:
-                    task_update["started_at"] = self.tasks[task_id].started_at or now
-                if task_status == WorkspaceTaskStatus.REVIEW:
-                    task_update["reviewed_at"] = now
+                if (
+                    session.role == WorkspaceSessionRole.ORCHESTRATOR
+                    and task_status == WorkspaceTaskStatus.WORKING
+                    and self.tasks[task_id].status == WorkspaceTaskStatus.REVIEW
+                    and self.tasks[task_id].review_requested_at
+                    and not self.tasks[task_id].review_completed_at
+                ):
+                    task_update["updated_at"] = now
+                else:
+                    task_update.update({"status": task_status, "updated_at": now})
+                    if task_status == WorkspaceTaskStatus.WORKING:
+                        task_update["started_at"] = self.tasks[task_id].started_at or now
+                    if task_status == WorkspaceTaskStatus.REVIEW:
+                        task_update["reviewed_at"] = now
             elif task_update:
                 task_update["updated_at"] = now
             if task_update:
@@ -3014,12 +3997,30 @@ class WorkspaceManager:
         if session.role == WorkspaceSessionRole.REVIEWER:
             await self._handle_review_report(task, session, report)
             return
-        if session.role != WorkspaceSessionRole.ORCHESTRATOR:
+        if session.role not in {
+            WorkspaceSessionRole.ORCHESTRATOR,
+            WorkspaceSessionRole.WORKER,
+        }:
+            return
+        if task.system_internal:
+            await self._handle_internal_task_report(task, session, report)
             return
         if not state_policy.is_review_gate_state(report.state):
             return
         if task.review_requested_at and not task.review_completed_at:
-            return
+            # Allow a new gate report to recover a stuck review: only skip if
+            # the previously-assigned reviewer session is still actively
+            # working on the review.
+            if self._reviewer_is_active(task):
+                return
+            logger.info(
+                "Recovering stuck review via agent report task_id=%s "
+                "report_state=%s review_session_id=%s",
+                task.id,
+                report.state.value,
+                task.review_session_id,
+            )
+            self._release_stale_reviewer_for_task(task, updated_at=_now())
         if task.task_mode == WorkspaceTaskMode.DIRECT:
             if report.review_decision == ReviewDecision.REQUEST:
                 await self._request_task_review(task, report)
@@ -3046,6 +4047,69 @@ class WorkspaceManager:
             await self._request_task_review(task, report)
             return
         self._mark_task_review_skipped(task, report)
+
+    async def _handle_internal_task_report(
+        self,
+        task: WorkspaceTask,
+        session: ManagedSession,
+        report: AgentReport,
+    ) -> None:
+        if report.state not in {
+            AgentReportState.COMPLETED,
+            AgentReportState.READY_FOR_REVIEW,
+        }:
+            return
+        now = _now()
+        updated = self.tasks[task.id].model_copy(
+            update={
+                "status": WorkspaceTaskStatus.DONE,
+                "review_skipped_at": now,
+                "review_skip_reason": "System-internal task completed without human review.",
+                "completed_at": now,
+                "human_accepted_at": None,
+                "updated_at": now,
+            }
+        )
+        self.tasks[task.id] = updated
+        summary_run = None
+        if updated.internal_kind == "feedback_reaper":
+            summary_run = self._feedback_store().complete_summary_run(
+                updated.workspace_id,
+                updated.id,
+                report,
+                now=now,
+            )
+        self._record_system_task_audit(
+            task=updated,
+            message=(
+                "Internal Feedback Reaper completed and was archived without ordinary review."
+            ),
+            message_zh="内部 Feedback Reaper 已完成，并已跳过普通 review 归档。",
+            validation=(
+                f"completion_report_id={report.id}; session_id={session.id}; "
+                "review_gate=skipped_internal"
+                + (
+                    f"; summary_run_id={summary_run.id}; "
+                    f"created_lesson_ids={json.dumps(summary_run.created_lesson_ids)}; "
+                    f"merged_lesson_ids={json.dumps(summary_run.merged_lesson_ids)}; "
+                    f"skipped_reason={summary_run.skipped_reason}"
+                    if summary_run
+                    else ""
+                )
+            ),
+            session_id=session.id,
+        )
+        self._write_task_record(updated)
+        self._release_task_session(updated)
+        if updated.feedback_lesson_ids:
+            self._feedback_store().increment_lesson_usage(
+                updated.workspace_id,
+                list(updated.feedback_lesson_ids),
+                success=True,
+                now=now,
+            )
+        self._save_state()
+        await self.dispatch_workspace(updated.workspace_id)
 
     async def _should_request_task_review(
         self,
@@ -3374,6 +4438,10 @@ class WorkspaceManager:
             raise KeyError(task.workspace_id)
         reviewer = await self._select_or_create_reviewer(workspace, task)
         now = _now()
+        lesson_context = self._lesson_context_payload(
+            workspace,
+            f"{task.title}\n{task.prompt}\n{trigger_report.message}",
+        )
         reviewer = await self._rename_session_for_task(reviewer, task, updated_at=now)
         autonomous_run = task.autonomous_run
         if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
@@ -3394,7 +4462,7 @@ class WorkspaceManager:
             )
         self.tasks[task.id] = task.model_copy(
             update={
-                "status": WorkspaceTaskStatus.WORKING,
+                "status": WorkspaceTaskStatus.REVIEW,
                 "review_session_id": reviewer.id,
                 "review_attempts": task.review_attempts + 1,
                 "review_requested_at": now,
@@ -3414,6 +4482,8 @@ class WorkspaceManager:
                 "current_task_id": task.id,
                 "status": ManagedSessionStatus.WORKING,
                 "runtime_status": AgentRuntimeStatus.WORKING,
+                "prompt_retry_task_id": None,
+                "prompt_retry_attempted_at": None,
                 "updated_at": now,
                 "last_activity_at": now,
             }
@@ -3431,15 +4501,34 @@ class WorkspaceManager:
             )
             await self.send_session_message(reviewer.id, "/clear")
             await asyncio.sleep(0.5)
-        await self.send_session_message(
-            reviewer.id,
-            self._build_review_prompt(
-                workspace,
-                self.tasks[task.id],
-                self.sessions[reviewer.id],
-                trigger_report,
-            ),
-        )
+        try:
+            await self.send_session_message(
+                reviewer.id,
+                self._build_review_prompt(
+                    workspace,
+                    self.tasks[task.id],
+                    self.sessions[reviewer.id],
+                    trigger_report,
+                    lesson_context=lesson_context,
+                ),
+            )
+        except Exception as exc:
+            logger.exception(
+                "Failed to dispatch workspace review prompt task_id=%s reviewer_id=%s",
+                task.id,
+                reviewer.id,
+            )
+            self._mark_prompt_dispatch_stalled(
+                task_id=task.id,
+                session_id=reviewer.id,
+                message=(
+                    "Reviewer prompt could not be submitted to the terminal; "
+                    f"manual recovery is required. Error: {exc}"
+                ),
+                message_zh=("Reviewer prompt 未能提交到终端；需要手动恢复。" f"错误：{exc}"),
+                report_state=AgentReportState.REVIEW_NEEDS_INPUT,
+                sampled_at=_now(),
+            )
 
     async def _select_or_create_reviewer(
         self,
@@ -3537,13 +4626,11 @@ class WorkspaceManager:
         if report.state != AgentReportState.REVIEW_FAILED:
             return
         updated_task = self.tasks[task.id]
-        if (
-            updated_task.task_mode == WorkspaceTaskMode.AUTONOMOUS
-            and autonomous_next_phase != AutonomousRunPhase.REVISING
-        ):
-            return
-        if updated_task.review_attempts > MAX_AUTOMATED_REVIEW_FAILURES:
-            return
+        if updated_task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
+            if autonomous_next_phase != AutonomousRunPhase.REVISING:
+                return
+            if updated_task.review_attempts > MAX_AUTOMATED_REVIEW_FAILURES:
+                return
         feedback = (
             "Autonomous evaluator requested changes.\n\n"
             if updated_task.task_mode == WorkspaceTaskMode.AUTONOMOUS
@@ -3735,6 +4822,226 @@ class WorkspaceManager:
         agents = self._workspace_agents(workspace_id)
         return agents[0] if agents else None
 
+    def _reviewer_is_active(self, task: WorkspaceTask) -> bool:
+        """Return True when the task has a reviewer session that is actively
+        working on its review. A missing, idle, or stopped reviewer means the
+        prior dispatch got stuck and re-dispatch is allowed."""
+        if not task.review_session_id:
+            return False
+        reviewer = self.sessions.get(task.review_session_id)
+        if not reviewer:
+            return False
+        if reviewer.status == ManagedSessionStatus.STOPPED:
+            return False
+        if reviewer.runtime_status == AgentRuntimeStatus.IDLE:
+            return False
+        if reviewer.task_id != task.id and reviewer.current_task_id != task.id:
+            return False
+        return True
+
+    def _release_stale_reviewer_for_task(
+        self, task: WorkspaceTask, *, updated_at: datetime
+    ) -> None:
+        """Clear the task's stale review_session_id reference and reset any
+        reviewer sessions whose task_id/current_task_id still point at this
+        task but are not actively working on it. Used to unstick review
+        dispatch after a prompt send failure or reviewer crash."""
+        # Release any reviewer session that still carries this task's id.
+        self._release_reviewer_session(
+            task,
+            status=ManagedSessionStatus.IDLE,
+            runtime_status=AgentRuntimeStatus.IDLE,
+            updated_at=updated_at,
+            include_stale_assignments=True,
+        )
+        # Clear the task's own stale reference so future dispatch succeeds.
+        current = self.tasks.get(task.id)
+        if not current:
+            return
+        if current.review_session_id and not self._reviewer_is_active(current):
+            self.tasks[current.id] = current.model_copy(
+                update={
+                    "review_session_id": None,
+                    "updated_at": updated_at,
+                }
+            )
+
+    def _cleanup_stale_reviewer_assignments(self, workspace_id: str) -> bool:
+        """Drop stale task_id/current_task_id values from REVIEWER sessions
+        where the referenced task no longer exists, is not awaiting review,
+        or does not list the session as its review_session_id. Returns True
+        if any session was modified."""
+        changed = False
+        now = _now()
+        for session in self._sessions_for_workspace_raw(workspace_id):
+            if session.role != WorkspaceSessionRole.REVIEWER:
+                continue
+            if not session.task_id and not session.current_task_id:
+                continue
+            candidate_id = session.task_id or session.current_task_id
+            if not candidate_id:
+                continue
+            task = self.tasks.get(candidate_id)
+            should_reset = False
+            if not task or task.workspace_id != workspace_id:
+                should_reset = True
+            elif task.status == WorkspaceTaskStatus.DONE:
+                should_reset = True
+            elif task.review_session_id != session.id:
+                # Session claims the task but the task does not reference this
+                # session as its reviewer — the assignment is stale.
+                should_reset = True
+            elif (
+                session.runtime_status == AgentRuntimeStatus.IDLE
+                and session.status == ManagedSessionStatus.IDLE
+            ):
+                # Session is idle while still holding task pointers —
+                # typically left over from a dispatch error.
+                should_reset = True
+            if not should_reset:
+                continue
+            logger.info(
+                "Cleaning stale reviewer assignment session_id=%s task_id=%s",
+                session.id,
+                candidate_id,
+            )
+            self.sessions[session.id] = session.model_copy(
+                update={
+                    "task_id": None,
+                    "current_task_id": None,
+                    "status": ManagedSessionStatus.IDLE,
+                    "runtime_status": AgentRuntimeStatus.IDLE,
+                    "updated_at": now,
+                    "last_activity_at": now,
+                }
+            )
+            changed = True
+        return changed
+
+    def _review_dispatch_in_reaper_grace(self, task: WorkspaceTask, *, now: datetime) -> bool:
+        """Return True when a review dispatch is recent enough that the
+        reviewer may simply be slow to emit first tokens. The fallback
+        reaper should not redispatch in this window even when
+        ``_reviewer_is_active`` reports False, because the terminal
+        classifier briefly reports IDLE between bursts of model output.
+
+        We grant the grace based on whichever of the two timestamps is
+        more recent: when the review was last requested, or when the
+        assigned reviewer last had terminal activity recorded.
+        """
+        candidates: list[datetime] = []
+        if task.review_requested_at:
+            candidates.append(task.review_requested_at)
+        if task.review_session_id:
+            reviewer = self.sessions.get(task.review_session_id)
+            if reviewer and reviewer.last_activity_at:
+                candidates.append(reviewer.last_activity_at)
+        if not candidates:
+            return False
+        latest = max(candidates)
+        return (now - latest).total_seconds() < REVIEW_REAPER_DISPATCH_GRACE_SECONDS
+
+    async def _reap_stuck_reviews(self, workspace_id: str) -> int:
+        """Fallback reaper: find tasks whose review dispatch appears stuck
+        (review-requested or REVIEW status with no active reviewer) and
+        trigger a fresh review dispatch. Called from the periodic
+        dispatch_workspace loop so transient failures do not permanently
+        strand tasks in "Awaiting AI review".
+
+        Returns the number of tasks that were re-dispatched."""
+        reaped = 0
+        for task in list(self.tasks.values()):
+            if task.workspace_id != workspace_id:
+                continue
+            if task.status == WorkspaceTaskStatus.DONE:
+                continue
+            if task.system_internal:
+                continue
+            needs_review_dispatch = False
+            if (
+                task.review_requested_at
+                and not task.review_completed_at
+                and not self._reviewer_is_active(task)
+            ):
+                # Review was requested but the assigned reviewer is idle,
+                # stopped, missing, or reassigned.
+                needs_review_dispatch = True
+            elif (
+                task.status == WorkspaceTaskStatus.REVIEW
+                and not task.review_completed_at
+                and not task.human_acceptance_requested_at
+                and not self._reviewer_is_active(task)
+            ):
+                # Task is in REVIEW state with no reviewer progress — a
+                # reconciler or manual status transition set REVIEW without
+                # actually dispatching a reviewer.
+                needs_review_dispatch = True
+            if not needs_review_dispatch:
+                continue
+            if not task.session_id:
+                continue
+            now = _now()
+            if self._review_dispatch_in_reaper_grace(task, now=now):
+                # Reviewer was just dispatched (or has very recent terminal
+                # activity). The terminal classifier can briefly report IDLE
+                # while the model produces its first tokens — wait the
+                # configured grace before declaring the dispatch stuck.
+                logger.debug(
+                    "Skipping fallback reaper for task_id=%s within dispatch grace",
+                    task.id,
+                )
+                continue
+            latest_state = self._latest_report_state(task.id)
+            trigger_state = (
+                latest_state
+                if latest_state
+                in {
+                    AgentReportState.READY_FOR_REVIEW,
+                    AgentReportState.COMPLETED,
+                    AgentReportState.BLOCKED,
+                    AgentReportState.NEEDS_INPUT,
+                }
+                else AgentReportState.READY_FOR_REVIEW
+            )
+            self._release_stale_reviewer_for_task(task, updated_at=now)
+            trigger_report = AgentReport(
+                id=str(uuid.uuid4()),
+                workspace_id=task.workspace_id,
+                task_id=task.id,
+                session_id=task.session_id,
+                state=trigger_state,
+                message=(
+                    "Re-dispatching stuck review task (fallback reaper); "
+                    "prior reviewer dispatch did not complete."
+                ),
+                message_en=(
+                    "Re-dispatching stuck review task (fallback reaper); "
+                    "prior reviewer dispatch did not complete."
+                ),
+                message_zh=(
+                    "重新分派卡住的 review 任务（fallback reaper）；" "之前的 reviewer 分派未完成。"
+                ),
+                changed_files=[],
+                validation=None,
+                risks=None,
+                review_decision=ReviewDecision.REQUEST,
+                review_reason="Stuck review recovered by background dispatcher.",
+                risk_level=None,
+                created_at=now,
+            )
+            self.reports[trigger_report.id] = trigger_report
+            logger.info(
+                "Reaping stuck review task_id=%s trigger_state=%s",
+                task.id,
+                trigger_state.value,
+            )
+            try:
+                await self._request_task_review(self.tasks[task.id], trigger_report)
+                reaped += 1
+            except Exception:
+                logger.exception("Failed to reap stuck review task_id=%s", task.id)
+        return reaped
+
     def _first_available_reviewer(self, workspace_id: str) -> Optional[ManagedSession]:
         reviewers = [
             session
@@ -3754,15 +5061,24 @@ class WorkspaceManager:
             [
                 task
                 for task in self.tasks.values()
-                if task.session_id == session_id and task.status == WorkspaceTaskStatus.QUEUED
+                if task.session_id == session_id
+                and task.status == WorkspaceTaskStatus.QUEUED
+                and not task.system_internal
             ]
         )
 
     def _with_assignment_summary(self, session: ManagedSession) -> ManagedSession:
         current_task_id = session.current_task_id or session.task_id
+        current_task = self.tasks.get(current_task_id or "")
+        visible_current_task_id = (
+            None if current_task and current_task.system_internal else current_task_id
+        )
         return session.model_copy(
             update={
-                "current_task_id": current_task_id,
+                "task_id": (
+                    None if current_task and current_task.system_internal else session.task_id
+                ),
+                "current_task_id": visible_current_task_id,
                 "queued_count": self._queued_count(session.id),
             }
         )
@@ -3775,7 +5091,11 @@ class WorkspaceManager:
         await self._refresh_session_statuses(workspace_id)
         self._reconcile_task_report_statuses(workspace_id)
         self._sync_workspace_tab_metadata(workspace_id)
-        tasks = [task for task in self.tasks.values() if task.workspace_id == workspace_id]
+        tasks = [
+            task
+            for task in self.tasks.values()
+            if task.workspace_id == workspace_id and not task.system_internal
+        ]
         sessions = self.sessions_for_workspace(workspace_id)
         reports = self.reports_for_workspace(workspace_id)
         return WorkspaceBoard(
@@ -3783,6 +5103,7 @@ class WorkspaceManager:
             tasks=tasks,
             sessions=sessions,
             reports=reports,
+            markdown_documents=self.markdown_documents_for_workspace(workspace_id),
             snapshot_path=str(self.snapshot_path(workspace_id)),
         )
 
@@ -3842,6 +5163,21 @@ class WorkspaceManager:
 
             if current_task_id:
                 task = self.tasks.get(current_task_id)
+                if task and task.status in {
+                    WorkspaceTaskStatus.WORKING,
+                    WorkspaceTaskStatus.REVIEW,
+                }:
+                    stalled_update = await self._detect_prompt_dispatch_stall(
+                        session,
+                        task,
+                        status.sampled_at,
+                    )
+                    if stalled_update:
+                        update.update(stalled_update)
+                        next_status = update["status"]
+                        runtime_status = update["runtime_status"]
+                        task = self.tasks.get(current_task_id)
+                        changed = True
                 if (
                     run_auto_continue
                     and runtime_status == AgentRuntimeStatus.IDLE
@@ -3859,7 +5195,8 @@ class WorkspaceManager:
                         runtime_status = update["runtime_status"]
                         changed = True
                 if (
-                    runtime_status == AgentRuntimeStatus.WORKING
+                    session.role == WorkspaceSessionRole.ORCHESTRATOR
+                    and runtime_status == AgentRuntimeStatus.WORKING
                     and task
                     and task.status == WorkspaceTaskStatus.REVIEW
                     and current_task_id is not None
@@ -3910,6 +5247,197 @@ class WorkspaceManager:
             changed = True
         if changed:
             self._save_state()
+
+    async def _detect_prompt_dispatch_stall(
+        self,
+        session: ManagedSession,
+        task: WorkspaceTask,
+        sampled_at: datetime,
+    ) -> dict[str, Any] | None:
+        if self._prompt_dispatch_still_in_grace_period(session, task, sampled_at):
+            return None
+        try:
+            output = await self._capture_tmux_output(session.tmux_session)
+        except RuntimeError as exc:
+            logger.warning(
+                "Could not inspect workspace prompt dispatch for session_id=%s: %s",
+                session.id,
+                exc,
+            )
+            return None
+
+        if not self._message_still_in_input(
+            output,
+            self._expected_pending_prompt_prefix(session, task),
+        ):
+            return None
+        if self._latest_report_has_risk(task.id, PROMPT_STUCK_RISK_LEVEL):
+            return {
+                "status": ManagedSessionStatus.NEEDS_INPUT,
+                "runtime_status": AgentRuntimeStatus.ATTENTION,
+                "updated_at": sampled_at,
+            }
+        if session.prompt_retry_task_id != task.id:
+            await self._retry_pending_prompt_submit(session, task, sampled_at)
+            return {
+                "status": ManagedSessionStatus.WORKING,
+                "runtime_status": AgentRuntimeStatus.WORKING,
+                "prompt_retry_task_id": task.id,
+                "prompt_retry_attempted_at": sampled_at,
+                "updated_at": sampled_at,
+                "last_activity_at": sampled_at,
+            }
+        if self._prompt_dispatch_retry_still_in_grace_period(session, sampled_at):
+            return {
+                "status": ManagedSessionStatus.WORKING,
+                "runtime_status": AgentRuntimeStatus.WORKING,
+                "updated_at": sampled_at,
+            }
+
+        if session.role == WorkspaceSessionRole.REVIEWER:
+            message = (
+                "Reviewer prompt appears to still be sitting in the terminal input box; "
+                "review did not start and manual recovery is required."
+            )
+            message_zh = "Reviewer prompt 似乎仍停留在终端输入框；评审未启动，需要手动恢复。"
+            report_state = AgentReportState.REVIEW_NEEDS_INPUT
+        else:
+            message = (
+                "Workspace task prompt appears to still be sitting in the terminal input box; "
+                "the agent did not start executing and manual recovery is required."
+            )
+            message_zh = (
+                "Workspace task prompt 似乎仍停留在终端输入框；Agent 未开始执行，需要手动恢复。"
+            )
+            report_state = AgentReportState.NEEDS_INPUT
+
+        self._mark_prompt_dispatch_stalled(
+            task_id=task.id,
+            session_id=session.id,
+            message=message,
+            message_zh=message_zh,
+            report_state=report_state,
+            sampled_at=sampled_at,
+        )
+        return {
+            "status": ManagedSessionStatus.NEEDS_INPUT,
+            "runtime_status": AgentRuntimeStatus.ATTENTION,
+            "updated_at": sampled_at,
+        }
+
+    def _expected_pending_prompt_prefix(
+        self,
+        session: ManagedSession,
+        task: WorkspaceTask,
+    ) -> str:
+        if session.role == WorkspaceSessionRole.REVIEWER:
+            return "Review workspace task."
+        return "New workspace task assigned."
+
+    def _prompt_dispatch_still_in_grace_period(
+        self,
+        session: ManagedSession,
+        task: WorkspaceTask,
+        sampled_at: datetime,
+    ) -> bool:
+        dispatch_started_at = (
+            task.review_requested_at
+            if session.role == WorkspaceSessionRole.REVIEWER
+            else task.started_at
+        )
+        if not dispatch_started_at:
+            return False
+        return (
+            sampled_at - dispatch_started_at
+        ).total_seconds() < PROMPT_DISPATCH_STALL_GRACE_SECONDS
+
+    def _prompt_dispatch_retry_still_in_grace_period(
+        self,
+        session: ManagedSession,
+        sampled_at: datetime,
+    ) -> bool:
+        if not session.prompt_retry_attempted_at:
+            return False
+        return (
+            sampled_at - session.prompt_retry_attempted_at
+        ).total_seconds() < PROMPT_DISPATCH_RETRY_GRACE_SECONDS
+
+    async def _retry_pending_prompt_submit(
+        self,
+        session: ManagedSession,
+        task: WorkspaceTask,
+        sampled_at: datetime,
+    ) -> None:
+        logger.warning(
+            "Workspace prompt appears pending; retrying Enter submit session_id=%s task_id=%s role=%s",
+            session.id,
+            task.id,
+            session.role,
+        )
+        await self._run_tmux("send-keys", "-t", session.tmux_session, "C-m")
+        self.sessions[session.id] = session.model_copy(
+            update={
+                "status": ManagedSessionStatus.WORKING,
+                "runtime_status": AgentRuntimeStatus.WORKING,
+                "prompt_retry_task_id": task.id,
+                "prompt_retry_attempted_at": sampled_at,
+                "last_activity_at": sampled_at,
+                "updated_at": sampled_at,
+            }
+        )
+        self._save_state()
+
+    def _mark_prompt_dispatch_stalled(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        message: str,
+        message_zh: str,
+        report_state: AgentReportState,
+        sampled_at: datetime,
+    ) -> None:
+        task = self.tasks.get(task_id)
+        session = self.sessions.get(session_id)
+        if not task or not session:
+            return
+
+        report = AgentReport(
+            id=str(uuid.uuid4()),
+            workspace_id=task.workspace_id,
+            task_id=task.id,
+            session_id=session.id,
+            state=report_state,
+            message=message,
+            message_en=message,
+            message_zh=message_zh,
+            changed_files=[],
+            validation=None,
+            risks="Prompt dispatch stalled before execution; terminal input needs manual inspection.",
+            review_decision=ReviewDecision.SKIP,
+            review_reason="Prompt dispatch did not reach execution; independent review cannot run until recovered.",
+            risk_level=PROMPT_STUCK_RISK_LEVEL,
+            created_at=sampled_at,
+        )
+        self.reports[report.id] = report
+        self.tasks[task.id] = task.model_copy(
+            update={
+                "status": WorkspaceTaskStatus.REVIEW,
+                "reviewed_at": task.reviewed_at or sampled_at,
+                "updated_at": sampled_at,
+            }
+        )
+        self.sessions[session.id] = session.model_copy(
+            update={
+                "status": ManagedSessionStatus.NEEDS_INPUT,
+                "runtime_status": AgentRuntimeStatus.ATTENTION,
+                "task_id": task.id,
+                "current_task_id": task.id,
+                "last_activity_at": sampled_at,
+                "updated_at": sampled_at,
+            }
+        )
+        self._save_state()
 
     async def _auto_continue_stopped_task(
         self,
@@ -4110,6 +5638,13 @@ class WorkspaceManager:
             key=lambda report: report.created_at,
         )
         return reports[-1].state if reports else None
+
+    def _latest_report_has_risk(self, task_id: str, risk_level: str) -> bool:
+        reports = sorted(
+            [report for report in self.reports.values() if report.task_id == task_id],
+            key=lambda report: report.created_at,
+        )
+        return bool(reports and reports[-1].risk_level == risk_level)
 
     def _latest_review_report_state(self, task_id: str) -> AgentReportState | None:
         reports = sorted(

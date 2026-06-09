@@ -6,11 +6,16 @@ import type {
   AgentType,
   ContinueTaskRequest,
   EnsureWorkspaceAgentRequest,
+  FeedbackLesson,
+  FeedbackLessonCreate,
+  FeedbackSummaryRequest,
+  FeedbackSummaryRun,
   ManualTaskControlRequest,
   ManagedSession,
   RequestTaskReviewRequest,
   StartTaskRequest,
   Workspace,
+  WorkspaceArtifactPreview,
   WorkspaceAttachmentCreate,
   WorkspaceBoard,
   WorkspaceCreate,
@@ -37,6 +42,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const workspaces = ref<Workspace[]>([])
   const activeWorkspaceId = ref<string | null>(localStorage.getItem(STORAGE_KEY_ACTIVE_WORKSPACE))
   const board = ref<WorkspaceBoard | null>(null)
+  const feedbackLessons = ref<FeedbackLesson[]>([])
   const isLoading = ref(false)
   const error = ref<string | null>(null)
   const boardFetches = new Map<string, Promise<void>>()
@@ -47,6 +53,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const tasks = computed(() => board.value?.tasks || [])
   const sessions = computed(() => board.value?.sessions || [])
   const reports = computed(() => board.value?.reports || [])
+  const activeFeedbackLessons = computed(() =>
+    feedbackLessons.value.filter(lesson => lesson.status === 'active')
+  )
   const workspaceAgents = computed(() =>
     sessions.value.filter(session => session.role === 'orchestrator' || session.role === 'worker')
   )
@@ -118,6 +127,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       const response = await fetch(`${API_BASE}/workspaces/${workspaceId}/board`)
       if (!response.ok) throw new Error(await readError(response))
       board.value = await response.json()
+      await fetchFeedbackLessons(workspaceId)
       error.value = null
     })()
 
@@ -129,6 +139,79 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       throw e
     } finally {
       boardFetches.delete(workspaceId)
+    }
+  }
+
+  async function fetchFeedbackLessons(workspaceId = activeWorkspaceId.value) {
+    if (!workspaceId) {
+      feedbackLessons.value = []
+      return
+    }
+    const response = await fetch(`${API_BASE}/workspaces/${workspaceId}/lessons?limit=50`)
+    if (!response.ok) throw new Error(await readError(response))
+    feedbackLessons.value = await response.json()
+  }
+
+  async function createFeedbackLesson(payload: FeedbackLessonCreate) {
+    if (!activeWorkspaceId.value) return
+    isLoading.value = true
+    error.value = null
+    try {
+      const response = await fetch(`${API_BASE}/workspaces/${activeWorkspaceId.value}/lessons`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      await fetchFeedbackLessons()
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Failed to create lesson'
+      throw e
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  async function deleteFeedbackLesson(lessonId: string) {
+    if (!activeWorkspaceId.value) return
+    isLoading.value = true
+    error.value = null
+    try {
+      const response = await fetch(`${API_BASE}/workspaces/${activeWorkspaceId.value}/lessons/${encodeURIComponent(lessonId)}`, {
+        method: 'DELETE',
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      await fetchFeedbackLessons()
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Failed to delete lesson'
+      throw e
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  async function summarizeFeedbackLessons(
+    payload: FeedbackSummaryRequest = {}
+  ): Promise<FeedbackSummaryRun | undefined> {
+    if (!activeWorkspaceId.value) return
+    isLoading.value = true
+    error.value = null
+    try {
+      const response = await fetch(`${API_BASE}/workspaces/${activeWorkspaceId.value}/lessons/summarize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      const run = await response.json() as FeedbackSummaryRun
+      await fetchBoard()
+      await fetchFeedbackLessons()
+      return run
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Failed to summarize lessons'
+      throw e
+    } finally {
+      isLoading.value = false
     }
   }
 
@@ -395,11 +478,25 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     await fetchBoard()
   }
 
+  async function fetchArtifactPreview(
+    workspaceId: string,
+    artifactPath: string,
+    reportId?: string,
+  ): Promise<WorkspaceArtifactPreview> {
+    const params = new URLSearchParams({ path: artifactPath })
+    if (reportId) params.set('report_id', reportId)
+    const response = await fetch(`${API_BASE}/workspaces/${workspaceId}/artifacts/preview?${params}`)
+    if (!response.ok) throw new Error(await readError(response))
+    return response.json()
+  }
+
   return {
     workspaces,
     activeWorkspaceId,
     activeWorkspace,
     board,
+    feedbackLessons,
+    activeFeedbackLessons,
     tasks,
     sessions,
     reports,
@@ -416,6 +513,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     fetchWorkspaces,
     setActiveWorkspace,
     fetchBoard,
+    fetchFeedbackLessons,
+    createFeedbackLesson,
+    deleteFeedbackLesson,
+    summarizeFeedbackLessons,
     createWorkspace,
     updateWorkspace,
     createTask,
@@ -431,5 +532,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     dispatchWorkspace,
     sendMessage,
     createReport,
+    fetchArtifactPreview,
   }
 })

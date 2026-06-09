@@ -1,6 +1,8 @@
 import json
 import os
 import re
+import socket
+from urllib.parse import urlparse
 
 # Disable all proxies for localhost connections
 os.environ["NO_PROXY"] = "localhost,127.0.0.1"
@@ -14,6 +16,7 @@ os.environ.pop("all_proxy", None)
 
 import logging
 from collections.abc import Sequence
+from socket import IPPROTO_TCP, TCP_NODELAY
 from typing import Optional
 
 import httpx
@@ -38,8 +41,91 @@ from ..services import ttyd_manager
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/terminal", tags=["terminal"])
 
+
+def _set_tcp_nodelay(sock: Optional[socket.socket]) -> None:
+    """Enable TCP_NODELAY on a socket when possible.
+
+    Terminal traffic is dominated by tiny frames (1–5 bytes per keystroke).
+    Leaving Nagle's algorithm enabled (the kernel default for TCP sockets)
+    introduces a 40–200 ms write-delay while the kernel waits for more data
+    to coalesce.  For the interactive terminal path that delay is
+    user-visible and defeats the entire purpose of the browser-side SAB
+    + Atomics fast path.
+
+    This helper is defensive: it silently no-ops on ``None``, non-TCP
+    sockets (e.g. AF_UNIX), and platforms where ``TCP_NODELAY`` is not
+    available.
+    """
+    if sock is None:
+        return
+    if sock.family not in (socket.AF_INET, socket.AF_INET6):
+        return
+    try:
+        sock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+    except (OSError, AttributeError):
+        # Not all transports expose a real socket; ignore silently.
+        pass
+
+
+def _create_nodelay_socket_for_uri(server_uri: str) -> Optional[socket.socket]:
+    """Create a TCP socket pre-configured with TCP_NODELAY for ``server_uri``.
+
+    ``websockets.connect`` (v13+) forwards extra ``**kwargs`` to
+    ``asyncio.loop.create_connection``, which accepts a ``sock`` parameter
+    carrying a pre-connected socket.  We open the socket synchronously
+    (localhost, so connection latency is effectively zero) so we can set
+    TCP_NODELAY before any bytes are written.
+
+    Returns ``None`` if the URI cannot be parsed into a TCP host/port or
+    the socket cannot be configured — in that case the caller falls back
+    to the default asyncio socket creation path.
+    """
+    try:
+        parsed = urlparse(server_uri)
+        host = parsed.hostname
+        port = parsed.port
+        if not host or not port:
+            return None
+        sock = socket.create_connection((host, port), timeout=5)
+    except (OSError, ValueError):
+        return None
+    _set_tcp_nodelay(sock)
+    return sock
+
+
+def _build_nodelay_httpx_transport() -> httpx.AsyncHTTPTransport:
+    """Build an AsyncHTTPTransport with TCP_NODELAY on every outbound socket.
+
+    The HTTP proxy path serves the ttyd HTML bundle plus injected scripts;
+    while those are larger responses, the handshake and early frames still
+    benefit from disabled Nagle buffering, and more importantly this keeps
+    our socket posture consistent across both proxy transports.
+
+    We prefer the typed ``socket_options`` kwarg when available (httpx
+    >=0.27) and fall back to a subclass hook for older versions so the
+    build does not break on pinned versions.
+    """
+    socket_options: list[tuple[int, int, int]] = [
+        (socket.IPPROTO_TCP, socket.TCP_NODELAY, 1),
+    ]
+    try:
+        return httpx.AsyncHTTPTransport(socket_options=socket_options)
+    except TypeError:
+        # Older httpx does not accept socket_options; fall back to a
+        # subclass override that patches the socket after open.
+        base_transport = httpx.AsyncHTTPTransport()
+
+        class _NodelayTransport(type(base_transport)):  # type: ignore[misc,valid-type]
+            async def _open_socket(self, *args: object, **kwargs: object) -> object:  # type: ignore[override]
+                sock = await super()._open_socket(*args, **kwargs)
+                _set_tcp_nodelay(sock)  # type: ignore[arg-type]
+                return sock
+
+        return _NodelayTransport(verify=getattr(base_transport, "_verify", True))
+
+
 # HTTP client for proxying (no proxy for localhost connections)
-transport = httpx.AsyncHTTPTransport()
+transport = _build_nodelay_httpx_transport()
 client = httpx.AsyncClient(
     timeout=None,
     verify=False,
@@ -93,7 +179,24 @@ async def proxy_websocket(
 ) -> None:
     """Proxy WebSocket messages between client and ttyd."""
     try:
-        async with websockets.connect(server_uri, subprotocols=subprotocols) as server_ws:
+        # Pass a pre-connected, TCP_NODELAY-configured socket when possible
+        # to disable Nagle's algorithm before the first byte is sent. The
+        # `sock` kwarg is forwarded by websockets.connect (v13+) to
+        # asyncio.loop.create_connection, which accepts a pre-connected
+        # socket. The pre-connect is cheap (localhost).
+        nodelay_sock = _create_nodelay_socket_for_uri(server_uri)
+        if nodelay_sock is not None:
+            server_ws_ctx = websockets.connect(
+                server_uri,
+                subprotocols=subprotocols,
+                sock=nodelay_sock,  # type: ignore[arg-type]
+            )
+        else:
+            server_ws_ctx = websockets.connect(
+                server_uri,
+                subprotocols=subprotocols,
+            )
+        async with server_ws_ctx as server_ws:
             # Forward messages from client to server
             async def client_to_server() -> None:
                 try:

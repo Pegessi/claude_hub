@@ -285,6 +285,80 @@
               <span class="checkbox-desc">Reconnect SSH automatically if the network drops</span>
             </label>
           </div>
+          <div class="form-group env-editor">
+            <label>Environment Preset</label>
+            <div class="env-preset-row">
+              <select
+                v-model="form.env_preset"
+                class="select-input"
+                @change="applyEnvPreset(form.env_preset)"
+              >
+                <option
+                  v-for="preset in envPresets"
+                  :key="preset.id"
+                  :value="preset.id"
+                >
+                  {{ preset.name }}
+                </option>
+              </select>
+              <button
+                type="button"
+                class="btn btn-secondary env-action-button"
+                @click="startEnvPresetEdit"
+              >
+                {{ selectedEnvPreset?.id !== 'none' ? 'Edit' : 'New' }}
+              </button>
+              <button
+                type="button"
+                class="btn btn-secondary env-action-button"
+                @click="deleteCurrentEnvPreset"
+              >
+                Delete
+              </button>
+            </div>
+            <textarea
+              v-if="selectedEnvPreset && selectedEnvPreset.id !== 'none' && !form.env_editor_open"
+              class="env-textarea env-textarea-preview"
+              readonly
+              :value="selectedEnvPreset.text"
+            />
+            <div
+              v-if="form.env_editor_open"
+              class="env-template-panel"
+            >
+              <input
+                v-model="form.env_preset_name"
+                class="env-preset-name"
+                placeholder="Preset name"
+              >
+              <textarea
+                v-model="form.env_text"
+                class="env-textarea"
+                spellcheck="false"
+                placeholder="HTTP_PROXY=http://127.0.0.1:7890&#10;HTTPS_PROXY=http://127.0.0.1:7890&#10;NO_PROXY=localhost,127.0.0.1,::1"
+              />
+              <div class="env-editor-actions">
+                <button
+                  type="button"
+                  class="btn btn-secondary"
+                  @click="cancelEnvPresetEdit"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-secondary env-save-button"
+                  :disabled="!form.env_text.trim() || !form.env_preset_name.trim()"
+                  @click="saveCurrentEnvPreset"
+                >
+                  Save preset
+                </button>
+              </div>
+            </div>
+            <p class="form-hint">
+              Pick a preset for this launch, or create your own KEY=value template here. Values are not printed in backend logs.
+            </p>
+          </div>
           <div class="modal-actions">
             <button
               type="button"
@@ -458,6 +532,11 @@ import AgentStatusFloatingPanel from '@/components/AgentStatusFloatingPanel.vue'
 import LayoutSelector from '@/components/LayoutSelector.vue'
 import LoadingButton from '@/components/LoadingButton.vue'
 import NetworkAccessMenu from '@/components/NetworkAccessMenu.vue'
+import {
+  defaultLaunchEnvPresetForAgent,
+  parseLaunchEnv,
+  useLaunchEnvPresets,
+} from '@/composables/useLaunchEnvPresets'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
@@ -479,6 +558,8 @@ interface DirectoryListing {
 
 const store = useTerminalStore()
 const appStore = useAppStore()
+const { envPresets, getPresetText, defaultPresetTextForAgent, savePreset, deletePreset } =
+  useLaunchEnvPresets()
 const { isPending, runPending } = usePendingActions()
 const { tabs, manualTabs, managedTabs, activeTabId, isLoading, agentStatuses } = storeToRefs(store)
 const { mode, colorScheme } = storeToRefs(appStore)
@@ -519,6 +600,10 @@ const form = reactive({
   target: 'local' as 'local' | 'remote',
   remote_profile_id: '',
   remote_reconnect: true,
+  env_preset: defaultLaunchEnvPresetForAgent('claude'),
+  env_preset_name: '',
+  env_text: defaultPresetTextForAgent('claude'),
+  env_editor_open: false,
 })
 
 const supportsSoloMode = computed(() => form.agent_type === 'claude' || form.agent_type === 'codex')
@@ -543,6 +628,9 @@ const remoteProfilesError = ref<string | null>(null)
 const selectedRemoteProfile = computed(() =>
   remoteProfiles.value.find(profile => profile.id === form.remote_profile_id) || null
 )
+const selectedEnvPreset = computed(() =>
+  envPresets.value.find(preset => preset.id === form.env_preset) || null
+)
 const isCreateDisabled = computed(
   () =>
     isLoading.value ||
@@ -552,6 +640,51 @@ const isCreateDisabled = computed(
 
 function tabActionKey(action: string, tabId: string | null | undefined) {
   return `tab:${tabId || 'none'}:${action}`
+}
+
+function applyEnvPreset(presetId: string) {
+  const text = getPresetText(presetId)
+  if (text === null) return
+  form.env_text = text
+  form.env_editor_open = false
+}
+
+function startEnvPresetEdit() {
+  const preset = selectedEnvPreset.value
+  form.env_preset_name = preset && preset.id !== 'none' ? preset.name : ''
+  form.env_text = preset && preset.id !== 'none' ? preset.text : ''
+  form.env_editor_open = true
+}
+
+function cancelEnvPresetEdit() {
+  applyEnvPreset(form.env_preset)
+  form.env_preset_name = ''
+  form.env_editor_open = false
+}
+
+function saveCurrentEnvPreset() {
+  const preset = savePreset(form.env_preset_name, form.env_text, form.env_preset)
+  if (!preset) return
+  form.env_preset = preset.id
+  form.env_preset_name = ''
+  form.env_text = preset.text
+  form.env_editor_open = false
+}
+
+function deleteCurrentEnvPreset() {
+  if (!selectedEnvPreset.value || selectedEnvPreset.value.id === 'none') return
+  if (!deletePreset(form.env_preset)) return
+  form.env_preset = 'none'
+  form.env_preset_name = ''
+  form.env_text = ''
+  form.env_editor_open = false
+}
+
+function resetEnvForAgentType(agentType: AgentType) {
+  form.env_preset = defaultLaunchEnvPresetForAgent(agentType)
+  form.env_preset_name = ''
+  form.env_text = defaultPresetTextForAgent(agentType)
+  form.env_editor_open = false
 }
 
 function agentTypeLabel(agentType: AgentType): string {
@@ -844,6 +977,7 @@ watch(showModal, (newVal) => {
     form.target = 'local'
     form.remote_profile_id = remoteProfiles.value[0]?.id || ''
     form.remote_reconnect = true
+    resetEnvForAgentType(form.agent_type)
     showFileBrowser.value = false
   }
 })
@@ -854,6 +988,7 @@ watch(
     if (agentType === 'cursor' || agentType === 'terminal') {
       form.solo_mode = false
     }
+    resetEnvForAgentType(agentType)
   }
 )
 
@@ -920,6 +1055,7 @@ async function handleCreateTab() {
   const remote_profile_id = target === 'remote' ? form.remote_profile_id : undefined
   const remote_cwd = target === 'remote' ? cwd : undefined
   const remote_reconnect = target === 'remote' ? form.remote_reconnect : undefined
+  const env = parseLaunchEnv(form.env_text)
 
   if (target === 'remote' && !selectedProfile) {
     remoteProfilesError.value = 'Select a remote server first'
@@ -942,6 +1078,7 @@ async function handleCreateTab() {
       remote_profile_id,
       remote_cwd,
       remote_reconnect,
+      env,
     })
 
     form.name = ''
@@ -951,6 +1088,7 @@ async function handleCreateTab() {
     form.target = 'local'
     form.remote_profile_id = remoteProfiles.value[0]?.id || ''
     form.remote_reconnect = true
+    resetEnvForAgentType(form.agent_type)
     showFileBrowser.value = false
     showModal.value = false
   })
@@ -1631,6 +1769,60 @@ async function handleCreateTab() {
   color: var(--ch-color-text-soft);
   font-size: 12px;
   margin-left: 24px;
+}
+
+.env-editor {
+  gap: 8px;
+}
+
+.env-preset-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+}
+
+.env-action-button,
+.env-save-button {
+  white-space: nowrap;
+}
+
+.env-template-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-muted);
+  padding: 10px;
+}
+
+.env-preset-name {
+  width: 100%;
+}
+
+.env-textarea {
+  width: 100%;
+  min-height: 92px;
+  resize: vertical;
+  font-family: monospace !important;
+  line-height: 1.45;
+}
+
+.env-textarea-preview {
+  margin-top: 8px;
+  width: 100%;
+  resize: none;
+  min-height: 60px;
+  opacity: 0.75;
+  cursor: default;
+  white-space: pre-wrap;
+  font-family: monospace !important;
+}
+
+.env-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .modal-actions {

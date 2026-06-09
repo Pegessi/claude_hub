@@ -307,15 +307,18 @@ def runtime_status_from_report(
 def task_status_from_report(state: AgentReportState) -> Optional[WorkspaceTaskStatus]:
     """Map a report state into a board-column task status when it should affect the task."""
 
-    if state in {AgentReportState.REVIEW_PASSED, AgentReportState.REVIEW_NEEDS_INPUT}:
+    if state in {
+        AgentReportState.READY_FOR_REVIEW,
+        AgentReportState.COMPLETED,
+        AgentReportState.REVIEW_PASSED,
+        AgentReportState.REVIEW_NEEDS_INPUT,
+    }:
         return WorkspaceTaskStatus.REVIEW
     if state in {
         AgentReportState.STARTED,
         AgentReportState.WORKING,
         AgentReportState.BLOCKED,
         AgentReportState.NEEDS_INPUT,
-        AgentReportState.READY_FOR_REVIEW,
-        AgentReportState.COMPLETED,
         AgentReportState.REVIEW_STARTED,
         AgentReportState.REVIEW_FAILED,
     }:
@@ -352,9 +355,10 @@ def can_skip_task_review(context: ReviewSkipContext) -> bool:
         return False
     if context.evidence_gaps:
         return False
-    if context.changed_files:
+    normalized_risk_level = (context.risk_level or "").strip().lower()
+    if normalized_risk_level not in {"", "low", "none", "trivial"}:
         return False
-    if (context.risk_level or "").strip().lower() not in {"", "low", "none"}:
+    if context.changed_files and normalized_risk_level != "trivial":
         return False
     if context.latest_review_state == AgentReportState.REVIEW_FAILED:
         return False
