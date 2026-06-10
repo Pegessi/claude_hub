@@ -15,6 +15,9 @@ model:
   bounded tmux snapshot (agent TUIs use a smaller tail than plain terminals) so
   long-context tabs can show the bottom prompt promptly. Explicit manual
   refresh remains the full `-100000` recovery path.
+- **Short agent histories skip replay**: Claude/Codex/Cursor startup screens
+  should render from ttyd live when the initial captured history is short.
+  Replaying a tiny early snapshot can swallow later logo/help text.
 - **Phase A**: `term.open()` has not been called. Write scrollback only, use SU
   escape to push bottom rows into scrollback, and leave the visible screen blank
   for ttyd WebSocket data.

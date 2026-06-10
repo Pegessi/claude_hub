@@ -17,6 +17,9 @@ script that fetches tmux history and reconstructs scrollback.
   - agent TUIs (`claude`, `codex`, `cursor`): smaller tail for fast prompt
     visibility.
   - plain terminals: larger tail for normal shell scrollback.
+- Agent TUI initial replay is conditional: short captured histories skip replay
+  so fresh Claude/Codex/Cursor startup screens can render live from ttyd, while
+  genuinely long histories still take the bounded replay path.
 - Single-pane mode keeps a small LRU cache of recent terminal iframes so
   switching among active workspace agents does not repeatedly reload ttyd and
   replay history.
@@ -30,3 +33,6 @@ script that fetches tmux history and reconstructs scrollback.
   stable tab id, and resize messages should remain scoped to the active iframe.
 - Agent TUIs should not receive automatic history resync during live redraws;
   cursor-relative screen updates can be corrupted by plain tmux snapshot replay.
+- Do not replay tiny early agent snapshots. Fresh agent tabs may emit the logo
+  and guidance after the first history capture; replaying the early snapshot
+  can hide those live startup frames.
