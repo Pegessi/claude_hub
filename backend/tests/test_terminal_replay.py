@@ -17,7 +17,11 @@ from typing import Any
 import pytest
 from playwright.sync_api import Page
 
-from claude_hub.api.terminal import FULL_HISTORY_LINES, INITIAL_AGENT_HISTORY_LINES
+from claude_hub.api.terminal import (
+    FULL_HISTORY_LINES,
+    INITIAL_AGENT_HISTORY_LINES,
+    INITIAL_AGENT_REPLAY_MIN_LINES,
+)
 
 from .conftest import (
     BACKEND_URL,
@@ -738,10 +742,11 @@ def test_agent_tui_tab_does_not_auto_resync_after_live_writes_or_activation(
     assert resp.status_code == 201, f"Failed to create tab: {resp.text}"
     tab = resp.json()
     session_name = f"claude-hub-{tab['id'][:8]}"
+    history_count = INITIAL_AGENT_REPLAY_MIN_LINES + 80
 
     try:
         ensure_tmux_session(page, tab["id"], session_name)
-        produce_scrollback(session_name, count=160)
+        produce_scrollback(session_name, count=history_count)
         initial_history_fetches: list[str] = []
         page.on(
             "request",
@@ -751,7 +756,7 @@ def test_agent_tui_tab_does_not_auto_resync_after_live_writes_or_activation(
                 else None
             ),
         )
-        load_terminal_page(page, tab["id"], min_buffer_lines=160)
+        load_terminal_page(page, tab["id"], min_buffer_lines=history_count)
         page.wait_for_timeout(1200)
         assert len(initial_history_fetches) == 1, (
             "agent-tagged terminal performed implicit post-replay history refreshes: "
@@ -762,7 +767,7 @@ def test_agent_tui_tab_does_not_auto_resync_after_live_writes_or_activation(
         agent_history_numbers = {
             int(match.group(1)) for match in re.finditer(r"LINE_(\d{4})", agent_text)
         }
-        assert agent_history_numbers == set(range(160)), (
+        assert agent_history_numbers == set(range(history_count)), (
             "agent-tagged terminal lost or duplicated replayed scrollback "
             f"without a corrective history refresh: {sorted(agent_history_numbers)}"
         )
@@ -828,6 +833,49 @@ def test_agent_tui_tab_does_not_auto_resync_after_live_writes_or_activation(
             pass
 
 
+def test_agent_tui_short_history_skips_initial_replay(backend_server: None, page: Page) -> None:
+    """Short/new agent sessions should let ttyd render startup content live."""
+    session = local_requests_session()
+    resp = session.post(
+        f"{BACKEND_URL}/api/tabs",
+        json={
+            "name": "test-agent-tui-short-history",
+            "agent_type": "codex",
+            "shell": "/bin/zsh",
+        },
+    )
+    assert resp.status_code == 201, f"Failed to create tab: {resp.text}"
+    tab = resp.json()
+    session_name = f"claude-hub-{tab['id'][:8]}"
+
+    try:
+        ensure_tmux_session(page, tab["id"], session_name)
+        produce_scrollback(session_name, count=20)
+        history_fetches: list[str] = []
+        page.on(
+            "request",
+            lambda request: (
+                history_fetches.append(request.url)
+                if f"/api/terminal/history/{tab['id']}" in request.url
+                else None
+            ),
+        )
+        load_terminal_page(page, tab["id"])
+
+        assert len(history_fetches) == 1
+        assert f"lines={INITIAL_AGENT_HISTORY_LINES}" in history_fetches[0]
+        skipped = page.evaluate(
+            "() => window.term && window.term.__claudeHubReplaySkippedForShortHistory === true"
+        )
+        assert skipped is True
+        assert "LINE_0019" in read_xterm_text(page)
+    finally:
+        try:
+            session.delete(f"{BACKEND_URL}/api/tabs/{tab['id']}", timeout=5)
+        except Exception:
+            pass
+
+
 def test_agent_tui_initial_replay_keeps_live_frames(backend_server: None, page: Page) -> None:
     """Agent replay filters duplicate initial frames without swallowing new output."""
     session = local_requests_session()
@@ -845,7 +893,7 @@ def test_agent_tui_initial_replay_keeps_live_frames(backend_server: None, page: 
 
     try:
         ensure_tmux_session(page, tab["id"], session_name)
-        produce_scrollback(session_name, count=120)
+        produce_scrollback(session_name, count=INITIAL_AGENT_REPLAY_MIN_LINES + 80)
         send_keys_sync(
             session_name,
             (
@@ -921,11 +969,12 @@ def test_agent_tui_history_view_is_stable_during_live_redraws(
     tab = resp.json()
     session_name = f"claude-hub-{tab['id'][:8]}"
     line_count = 40
+    history_count = INITIAL_AGENT_REPLAY_MIN_LINES + 80
 
     try:
         ensure_tmux_session(page, tab["id"], session_name)
-        produce_scrollback(session_name, count=260)
-        load_terminal_page(page, tab["id"], min_buffer_lines=260)
+        produce_scrollback(session_name, count=history_count)
+        load_terminal_page(page, tab["id"], min_buffer_lines=history_count)
 
         page.evaluate("""() => {
                 const term = window.term;

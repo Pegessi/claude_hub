@@ -3,6 +3,20 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## 2026-06-10
+
+### fix: skip initial replay for short agent terminal history
+
+- Claude/Codex/Cursor tabs now skip initial snapshot replay when the captured
+  history is short, allowing fresh agent startup screens, logos, and guidance
+  text to render live from ttyd instead of being overwritten by an early
+  snapshot.
+- Long agent histories still use the bounded replay path from the prior
+  prompt-first optimization, and manual refresh still requests the full
+  `100000` line recovery snapshot.
+- **Files**: terminal.py, test_terminal_replay.py, terminal-debugging.md,
+  2026-06-09-long-context-terminal-activation.md, CHANGELOG.md
+
 ## 2026-06-09
 
 ### perf: make long-context terminal tab activation prompt-first

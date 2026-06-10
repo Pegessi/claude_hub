@@ -43,6 +43,7 @@ router = APIRouter(prefix="/api/terminal", tags=["terminal"])
 
 FULL_HISTORY_LINES = 100000
 INITIAL_AGENT_HISTORY_LINES = 5000
+INITIAL_AGENT_REPLAY_MIN_LINES = 1000
 INITIAL_TERMINAL_HISTORY_LINES = 20000
 
 
@@ -465,6 +466,7 @@ async def proxy_terminal_request(
         const IS_AGENT_TUI = AGENT_TYPE === 'claude' || AGENT_TYPE === 'codex' || AGENT_TYPE === 'cursor';
         const IS_REMOTE_AGENT_TUI = EXECUTION_TARGET === 'remote' && IS_AGENT_TUI;
         const FULL_HISTORY_LINES = {FULL_HISTORY_LINES};
+        const INITIAL_AGENT_REPLAY_MIN_LINES = {INITIAL_AGENT_REPLAY_MIN_LINES};
         const INITIAL_HISTORY_LINES = IS_AGENT_TUI
           ? {INITIAL_AGENT_HISTORY_LINES}
           : {INITIAL_TERMINAL_HISTORY_LINES};
@@ -634,6 +636,16 @@ async def proxy_terminal_request(
             lines.pop();
           }}
           if (lines.length === 0) {{
+            term.__claudeHubReplayDone = true;
+            return;
+          }}
+          if (fullReplay && IS_AGENT_TUI && lines.length < INITIAL_AGENT_REPLAY_MIN_LINES) {{
+            // Fresh Claude/Codex/Cursor sessions often produce their logo and
+            // startup guidance after the first fast history capture. Replaying
+            // that tiny early snapshot and filtering buffered ttyd frames can
+            // swallow the real startup screen, so only use initial replay for
+            // genuinely long agent histories.
+            term.__claudeHubReplaySkippedForShortHistory = true;
             term.__claudeHubReplayDone = true;
             return;
           }}
