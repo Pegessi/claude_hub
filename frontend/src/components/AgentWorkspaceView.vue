@@ -6618,6 +6618,44 @@ onUnmounted(() => {
 
 .agent-manager-modal {
   width: min(720px, 100%);
+  display: flex;
+  flex-direction: column;
+  /* Keep the whole modal within a single viewport height. */
+  max-height: calc(100dvh - 32px);
+  overflow: hidden;
+}
+
+/* Title stays pinned; sections below manage their own scrolling. */
+.agent-manager-modal > h3 {
+  flex-shrink: 0;
+}
+
+/* Workspace Agents list: fixed-height region that scrolls internally
+   instead of pushing the Add Agent form off-screen. */
+.agent-manager-modal .modal-section--first {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.agent-manager-modal .modal-section--first .modal-section-header {
+  flex-shrink: 0;
+}
+
+.agent-manager-modal .modal-section--first .agent-list {
+  flex: 1;
+  min-height: 0;
+  max-height: 32dvh;
+  overflow-y: auto;
+}
+
+/* Add Agent form fills the remaining space and scrolls on its own so the
+   action buttons stay reachable without the dialog growing past the screen. */
+.agent-manager-modal .agent-create-form {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .lessons-manager-modal {
