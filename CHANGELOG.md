@@ -5,6 +5,19 @@
 
 ## Unreleased
 
+### style: keep Manage Agents modal within one viewport with a scrollable agent list
+
+- The Manage Agents modal grew taller than the screen when many workspace
+  agents existed, pushing the "Add Agent" form and action buttons below the
+  fold and making the whole dialog scroll as one block.
+- Fix: `.agent-manager-modal` is now a flex column capped at the viewport
+  height (`overflow: hidden`). The Workspace Agents list (`.agent-list`) has a
+  fixed maximum height (`32dvh`) and scrolls internally, and the Add Agent form
+  fills the remaining space and scrolls on its own, so the action buttons stay
+  reachable without the modal exceeding one screen. Scoped to
+  `.agent-manager-modal` so other modals are unaffected.
+- **Files**: `frontend/src/components/AgentWorkspaceView.vue`
+
 ### fix: detect frozen "working" frames so a stopped agent is no longer pinned as working
 
 - A Claude/Cursor session that stops while leaving a lingering "working"
