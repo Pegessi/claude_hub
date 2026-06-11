@@ -88,6 +88,14 @@ _IDLE_TAIL_HINTS = (
 )
 
 _STATUS_CACHE_TTL_SECONDS = 0.75
+# A genuinely-working agent repaints its spinner/elapsed-time roughly every
+# second, so the captured frame content changes on every status sample. If a
+# pane still shows working markers (spinner / "esc to interrupt") but its
+# content has not changed for this long, the agent has stopped while leaving a
+# frozen "working" frame on screen — treat it as stuck rather than working.
+# Kept well above the monitor interval and spinner tick, with generous headroom
+# so a slow tool call that briefly stops repainting is not flagged prematurely.
+_WORKING_FRAME_STALE_SECONDS = 180.0
 _PORT_CHECK_TIMEOUT_SECONDS = 0.2
 _REMOTE_CAPTURE_TIMEOUT_SECONDS = 10.0
 _VOLCENGINE_CODING_PLAN_MODEL_ALIASES = {
@@ -122,6 +130,7 @@ class CursorPosition(TypedDict):
 class _AgentStatusSnapshot(TypedDict):
     hash: str
     last_changed_at: Optional[datetime]
+    frame_first_seen_at: Optional[datetime]
 
 
 def _is_local_port_listening(port: int) -> bool:
@@ -1577,21 +1586,51 @@ class TTYDManager:
         snapshot = self._status_snapshots.get(process.tab_id)
         last_hash = snapshot.get("hash") if snapshot else None
         last_changed_at = snapshot.get("last_changed_at") if snapshot else None
+        frame_first_seen_at = snapshot.get("frame_first_seen_at") if snapshot else None
 
         if snapshot is None:
+            frame_first_seen_at = now
             self._status_snapshots[process.tab_id] = {
                 "hash": output_hash,
                 "last_changed_at": None,
+                "frame_first_seen_at": frame_first_seen_at,
             }
         elif last_hash != output_hash:
             last_changed_at = now
+            frame_first_seen_at = now
             self._status_snapshots[process.tab_id] = {
                 "hash": output_hash,
                 "last_changed_at": last_changed_at,
+                "frame_first_seen_at": frame_first_seen_at,
             }
+        # else: identical frame — keep the existing frame_first_seen_at so we can
+        # measure how long the screen has been frozen.
 
         if not _tmux_session_exists(process.tmux_session):
             return AgentRuntimeStatus.OFFLINE, "Offline", "tmux session is not available", None
+
+        def working_or_stale() -> tuple[AgentRuntimeStatus, str, Optional[str], Optional[datetime]]:
+            # A live agent repaints its spinner/elapsed counter every second, so
+            # the captured frame keeps changing. If working markers are showing
+            # but the frame has been frozen past the staleness window, the agent
+            # has stopped behind a lingering "working" frame — flag it for
+            # attention instead of reporting it as working forever.
+            if (
+                frame_first_seen_at is not None
+                and (now - frame_first_seen_at).total_seconds() >= _WORKING_FRAME_STALE_SECONDS
+            ):
+                return (
+                    AgentRuntimeStatus.ATTENTION,
+                    "Agent may be stuck",
+                    "working indicator has not changed; agent appears stopped",
+                    last_changed_at,
+                )
+            return (
+                AgentRuntimeStatus.WORKING,
+                "Working",
+                "agent is processing",
+                last_changed_at,
+            )
 
         # Only inspect the bottom of the visible screen — the current prompt
         # area. Historical scrollback is ignored so that words like
@@ -1614,28 +1653,13 @@ class TTYDManager:
 
         for pattern in _WORKING_TAIL_PATTERNS:
             if pattern in status_tail:
-                return (
-                    AgentRuntimeStatus.WORKING,
-                    "Working",
-                    "agent is processing",
-                    last_changed_at,
-                )
+                return working_or_stale()
 
         if _CLAUDE_WORKING_STATUS_RE.search("\n".join(status_tail_lines)):
-            return (
-                AgentRuntimeStatus.WORKING,
-                "Working",
-                "agent is processing",
-                last_changed_at,
-            )
+            return working_or_stale()
 
         if _CURSOR_WORKING_STATUS_RE.search("\n".join(status_tail_lines)):
-            return (
-                AgentRuntimeStatus.WORKING,
-                "Working",
-                "agent is processing",
-                last_changed_at,
-            )
+            return working_or_stale()
 
         if _BARE_SHELL_PROMPT_RE.search(last_line):
             return (
