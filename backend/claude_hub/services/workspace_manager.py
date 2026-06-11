@@ -823,6 +823,13 @@ class WorkspaceManager:
             raise KeyError(workspace_id)
         if payload.related_task_id and payload.related_task_id not in self.tasks:
             raise KeyError(payload.related_task_id)
+        # Validate session_id if provided (dispatch target hint)
+        if payload.session_id:
+            session = self.sessions.get(payload.session_id)
+            if not session or session.workspace_id != workspace_id:
+                raise KeyError(payload.session_id)
+            if session.role != WorkspaceSessionRole.ORCHESTRATOR:
+                raise ValueError("Tasks can only be assigned to workspace agents")
         title = payload.title.strip()
         prompt = payload.prompt.strip()
         if not title:
@@ -857,6 +864,8 @@ class WorkspaceManager:
             ),
             status=WorkspaceTaskStatus.TODO,
             related_task_id=payload.related_task_id,
+            session_id=payload.session_id or None,
+            clear_context=payload.clear_context,
             system_internal=system_internal,
             internal_kind=internal_kind,
             created_at=now,
@@ -1416,19 +1425,91 @@ class WorkspaceManager:
 
         now = _now()
         update: dict[str, Any] = {"updated_at": now}
-        if payload.title is not None or payload.prompt is not None:
+
+        # Determine which fields require todo status
+        has_todo_only_fields = any([
+            payload.title is not None,
+            payload.prompt is not None,
+            payload.add_attachments is not None,
+            payload.removed_attachment_ids is not None,
+            payload.related_task_id is not None,
+            payload.clear_context is not None,
+            payload.session_id is not None,
+        ])
+
+        if has_todo_only_fields:
             if task.status != WorkspaceTaskStatus.TODO:
                 raise ValueError("Only todo tasks can be edited")
-            title = payload.title.strip() if payload.title is not None else task.title.strip()
-            prompt = payload.prompt.strip() if payload.prompt is not None else task.prompt.strip()
-            if not title:
-                raise ValueError("Task title is required")
-            if not prompt and not task.attachments:
-                raise ValueError("Task description is required")
-            if payload.title is not None:
-                update["title"] = title
-            if payload.prompt is not None:
-                update["prompt"] = prompt
+
+        # Compute effective title and prompt
+        effective_title = task.title
+        effective_prompt = task.prompt
+        if payload.title is not None:
+            effective_title = payload.title.strip()
+            update["title"] = effective_title
+        if payload.prompt is not None:
+            effective_prompt = payload.prompt.strip()
+            update["prompt"] = effective_prompt
+
+        # Title validation
+        if payload.title is not None and not effective_title:
+            raise ValueError("Task title is required")
+
+        # Handle attachments for todo tasks
+        effective_attachments = task.attachments
+        if payload.add_attachments is not None or payload.removed_attachment_ids is not None:
+            current_attachments = list(task.attachments)
+
+            # Remove specified attachments
+            if payload.removed_attachment_ids:
+                remove_set = set(payload.removed_attachment_ids)
+                removed = [a for a in current_attachments if a.id in remove_set]
+                current_attachments = [a for a in current_attachments if a.id not in remove_set]
+                # Delete files from disk
+                for attachment in removed:
+                    try:
+                        Path(attachment.path).unlink(missing_ok=True)
+                    except OSError:
+                        logger.warning("Failed to delete attachment file: %s", attachment.path)
+
+            # Add new attachments
+            if payload.add_attachments:
+                new_attachments = self._persist_attachments(
+                    task.workspace_id, task.id, payload.add_attachments
+                )
+                current_attachments.extend(new_attachments)
+
+            effective_attachments = current_attachments
+            update["attachments"] = current_attachments
+
+        # Combined prompt + attachments validation for todo-only edits
+        if has_todo_only_fields and not effective_prompt.strip() and not effective_attachments:
+            raise ValueError("Task description is required")
+
+        # Handle related_task_id for todo tasks
+        if payload.related_task_id is not None:
+            related_id = payload.related_task_id or None
+            if related_id and related_id not in self.tasks:
+                raise KeyError(related_id)
+            if related_id == task.id:
+                raise ValueError("A task cannot be related to itself")
+            update["related_task_id"] = related_id
+
+        # Handle clear_context for todo tasks
+        if payload.clear_context is not None:
+            update["clear_context"] = payload.clear_context
+
+        # Handle session_id (dispatch target hint) for todo tasks
+        if payload.session_id is not None:
+            if payload.session_id:
+                session = self.sessions.get(payload.session_id)
+                if not session or session.workspace_id != task.workspace_id:
+                    raise KeyError(payload.session_id)
+                if session.role != WorkspaceSessionRole.ORCHESTRATOR:
+                    raise ValueError("Tasks can only be assigned to workspace agents")
+                update["session_id"] = payload.session_id
+            else:
+                update["session_id"] = None
         if payload.goal_packet is not None:
             update["goal_packet"] = payload.goal_packet
         if payload.review_profiles is not None:
