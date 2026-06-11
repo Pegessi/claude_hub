@@ -4,6 +4,17 @@
 > same commit. This guide is the short, always-read entry point; detailed design
 > history and debugging recipes live in the linked docs.
 
+---
+
+**⚠️ RULE #1 — DO NOT DEVELOP DIRECTLY ON `main`. ⚠️**
+
+Every feature, bug fix, UI change, test, doc update, and managed workspace
+task **must** use an isolated worktree on a feature branch. No exceptions.
+This is the single most important rule in this document. See
+[Mandatory Workflow](#mandatory-workflow).
+
+---
+
 ## Project
 
 Claude Terminal Hub is a web-based persistent terminal service with a tabbed
@@ -19,13 +30,16 @@ interface and a workspace orchestration layer that drives multiple agents
 
 ## Mandatory Workflow
 
-Do not develop directly on `main`. For feature work, bug fixes, UI changes,
-tests, documentation changes, and managed workspace tasks:
+**This workflow is mandatory. Do not skip steps. Do not take shortcuts.**
+
+For all feature work, bug fixes, UI changes, tests, documentation changes,
+and managed workspace tasks — even small ones:
 
 1. Start from clean `main`: fetch/sync first.
 2. Create an isolated worktree and branch:
    `git worktree add ../claude_hub-<slug> -b feat/your-feature main`.
-3. Work only inside that task worktree.
+3. **Work only inside that task worktree.** Never edit files in the `main`
+   worktree directly.
 4. For frontend changes, run a dedicated dev/review server from that worktree
    on its own port and stop it before merging or leaving the task.
 5. Commit changes with conventional commits.
@@ -36,6 +50,9 @@ tests, documentation changes, and managed workspace tasks:
 
 A user request to merge or push means complete this branch-to-main flow. It is
 not permission to skip the worktree branch.
+
+If you catch yourself writing code on `main`, stop immediately. Stash or
+revert, create a worktree, and continue there.
 
 ## Commit And CI
 
@@ -127,6 +144,9 @@ task.
 
 ## Pitfalls
 
+- **No direct work on `main`**: always create a worktree + feature branch first.
+  Even small fixes and doc changes go through a worktree. See
+  [Mandatory Workflow](#mandatory-workflow).
 - **Pinia reactivity**: use `storeToRefs()` for state refs and computed getters.
   Actions can be destructured directly.
 - **System proxy**: backend clears proxy env vars at import in `terminal.py`.
