@@ -3,6 +3,105 @@
 > Each entry corresponds to a merge or significant commit on `main`.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
+## Unreleased
+
+### fix: remove reviewer-report → dashboard lag (two-phase save race)
+
+- **Symptom**: when a reviewer posted `review_passed` / `review_failed` /
+  `review_needs_input`, the task card on the workspace dashboard stayed in
+  "AI Reviewing" for a very long time (tens of minutes in the worst case)
+  before finally transitioning to the human-acceptance or working state —
+  even though the terminal clearly showed `Verdict: review_passed`.
+- **Root cause (A — primary)**: `create_report()` wrote the AgentReport
+  record and reviewer session assignment in a first `_save_state()`, then
+  awaited `_after_report_recorded()` → `_handle_review_report()`, which
+  wrote the actual review flags (`review_completed_at`,
+  `human_acceptance_requested_at`, `review_session_id`) in a **second**
+  `_save_state()`. Any board GET between the two saves saw the terminal
+  report state on the report record but NOT yet on the task fields, so the
+  frontend `activeReviewBadge` / `reviewStatusLabel` kept rendering
+  `review_started`-style "AI Reviewing". The `_reconcile_task_report_statuses`
+  repair path would eventually fix it on a later board poll, hence the
+  "隔了很长一段时间" / long-delay resolution.
+- **Root cause (B)**: `workspace_state_policy.task_status_from_report()`
+  bucketed `REVIEW_FAILED` into the `WORKING` status set alongside
+  `STARTED` / `WORKING` / `REVIEW_STARTED`. That kept the task card in
+  the working column even after a reviewer had posted a terminal
+  `review_failed` verdict, and masked legitimate status transitions in
+  the `task_status` write path.
+- **Fix** (A — atomic save, closes the two-save race): reviewer terminal
+  decisions are written **synchronously** inside `create_report()` BEFORE
+  the single `_save_state()` call. Next board GET always sees the report
+  and task review flags (`review_completed_at`, `reviewed_at`,
+  `human_acceptance_requested_at`, status, session binding) written
+  atomically. Goal-packet review decisions (PENDING_REVIEW →
+  APPROVED/REJECTED) are written in the same save and still dispatch
+  `continue_task` feedback via the existing paths, which are now
+  idempotent via a `review_completed_at >= report.created_at` guard so
+  redundant legacy-path writes are skipped. Autonomous-mode
+  `autonomous_run` / `next_phase` derivation and reviewer-session
+  release are also done in the fast-path so reviewers return to idle
+  immediately. Structured INFO logs are emitted for (a) fast-path
+  applied, (b) legacy idempotent skip, and (c) late orchestrator
+  report blocked.
+- **Fix** (B — REVIEW_FAILED column placement): `REVIEW_FAILED` now maps
+  to `WorkspaceTaskStatus.REVIEW` in `task_status_from_report`
+  (matching `REVIEW_PASSED` / `REVIEW_NEEDS_INPUT`) — the
+  `continue_task` reopen still fires afterwards inside
+  `_handle_review_report` so a failed review still returns the task
+  to WORKING with reviewer feedback.
+- **Fix** (C — new: late orchestrator-report guards):
+  (1) `create_report()` ORCHESTRATOR status-write block is widened to
+  short-circuit when the reviewer verdict is still authoritative
+  (task still in `REVIEW` status AND `review_completed_at` set AND
+  the new report has `created_at >= review_completed_at`): late
+  WORKING / STARTED / BLOCKED / NEEDS_INPUT reports can no longer
+  flip `task.status` back from REVIEW to WORKING, and late
+  READY_FOR_REVIEW / COMPLETED reports do not write
+  `review_requested_at` / `reviewed_at` again.
+  (2) `_after_report_recorded` short-circuits before the
+  `_request_task_review` re-dispatch when a prior reviewer verdict
+  is still authoritative (`status == REVIEW AND review_completed_at
+  AND latest review report has same-or-newer timestamp`) so
+  reviewer sessions are not reassigned.
+  (3) The `status == REVIEW` key-of-truth requirement (instead of
+  just `review_completed_at`) is critical for the Goal Packet
+  lifecycle: `review_passed` on a goal packet also writes
+  `review_completed_at` (fast-path), then `continue_task` reopens
+  the implementation phase by transitioning `status = WORKING` and
+  **clearing** the stale goal-packet verdict fields
+  (`review_completed_at / reviewed_at / review_session_id /
+  review_requested_at`). Without the `status == REVIEW` requirement
+  OR explicit field clearing, a subsequent implementation-phase
+  COMPLETED would be starved of a reviewer dispatch by the stale
+  goal-packet approval timestamp — which was the exact regression
+  caught by `test_goal_packet_review_pass_resumes_original_agent`.
+- **Regression tests added**:
+  `test_late_orchestrator_working_report_after_review_verdict_does_not_flip_status`
+  and
+  `test_late_orchestrator_completed_report_after_verdict_does_not_redispatch_review`
+  in `tests/test_workspaces.py`; plus an additional guarantee that
+  `continue_task()` erases stale review-timestamp fields when
+  reopening after a review verdict. Existing
+  `test_review_passed_reconciles_stale_working_task`,
+  `test_goal_packet_review_pass_resumes_original_agent`,
+  `test_goal_packet_review_failed_returns_revision_to_original_agent`,
+  and review `continue_task` E2E all green.
+- **Validation**: `pytest tests/test_workspace_state_policy.py` all
+  green (24 passed); `pytest tests/test_workspaces.py` all green
+  (118 passed); 142 passed across the two targeted files; 224
+  passed across the full backend suite with 16 pre-existing
+  Playwright / tmux / asyncio-nesting infra failures unrelated to
+  this patch. Black / isort clean on touched files; 3 mypy errors
+  (historical GoalPacket union-attr warnings at L3995, L3999,
+  L5101 — identical to pre-patch baseline; no NEW typing issues).
+- **Files changed in this patch (5)**:
+  - backend/claude_hub/services/workspace_manager.py
+  - backend/claude_hub/services/workspace_state_policy.py
+  - backend/tests/test_workspace_state_policy.py
+  - backend/tests/test_workspaces.py
+  - CHANGELOG.md
+
 ## 2026-06-10
 
 ### fix: skip initial replay for short agent terminal history

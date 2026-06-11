@@ -5340,6 +5340,273 @@ def test_review_passed_reconciles_stale_working_task(
     assert board["tasks"][0]["reviewed_at"] == pass_response.json()["created_at"]
 
 
+def _stub_workspace_terminal_for_late_reports(monkeypatch: MonkeyPatch, repo: Path) -> None:
+    """Monkeypatch ttyd + tmux calls out of the workspace manager for late-report tests."""
+
+    async def fake_create_tab(
+        name: str,
+        shell: Optional[str] = None,
+        cwd: Optional[str] = None,
+        solo_mode: bool = False,
+        agent_type: AgentType = AgentType.CLAUDE,
+        target: ExecutionTarget = ExecutionTarget.LOCAL,
+        remote_profile_id: Optional[str] = None,
+        remote_cwd: Optional[str] = None,
+        remote_reconnect: bool = True,
+        remote_forward_port: Optional[int] = None,
+        workspace_id: Optional[str] = None,
+        workspace_name: Optional[str] = None,
+        workspace_role: WorkspaceSessionRole | None = None,
+    ) -> TerminalTab:
+        return TerminalTab(
+            id=f"tab-{name}",
+            name=name,
+            shell=shell,
+            cwd=cwd,
+            solo_mode=solo_mode,
+            agent_type=agent_type,
+            target=target,
+            remote_profile_id=remote_profile_id,
+            remote_cwd=remote_cwd,
+            remote_reconnect=remote_reconnect,
+            port=12700,
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+            workspace_role=workspace_role,
+        )
+
+    async def fake_send_tmux_message(_tmux_session: str, _message: str) -> None:
+        return None
+
+    async def fake_ensure_session_ready(_session) -> None:
+        return None
+
+    async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
+        return []
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
+    monkeypatch.setattr(
+        workspace_module.ttyd_manager,
+        "list_tab_agent_statuses",
+        fake_list_statuses,
+    )
+    monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+    monkeypatch.setattr(
+        workspace_manager,
+        "_ensure_session_ready_for_send",
+        fake_ensure_session_ready,
+    )
+
+
+def test_late_orchestrator_working_report_after_review_verdict_does_not_flip_status(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """AC7: WORKING/STARTED/BLOCKED/NEEDS_INPUT reports arriving after a
+    reviewer verdict is rendered must not flip REVIEW→WORKING or overwrite
+    verdict evidence."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _stub_workspace_terminal_for_late_reports(monkeypatch, repo)
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Late Working Guard",
+            "path": str(repo),
+            "session_prefix": "late",
+        },
+    ).json()
+    client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={
+            "title": "Late working guard",
+            "prompt": "Produce something, pass review, emit late working",
+        },
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    session_id = started["session_id"]
+
+    # Orchestrator reports ready_for_review → reviewer picks it up
+    rfr_resp = client.post(
+        f"/api/workspaces/sessions/{session_id}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "ready_for_review",
+            "message": "Ready for review",
+        },
+    )
+    assert rfr_resp.status_code == 201
+
+    # Reviewer renders a PASS verdict — this sets REVIEW + review_completed_at
+    pass_resp = pass_task_review(client, task["id"])
+    assert pass_resp.status_code == 201
+    pass_resp_data = pass_resp.json()
+    reviewed_at = pass_resp_data["created_at"]
+    assert reviewed_at is not None
+
+    # Confirm task state before the late report.
+    board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
+    pre_task = next(t for t in board["tasks"] if t["id"] == task["id"])
+    assert pre_task["status"] == "review"
+    assert pre_task["reviewed_at"] == reviewed_at
+    review_completed_at_before = workspace_manager.tasks[task["id"]].review_completed_at
+    assert review_completed_at_before is not None
+
+    # Now the orchestrator emits a late WORKING report (e.g. a long-running
+    # subprocess finally flushed a progress line and an old agent process
+    # re-uses the same session).
+    late_working = client.post(
+        f"/api/workspaces/sessions/{session_id}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "working",
+            "message": "Late progress update",
+        },
+    )
+    assert late_working.status_code == 201
+
+    # Task MUST still be REVIEW with the original verdict evidence intact.
+    board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
+    post_task = next(t for t in board["tasks"] if t["id"] == task["id"])
+    assert post_task["status"] == "review", (
+        "Late WORKING report must not flip REVIEW → WORKING; " f"got {post_task['status']}"
+    )
+    assert (
+        post_task["reviewed_at"] == reviewed_at
+    ), "Late WORKING report must not overwrite reviewed_at"
+    task_obj = workspace_manager.tasks[task["id"]]
+    assert task_obj.review_completed_at == review_completed_at_before
+    assert task_obj.review_session_id is not None
+
+
+def test_late_orchestrator_completed_report_after_verdict_does_not_redispatch_review(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """AC8: COMPLETED / READY_FOR_REVIEW reports arriving AFTER a reviewer
+    verdict is rendered must not trigger a new review-assignment dispatch
+    and must not clear review_completed_at or reviewed_at."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _stub_workspace_terminal_for_late_reports(monkeypatch, repo)
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Late Completed Guard",
+            "path": str(repo),
+            "session_prefix": "latecomp",
+        },
+    ).json()
+    client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={
+            "title": "Late completed guard",
+            "prompt": "Produce something, pass review, emit late completed",
+        },
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    session_id = started["session_id"]
+
+    rfr_resp = client.post(
+        f"/api/workspaces/sessions/{session_id}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "ready_for_review",
+            "message": "Ready for review",
+        },
+    )
+    assert rfr_resp.status_code == 201
+
+    pass_resp = pass_task_review(client, task["id"])
+    assert pass_resp.status_code == 201
+    pass_data = pass_resp.json()
+    reviewed_at = pass_data["created_at"]
+    review_session_before = workspace_manager.tasks[task["id"]].review_session_id
+    review_completed_at_before = workspace_manager.tasks[task["id"]].review_completed_at
+    assert review_session_before is not None
+    assert review_completed_at_before is not None
+
+    # Count review reports BEFORE the late completed to ensure none added.
+    review_reports_before = [
+        r
+        for r in workspace_manager.reports.values()
+        if r.task_id == task["id"] and r.state.value.startswith("review_")
+    ]
+
+    # Late COMPLETED report from the orchestrator, well after verdict.
+    late_resp = client.post(
+        f"/api/workspaces/sessions/{session_id}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "completed",
+            "message": "Late completion report from retried agent run",
+            "changed_files": [],
+            "validation": "Already judged by reviewer.",
+            "risks": "None.",
+            "acceptance_check": [
+                {
+                    "criterion": "Placeholder criterion",
+                    "status": "passed",
+                    "evidence": "Already judged by reviewer verdict.",
+                }
+            ],
+            "goal_packet": {
+                "objective": "Late completed guard test",
+                "acceptance_criteria": ["Verdict must remain intact after late completed."],
+                "validation_plan": ["Assert status and review fields."],
+                "assumptions": ["Reviewer verdict is authoritative."],
+                "out_of_scope": ["Nothing else."],
+                "handoff_requirements": ["No handoff."],
+                "status": "approved",
+            },
+        },
+    )
+    assert late_resp.status_code == 201
+
+    # Verdict evidence MUST stay intact.
+    task_obj = workspace_manager.tasks[task["id"]]
+    assert (
+        task_obj.status == WorkspaceTaskStatus.REVIEW
+    ), f"Task must remain REVIEW after late COMPLETED; got {task_obj.status}"
+    assert (
+        task_obj.review_session_id == review_session_before
+    ), "Late COMPLETED must not reassign the reviewer (no redispatch)"
+    assert (
+        task_obj.review_completed_at == review_completed_at_before
+    ), "Late COMPLETED must not clear review_completed_at"
+    assert task_obj.reviewed_at is not None, "Late COMPLETED must not clobber reviewed_at"
+    # reviewed_at must fall within +-10s of the pass_response timestamp
+    # (both are set close in time; we only care it was not overwritten by
+    # the much-later COMPLETED report, so loose equality is enough).
+    reviewed_at_ts = task_obj.reviewed_at.timestamp()
+    pass_ts = datetime.fromisoformat(reviewed_at.replace("Z", "+00:00")).timestamp()
+    assert abs(reviewed_at_ts - pass_ts) < 10, (
+        f"reviewed_at {task_obj.reviewed_at.isoformat()} drifted too far from "
+        f"pass timestamp {reviewed_at}; late COMPLETED overwrote it"
+    )
+
+    # No extra REVIEW_STARTED (i.e. reviewer was not re-dispatched).
+    review_reports_after = [
+        r
+        for r in workspace_manager.reports.values()
+        if r.task_id == task["id"] and r.state.value.startswith("review_")
+    ]
+    assert len(review_reports_after) == len(review_reports_before), (
+        f"Late COMPLETED must not spawn new review dispatches; "
+        f"before={len(review_reports_before)} after={len(review_reports_after)}"
+    )
+
+
 def test_fresh_ready_report_is_not_immediately_reopened_by_runtime_working(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
