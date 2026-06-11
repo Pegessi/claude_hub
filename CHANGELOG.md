@@ -25,6 +25,25 @@
 - **Files**: `backend/claude_hub/services/ttyd_manager.py`,
   `backend/tests/test_ttyd_manager.py`
 
+### feat: todo task edit enhancements — dispatch options + create-form fixes
+
+- Edit modal for todo tasks now exposes dispatch options: dispatch agent
+  dropdown (orchestrator sessions), related task selector, and clear-context
+  toggle — previously these were only available at dispatch time from the card.
+- Fixed new-task creation: "dispatch agent" dropdown now works (wired to
+  `session_id` on `WorkspaceTaskCreate`) and "related task" selection now
+  persists to the created task (wired to `related_task_id`).
+- After edit save, card dispatch options, detail panel, and edit modal all
+  stay in sync — the per-task `startOptions` cache is invalidated so the
+  dispatch card re-reads stored values.
+- Backend PATCH endpoint (`update_task`) extended with todo-only fields:
+  `related_task_id`, `clear_context`, `session_id` — all validated
+  (session existence/role, related-task self-reference guard).
+- **Files**: `backend/claude_hub/models/schemas.py`,
+  `backend/claude_hub/services/workspace_manager.py`,
+  `frontend/src/types/index.ts`,
+  `frontend/src/components/AgentWorkspaceView.vue`
+
 ### fix: progress bug — prevent implementation review from being misrouted as goal packet review
 
 - The `is_goal_packet_review` condition in `_handle_review_report()` was too

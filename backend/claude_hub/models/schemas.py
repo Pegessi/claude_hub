@@ -478,6 +478,8 @@ class WorkspaceTaskCreate(BaseModel):
     goal_packet: Optional[GoalPacket] = None
     review_profiles: List[ReviewProfile] = Field(default_factory=list)
     autonomy_policy: Optional[AutonomyPolicy] = None
+    session_id: Optional[str] = None
+    clear_context: Optional[bool] = None
 
 
 class WorkspaceAttachmentCreate(BaseModel):
@@ -510,6 +512,12 @@ class WorkspaceTaskUpdate(BaseModel):
     review_profiles: Optional[List[ReviewProfile]] = None
     autonomy_policy: Optional[AutonomyPolicy] = None
     autonomous_run: Optional[AutonomousRun] = None
+    # Todo-task edit fields
+    add_attachments: Optional[List["WorkspaceAttachmentCreate"]] = None
+    removed_attachment_ids: Optional[List[str]] = None
+    related_task_id: Optional[str] = None
+    clear_context: Optional[bool] = None
+    session_id: Optional[str] = None
 
 
 class WorkspaceTask(BaseModel):

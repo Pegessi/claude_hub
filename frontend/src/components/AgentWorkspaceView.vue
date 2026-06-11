@@ -1603,6 +1603,33 @@
             </div>
           </div>
           <div class="modal-field">
+            <label>Dispatch agent</label>
+            <select
+              v-model="taskForm.session_id"
+              :disabled="!activeWorkspaceId"
+            >
+              <option value="">
+                Auto
+              </option>
+              <option
+                v-for="agent in workspaceAgents"
+                :key="agent.id"
+                :value="agent.id"
+              >
+                {{ agent.title }}
+              </option>
+            </select>
+          </div>
+          <div class="modal-field">
+            <label class="checkbox-label">
+              <input
+                v-model="taskForm.clear_context"
+                type="checkbox"
+              >
+              Clear context
+            </label>
+          </div>
+          <div class="modal-field">
             <label>Related task</label>
             <select
               v-model="taskForm.related_task_id"
@@ -1649,7 +1676,10 @@
     >
       <div class="workspace-modal">
         <h3>Edit Task</h3>
-        <form @submit.prevent="handleUpdateTask">
+        <form
+          @submit.prevent="handleUpdateTask"
+          @paste.prevent
+        >
           <div class="modal-field">
             <label>Title</label>
             <input
@@ -1660,6 +1690,45 @@
           <div class="modal-field">
             <label>Task description</label>
             <textarea v-model="editTaskForm.prompt" />
+          </div>
+          <div class="modal-field">
+            <label>Dispatch agent</label>
+            <select v-model="editTaskForm.session_id">
+              <option value="">
+                Auto
+              </option>
+              <option
+                v-for="agent in workspaceAgents"
+                :key="agent.id"
+                :value="agent.id"
+              >
+                {{ agent.title }}
+              </option>
+            </select>
+          </div>
+          <div class="modal-field">
+            <label>Related task</label>
+            <select v-model="editTaskForm.related_task_id">
+              <option value="">
+                None
+              </option>
+              <option
+                v-for="task in tasks.filter(item => item.id !== editingTaskId)"
+                :key="task.id"
+                :value="task.id"
+              >
+                {{ task.title }}
+              </option>
+            </select>
+          </div>
+          <div class="modal-field">
+            <label class="checkbox-label">
+              <input
+                v-model="editTaskForm.clear_context"
+                type="checkbox"
+              >
+              Clear context
+            </label>
           </div>
           <div class="modal-actions">
             <button
@@ -1672,7 +1741,7 @@
             <LoadingButton
               type="submit"
               class="primary-button"
-              :disabled="!editingTaskId || isLoading || !editTaskForm.title.trim() || (!editTaskForm.prompt.trim() && !editTaskForm.has_attachments)"
+              :disabled="!editingTaskId || isLoading || !editTaskForm.title.trim() || !editTaskForm.prompt.trim()"
               :loading="isPending(taskActionKey('edit', editingTaskId))"
               loading-label="Saving task"
             >
@@ -2260,6 +2329,7 @@ import type {
   WorkspaceTaskExecutionComplexity,
   WorkspaceTaskMode,
   WorkspaceTaskStatus,
+  WorkspaceTaskUpdate,
 } from '@/types'
 
 interface TaskStartOptions {
@@ -2397,6 +2467,8 @@ const taskForm = reactive({
   evaluation_strictness: 'balanced' as AutonomyPolicy['evaluation_strictness'],
   allow_web_research: false,
   require_artifact_review: false,
+  session_id: '',
+  clear_context: false,
   related_task_id: '',
   attachments: [] as DraftAttachment[],
 })
@@ -2404,7 +2476,9 @@ const taskForm = reactive({
 const editTaskForm = reactive({
   title: '',
   prompt: '',
-  has_attachments: false,
+  session_id: '',
+  related_task_id: '',
+  clear_context: false,
 })
 
 const lessonForm = reactive({
@@ -2944,9 +3018,9 @@ function sessionActionKey(action: string, sessionId: string | null | undefined) 
 function startOptionsFor(task: WorkspaceTask): TaskStartOptions {
   if (!startOptions[task.id]) {
     startOptions[task.id] = {
-      target_session_id: '',
-      related_task_id: '',
-      clear_context: false,
+      target_session_id: task.session_id || '',
+      related_task_id: task.related_task_id || '',
+      clear_context: Boolean(task.clear_context),
     }
   }
   return startOptions[task.id]
@@ -3971,6 +4045,8 @@ function resetTaskForm() {
   taskForm.evaluation_strictness = 'balanced'
   taskForm.allow_web_research = false
   taskForm.require_artifact_review = false
+  taskForm.session_id = ''
+  taskForm.clear_context = false
   taskForm.related_task_id = ''
   resetDraftAttachments(taskForm.attachments)
 }
@@ -3990,7 +4066,9 @@ function openEditTaskModal(task: WorkspaceTask) {
   editingTaskId.value = task.id
   editTaskForm.title = task.title
   editTaskForm.prompt = task.prompt
-  editTaskForm.has_attachments = task.attachments.length > 0
+  editTaskForm.session_id = task.session_id || ''
+  editTaskForm.related_task_id = task.related_task_id || ''
+  editTaskForm.clear_context = Boolean(task.clear_context)
   showEditTaskModal.value = true
 }
 
@@ -3999,7 +4077,9 @@ function closeEditTaskModal() {
   editingTaskId.value = null
   editTaskForm.title = ''
   editTaskForm.prompt = ''
-  editTaskForm.has_attachments = false
+  editTaskForm.session_id = ''
+  editTaskForm.related_task_id = ''
+  editTaskForm.clear_context = false
 }
 
 function openLessonsModal() {
@@ -4090,6 +4170,8 @@ async function handleCreateTask() {
       task_mode: taskForm.task_mode,
       execution_complexity: taskForm.execution_complexity,
       autonomy_policy: autonomyPolicy,
+      session_id: taskForm.session_id || null,
+      clear_context: taskForm.clear_context || null,
       related_task_id: taskForm.related_task_id || null,
       attachments: serializeDraftAttachments(taskForm.attachments),
     })
@@ -4103,15 +4185,21 @@ async function handleUpdateTask() {
   if (
     !taskId ||
     !editTaskForm.title.trim() ||
-    (!editTaskForm.prompt.trim() && !editTaskForm.has_attachments)
+    !editTaskForm.prompt.trim()
   ) {
     return
   }
   await runPending(taskActionKey('edit', taskId), async () => {
-    await workspaceStore.updateTask(taskId, {
+    const payload: WorkspaceTaskUpdate = {
       title: editTaskForm.title.trim(),
       prompt: editTaskForm.prompt.trim(),
-    })
+      session_id: editTaskForm.session_id || null,
+      related_task_id: editTaskForm.related_task_id || null,
+      clear_context: editTaskForm.clear_context ? true : null,
+    }
+    await workspaceStore.updateTask(taskId, payload)
+    // Clear cached start options so they re-read from the updated task
+    delete startOptions[taskId]
     closeEditTaskModal()
   })
 }
