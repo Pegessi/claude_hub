@@ -1081,6 +1081,147 @@ def test_goal_packet_review_failed_returns_revision_to_original_agent(
     assert "Do not start implementation" in sent_messages[-1][1]
 
 
+def test_implementation_review_not_misrouted_as_goal_packet_review(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Regression test: implementation-phase review must not be misrouted
+    to the goal-packet review handler.
+
+    Bug: after goal packet approval, the packet stays in APPROVED status
+    and review_completed_at gets rewritten by the implementation review's
+    own fast-path. The old `is_goal_packet_review` condition matched both
+    (APPROVED status + review_session_id + review_completed_at >= report),
+    so implementation review_passed was incorrectly handled as a goal
+    packet approval, triggering continue_task and looping the task back
+    into implementation + review cycles.
+
+    Fix: also require goal_packet.updated_at >= report.created_at, which
+    is only true when the *packet itself* was touched by this review
+    cycle (goal packet reviews only).
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="impl-not-goal-tab",
+        port=12700,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "ImplNotGoal", "path": str(repo), "session_prefix": "implnotgoal"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Impl review stays review", "prompt": "Build it and review it"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+
+    # Step 1: agent submits goal packet → goal packet approval review
+    client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "working",
+            "message": "Goal Packet created; waiting for approval.",
+            "goal_packet": {
+                "objective": "Build the feature.",
+                "acceptance_criteria": ["Feature works"],
+                "validation_plan": ["Run tests"],
+                "assumptions": [],
+                "out_of_scope": [],
+                "handoff_requirements": [],
+            },
+        },
+    )
+    goal_reviewer_id = workspace_manager.tasks[task["id"]].review_session_id
+    assert goal_reviewer_id is not None
+    sent_messages.clear()
+
+    # Step 2: goal packet reviewer approves → task resumes in WORKING
+    client.post(
+        f"/api/workspaces/sessions/{goal_reviewer_id}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "review_passed",
+            "message": "Goal Packet looks good.",
+        },
+    )
+    after_goal_pass = workspace_manager.tasks[task["id"]]
+    assert after_goal_pass.status == WorkspaceTaskStatus.WORKING
+    assert after_goal_pass.goal_packet is not None
+    assert after_goal_pass.goal_packet.status.value == "approved"
+    assert after_goal_pass.session_id == started["session_id"]
+    sent_messages.clear()
+
+    # Step 3: agent completes implementation → implementation review dispatched
+    client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "completed",
+            "message": "Implementation complete.",
+            "acceptance_check": [
+                {
+                    "criterion": "Feature works",
+                    "status": "passed",
+                    "evidence": "Tests pass.",
+                }
+            ],
+            "changed_files": ["src/feature.py"],
+            "validation": "pytest",
+            "risks": "none",
+            "review_decision": "request",
+            "review_reason": "Implementation needs review.",
+        },
+    )
+    impl_reviewer_id = workspace_manager.tasks[task["id"]].review_session_id
+    assert impl_reviewer_id is not None
+    after_impl_request = workspace_manager.tasks[task["id"]]
+    assert after_impl_request.status == WorkspaceTaskStatus.REVIEW
+    assert after_impl_request.goal_packet.status.value == "approved"
+    # The goal packet's updated_at should be from the goal review, not
+    # the implementation review request.
+    goal_updated_at_before = after_impl_request.goal_packet.updated_at
+    sent_messages.clear()
+
+    # Step 4: implementation reviewer passes.  This is the bug point:
+    # the old code would misroute this as a goal-packet review (because
+    # packet is APPROVED, review_session_id matches, review_completed_at
+    # is set by the fast-path and >= report.created_at), call
+    # continue_task, and push the task back to WORKING.
+    impl_review_response = client.post(
+        f"/api/workspaces/sessions/{impl_reviewer_id}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "review_passed",
+            "message": "Implementation looks good.",
+        },
+    )
+    assert impl_review_response.status_code == 201
+
+    final_task = workspace_manager.tasks[task["id"]]
+    # Key assertions for the bug fix:
+    assert final_task.status == WorkspaceTaskStatus.REVIEW
+    assert final_task.human_acceptance_requested_at is not None
+    assert final_task.goal_packet is not None
+    assert final_task.goal_packet.status.value == "approved"
+    # Goal packet updated_at must NOT have changed — implementation
+    # reviews do not touch the goal packet.
+    assert final_task.goal_packet.updated_at == goal_updated_at_before
+    # The last sent message should NOT be "Goal Packet approved" feedback
+    # (which is what the bug would have produced via continue_task).
+    if sent_messages:
+        last_msg = sent_messages[-1][1]
+        assert "Goal Packet approved" not in last_msg
+        assert "Begin implementation" not in last_msg
+
+
 def test_update_workspace_changes_path_and_remote_cwd(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
