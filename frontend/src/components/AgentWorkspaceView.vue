@@ -1603,6 +1603,33 @@
             </div>
           </div>
           <div class="modal-field">
+            <label>Dispatch agent</label>
+            <select
+              v-model="taskForm.session_id"
+              :disabled="!activeWorkspaceId"
+            >
+              <option value="">
+                Auto
+              </option>
+              <option
+                v-for="agent in workspaceAgents"
+                :key="agent.id"
+                :value="agent.id"
+              >
+                {{ agent.title }}
+              </option>
+            </select>
+          </div>
+          <div class="modal-field">
+            <label class="checkbox-label">
+              <input
+                v-model="taskForm.clear_context"
+                type="checkbox"
+              >
+              Clear context
+            </label>
+          </div>
+          <div class="modal-field">
             <label>Related task</label>
             <select
               v-model="taskForm.related_task_id"
@@ -1649,7 +1676,10 @@
     >
       <div class="workspace-modal">
         <h3>Edit Task</h3>
-        <form @submit.prevent="handleUpdateTask">
+        <form
+          @submit.prevent="handleUpdateTask"
+          @paste="handleAttachmentPaste($event, editTaskForm.new_attachments)"
+        >
           <div class="modal-field">
             <label>Title</label>
             <input
@@ -1660,6 +1690,86 @@
           <div class="modal-field">
             <label>Task description</label>
             <textarea v-model="editTaskForm.prompt" />
+          </div>
+          <div class="modal-field">
+            <label>
+              Attachments
+              <span class="field-hint">(paste images to add)</span>
+            </label>
+            <div
+              v-if="editTaskAllAttachments.length > 0"
+              class="attachment-list"
+            >
+              <div
+                v-for="attachment in editTaskAllAttachments"
+                :key="attachment.id"
+                class="attachment-row"
+              >
+                <div class="attachment-thumb">
+                  <img
+                    :src="editTaskAttachmentPreview(attachment)"
+                    :alt="attachment.filename"
+                  >
+                </div>
+                <div class="attachment-meta">
+                  <strong>{{ attachment.filename }}</strong>
+                  <span>{{ attachment.mime_type }} · {{ formatAttachmentSize(editTaskAttachmentSize(attachment)) }}</span>
+                </div>
+                <button
+                  type="button"
+                  class="icon-button"
+                  aria-label="Remove attachment"
+                  @click="removeEditTaskAttachment(attachment)"
+                >
+                  x
+                </button>
+              </div>
+            </div>
+            <div
+              v-else
+              class="attachment-empty-hint"
+            >
+              No attachments. Paste images to add.
+            </div>
+          </div>
+          <div class="modal-field">
+            <label>Dispatch agent</label>
+            <select v-model="editTaskForm.session_id">
+              <option value="">
+                Auto
+              </option>
+              <option
+                v-for="agent in workspaceAgents"
+                :key="agent.id"
+                :value="agent.id"
+              >
+                {{ agent.title }}
+              </option>
+            </select>
+          </div>
+          <div class="modal-field">
+            <label>Related task</label>
+            <select v-model="editTaskForm.related_task_id">
+              <option value="">
+                None
+              </option>
+              <option
+                v-for="task in tasks.filter(item => item.id !== editingTaskId)"
+                :key="task.id"
+                :value="task.id"
+              >
+                {{ task.title }}
+              </option>
+            </select>
+          </div>
+          <div class="modal-field">
+            <label class="checkbox-label">
+              <input
+                v-model="editTaskForm.clear_context"
+                type="checkbox"
+              >
+              Clear context
+            </label>
           </div>
           <div class="modal-actions">
             <button
@@ -1672,7 +1782,7 @@
             <LoadingButton
               type="submit"
               class="primary-button"
-              :disabled="!editingTaskId || isLoading || !editTaskForm.title.trim() || (!editTaskForm.prompt.trim() && !editTaskForm.has_attachments)"
+              :disabled="!editingTaskId || isLoading || !editTaskForm.title.trim() || (!editTaskForm.prompt.trim() && editTaskAllAttachments.length === 0)"
               :loading="isPending(taskActionKey('edit', editingTaskId))"
               loading-label="Saving task"
             >
@@ -2260,6 +2370,7 @@ import type {
   WorkspaceTaskExecutionComplexity,
   WorkspaceTaskMode,
   WorkspaceTaskStatus,
+  WorkspaceTaskUpdate,
 } from '@/types'
 
 interface TaskStartOptions {
@@ -2397,6 +2508,8 @@ const taskForm = reactive({
   evaluation_strictness: 'balanced' as AutonomyPolicy['evaluation_strictness'],
   allow_web_research: false,
   require_artifact_review: false,
+  session_id: '',
+  clear_context: false,
   related_task_id: '',
   attachments: [] as DraftAttachment[],
 })
@@ -2404,7 +2517,12 @@ const taskForm = reactive({
 const editTaskForm = reactive({
   title: '',
   prompt: '',
-  has_attachments: false,
+  session_id: '',
+  related_task_id: '',
+  clear_context: false,
+  new_attachments: [] as DraftAttachment[],
+  removed_attachment_ids: [] as string[],
+  _original_attachments: [] as WorkspaceAttachment[],
 })
 
 const lessonForm = reactive({
@@ -2430,6 +2548,12 @@ const mobileWorkspaceSummary = computed(() => {
 const selectedTask = computed(() =>
   tasks.value.find(task => task.id === selectedTaskId.value) || null
 )
+
+const editTaskAllAttachments = computed<Array<WorkspaceAttachment | DraftAttachment>>(() => {
+  const removed = new Set(editTaskForm.removed_attachment_ids)
+  const kept = editTaskForm._original_attachments.filter(a => !removed.has(a.id))
+  return [...kept, ...editTaskForm.new_attachments]
+})
 
 function feedbackTokens(value: string): Set<string> {
   const text = value.toLowerCase()
@@ -2944,9 +3068,9 @@ function sessionActionKey(action: string, sessionId: string | null | undefined) 
 function startOptionsFor(task: WorkspaceTask): TaskStartOptions {
   if (!startOptions[task.id]) {
     startOptions[task.id] = {
-      target_session_id: '',
-      related_task_id: '',
-      clear_context: false,
+      target_session_id: task.session_id || '',
+      related_task_id: task.related_task_id || '',
+      clear_context: Boolean(task.clear_context),
     }
   }
   return startOptions[task.id]
@@ -3155,6 +3279,33 @@ function canAbortTask(task: WorkspaceTask) {
 
 function canEditTask(task: WorkspaceTask) {
   return task.status === 'todo'
+}
+
+function editTaskAttachmentPreview(attachment: WorkspaceAttachment | DraftAttachment): string {
+  if ('preview_url' in attachment) {
+    return (attachment as DraftAttachment).preview_url
+  }
+  return `/api/workspaces/attachments/${attachment.id}`
+}
+
+function editTaskAttachmentSize(attachment: WorkspaceAttachment | DraftAttachment): number {
+  if ('size_bytes' in attachment && typeof attachment.size_bytes === 'number') {
+    return attachment.size_bytes
+  }
+  return 0
+}
+
+function removeEditTaskAttachment(attachment: WorkspaceAttachment | DraftAttachment) {
+  if ('preview_url' in attachment) {
+    // It's a new draft attachment - remove from new list
+    const idx = editTaskForm.new_attachments.findIndex(a => a.id === attachment.id)
+    if (idx >= 0) editTaskForm.new_attachments.splice(idx, 1)
+  } else {
+    // It's an existing persisted attachment - mark as removed
+    if (!editTaskForm.removed_attachment_ids.includes(attachment.id)) {
+      editTaskForm.removed_attachment_ids.push(attachment.id)
+    }
+  }
 }
 
 function primaryExpandedReportId(): string | null {
@@ -3971,6 +4122,8 @@ function resetTaskForm() {
   taskForm.evaluation_strictness = 'balanced'
   taskForm.allow_web_research = false
   taskForm.require_artifact_review = false
+  taskForm.session_id = ''
+  taskForm.clear_context = false
   taskForm.related_task_id = ''
   resetDraftAttachments(taskForm.attachments)
 }
@@ -3990,7 +4143,12 @@ function openEditTaskModal(task: WorkspaceTask) {
   editingTaskId.value = task.id
   editTaskForm.title = task.title
   editTaskForm.prompt = task.prompt
-  editTaskForm.has_attachments = task.attachments.length > 0
+  editTaskForm.session_id = task.session_id || ''
+  editTaskForm.related_task_id = task.related_task_id || ''
+  editTaskForm.clear_context = Boolean(task.clear_context)
+  editTaskForm.new_attachments = []
+  editTaskForm.removed_attachment_ids = []
+  editTaskForm._original_attachments = [...task.attachments]
   showEditTaskModal.value = true
 }
 
@@ -3999,7 +4157,12 @@ function closeEditTaskModal() {
   editingTaskId.value = null
   editTaskForm.title = ''
   editTaskForm.prompt = ''
-  editTaskForm.has_attachments = false
+  editTaskForm.session_id = ''
+  editTaskForm.related_task_id = ''
+  editTaskForm.clear_context = false
+  resetDraftAttachments(editTaskForm.new_attachments)
+  editTaskForm.removed_attachment_ids = []
+  editTaskForm._original_attachments = []
 }
 
 function openLessonsModal() {
@@ -4090,6 +4253,8 @@ async function handleCreateTask() {
       task_mode: taskForm.task_mode,
       execution_complexity: taskForm.execution_complexity,
       autonomy_policy: autonomyPolicy,
+      session_id: taskForm.session_id || null,
+      clear_context: taskForm.clear_context || null,
       related_task_id: taskForm.related_task_id || null,
       attachments: serializeDraftAttachments(taskForm.attachments),
     })
@@ -4103,15 +4268,27 @@ async function handleUpdateTask() {
   if (
     !taskId ||
     !editTaskForm.title.trim() ||
-    (!editTaskForm.prompt.trim() && !editTaskForm.has_attachments)
+    (!editTaskForm.prompt.trim() && editTaskAllAttachments.value.length === 0)
   ) {
     return
   }
   await runPending(taskActionKey('edit', taskId), async () => {
-    await workspaceStore.updateTask(taskId, {
+    const payload: WorkspaceTaskUpdate = {
       title: editTaskForm.title.trim(),
       prompt: editTaskForm.prompt.trim(),
-    })
+      session_id: editTaskForm.session_id || null,
+      related_task_id: editTaskForm.related_task_id || null,
+      clear_context: editTaskForm.clear_context ? true : null,
+    }
+    if (editTaskForm.new_attachments.length > 0) {
+      payload.add_attachments = serializeDraftAttachments(editTaskForm.new_attachments)
+    }
+    if (editTaskForm.removed_attachment_ids.length > 0) {
+      payload.removed_attachment_ids = [...editTaskForm.removed_attachment_ids]
+    }
+    await workspaceStore.updateTask(taskId, payload)
+    // Clear cached start options so they re-read from the updated task
+    delete startOptions[taskId]
     closeEditTaskModal()
   })
 }
@@ -5907,6 +6084,20 @@ onUnmounted(() => {
 .attachment-meta strong {
   color: var(--ch-color-text);
   font-size: 12px;
+}
+
+.attachment-empty-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--ch-color-text-muted);
+  font-style: italic;
+}
+
+.field-hint {
+  font-size: 12px;
+  color: var(--ch-color-text-muted);
+  font-weight: normal;
+  margin-left: 6px;
 }
 
 .attachment-meta span,
