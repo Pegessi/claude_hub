@@ -1930,11 +1930,31 @@
         <section class="modal-section modal-section--first">
           <div class="modal-section-header">
             <h4>Workspace Agents</h4>
-            <span>{{ managedWorkspaceSessions.length }}</span>
+            <div
+              class="agent-manager-view-switch"
+              aria-label="Workspace agents view"
+            >
+              <button
+                type="button"
+                :data-active="agentManagerView === 'agents'"
+                @click="agentManagerView = 'agents'"
+              >
+                <span>Agents</span>
+                <strong>{{ workspaceAgents.length + (dispatcherAgent ? 1 : 0) }}</strong>
+              </button>
+              <button
+                type="button"
+                :data-active="agentManagerView === 'reviewers'"
+                @click="agentManagerView = 'reviewers'"
+              >
+                <span>Reviewers</span>
+                <strong>{{ reviewerSessions.length }}</strong>
+              </button>
+            </div>
           </div>
           <div class="agent-list">
             <article
-              v-for="agent in managedWorkspaceSessions"
+              v-for="agent in agentManagerSessions"
               :key="agent.id"
               :class="['agent-row', { 'dispatcher-row': agent.role === 'dispatcher' }]"
             >
@@ -1975,10 +1995,10 @@
               </div>
             </article>
             <div
-              v-if="managedWorkspaceSessions.length === 0"
+              v-if="agentManagerSessions.length === 0"
               class="empty-inline"
             >
-              No workspace agents.
+              {{ agentManagerEmptyText }}
             </div>
           </div>
         </section>
@@ -1998,34 +2018,36 @@
             >
           </div>
 
-          <div class="modal-field">
-            <label>Role</label>
-            <select v-model="agentOptionsForm.role">
-              <option value="orchestrator">
-                Agent
-              </option>
-              <option value="reviewer">
-                Reviewer
-              </option>
-            </select>
-          </div>
+          <div class="modal-field-row">
+            <div class="modal-field">
+              <label>Role</label>
+              <select v-model="agentOptionsForm.role">
+                <option value="orchestrator">
+                  Agent
+                </option>
+                <option value="reviewer">
+                  Reviewer
+                </option>
+              </select>
+            </div>
 
-          <div class="modal-field">
-            <label>Agent Type</label>
-            <select v-model="agentOptionsForm.agent_type">
-              <option value="codex">
-                Codex
-              </option>
-              <option value="claude">
-                Claude
-              </option>
-              <option value="cursor">
-                Cursor
-              </option>
-              <option value="terminal">
-                Terminal
-              </option>
-            </select>
+            <div class="modal-field">
+              <label>Agent Type</label>
+              <select v-model="agentOptionsForm.agent_type">
+                <option value="codex">
+                  Codex
+                </option>
+                <option value="claude">
+                  Claude
+                </option>
+                <option value="cursor">
+                  Cursor
+                </option>
+                <option value="terminal">
+                  Terminal
+                </option>
+              </select>
+            </div>
           </div>
 
           <div class="modal-field">
@@ -2957,6 +2979,20 @@ const managedWorkspaceSessions = computed<ManagedSession[]>(() => [
   ...reviewerSessions.value,
   ...(dispatcherAgent.value ? [dispatcherAgent.value] : []),
 ])
+
+const agentManagerView = ref<'agents' | 'reviewers'>('agents')
+
+const agentManagerSessions = computed<ManagedSession[]>(() =>
+  agentManagerView.value === 'reviewers'
+    ? reviewerSessions.value
+    : [...workspaceAgents.value, ...(dispatcherAgent.value ? [dispatcherAgent.value] : [])],
+)
+
+const agentManagerEmptyText = computed(() =>
+  agentManagerView.value === 'reviewers'
+    ? 'No reviewers in this workspace.'
+    : 'No agents in this workspace.',
+)
 
 const visibleWorkspaceSessions = computed<ManagedSession[]>(() =>
   workspaceSessionView.value === 'reviewers' ? reviewerSessions.value : workspaceAgents.value
@@ -5208,6 +5244,48 @@ onUnmounted(() => {
   gap: 8px;
 }
 
+.agent-manager-view-switch {
+  display: flex;
+  gap: 6px;
+}
+
+.agent-manager-view-switch button {
+  height: 30px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text-muted);
+  cursor: pointer;
+  padding: 0 12px;
+  text-align: left;
+}
+
+.agent-manager-view-switch button[data-active='true'] {
+  border-color: var(--ch-color-border-strong);
+  background: var(--ch-color-surface-control-hover);
+  color: var(--ch-color-text);
+}
+
+.agent-manager-view-switch span {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.agent-manager-view-switch strong {
+  min-width: 20px;
+  border-radius: 999px;
+  background: var(--ch-color-chip-bg);
+  color: currentColor;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+
 .agent-row {
   border: 1px solid var(--ch-color-surface-control-active);
   border-radius: 6px;
@@ -6628,12 +6706,13 @@ onUnmounted(() => {
 /* Title stays pinned; sections below manage their own scrolling. */
 .agent-manager-modal > h3 {
   flex-shrink: 0;
+  margin-bottom: 12px;
 }
 
-/* Workspace Agents list: fixed-height region that scrolls internally
-   instead of pushing the Add Agent form off-screen. */
+/* Workspace Agents list takes the larger share of the modal and scrolls
+   internally instead of pushing the Add Agent form off-screen. */
 .agent-manager-modal .modal-section--first {
-  flex-shrink: 0;
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -6645,17 +6724,36 @@ onUnmounted(() => {
 
 .agent-manager-modal .modal-section--first .agent-list {
   flex: 1;
-  min-height: 0;
-  max-height: 32dvh;
+  min-height: 80px;
   overflow-y: auto;
 }
 
-/* Add Agent form fills the remaining space and scrolls on its own so the
-   action buttons stay reachable without the dialog growing past the screen. */
+/* Add Agent form is the compact lower section: smaller share, its own
+   scroll only when needed, so the action buttons stay reachable without the
+   dialog growing past the screen. */
 .agent-manager-modal .agent-create-form {
-  flex: 1;
+  flex: 0 1 auto;
   min-height: 0;
   overflow-y: auto;
+  margin-top: 14px;
+  padding-top: 12px;
+}
+
+/* Two controls per row to keep the form short (e.g. Role + Agent Type). */
+.agent-manager-modal .modal-field-row {
+  display: flex;
+  gap: 12px;
+}
+
+.agent-manager-modal .modal-field-row .modal-field {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* Tighter vertical rhythm inside the Add Agent form so it fits without
+   scrolling on a standard screen. */
+.agent-manager-modal .agent-create-form .modal-field {
+  margin-bottom: 10px;
 }
 
 .lessons-manager-modal {
@@ -7135,6 +7233,11 @@ onUnmounted(() => {
     max-height: calc(100dvh - 20px);
     padding: 14px;
     border-radius: var(--ch-radius-md);
+  }
+
+  .agent-manager-modal .modal-field-row {
+    flex-direction: column;
+    gap: 0;
   }
 
   .file-browser-modal {
