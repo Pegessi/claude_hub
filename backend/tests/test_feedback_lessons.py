@@ -1,6 +1,7 @@
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -49,8 +50,8 @@ def _write_iteration_record(
     )
 
 
-def _make_payload(**overrides) -> FeedbackLessonCreate:
-    base = {
+def _make_payload(**overrides: Any) -> FeedbackLessonCreate:
+    base: dict[str, Any] = {
         "summary": "Always commit before reporting.",
         "applies_when": ["any task delivering an MR"],
         "do": "Verify git push before reporting completion.",

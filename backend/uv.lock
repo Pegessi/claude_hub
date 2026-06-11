@@ -191,6 +191,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-playwright" },
+    { name = "pytest-rerunfailures" },
 ]
 
 [package.dev-dependencies]
@@ -211,6 +212,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
     { name = "pytest-playwright", marker = "extra == 'dev'", specifier = ">=0.4.0" },
+    { name = "pytest-rerunfailures", marker = "extra == 'dev'", specifier = ">=14.0" },
     { name = "python-multipart", specifier = ">=0.0.12" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
     { name = "websockets", specifier = ">=13.0" },
@@ -792,6 +794,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e8/6b/913e36aa421b35689ec95ed953ff7e8df3f2ee1c7b8ab2a3f1fd39d95faf/pytest_playwright-0.7.2.tar.gz", hash = "sha256:247b61123b28c7e8febb993a187a07e54f14a9aa04edc166f7a976d88f04c770", size = 16928, upload-time = "2025-11-24T03:43:22.53Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/76/61/4d333d8354ea2bea2c2f01bad0a4aa3c1262de20e1241f78e73360e9b620/pytest_playwright-0.7.2-py3-none-any.whl", hash = "sha256:8084e015b2b3ecff483c2160f1c8219b38b66c0d4578b23c0f700d1b0240ea38", size = 16881, upload-time = "2025-11-24T03:43:24.423Z" },
+]
+
+[[package]]
+name = "pytest-rerunfailures"
+version = "16.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4d/f0/74f8e685be7ecd1572c1256132f18fce3a665d7e07649a3f23b7eb2d3bec/pytest_rerunfailures-16.3.tar.gz", hash = "sha256:37c9b1231c8083e9f4e724f50f7a21241822f9516c15c700ebbf218d6452355c", size = 34148, upload-time = "2026-05-22T06:51:22.292Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f8/98/58a71d68d3126d7f6a6ed1944c37ec207a4ff3dc66cad3bed7b59d38df61/pytest_rerunfailures-16.3-py3-none-any.whl", hash = "sha256:6bdfb8ffb46c46072e6c16bdedee38b6c13eac620d9415ed5b63152cbf283170", size = 15396, upload-time = "2026-05-22T06:51:20.547Z" },
 ]
 
 [[package]]

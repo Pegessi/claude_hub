@@ -1427,15 +1427,17 @@ class WorkspaceManager:
         update: dict[str, Any] = {"updated_at": now}
 
         # Determine which fields require todo status
-        has_todo_only_fields = any([
-            payload.title is not None,
-            payload.prompt is not None,
-            payload.add_attachments is not None,
-            payload.removed_attachment_ids is not None,
-            payload.related_task_id is not None,
-            payload.clear_context is not None,
-            payload.session_id is not None,
-        ])
+        has_todo_only_fields = any(
+            [
+                payload.title is not None,
+                payload.prompt is not None,
+                payload.add_attachments is not None,
+                payload.removed_attachment_ids is not None,
+                payload.related_task_id is not None,
+                payload.clear_context is not None,
+                payload.session_id is not None,
+            ]
+        )
 
         if has_todo_only_fields:
             if task.status != WorkspaceTaskStatus.TODO:
@@ -2657,9 +2659,8 @@ class WorkspaceManager:
         sessions_to_interrupt: list[ManagedSession] = []
         if task_before_release.session_id:
             worker_session = self.sessions.get(task_before_release.session_id)
-            if (
-                worker_session
-                and (worker_session.task_id == task.id or worker_session.current_task_id == task.id)
+            if worker_session and (
+                worker_session.task_id == task.id or worker_session.current_task_id == task.id
             ):
                 sessions_to_interrupt.append(worker_session)
         reviewer_ids: set[str] = set()
@@ -2676,7 +2677,10 @@ class WorkspaceManager:
             if (
                 reviewer_session
                 and reviewer_session.role == WorkspaceSessionRole.REVIEWER
-                and (reviewer_session.task_id == task.id or reviewer_session.current_task_id == task.id)
+                and (
+                    reviewer_session.task_id == task.id
+                    or reviewer_session.current_task_id == task.id
+                )
             ):
                 sessions_to_interrupt.append(reviewer_session)
         if sessions_to_interrupt:
@@ -4108,6 +4112,9 @@ class WorkspaceManager:
             session = await self._rename_session_for_task(session, task, updated_at=now)
         goal_packet_for_task = payload.goal_packet
         if self._should_route_goal_packet_for_approval(task, session, payload):
+            # _should_route_goal_packet_for_approval only returns True when the
+            # payload carries a goal packet; assert it so mypy can narrow None.
+            assert payload.goal_packet is not None
             created_at = (
                 payload.goal_packet.created_at
                 or (task.goal_packet.created_at if task and task.goal_packet else None)
@@ -5228,6 +5235,9 @@ class WorkspaceManager:
                 packet_status = GoalPacketStatus.APPROVED
             elif report.state == AgentReportState.REVIEW_FAILED:
                 packet_status = GoalPacketStatus.REJECTED
+            # This handler only runs for goal-packet review reports, so the
+            # task always carries a goal packet here; assert for mypy.
+            assert task.goal_packet is not None
             goal_packet = task.goal_packet.model_copy(
                 update={
                     "status": packet_status,
