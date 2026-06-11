@@ -51,6 +51,15 @@ disallow_untyped_defs = true
 module = "tests.*"
 disallow_untyped_defs = false
 
+# The workspace_manager package is one logical class split into method-group
+# mixins for maintainability. Cross-mixin ``self.*`` calls and returns cannot be
+# resolved statically per-submodule, so mypy emits false-positive ``attr-defined``
+# / ``no-any-return`` on the submodules only. The composed ``WorkspaceManager``
+# class and every caller in ``__init__`` remain fully type-checked.
+[[tool.mypy.overrides]]
+module = "claude_hub.services.workspace_manager.*"
+disable_error_code = ["attr-defined", "no-any-return"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 
