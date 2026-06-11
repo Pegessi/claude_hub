@@ -6,6 +6,10 @@ from ._constants import *  # noqa: F401,F403
 
 
 class _WorkspacesMixin:
+    # Initialized in _StateMixin.__init__; annotation-only declaration (no value,
+    # so no runtime attribute is created) lets mypy type the rebind below.
+    _monitor_task: "asyncio.Task[None] | None"
+
     def list_workspaces(self) -> list[Workspace]:
         return sorted(self.workspaces.values(), key=lambda item: item.created_at)
 

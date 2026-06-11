@@ -6,6 +6,10 @@ from ._constants import *  # noqa: F401,F403
 
 
 class _SessionsMixin:
+    # Initialized in _StateMixin.__init__; annotation-only declaration (no value,
+    # so no runtime attribute is created) lets mypy type the rebind below.
+    reports: "dict[str, AgentReport]"
+
     def delete_task(self, task_id: str) -> None:
         task = self.tasks.pop(task_id, None)
         if not task:
