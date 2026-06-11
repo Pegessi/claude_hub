@@ -311,6 +311,7 @@ def task_status_from_report(state: AgentReportState) -> Optional[WorkspaceTaskSt
         AgentReportState.READY_FOR_REVIEW,
         AgentReportState.COMPLETED,
         AgentReportState.REVIEW_PASSED,
+        AgentReportState.REVIEW_FAILED,
         AgentReportState.REVIEW_NEEDS_INPUT,
     }:
         return WorkspaceTaskStatus.REVIEW
@@ -320,7 +321,6 @@ def task_status_from_report(state: AgentReportState) -> Optional[WorkspaceTaskSt
         AgentReportState.BLOCKED,
         AgentReportState.NEEDS_INPUT,
         AgentReportState.REVIEW_STARTED,
-        AgentReportState.REVIEW_FAILED,
     }:
         return WorkspaceTaskStatus.WORKING
     return None

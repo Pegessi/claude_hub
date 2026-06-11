@@ -127,10 +127,10 @@ def test_runtime_status_from_report(
         (AgentReportState.BLOCKED, WorkspaceTaskStatus.WORKING),
         (AgentReportState.NEEDS_INPUT, WorkspaceTaskStatus.WORKING),
         (AgentReportState.REVIEW_STARTED, WorkspaceTaskStatus.WORKING),
-        (AgentReportState.REVIEW_FAILED, WorkspaceTaskStatus.WORKING),
         (AgentReportState.READY_FOR_REVIEW, WorkspaceTaskStatus.REVIEW),
         (AgentReportState.COMPLETED, WorkspaceTaskStatus.REVIEW),
         (AgentReportState.REVIEW_PASSED, WorkspaceTaskStatus.REVIEW),
+        (AgentReportState.REVIEW_FAILED, WorkspaceTaskStatus.REVIEW),
         (AgentReportState.REVIEW_NEEDS_INPUT, WorkspaceTaskStatus.REVIEW),
     ],
 )

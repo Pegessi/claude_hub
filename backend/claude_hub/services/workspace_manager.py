@@ -2399,7 +2399,18 @@ class WorkspaceManager:
                 "autonomous_run": autonomous_run,
                 "updated_at": now,
                 "dispatch_pending": False,
+                "review_completed_at": None,
+                "reviewed_at": None,
+                "review_session_id": None,
+                "review_requested_at": None,
             }
+        )
+        logger.info(
+            "continue_task set status=WORKING and cleared stale goal-packet verdict fields "
+            "task_id=%s review_completed_at_cleared=%s session_id=%s",
+            task.id,
+            task.review_completed_at is not None,
+            task.session_id,
         )
         self.sessions[session.id] = session.model_copy(
             update={
@@ -2553,7 +2564,6 @@ class WorkspaceManager:
             created_at=now,
         )
         self.reports[report.id] = report
-
         task_before_release = task
         self.tasks[task.id] = task.model_copy(
             update={
@@ -4049,7 +4059,92 @@ class WorkspaceManager:
                 )
                 if autonomous_run is not None:
                     task_update["autonomous_run"] = autonomous_run
-            if task_status:
+            # ------------------------------------------------------------------
+            # ORCHESTRATOR post-review late-report guard.
+            #
+            # Once a reviewer verdict has been recorded (review_completed_at
+            # is set AND task.status is still REVIEW — i.e. the verdict is
+            # "still authoritative" and no continue_task / reopen happened),
+            # late/follow-up orchestrator reports MUST NOT:
+            #   1. overwrite task.status back from REVIEW → WORKING (which
+            #      would be invisible in "AI Reviewing" for minutes until
+            #      reconcile repairs, or worse permanently lose the verdict
+            #      if status becomes WORKING),
+            #   2. re-request review by writing review_requested_at /
+            #      reviewed_at for a second time (which triggers another
+            #      reviewer dispatch cycle against an already-judged task).
+            #
+            # The key-of-truth is review_completed_at (atomically written
+            # in the reviewer-decision fast-path below) TOGETHER with
+            # task.status still being REVIEW. Legitimate task reopens
+            # (continue_task after review_failed, or goal-packet approval
+            #  → implementation-phase reopen) transition status back to
+            #  WORKING; in those cases review_completed_at records the
+            #  PREVIOUS phase's verdict and a NEW implementation-phase
+            #  review MUST be allowed to fire. Requiring status=REVIEW
+            #  correctly distinguishes the two cases.
+            #
+            # We guard both buckets:
+            #   • WORKING-family states (STARTED/WORKING/BLOCKED/NEEDS_INPUT)
+            #     → drop the status write and started_at overwrite entirely.
+            #   • REVIEW-family gate states (READY_FOR_REVIEW/COMPLETED)
+            #     → keep status=REVIEW if not already REVIEW, but NEVER
+            #       touch review_requested_at / reviewed_at / reviewer
+            #       binding fields, since that would trigger the re-review
+            #       path.
+            # ------------------------------------------------------------------
+            _verdict_still_authoritative = (
+                current_task.status == WorkspaceTaskStatus.REVIEW
+                and current_task.review_completed_at is not None
+                and now >= current_task.review_completed_at
+            )
+            if (
+                session.role == WorkspaceSessionRole.ORCHESTRATOR
+                and _verdict_still_authoritative
+                and task_status is not None
+            ):
+                # Drop WORKING/BLOCKED/NEEDS_INPUT/STARTED status write
+                # entirely — the verdict is still terminal.
+                if task_status == WorkspaceTaskStatus.WORKING:
+                    task_update["updated_at"] = now
+                    task_update.pop("status", None)
+                    task_update.pop("started_at", None)
+                    logger.info(
+                        "Late orchestrator working-family report after reviewer verdict "
+                        "suppressed status overwrite workspace_id=%s task_id=%s "
+                        "session_id=%s report_state=%s review_completed_at=%s",
+                        session.workspace_id,
+                        task_id,
+                        session.id,
+                        payload.state.value,
+                        current_task.review_completed_at,
+                    )
+                # Keep REVIEW column (so a legitimate new human-acceptance
+                # request still surfaces the card in the REVIEW list), but
+                # never re-dispatch review or overwrite the reviewer
+                # decision timestamp.
+                elif task_status == WorkspaceTaskStatus.REVIEW:
+                    if current_task.status != WorkspaceTaskStatus.REVIEW:
+                        task_update["status"] = WorkspaceTaskStatus.REVIEW
+                    task_update["updated_at"] = now
+                    # Intentionally do NOT set reviewed_at /
+                    # review_requested_at — _request_task_review is also
+                    # guarded in _after_report_recorded.
+                    logger.info(
+                        "Late orchestrator completion/review report after reviewer verdict "
+                        "suppressed re-review fields workspace_id=%s task_id=%s "
+                        "session_id=%s report_state=%s review_completed_at=%s",
+                        session.workspace_id,
+                        task_id,
+                        session.id,
+                        payload.state.value,
+                        current_task.review_completed_at,
+                    )
+                _status_block_applied = True
+            else:
+                _status_block_applied = False
+
+            if task_status and not _status_block_applied:
                 if (
                     session.role == WorkspaceSessionRole.ORCHESTRATOR
                     and task_status == WorkspaceTaskStatus.WORKING
@@ -4064,6 +4159,113 @@ class WorkspaceManager:
                         task_update["started_at"] = self.tasks[task_id].started_at or now
                     if task_status == WorkspaceTaskStatus.REVIEW:
                         task_update["reviewed_at"] = now
+            # ------------------------------------------------------------------
+            # REVIEWER terminal-review states: write all review fields and
+            # release the reviewer binding BEFORE the first (and now only)
+            # _save_state call. The previous pattern wrote the report in one
+            # save, then relied on _after_report_recorded → _handle_review_report
+            # to do a SECOND save with review_completed_at / human_acceptance_requested_at
+            # set. That two-phase gap meant every board poll between them saw
+            # review_{passed,failed,needs_input} on the report but not on the
+            # task, so the frontend kept rendering "AI Reviewing" until the
+            # reconcile repair ran — which matches the user-reported symptom
+            # "reviewer passed but dashboard stuck in AI Reviewing for a long
+            # time, then resolves". Writing fields here makes reconciliation
+            # idempotent and removes the race.
+            # ------------------------------------------------------------------
+            if session.role == WorkspaceSessionRole.REVIEWER and payload.state in {
+                AgentReportState.REVIEW_PASSED,
+                AgentReportState.REVIEW_FAILED,
+                AgentReportState.REVIEW_NEEDS_INPUT,
+            }:
+                current_task = self.tasks[task_id]
+                task_update.setdefault("status", WorkspaceTaskStatus.REVIEW)
+                task_update.setdefault("updated_at", now)
+                task_update["review_session_id"] = session.id
+                task_update["review_completed_at"] = current_task.review_completed_at or now
+                task_update["review_skipped_at"] = None
+                task_update["review_skip_reason"] = None
+                # reviewed_at should match the latest review-decision report
+                # timestamp (same invariant enforced by reconcile and asserted
+                # by tests). We intentionally overwrite any older reviewed_at
+                # from a prior READY_FOR_REVIEW / COMPLETED transition so the
+                # board timeline lines up with when reviewer rendered a
+                # decision.
+                task_update["reviewed_at"] = now
+                task_update["completed_at"] = None
+                task_update["human_accepted_at"] = None
+                if payload.state == AgentReportState.REVIEW_PASSED:
+                    task_update["human_acceptance_requested_at"] = (
+                        current_task.human_acceptance_requested_at or now
+                    )
+                else:
+                    task_update["human_acceptance_requested_at"] = None
+                # Autonomous mode: recompute next phase so the task remains
+                # in sync with _autonomous_run_after_evaluation.
+                if current_task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
+                    autonomous_run, autonomous_next_phase = self._autonomous_run_after_evaluation(
+                        current_task, session, report, now=now
+                    )
+                    if autonomous_run is not None:
+                        task_update["autonomous_run"] = autonomous_run
+                        task_update["human_acceptance_requested_at"] = (
+                            now if autonomous_next_phase == AutonomousRunPhase.PASSED else None
+                        )
+                # Goal Packet review transition: move packet status to
+                # APPROVED / REJECTED so frontend detail view shows the
+                # verdict immediately (and so _handle_goal_packet_review_report
+                # can bail out if already transitioned).
+                if (
+                    current_task.task_mode == WorkspaceTaskMode.REVIEWED
+                    and current_task.goal_packet is not None
+                    and current_task.goal_packet.status == GoalPacketStatus.PENDING_REVIEW
+                ):
+                    if payload.state == AgentReportState.REVIEW_PASSED:
+                        new_packet_status = GoalPacketStatus.APPROVED
+                    elif payload.state == AgentReportState.REVIEW_FAILED:
+                        new_packet_status = GoalPacketStatus.REJECTED
+                    else:
+                        new_packet_status = GoalPacketStatus.PENDING_REVIEW
+                    if new_packet_status != GoalPacketStatus.PENDING_REVIEW:
+                        task_update["goal_packet"] = current_task.goal_packet.model_copy(
+                            update={
+                                "status": new_packet_status,
+                                "updated_at": now,
+                            }
+                        )
+                # Release the reviewer session binding NOW so the dashboard
+                # shows the reviewer as idle rather than still assigned to
+                # a terminal-decision task.
+                reviewer_final_status = (
+                    ManagedSessionStatus.NEEDS_INPUT
+                    if payload.state == AgentReportState.REVIEW_NEEDS_INPUT
+                    else ManagedSessionStatus.IDLE
+                )
+                reviewer_final_runtime = (
+                    AgentRuntimeStatus.ATTENTION
+                    if payload.state == AgentReportState.REVIEW_NEEDS_INPUT
+                    else AgentRuntimeStatus.IDLE
+                )
+                _pre_review_task = current_task.model_copy(update={"review_session_id": session.id})
+                self._release_reviewer_session(
+                    _pre_review_task,
+                    status=reviewer_final_status,
+                    runtime_status=reviewer_final_runtime,
+                    updated_at=now,
+                    include_stale_assignments=(
+                        payload.state != AgentReportState.REVIEW_NEEDS_INPUT
+                    ),
+                )
+                logger.info(
+                    "Reviewer terminal decision recorded in create_report "
+                    "workspace_id=%s task_id=%s reviewer=%s decision=%s "
+                    "review_completed_at=%s",
+                    session.workspace_id,
+                    task_id,
+                    session.id,
+                    payload.state.value,
+                    now,
+                )
             elif task_update:
                 task_update["updated_at"] = now
             if task_update:
@@ -4097,6 +4299,55 @@ class WorkspaceManager:
             await self._request_task_review(task, report)
             return
         if not state_policy.is_review_gate_state(report.state):
+            return
+        # ------------------------------------------------------------------
+        # After-review short-circuit: once a prior reviewer verdict has
+        # been recorded (status still REVIEW, review_completed_at set,
+        # AND the latest review report is a terminal one), late
+        # orchestrator gate-state reports must not trigger a second
+        # reviewer dispatch. Returning here keeps the previous reviewer
+        # binding, timestamps, and verdict intact; the fast-path in
+        # create_report also already prevented any status/timestamp
+        # overwrite on the task row itself.
+        #
+        # NOTE: we REQUIRE status == REVIEW here (not just
+        # review_completed_at set) because:
+        #   • After review_failed → continue_task sets status = WORKING
+        #     and clears review_session_id (for reviewed-mode reopen).
+        #   • After goal-packet review_passed → continue_task dispatches
+        #     the implementation phase, status = WORKING.
+        # In both cases review_completed_at records the *previous*
+        # phase's verdict, and a subsequent COMPLETED / READY_FOR_REVIEW
+        # from the orchestrator is a legitimate new phase that MUST be
+        # routed to a (new) implementation reviewer. Dropping the
+        # status == REVIEW check here would permanently starve the
+        # implementation phase of any reviewer dispatch.
+        # ------------------------------------------------------------------
+        _latest_review = self._latest_review_report_for_task(task.id)
+        _review_verdict_terminal = (
+            task.status == WorkspaceTaskStatus.REVIEW
+            and _latest_review is not None
+            and _latest_review.state
+            in {
+                AgentReportState.REVIEW_PASSED,
+                AgentReportState.REVIEW_FAILED,
+                AgentReportState.REVIEW_NEEDS_INPUT,
+            }
+            and task.review_completed_at is not None
+            and _latest_review.created_at <= report.created_at
+        )
+        if _review_verdict_terminal:
+            logger.info(
+                "Skipping re-review dispatch after recorded reviewer verdict "
+                "workspace_id=%s task_id=%s session_id=%s report_state=%s "
+                "review_completed_at=%s latest_review_state=%s",
+                task.workspace_id,
+                task.id,
+                session.id,
+                report.state.value,
+                task.review_completed_at,
+                _latest_review.state.value if _latest_review else None,
+            )
             return
         if task.review_requested_at and not task.review_completed_at:
             # Allow a new gate report to recover a stuck review: only skip if
@@ -4671,67 +4922,111 @@ class WorkspaceManager:
             AgentReportState.REVIEW_NEEDS_INPUT,
         }:
             return
-        if (
-            task.task_mode == WorkspaceTaskMode.REVIEWED
-            and task.goal_packet is not None
-            and task.goal_packet.status == GoalPacketStatus.PENDING_REVIEW
-        ):
+        # Route to goal-packet review handler when this report corresponds
+        # to a goal packet review decision — regardless of whether the packet
+        # is still in PENDING_REVIEW (pre-create_report fast-path) or was
+        # already transitioned to APPROVED / REJECTED by the create_report
+        # fast-path single-save write.
+        packet_status = task.goal_packet.status if task.goal_packet else None
+        is_goal_packet_review = task.task_mode == WorkspaceTaskMode.REVIEWED and (
+            packet_status == GoalPacketStatus.PENDING_REVIEW
+            or (
+                packet_status in {GoalPacketStatus.APPROVED, GoalPacketStatus.REJECTED}
+                and task.review_session_id == reviewer.id
+                and task.review_completed_at is not None
+                and task.review_completed_at >= report.created_at
+            )
+        )
+        if is_goal_packet_review:
             await self._handle_goal_packet_review_report(task, reviewer, report)
             return
 
         now = _now()
-        reviewer_status = (
-            ManagedSessionStatus.NEEDS_INPUT
-            if report.state == AgentReportState.REVIEW_NEEDS_INPUT
-            else ManagedSessionStatus.IDLE
+        # ------------------------------------------------------------------
+        # Idempotency guard: terminal review flags are now written
+        # synchronously in create_report() before the first save. If this
+        # task already has review_completed_at set (at or after the report
+        # timestamp), the persistent state is already correct; re-run
+        # continue_task() for REVIEW_FAILED but do not re-save the task or
+        # re-release the reviewer (would be a no-op at best, and risks
+        # clobbering newer state if any).
+        # ------------------------------------------------------------------
+        already_applied = (
+            task.review_completed_at is not None and task.review_completed_at >= report.created_at
         )
-        reviewer_runtime_status = (
-            AgentRuntimeStatus.ATTENTION
-            if report.state == AgentReportState.REVIEW_NEEDS_INPUT
-            else AgentRuntimeStatus.IDLE
-        )
-        task_with_reviewer = task.model_copy(update={"review_session_id": reviewer.id})
-        self._release_reviewer_session(
-            task_with_reviewer,
-            status=reviewer_status,
-            runtime_status=reviewer_runtime_status,
-            updated_at=now,
-            include_stale_assignments=report.state != AgentReportState.REVIEW_NEEDS_INPUT,
-        )
-
-        task_update = {
-            "review_session_id": reviewer.id,
-            "review_completed_at": now,
-            "review_skipped_at": None,
-            "review_skip_reason": None,
-            "reviewed_at": task.reviewed_at or now,
-            "completed_at": None,
-            "human_acceptance_requested_at": (
-                now if report.state == AgentReportState.REVIEW_PASSED else None
-            ),
-            "human_accepted_at": None,
-            "updated_at": now,
-        }
         autonomous_next_phase: AutonomousRunPhase | None = None
-        if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
-            autonomous_run, autonomous_next_phase = self._autonomous_run_after_evaluation(
-                task,
-                reviewer,
-                report,
-                now=now,
+        if not already_applied:
+            reviewer_status = (
+                ManagedSessionStatus.NEEDS_INPUT
+                if report.state == AgentReportState.REVIEW_NEEDS_INPUT
+                else ManagedSessionStatus.IDLE
             )
-            if autonomous_run is not None:
-                task_update["autonomous_run"] = autonomous_run
-                task_update["human_acceptance_requested_at"] = (
-                    now if autonomous_next_phase == AutonomousRunPhase.PASSED else None
-                )
-        self.tasks[task.id] = task.model_copy(
-            update={
-                **task_update,
-                "status": WorkspaceTaskStatus.REVIEW,
+            reviewer_runtime_status = (
+                AgentRuntimeStatus.ATTENTION
+                if report.state == AgentReportState.REVIEW_NEEDS_INPUT
+                else AgentRuntimeStatus.IDLE
+            )
+            task_with_reviewer = task.model_copy(update={"review_session_id": reviewer.id})
+            self._release_reviewer_session(
+                task_with_reviewer,
+                status=reviewer_status,
+                runtime_status=reviewer_runtime_status,
+                updated_at=now,
+                include_stale_assignments=(report.state != AgentReportState.REVIEW_NEEDS_INPUT),
+            )
+
+            task_update = {
+                "review_session_id": reviewer.id,
+                "review_completed_at": now,
+                "review_skipped_at": None,
+                "review_skip_reason": None,
+                "reviewed_at": task.reviewed_at or now,
+                "completed_at": None,
+                "human_acceptance_requested_at": (
+                    now if report.state == AgentReportState.REVIEW_PASSED else None
+                ),
+                "human_accepted_at": None,
+                "updated_at": now,
             }
-        )
-        self._save_state()
+            if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
+                autonomous_run, autonomous_next_phase = self._autonomous_run_after_evaluation(
+                    task, reviewer, report, now=now
+                )
+                if autonomous_run is not None:
+                    task_update["autonomous_run"] = autonomous_run
+                    task_update["human_acceptance_requested_at"] = (
+                        now if autonomous_next_phase == AutonomousRunPhase.PASSED else None
+                    )
+            self.tasks[task.id] = task.model_copy(
+                update={**task_update, "status": WorkspaceTaskStatus.REVIEW}
+            )
+            self._save_state()
+            logger.info(
+                "Reviewer terminal decision applied in _handle_review_report "
+                "workspace_id=%s task_id=%s reviewer=%s decision=%s "
+                "review_completed_at=%s",
+                task.workspace_id,
+                task.id,
+                reviewer.id,
+                report.state.value,
+                now,
+            )
+        else:
+            # Fields were already written by create_report fast-path; just
+            # derive autonomous_next_phase so the REVIEW_FAILED re-dispatch
+            # guard still works correctly for autonomous tasks.
+            if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
+                _run, autonomous_next_phase = self._autonomous_run_after_evaluation(
+                    task, reviewer, report, now=now
+                )
+            logger.info(
+                "Reviewer terminal decision already applied; _handle_review_report "
+                "skipping writes workspace_id=%s task_id=%s reviewer=%s decision=%s",
+                task.workspace_id,
+                task.id,
+                reviewer.id,
+                report.state.value,
+            )
 
         if report.state != AgentReportState.REVIEW_FAILED:
             return
@@ -4761,52 +5056,89 @@ class WorkspaceManager:
         report: AgentReport,
     ) -> None:
         now = _now()
-        reviewer_status = (
-            ManagedSessionStatus.NEEDS_INPUT
-            if report.state == AgentReportState.REVIEW_NEEDS_INPUT
-            else ManagedSessionStatus.IDLE
-        )
-        reviewer_runtime_status = (
-            AgentRuntimeStatus.ATTENTION
-            if report.state == AgentReportState.REVIEW_NEEDS_INPUT
-            else AgentRuntimeStatus.IDLE
-        )
-        task_with_reviewer = task.model_copy(update={"review_session_id": reviewer.id})
-        self._release_reviewer_session(
-            task_with_reviewer,
-            status=reviewer_status,
-            runtime_status=reviewer_runtime_status,
-            updated_at=now,
-            include_stale_assignments=report.state != AgentReportState.REVIEW_NEEDS_INPUT,
+        # ------------------------------------------------------------------
+        # Idempotency guard: the create_report() fast-path already writes
+        # review_completed_at and transitions the Goal Packet to
+        # APPROVED / REJECTED. If those fields are in place, skip the task
+        # rewrite and just dispatch continue_task feedback.
+        # ------------------------------------------------------------------
+        packet_current = task.goal_packet.status if task.goal_packet else None
+        already_terminal_packet = packet_current in {
+            GoalPacketStatus.APPROVED,
+            GoalPacketStatus.REJECTED,
+        }
+        already_applied = (
+            task.review_completed_at is not None
+            and task.review_completed_at >= report.created_at
+            and already_terminal_packet
         )
 
-        packet_status = GoalPacketStatus.PENDING_REVIEW
-        if report.state == AgentReportState.REVIEW_PASSED:
-            packet_status = GoalPacketStatus.APPROVED
-        elif report.state == AgentReportState.REVIEW_FAILED:
-            packet_status = GoalPacketStatus.REJECTED
-        goal_packet = task.goal_packet.model_copy(
-            update={
-                "status": packet_status,
-                "updated_at": now,
-            }
-        )
-        self.tasks[task.id] = task.model_copy(
-            update={
-                "status": WorkspaceTaskStatus.REVIEW,
-                "goal_packet": goal_packet,
-                "review_session_id": reviewer.id,
-                "review_completed_at": now,
-                "review_skipped_at": None,
-                "review_skip_reason": None,
-                "reviewed_at": task.reviewed_at or now,
-                "completed_at": None,
-                "human_acceptance_requested_at": None,
-                "human_accepted_at": None,
-                "updated_at": now,
-            }
-        )
-        self._save_state()
+        if not already_applied:
+            reviewer_status = (
+                ManagedSessionStatus.NEEDS_INPUT
+                if report.state == AgentReportState.REVIEW_NEEDS_INPUT
+                else ManagedSessionStatus.IDLE
+            )
+            reviewer_runtime_status = (
+                AgentRuntimeStatus.ATTENTION
+                if report.state == AgentReportState.REVIEW_NEEDS_INPUT
+                else AgentRuntimeStatus.IDLE
+            )
+            task_with_reviewer = task.model_copy(update={"review_session_id": reviewer.id})
+            self._release_reviewer_session(
+                task_with_reviewer,
+                status=reviewer_status,
+                runtime_status=reviewer_runtime_status,
+                updated_at=now,
+                include_stale_assignments=(report.state != AgentReportState.REVIEW_NEEDS_INPUT),
+            )
+
+            packet_status = GoalPacketStatus.PENDING_REVIEW
+            if report.state == AgentReportState.REVIEW_PASSED:
+                packet_status = GoalPacketStatus.APPROVED
+            elif report.state == AgentReportState.REVIEW_FAILED:
+                packet_status = GoalPacketStatus.REJECTED
+            goal_packet = task.goal_packet.model_copy(
+                update={
+                    "status": packet_status,
+                    "updated_at": now,
+                }
+            )
+            self.tasks[task.id] = task.model_copy(
+                update={
+                    "status": WorkspaceTaskStatus.REVIEW,
+                    "goal_packet": goal_packet,
+                    "review_session_id": reviewer.id,
+                    "review_completed_at": now,
+                    "review_skipped_at": None,
+                    "review_skip_reason": None,
+                    "reviewed_at": task.reviewed_at or now,
+                    "completed_at": None,
+                    "human_acceptance_requested_at": None,
+                    "human_accepted_at": None,
+                    "updated_at": now,
+                }
+            )
+            self._save_state()
+            logger.info(
+                "Goal packet reviewer decision applied in _handle_goal_packet_review_report "
+                "workspace_id=%s task_id=%s reviewer=%s decision=%s packet=%s",
+                task.workspace_id,
+                task.id,
+                reviewer.id,
+                report.state.value,
+                packet_status.value,
+            )
+        else:
+            logger.info(
+                "Goal packet reviewer decision already applied; "
+                "_handle_goal_packet_review_report skipping writes "
+                "workspace_id=%s task_id=%s reviewer=%s decision=%s",
+                task.workspace_id,
+                task.id,
+                reviewer.id,
+                report.state.value,
+            )
 
         if report.state == AgentReportState.REVIEW_PASSED:
             feedback = (
@@ -5843,6 +6175,19 @@ class WorkspaceManager:
             key=lambda report: report.created_at,
         )
         return reports[-1].state if reports else None
+
+    def _latest_review_report_for_task(self, task_id: str) -> AgentReport | None:
+        """Return the most recent REVIEW_* AgentReport on the task (or None)."""
+
+        reports = sorted(
+            [
+                report
+                for report in self.reports.values()
+                if report.task_id == task_id and report.state.value.startswith("review_")
+            ],
+            key=lambda report: report.created_at,
+        )
+        return reports[-1] if reports else None
 
     def _map_runtime_status(self, status: TerminalAgentStatus) -> ManagedSessionStatus:
         return state_policy.managed_status_from_runtime(status.status)
