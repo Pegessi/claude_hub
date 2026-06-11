@@ -340,12 +340,19 @@ export interface WorkspaceTaskCreate {
   goal_packet?: GoalPacket | null
   review_profiles?: ReviewProfile[]
   autonomy_policy?: AutonomyPolicy | null
+  session_id?: string | null
+  clear_context?: boolean | null
 }
 
 export interface WorkspaceTaskUpdate {
   title?: string
   prompt?: string
   status?: WorkspaceTaskStatus
+  add_attachments?: WorkspaceAttachmentCreate[]
+  removed_attachment_ids?: string[]
+  related_task_id?: string | null
+  clear_context?: boolean | null
+  session_id?: string | null
 }
 
 export interface StartTaskRequest {
