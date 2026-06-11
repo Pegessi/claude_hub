@@ -1184,6 +1184,7 @@ def test_implementation_review_not_misrouted_as_goal_packet_review(
     assert impl_reviewer_id is not None
     after_impl_request = workspace_manager.tasks[task["id"]]
     assert after_impl_request.status == WorkspaceTaskStatus.REVIEW
+    assert after_impl_request.goal_packet is not None
     assert after_impl_request.goal_packet.status.value == "approved"
     # The goal packet's updated_at should be from the goal review, not
     # the implementation review request.

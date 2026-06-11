@@ -66,10 +66,11 @@ def isolated_workspace_manager(monkeypatch: MonkeyPatch) -> Generator[None, None
 
 
 def _make_workspace(client: TestClient, repo: Path, *, name: str = "Sess Repo") -> dict:
-    return client.post(
+    result: dict = client.post(
         "/api/workspaces",
         json={"name": name, "path": str(repo), "session_prefix": "sess"},
     ).json()
+    return result
 
 
 def _make_session(
