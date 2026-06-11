@@ -5,6 +5,23 @@
 
 ## Unreleased
 
+### feat: env preset manage modal (replace inline editor)
+
+- Replaced the inline env preset editor (New/Delete buttons + small textarea)
+  in both the create-tab modal (TabBar) and agent options modal
+  (AgentWorkspaceView) with a compact selector dropdown + "Manage" button.
+- New reusable `EnvPresetManager.vue` modal component handles all CRUD
+  operations with a much larger textarea (280px min-height) for easier
+  viewing and editing of env var content.
+- Fixed "New" preset flow so the edit form appears immediately with empty
+  name and content drafts.
+- Both call sites share the same modal component via `v-model:modelValue`
+  two-way binding — selection stays in sync across open/close.
+- **Files**: `frontend/src/components/EnvPresetManager.vue` (new),
+  `frontend/src/components/TabBar.vue`,
+  `frontend/src/components/AgentWorkspaceView.vue`,
+  `frontend/src/composables/useLaunchEnvPresets.ts`
+
 ### fix: interrupt running agent and reviewer processes on task abort
 
 - Previously, aborting a task only updated bookkeeping state (reset task to
