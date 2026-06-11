@@ -34,6 +34,28 @@
 - **Files**: `.github/workflows/ci.yml`, `backend/tests/conftest.py`,
   `backend/tests/test_terminal_replay.py`
 
+### refactor: split workspace_manager.py into a method-group mixin package
+
+- `backend/claude_hub/services/workspace_manager.py` had grown to a single
+  multi-thousand-line module holding the entire `WorkspaceManager` class, making
+  it hard to navigate and review.
+- Refactor: the module is now a package
+  (`backend/claude_hub/services/workspace_manager/`) split into method-group
+  mixins (`_state.py`, `_workspaces.py`, `_sessions.py`, `_dispatch.py`,
+  `_reports.py`, `_review.py`, `_task_updates.py`, and others), with shared
+  imports/constants/helpers in `_constants.py`. `WorkspaceManager` is composed
+  from the mixins in `__init__.py`, which also exports the `workspace_manager`
+  singleton.
+- This is a pure code-organization change with **zero behavioral change**:
+  method bodies were moved verbatim, no signatures changed, and the existing
+  test suite passes untouched. Submodules reference patch-sensitive globals via
+  the package module (`_wm._now()`, `_wm.STATE_ROOT`) so test monkeypatches
+  resolve at call time. A scoped mypy override suppresses cross-mixin
+  `attr-defined`/`no-any-return` false positives on the submodules only; the
+  composed class and all callers remain fully type-checked.
+- **Files**: `backend/claude_hub/services/workspace_manager/` (new package),
+  `backend/pyproject.toml` (scoped mypy override)
+
 ### style: rework Manage Agents modal to fit one viewport with an Agents/Reviewers toggle
 
 - The Manage Agents modal grew taller than the screen when many workspace
