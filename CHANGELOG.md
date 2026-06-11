@@ -5,6 +5,35 @@
 
 ## Unreleased
 
+### ci: wire frontend unit tests into CI and make Terminal E2E timeouts CI-scalable
+
+- The CI `frontend` job only ran `lint:check` and `build` — the `node:test`
+  unit suite (`pnpm run test:unit`) existed but was never executed in CI, so a
+  broken frontend unit test could land on `main` undetected. The backend job
+  already runs its functional suite (~276 tests); this closes the obvious
+  coverage gap on the frontend side.
+- The Terminal E2E (Playwright) job failed deterministically on shared runners:
+  heavy browser-driven replay tests assert that history renders within fixed
+  deadlines (mostly 12s) that are comfortable on a laptop but too tight under CI
+  CPU contention, where xterm.js rendering and tmux/ttyd startup are slowed. The
+  previous `--reruns 2 --reruns-delay 5` retry strategy turned a deterministic
+  failure into a ~17min red job.
+- Fix:
+  - `frontend` job now runs `pnpm run test:unit` between lint and build.
+  - A single env-driven multiplier, `CLAUDE_HUB_E2E_TIMEOUT_SCALE`, widens every
+    Playwright wait deadline and tmux/output poll budget at once. It defaults to
+    `1.0` (local runs unchanged) and is clamped so it can only relax, never
+    tighten, deadlines. The `terminal-e2e` job sets it to `3`. Deadlines
+    (`wait_for_function` / `wait_for_selector`) are scaled via a session-scoped
+    autouse fixture that monkeypatches the Playwright `Page` class; deliberate
+    fixed pauses (`wait_for_timeout` observation windows) are intentionally left
+    untouched. Polling loops in the replay helpers are scaled via a shared
+    `scale_timeout()` helper.
+  - The E2E rerun strategy is reduced to `--reruns 1` so the job wall-clock is
+    bounded while still tolerating a single transient flake.
+- **Files**: `.github/workflows/ci.yml`, `backend/tests/conftest.py`,
+  `backend/tests/test_terminal_replay.py`
+
 ### style: rework Manage Agents modal to fit one viewport with an Agents/Reviewers toggle
 
 - The Manage Agents modal grew taller than the screen when many workspace

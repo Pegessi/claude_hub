@@ -68,6 +68,8 @@ jobs:
         run: pnpm install
       - name: Run ESLint (linting)
         run: pnpm run lint:check
+      - name: Run unit tests
+        run: pnpm run test:unit
       - name: Run Type check and build
         run: pnpm run build
 
@@ -138,7 +140,13 @@ jobs:
           sudo mv ttyd /usr/local/bin/
       - name: Run terminal replay tests
         # Heavy browser-driven e2e tests are sensitive to CI resource
-        # contention and can flake under sequential load. Retry failed
-        # tests a couple of times so transient flakes don't fail CI; a
-        # genuine regression still fails after all reruns are exhausted.
-        run: uv run pytest tests/test_terminal_replay.py -v --reruns 2 --reruns-delay 5
+        # contention: on shared runners, CPU starvation slows xterm.js
+        # rendering and tmux/ttyd startup enough to blow past the fixed
+        # wait deadlines (mostly 12s) that pass comfortably on a laptop.
+        # CLAUDE_HUB_E2E_TIMEOUT_SCALE multiplies every Playwright deadline
+        # and tmux setup poll budget so the slowness is tolerated instead of
+        # failing deterministically. One rerun still absorbs a rare transient
+        # flake without ballooning the job into reruns-of-everything.
+        env:
+          CLAUDE_HUB_E2E_TIMEOUT_SCALE: "3"
+        run: uv run pytest tests/test_terminal_replay.py -v --reruns 1 --reruns-delay 5
