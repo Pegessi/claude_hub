@@ -75,6 +75,9 @@ def safe_list_dir(path: str) -> DirectoryListing:
 
     except PermissionError:
         raise HTTPException(status_code=403, detail="Permission denied")
+    except HTTPException:
+        # Preserve intentional 404/400 responses instead of masking them as 500.
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
