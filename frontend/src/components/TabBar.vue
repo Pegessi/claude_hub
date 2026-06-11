@@ -303,60 +303,14 @@
               </select>
               <button
                 type="button"
-                class="btn btn-secondary env-action-button"
-                @click="startEnvPresetEdit"
+                class="btn btn-secondary env-manage-button"
+                @click="openEnvPresetManager"
               >
-                {{ selectedEnvPreset?.id !== 'none' ? 'Edit' : 'New' }}
+                Manage
               </button>
-              <button
-                type="button"
-                class="btn btn-secondary env-action-button"
-                @click="deleteCurrentEnvPreset"
-              >
-                Delete
-              </button>
-            </div>
-            <textarea
-              v-if="selectedEnvPreset && selectedEnvPreset.id !== 'none' && !form.env_editor_open"
-              class="env-textarea env-textarea-preview"
-              readonly
-              :value="selectedEnvPreset.text"
-            />
-            <div
-              v-if="form.env_editor_open"
-              class="env-template-panel"
-            >
-              <input
-                v-model="form.env_preset_name"
-                class="env-preset-name"
-                placeholder="Preset name"
-              >
-              <textarea
-                v-model="form.env_text"
-                class="env-textarea"
-                spellcheck="false"
-                placeholder="HTTP_PROXY=http://127.0.0.1:7890&#10;HTTPS_PROXY=http://127.0.0.1:7890&#10;NO_PROXY=localhost,127.0.0.1,::1"
-              />
-              <div class="env-editor-actions">
-                <button
-                  type="button"
-                  class="btn btn-secondary"
-                  @click="cancelEnvPresetEdit"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  class="btn btn-secondary env-save-button"
-                  :disabled="!form.env_text.trim() || !form.env_preset_name.trim()"
-                  @click="saveCurrentEnvPreset"
-                >
-                  Save preset
-                </button>
-              </div>
             </div>
             <p class="form-hint">
-              Pick a preset for this launch, or create your own KEY=value template here. Values are not printed in backend logs.
+              Pick a preset for this launch. Click "Manage" to create, edit, or delete presets. Values are not printed in backend logs.
             </p>
           </div>
           <div class="modal-actions">
@@ -522,6 +476,13 @@
         </div>
       </div>
     </div>
+
+    <!-- Env Preset Manager Modal -->
+    <EnvPresetManager
+      v-model:model-value="form.env_preset"
+      :visible="showEnvManager"
+      @close="closeEnvPresetManager"
+    />
   </div>
 </template>
 
@@ -537,6 +498,7 @@ import {
   parseLaunchEnv,
   useLaunchEnvPresets,
 } from '@/composables/useLaunchEnvPresets'
+import EnvPresetManager from '@/components/EnvPresetManager.vue'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
@@ -558,7 +520,7 @@ interface DirectoryListing {
 
 const store = useTerminalStore()
 const appStore = useAppStore()
-const { envPresets, getPresetText, defaultPresetTextForAgent, savePreset, deletePreset } =
+const { envPresets, getPresetText, defaultPresetTextForAgent } =
   useLaunchEnvPresets()
 const { isPending, runPending } = usePendingActions()
 const { tabs, manualTabs, managedTabs, activeTabId, isLoading, agentStatuses } = storeToRefs(store)
@@ -584,6 +546,7 @@ const fromIndex = ref<number | null>(null)
 const showModal = ref(false)
 const showCloseConfirm = ref(false)
 const showFileBrowser = ref(false)
+const showEnvManager = ref(false)
 const tabToClose = ref<TerminalTab | null>(null)
 const editingTabId = ref<string | null>(null)
 const editingTabName = ref('')
@@ -601,9 +564,7 @@ const form = reactive({
   remote_profile_id: '',
   remote_reconnect: true,
   env_preset: defaultLaunchEnvPresetForAgent('claude'),
-  env_preset_name: '',
   env_text: defaultPresetTextForAgent('claude'),
-  env_editor_open: false,
 })
 
 const supportsSoloMode = computed(() => form.agent_type === 'claude' || form.agent_type === 'codex')
@@ -628,9 +589,6 @@ const remoteProfilesError = ref<string | null>(null)
 const selectedRemoteProfile = computed(() =>
   remoteProfiles.value.find(profile => profile.id === form.remote_profile_id) || null
 )
-const selectedEnvPreset = computed(() =>
-  envPresets.value.find(preset => preset.id === form.env_preset) || null
-)
 const isCreateDisabled = computed(
   () =>
     isLoading.value ||
@@ -646,45 +604,21 @@ function applyEnvPreset(presetId: string) {
   const text = getPresetText(presetId)
   if (text === null) return
   form.env_text = text
-  form.env_editor_open = false
 }
 
-function startEnvPresetEdit() {
-  const preset = selectedEnvPreset.value
-  form.env_preset_name = preset && preset.id !== 'none' ? preset.name : ''
-  form.env_text = preset && preset.id !== 'none' ? preset.text : ''
-  form.env_editor_open = true
+function openEnvPresetManager() {
+  showEnvManager.value = true
 }
 
-function cancelEnvPresetEdit() {
+function closeEnvPresetManager() {
+  showEnvManager.value = false
+  // Sync env_text with potentially updated preset
   applyEnvPreset(form.env_preset)
-  form.env_preset_name = ''
-  form.env_editor_open = false
-}
-
-function saveCurrentEnvPreset() {
-  const preset = savePreset(form.env_preset_name, form.env_text, form.env_preset)
-  if (!preset) return
-  form.env_preset = preset.id
-  form.env_preset_name = ''
-  form.env_text = preset.text
-  form.env_editor_open = false
-}
-
-function deleteCurrentEnvPreset() {
-  if (!selectedEnvPreset.value || selectedEnvPreset.value.id === 'none') return
-  if (!deletePreset(form.env_preset)) return
-  form.env_preset = 'none'
-  form.env_preset_name = ''
-  form.env_text = ''
-  form.env_editor_open = false
 }
 
 function resetEnvForAgentType(agentType: AgentType) {
   form.env_preset = defaultLaunchEnvPresetForAgent(agentType)
-  form.env_preset_name = ''
   form.env_text = defaultPresetTextForAgent(agentType)
-  form.env_editor_open = false
 }
 
 function agentTypeLabel(agentType: AgentType): string {
@@ -1777,12 +1711,11 @@ async function handleCreateTab() {
 
 .env-preset-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
 }
 
-.env-action-button,
-.env-save-button {
+.env-manage-button {
   white-space: nowrap;
 }
 
