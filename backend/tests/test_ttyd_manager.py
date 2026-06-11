@@ -4,6 +4,7 @@ import os
 import shlex
 import stat
 import subprocess
+from datetime import datetime, timedelta
 
 import pytest
 from pytest import MonkeyPatch
@@ -736,6 +737,133 @@ def test_cursor_running_tokens_status_classifies_as_working(monkeypatch: MonkeyP
     assert status == AgentRuntimeStatus.WORKING
     assert status_text == "Working"
     assert detail == "agent is processing"
+
+
+_FROZEN_WORKING_FRAME = "\n".join(
+    [
+        "⏺ Now let me also add CSS for the attachment empty hint.",
+        "✻ Implementing frontend task edit modal enhancements… (14m 59s · ↑ 16.9k tokens)",
+        "  ⎿  ✔ Implement backend schema and update_task changes",
+        "     ◼ Implement frontend task edit/create modal enhancements",
+        "     ◻ Validate changes and update changelog",
+        "────────────────────────────────────────────────────",
+        "❯ ",
+        "────────────────────────────────────────────────────",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ctrl+t to hide tasks",
+    ]
+)
+
+
+def test_frozen_working_frame_classifies_as_stuck(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
+    manager = TTYDManager.__new__(TTYDManager)
+    # Simulate a frame first observed well past the staleness window: the agent
+    # left a working frame on screen but nothing has changed since.
+    first_seen = datetime.now() - timedelta(
+        seconds=ttyd_manager_module._WORKING_FRAME_STALE_SECONDS + 30
+    )
+    manager._status_snapshots = {
+        "tab-frozen": {
+            "hash": "frozen-hash",
+            "last_changed_at": first_seen,
+            "frame_first_seen_at": first_seen,
+        }
+    }
+    process = TTYDProcess(
+        tab_id="tab-frozen",
+        port=12360,
+        name="Frozen Working",
+        agent_type=AgentType.CLAUDE,
+    )
+
+    status, status_text, _detail, _last_changed_at = manager._classify_agent_status(
+        process,
+        _FROZEN_WORKING_FRAME,
+        "frozen-hash",
+        "zsh",
+    )
+
+    assert status == AgentRuntimeStatus.ATTENTION
+    assert status_text == "Agent may be stuck"
+
+
+def test_ticking_working_frame_stays_working(monkeypatch: MonkeyPatch) -> None:
+    """A live spinner repaints each sample, so a changed frame stays WORKING."""
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
+    manager = TTYDManager.__new__(TTYDManager)
+    # Previous sample had a different hash and is old; the new (changed) frame
+    # resets frame_first_seen_at, so it must not be treated as stale.
+    old = datetime.now() - timedelta(seconds=ttyd_manager_module._WORKING_FRAME_STALE_SECONDS + 120)
+    manager._status_snapshots = {
+        "tab-ticking": {
+            "hash": "previous-hash",
+            "last_changed_at": old,
+            "frame_first_seen_at": old,
+        }
+    }
+    process = TTYDProcess(
+        tab_id="tab-ticking",
+        port=12361,
+        name="Ticking Working",
+        agent_type=AgentType.CLAUDE,
+    )
+
+    status, status_text, detail, _last_changed_at = manager._classify_agent_status(
+        process,
+        _FROZEN_WORKING_FRAME,  # same content, but a NEW hash this sample
+        "new-hash",
+        "zsh",
+    )
+
+    assert status == AgentRuntimeStatus.WORKING
+    assert status_text == "Working"
+    assert detail == "agent is processing"
+
+
+def test_frozen_working_frame_with_task_panel_classifies_as_stuck(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Persistent bottom task panel must not keep a stopped agent 'working'."""
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
+    manager = TTYDManager.__new__(TTYDManager)
+    first_seen = datetime.now() - timedelta(
+        seconds=ttyd_manager_module._WORKING_FRAME_STALE_SECONDS + 5
+    )
+    manager._status_snapshots = {
+        "tab-panel": {
+            "hash": "panel-hash",
+            "last_changed_at": first_seen,
+            "frame_first_seen_at": first_seen,
+        }
+    }
+    process = TTYDProcess(
+        tab_id="tab-panel",
+        port=12362,
+        name="Frozen Panel",
+        agent_type=AgentType.CLAUDE,
+    )
+
+    output = "\n".join(
+        [
+            "✻ Implementing frontend task edit modal enhancements… (8m 2s · ↑ 9k tokens)",
+            "  3 tasks (0 done, 1 in progress, 2 open)",
+            "  ◼ Implement frontend task edit/create modal enhancements",
+            "  ◻ Validate changes and update changelog",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ctrl+t to hide tasks",
+        ]
+    )
+
+    status, status_text, _detail, _last_changed_at = manager._classify_agent_status(
+        process,
+        output,
+        "panel-hash",
+        "zsh",
+    )
+
+    assert status == AgentRuntimeStatus.ATTENTION
+    assert status_text == "Agent may be stuck"
 
 
 def test_codex_selection_prompt_classifies_as_attention(monkeypatch: MonkeyPatch) -> None:
