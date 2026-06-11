@@ -2565,6 +2565,42 @@ class WorkspaceManager:
         )
         self.reports[report.id] = report
         task_before_release = task
+
+        # Collect sessions to interrupt before we clear the session IDs on the
+        # task object.  Only sessions actually assigned to THIS task are targeted
+        # (worker via task.session_id, reviewers via task.review_session_id plus
+        # stale REVIEWER-role sessions still pointing at this task) — we never
+        # interrupt unrelated/idle sessions.  Interrupts are sent concurrently
+        # and are best-effort: failures are logged inside _interrupt_session and
+        # do not block the bookkeeping abort.
+        sessions_to_interrupt: list[ManagedSession] = []
+        if task_before_release.session_id:
+            worker_session = self.sessions.get(task_before_release.session_id)
+            if (
+                worker_session
+                and (worker_session.task_id == task.id or worker_session.current_task_id == task.id)
+            ):
+                sessions_to_interrupt.append(worker_session)
+        reviewer_ids: set[str] = set()
+        if task_before_release.review_session_id:
+            reviewer_ids.add(task_before_release.review_session_id)
+        reviewer_ids.update(
+            s.id
+            for s in self.sessions.values()
+            if s.role == WorkspaceSessionRole.REVIEWER
+            and (s.task_id == task.id or s.current_task_id == task.id)
+        )
+        for sid in reviewer_ids:
+            reviewer_session = self.sessions.get(sid)
+            if (
+                reviewer_session
+                and reviewer_session.role == WorkspaceSessionRole.REVIEWER
+                and (reviewer_session.task_id == task.id or reviewer_session.current_task_id == task.id)
+            ):
+                sessions_to_interrupt.append(reviewer_session)
+        if sessions_to_interrupt:
+            await asyncio.gather(*(self._interrupt_session(s) for s in sessions_to_interrupt))
+
         self.tasks[task.id] = task.model_copy(
             update={
                 "status": WorkspaceTaskStatus.TODO,
@@ -5260,6 +5296,33 @@ class WorkspaceManager:
         if proc.returncode != 0:
             error = stderr.decode("utf-8", errors="ignore").strip()
             raise RuntimeError(error or f"tmux {' '.join(args)} failed with code {proc.returncode}")
+
+    async def _interrupt_session(self, session: ManagedSession) -> None:
+        """Send Escape then a single Ctrl-C to interrupt a running Claude Code process.
+
+        Sequence: Escape dismisses any open dialog/prompt, a short settle allows the
+        TUI to return to its main loop, then one Ctrl-C raises KeyboardInterrupt in
+        the agent.  We deliberately send exactly one Ctrl-C to avoid the double-tap
+        that exits Claude Code entirely.  Errors are logged but not raised so that
+        bookkeeping abort can still proceed.
+        """
+        tmux_name = session.tmux_session
+        try:
+            await self._run_tmux("send-keys", "-t", tmux_name, "Escape")
+            await asyncio.sleep(0.3)
+            await self._run_tmux("send-keys", "-t", tmux_name, "C-c")
+            logger.info(
+                "Sent interrupt (Escape + single C-c) to session_id=%s tmux=%s role=%s",
+                session.id,
+                tmux_name,
+                session.role.value,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to send interrupt keys to session_id=%s tmux=%s",
+                session.id,
+                tmux_name,
+            )
 
     async def _rename_session_for_task(
         self,

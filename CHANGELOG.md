@@ -5,6 +5,23 @@
 
 ## Unreleased
 
+### fix: interrupt running agent and reviewer processes on task abort
+
+- Previously, aborting a task only updated bookkeeping state (reset task to
+  TODO, cleared session IDs, released sessions) but did not actually stop the
+  running Claude Code processes in either the worker or reviewer tmux
+  sessions. Agents continued consuming API tokens and could still write to
+  disk after the user thought the task was cancelled.
+- Added `_interrupt_session()` which sends Escape (to dismiss any open TUI
+  dialog) followed by a single Ctrl-C (to raise KeyboardInterrupt in the
+  agent) with a 300ms settle between them. Only one Ctrl-C is sent to avoid
+  the double-tap that exits Claude Code entirely.
+- `abort_task()` now collects the worker session and all reviewer sessions
+  (only those whose `task_id`/`current_task_id` still points to this task)
+  and interrupts them concurrently before updating bookkeeping state.
+  Interrupt errors are logged but do not block the abort flow.
+- **Files**: backend/claude_hub/services/workspace_manager.py
+
 ### fix: remove reviewer-report → dashboard lag (two-phase save race)
 
 - **Symptom**: when a reviewer posted `review_passed` / `review_failed` /
