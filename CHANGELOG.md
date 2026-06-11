@@ -5,6 +5,30 @@
 
 ## Unreleased
 
+### style: rework Manage Agents modal to fit one viewport with an Agents/Reviewers toggle
+
+- The Manage Agents modal grew taller than the screen when many workspace
+  agents existed, pushing the "Add Agent" form and action buttons below the
+  fold and making the whole dialog scroll as one block. The layout also wasted
+  vertical space (Role and Agent Type on separate rows) and mixed agents and
+  reviewers in a single undifferentiated list.
+- Fix: `.agent-manager-modal` is now a flex column capped at the viewport
+  height (`max-height: calc(100dvh - 32px)`, `overflow: hidden`). The Workspace
+  Agents list (`.agent-list`) takes the larger share (`flex: 1 1 auto`,
+  `min-height: 0`) and scrolls internally, while the Add Agent form takes the
+  smaller share (`flex: 0 1 auto`) and scrolls on its own, so the action
+  buttons stay reachable without the modal exceeding one screen.
+- Role and Agent Type now share a single row (`.modal-field-row`, stacked again
+  below 760px), and form margins were tightened to keep everything on screen
+  without scrolling in the common case.
+- The Workspace Agents section header now has a segmented Agents / Reviewers
+  toggle (with live counts) that filters the list, reusing the existing
+  page-level `.agent-status-view-switch` visual pattern. The Agents view count
+  includes the dispatcher.
+- All changes are scoped to `.agent-manager-modal` so other modals are
+  unaffected.
+- **Files**: `frontend/src/components/AgentWorkspaceView.vue`
+
 ### fix: detect frozen "working" frames so a stopped agent is no longer pinned as working
 
 - A Claude/Cursor session that stops while leaving a lingering "working"
