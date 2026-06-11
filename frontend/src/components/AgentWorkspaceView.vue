@@ -1678,7 +1678,7 @@
         <h3>Edit Task</h3>
         <form
           @submit.prevent="handleUpdateTask"
-          @paste="handleAttachmentPaste($event, editTaskForm.new_attachments)"
+          @paste.prevent
         >
           <div class="modal-field">
             <label>Title</label>
@@ -1690,47 +1690,6 @@
           <div class="modal-field">
             <label>Task description</label>
             <textarea v-model="editTaskForm.prompt" />
-          </div>
-          <div class="modal-field">
-            <label>
-              Attachments
-              <span class="field-hint">(paste images to add)</span>
-            </label>
-            <div
-              v-if="editTaskAllAttachments.length > 0"
-              class="attachment-list"
-            >
-              <div
-                v-for="attachment in editTaskAllAttachments"
-                :key="attachment.id"
-                class="attachment-row"
-              >
-                <div class="attachment-thumb">
-                  <img
-                    :src="editTaskAttachmentPreview(attachment)"
-                    :alt="attachment.filename"
-                  >
-                </div>
-                <div class="attachment-meta">
-                  <strong>{{ attachment.filename }}</strong>
-                  <span>{{ attachment.mime_type }} · {{ formatAttachmentSize(editTaskAttachmentSize(attachment)) }}</span>
-                </div>
-                <button
-                  type="button"
-                  class="icon-button"
-                  aria-label="Remove attachment"
-                  @click="removeEditTaskAttachment(attachment)"
-                >
-                  x
-                </button>
-              </div>
-            </div>
-            <div
-              v-else
-              class="attachment-empty-hint"
-            >
-              No attachments. Paste images to add.
-            </div>
           </div>
           <div class="modal-field">
             <label>Dispatch agent</label>
@@ -1782,7 +1741,7 @@
             <LoadingButton
               type="submit"
               class="primary-button"
-              :disabled="!editingTaskId || isLoading || !editTaskForm.title.trim() || (!editTaskForm.prompt.trim() && editTaskAllAttachments.length === 0)"
+              :disabled="!editingTaskId || isLoading || !editTaskForm.title.trim() || !editTaskForm.prompt.trim()"
               :loading="isPending(taskActionKey('edit', editingTaskId))"
               loading-label="Saving task"
             >
@@ -2520,9 +2479,6 @@ const editTaskForm = reactive({
   session_id: '',
   related_task_id: '',
   clear_context: false,
-  new_attachments: [] as DraftAttachment[],
-  removed_attachment_ids: [] as string[],
-  _original_attachments: [] as WorkspaceAttachment[],
 })
 
 const lessonForm = reactive({
@@ -2548,12 +2504,6 @@ const mobileWorkspaceSummary = computed(() => {
 const selectedTask = computed(() =>
   tasks.value.find(task => task.id === selectedTaskId.value) || null
 )
-
-const editTaskAllAttachments = computed<Array<WorkspaceAttachment | DraftAttachment>>(() => {
-  const removed = new Set(editTaskForm.removed_attachment_ids)
-  const kept = editTaskForm._original_attachments.filter(a => !removed.has(a.id))
-  return [...kept, ...editTaskForm.new_attachments]
-})
 
 function feedbackTokens(value: string): Set<string> {
   const text = value.toLowerCase()
@@ -3279,33 +3229,6 @@ function canAbortTask(task: WorkspaceTask) {
 
 function canEditTask(task: WorkspaceTask) {
   return task.status === 'todo'
-}
-
-function editTaskAttachmentPreview(attachment: WorkspaceAttachment | DraftAttachment): string {
-  if ('preview_url' in attachment) {
-    return (attachment as DraftAttachment).preview_url
-  }
-  return `/api/workspaces/attachments/${attachment.id}`
-}
-
-function editTaskAttachmentSize(attachment: WorkspaceAttachment | DraftAttachment): number {
-  if ('size_bytes' in attachment && typeof attachment.size_bytes === 'number') {
-    return attachment.size_bytes
-  }
-  return 0
-}
-
-function removeEditTaskAttachment(attachment: WorkspaceAttachment | DraftAttachment) {
-  if ('preview_url' in attachment) {
-    // It's a new draft attachment - remove from new list
-    const idx = editTaskForm.new_attachments.findIndex(a => a.id === attachment.id)
-    if (idx >= 0) editTaskForm.new_attachments.splice(idx, 1)
-  } else {
-    // It's an existing persisted attachment - mark as removed
-    if (!editTaskForm.removed_attachment_ids.includes(attachment.id)) {
-      editTaskForm.removed_attachment_ids.push(attachment.id)
-    }
-  }
 }
 
 function primaryExpandedReportId(): string | null {
@@ -4146,9 +4069,6 @@ function openEditTaskModal(task: WorkspaceTask) {
   editTaskForm.session_id = task.session_id || ''
   editTaskForm.related_task_id = task.related_task_id || ''
   editTaskForm.clear_context = Boolean(task.clear_context)
-  editTaskForm.new_attachments = []
-  editTaskForm.removed_attachment_ids = []
-  editTaskForm._original_attachments = [...task.attachments]
   showEditTaskModal.value = true
 }
 
@@ -4160,9 +4080,6 @@ function closeEditTaskModal() {
   editTaskForm.session_id = ''
   editTaskForm.related_task_id = ''
   editTaskForm.clear_context = false
-  resetDraftAttachments(editTaskForm.new_attachments)
-  editTaskForm.removed_attachment_ids = []
-  editTaskForm._original_attachments = []
 }
 
 function openLessonsModal() {
@@ -4268,7 +4185,7 @@ async function handleUpdateTask() {
   if (
     !taskId ||
     !editTaskForm.title.trim() ||
-    (!editTaskForm.prompt.trim() && editTaskAllAttachments.value.length === 0)
+    !editTaskForm.prompt.trim()
   ) {
     return
   }
@@ -4279,12 +4196,6 @@ async function handleUpdateTask() {
       session_id: editTaskForm.session_id || null,
       related_task_id: editTaskForm.related_task_id || null,
       clear_context: editTaskForm.clear_context ? true : null,
-    }
-    if (editTaskForm.new_attachments.length > 0) {
-      payload.add_attachments = serializeDraftAttachments(editTaskForm.new_attachments)
-    }
-    if (editTaskForm.removed_attachment_ids.length > 0) {
-      payload.removed_attachment_ids = [...editTaskForm.removed_attachment_ids]
     }
     await workspaceStore.updateTask(taskId, payload)
     // Clear cached start options so they re-read from the updated task
@@ -6084,20 +5995,6 @@ onUnmounted(() => {
 .attachment-meta strong {
   color: var(--ch-color-text);
   font-size: 12px;
-}
-
-.attachment-empty-hint {
-  margin-top: 8px;
-  font-size: 12px;
-  color: var(--ch-color-text-muted);
-  font-style: italic;
-}
-
-.field-hint {
-  font-size: 12px;
-  color: var(--ch-color-text-muted);
-  font-weight: normal;
-  margin-left: 6px;
 }
 
 .attachment-meta span,
