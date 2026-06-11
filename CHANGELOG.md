@@ -5,6 +5,26 @@
 
 ## Unreleased
 
+### fix: detect frozen "working" frames so a stopped agent is no longer pinned as working
+
+- A Claude/Cursor session that stops while leaving a lingering "working"
+  frame on screen (spinner + "esc to interrupt" footer, or a persistent
+  task/progress panel) was classified as `WORKING` indefinitely, because the
+  status classifier only matched working markers and never checked whether the
+  frame was still alive.
+- Fix: `_classify_agent_status()` now tracks `frame_first_seen_at` per tab via
+  the existing content-hash snapshot. A genuinely-working agent repaints its
+  spinner/elapsed-time counter every second, so the captured frame keeps
+  changing; if working markers are still present but the frame has not changed
+  for `_WORKING_FRAME_STALE_SECONDS` (180s, well above the 5s monitor interval
+  and 1s spinner tick), the agent is reported as `ATTENTION` ("Agent may be
+  stuck") instead of `WORKING`. This routes a stuck session to the
+  needs-input/review path so it no longer blocks the task forever.
+- Added regression tests for frozen frames (spinner footer and task panel) and
+  for a ticking frame that must stay `WORKING`.
+- **Files**: `backend/claude_hub/services/ttyd_manager.py`,
+  `backend/tests/test_ttyd_manager.py`
+
 ### fix: progress bug — prevent implementation review from being misrouted as goal packet review
 
 - The `is_goal_packet_review` condition in `_handle_review_report()` was too
