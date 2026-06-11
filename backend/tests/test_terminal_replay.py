@@ -29,6 +29,7 @@ from .conftest import (
     diff_summary,
     local_requests_session,
     normalize_terminal_output,
+    scale_timeout,
     send_keys_sync,
     tmux_session_exists,
 )
@@ -49,7 +50,7 @@ def ensure_tmux_session(page: Page, tab_id: str, session_name: str) -> None:
     page.goto(f"{BACKEND_URL}/api/terminal/proxy/{tab_id}/")
     page.wait_for_selector(".xterm", timeout=15000)
     # Wait for ttyd to connect to tmux and create the session
-    for _ in range(30):
+    for _ in range(int(scale_timeout(30))):
         time.sleep(0.2)
         if tmux_session_exists(session_name):
             break
@@ -62,7 +63,7 @@ def produce_scrollback(session_name: str, count: int = 200) -> None:
     shell_cmd = f"for i in $(seq 0 {count - 1}); do echo LINE_$(printf '%04d' $i); done"
     send_keys_sync(session_name, shell_cmd, "Enter")
     # Wait for the shell to process all output
-    for _ in range(50):
+    for _ in range(int(scale_timeout(50))):
         time.sleep(0.2)
         output = capture_pane_sync(session_name, start="-100000")
         if f"LINE_{count - 1:04d}" in output:
@@ -609,7 +610,7 @@ def test_live_output_keeps_viewport_pinned_to_latest(terminal_tab: dict, page: P
     ]
     assert not drifted, f"viewport drifted away from latest live output: {drifted[:5]}"
 
-    for _ in range(120):
+    for _ in range(int(scale_timeout(120))):
         if f"FOLLOW_{line_count - 1:04d}" in capture_pane_sync(session_name):
             break
         time.sleep(0.1)
@@ -688,7 +689,7 @@ def test_internal_scroll_event_does_not_cancel_live_bottom_follow(
         "Enter",
     )
 
-    for _ in range(120):
+    for _ in range(int(scale_timeout(120))):
         if f"DYNAMIC_{line_count - 1:04d}" in capture_pane_sync(session_name):
             break
         time.sleep(0.1)
@@ -795,7 +796,7 @@ def test_agent_tui_tab_does_not_auto_resync_after_live_writes_or_activation(
             "Enter",
         )
 
-        for _ in range(40):
+        for _ in range(int(scale_timeout(40))):
             if "AGENT_TUI_NO_RESYNC_0005" in capture_pane_sync(session_name):
                 break
             time.sleep(0.2)
@@ -918,7 +919,7 @@ def test_agent_tui_initial_replay_keeps_live_frames(backend_server: None, page: 
         page.wait_for_selector(".xterm", timeout=15000)
         wait_for_replay_done(page, timeout=30)
 
-        for _ in range(50):
+        for _ in range(int(scale_timeout(50))):
             if "AGENT_HELD_FRAME_0029" in capture_pane_sync(session_name):
                 break
             time.sleep(0.2)
@@ -1007,7 +1008,7 @@ def test_agent_tui_history_view_is_stable_during_live_redraws(
             "Enter",
         )
 
-        for _ in range(80):
+        for _ in range(int(scale_timeout(80))):
             if f"AGENT_HISTORY_VIEW_LIVE_{line_count - 1:04d}" in capture_pane_sync(session_name):
                 break
             time.sleep(0.2)
@@ -1258,7 +1259,7 @@ def test_typing_interrupts_pending_history_resync(terminal_tab: dict, page: Page
     )
 
     try:
-        for _ in range(80):
+        for _ in range(int(scale_timeout(80))):
             if f"LIVE_{line_count - 1:04d}" in capture_pane_sync(session_name):
                 break
             time.sleep(0.2)
@@ -1326,7 +1327,7 @@ def test_wrapped_live_output_resyncs_complete_history(terminal_tab: dict, page: 
         "Enter",
     )
 
-    for _ in range(120):
+    for _ in range(int(scale_timeout(120))):
         if f"LIVE_{line_count - 1:04d}" in capture_pane_sync(session_name):
             break
         time.sleep(0.2)
@@ -1393,7 +1394,7 @@ def test_typed_wrapped_output_resyncs_after_input_quiets(terminal_tab: dict, pag
     )
     page.keyboard.press("Enter")
 
-    for _ in range(120):
+    for _ in range(int(scale_timeout(120))):
         if f"LIVE_{line_count - 1:04d}" in capture_pane_sync(session_name):
             break
         time.sleep(0.2)
@@ -1454,7 +1455,7 @@ def test_history_resync_does_not_replace_near_bottom_view(terminal_tab: dict, pa
         "Enter",
     )
 
-    for _ in range(120):
+    for _ in range(int(scale_timeout(120))):
         if f"LIVE_{line_count - 1:04d}" in capture_pane_sync(session_name):
             break
         time.sleep(0.2)

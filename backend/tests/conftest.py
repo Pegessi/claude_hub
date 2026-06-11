@@ -13,6 +13,34 @@ from playwright.sync_api import Page
 BACKEND_URL = os.environ.get("CLAUDE_HUB_TEST_BACKEND_URL", "http://127.0.0.1:8173").rstrip("/")
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
+
+def _e2e_timeout_scale() -> float:
+    """Multiplier applied to Playwright wait deadlines in the replay E2E tests.
+
+    The browser-driven terminal tests assert that history renders within fixed
+    deadlines (mostly 12s). Those budgets are comfortable on a developer laptop
+    but too tight on shared CI runners, where CPU contention slows xterm.js
+    rendering and tmux/ttyd startup enough to blow past them deterministically.
+    Set ``CLAUDE_HUB_E2E_TIMEOUT_SCALE`` (e.g. 3) in CI to widen every deadline
+    without changing local behaviour (default 1.0). Values below 1.0 are
+    clamped to 1.0 so the env var can only ever relax, never tighten, deadlines.
+    """
+    raw = os.environ.get("CLAUDE_HUB_E2E_TIMEOUT_SCALE", "1")
+    try:
+        scale = float(raw)
+    except ValueError:
+        return 1.0
+    return scale if scale > 1.0 else 1.0
+
+
+E2E_TIMEOUT_SCALE = _e2e_timeout_scale()
+
+
+def scale_timeout(timeout: float) -> float:
+    """Scale a raw timeout/poll budget by ``E2E_TIMEOUT_SCALE``."""
+    return timeout * E2E_TIMEOUT_SCALE
+
+
 # ── helpers ──────────────────────────────────────────────────────────────
 
 
@@ -167,6 +195,46 @@ def backend_server() -> Generator[None, None, None]:
         except subprocess.TimeoutExpired:
             proc.kill()
         log_file.close()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _scale_playwright_timeouts() -> Generator[None, None, None]:
+    """Widen Playwright wait deadlines by ``E2E_TIMEOUT_SCALE`` on slow runners.
+
+    When ``CLAUDE_HUB_E2E_TIMEOUT_SCALE`` is left at its default (1.0) this is a
+    no-op, so local runs behave exactly as before. In CI we set it to a larger
+    value to multiply every ``page.wait_for_*`` deadline at once instead of
+    editing ~40 individual ``timeout=`` literals. Only true deadlines
+    (``wait_for_function`` / ``wait_for_selector``) are scaled; deliberate fixed
+    pauses (``wait_for_timeout`` observation windows) are left untouched.
+    Patching the Page class (not an instance) means it never forces a browser
+    launch for the pure backend functional tests — the wrappers only run when an
+    E2E test actually calls these methods.
+    """
+    if E2E_TIMEOUT_SCALE == 1.0:
+        yield
+        return
+
+    from playwright.sync_api import Page as _Page
+
+    originals = {name: getattr(_Page, name) for name in ("wait_for_function", "wait_for_selector")}
+
+    def make_kwarg_wrapper(orig):  # type: ignore[no-untyped-def]
+        def wrapper(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            if kwargs.get("timeout") is not None:
+                kwargs["timeout"] = kwargs["timeout"] * E2E_TIMEOUT_SCALE
+            return orig(self, *args, **kwargs)
+
+        return wrapper
+
+    _Page.wait_for_function = make_kwarg_wrapper(originals["wait_for_function"])  # type: ignore[method-assign]
+    _Page.wait_for_selector = make_kwarg_wrapper(originals["wait_for_selector"])  # type: ignore[method-assign]
+
+    try:
+        yield
+    finally:
+        for name, orig in originals.items():
+            setattr(_Page, name, orig)
 
 
 @pytest.fixture
