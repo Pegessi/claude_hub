@@ -5,6 +5,34 @@
 
 ## Unreleased
 
+### fix: progress bug — prevent implementation review from being misrouted as goal packet review
+
+- The `is_goal_packet_review` condition in `_handle_review_report()` was too
+  broad: after goal packet approval, the packet stays in APPROVED status and
+  `review_completed_at` gets rewritten by the implementation review's own
+  fast-path. This caused implementation `review_passed` reports to be
+  incorrectly routed to the goal packet review handler, which called
+  `continue_task` and looped the task back into implementation + review
+  cycles (the "N-times review" symptom and the "completed task somehow
+  re-enters review" symptom).
+- Fix: add `goal_packet.updated_at >= report.created_at` check to the
+  idempotency branch. Goal packet reviews touch `goal_packet.updated_at`
+  (set to the same `now` as `review_completed_at`), while implementation
+  reviews never modify the goal packet — so this timestamp reliably
+  distinguishes the two review phases.
+- Added regression test `test_implementation_review_not_misrouted_as_goal_packet_review`.
+- **Files**: `backend/claude_hub/services/workspace_manager.py`,
+  `backend/tests/test_workspaces.py`
+
+### docs: strengthen worktree development mandate in CLAUDE.md / AGENTS.md
+
+- Added a prominent RULE #1 banner at the top of the entry guide stating
+  that direct development on `main` is never allowed.
+- Expanded the Mandatory Workflow section with stronger language and a
+  guard clause for catching oneself mid-edit on `main`.
+- Added a worktree reminder to the Pitfalls section.
+- **Files**: `CLAUDE.md`, `AGENTS.md`
+
 ### feat: env preset manage modal (replace inline editor)
 
 - Replaced the inline env preset editor (New/Delete buttons + small textarea)
