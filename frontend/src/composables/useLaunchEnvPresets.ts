@@ -3,7 +3,7 @@ import type { AgentType } from '@/types'
 
 type LaunchEnv = Record<string, string>
 
-interface LaunchEnvPreset {
+export interface LaunchEnvPreset {
   id: string
   name: string
   text: string
@@ -18,6 +18,13 @@ interface StoredLaunchEnvPreset {
 const STORAGE_KEY = 'claude-hub.launch-env-presets'
 const HIDDEN_KEY = 'claude-hub.launch-env-hidden'
 export const DEFAULT_CLAUDE_ENV_PRESET_ID = 'volcengine-coding-plan'
+
+export const BUILT_IN_PRESET_IDS = [
+  'none',
+  'local-proxy-7890',
+  'socks-proxy-1080',
+  'volcengine-coding-plan',
+]
 
 const builtInPresets: LaunchEnvPreset[] = [
   {
