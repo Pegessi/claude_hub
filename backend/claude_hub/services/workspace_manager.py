@@ -4963,11 +4963,24 @@ class WorkspaceManager:
         # is still in PENDING_REVIEW (pre-create_report fast-path) or was
         # already transitioned to APPROVED / REJECTED by the create_report
         # fast-path single-save write.
-        packet_status = task.goal_packet.status if task.goal_packet else None
+        #
+        # The second (APPROVED/REJECTED) branch is an idempotency path for
+        # when the fast-path already transitioned the packet. To avoid
+        # mis-routing implementation-phase reviews (where the packet was
+        # approved in a *prior* review cycle and review_completed_at gets
+        # rewritten by the implementation review's own fast-path), we also
+        # require that goal_packet.updated_at be at or after the report
+        # timestamp — meaning the packet itself was touched by this review
+        # cycle, which only happens for goal packet reviews.
+        packet = task.goal_packet
+        packet_status = packet.status if packet else None
         is_goal_packet_review = task.task_mode == WorkspaceTaskMode.REVIEWED and (
             packet_status == GoalPacketStatus.PENDING_REVIEW
             or (
                 packet_status in {GoalPacketStatus.APPROVED, GoalPacketStatus.REJECTED}
+                and packet is not None
+                and packet.updated_at is not None
+                and packet.updated_at >= report.created_at
                 and task.review_session_id == reviewer.id
                 and task.review_completed_at is not None
                 and task.review_completed_at >= report.created_at
