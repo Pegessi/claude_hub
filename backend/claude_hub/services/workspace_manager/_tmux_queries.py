@@ -359,11 +359,9 @@ class _TmuxQueriesMixin:
             if task.system_internal:
                 continue
             needs_review_dispatch = False
-            if (
-                task.review_requested_at
-                and not task.review_completed_at
-                and not self._reviewer_is_active(task)
-            ):
+            if state_policy.review_in_flight(
+                task.review_requested_at, task.review_completed_at
+            ) and not self._reviewer_is_active(task):
                 # Review was requested but the assigned reviewer is idle,
                 # stopped, missing, or reassigned.
                 needs_review_dispatch = True

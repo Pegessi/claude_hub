@@ -25,7 +25,7 @@ class _ReportsMixin:
             return False
         if payload.state != AgentReportState.WORKING:
             return False
-        if task.review_requested_at and not task.review_completed_at:
+        if state_policy.review_in_flight(task.review_requested_at, task.review_completed_at):
             return False
         current_status = task.goal_packet.status if task.goal_packet else None
         return current_status not in {
@@ -62,9 +62,11 @@ class _ReportsMixin:
         report timestamp) stays actionable so existing idempotency and
         REVIEW_FAILED re-dispatch paths keep working.
         """
-        if task.review_completed_at is not None and task.review_completed_at >= report.created_at:
-            return True
-        return task.review_requested_at is not None and task.review_completed_at is None
+        return state_policy.reviewer_verdict_actionable(
+            task.review_requested_at,
+            task.review_completed_at,
+            report.created_at,
+        )
 
     async def create_report(self, session_id: str, payload: AgentReportCreate) -> AgentReport:
         session = self.sessions.get(session_id)
@@ -227,10 +229,10 @@ class _ReportsMixin:
             #       binding fields, since that would trigger the re-review
             #       path.
             # ------------------------------------------------------------------
-            _verdict_still_authoritative = (
-                current_task.status == WorkspaceTaskStatus.REVIEW
-                and current_task.review_completed_at is not None
-                and now >= current_task.review_completed_at
+            _verdict_still_authoritative = state_policy.reviewer_verdict_still_authoritative(
+                current_task.status,
+                current_task.review_completed_at,
+                now,
             )
             if (
                 session.role == WorkspaceSessionRole.ORCHESTRATOR
@@ -318,27 +320,25 @@ class _ReportsMixin:
                 and self._reviewer_verdict_actionable(self.tasks[task_id], report)
             ):
                 current_task = self.tasks[task_id]
-                task_update.setdefault("status", WorkspaceTaskStatus.REVIEW)
-                task_update.setdefault("updated_at", now)
-                task_update["review_session_id"] = session.id
-                task_update["review_completed_at"] = current_task.review_completed_at or now
-                task_update["review_skipped_at"] = None
-                task_update["review_skip_reason"] = None
-                # reviewed_at should match the latest review-decision report
-                # timestamp (same invariant enforced by reconcile and asserted
-                # by tests). We intentionally overwrite any older reviewed_at
-                # from a prior READY_FOR_REVIEW / COMPLETED transition so the
-                # board timeline lines up with when reviewer rendered a
-                # decision.
-                task_update["reviewed_at"] = now
-                task_update["completed_at"] = None
-                task_update["human_accepted_at"] = None
-                if payload.state == AgentReportState.REVIEW_PASSED:
-                    task_update["human_acceptance_requested_at"] = (
-                        current_task.human_acceptance_requested_at or now
+                # reviewed_at is intentionally overwritten with ``now`` (not
+                # preserved) so the board timeline matches when the reviewer
+                # rendered a decision; review_completed_at and (for passed)
+                # human_acceptance_requested_at keep any existing value.
+                task_update.update(
+                    state_policy.compute_reviewer_verdict_task_update(
+                        report_state=payload.state,
+                        reviewer_session_id=session.id,
+                        now=now,
+                        existing_review_completed_at=current_task.review_completed_at,
+                        existing_reviewed_at=current_task.reviewed_at,
+                        existing_human_acceptance_requested_at=(
+                            current_task.human_acceptance_requested_at
+                        ),
+                        preserve_existing_review_completed_at=True,
+                        preserve_existing_reviewed_at=False,
+                        preserve_existing_human_acceptance_requested_at=True,
                     )
-                else:
-                    task_update["human_acceptance_requested_at"] = None
+                )
                 # Autonomous mode: recompute next phase so the task remains
                 # in sync with _autonomous_run_after_evaluation.
                 if current_task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
@@ -446,17 +446,12 @@ class _ReportsMixin:
         # implementation phase of any reviewer dispatch.
         # ------------------------------------------------------------------
         _latest_review = self._latest_review_report_for_task(task.id)
-        _review_verdict_terminal = (
-            task.status == WorkspaceTaskStatus.REVIEW
-            and _latest_review is not None
-            and _latest_review.state
-            in {
-                AgentReportState.REVIEW_PASSED,
-                AgentReportState.REVIEW_FAILED,
-                AgentReportState.REVIEW_NEEDS_INPUT,
-            }
-            and task.review_completed_at is not None
-            and _latest_review.created_at <= report.created_at
+        _review_verdict_terminal = state_policy.review_verdict_terminal(
+            task.status,
+            _latest_review.state if _latest_review else None,
+            _latest_review.created_at if _latest_review else None,
+            task.review_completed_at,
+            report.created_at,
         )
         if _review_verdict_terminal:
             logger.info(
@@ -471,7 +466,7 @@ class _ReportsMixin:
                 _latest_review.state.value if _latest_review else None,
             )
             return
-        if task.review_requested_at and not task.review_completed_at:
+        if state_policy.review_in_flight(task.review_requested_at, task.review_completed_at):
             # Allow a new gate report to recover a stuck review: only skip if
             # the previously-assigned reviewer session is still actively
             # working on the review.

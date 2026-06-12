@@ -5,6 +5,35 @@
 
 ## Unreleased
 
+### refactor: unify reviewer-verdict state logic in the pure policy layer
+
+- Behavior-preserving cleanup of the workspace task state machine following the
+  stale-verdict fix below. The review-state predicates that had been
+  copy-pasted inline across the `workspace_manager` mixins (~10 sites) and the
+  three independent `status=REVIEW` verdict-writers (kept consistent only by
+  idempotency guards) are now expressed once in the side-effect-free
+  `workspace_state_policy` layer.
+- New pure functions (scalar-field signatures, fully unit-tested):
+  `review_in_flight`, `reviewer_verdict_already_applied`,
+  `reviewer_verdict_actionable`, `reviewer_verdict_still_authoritative`,
+  `review_verdict_terminal`, and `compute_reviewer_verdict_task_update` — the
+  last builds the reviewer-verdict task-field update dict for all three writers
+  (`create_report` fast-path, `_handle_review_report`,
+  `_handle_goal_packet_review_report`). Per-call-site `preserve_*` /
+  `human_acceptance_for_passed` flags preserve each writer's exact historical
+  timestamp policy, so no state-machine semantics change. The mixins now
+  delegate to these functions; goal-packet transition, autonomous recompute,
+  and `continue_task` side effects remain in the mixins.
+- The `_reconcile_task_report_statuses` monitor repair path is intentionally
+  left as-is (it keys off report-time timestamps, structurally different).
+- **Files**: `backend/claude_hub/services/workspace_state_policy.py`,
+  `backend/claude_hub/services/workspace_manager/_reports.py`,
+  `backend/claude_hub/services/workspace_manager/_review.py`,
+  `backend/claude_hub/services/workspace_manager/_monitor.py`,
+  `backend/claude_hub/services/workspace_manager/_dispatch.py`,
+  `backend/claude_hub/services/workspace_manager/_tmux_queries.py`,
+  `backend/tests/test_workspace_state_policy.py`
+
 ### fix: stop stale duplicate reviewer verdict from stranding a reviewed task in WORKING
 
 - A reviewed task that posted `completed` could get stuck in the "Working"

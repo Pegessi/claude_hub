@@ -128,19 +128,17 @@ class _ReviewMixin:
         )
         autonomous_next_phase: AutonomousRunPhase | None = None
         if not already_applied:
-            task_update = {
-                "review_session_id": reviewer.id,
-                "review_completed_at": now,
-                "review_skipped_at": None,
-                "review_skip_reason": None,
-                "reviewed_at": task.reviewed_at or now,
-                "completed_at": None,
-                "human_acceptance_requested_at": (
-                    now if report.state == AgentReportState.REVIEW_PASSED else None
-                ),
-                "human_accepted_at": None,
-                "updated_at": now,
-            }
+            task_update = state_policy.compute_reviewer_verdict_task_update(
+                report_state=report.state,
+                reviewer_session_id=reviewer.id,
+                now=now,
+                existing_review_completed_at=task.review_completed_at,
+                existing_reviewed_at=task.reviewed_at,
+                existing_human_acceptance_requested_at=task.human_acceptance_requested_at,
+                preserve_existing_review_completed_at=False,
+                preserve_existing_reviewed_at=True,
+                preserve_existing_human_acceptance_requested_at=False,
+            )
             if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
                 autonomous_run, autonomous_next_phase = self._autonomous_run_after_evaluation(
                     task, reviewer, report, now=now
@@ -150,9 +148,7 @@ class _ReviewMixin:
                     task_update["human_acceptance_requested_at"] = (
                         now if autonomous_next_phase == AutonomousRunPhase.PASSED else None
                     )
-            self.tasks[task.id] = task.model_copy(
-                update={**task_update, "status": WorkspaceTaskStatus.REVIEW}
-            )
+            self.tasks[task.id] = task.model_copy(update=task_update)
             self._save_state()
             logger.info(
                 "Reviewer terminal decision applied in _handle_review_report "
@@ -241,20 +237,20 @@ class _ReviewMixin:
                     "updated_at": now,
                 }
             )
+            task_update = state_policy.compute_reviewer_verdict_task_update(
+                report_state=report.state,
+                reviewer_session_id=reviewer.id,
+                now=now,
+                existing_review_completed_at=task.review_completed_at,
+                existing_reviewed_at=task.reviewed_at,
+                existing_human_acceptance_requested_at=task.human_acceptance_requested_at,
+                preserve_existing_review_completed_at=False,
+                preserve_existing_reviewed_at=True,
+                preserve_existing_human_acceptance_requested_at=False,
+                human_acceptance_for_passed=False,
+            )
             self.tasks[task.id] = task.model_copy(
-                update={
-                    "status": WorkspaceTaskStatus.REVIEW,
-                    "goal_packet": goal_packet,
-                    "review_session_id": reviewer.id,
-                    "review_completed_at": now,
-                    "review_skipped_at": None,
-                    "review_skip_reason": None,
-                    "reviewed_at": task.reviewed_at or now,
-                    "completed_at": None,
-                    "human_acceptance_requested_at": None,
-                    "human_accepted_at": None,
-                    "updated_at": now,
-                }
+                update={**task_update, "goal_packet": goal_packet}
             )
             self._save_state()
             logger.info(

@@ -108,7 +108,9 @@ class _MonitorMixin:
                     and task
                     and task.status == WorkspaceTaskStatus.WORKING
                 ):
-                    if not (task.review_requested_at and not task.review_completed_at):
+                    if not state_policy.review_in_flight(
+                        task.review_requested_at, task.review_completed_at
+                    ):
                         report = AgentReport(
                             id=str(uuid.uuid4()),
                             workspace_id=task.workspace_id,
@@ -329,7 +331,7 @@ class _MonitorMixin:
         task: WorkspaceTask,
         sampled_at: datetime,
     ) -> dict[str, Any] | None:
-        if task.review_requested_at and not task.review_completed_at:
+        if state_policy.review_in_flight(task.review_requested_at, task.review_completed_at):
             return None
         latest_state = self._latest_report_state(task.id)
         if latest_state in {
