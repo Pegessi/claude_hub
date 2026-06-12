@@ -44,8 +44,10 @@ measuring coverage objectively.
 | `test_clipboard.py` | 2 |
 | `test_system.py` | 1 |
 
-Full backend suite: **268 passing** (excluding `test_terminal_replay.py`, which
-CI ignores). 46 of these are new in this pass.
+Full backend suite: **~270 tests** excluding `test_terminal_replay.py` (which CI
+runs in a separate job). Exact counts change with each PR — add
+`pytest --collect-only -q | tail -1` to see the current number. Roughly 46 of
+these were added in this coverage pass.
 
 ---
 
