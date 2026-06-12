@@ -58,6 +58,228 @@
   `backend/claude_hub/services/workspace_manager/_review.py`,
   `backend/tests/test_workspaces.py`
 
+### ci: add pytest-cov backend coverage reporting
+
+- Added `pytest-cov>=5.0` to the `backend/pyproject.toml` `dev` optional
+  dependencies so any developer can produce a coverage report locally with
+  the same flags CI uses.
+- The CI `backend` job now appends
+  `--cov=claude_hub --cov-report=xml:coverage.xml --cov-report=term-missing`
+  to its existing `pytest` invocation (no extra pytest execution — coverage
+  is collected on the same run). Per-test pass/fail still short-circuits via
+  `-x` and the terminal-replay E2E file is still ignored; nothing changes
+  functionally.
+- Added a follow-up `Upload backend coverage to Codecov` step that ships
+  `backend/coverage.xml` to codecov.io with `flags: backend` and
+  `fail_ci_if_error: false`, so coverage reporting is visible in PRs even
+  before the repo has a Codecov token configured.
+- **Frontend coverage is explicitly out of scope for this round** — it is
+  gated on T1 migrating the suite to Vitest. A `// TODO(T1)` comment was
+  added above the `test:unit` script in `frontend/package.json` documenting
+  the target (`Vitest + @vitest/coverage-v8`) and a matching `TODO(T1)`
+  comment was added in the `frontend` CI job right above the unit-test step
+  so nobody adds coverage ad-hoc with the node:test runner.
+- **Files**: `backend/pyproject.toml`, `.github/workflows/ci.yml`,
+  `frontend/package.json`
+
+### ci: add security-audit job + Dependabot config
+
+- New informational-only CI job `security-audit` — named to make it clear it
+  **never fails the pipeline**. Steps:
+  1. Install backend deps (Python + uv, same caching pattern as the backend
+     job, suffixed `-security-` so the caches don't collide).
+  2. Install Bandit inside the step only (no bloat in `dev` deps / the
+     local lockfile), run it recursively over `backend/claude_hub` writing
+     `bandit-report.txt`, `|| true` because many Bandit rules fire false
+     positives against tmux / file-management code.
+  3. Python dep CVE audit step is stubbed with a `TODO(PY-AUDIT)` comment
+     because `uv` does not yet expose a first-class `uv audit` subcommand.
+     Once that lands, the stub can be replaced with the real invocation.
+  4. Install frontend deps (Node 20 + pnpm 9, same caching pattern,
+     `-security-` suffix).
+  5. `pnpm audit --prod --audit-level high || true` — production-only,
+     high-severity threshold, never red.
+  6. `actions/upload-artifact@v4` uploads `backend/bandit-report.txt` if
+     present, with `if-no-files-found: ignore` and `if: always()` so the
+     artifact survives any failing step and can be inspected post-hoc.
+- Added `.github/dependabot.yml` with three weekly updaters, each grouping
+  every dependency change into a single PR to avoid PR spam:
+  - `pip` → `/backend`
+  - `npm` → `/frontend`
+  - `github-actions` → `/`
+- **Files**: `.github/workflows/ci.yml`, `.github/dependabot.yml` (new)
+
+### chore: fix Dockerfile build and expand docker-compose with env/volume/healthcheck
+
+- **`docker/Dockerfile` (backend)** — two build-blocking bugs fixed:
+  1. `apt-get install` was effectively just `curl`. Added the missing
+     **hard runtime requirement `tmux`** (without it, creating a terminal
+     tab fails at runtime), plus `git`, `python3`, and `build-essential` so
+     agents running inside the container can clone repos, compile wheels,
+     and invoke system Python. `ca-certificates` also added so HTTPS fetches
+     (ttyd / uv / curl) stay trusted on the base slim image.
+  2. `RUN uv sync --no-dev --frozen` was failing because `uv.lock` was
+     never copied into the layer. Added `COPY backend/uv.lock ./` right
+     after the `pyproject.toml` / `README.md` copy so `--frozen` is
+     satisfiable. Also reordered COPY lines for optimal layer caching:
+     manifest + lock first → `uv sync` → source code last, so source-only
+     commits reuse the (expensive) dependency layer.
+  3. Added a comment on the `EXPOSE 8173` line documenting that it is the
+     FastAPI/uvicorn HTTP + WebSocket port.
+- **`docker/Dockerfile.frontend`** — `node:20-slim` lacks basic system
+  packages that make Node builds flaky on networks with TLS proxies or
+  localised timestamps. Added `ca-certificates` and `tzdata` via the same
+  `apt-get install` pattern used in the backend image. COPY lines were
+  also reordered for layer caching (manifest + config → `pnpm install` →
+  source → build); `EXPOSE 5173` now carries a comment explaining it is
+  the Vite preview server port.
+- **`docker/docker-compose.yml`** — four functional gaps closed:
+  1. **`env_file: ../.env`** on the `backend` service so Settings env vars
+     (`ANTHROPIC_API_KEY`, `DATABASE_URL`, proxy env, etc.) actually reach
+     the container instead of only the host.
+  2. **Named volume `claude_hub_state`** mounted at `/root/.claude_hub` in
+     the backend container so `tabs.json`, workspace state, tmux sockets,
+     logs and feedback lessons survive `docker compose restart` /
+     re-builds. The volume is declared at the top-level `volumes:` key
+     with an explanatory comment.
+  3. **Backend `healthcheck`** using `curl -f http://localhost:8173/api/health`
+     with `interval: 30s`, `timeout: 10s`, `retries: 5`, and a 20 s
+     `start_period` so docker and downstream orchestrators know when the
+     FastAPI app is actually serving instead of just the process being up.
+  4. **TODO(prod)** comment on the `frontend` service explicitly calling
+     out that `pnpm preview` is the dev-mode Vite preview server and a
+     real deployment should use a multi-stage build copying `dist/` into
+     an Nginx/Caddy container — kept as a clear marker, not removed, per
+     the task scope.
+- **Files**: `docker/Dockerfile`, `docker/Dockerfile.frontend`,
+  `docker/docker-compose.yml`
+
+### fix: remove hardcoded developer laptop path from workspace form defaults
+
+- Replaced the hardcoded default `'/Users/bytedance/claude_hub'` in the
+  workspace creation form (AgentWorkspaceView.vue) with an empty string in
+  both the initial form state and `resetWorkspaceForm()`. The backend now
+  expands `$HOME`/its own default when the cwd field is submitted empty, so
+  production users no longer see a reference to a local dev machine.
+- **Files**: `frontend/src/components/AgentWorkspaceView.vue`
+
+### fix: checkAuth() no longer swallows network errors into an infinite spinner
+
+- Added a reactive `checkAuthError: false` flag to `authStore`, and set it
+  (plus clear `isLoading`) in the catch branch so the UI can exit the
+  spinner state on backend unreachable / 5xx.
+- Added a top-of-page retry banner in `App.vue` that surfaces when
+  `checkAuthError` is true, with a Chinese warning message ("认证检查失败，
+  无法连接后端…") plus a "刷新重试" button that re-runs `checkAuth` and
+  re-fetches tabs on success, and a close button that sets
+  `checkAuthError = false`.
+- **Files**: `frontend/src/stores/authStore.ts`, `frontend/src/App.vue`
+
+### chore: tighten ESLint on `any`; fix trivially-typed usages
+
+- Changed `@typescript-eslint/no-explicit-any` from `off` to `warn` in
+  `eslint.config.js` so remaining `any` usages surface while CI stays green.
+- Fixed the four trivial `any` warnings that did occur (all in
+  TerminalView.vue): broadened `registerIframe` parameter type to the
+  actual template-ref union, and replaced `(iframe as any)` casts on a
+  transient SAB-script property with a typed `HTMLIFrameElement &` helper.
+  All warnings now resolved at the current codebase size.
+- **Files**: `frontend/eslint.config.js`, `frontend/src/components/TerminalView.vue`
+
+### fix: consolidate reactive window globals into a namespaced object with proper cleanup
+
+- Created `window.__claudeHub = {}` exactly once at app bootstrap (main.ts)
+  with a single shared TypeScript interface in `src/types/index.ts`.
+- Migrated all previous stray globals off the top-level `window` namespace
+  and into `window.__claudeHub`: `__activePaneTabId`,
+  `__claudeHubTerminalState`, `__registerTerminalIframe`,
+  `__refreshTerminalHistory`, and `__sendTerminalKey`. Every consumer
+  updated (App.vue, TerminalView.vue, TerminalGridView.vue, MobileControls.vue,
+  TerminalPane.vue).
+- Removed the DUPLICATE write of `__activePaneTabId` from
+  TerminalGridView.vue — App.vue is now the single authoritative writer.
+- Added onUnmounted cleanup in TerminalView.vue for the three globals it
+  registers (registerTerminalIframe, refreshTerminalHistory, sendTerminalKey).
+- SAB-ring globals (`__CLAUDE_HUB_SAB_BUFFER__`, `__claudeHubDrainSabRing`)
+  are intentionally left alone — they live inside each iframe's own
+  `contentWindow`, not the top-level window.
+- **Files**: `frontend/src/main.ts`, `frontend/src/types/index.ts`,
+  `frontend/src/App.vue`,
+  `frontend/src/components/TerminalView.vue`,
+  `frontend/src/components/TerminalGridView.vue`,
+  `frontend/src/components/MobileControls.vue`,
+  `frontend/src/components/TerminalPane.vue`
+
+### fix: replace single error-string anti-pattern with a stacked notification queue
+
+- **terminalStore** and **workspaceStore** both had a single shared
+  `error: ref<string>` that every concurrent API failure would overwrite,
+  hiding earlier errors. Replaced each with:
+  - A reactive `notifications: StoreNotification[]` queue (type: error /
+    success / warning / info, unique id, optional `autoDismissMs`).
+  - `pushNotification({ type, message, autoDismissMs? })` which assigns
+    a unique id and auto-splices after `autoDismissMs` when set.
+  - `dismissNotification(id)` for manual dismissal.
+  - `error` kept as a backward-compatible computed returning the latest
+    error-type notification (so existing single-banner UIs still work,
+    but callers can no longer `.value = ...` it).
+- Migrated every `error.value = ...` assignment in both stores to
+  `notifyError(msg)` (an 8–10 s auto-dismiss error toast) or, for
+  non-critical failures, an explicit `pushNotification({ type: 'warning', ... })`.
+- **Re-enabled** tab-order save error reporting in
+  `terminalStore.saveTabOrder()` — previously commented out because it
+  would clobber other errors; now it surfaces via its own warning toast.
+- Added an inline **toast stack UI** directly in `TabBar.vue` (top-right,
+  fixed position, layered, with close button + auto-dismiss timer bar,
+  all scoped styles — no new component file) rendering every notification
+  from the terminal store.
+- Added a close button + `dismissWorkspaceErrors()` to the existing
+  workspace error banner in `AgentWorkspaceView.vue` so users can dismiss
+  workspace errors too.
+- Defined `StoreNotification` / `NotificationType` once in
+  `src/types/index.ts` for reuse across stores.
+- **Files**: `frontend/src/types/index.ts`,
+  `frontend/src/stores/terminalStore.ts`,
+  `frontend/src/stores/workspaceStore.ts`,
+  `frontend/src/components/TabBar.vue`,
+  `frontend/src/components/AgentWorkspaceView.vue`,
+  `frontend/src/App.vue`
+
+### docs: add CONTRIBUTING.md, refresh ARCHITECTURE.md module map, add CI docs integrity check
+
+- Added `CONTRIBUTING.md` with the mandatory worktree development workflow,
+  commit conventions, validation steps, and CHANGELOG rules — information
+  previously scattered across `CLAUDE.md`/`AGENTS.md` and README now has a
+  single community-facing home. README links to it from the Reference Docs
+  section.
+- Rewrote the `ARCHITECTURE.md` system diagram, backend module table (now lists
+  9 new API routers, 6 new services, and the 19-file WorkspaceManager mixin
+  package with per-mixin responsibilities), frontend module table (8 new
+  components, 2 Pinia stores, 2 composables, 1 utility), and the state
+  persistence table (workspace index, per-workspace state + artifacts +
+  attachments + lessons, session store file-backed details).
+- Added a `repo-docs` CI job that enforces the `AGENTS.md` ≡ `CLAUDE.md`
+  byte-identity invariant with `diff` so the two files can no longer drift
+  silently on merge.
+- Removed stale absolute test counts from `docs/test-completeness-assessment.md`
+  to prevent them from drifting again with each new test.
+- **Files**: `CONTRIBUTING.md` (new), `ARCHITECTURE.md`, `README.md`,
+  `.github/workflows/ci.yml`, `docs/test-completeness-assessment.md`
+
+### chore: expand .gitignore with IDE, runtime, and ad-hoc artifact patterns
+
+- Added `.cursor/` to the IDE ignore block (Cursor is a first-class agent type
+  in the product, so its config dir is expected locally).
+- Added ignore rules for the runtime state directories produced locally:
+  `log/`, `tasks/`, `tmp_remote_media/`, and `backend/log/`.
+- Added patterns for root-level ad-hoc GPU debug / NCCL probe artifacts that
+  accumulate on developer machines: `abl_*.json`, `nccl_*`, `pure_pytorch_*`,
+  `run_nccl_*`, `run_pure_pytorch_*`, `summarize_mem*.py`, `sweep_*.sh`.
+- Added explicit log-filename patterns (`*_nohup.log`, `nohup.out`) and
+  `*.bak` for extra belt-and-suspenders protection next to the existing `*.log`
+  rule.
+- **Files**: `.gitignore`
+
 ### fix: keep reviewers task-bound and clean up temporary reviewers
 
 - Reviewer sessions now remain bound to their task while the task is still in

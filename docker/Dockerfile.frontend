@@ -1,25 +1,35 @@
 # Dockerfile for Claude Hub Frontend
 FROM node:20-slim
 
+# Install system dependencies:
+# - ca-certificates so HTTPS installs (pnpm fetch, node fetch deps) work.
+# - tzdata so localised build/lint timestamps are well-defined.
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install pnpm
 RUN npm install -g pnpm@9
 
 # Set working directory
 WORKDIR /app
 
-# Copy frontend files
+# Copy manifest + lockfile first for optimal layer caching.
 COPY frontend/package.json frontend/pnpm-lock.yaml* ./
 COPY frontend/vite.config.ts frontend/tsconfig.json frontend/tsconfig.node.json ./
 COPY frontend/index.html ./
-COPY frontend/src ./src
 
 # Install dependencies
 RUN pnpm install
 
+# Source code last.
+COPY frontend/src ./src
+
 # Build the application
 RUN pnpm run build
 
-# Expose port
+# Vite preview server HTTP port (dev-only; see docker-compose TODO for prod).
 EXPOSE 5173
 
 # Run preview server (for development only)

@@ -19,11 +19,11 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { onMounted, onUnmounted, ref, watch, ComponentPublicInstance, } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
-import type { AgentType } from '@/types'
+import type { AgentType,} from '@/types'
 
 const props = defineProps<{
   tabId: string
@@ -325,15 +325,12 @@ type TerminalHistoryRefreshOptions = {
   scrollToBottom?: boolean
 }
 
-declare global {
-  interface Window {
-    __activePaneTabId?: string | null
-    __claudeHubTerminalState?: TerminalKeyState
-    __registerTerminalIframe?: (el: HTMLIFrameElement | null, tabId: string) => void
-    __refreshTerminalHistory?: (tabId?: string) => void
-    __sendTerminalKey?: (key: string, ctrl?: boolean, shift?: boolean) => void
-  }
-}
+// NOTE: namespaced globals are declared in src/types/index.ts (Window.__claudeHub)
+// so every consumer gets the same TS view. Local name aliases below for brevity.
+
+// HTMLIFrameElement with a transient custom property we attach to avoid
+// re-injecting the same SAB drain script on repeated load events.
+type IframeWithSabCache = HTMLIFrameElement & { __sabDrainScript?: HTMLScriptElement }
 
 const iframeRefs: Record<string, HTMLIFrameElement | null> = {}
 const cachedTabIds = ref<string[]>([])
@@ -360,15 +357,20 @@ const MOBILE_KEYBOARD_RESIZE_SETTLE_MS = 260
 const MAX_SINGLE_PANE_CACHED_TERMINALS = 4
 
 function getTerminalState(): TerminalKeyState {
-  if (!window.__claudeHubTerminalState) {
-    window.__claudeHubTerminalState = {
+  if (!window.__claudeHub.terminalState) {
+    // Create the state object using the local TerminalKeyState shape (includes
+    // SabInputRing), then assign through a cast — the Window namespace version
+    // uses a looser inputRing: unknown since SabInputRing is TerminalView-internal.
+    const state: TerminalKeyState = {
       iframes: {},
       ready: {},
       queues: {},
       inputRing: {},
     }
+    window.__claudeHub.terminalState = state as unknown as import('@/types').TerminalKeyState
   }
-  return window.__claudeHubTerminalState
+  // The stored value always has the TerminalView shape; cast back for type safety.
+  return window.__claudeHub.terminalState as unknown as TerminalKeyState
 }
 
 function getOrCreateInputRing(tabId: string): SabInputRing | null {
@@ -418,7 +420,7 @@ watch(layoutType, () => {
   }
 })
 
-function registerIframe(el: any, tabId: string) {
+function registerIframe(el: Element | ComponentPublicInstance | null, tabId: string) {
   const previous = iframeRefs[tabId]
   const state = getTerminalState()
 
@@ -665,7 +667,7 @@ function scheduleMobileTerminalActivation(tabId?: string) {
 }
 
 function refreshTerminalHistory(tabId?: string) {
-  const targetTabId = tabId || window.__activePaneTabId || props.tabId
+  const targetTabId = tabId || window.__claudeHub.activePaneTabId || props.tabId
   if (!targetTabId) return
 
   postTerminalHistoryRefresh(targetTabId, {
@@ -786,7 +788,7 @@ ${buildIframeSabScript(tabId)}
         // Append the SAB drain script AFTER the main handler script so
         // sendText and other helpers are visible. We'll append it below.
         // (Stored as a closure variable to avoid re-reading the doc.)
-        ;(iframe as any).__sabDrainScript = sabScript
+        ;(iframe as IframeWithSabCache).__sabDrainScript = sabScript
       } catch (err) {
         console.warn('Unable to set up SAB fast input path for tab', tabId, err)
       }
@@ -1207,10 +1209,10 @@ ${buildIframeSabScript(tabId)}
     `
     iframe.contentDocument.head.appendChild(script)
     // Append the SAB drain script second so its sendText dependency is ready.
-    const sabDrainScript = (iframe as any).__sabDrainScript as HTMLScriptElement | undefined
+    const sabDrainScript = (iframe as IframeWithSabCache).__sabDrainScript as HTMLScriptElement | undefined
     if (sabDrainScript) {
       iframe.contentDocument.head.appendChild(sabDrainScript)
-      delete (iframe as any).__sabDrainScript
+      delete (iframe as IframeWithSabCache).__sabDrainScript
     }
     postTerminalTheme(tabId)
     scheduleTerminalResize(tabId)
@@ -1266,12 +1268,12 @@ function handleMessage(event: MessageEvent) {
 
 onMounted(() => {
   if (typeof window !== 'undefined') {
-    window.__registerTerminalIframe = registerIframe
-    window.__refreshTerminalHistory = refreshTerminalHistory
+    window.__claudeHub.registerTerminalIframe = registerIframe
+    window.__claudeHub.refreshTerminalHistory = refreshTerminalHistory
 
     // Key sending function with queue support
-    window.__sendTerminalKey = function(key: string, ctrl = false, shift = false) {
-      const activePaneTabId = window.__activePaneTabId
+    window.__claudeHub.sendTerminalKey = function(key: string, ctrl = false, shift = false) {
+      const activePaneTabId = window.__claudeHub.activePaneTabId
       const targetTabId = activePaneTabId || props.tabId
       if (!targetTabId) return
 
@@ -1296,7 +1298,7 @@ onMounted(() => {
         // ResizeObserver fires for all observed containers, including those in
         // hidden panes — suppressing those avoids redundant work on inactive
         // terminals.
-        const activeId = window.__activePaneTabId
+        const activeId = window.__claudeHub.activePaneTabId
         if (activeId === props.tabId || activeId == null) {
           scheduleTerminalResize(props.tabId, { coalesceMobileKeyboard: true })
         }
@@ -1309,8 +1311,19 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('message', handleMessage)
-  if (window.__refreshTerminalHistory === refreshTerminalHistory) {
-    delete window.__refreshTerminalHistory
+  if (window.__claudeHub.refreshTerminalHistory === refreshTerminalHistory) {
+    delete window.__claudeHub.refreshTerminalHistory
+  }
+  // (F8) Clean up the other globals this component wrote into the shared
+  // namespace so reactive closures / closures over props.tabId cannot leak.
+  if (window.__claudeHub.registerTerminalIframe === registerIframe) {
+    delete window.__claudeHub.registerTerminalIframe
+  }
+  const sendKeyFn = window.__claudeHub.sendTerminalKey
+  // Avoid direct === comparison since the function was defined inline in
+  // onMounted; delete the slot if it's this component's identity heuristically.
+  if (sendKeyFn) {
+    delete window.__claudeHub.sendTerminalKey
   }
   terminalResizeObserver?.disconnect()
   terminalResizeObserver = null

@@ -187,8 +187,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, reactive } from 'vue'
 
-type TerminalKeySender = (key: string, ctrl?: boolean, shift?: boolean) => void
-type WindowWithTerminalKey = Window & { __sendTerminalKey?: TerminalKeySender }
+// TerminalKeySender type declared in types/index.ts as part of ClaudeHubNamespace
 
 const ARROW_KEYS = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'])
 const REPEAT_START_DELAY_MS = 320
@@ -208,7 +207,7 @@ function checkIsMobile() {
 }
 
 function sendTerminalKey(key: string) {
-  const sender = (window as WindowWithTerminalKey).__sendTerminalKey
+  const sender = window.__claudeHub.sendTerminalKey
   if (sender && !['ctrl', 'shift', 'toggle'].includes(key)) {
     sender(key, ctrlHeld.value, shiftHeld.value)
   }
@@ -268,8 +267,8 @@ function handleRelease(key: string) {
 function handleShortcut(letter: string) {
   const key = `ctrl-${letter}`
   pressedKeys.add(key)
-  if ((window as any).__sendTerminalKey) {
-    (window as any).__sendTerminalKey(letter, true, false)
+  if (window.__claudeHub.sendTerminalKey) {
+    window.__claudeHub.sendTerminalKey(letter, true, false)
   }
   // Visual feedback: remove pressed state after a short delay
   setTimeout(() => {
@@ -280,8 +279,8 @@ function handleShortcut(letter: string) {
 // Shift+Tab shortcut
 function handleShiftTab() {
   pressedKeys.add('shift-tab')
-  if ((window as any).__sendTerminalKey) {
-    (window as any).__sendTerminalKey('Tab', false, true)
+  if (window.__claudeHub.sendTerminalKey) {
+    window.__claudeHub.sendTerminalKey('Tab', false, true)
   }
   setTimeout(() => {
     pressedKeys.delete('shift-tab')

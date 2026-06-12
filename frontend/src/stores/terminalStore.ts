@@ -7,6 +7,8 @@ import type {
   TerminalTabUpdate,
   LayoutType,
   Pane,
+  StoreNotification,
+  NotificationType,
 } from '@/types'
 
 const API_BASE = '/api'
@@ -58,7 +60,33 @@ export const useTerminalStore = defineStore('terminal', () => {
   const activeTabId = ref<string | null>(null)
   const isLoading = ref(false)
   const isStatusLoading = ref(false)
-  const error = ref<string | null>(null)
+  // ---- Notification / toast queue (F5: replaces single error string) ----
+  const notifications = ref<StoreNotification[]>([])
+  let _notifIdSeq = 0
+
+  function pushNotification(partial: Omit<StoreNotification, 'id'>) {
+    const id = `n-${Date.now().toString(36)}-${(_notifIdSeq++).toString(36)}`
+    const n: StoreNotification = { id, ...partial }
+    notifications.value.push(n)
+    if (n.autoDismissMs && n.autoDismissMs > 0) {
+      window.setTimeout(() => dismissNotification(id), n.autoDismissMs)
+    }
+  }
+
+  function dismissNotification(id: string) {
+    const i = notifications.value.findIndex(n => n.id === id)
+    if (i >= 0) notifications.value.splice(i, 1)
+  }
+
+  function notifyError(message: string) {
+    pushNotification({ type: 'error', message, autoDismissMs: 8000 })
+  }
+
+  // Backward compat: the most recent error-like message. Callers should prefer
+  // notifications + the toast UI rendered by TabBar.
+  const error = computed<string | null>(() =>
+    notifications.value.find(n => n.type === ('error' as NotificationType))?.message ?? null
+  )
   let statusPollTimer: number | null = null
   let statusPollConsumers = 0
 
@@ -172,7 +200,6 @@ export const useTerminalStore = defineStore('terminal', () => {
 
   async function fetchTabs() {
     isLoading.value = true
-    error.value = null
     try {
       const response = await fetch(`${API_BASE}/tabs`)
       if (!response.ok) throw new Error('Failed to fetch tabs')
@@ -192,7 +219,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         }
       }
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error'
+      notifyError(e instanceof Error ? e.message : 'Unknown error')
     } finally {
       isLoading.value = false
     }
@@ -241,7 +268,6 @@ export const useTerminalStore = defineStore('terminal', () => {
 
   async function createTab(data: TerminalTabCreate) {
     isLoading.value = true
-    error.value = null
     try {
       const response = await fetch(`${API_BASE}/tabs`, {
         method: 'POST',
@@ -258,7 +284,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       }
       return newTab
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error'
+      notifyError(e instanceof Error ? e.message : 'Unknown error')
     } finally {
       isLoading.value = false
     }
@@ -266,7 +292,6 @@ export const useTerminalStore = defineStore('terminal', () => {
 
   async function duplicateTab(tabId: string) {
     isLoading.value = true
-    error.value = null
     try {
       const response = await fetch(`${API_BASE}/tabs/${tabId}/duplicate`, {
         method: 'POST',
@@ -280,7 +305,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       }
       return newTab
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error'
+      notifyError(e instanceof Error ? e.message : 'Unknown error')
     } finally {
       isLoading.value = false
     }
@@ -288,7 +313,6 @@ export const useTerminalStore = defineStore('terminal', () => {
 
   async function updateTab(tabId: string, data: TerminalTabUpdate) {
     isLoading.value = true
-    error.value = null
     try {
       const response = await fetch(`${API_BASE}/tabs/${tabId}`, {
         method: 'PUT',
@@ -303,7 +327,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       }
       return updatedTab
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error'
+      notifyError(e instanceof Error ? e.message : 'Unknown error')
     } finally {
       isLoading.value = false
     }
@@ -311,7 +335,6 @@ export const useTerminalStore = defineStore('terminal', () => {
 
   async function deleteTab(tabId: string) {
     isLoading.value = true
-    error.value = null
     try {
       const response = await fetch(`${API_BASE}/tabs/${tabId}`, {
         method: 'DELETE',
@@ -328,7 +351,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         activeTabId.value = manualTabs.value.length ? manualTabs.value[0].id : null
       }
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error'
+      notifyError(e instanceof Error ? e.message : 'Unknown error')
     } finally {
       isLoading.value = false
     }
@@ -360,8 +383,13 @@ export const useTerminalStore = defineStore('terminal', () => {
       console.log('Tab order saved:', result)
     } catch (e) {
       console.error('Error saving tab order:', e)
-      // Don't set global error for this - it's non-critical
-      // error.value = e instanceof Error ? e.message : 'Unknown error'
+      // (F5) Re-enabled — use pushNotification so transient tab-order save
+      // failures surface without overwriting other concurrent errors.
+      pushNotification({
+        type: 'warning',
+        message: e instanceof Error ? `保存标签页顺序失败：${e.message}` : '保存标签页顺序失败',
+        autoDismissMs: 6000,
+      })
     }
   }
 
@@ -389,6 +417,9 @@ export const useTerminalStore = defineStore('terminal', () => {
     isLoading,
     isStatusLoading,
     error,
+    notifications,
+    pushNotification,
+    dismissNotification,
     layoutType,
     panes,
     activePaneId,

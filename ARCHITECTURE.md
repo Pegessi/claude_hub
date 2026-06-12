@@ -5,59 +5,84 @@
 ## System Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Browser (Vue 3)                          │
-│  ┌──────────┐  ┌──────────┐  ┌──────────────────────────────┐  │
-│  │ TabBar    │  │ Layout   │  │ TerminalPane (iframe)        │  │
-│  │ (create/  │  │ Selector │  │  → loads /api/terminal/     │  │
-│  │  switch/  │  │ (1x1→3x3)│  │    proxy/{tab_id}/          │  │
-│  │  reorder) │  │          │  │  → WS /api/terminal/ws/     │  │
-│  └─────┬─────┘  └─────┬────┘  │    {tab_id}                 │  │
-│        │              │       └──────────────┬───────────────┘  │
-│        └──────────────┼──────────────────────┘                  │
-│                       │  fetch /api/tabs                        │
-│                       │  WS /api/terminal/ws/{id}               │
-└───────────────────────┼─────────────────────────────────────────┘
-                        │
-                  Vite proxy (dev) / Nginx (prod)
-                  forwards /api/* → backend:8173
-                        │
-┌───────────────────────┼─────────────────────────────────────────┐
-│                  FastAPI Backend (:8173)                         │
-│                       │                                          │
-│  ┌────────────────────┼───────────────────────────────────┐     │
-│  │ API Layer          │                                   │     │
-│  │  /api/tabs         │  CRUD + ordering                  │     │
-│  │  /api/terminal/*   │  HTTP proxy + WS proxy + history  │     │
-│  │  /api/auth/*       │  Feishu OAuth + session           │     │
-│  │  /api/fs/*         │  Directory browsing               │     │
-│  └────────────────────┼───────────────────────────────────┘     │
-│                       │                                          │
-│  ┌────────────────────┼───────────────────────────────────┐     │
-│  │ Service Layer      │                                   │     │
-│  │  TTYDManager ──────┼──→ manages N TTYDProcess          │     │
-│  │  ConnectionManager │    WS connection tracking          │     │
-│  └────────────────────┼───────────────────────────────────┘     │
-│                       │                                          │
-│  ┌────────────────────┼───────────────────────────────────┐     │
-│  │ Auth Layer         │                                   │     │
-│  │  dependencies.py ──┼──→ get_current_user (HTTP)        │     │
-│  │                   ──┼──→ get_current_user_ws (WS)      │     │
-│  │  feishu.py         │    OAuth token exchange            │     │
-│  │  session.py        │    In-memory session store         │     │
-│  └────────────────────┘                                   │     │
-└────────────────────────────────────────────────────────────┘     │
-                        │                                          │
-          For each tab, one ttyd process on port 10xxx             │
-          ttyd attaches to a tmux session for persistence          │
-                        │                                          │
-┌───────────────────────┼─────────────────────────────────────────┐
-│  ttyd :10xxx  ────→  tmux session: claude-hub-{id[:8]}         │
-│                       │                                          │
-│  ttyd serves xterm.js via HTTP on 127.0.0.1:10xxx              │
-│  ttyd proxies terminal I/O via WebSocket (subprotocol "tty")   │
-│  tmux keeps the shell/Claude alive across ttyd restarts        │
-└─────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────┐
+│                           Browser (Vue 3)                              │
+│ ┌──────────┐ ┌──────────────┐ ┌────────────────────────────────────┐ │
+│ │ TabBar   │ │ Layout       │ │ TerminalPane (iframe)               │ │
+│ │ create/  │ │ Selector     │ │ → loads /api/terminal/proxy/{id}/  │ │
+│ │ switch/  │ │ (1x1→3x3)    │ │ → WS /api/terminal/ws/{id}         │ │
+│ │ reorder  │ │              │ │                                    │ │
+│ └────┬─────┘ └──────┬───────┘ └──────────────┬─────────────────────┘ │
+│      │              │                        │                       │
+│      │              │  ┌─────────────────────▼──────────────────┐    │
+│      │              │  │ AgentWorkspaceView                     │    │
+│      │              │  │   • Task board (Todo/Queued/Working/   │    │
+│      │              │  │     Review/Done columns)               │    │
+│      │              │  │   • Task detail panel + reports        │    │
+│      │              │  │   • Workspace / agent management      │    │
+│      │              │  │   • Feedback lessons catalog          │    │
+│      │              │  │   • Mobile controls + clipboard bridge│    │
+│      │              │  └─────────────────────┬──────────────────┘    │
+│      └──────────────┼────────────────────────┤                       │
+│                     │  fetch /api/tabs       │ /api/workspaces/*     │
+│                     │  WS /api/terminal/ws/* │ /api/system/*         │
+└─────────────────────┼────────────────────────┼───────────────────────┘
+                      │                        │
+                Vite proxy (dev) / Nginx (prod)
+                forwards /api/* → backend:8173
+                      │                        │
+┌─────────────────────┼────────────────────────┼───────────────────────┐
+│                FastAPI Backend (:8173)                                  │
+│                    │                        │                         │
+│  ┌─────────────────▼────────────────────────▼───────────────┐         │
+│  │ API Layer                                                 │         │
+│  │  /api/tabs             CRUD + ordering                   │         │
+│  │  /api/terminal/*       HTTP proxy + WS proxy + history   │         │
+│  │  /api/auth/*           Feishu OAuth + session             │         │
+│  │  /api/fs/*             Directory browsing                │         │
+│  │  /api/clipboard/*      macOS image clipboard bridge      │         │
+│  │  /api/remote/*         SSH-backed remote profile mgmt    │         │
+│  │  /api/system/*         Network status, host info, env    │         │
+│  │  /api/workspaces/*     Workspace + task lifecycle API    │         │
+│  └───────────────────────────────┬───────────────────────────┘         │
+│                                  │                                     │
+│  ┌────────────────────────────────▼──────────────────────────────┐    │
+│  │ Service Layer                                                  │    │
+│  │  TTYDManager ──────────────────── N x TTYDProcess (ttyd+tmux) │    │
+│  │  ConnectionManager                WS connection tracking      │    │
+│  │  ┌─────────────────────────────────────────────────────────┐  │    │
+│  │  │ WorkspaceManager (mixin package: 19 submodules)         │  │    │
+│  │  │   _tasks, _sessions, _dispatch, _reports, _review,      │  │    │
+│  │  │   _state, _persistence, _messaging, _monitor,          │  │    │
+│  │  │   _normalize, _task_updates, _workspaces, _artifacts,  │  │    │
+│  │  │   _attachments, _constants, _prompts, _feedback,       │  │    │
+│  │  │   _tmux_queries                                         │  │    │
+│  │  └─────────────────────────────────────────────────────────┘  │    │
+│  │  WorkspaceStatePolicy     Review routing / status transitions│    │
+│  │  RemoteProfileManager     SSH profile auto-discovery + CRUD  │    │
+│  │  FeedbackLessonsStore     Catalog of learned lessons        │    │
+│  └───────────────────────────────────────────────────────────────┘    │
+│                                                                       │
+│  ┌──────────────────────────────────────────────────────────────┐    │
+│  │ Auth Layer                                                    │    │
+│  │  dependencies.py ──► get_current_user (HTTP)                 │    │
+│  │                   ──► get_current_user_ws (WS)               │    │
+│  │                   ──► optional_user, is_local_network_request│    │
+│  │  feishu.py          OAuth token exchange + user info         │    │
+│  │  session.py         File-backed LoginSession store           │    │
+│  └──────────────────────────────────────────────────────────────┘    │
+└───────────────────────────────────────────────────────────────────────┘
+                              │
+          For each tab, one ttyd process on port 10xxx
+          ttyd attaches to a tmux session for persistence
+                              │
+┌─────────────────────────────▼─────────────────────────────────────────┐
+│  ttyd :10xxx  ────►  tmux session: claude-hub-{id[:8]}                │
+│                                                                       │
+│  ttyd serves xterm.js via HTTP on 127.0.0.1:10xxx                    │
+│  ttyd proxies terminal I/O via WebSocket (subprotocol "tty")         │
+│  tmux keeps the shell/Claude alive across ttyd restarts              │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Core Data Flows
@@ -137,50 +162,114 @@ Subsequent requests:
 
 | Module | Key Classes/Functions | Depends On |
 |--------|----------------------|------------|
-| `main.py` | `app`, `lifespan()` | api_router, ttyd_manager, config |
-| `config.py` | `Settings`, `settings` | pydantic-settings, .env |
-| `api/tabs.py` | `list_tabs`, `create_tab`, `update_tab`, `delete_tab`, `update_tab_order` | auth.dependencies, ttyd_manager, models |
-| `api/terminal.py` | `websocket_endpoint`, `proxy_terminal_request`, `get_terminal_history`, `proxy_websocket` | auth.dependencies, ttyd_manager, httpx, websockets |
-| `api/auth.py` | `login`, `callback`, `get_me`, `check_auth`, `logout` | auth.feishu, auth.session, auth.dependencies, config |
-| `api/filesystem.py` | Directory listing endpoints | auth.dependencies |
-| `auth/dependencies.py` | `get_current_user`, `get_current_user_ws`, `optional_user`, `is_local_network_request` | auth.session, config, models |
-| `auth/feishu.py` | `get_feishu_auth_url`, `get_user_access_token`, `get_user_info` | httpx, config |
-| `auth/session.py` | `create_session`, `get_session`, `delete_session`, `LoginSession` | models.User |
-| `services/ttyd_manager.py` | `TTYDProcess`, `TTYDManager`, `ttyd_manager` (global) | config, models |
-| `services/session_manager.py` | `ConnectionManager`, `connection_manager` (global) | — |
-| `models/schemas.py` | `AgentType`, `TerminalTab`, `User`, `LoginSession`, etc. | pydantic |
+| `main.py` | `app`, `lifespan()` startup/shutdown, logging bootstrap | api_router, service singletons, config |
+| `config.py` | `Settings` (pydantic-settings) — env + defaults for all runtime knobs | pydantic-settings, .env |
+| `models/schemas.py` | Pydantic v2 schemas — `AgentType`, `TerminalTab`, `User`, `LoginSession`, workspace/task/report models, etc. | pydantic |
+| **API layer** | | |
+| `api/tabs.py` | `list_tabs`, `create_tab`, `update_tab`, `delete_tab`, `update_tab_order`, terminal reorder/duplicate | auth.dependencies, ttyd_manager, models |
+| `api/terminal.py` | `websocket_endpoint`, `proxy_terminal_request`, `get_terminal_history`, `proxy_websocket` — ttyd HTTP/WS reverse proxy + history replay injection | auth.dependencies, ttyd_manager, httpx, websockets |
+| `api/auth.py` | `login`, `callback`, `get_me`, `check_auth`, `logout` — Feishu OAuth + cookie session lifecycle | auth.feishu, auth.session, auth.dependencies, config |
+| `api/filesystem.py` | Server-side directory listing for workspace/file pickers (`safe_list_dir`, `normalize_path`) | auth.dependencies |
+| `api/clipboard.py` | macOS browser → agent image bridge: save PNG from browser clipboard, poll, attach to task form | auth.dependencies |
+| `api/remote.py` | SSH-backed remote profile CRUD + auto-discovery from `~/.ssh/config` | auth.dependencies, remote_profiles service |
+| `api/system.py` | Host runtime introspection: network access (IPv4/IPv6, proxy reachability), public URL, environment presets | auth.dependencies |
+| `api/workspaces.py` | Workspace CRUD, task lifecycle (create/update/review/dispatch), resident-agent sessions, goal packet, reports, feedback lessons | auth.dependencies, workspace_manager, workspace_state_policy |
+| **Auth layer** | | |
+| `auth/dependencies.py` | `get_current_user`, `get_current_user_ws`, `optional_user`, `is_local_network_request`, `get_client_ip`, XFF parsing | auth.session, config, models |
+| `auth/feishu.py` | `get_feishu_auth_url`, `get_app_access_token`, `get_user_access_token`, `refresh_user_access_token`, `get_user_info` | httpx, config |
+| `auth/session.py` | File-backed random-id session store: `create_session`, `get_session`, `delete_session`, `LoginSession` model | models.User |
+| **Service layer** | | |
+| `services/ttyd_manager.py` | `TTYDProcess` + `TTYDManager` — per-tab ttyd/tmux lifecycle, env/tunnel setup, status classifier, history capture, remote launch | config, models |
+| `services/session_manager.py` | `ConnectionManager` — active WS connection tracking (subscribe/broadcast patterns) | — |
+| `services/workspace_state_policy.py` | Pure stateless policy module: status transitions, review routing, auto-continue, review-profile inference, goal packet | workspace_manager models |
+| `services/remote_profiles.py` | `RemoteProfileManager` — CRUD + `~/.ssh/config` Host auto-discovery | pydantic |
+| `services/feedback_lessons.py` | `FeedbackLessonStore` — workspace-scored lesson catalog, persistence, retrieval prompts | models |
+| **WorkspaceManager mixin package** (19 files, one logical class) | See table below | cross-mixin via `self.*` |
+| | `__init__.py` — Composes all mixins into `WorkspaceManager`, public `initialize()` / `shutdown()` | all mixins |
+| | `_workspaces.py` — Workspace CRUD + listing | _persistence, _state |
+| | `_tasks.py` — Task CRUD, ordering, status mutation helpers | _persistence, _state |
+| | `_task_updates.py` — User-initiated task edits, Todo→Queued dispatch, attachment add/remove | _tasks, _attachments, _dispatch |
+| | `_sessions.py` — Resident agent session lifecycle (spawn/stop/attach-to-task) + managed tabs | _tasks, ttyd_manager |
+| | `_dispatch.py` — Dispatch policies: manual → specific agent, workspace auto-assign, goal packet reviewers | _sessions, _messaging, workspace_state_policy |
+| | `_messaging.py` — tmux-based message injection into resident agent terminals + reply parsing | _tmux_queries |
+| | `_monitor.py` — Polling monitor loop: tmux pane capture, status inference, auto-continue, late-report suppression, reopen heuristic | _tmux_queries, workspace_state_policy |
+| | `_reports.py` — `AgentReport` ingestion, changed-files parse, idempotency, reviewer pipeline routing | _review, _persistence |
+| | `_review.py` — Review report ingestion, `review_passed`/`review_failed`/`needs_input` handling, stale-verdict guard | _reports, workspace_state_policy, _dispatch |
+| | `_feedback.py` — Feedback lesson generation + catalog storage from completed task journeys | feedback_lessons service, _persistence |
+| | `_normalize.py` — Workspace/task JSON in-place migration (schema evolution) | — |
+| | `_state.py` — In-memory workspace board state cache, dirty tracking, index | _persistence |
+| | `_persistence.py` — JSON on-disk format: index.json, per-workspace state.json, snapshots, atomic writes | _state, _normalize |
+| | `_attachments.py` — Task image attachments storage, filename sanitization, upload → workspace storage | _tasks |
+| | `_artifacts.py` — Changed-file report rendering, goal packet/REVIEW.md rendering, export file path helpers | — |
+| | `_prompts.py` — Prompt templates: agent system context injection, goal packet format, review rubric | — |
+| | `_tmux_queries.py` — Low-level tmux pane capture, status text classifier (idle/working/attention/offline), interrupt injection | _constants |
+| | `_constants.py` — Timeouts, state machine column definitions, filesystem roots (patch seam for tests) | — |
 
 ### Frontend Modules
 
 | Module | Key Responsibilities |
 |--------|---------------------|
-| `App.vue` | Root: auth gate → TabBar + LayoutSelector + TerminalGridView |
-| `stores/terminalStore.ts` | Tab CRUD, layout/pane management, tab ordering |
-| `stores/authStore.ts` | Auth state, login/logout, auth check |
-| `components/TabBar.vue` | Tab creation dialog, tab switching, drag-reorder, rename |
-| `components/LayoutSelector.vue` | Grid layout picker (1x1 through 3x3) |
-| `components/TerminalGridView.vue` | CSS Grid renderer for panes |
-| `components/TerminalPane.vue` | Single pane: iframe loading /api/terminal/proxy/{id}/ |
-| `components/TerminalView.vue` | Terminal interaction handlers (context menu, etc.) |
-| `components/MobileControls.vue` | Mobile-specific controls (send keys to active pane) |
-| `views/LoginView.vue` | Feishu OAuth login page |
-| `types/index.ts` | TypeScript interfaces |
+| **App shell** | |
+| `App.vue` | Root: auth gate → Terminal view (TabBar + LayoutSelector + TerminalGridView) vs Agent Workspace view switcher |
+| `main.ts` | Vue + Pinia bootstrap |
+| `views/LoginView.vue` | Feishu OAuth login page + auth-error rendering |
+| **Stores (Pinia)** | |
+| `stores/authStore.ts` | Auth state, login/logout, `checkAuth()`, local-network bypass detection |
+| `stores/appStore.ts` | App-level UI: active view (terminals vs workspace), theme, sidebar toggle state |
+| `stores/terminalStore.ts` | Tab CRUD, layout/pane management (1x1 → 3x3 grid), tab ordering, error state, env preset wiring |
+| `stores/workspaceStore.ts` | Workspace CRUD, task board state, dispatch, detail panel, attachments, managed sessions |
+| **Terminal components** | |
+| `components/TabBar.vue` | Tab creation dialog, tab switching, drag-reorder, rename, duplicate, delete, file-browser for cwd |
+| `components/LayoutSelector.vue` | Grid layout picker (1x1 through 3x3) + visual preview |
+| `components/TerminalGridView.vue` | CSS Grid renderer for pane slots, pane <-> tab assignment |
+| `components/TerminalPane.vue` | Single pane: iframe loading `/api/terminal/proxy/{id}/`, lifecycle, postMessage bridge |
+| `components/TerminalView.vue` | Terminal interaction glue: postMessage key dispatch, clipboard-image upload, context-menu, mobile controls bridge |
+| `components/MobileControls.vue` | Mobile-specific soft-buttons (Ctrl, Alt, Esc, arrow keys, paste, etc.) |
+| **Workspace components** | |
+| `components/AgentWorkspaceView.vue` | Task board (5-column drag-drop), task detail panel, report/review rendering, modals for workspace/task/agent/env/lessons management, file browser, clipboard attachments |
+| `components/AgentAvatar.vue` | Small agent/caller badge: type icon + name |
+| `components/AgentStatusFloatingPanel.vue` | Per-agent floating status chip grid: idle/working/attention/offline |
+| `components/LoadingButton.vue` | Generic button with loading + success/error state |
+| `components/MarkdownContent.vue` | Markdown rendering (marked + DOMPurify), inline path mention linking |
+| `components/EnvPresetManager.vue` | Launch-env preset CRUD, hide/unhide, workspace-level assignment |
+| `components/NetworkAccessMenu.vue` | Realtime network status indicator + tunnel / reachability info (system API data) |
+| **Composables / utilities** | |
+| `composables/useLaunchEnvPresets.ts` | Preset read/edit/hide helpers + `localStorage` cache |
+| `composables/usePendingActions.ts` | Pending-action counter + reactive `isPending(key)` helper |
+| `utils/taskAbort.ts` | `AbortController` keyed registry with leak-safe cleanup |
+| **Types** | |
+| `types/index.ts` | All TypeScript interfaces for backend Pydantic schemas (TerminalTab, WorkspaceTask, AgentReport, etc.) |
 
 ## State Persistence
 
 | File | Location | Content |
 |------|----------|---------|
-| `tabs.json` | `~/.claude_hub/tabs.json` | Array of tab configs (id, name, port, shell, cwd, solo_mode, agent_type, created_at) |
+| `tabs.json` | `~/.claude_hub/tabs.json` | Array of tab configs (id, name, port, shell, cwd, solo_mode, agent_type, created_at, env_preset) |
 | `tab_order.json` | `~/.claude_hub/tab_order.json` | Ordered array of tab IDs |
 | tmux sessions | tmux server | Session `claude-hub-{id[:8]}` per tab; survives backend restart |
-| session store | In-memory (backend) | LoginSession objects keyed by session_id; lost on backend restart |
+| session store | `~/.claude_hub/sessions.json` | File-backed `LoginSession` dict (keyed by random session_id) — Feishu tokens + user info |
+| `launch_env_settings.json` | `~/.claude_hub/launch_env_settings.json` | Agent launch env per tab (tunnel scripts, profile paths) |
+| Workspace index | `~/.claude_hub/workspaces/index.json` | ID → workspace metadata mapping |
+| Per-workspace state | `~/.claude_hub/workspaces/<id>/state.json` | Full workspace board: tasks, sessions, dispatch plan |
+| Per-workspace artifacts | `~/.claude_hub/workspaces/<id>/` | `snapshot.md`, `goal_packet.md`, `REVIEW_*.md`, agent report files |
+| Task attachments | `~/.claude_hub/workspaces/<id>/attachments/` | Pasted images / uploaded files referenced by tasks |
+| Feedback lessons | `~/.claude_hub/workspaces/<id>/lessons.json` | Scored, context-tagged lessons learned from this workspace's runs |
+| Agent env profiles | Per-tab generated scripts under `~/.claude_hub/tunnel/` or tab-specific settings | Proxy scripts, launch env JSON (deleted on tab stop) |
+| Backend logs | `~/.claude_hub/logs/backend.log` | Rolling file log (all backend logging mirrored here) |
 | layout preference | `localStorage` (browser) | Key `claude_hub_layout_type`, e.g. "2x2" |
+| launch env presets | `localStorage` (browser) | Custom/hidden preset state + user-created profiles |
+| terminal tab ordering (UI cache) | `localStorage` (browser) | Per-workspace cached order, reconciled with backend on load |
 
 **Lifecycle**:
-- Backend startup: `_load_state()` from tabs.json → `_load_order()` → `start_all_tabs()` (reattaches existing tmux sessions)
-- Tab creation: append to processes dict → save tabs.json → append to tab_order → save tab_order.json
-- Tab deletion: `stop(kill_tmux=True)` → remove from processes → save both files
-- Backend shutdown (lifespan): `cleanup()` → stop ttyd processes but keep tmux sessions alive
+- Backend startup (lifespan):
+  - `TTYDManager._load_state()` from `tabs.json` → `_load_order()` → `start_all_tabs()` (reattaches existing tmux sessions; starts a fresh ttyd for each)
+  - `WorkspaceManager.initialize()`: load workspace index → migrate each state via `_normalize` → build in-memory board cache → start monitor loop
+- Tab creation: append to `processes` dict → atomically save `tabs.json` → append to `tab_order` → save `tab_order.json`
+- Tab deletion: `process.stop(kill_tmux=True)` → remove from dict → atomic rewrite both JSON files
+- Workspace/task mutation: update in-memory cache (mark dirty) → `_persistence` layer atomic write + fsync
+- Backend shutdown:
+  - `TTYDManager.cleanup()`: stop all ttyd processes — keep tmux sessions alive (for persistence across restart)
+  - `WorkspaceManager.shutdown()`: cancel monitor loop, flush pending writes, close all background async tasks
 
 ## Key Design Decisions
 

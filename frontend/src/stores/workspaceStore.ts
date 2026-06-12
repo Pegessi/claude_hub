@@ -24,6 +24,8 @@ import type {
   WorkspaceTaskStatus,
   WorkspaceTaskUpdate,
   WorkspaceUpdate,
+  StoreNotification,
+  NotificationType,
 } from '@/types'
 
 const API_BASE = '/api'
@@ -44,7 +46,32 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const board = ref<WorkspaceBoard | null>(null)
   const feedbackLessons = ref<FeedbackLesson[]>([])
   const isLoading = ref(false)
-  const error = ref<string | null>(null)
+  // ---- Notification / toast stack (F5: replaces single error string) ----
+  const notifications = ref<StoreNotification[]>([])
+  let _wsNotifIdSeq = 0
+
+  function pushNotification(partial: Omit<StoreNotification, 'id'>) {
+    const id = `ws-${Date.now().toString(36)}-${(_wsNotifIdSeq++).toString(36)}`
+    const n: StoreNotification = { id, ...partial }
+    notifications.value.push(n)
+    if (n.autoDismissMs && n.autoDismissMs > 0) {
+      window.setTimeout(() => dismissNotification(id), n.autoDismissMs)
+    }
+  }
+
+  function dismissNotification(id: string) {
+    const i = notifications.value.findIndex(n => n.id === id)
+    if (i >= 0) notifications.value.splice(i, 1)
+  }
+
+  function notifyError(message: string) {
+    pushNotification({ type: 'error', message, autoDismissMs: 10000 })
+  }
+
+  // Backward compat: the most recent error-type message (for single banner UI)
+  const error = computed<string | null>(() =>
+    notifications.value.find(n => n.type === ('error' as NotificationType))?.message ?? null
+  )
   const boardFetches = new Map<string, Promise<void>>()
 
   const activeWorkspace = computed(() =>
@@ -88,7 +115,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function fetchWorkspaces() {
     isLoading.value = true
-    error.value = null
     try {
       const response = await fetch(`${API_BASE}/workspaces`)
       if (!response.ok) throw new Error(await readError(response))
@@ -107,7 +133,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         await fetchBoard(activeWorkspaceId.value)
       }
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to fetch workspaces'
+      notifyError(e instanceof Error ? e.message : 'Failed to fetch workspaces')
     } finally {
       isLoading.value = false
     }
@@ -128,14 +154,13 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       if (!response.ok) throw new Error(await readError(response))
       board.value = await response.json()
       await fetchFeedbackLessons(workspaceId)
-      error.value = null
     })()
 
     boardFetches.set(workspaceId, request)
     try {
       await request
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to fetch workspace board'
+      notifyError(e instanceof Error ? e.message : 'Failed to fetch workspace board')
       throw e
     } finally {
       boardFetches.delete(workspaceId)
@@ -155,7 +180,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   async function createFeedbackLesson(payload: FeedbackLessonCreate) {
     if (!activeWorkspaceId.value) return
     isLoading.value = true
-    error.value = null
     try {
       const response = await fetch(`${API_BASE}/workspaces/${activeWorkspaceId.value}/lessons`, {
         method: 'POST',
@@ -165,7 +189,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       if (!response.ok) throw new Error(await readError(response))
       await fetchFeedbackLessons()
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to create lesson'
+      notifyError(e instanceof Error ? e.message : 'Failed to create lesson')
       throw e
     } finally {
       isLoading.value = false
@@ -175,7 +199,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   async function deleteFeedbackLesson(lessonId: string) {
     if (!activeWorkspaceId.value) return
     isLoading.value = true
-    error.value = null
     try {
       const response = await fetch(`${API_BASE}/workspaces/${activeWorkspaceId.value}/lessons/${encodeURIComponent(lessonId)}`, {
         method: 'DELETE',
@@ -183,7 +206,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       if (!response.ok) throw new Error(await readError(response))
       await fetchFeedbackLessons()
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to delete lesson'
+      notifyError(e instanceof Error ? e.message : 'Failed to delete lesson')
       throw e
     } finally {
       isLoading.value = false
@@ -195,7 +218,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   ): Promise<FeedbackSummaryRun | undefined> {
     if (!activeWorkspaceId.value) return
     isLoading.value = true
-    error.value = null
     try {
       const response = await fetch(`${API_BASE}/workspaces/${activeWorkspaceId.value}/lessons/summarize`, {
         method: 'POST',
@@ -208,7 +230,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       await fetchFeedbackLessons()
       return run
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to summarize lessons'
+      notifyError(e instanceof Error ? e.message : 'Failed to summarize lessons')
       throw e
     } finally {
       isLoading.value = false
@@ -217,7 +239,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function createWorkspace(payload: WorkspaceCreate) {
     isLoading.value = true
-    error.value = null
     try {
       const response = await fetch(`${API_BASE}/workspaces`, {
         method: 'POST',
@@ -231,7 +252,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       await fetchBoard(workspace.id)
       return workspace
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to create workspace'
+      notifyError(e instanceof Error ? e.message : 'Failed to create workspace')
     } finally {
       isLoading.value = false
     }
@@ -239,7 +260,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function updateWorkspace(workspaceId: string, payload: WorkspaceUpdate) {
     isLoading.value = true
-    error.value = null
     try {
       const response = await fetch(`${API_BASE}/workspaces/${workspaceId}`, {
         method: 'PATCH',
@@ -259,7 +279,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       }
       return workspace
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to update workspace'
+      notifyError(e instanceof Error ? e.message : 'Failed to update workspace')
     } finally {
       isLoading.value = false
     }
@@ -268,7 +288,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   async function createTask(payload: WorkspaceTaskCreate) {
     if (!activeWorkspaceId.value) return
     isLoading.value = true
-    error.value = null
     try {
       const response = await fetch(`${API_BASE}/workspaces/${activeWorkspaceId.value}/tasks`, {
         method: 'POST',
@@ -278,7 +297,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       if (!response.ok) throw new Error(await readError(response))
       await fetchBoard()
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to create task'
+      notifyError(e instanceof Error ? e.message : 'Failed to create task')
     } finally {
       isLoading.value = false
     }
@@ -286,7 +305,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function updateTask(taskId: string, payload: WorkspaceTaskUpdate) {
     isLoading.value = true
-    error.value = null
     try {
       const response = await fetch(`${API_BASE}/workspaces/tasks/${taskId}`, {
         method: 'PATCH',
@@ -296,7 +314,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       if (!response.ok) throw new Error(await readError(response))
       await fetchBoard()
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to update task'
+      notifyError(e instanceof Error ? e.message : 'Failed to update task')
       throw e
     } finally {
       isLoading.value = false
@@ -315,7 +333,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function deleteTask(taskId: string) {
     isLoading.value = true
-    error.value = null
     try {
       const response = await fetch(`${API_BASE}/workspaces/tasks/${taskId}`, {
         method: 'DELETE',
@@ -323,7 +340,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       if (!response.ok) throw new Error(await readError(response))
       await fetchBoard()
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to delete task'
+      notifyError(e instanceof Error ? e.message : 'Failed to delete task')
       throw e
     } finally {
       isLoading.value = false
@@ -335,7 +352,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   ) {
     if (!activeWorkspaceId.value) return
     isLoading.value = true
-    error.value = null
     const body = typeof payload === 'string' ? { agent_type: payload } : payload
     try {
       const response = await fetch(`${API_BASE}/workspaces/${activeWorkspaceId.value}/agent`, {
@@ -346,7 +362,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       if (!response.ok) throw new Error(await readError(response))
       await fetchBoard()
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to start workspace agent'
+      notifyError(e instanceof Error ? e.message : 'Failed to start workspace agent')
     } finally {
       isLoading.value = false
     }
@@ -354,7 +370,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function deleteSession(sessionId: string) {
     isLoading.value = true
-    error.value = null
     try {
       const response = await fetch(`${API_BASE}/workspaces/sessions/${sessionId}`, {
         method: 'DELETE',
@@ -362,7 +377,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       if (!response.ok) throw new Error(await readError(response))
       await fetchBoard()
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to delete agent'
+      notifyError(e instanceof Error ? e.message : 'Failed to delete agent')
       throw e
     } finally {
       isLoading.value = false
@@ -371,7 +386,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function startTask(taskId: string, payload: StartTaskRequest = {}) {
     isLoading.value = true
-    error.value = null
     try {
       const response = await fetch(`${API_BASE}/workspaces/tasks/${taskId}/start`, {
         method: 'POST',
@@ -381,7 +395,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       if (!response.ok) throw new Error(await readError(response))
       await fetchBoard()
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to start task'
+      notifyError(e instanceof Error ? e.message : 'Failed to start task')
     } finally {
       isLoading.value = false
     }
@@ -389,7 +403,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function continueTask(taskId: string, payload: ContinueTaskRequest = {}) {
     isLoading.value = true
-    error.value = null
     try {
       const response = await fetch(`${API_BASE}/workspaces/tasks/${taskId}/continue`, {
         method: 'POST',
@@ -399,7 +412,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       if (!response.ok) throw new Error(await readError(response))
       await fetchBoard()
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to continue task'
+      notifyError(e instanceof Error ? e.message : 'Failed to continue task')
     } finally {
       isLoading.value = false
     }
@@ -410,7 +423,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     payload: RequestTaskReviewRequest = {},
   ) {
     isLoading.value = true
-    error.value = null
     try {
       const response = await fetch(`${API_BASE}/workspaces/tasks/${taskId}/request-review`, {
         method: 'POST',
@@ -420,7 +432,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       if (!response.ok) throw new Error(await readError(response))
       await fetchBoard()
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to request review'
+      notifyError(e instanceof Error ? e.message : 'Failed to request review')
       throw e
     } finally {
       isLoading.value = false
@@ -429,7 +441,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function abortTask(taskId: string, payload: ManualTaskControlRequest) {
     isLoading.value = true
-    error.value = null
     try {
       const response = await fetch(`${API_BASE}/workspaces/tasks/${taskId}/abort`, {
         method: 'POST',
@@ -439,7 +450,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       if (!response.ok) throw new Error(await readError(response))
       await fetchBoard()
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to abort task'
+      notifyError(e instanceof Error ? e.message : 'Failed to abort task')
       throw e
     } finally {
       isLoading.value = false
@@ -507,6 +518,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     workspaceAgent,
     isLoading,
     error,
+    notifications,
+    pushNotification,
+    dismissNotification,
     sessionForTask,
     reportsForTask,
     latestReportForTask,

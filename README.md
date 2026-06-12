@@ -163,6 +163,12 @@ claude_hub/
 └── .github/           # GitHub Actions workflows
 ```
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the mandatory development workflow
+(isolated worktrees, conventional commits, validation steps, and CHANGELOG
+rules). **No change — even a small one — should be made directly on `main`.**
+
 ## Reference Docs
 
 - [CLAUDE.md](CLAUDE.md): project conventions and development workflow

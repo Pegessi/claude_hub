@@ -38,7 +38,27 @@ jobs:
       - name: Run mypy (type check)
         run: uv run mypy .
       - name: Run pytest (tests)
-        run: uv run pytest -xvs --ignore=tests/test_terminal_replay.py
+        run: uv run pytest -xvs --ignore=tests/test_terminal_replay.py --cov=claude_hub --cov-report=xml:coverage.xml --cov-report=term-missing
+      - name: Upload backend coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./backend/coverage.xml
+          flags: backend
+          fail_ci_if_error: false
+
+  repo-docs:
+    name: Repo hygiene & docs integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify AGENTS.md and CLAUDE.md stay in sync
+        run: |
+          if ! diff -q AGENTS.md CLAUDE.md >/dev/null 2>&1; then
+            echo "::error::AGENTS.md and CLAUDE.md differ. These files must remain byte-identical. Update both in the same commit."
+            diff AGENTS.md CLAUDE.md || true
+            exit 1
+          fi
+          echo "✓ AGENTS.md == CLAUDE.md"
 
   frontend:
     runs-on: ubuntu-latest
@@ -68,6 +88,7 @@ jobs:
         run: pnpm install
       - name: Run ESLint (linting)
         run: pnpm run lint:check
+      # TODO(T1): no coverage until Vitest is set up — see frontend/package.json test:unit TODO.
       - name: Run unit tests
         run: pnpm run test:unit
       - name: Run Type check and build
@@ -150,3 +171,79 @@ jobs:
         env:
           CLAUDE_HUB_E2E_TIMEOUT_SCALE: "3"
         run: uv run pytest tests/test_terminal_replay.py -v --reruns 1 --reruns-delay 5
+
+  security-audit:
+    name: Security audit (informational only — never fails the pipeline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Python side ----------------------------------------------------
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Cache uv packages (security-audit)
+        uses: actions/cache@v4
+        with:
+          path: |
+            .venv
+            ~/.cache/uv
+          key: ${{ runner.os }}-uv-security-${{ hashFiles('backend/uv.lock', 'backend/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-uv-
+      - name: Install backend deps
+        working-directory: ./backend
+        run: uv sync --extra dev
+
+      - name: Run Bandit (Python SAST)
+        working-directory: ./backend
+        # || true — many Bandit warnings are false positives in terminal /
+        # file-management code. We want the report visible, not a red CI.
+        run: |
+          uv run pip install bandit
+          uv run bandit -r claude_hub -f txt -o bandit-report.txt || true
+
+      # TODO(PY-AUDIT): uv does not yet expose a first-class `uv audit` subcommand.
+      # Once https://github.com/astral-sh/uv/issues/XXXX (CVE audit) ships, replace
+      # this note with `uv audit` (or `uv tool run pip-audit`) as a real step.
+      - name: Run uv audit (Python deps) — stubbed, informational
+        run: echo "Skipping Python dep CVE audit — uv does not expose a first-class audit subcommand yet."
+
+      # --- JS side --------------------------------------------------------
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - name: Cache pnpm packages (security-audit)
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            ~/.pnpm-store
+          key: ${{ runner.os }}-pnpm-security-${{ hashFiles('frontend/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+      - name: Install frontend deps
+        working-directory: ./frontend
+        run: pnpm install
+
+      - name: Run pnpm audit (production deps)
+        working-directory: ./frontend
+        # || true — keep CI green while the team triages any upstream advisories.
+        run: pnpm audit --prod --audit-level high || true
+
+      # --- Artifacts ------------------------------------------------------
+      - name: Upload Bandit report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: backend/bandit-report.txt
+          if-no-files-found: ignore
