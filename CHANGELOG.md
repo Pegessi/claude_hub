@@ -29,6 +29,33 @@
 - **Files**: `backend/pyproject.toml`, `.github/workflows/ci.yml`,
   `frontend/package.json`
 
+### ci: add security-audit job + Dependabot config
+
+- New informational-only CI job `security-audit` — named to make it clear it
+  **never fails the pipeline**. Steps:
+  1. Install backend deps (Python + uv, same caching pattern as the backend
+     job, suffixed `-security-` so the caches don't collide).
+  2. Install Bandit inside the step only (no bloat in `dev` deps / the
+     local lockfile), run it recursively over `backend/claude_hub` writing
+     `bandit-report.txt`, `|| true` because many Bandit rules fire false
+     positives against tmux / file-management code.
+  3. Python dep CVE audit step is stubbed with a `TODO(PY-AUDIT)` comment
+     because `uv` does not yet expose a first-class `uv audit` subcommand.
+     Once that lands, the stub can be replaced with the real invocation.
+  4. Install frontend deps (Node 20 + pnpm 9, same caching pattern,
+     `-security-` suffix).
+  5. `pnpm audit --prod --audit-level high || true` — production-only,
+     high-severity threshold, never red.
+  6. `actions/upload-artifact@v4` uploads `backend/bandit-report.txt` if
+     present, with `if-no-files-found: ignore` and `if: always()` so the
+     artifact survives any failing step and can be inspected post-hoc.
+- Added `.github/dependabot.yml` with three weekly updaters, each grouping
+  every dependency change into a single PR to avoid PR spam:
+  - `pip` → `/backend`
+  - `npm` → `/frontend`
+  - `github-actions` → `/`
+- **Files**: `.github/workflows/ci.yml`, `.github/dependabot.yml` (new)
+
 ### chore: fix Dockerfile build and expand docker-compose with env/volume/healthcheck
 
 - **`docker/Dockerfile` (backend)** — two build-blocking bugs fixed:
