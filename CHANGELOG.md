@@ -5,6 +5,47 @@
 
 ## Unreleased
 
+### fix: replace reviewer-verdict timestamp heuristics with an ordinal review-cycle model
+
+- A passed/parked task could be silently stranded in the "Working" column and
+  never re-enter review. Two coupled defects: (1) stale reviewer-verdict
+  timestamps from an earlier round survived into a later round and swallowed a
+  fresh `ready_for_review`; (2) the runtime layer mutated the review layer —
+  free-form terminal chat flipped the agent runtime to WORKING, the monitor
+  reopened the REVIEW task, and the reconcile path then re-forced REVIEW with
+  the stale timestamps. The two fought and the verdict never advanced.
+- **Product behavior locked**: a passed task is a *parked* (awaiting-acceptance)
+  state — `status=REVIEW` with `human_acceptance_requested_at` set and
+  `human_accepted_at=None`. It leaves parked **only** via human acceptance
+  (→ DONE) or `continue_task` from the task board (→ a fresh work round).
+  Free-form agent activity in the terminal never moves it or touches review
+  fields.
+- Replaced the wall-clock timestamp heuristics with an ordinal mechanism:
+  `WorkspaceTask.review_cycle` (current round, default 1),
+  `WorkspaceTask.reviewed_cycle` (round of last applied verdict, default 0), and
+  `AgentReport.review_cycle` (stamped at intake with the task's current round).
+  A reviewer verdict applies iff it opens a fresh round
+  (`report.review_cycle > reviewed_cycle`) **and** a review is actually in flight
+  — the in-flight requirement rejects a stale echo that arrives after
+  `continue_task` already bumped the cycle and cleared `review_requested_at`.
+  Reopen paths (`continue_task`, review-failed, goal-packet supplement) increment
+  `review_cycle`; applying a verdict advances `reviewed_cycle`.
+- Decoupled the runtime layer: removed the monitor's runtime-reopen of REVIEW
+  tasks and made the reconcile path cycle-aware, so terminal activity can no
+  longer drag a parked task back to WORKING or resurrect a prior-round verdict.
+- New pure predicates `report_opens_review_round` and `current_round_has_verdict`
+  in `workspace_state_policy`; `compute_reviewer_verdict_task_update` now emits
+  `reviewed_cycle`.
+- **Files**: `backend/claude_hub/models/schemas.py`,
+  `backend/claude_hub/services/workspace_state_policy.py`,
+  `backend/claude_hub/services/workspace_manager/_reports.py`,
+  `backend/claude_hub/services/workspace_manager/_review.py`,
+  `backend/claude_hub/services/workspace_manager/_monitor.py`,
+  `backend/claude_hub/services/workspace_manager/_dispatch.py`,
+  `backend/claude_hub/services/workspace_manager/_normalize.py`,
+  `backend/tests/test_workspace_state_policy.py`,
+  `backend/tests/test_workspaces.py`
+
 ### refactor: unify reviewer-verdict state logic in the pure policy layer
 
 - Behavior-preserving cleanup of the workspace task state machine following the

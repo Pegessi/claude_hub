@@ -5447,13 +5447,18 @@ def test_review_passed_task_stays_in_review_when_agent_runtime_is_working(
     )
     reviewed_at = workspace_manager.tasks[task["id"]].reviewed_at
     assert reviewed_at is not None
-    workspace_manager.tasks[task["id"]] = workspace_manager.tasks[task["id"]].model_copy(
-        update={
-            "status": WorkspaceTaskStatus.WORKING,
-            "updated_at": reviewed_at,
-        }
-    )
+    # Capture the parked verdict fields. Under the decoupled review-cycle model
+    # a passed task is parked in REVIEW; runtime activity (terminal chat) must
+    # never move it or touch these fields. We deliberately do NOT flip the task
+    # to WORKING here — that runtime-reopen path was removed.
+    parked = workspace_manager.tasks[task["id"]]
+    parked_review_cycle = parked.review_cycle
+    parked_reviewed_cycle = parked.reviewed_cycle
+    parked_review_completed_at = parked.review_completed_at
+    parked_human_acceptance_requested_at = parked.human_acceptance_requested_at
 
+    # Simulate the agent runtime going WORKING (free-form terminal chat after
+    # the verdict). This drives _refresh_session_statuses on the next board poll.
     status_samples[:] = [
         TerminalAgentStatus(
             tab_id="tab-review-agent",
@@ -5470,10 +5475,18 @@ def test_review_passed_task_stays_in_review_when_agent_runtime_is_working(
 
     board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
 
+    # The parked task stays in REVIEW and its verdict fields are untouched even
+    # though the agent runtime reports WORKING.
     assert board["tasks"][0]["status"] == "review"
     assert board["tasks"][0]["session_id"] == session_id
     assert board["sessions"][0]["runtime_status"] == "working"
     assert board["sessions"][0]["current_task_id"] == task["id"]
+    after = workspace_manager.tasks[task["id"]]
+    assert after.review_cycle == parked_review_cycle
+    assert after.reviewed_cycle == parked_reviewed_cycle
+    assert after.review_completed_at == parked_review_completed_at
+    assert after.human_acceptance_requested_at == parked_human_acceptance_requested_at
+    assert after.human_accepted_at is None
 
 
 def test_review_passed_task_does_not_reopen_when_agent_has_new_activity(
@@ -5695,22 +5708,183 @@ def test_review_passed_reconciles_stale_working_task(
     assert review_response.status_code == 201
     pass_response = pass_task_review(client, task["id"])
     assert pass_response.status_code == 201
-    review_created_at = datetime.fromisoformat(pass_response.json()["created_at"])
-    stale_started_at = review_created_at + timedelta(seconds=30)
-    workspace_manager.tasks[task["id"]] = workspace_manager.tasks[task["id"]].model_copy(
-        update={
-            "status": WorkspaceTaskStatus.WORKING,
-            "started_at": stale_started_at,
-            "completed_at": stale_started_at,
-            "updated_at": stale_started_at,
-        }
-    )
 
+    # A passed task is parked in REVIEW. Under the decoupled review-cycle model
+    # the runtime layer no longer drifts it to WORKING, so the reconcile-back-to
+    # -REVIEW repair is gone; instead the verdict is stable from the first save.
+    # A board poll must keep it parked with completed_at cleared and reviewed_at
+    # preserved (the user-visible "passed, awaiting acceptance" state).
     board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
 
     assert board["tasks"][0]["status"] == "review"
     assert board["tasks"][0]["completed_at"] is None
     assert board["tasks"][0]["reviewed_at"] == pass_response.json()["created_at"]
+    parked = workspace_manager.tasks[task["id"]]
+    assert parked.review_completed_at is not None
+    assert parked.human_acceptance_requested_at is not None
+    assert parked.reviewed_cycle == parked.review_cycle
+
+
+def test_review_cycle_stale_echo_suppressed_when_parked(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A replayed reviewer verdict on a parked task mutates no state (cycle echo)."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    stub_workspace_terminal(monkeypatch, repo, tab_id="echo-tab", port=12821)
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Echo Repo", "path": str(repo), "session_prefix": "echo"},
+    ).json()
+    client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Echo task", "prompt": "Work then review"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+
+    client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={"task_id": task["id"], "state": "ready_for_review", "message": "Ready"},
+    )
+    reviewer_id = workspace_manager.tasks[task["id"]].review_session_id
+    assert reviewer_id is not None
+    assert pass_task_review(client, task["id"]).status_code == 201
+
+    parked = workspace_manager.tasks[task["id"]]
+    assert parked.status == WorkspaceTaskStatus.REVIEW
+    parked_reviewed_cycle = parked.reviewed_cycle
+    parked_review_completed_at = parked.review_completed_at
+    parked_human_acceptance_requested_at = parked.human_acceptance_requested_at
+
+    # Replay the SAME reviewer verdict (a stale echo on the closed round).
+    echo = client.post(
+        f"/api/workspaces/sessions/{reviewer_id}/reports",
+        json={"task_id": task["id"], "state": "review_passed", "message": "echo"},
+    )
+    assert echo.status_code == 201
+
+    after = workspace_manager.tasks[task["id"]]
+    assert after.status == WorkspaceTaskStatus.REVIEW
+    assert after.reviewed_cycle == parked_reviewed_cycle
+    assert after.review_cycle == parked.review_cycle  # not reopened
+    assert after.review_completed_at == parked_review_completed_at
+    assert after.human_acceptance_requested_at == parked_human_acceptance_requested_at
+    assert after.human_accepted_at is None
+
+
+def test_review_cycle_continue_task_reopens_and_redispatches_review(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """continue_task on a parked task bumps the cycle and a fresh review fires."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    stub_workspace_terminal(monkeypatch, repo, tab_id="reopen-tab", port=12822)
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Reopen Repo", "path": str(repo), "session_prefix": "reopen"},
+    ).json()
+    client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Reopen task", "prompt": "Work then review"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+
+    client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={"task_id": task["id"], "state": "ready_for_review", "message": "Ready"},
+    )
+    assert pass_task_review(client, task["id"]).status_code == 201
+    parked = workspace_manager.tasks[task["id"]]
+    cycle_before = parked.review_cycle
+    assert parked.reviewed_cycle == cycle_before  # round sealed
+
+    # Human requests changes from the task board.
+    reopened = client.post(
+        f"/api/workspaces/tasks/{task['id']}/continue",
+        json={"message": "Please add more tests"},
+    )
+    assert reopened.status_code == 200
+    reopened_task = workspace_manager.tasks[task["id"]]
+    assert reopened_task.status == WorkspaceTaskStatus.WORKING
+    assert reopened_task.review_cycle == cycle_before + 1
+    assert reopened_task.reviewed_cycle == cycle_before  # prior verdict, now stale
+    assert reopened_task.review_completed_at is None
+    assert reopened_task.human_acceptance_requested_at is None
+
+    # Worker resubmits the new round; a fresh reviewer must be dispatched.
+    resubmit = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={"task_id": task["id"], "state": "ready_for_review", "message": "Round 2"},
+    )
+    assert resubmit.status_code == 201
+    after = workspace_manager.tasks[task["id"]]
+    assert after.review_requested_at is not None
+    assert after.review_session_id is not None
+    # New round is in flight, not yet judged.
+    assert after.reviewed_cycle < after.review_cycle
+
+
+def test_review_cycle_review_failed_reopens_for_fresh_review(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed verdict reopens the round; the worker resubmit gets a fresh review."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    stub_workspace_terminal(monkeypatch, repo, tab_id="failreopen-tab", port=12823)
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Fail Repo", "path": str(repo), "session_prefix": "fail"},
+    ).json()
+    client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Fail task", "prompt": "Work then review"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+
+    client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={"task_id": task["id"], "state": "ready_for_review", "message": "Ready"},
+    )
+    reviewer_id = workspace_manager.tasks[task["id"]].review_session_id
+    assert reviewer_id is not None
+    cycle_before = workspace_manager.tasks[task["id"]].review_cycle
+
+    # Reviewer rejects → continue_task feedback path reopens to WORKING.
+    fail = client.post(
+        f"/api/workspaces/sessions/{reviewer_id}/reports",
+        json={"task_id": task["id"], "state": "review_failed", "message": "Fix it"},
+    )
+    assert fail.status_code == 201
+    reopened = workspace_manager.tasks[task["id"]]
+    assert reopened.status == WorkspaceTaskStatus.WORKING
+    assert reopened.review_cycle == cycle_before + 1
+    assert reopened.reviewed_cycle == cycle_before  # failed verdict applied to round 1
+    assert reopened.review_requested_at is None
+
+    # Worker resubmits the fix; a fresh review must be dispatched for round 2.
+    resubmit = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={"task_id": task["id"], "state": "ready_for_review", "message": "Fixed"},
+    )
+    assert resubmit.status_code == 201
+    after = workspace_manager.tasks[task["id"]]
+    assert after.review_requested_at is not None
+    assert after.reviewed_cycle < after.review_cycle
 
 
 def _stub_workspace_terminal_for_late_reports(monkeypatch: MonkeyPatch, repo: Path) -> None:

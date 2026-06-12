@@ -188,6 +188,7 @@ class _TaskUpdatesMixin:
                     review_decision=ReviewDecision.REQUEST,
                     review_reason="Manual status transition to REVIEW.",
                     risk_level=None,
+                    review_cycle=task.review_cycle,
                     created_at=now,
                 )
                 self.reports[review_report.id] = review_report
