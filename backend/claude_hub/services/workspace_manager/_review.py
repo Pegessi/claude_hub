@@ -85,6 +85,34 @@ class _ReviewMixin:
             await self._handle_goal_packet_review_report(task, reviewer, report)
             return
 
+        # ------------------------------------------------------------------
+        # Stale / duplicate reviewer verdict guard (implementation phase).
+        #
+        # If no review is in flight for this task (review_requested_at is
+        # cleared and there is no recorded verdict at/after this report), the
+        # report is a stale or duplicate reviewer message — typically a second
+        # goal-packet review_passed that arrives after continue_task already
+        # reopened the task for implementation. Recording it as an
+        # implementation verdict here would write a phantom
+        # review_completed_at / status=REVIEW before implementation is done,
+        # which the monitor reopen heuristic and late-report suppression then
+        # turn into a permanently-stuck WORKING task. Ignore it.
+        # ------------------------------------------------------------------
+        if not self._reviewer_verdict_actionable(task, report):
+            logger.info(
+                "Ignoring stale/duplicate reviewer verdict in _handle_review_report "
+                "(no active review) workspace_id=%s task_id=%s reviewer=%s decision=%s "
+                "status=%s review_requested_at=%s review_completed_at=%s",
+                task.workspace_id,
+                task.id,
+                reviewer.id,
+                report.state.value,
+                task.status.value,
+                task.review_requested_at,
+                task.review_completed_at,
+            )
+            return
+
         now = _wm._now()
         # ------------------------------------------------------------------
         # Idempotency guard: terminal review flags are now written

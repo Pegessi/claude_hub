@@ -1223,6 +1223,138 @@ def test_implementation_review_not_misrouted_as_goal_packet_review(
         assert "Begin implementation" not in last_msg
 
 
+def test_duplicate_goal_packet_review_does_not_strand_task_in_working(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Regression test for the reported incident: a reviewed task that posted
+    ``completed`` stayed stuck in the Working column and never entered Review.
+
+    Reproduces the exact production sequence:
+
+      1. Agent posts a Goal Packet → goal-packet review dispatched.
+      2. Goal-packet reviewer ``review_passed`` → packet APPROVED,
+         ``continue_task`` reopens the task to WORKING and clears
+         ``review_requested_at`` / ``review_completed_at``.
+      3. A SECOND (duplicate / stale) goal-packet ``review_passed`` arrives
+         from the same reviewer while the agent is still implementing. With no
+         review in flight this must be IGNORED. Previously it was misrouted as
+         an implementation-phase verdict, writing a phantom
+         ``review_completed_at`` / ``reviewed_at`` that the monitor reopen
+         heuristic and late-report suppression turned into a permanently-stuck
+         WORKING task.
+      4. Agent posts ``completed`` → a genuine implementation review must be
+         dispatched and the task must end in REVIEW (not stuck in WORKING).
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="dup-goal-review-tab",
+        port=12701,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "DupGoalReview", "path": str(repo), "session_prefix": "dupgoal"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Stale dup review", "prompt": "Build it and review it"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+
+    # Step 1: agent submits goal packet → goal-packet approval review.
+    client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "working",
+            "message": "Goal Packet created; waiting for approval.",
+            "goal_packet": {
+                "objective": "Build the feature.",
+                "acceptance_criteria": ["Feature works"],
+                "validation_plan": ["Run tests"],
+                "assumptions": [],
+                "out_of_scope": [],
+                "handoff_requirements": [],
+            },
+        },
+    )
+    goal_reviewer_id = workspace_manager.tasks[task["id"]].review_session_id
+    assert goal_reviewer_id is not None
+
+    # Step 2: goal-packet reviewer approves → task resumes in WORKING and the
+    # goal-review verdict fields are cleared by continue_task.
+    client.post(
+        f"/api/workspaces/sessions/{goal_reviewer_id}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "review_passed",
+            "message": "Goal Packet looks good.",
+        },
+    )
+    after_goal_pass = workspace_manager.tasks[task["id"]]
+    assert after_goal_pass.status == WorkspaceTaskStatus.WORKING
+    assert after_goal_pass.goal_packet is not None
+    assert after_goal_pass.goal_packet.status.value == "approved"
+    assert after_goal_pass.review_requested_at is None
+    assert after_goal_pass.review_completed_at is None
+    sent_messages.clear()
+
+    # Step 3: a DUPLICATE / stale goal-packet review_passed arrives from the
+    # same reviewer while the agent is still implementing. No review is in
+    # flight, so it must be ignored — it must NOT seed a phantom verdict.
+    dup_response = client.post(
+        f"/api/workspaces/sessions/{goal_reviewer_id}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "review_passed",
+            "message": "Goal Packet looks good (duplicate).",
+        },
+    )
+    assert dup_response.status_code == 201
+    after_dup = workspace_manager.tasks[task["id"]]
+    assert after_dup.status == WorkspaceTaskStatus.WORKING
+    assert after_dup.review_completed_at is None
+    assert after_dup.reviewed_at is None
+    assert after_dup.human_acceptance_requested_at is None
+
+    # Step 4: agent completes implementation → a genuine implementation review
+    # must be dispatched and the task must reach REVIEW (not stay WORKING).
+    completed_response = client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "completed",
+            "message": "Implementation complete.",
+            "acceptance_check": [
+                {
+                    "criterion": "Feature works",
+                    "status": "passed",
+                    "evidence": "Tests pass.",
+                }
+            ],
+            "changed_files": ["src/feature.py"],
+            "validation": "pytest",
+            "risks": "none",
+            "review_decision": "request",
+            "review_reason": "Implementation needs review.",
+        },
+    )
+    assert completed_response.status_code == 201
+
+    final_task = workspace_manager.tasks[task["id"]]
+    assert final_task.status == WorkspaceTaskStatus.REVIEW
+    assert final_task.review_session_id is not None
+    assert final_task.review_requested_at is not None
+    assert final_task.review_completed_at is None
+
+
 def test_update_workspace_changes_path_and_remote_cwd(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
