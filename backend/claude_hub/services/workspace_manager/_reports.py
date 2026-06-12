@@ -34,6 +34,38 @@ class _ReportsMixin:
             GoalPacketStatus.FROZEN,
         }
 
+    def _reviewer_verdict_actionable(
+        self,
+        task: WorkspaceTask,
+        report: AgentReport,
+    ) -> bool:
+        """Whether a reviewer terminal report should mutate task state.
+
+        A reviewer verdict (review_passed / review_failed / review_needs_input)
+        is only authoritative while a review is genuinely in flight for this
+        task — i.e. a review was requested and no verdict has been recorded
+        yet.
+
+        This blocks a stale / duplicate reviewer report from being misrouted
+        into a phantom verdict. The concrete failure it prevents: a second
+        goal-packet ``review_passed`` that arrives after the packet was
+        already approved and ``continue_task`` reopened the task to WORKING
+        (which clears ``review_requested_at`` / ``review_completed_at``). With
+        no active review, that stale report must not write
+        ``review_completed_at`` / ``status=REVIEW`` / ``reviewed_at`` — doing
+        so creates an "implementation passed" verdict before implementation
+        finished, after which the monitor runtime-reopen heuristic flips the
+        task back to WORKING and the late-report suppression guard drops the
+        genuine ``completed`` report, permanently stranding the task.
+
+        The already-applied case (``review_completed_at`` at or after the
+        report timestamp) stays actionable so existing idempotency and
+        REVIEW_FAILED re-dispatch paths keep working.
+        """
+        if task.review_completed_at is not None and task.review_completed_at >= report.created_at:
+            return True
+        return task.review_requested_at is not None and task.review_completed_at is None
+
     async def create_report(self, session_id: str, payload: AgentReportCreate) -> AgentReport:
         session = self.sessions.get(session_id)
         if not session:
@@ -115,6 +147,43 @@ class _ReportsMixin:
             if goal_packet_for_task is not None:
                 task_update["goal_packet"] = goal_packet_for_task
             current_task = self.tasks[task_id]
+            # ------------------------------------------------------------------
+            # Stale / duplicate reviewer verdict suppression.
+            #
+            # A reviewer terminal report (review_passed / review_failed /
+            # review_needs_input) is only authoritative while a review is
+            # genuinely in flight (see _reviewer_verdict_actionable). When it
+            # is not — e.g. a second goal-packet review_passed arriving after
+            # continue_task already reopened the task to WORKING for the
+            # implementation phase — the generic status block below would
+            # otherwise write status=REVIEW / reviewed_at from
+            # _task_status_from_report, seeding a phantom verdict. Zero out
+            # task_status so the verdict is recorded for audit but mutates no
+            # task state; the reviewer fast-path is likewise gated below.
+            # ------------------------------------------------------------------
+            if (
+                session.role == WorkspaceSessionRole.REVIEWER
+                and payload.state
+                in {
+                    AgentReportState.REVIEW_PASSED,
+                    AgentReportState.REVIEW_FAILED,
+                    AgentReportState.REVIEW_NEEDS_INPUT,
+                }
+                and not self._reviewer_verdict_actionable(current_task, report)
+            ):
+                logger.info(
+                    "Ignoring stale/duplicate reviewer verdict with no active review "
+                    "workspace_id=%s task_id=%s reviewer=%s decision=%s status=%s "
+                    "review_requested_at=%s review_completed_at=%s",
+                    session.workspace_id,
+                    task_id,
+                    session.id,
+                    payload.state.value,
+                    current_task.status.value,
+                    current_task.review_requested_at,
+                    current_task.review_completed_at,
+                )
+                task_status = None
             if current_task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
                 autonomous_run = self._autonomous_run_after_worker_report(
                     current_task,
@@ -238,11 +307,16 @@ class _ReportsMixin:
             # time, then resolves". Writing fields here makes reconciliation
             # idempotent and removes the race.
             # ------------------------------------------------------------------
-            if session.role == WorkspaceSessionRole.REVIEWER and payload.state in {
-                AgentReportState.REVIEW_PASSED,
-                AgentReportState.REVIEW_FAILED,
-                AgentReportState.REVIEW_NEEDS_INPUT,
-            }:
+            if (
+                session.role == WorkspaceSessionRole.REVIEWER
+                and payload.state
+                in {
+                    AgentReportState.REVIEW_PASSED,
+                    AgentReportState.REVIEW_FAILED,
+                    AgentReportState.REVIEW_NEEDS_INPUT,
+                }
+                and self._reviewer_verdict_actionable(self.tasks[task_id], report)
+            ):
                 current_task = self.tasks[task_id]
                 task_update.setdefault("status", WorkspaceTaskStatus.REVIEW)
                 task_update.setdefault("updated_at", now)
