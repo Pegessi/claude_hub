@@ -383,7 +383,6 @@ class _DispatchMixin:
                 "dispatch_pending": False,
                 "review_completed_at": None,
                 "reviewed_at": None,
-                "review_session_id": None,
                 "review_requested_at": None,
             }
         )
@@ -609,13 +608,7 @@ class _DispatchMixin:
             }
         )
         self._release_task_session(task_before_release)
-        self._release_reviewer_session(
-            task_before_release,
-            status=ManagedSessionStatus.IDLE,
-            runtime_status=AgentRuntimeStatus.IDLE,
-            updated_at=now,
-            include_stale_assignments=True,
-        )
+        await self._cleanup_reviewer_for_terminal_task(task_before_release, updated_at=now)
         self._save_state()
         await self.dispatch_workspace(task.workspace_id)
         return self.tasks[task.id]

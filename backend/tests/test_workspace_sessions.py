@@ -161,6 +161,27 @@ def test_delete_session_succeeds_for_idle_session(tmp_path: Path, monkeypatch: M
     assert session.tab_id in deleted_tabs
 
 
+def test_delete_session_removes_agent_when_tab_cleanup_fails(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    client = TestClient(app)
+
+    async def fake_delete_tab(_tab_id: str) -> None:
+        raise RuntimeError("cli unregister failed")
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "delete_tab", fake_delete_tab)
+
+    workspace = _make_workspace(client, repo)
+    session = _make_session(workspace["id"], repo)
+
+    response = client.delete(f"/api/workspaces/sessions/{session.id}")
+
+    assert response.status_code == 204
+    assert session.id not in workspace_manager.sessions
+
+
 def test_delete_session_blocked_by_active_task_returns_400(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:

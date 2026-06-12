@@ -158,6 +158,7 @@ class _TaskUpdatesMixin:
         if status == WorkspaceTaskStatus.DONE:
             self._write_task_record(self.tasks[task.id])
             self._release_task_session(self.tasks[task.id])
+            await self._cleanup_reviewer_for_terminal_task(self.tasks[task.id], updated_at=now)
             if task.feedback_lesson_ids:
                 self._feedback_store().increment_lesson_usage(
                     task.workspace_id,

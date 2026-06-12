@@ -5,6 +5,21 @@
 
 ## Unreleased
 
+### fix: keep reviewers task-bound and clean up temporary reviewers
+
+- Reviewer sessions now remain bound to their task while the task is still in
+  `working` or `review`, including after review feedback returns the task to
+  the implementation agent. A bound reviewer is not eligible for unrelated
+  review dispatch, and a re-review of the same task reuses the same reviewer.
+- Temporary reviewers created when no persistent reviewer is available are now
+  removed when the associated task is accepted as `done` or manually aborted;
+  persistent reviewers are released but kept.
+- Deleting an idle agent now removes the workspace session in the same API call
+  before best-effort terminal tab cleanup, so a tab/CLI shutdown issue no
+  longer makes the first delete click appear to only unregister the CLI.
+- **Files**: `backend/claude_hub/services/workspace_manager/`,
+  `backend/tests/test_workspaces.py`, `backend/tests/test_workspace_sessions.py`
+
 ### ci: wire frontend unit tests into CI and make Terminal E2E timeouts CI-scalable
 
 - The CI `frontend` job only ran `lint:check` and `build` — the `node:test`

@@ -228,6 +228,14 @@ class _TmuxQueriesMixin:
             return False
         return True
 
+    def _reviewer_has_active_task_binding(self, session: ManagedSession) -> bool:
+        return any(
+            task.workspace_id == session.workspace_id
+            and task.review_session_id == session.id
+            and task.status in {WorkspaceTaskStatus.WORKING, WorkspaceTaskStatus.REVIEW}
+            for task in self.tasks.values()
+        )
+
     def _release_stale_reviewer_for_task(
         self, task: WorkspaceTask, *, updated_at: datetime
     ) -> None:
@@ -284,9 +292,13 @@ class _TmuxQueriesMixin:
                 session.runtime_status == AgentRuntimeStatus.IDLE
                 and session.status == ManagedSessionStatus.IDLE
             ):
-                # Session is idle while still holding task pointers —
-                # typically left over from a dispatch error.
-                should_reset = True
+                # An idle reviewer may still be intentionally bound to a task
+                # after a terminal verdict. Only clear the fields when the task
+                # itself is no longer in a protected working/review phase.
+                should_reset = task.status not in {
+                    WorkspaceTaskStatus.WORKING,
+                    WorkspaceTaskStatus.REVIEW,
+                }
             if not should_reset:
                 continue
             logger.info(
@@ -440,6 +452,7 @@ class _TmuxQueriesMixin:
             and session.runtime_status == AgentRuntimeStatus.IDLE
             and not session.task_id
             and not session.current_task_id
+            and not self._reviewer_has_active_task_binding(session)
         ]
         if not reviewers:
             return None
