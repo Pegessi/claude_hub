@@ -40,6 +40,14 @@ class _NormalizeMixin:
         )
         normalized.setdefault("review_session_id", None)
         normalized.setdefault("review_attempts", 0)
+        # Review-cycle ordinals. Derive from existing verdict state so tasks
+        # persisted before this field existed still judge correctly: a parked
+        # task (verdict present) migrates to 1/1 so stale echoes suppress, while
+        # an in-flight task (no verdict) migrates to 1/0 so a live resubmit still
+        # dispatches a reviewer.
+        has_verdict = normalized.get("review_completed_at") is not None
+        normalized.setdefault("reviewed_cycle", 1 if has_verdict else 0)
+        normalized.setdefault("review_cycle", max(1, normalized["reviewed_cycle"]))
         normalized.setdefault("review_requested_at", None)
         normalized.setdefault("review_completed_at", None)
         normalized.setdefault("review_skipped_at", None)
@@ -85,6 +93,9 @@ class _NormalizeMixin:
             task_id=normalized.get("task_id"),
             session_id=normalized.get("session_id"),
         )
+        # Legacy reports have no stamped cycle; default 0 so they rank below any
+        # post-migration round (reviewed_cycle starts at >=1 once a verdict lands).
+        normalized.setdefault("review_cycle", 0)
         return normalized
 
     def _normalize_goal_packet(self, value: Any) -> dict[str, Any] | None:

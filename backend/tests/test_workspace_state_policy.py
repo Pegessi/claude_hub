@@ -589,6 +589,7 @@ def test_compute_reviewer_verdict_task_update_excludes_mixin_fields() -> None:
         report_state=AgentReportState.REVIEW_PASSED,
         reviewer_session_id="rev-1",
         now=_T0,
+        report_review_cycle=3,
         existing_review_completed_at=None,
         existing_reviewed_at=None,
         existing_human_acceptance_requested_at=None,
@@ -604,6 +605,7 @@ def test_compute_reviewer_verdict_task_update_excludes_mixin_fields() -> None:
     assert update["review_skip_reason"] is None
     assert update["completed_at"] is None
     assert update["human_accepted_at"] is None
+    assert update["reviewed_cycle"] == 3
     assert update["updated_at"] == _T0
 
 
@@ -614,6 +616,7 @@ def test_compute_reviewer_verdict_task_update_fast_path_flags() -> None:
         report_state=AgentReportState.REVIEW_PASSED,
         reviewer_session_id="rev-1",
         now=_T0,
+        report_review_cycle=1,
         existing_review_completed_at=_BEFORE,
         existing_reviewed_at=_BEFORE,
         existing_human_acceptance_requested_at=_BEFORE,
@@ -624,6 +627,7 @@ def test_compute_reviewer_verdict_task_update_fast_path_flags() -> None:
     assert update["review_completed_at"] == _BEFORE  # existing kept
     assert update["reviewed_at"] == _T0  # always now
     assert update["human_acceptance_requested_at"] == _BEFORE  # existing kept
+    assert update["reviewed_cycle"] == 1
 
 
 def test_compute_reviewer_verdict_task_update_fast_path_no_existing() -> None:
@@ -631,6 +635,7 @@ def test_compute_reviewer_verdict_task_update_fast_path_no_existing() -> None:
         report_state=AgentReportState.REVIEW_PASSED,
         reviewer_session_id="rev-1",
         now=_T0,
+        report_review_cycle=2,
         existing_review_completed_at=None,
         existing_reviewed_at=None,
         existing_human_acceptance_requested_at=None,
@@ -641,6 +646,7 @@ def test_compute_reviewer_verdict_task_update_fast_path_no_existing() -> None:
     assert update["review_completed_at"] == _T0
     assert update["reviewed_at"] == _T0
     assert update["human_acceptance_requested_at"] == _T0
+    assert update["reviewed_cycle"] == 2
 
 
 def test_compute_reviewer_verdict_task_update_impl_handler_flags() -> None:
@@ -650,6 +656,7 @@ def test_compute_reviewer_verdict_task_update_impl_handler_flags() -> None:
         report_state=AgentReportState.REVIEW_PASSED,
         reviewer_session_id="rev-1",
         now=_T0,
+        report_review_cycle=4,
         existing_review_completed_at=_BEFORE,
         existing_reviewed_at=_BEFORE,
         existing_human_acceptance_requested_at=_BEFORE,
@@ -660,6 +667,7 @@ def test_compute_reviewer_verdict_task_update_impl_handler_flags() -> None:
     assert update["review_completed_at"] == _T0  # always now
     assert update["reviewed_at"] == _BEFORE  # existing kept
     assert update["human_acceptance_requested_at"] == _T0  # always now (passed)
+    assert update["reviewed_cycle"] == 4
 
 
 @pytest.mark.parametrize(
@@ -673,6 +681,7 @@ def test_compute_reviewer_verdict_task_update_non_passed_clears_human(
         report_state=report_state,
         reviewer_session_id="rev-1",
         now=_T0,
+        report_review_cycle=5,
         existing_review_completed_at=None,
         existing_reviewed_at=None,
         existing_human_acceptance_requested_at=_BEFORE,
@@ -681,6 +690,7 @@ def test_compute_reviewer_verdict_task_update_non_passed_clears_human(
         preserve_existing_human_acceptance_requested_at=False,
     )
     assert update["human_acceptance_requested_at"] is None
+    assert update["reviewed_cycle"] == 5
 
 
 def test_compute_reviewer_verdict_task_update_goal_packet_never_requests_human() -> None:
@@ -690,6 +700,7 @@ def test_compute_reviewer_verdict_task_update_goal_packet_never_requests_human()
         report_state=AgentReportState.REVIEW_PASSED,
         reviewer_session_id="rev-1",
         now=_T0,
+        report_review_cycle=6,
         existing_review_completed_at=None,
         existing_reviewed_at=_BEFORE,
         existing_human_acceptance_requested_at=None,
@@ -701,3 +712,32 @@ def test_compute_reviewer_verdict_task_update_goal_packet_never_requests_human()
     assert update["human_acceptance_requested_at"] is None
     assert update["review_completed_at"] == _T0
     assert update["reviewed_at"] == _BEFORE
+    assert update["reviewed_cycle"] == 6
+
+
+@pytest.mark.parametrize(
+    "report_cycle, reviewed_cycle, expected",
+    [
+        (1, 0, True),  # first round, nothing judged yet → opens
+        (1, 1, False),  # same-round duplicate echo → does not open
+        (2, 1, True),  # fresh round after a reopen → opens
+        (1, 2, False),  # stale echo from a closed round → does not open
+        (0, 0, False),  # legacy report (cycle 0) never opens
+    ],
+)
+def test_report_opens_review_round(report_cycle: int, reviewed_cycle: int, expected: bool) -> None:
+    assert policy.report_opens_review_round(report_cycle, reviewed_cycle) is expected
+
+
+@pytest.mark.parametrize(
+    "review_cycle, reviewed_cycle, expected",
+    [
+        (1, 0, False),  # round 1 in flight, no verdict yet
+        (1, 1, True),  # round 1 judged → sealed
+        (2, 1, False),  # reopened to round 2, prior verdict from round 1
+        (2, 2, True),  # round 2 judged → sealed
+        (1, 2, True),  # reviewed ahead (defensive) → still sealed
+    ],
+)
+def test_current_round_has_verdict(review_cycle: int, reviewed_cycle: int, expected: bool) -> None:
+    assert policy.current_round_has_verdict(review_cycle, reviewed_cycle) is expected
