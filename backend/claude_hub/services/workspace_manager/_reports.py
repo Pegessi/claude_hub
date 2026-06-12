@@ -298,29 +298,6 @@ class _ReportsMixin:
                                 "updated_at": now,
                             }
                         )
-                # Release the reviewer session binding NOW so the dashboard
-                # shows the reviewer as idle rather than still assigned to
-                # a terminal-decision task.
-                reviewer_final_status = (
-                    ManagedSessionStatus.NEEDS_INPUT
-                    if payload.state == AgentReportState.REVIEW_NEEDS_INPUT
-                    else ManagedSessionStatus.IDLE
-                )
-                reviewer_final_runtime = (
-                    AgentRuntimeStatus.ATTENTION
-                    if payload.state == AgentReportState.REVIEW_NEEDS_INPUT
-                    else AgentRuntimeStatus.IDLE
-                )
-                _pre_review_task = current_task.model_copy(update={"review_session_id": session.id})
-                self._release_reviewer_session(
-                    _pre_review_task,
-                    status=reviewer_final_status,
-                    runtime_status=reviewer_final_runtime,
-                    updated_at=now,
-                    include_stale_assignments=(
-                        payload.state != AgentReportState.REVIEW_NEEDS_INPUT
-                    ),
-                )
                 logger.info(
                     "Reviewer terminal decision recorded in create_report "
                     "workspace_id=%s task_id=%s reviewer=%s decision=%s "
@@ -335,6 +312,12 @@ class _ReportsMixin:
                 task_update["updated_at"] = now
             if task_update:
                 self.tasks[task_id] = self.tasks[task_id].model_copy(update=task_update)
+            if session.role == WorkspaceSessionRole.REVIEWER and payload.state in {
+                AgentReportState.REVIEW_PASSED,
+                AgentReportState.REVIEW_FAILED,
+                AgentReportState.REVIEW_NEEDS_INPUT,
+            }:
+                self._cleanup_stale_reviewer_assignments(session.workspace_id)
 
         self._save_state()
         if task_id and task_id in self.tasks:

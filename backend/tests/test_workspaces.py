@@ -1494,6 +1494,12 @@ def test_completed_report_creates_temporary_reviewer(
     async def fake_ensure_session_ready(_session) -> None:
         return None
 
+    deleted_tabs: list[str] = []
+
+    async def fake_delete_tab(tab_id: str) -> bool:
+        deleted_tabs.append(tab_id)
+        return True
+
     async def fake_update_tab(tab_id: str, name: Optional[str] = None, **_: object) -> TerminalTab:
         renamed_tabs.append((tab_id, name))
         return TerminalTab(
@@ -1516,6 +1522,7 @@ def test_completed_report_creates_temporary_reviewer(
         )
 
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
+    monkeypatch.setattr(workspace_module.ttyd_manager, "delete_tab", fake_delete_tab)
     monkeypatch.setattr(workspace_module.ttyd_manager, "update_tab", fake_update_tab)
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
     monkeypatch.setattr(
@@ -1564,6 +1571,16 @@ def test_completed_report_creates_temporary_reviewer(
     assert "independent reviewer agent" in sent_messages[-2][1]
     assert "Review workspace task" in sent_messages[-1][1]
 
+    pass_response = pass_task_review(client, task["id"])
+    assert pass_response.status_code == 201
+    assert updated.review_session_id in workspace_manager.sessions
+    assert workspace_manager.sessions[reviewer.id].current_task_id == task["id"]
+
+    done_response = client.patch(f"/api/workspaces/tasks/{task['id']}", json={"status": "done"})
+    assert done_response.status_code == 200
+    assert reviewer.id not in workspace_manager.sessions
+    assert reviewer.tab_id in deleted_tabs
+
 
 def test_reviewer_clears_context_between_unrelated_tasks(
     monkeypatch: MonkeyPatch,
@@ -1586,6 +1603,10 @@ def test_reviewer_clears_context_between_unrelated_tasks(
         json={"name": "Reviewer Clear", "path": str(repo), "session_prefix": "rc"},
     ).json()
     worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    persistent_reviewer = client.post(
+        f"/api/workspaces/{workspace['id']}/agent",
+        json={"role": "reviewer", "reuse_existing": False},
+    ).json()
 
     first_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
@@ -1603,6 +1624,7 @@ def test_reviewer_clears_context_between_unrelated_tasks(
 
     first_reviewer_id = workspace_manager.tasks[first_task["id"]].review_session_id
     assert first_reviewer_id is not None
+    assert first_reviewer_id == persistent_reviewer["id"]
     first_review_messages = [m for _sess, m in sent_messages]
     assert (
         "/clear" not in first_review_messages
@@ -1610,6 +1632,11 @@ def test_reviewer_clears_context_between_unrelated_tasks(
 
     pass_resp = pass_task_review(client, first_task["id"])
     assert pass_resp.status_code == 201
+    done_resp = client.patch(
+        f"/api/workspaces/tasks/{first_task['id']}",
+        json={"status": "done"},
+    )
+    assert done_resp.status_code == 200
 
     second_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
@@ -1643,6 +1670,78 @@ def test_reviewer_clears_context_between_unrelated_tasks(
     ), "Reviewer with prior task history should receive /clear before unrelated review"
     assert prompt_index is not None
     assert clear_index < prompt_index
+
+
+def test_reviewer_bound_to_working_task_is_not_reused_for_other_review(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="rev-bound-tab",
+        port=12812,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Reviewer Bound", "path": str(repo), "session_prefix": "rb"},
+    ).json()
+    first_worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    second_worker = client.post(
+        f"/api/workspaces/{workspace['id']}/agent",
+        json={"reuse_existing": False},
+    ).json()
+
+    first_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "First", "prompt": "Needs revision"},
+    ).json()
+    client.post(
+        f"/api/workspaces/tasks/{first_task['id']}/start",
+        json={"target_session_id": first_worker["id"]},
+    )
+    client.post(
+        f"/api/workspaces/sessions/{first_worker['id']}/reports",
+        json={"task_id": first_task["id"], "state": "completed", "message": "v1"},
+    )
+    first_reviewer_id = workspace_manager.tasks[first_task["id"]].review_session_id
+    assert first_reviewer_id is not None
+
+    fail_resp = client.post(
+        f"/api/workspaces/sessions/{first_reviewer_id}/reports",
+        json={
+            "task_id": first_task["id"],
+            "state": "review_failed",
+            "message": "Needs changes.",
+        },
+    )
+    assert fail_resp.status_code == 201
+    assert workspace_manager.tasks[first_task["id"]].status == WorkspaceTaskStatus.WORKING
+    assert workspace_manager.tasks[first_task["id"]].review_session_id == first_reviewer_id
+    assert workspace_manager.sessions[first_reviewer_id].current_task_id == first_task["id"]
+
+    second_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Second", "prompt": "Independent review"},
+    ).json()
+    client.post(
+        f"/api/workspaces/tasks/{second_task['id']}/start",
+        json={"target_session_id": second_worker["id"]},
+    )
+    client.post(
+        f"/api/workspaces/sessions/{second_worker['id']}/reports",
+        json={"task_id": second_task["id"], "state": "completed", "message": "done"},
+    )
+
+    second_reviewer_id = workspace_manager.tasks[second_task["id"]].review_session_id
+    assert second_reviewer_id is not None
+    assert second_reviewer_id != first_reviewer_id
 
 
 def test_failed_review_continues_reviewed_task_after_repeated_attempts(
@@ -2933,7 +3032,7 @@ def test_review_passed_keeps_task_in_review(
     assert reviewed_task.human_acceptance_requested_at is not None
     assert reviewed_task.human_accepted_at is None
     assert workspace_manager.sessions[started["session_id"]].current_task_id == task["id"]
-    assert workspace_manager.sessions[reviewer_id].current_task_id is None
+    assert workspace_manager.sessions[reviewer_id].current_task_id == task["id"]
     assert workspace_manager.sessions[stale_reviewer_id].current_task_id is None
     assert workspace_manager.sessions[stale_reviewer_id].status == ManagedSessionStatus.IDLE
 
@@ -6938,8 +7037,7 @@ def test_abort_task_returns_active_review_to_todo_and_releases_sessions(
     assert aborted["dispatch_reason"] == "Manually aborted: Reviewer did not respond"
     assert workspace_manager.sessions[started["session_id"]].current_task_id is None
     assert workspace_manager.sessions[started["session_id"]].status == ManagedSessionStatus.IDLE
-    assert workspace_manager.sessions[reviewer_id].current_task_id is None
-    assert workspace_manager.sessions[reviewer_id].status == ManagedSessionStatus.IDLE
+    assert reviewer_id not in workspace_manager.sessions
     abort_report = list(workspace_manager.reports.values())[-1]
     assert abort_report.state.value == "blocked"
     assert "Reviewer did not respond" in abort_report.message
@@ -6966,10 +7064,8 @@ def test_abort_task_returns_active_review_to_todo_and_releases_sessions(
             "message": "Late reviewer pass",
         },
     )
-    assert late_reviewer_response.status_code == 400
-    assert "manually aborted" in late_reviewer_response.json()["detail"]
+    assert late_reviewer_response.status_code == 404
     assert workspace_manager.tasks[task["id"]].status == WorkspaceTaskStatus.TODO
-    assert workspace_manager.sessions[reviewer_id].current_task_id is None
 
     restarted = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     restarted_task = workspace_manager.tasks[task["id"]]

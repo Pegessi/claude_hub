@@ -234,7 +234,6 @@ class _SessionsMixin:
         if blocking:
             raise RuntimeError("Cannot delete an agent with queued, working, or review tasks")
 
-        await ttyd_manager.delete_tab(session.tab_id)
         self.sessions.pop(session_id, None)
         workspace = self.workspaces.get(session.workspace_id)
         if workspace and workspace.dispatcher_session_id == session_id:
@@ -242,3 +241,12 @@ class _SessionsMixin:
                 update={"dispatcher_session_id": None, "updated_at": _wm._now()}
             )
         self._save_state()
+        try:
+            await ttyd_manager.delete_tab(session.tab_id)
+        except Exception:
+            logger.exception(
+                "Failed to delete terminal tab after removing workspace session "
+                "session_id=%s tab_id=%s",
+                session.id,
+                session.tab_id,
+            )
