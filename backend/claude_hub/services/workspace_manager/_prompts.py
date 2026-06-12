@@ -390,6 +390,7 @@ class _PromptsMixin:
             review_decision=ReviewDecision.SKIP,
             review_reason="System audit event for prompt-time feedback lesson injection.",
             risk_level="system_audit",
+            review_cycle=task.review_cycle,
             created_at=created_at,
         )
         self.reports[report.id] = report
@@ -418,6 +419,7 @@ class _PromptsMixin:
             review_decision=ReviewDecision.SKIP,
             review_reason="System audit event for an internal workspace task.",
             risk_level="system_audit",
+            review_cycle=task.review_cycle,
             created_at=_wm._now(),
         )
         self.reports[report.id] = report

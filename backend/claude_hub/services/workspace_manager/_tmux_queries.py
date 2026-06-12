@@ -426,6 +426,7 @@ class _TmuxQueriesMixin:
                 review_decision=ReviewDecision.REQUEST,
                 review_reason="Stuck review recovered by background dispatcher.",
                 risk_level=None,
+                review_cycle=task.review_cycle,
                 created_at=now,
             )
             self.reports[trigger_report.id] = trigger_report

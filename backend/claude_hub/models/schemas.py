@@ -546,6 +546,14 @@ class WorkspaceTask(BaseModel):
     feedback_lesson_ids: List[str] = Field(default_factory=list)
     review_session_id: Optional[str] = None
     review_attempts: int = 0
+    # Review-cycle ordinals. ``review_cycle`` is the current work round (a task is
+    # born in round 1; each reopen-to-worker opens the next round).
+    # ``reviewed_cycle`` is the round number of the most recently applied reviewer
+    # verdict (0 = none judged yet). A gate report opens a new review when its
+    # stamped cycle exceeds ``reviewed_cycle``; the current round is already
+    # judged when ``reviewed_cycle >= review_cycle``.
+    review_cycle: int = 1
+    reviewed_cycle: int = 0
     review_requested_at: Optional[datetime] = None
     review_completed_at: Optional[datetime] = None
     review_skipped_at: Optional[datetime] = None
@@ -645,6 +653,10 @@ class AgentReport(BaseModel):
     review_decision: ReviewDecision = ReviewDecision.AUTO
     review_reason: Optional[str] = None
     risk_level: Optional[str] = None
+    # The owning task's ``review_cycle`` at the moment this report was created.
+    # Used to rank gate/verdict reports against the task's ``reviewed_cycle``.
+    # Defaults to 0 so legacy on-disk reports rank below any post-migration round.
+    review_cycle: int = 0
     created_at: datetime
 
 
