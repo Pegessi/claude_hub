@@ -484,13 +484,6 @@ class _MonitorMixin:
                     }
                 )
                 self.tasks[task_id] = reviewed_task
-                self._release_reviewer_session(
-                    reviewed_task,
-                    status=ManagedSessionStatus.IDLE,
-                    runtime_status=AgentRuntimeStatus.IDLE,
-                    updated_at=report.created_at,
-                    include_stale_assignments=True,
-                )
                 changed = True
                 continue
             if task.status == WorkspaceTaskStatus.REVIEW:
@@ -642,6 +635,50 @@ class _MonitorMixin:
                     "current_task_id": None,
                     "status": status,
                     "runtime_status": runtime_status,
+                    "updated_at": updated_at,
+                    "last_activity_at": updated_at,
+                }
+            )
+
+    async def _cleanup_reviewer_for_terminal_task(
+        self,
+        task: WorkspaceTask,
+        *,
+        updated_at: datetime,
+    ) -> None:
+        """Release persistent reviewers and delete task-scoped temporary reviewers."""
+
+        session_ids: set[str] = set()
+        if task.review_session_id:
+            session_ids.add(task.review_session_id)
+        session_ids.update(
+            session.id
+            for session in self.sessions.values()
+            if session.role == WorkspaceSessionRole.REVIEWER
+            and (session.task_id == task.id or session.current_task_id == task.id)
+        )
+
+        for session_id in session_ids:
+            session = self.sessions.get(session_id)
+            if not session or session.role != WorkspaceSessionRole.REVIEWER:
+                continue
+            if session.ephemeral:
+                self.sessions.pop(session.id, None)
+                try:
+                    await ttyd_manager.delete_tab(session.tab_id)
+                except Exception:
+                    logger.exception(
+                        "Failed to delete temporary reviewer tab session_id=%s tab_id=%s",
+                        session.id,
+                        session.tab_id,
+                    )
+                continue
+            self.sessions[session.id] = session.model_copy(
+                update={
+                    "task_id": None,
+                    "current_task_id": None,
+                    "status": ManagedSessionStatus.IDLE,
+                    "runtime_status": AgentRuntimeStatus.IDLE,
                     "updated_at": updated_at,
                     "last_activity_at": updated_at,
                 }
