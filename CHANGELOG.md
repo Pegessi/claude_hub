@@ -5,6 +5,30 @@
 
 ## Unreleased
 
+### ci: add pytest-cov backend coverage reporting
+
+- Added `pytest-cov>=5.0` to the `backend/pyproject.toml` `dev` optional
+  dependencies so any developer can produce a coverage report locally with
+  the same flags CI uses.
+- The CI `backend` job now appends
+  `--cov=claude_hub --cov-report=xml:coverage.xml --cov-report=term-missing`
+  to its existing `pytest` invocation (no extra pytest execution — coverage
+  is collected on the same run). Per-test pass/fail still short-circuits via
+  `-x` and the terminal-replay E2E file is still ignored; nothing changes
+  functionally.
+- Added a follow-up `Upload backend coverage to Codecov` step that ships
+  `backend/coverage.xml` to codecov.io with `flags: backend` and
+  `fail_ci_if_error: false`, so coverage reporting is visible in PRs even
+  before the repo has a Codecov token configured.
+- **Frontend coverage is explicitly out of scope for this round** — it is
+  gated on T1 migrating the suite to Vitest. A `// TODO(T1)` comment was
+  added above the `test:unit` script in `frontend/package.json` documenting
+  the target (`Vitest + @vitest/coverage-v8`) and a matching `TODO(T1)`
+  comment was added in the `frontend` CI job right above the unit-test step
+  so nobody adds coverage ad-hoc with the node:test runner.
+- **Files**: `backend/pyproject.toml`, `.github/workflows/ci.yml`,
+  `frontend/package.json`
+
 ### chore: fix Dockerfile build and expand docker-compose with env/volume/healthcheck
 
 - **`docker/Dockerfile` (backend)** — two build-blocking bugs fixed:

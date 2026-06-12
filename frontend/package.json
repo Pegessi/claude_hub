@@ -8,6 +8,7 @@
     "preview": "vite preview",
     "lint": "eslint . --ext .vue,.js,.jsx,.cjs,.mjs,.ts,.tsx,.cts,.mts --fix",
     "lint:check": "eslint . --ext .vue,.js,.jsx,.cjs,.mjs,.ts,.tsx,.cts,.mts",
+    // TODO(T1): migrate from node --test to Vitest + @vitest/coverage-v8 for component/store coverage
     "test:unit": "node --test tests/*.test.mjs"
   },
   "dependencies": {
