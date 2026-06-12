@@ -8,12 +8,14 @@ export const useAuthStore = defineStore('auth', () => {
   const user = ref<User | null>(null)
   const isLoading = ref(false)
   const authRequired = ref(false)
+  const checkAuthError = ref(false)
 
   const isAuthenticated = computed(() => user.value !== null)
   const authEnabled = computed(() => authRequired.value)
 
   async function checkAuth(): Promise<void> {
     isLoading.value = true
+    checkAuthError.value = false
     try {
       const response = await fetch(`${API_BASE}/auth/check`, {
         credentials: 'include',
@@ -21,9 +23,12 @@ export const useAuthStore = defineStore('auth', () => {
       const data: AuthCheckResponse = await response.json()
       authRequired.value = data.auth_required
       user.value = data.user
-    } catch (error) {
-      console.error('Failed to check auth:', error)
+    } catch (err) {
+      console.error('Failed to check auth:', err)
       user.value = null
+      checkAuthError.value = true
+      isLoading.value = false
+      return
     } finally {
       isLoading.value = false
     }
@@ -79,16 +84,22 @@ export const useAuthStore = defineStore('auth', () => {
     return null
   }
 
+  function clearCheckAuthError() {
+    checkAuthError.value = false
+  }
+
   return {
     user,
     isLoading,
     authRequired,
     authEnabled,
+    checkAuthError,
     isAuthenticated,
     checkAuth,
     fetchUser,
     getLoginUrl,
     logout,
+    clearCheckAuthError,
     getSessionIdFromCookie,
   }
 })
