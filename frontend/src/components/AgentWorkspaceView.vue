@@ -159,7 +159,15 @@
       v-if="error"
       class="workspace-error"
     >
-      {{ error }}
+      <span>{{ error }}</span>
+      <button
+        type="button"
+        class="workspace-error__close"
+        aria-label="关闭错误提示"
+        @click="dismissWorkspaceErrors"
+      >
+        ×
+      </button>
     </div>
 
     <div
@@ -2383,6 +2391,15 @@ type WorkspaceSessionView = 'agents' | 'reviewers'
 const appStore = useAppStore()
 const terminalStore = useTerminalStore()
 const workspaceStore = useWorkspaceStore()
+
+// Dismiss all error-type notifications from workspace store.
+function dismissWorkspaceErrors() {
+  const ids = workspaceStore.notifications
+    .filter(n => n.type === 'error')
+    .map(n => n.id)
+  for (const id of ids) workspaceStore.dismissNotification(id)
+}
+
 const { envPresets, getPresetText, defaultPresetTextForAgent } =
   useLaunchEnvPresets()
 const { isPending, runPending } = usePendingActions()
@@ -2458,7 +2475,7 @@ const columns: { status: WorkspaceTaskStatus; label: string }[] = [
 
 const workspaceForm = reactive({
   name: 'Claude Hub',
-  path: '/Users/bytedance/claude_hub',
+  path: '',
   default_branch: 'main',
   session_prefix: 'chub',
   target: 'local' as ExecutionTarget,
@@ -3748,7 +3765,12 @@ async function fetchRemoteProfiles() {
       workspaceForm.remote_profile_id = remoteProfiles.value[0].id
     }
   } catch (e) {
-    workspaceStore.error = e instanceof Error ? e.message : 'Failed to load remote profiles'
+    // (F5) error is now a computed; push to the notification queue instead.
+    workspaceStore.pushNotification({
+      type: 'error',
+      message: e instanceof Error ? e.message : 'Failed to load remote profiles',
+      autoDismissMs: 8000,
+    })
   } finally {
     remoteProfilesLoading.value = false
   }
@@ -3803,7 +3825,7 @@ async function handleSaveWorkspace() {
 
 function resetWorkspaceForm() {
   workspaceForm.name = 'Claude Hub'
-  workspaceForm.path = '/Users/bytedance/claude_hub'
+  workspaceForm.path = ''
   workspaceForm.default_branch = 'main'
   workspaceForm.session_prefix = 'chub'
   workspaceForm.target = 'local'

@@ -5,6 +5,98 @@
 
 ## Unreleased
 
+
+### fix: remove hardcoded developer laptop path from workspace form defaults
+
+- Replaced the hardcoded default `'/Users/bytedance/claude_hub'` in the
+  workspace creation form (AgentWorkspaceView.vue) with an empty string in
+  both the initial form state and `resetWorkspaceForm()`. The backend now
+  expands `$HOME`/its own default when the cwd field is submitted empty, so
+  production users no longer see a reference to a local dev machine.
+- **Files**: `frontend/src/components/AgentWorkspaceView.vue`
+
+### fix: checkAuth() no longer swallows network errors into an infinite spinner
+
+- Added a reactive `checkAuthError: false` flag to `authStore`, and set it
+  (plus clear `isLoading`) in the catch branch so the UI can exit the
+  spinner state on backend unreachable / 5xx.
+- Added a top-of-page retry banner in `App.vue` that surfaces when
+  `checkAuthError` is true, with a Chinese warning message ("认证检查失败，
+  无法连接后端…") plus a "刷新重试" button that re-runs `checkAuth` and
+  re-fetches tabs on success, and a close button that sets
+  `checkAuthError = false`.
+- **Files**: `frontend/src/stores/authStore.ts`, `frontend/src/App.vue`
+
+### chore: tighten ESLint on `any`; fix trivially-typed usages
+
+- Changed `@typescript-eslint/no-explicit-any` from `off` to `warn` in
+  `eslint.config.js` so remaining `any` usages surface while CI stays green.
+- Fixed the four trivial `any` warnings that did occur (all in
+  TerminalView.vue): broadened `registerIframe` parameter type to the
+  actual template-ref union, and replaced `(iframe as any)` casts on a
+  transient SAB-script property with a typed `HTMLIFrameElement &` helper.
+  All warnings now resolved at the current codebase size.
+- **Files**: `frontend/eslint.config.js`, `frontend/src/components/TerminalView.vue`
+
+### fix: consolidate reactive window globals into a namespaced object with proper cleanup
+
+- Created `window.__claudeHub = {}` exactly once at app bootstrap (main.ts)
+  with a single shared TypeScript interface in `src/types/index.ts`.
+- Migrated all previous stray globals off the top-level `window` namespace
+  and into `window.__claudeHub`: `__activePaneTabId`,
+  `__claudeHubTerminalState`, `__registerTerminalIframe`,
+  `__refreshTerminalHistory`, and `__sendTerminalKey`. Every consumer
+  updated (App.vue, TerminalView.vue, TerminalGridView.vue, MobileControls.vue,
+  TerminalPane.vue).
+- Removed the DUPLICATE write of `__activePaneTabId` from
+  TerminalGridView.vue — App.vue is now the single authoritative writer.
+- Added onUnmounted cleanup in TerminalView.vue for the three globals it
+  registers (registerTerminalIframe, refreshTerminalHistory, sendTerminalKey).
+- SAB-ring globals (`__CLAUDE_HUB_SAB_BUFFER__`, `__claudeHubDrainSabRing`)
+  are intentionally left alone — they live inside each iframe's own
+  `contentWindow`, not the top-level window.
+- **Files**: `frontend/src/main.ts`, `frontend/src/types/index.ts`,
+  `frontend/src/App.vue`,
+  `frontend/src/components/TerminalView.vue`,
+  `frontend/src/components/TerminalGridView.vue`,
+  `frontend/src/components/MobileControls.vue`,
+  `frontend/src/components/TerminalPane.vue`
+
+### fix: replace single error-string anti-pattern with a stacked notification queue
+
+- **terminalStore** and **workspaceStore** both had a single shared
+  `error: ref<string>` that every concurrent API failure would overwrite,
+  hiding earlier errors. Replaced each with:
+  - A reactive `notifications: StoreNotification[]` queue (type: error /
+    success / warning / info, unique id, optional `autoDismissMs`).
+  - `pushNotification({ type, message, autoDismissMs? })` which assigns
+    a unique id and auto-splices after `autoDismissMs` when set.
+  - `dismissNotification(id)` for manual dismissal.
+  - `error` kept as a backward-compatible computed returning the latest
+    error-type notification (so existing single-banner UIs still work,
+    but callers can no longer `.value = ...` it).
+- Migrated every `error.value = ...` assignment in both stores to
+  `notifyError(msg)` (an 8–10 s auto-dismiss error toast) or, for
+  non-critical failures, an explicit `pushNotification({ type: 'warning', ... })`.
+- **Re-enabled** tab-order save error reporting in
+  `terminalStore.saveTabOrder()` — previously commented out because it
+  would clobber other errors; now it surfaces via its own warning toast.
+- Added an inline **toast stack UI** directly in `TabBar.vue` (top-right,
+  fixed position, layered, with close button + auto-dismiss timer bar,
+  all scoped styles — no new component file) rendering every notification
+  from the terminal store.
+- Added a close button + `dismissWorkspaceErrors()` to the existing
+  workspace error banner in `AgentWorkspaceView.vue` so users can dismiss
+  workspace errors too.
+- Defined `StoreNotification` / `NotificationType` once in
+  `src/types/index.ts` for reuse across stores.
+- **Files**: `frontend/src/types/index.ts`,
+  `frontend/src/stores/terminalStore.ts`,
+  `frontend/src/stores/workspaceStore.ts`,
+  `frontend/src/components/TabBar.vue`,
+  `frontend/src/components/AgentWorkspaceView.vue`,
+  `frontend/src/App.vue`
+
 ### docs: add CONTRIBUTING.md, refresh ARCHITECTURE.md module map, add CI docs integrity check
 
 - Added `CONTRIBUTING.md` with the mandatory worktree development workflow,

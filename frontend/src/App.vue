@@ -17,6 +17,30 @@
 
     <!-- 主应用 -->
     <template v-else>
+      <div
+        v-if="authStore.checkAuthError"
+        class="auth-error-banner"
+        role="alert"
+      >
+        <span>认证检查失败，无法连接后端。请检查后端服务是否启动或刷新页面重试。</span>
+        <div class="auth-error-banner__actions">
+          <button
+            type="button"
+            class="auth-error-banner__retry"
+            @click="retryCheckAuth"
+          >
+            刷新重试
+          </button>
+          <button
+            type="button"
+            class="auth-error-banner__close"
+            aria-label="关闭提示"
+            @click="authStore.clearCheckAuthError()"
+          >
+            ×
+          </button>
+        </div>
+      </div>
       <div class="app-mode-bar">
         <div
           class="mode-switch"
@@ -111,14 +135,25 @@ const authStore = useAuthStore()
 const { tabs, error, activePane } = storeToRefs(store)
 const { mode, colorScheme } = storeToRefs(appStore)
 
+// Clear all error-type notifications from the terminal store toast stack.
 function clearError() {
-  error.value = null
+  const ids = store.notifications
+    .filter(n => n.type === 'error')
+    .map(n => n.id)
+  for (const id of ids) store.dismissNotification(id)
+}
+
+async function retryCheckAuth() {
+  await authStore.checkAuth()
+  if (!authStore.authEnabled || !authStore.authRequired || authStore.isAuthenticated) {
+    await store.fetchTabs()
+  }
 }
 
 // Expose active pane tab ID for mobile controls.
 watch(() => activePane.value?.tabId || null, (tabId) => {
   if (typeof window !== 'undefined') {
-    (window as Window & { __activePaneTabId?: string | null }).__activePaneTabId = tabId
+    window.__claudeHub.activePaneTabId = tabId
   }
 }, { immediate: true })
 
@@ -582,6 +617,59 @@ textarea {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+.auth-error-banner {
+  background-color: var(--ch-color-warning-bg);
+  color: var(--ch-color-warning);
+  border: 1px solid var(--ch-color-warning);
+  border-width: 0 0 1px 0;
+  padding: 10px 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.auth-error-banner__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.auth-error-banner__retry {
+  background: var(--ch-color-warning);
+  color: #1a1a1a;
+  border: 1px solid var(--ch-color-warning-strong);
+  border-radius: var(--ch-radius-sm);
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background var(--ch-motion-fast);
+}
+
+.auth-error-banner__retry:hover {
+  background: var(--ch-color-warning-strong);
+}
+
+.auth-error-banner__close {
+  background: none;
+  border: none;
+  color: inherit;
+  font-size: 22px;
+  cursor: pointer;
+  padding: 0 6px;
+  line-height: 1;
+  opacity: 0.8;
+  transition: opacity var(--ch-motion-fast);
+}
+
+.auth-error-banner__close:hover {
+  opacity: 1;
 }
 
 .app-mode-bar {
