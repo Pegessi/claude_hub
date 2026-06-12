@@ -11,6 +11,15 @@ class _ReviewMixin:
         workspace: Workspace,
         task: WorkspaceTask,
     ) -> ManagedSession:
+        if task.review_session_id:
+            reviewer = self.sessions.get(task.review_session_id)
+            if (
+                reviewer
+                and reviewer.workspace_id == workspace.id
+                and reviewer.role == WorkspaceSessionRole.REVIEWER
+                and reviewer.status != ManagedSessionStatus.STOPPED
+            ):
+                return reviewer
         reviewer = self._first_available_reviewer(workspace.id)
         if reviewer:
             return reviewer
@@ -91,25 +100,6 @@ class _ReviewMixin:
         )
         autonomous_next_phase: AutonomousRunPhase | None = None
         if not already_applied:
-            reviewer_status = (
-                ManagedSessionStatus.NEEDS_INPUT
-                if report.state == AgentReportState.REVIEW_NEEDS_INPUT
-                else ManagedSessionStatus.IDLE
-            )
-            reviewer_runtime_status = (
-                AgentRuntimeStatus.ATTENTION
-                if report.state == AgentReportState.REVIEW_NEEDS_INPUT
-                else AgentRuntimeStatus.IDLE
-            )
-            task_with_reviewer = task.model_copy(update={"review_session_id": reviewer.id})
-            self._release_reviewer_session(
-                task_with_reviewer,
-                status=reviewer_status,
-                runtime_status=reviewer_runtime_status,
-                updated_at=now,
-                include_stale_assignments=(report.state != AgentReportState.REVIEW_NEEDS_INPUT),
-            )
-
             task_update = {
                 "review_session_id": reviewer.id,
                 "review_completed_at": now,
@@ -209,25 +199,6 @@ class _ReviewMixin:
         )
 
         if not already_applied:
-            reviewer_status = (
-                ManagedSessionStatus.NEEDS_INPUT
-                if report.state == AgentReportState.REVIEW_NEEDS_INPUT
-                else ManagedSessionStatus.IDLE
-            )
-            reviewer_runtime_status = (
-                AgentRuntimeStatus.ATTENTION
-                if report.state == AgentReportState.REVIEW_NEEDS_INPUT
-                else AgentRuntimeStatus.IDLE
-            )
-            task_with_reviewer = task.model_copy(update={"review_session_id": reviewer.id})
-            self._release_reviewer_session(
-                task_with_reviewer,
-                status=reviewer_status,
-                runtime_status=reviewer_runtime_status,
-                updated_at=now,
-                include_stale_assignments=(report.state != AgentReportState.REVIEW_NEEDS_INPUT),
-            )
-
             packet_status = GoalPacketStatus.PENDING_REVIEW
             if report.state == AgentReportState.REVIEW_PASSED:
                 packet_status = GoalPacketStatus.APPROVED
