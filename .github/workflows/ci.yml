@@ -242,7 +242,7 @@ jobs:
       # --- Artifacts ------------------------------------------------------
       - name: Upload Bandit report artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bandit-report
           path: backend/bandit-report.txt
