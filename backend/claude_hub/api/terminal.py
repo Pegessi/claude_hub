@@ -454,6 +454,35 @@ async def proxy_terminal_request(
       }
       .xterm-viewport {
         -webkit-overflow-scrolling: touch !important;
+        /* Slim, theme-matching overlay scrollbar (Firefox).
+           The default thick scrollbar sits flush against the iframe edge and
+           its bottom gets clipped by the host pane's rounded corner, which
+           looks awkward. A thin translucent bar blends with the terminal. */
+        scrollbar-width: thin !important;
+        scrollbar-color: rgba(255, 255, 255, 0.28) transparent !important;
+      }
+      /* WebKit/Blink slim overlay scrollbar for the xterm viewport. */
+      .xterm-viewport::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+        background: transparent;
+      }
+      .xterm-viewport::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      .xterm-viewport::-webkit-scrollbar-thumb {
+        background-color: rgba(255, 255, 255, 0.22);
+        border-radius: 8px;
+        /* Inset the thumb from the edges so it never touches the rounded
+           pane corner, and shrink it via a transparent border box. */
+        border: 2px solid transparent;
+        background-clip: padding-box;
+      }
+      .xterm-viewport::-webkit-scrollbar-thumb:hover {
+        background-color: rgba(255, 255, 255, 0.4);
+      }
+      .xterm-viewport::-webkit-scrollbar-corner {
+        background: transparent;
       }
     </style>
 """
