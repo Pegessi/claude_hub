@@ -79,31 +79,6 @@ class _MonitorMixin:
                         runtime_status = update["runtime_status"]
                         changed = True
                 if (
-                    session.role == WorkspaceSessionRole.ORCHESTRATOR
-                    and runtime_status == AgentRuntimeStatus.WORKING
-                    and task
-                    and task.status == WorkspaceTaskStatus.REVIEW
-                    and current_task_id is not None
-                    and status.last_changed_at
-                    and task.reviewed_at
-                    and (status.last_changed_at - task.reviewed_at).total_seconds()
-                    > REVIEW_RUNTIME_REOPEN_GRACE_SECONDS
-                    and self._latest_report_state(current_task_id)
-                    in {
-                        AgentReportState.READY_FOR_REVIEW,
-                        AgentReportState.COMPLETED,
-                    }
-                ):
-                    self.tasks[current_task_id] = task.model_copy(
-                        update={
-                            "status": WorkspaceTaskStatus.WORKING,
-                            "started_at": status.last_changed_at,
-                            "updated_at": status.last_changed_at,
-                        }
-                    )
-                    update["task_id"] = current_task_id
-                    changed = True
-                if (
                     runtime_status == AgentRuntimeStatus.ATTENTION
                     and task
                     and task.status == WorkspaceTaskStatus.WORKING
@@ -122,6 +97,7 @@ class _MonitorMixin:
                             changed_files=[],
                             validation=None,
                             risks=None,
+                            review_cycle=task.review_cycle,
                             created_at=status.sampled_at,
                         )
                         self.reports[report.id] = report
@@ -303,6 +279,7 @@ class _MonitorMixin:
             review_decision=ReviewDecision.SKIP,
             review_reason="Prompt dispatch did not reach execution; independent review cannot run until recovered.",
             risk_level=PROMPT_STUCK_RISK_LEVEL,
+            review_cycle=task.review_cycle,
             created_at=sampled_at,
         )
         self.reports[report.id] = report
@@ -464,29 +441,17 @@ class _MonitorMixin:
                 or task.status == WorkspaceTaskStatus.DONE
             ):
                 continue
+            # Cycle gate: never reconcile task status from a report belonging to
+            # a different work round. A prior-round verdict (e.g. an old
+            # REVIEW_PASSED stamped at review_cycle=1) must not resurrect itself
+            # after continue_task opened round 2; legacy reports (cycle 0) are
+            # likewise ignored once the task has advanced past round 0.
+            if report.review_cycle != task.review_cycle:
+                continue
             if report.state not in {
                 AgentReportState.READY_FOR_REVIEW,
                 AgentReportState.COMPLETED,
-                AgentReportState.REVIEW_PASSED,
             }:
-                continue
-            if report.state == AgentReportState.REVIEW_PASSED:
-                reviewed_task = task.model_copy(
-                    update={
-                        "status": WorkspaceTaskStatus.REVIEW,
-                        "review_session_id": report.session_id,
-                        "review_completed_at": task.review_completed_at or report.created_at,
-                        "reviewed_at": task.reviewed_at or report.created_at,
-                        "completed_at": None,
-                        "human_acceptance_requested_at": (
-                            task.human_acceptance_requested_at or report.created_at
-                        ),
-                        "human_accepted_at": None,
-                        "updated_at": report.created_at,
-                    }
-                )
-                self.tasks[task_id] = reviewed_task
-                changed = True
                 continue
             if task.status == WorkspaceTaskStatus.REVIEW:
                 continue

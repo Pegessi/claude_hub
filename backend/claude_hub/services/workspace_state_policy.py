@@ -376,6 +376,28 @@ def review_in_flight(
     return review_requested_at is not None and review_completed_at is None
 
 
+def report_opens_review_round(report_cycle: int, reviewed_cycle: int) -> bool:
+    """True when a gate/verdict report belongs to a not-yet-judged round.
+
+    A report stamped with the task's current ``review_cycle`` opens (or applies
+    to) a review when it outranks the last verdict's round. A lower-or-equal
+    cycle is a stale echo — recorded for audit, but it mutates no task state.
+    """
+
+    return report_cycle > reviewed_cycle
+
+
+def current_round_has_verdict(review_cycle: int, reviewed_cycle: int) -> bool:
+    """True when the task's current work round already has a reviewer verdict.
+
+    Used to suppress late-orchestrator overwrites and skip re-review dispatch:
+    once ``reviewed_cycle`` has caught up to ``review_cycle`` the round is sealed
+    until a reopen (``continue_task`` / review_failed) bumps ``review_cycle``.
+    """
+
+    return reviewed_cycle >= review_cycle
+
+
 def reviewer_verdict_already_applied(
     review_completed_at: Optional[datetime],
     report_created_at: datetime,
@@ -442,6 +464,7 @@ def compute_reviewer_verdict_task_update(
     report_state: AgentReportState,
     reviewer_session_id: str,
     now: datetime,
+    report_review_cycle: int,
     existing_review_completed_at: Optional[datetime],
     existing_reviewed_at: Optional[datetime],
     existing_human_acceptance_requested_at: Optional[datetime],
@@ -482,6 +505,7 @@ def compute_reviewer_verdict_task_update(
         "review_skipped_at": None,
         "review_skip_reason": None,
         "reviewed_at": reviewed_at,
+        "reviewed_cycle": report_review_cycle,
         "completed_at": None,
         "human_acceptance_requested_at": human_acceptance_requested_at,
         "human_accepted_at": None,

@@ -41,31 +41,39 @@ class _ReportsMixin:
     ) -> bool:
         """Whether a reviewer terminal report should mutate task state.
 
-        A reviewer verdict (review_passed / review_failed / review_needs_input)
-        is only authoritative while a review is genuinely in flight for this
-        task — i.e. a review was requested and no verdict has been recorded
-        yet.
+        Two conditions must hold:
 
-        This blocks a stale / duplicate reviewer report from being misrouted
-        into a phantom verdict. The concrete failure it prevents: a second
-        goal-packet ``review_passed`` that arrives after the packet was
-        already approved and ``continue_task`` reopened the task to WORKING
-        (which clears ``review_requested_at`` / ``review_completed_at``). With
-        no active review, that stale report must not write
-        ``review_completed_at`` / ``status=REVIEW`` / ``reviewed_at`` — doing
-        so creates an "implementation passed" verdict before implementation
-        finished, after which the monitor runtime-reopen heuristic flips the
-        task back to WORKING and the late-report suppression guard drops the
-        genuine ``completed`` report, permanently stranding the task.
+        1. **Cycle-fresh** — ``report_opens_review_round``: the report's
+           ``review_cycle`` outranks the task's last-applied ``reviewed_cycle``,
+           so it belongs to a round that has not yet been judged. A
+           lower-or-equal cycle is a closed-round echo.
+        2. **Review in flight** — ``review_in_flight``: a review was actually
+           dispatched for this round (``review_requested_at`` set,
+           ``review_completed_at`` cleared). A genuine verdict only ever arrives
+           in response to a dispatch.
 
-        The already-applied case (``review_completed_at`` at or after the
-        report timestamp) stays actionable so existing idempotency and
-        REVIEW_FAILED re-dispatch paths keep working.
+        The cycle check alone is insufficient because a reviewer report is
+        stamped with the task's *current* ``review_cycle`` at intake — not the
+        round it was "about". A stale/duplicate reviewer message that arrives
+        after ``continue_task`` already bumped ``review_cycle`` (e.g. a second
+        goal-packet ``review_passed`` echo arriving once the task was reopened
+        for the implementation phase) would be stamped with the new, higher
+        cycle and so spuriously pass ``report_opens_review_round``. Requiring a
+        live review in flight rejects that echo: ``continue_task`` clears
+        ``review_requested_at``, so no review is in flight until the worker
+        resubmits and a fresh reviewer is dispatched.
+
+        Both ``create_report`` call sites read the task **before** the verdict
+        is applied (``self.tasks[...]`` is only model_copy'd after the gates),
+        so both ``reviewed_cycle`` and the review-in-flight timestamps are still
+        the pre-apply values here.
         """
-        return state_policy.reviewer_verdict_actionable(
+        return state_policy.report_opens_review_round(
+            report.review_cycle,
+            task.reviewed_cycle,
+        ) and state_policy.review_in_flight(
             task.review_requested_at,
             task.review_completed_at,
-            report.created_at,
         )
 
     async def create_report(self, session_id: str, payload: AgentReportCreate) -> AgentReport:
@@ -125,6 +133,7 @@ class _ReportsMixin:
             review_decision=payload.review_decision,
             review_reason=payload.review_reason,
             risk_level=payload.risk_level,
+            review_cycle=task.review_cycle if task else 0,
             created_at=now,
         )
         self.reports[report.id] = report
@@ -229,10 +238,9 @@ class _ReportsMixin:
             #       binding fields, since that would trigger the re-review
             #       path.
             # ------------------------------------------------------------------
-            _verdict_still_authoritative = state_policy.reviewer_verdict_still_authoritative(
-                current_task.status,
-                current_task.review_completed_at,
-                now,
+            _verdict_still_authoritative = state_policy.current_round_has_verdict(
+                current_task.review_cycle,
+                current_task.reviewed_cycle,
             )
             if (
                 session.role == WorkspaceSessionRole.ORCHESTRATOR
@@ -329,6 +337,7 @@ class _ReportsMixin:
                         report_state=payload.state,
                         reviewer_session_id=session.id,
                         now=now,
+                        report_review_cycle=report.review_cycle,
                         existing_review_completed_at=current_task.review_completed_at,
                         existing_reviewed_at=current_task.reviewed_at,
                         existing_human_acceptance_requested_at=(
@@ -423,47 +432,31 @@ class _ReportsMixin:
         if not state_policy.is_review_gate_state(report.state):
             return
         # ------------------------------------------------------------------
-        # After-review short-circuit: once a prior reviewer verdict has
-        # been recorded (status still REVIEW, review_completed_at set,
-        # AND the latest review report is a terminal one), late
-        # orchestrator gate-state reports must not trigger a second
-        # reviewer dispatch. Returning here keeps the previous reviewer
-        # binding, timestamps, and verdict intact; the fast-path in
-        # create_report also already prevented any status/timestamp
-        # overwrite on the task row itself.
+        # After-review short-circuit: once the current work round already
+        # carries a reviewer verdict (reviewed_cycle >= review_cycle), late
+        # orchestrator gate-state reports must not trigger a second reviewer
+        # dispatch. Returning here keeps the previous reviewer binding,
+        # timestamps, and verdict intact; the fast-path in create_report also
+        # already prevented any status/timestamp overwrite on the task row.
         #
-        # NOTE: we REQUIRE status == REVIEW here (not just
-        # review_completed_at set) because:
-        #   • After review_failed → continue_task sets status = WORKING
-        #     and clears review_session_id (for reviewed-mode reopen).
-        #   • After goal-packet review_passed → continue_task dispatches
-        #     the implementation phase, status = WORKING.
-        # In both cases review_completed_at records the *previous*
-        # phase's verdict, and a subsequent COMPLETED / READY_FOR_REVIEW
-        # from the orchestrator is a legitimate new phase that MUST be
-        # routed to a (new) implementation reviewer. Dropping the
-        # status == REVIEW check here would permanently starve the
-        # implementation phase of any reviewer dispatch.
+        # NOTE: a legitimate reopen (review_failed → continue_task, or
+        # goal-packet review_passed → implementation-phase reopen) bumps
+        # review_cycle past reviewed_cycle, so current_round_has_verdict is
+        # False and the new phase's gate report is correctly routed to a fresh
+        # reviewer. This is the cycle-based replacement for the old
+        # status==REVIEW + review_completed_at timestamp heuristic.
         # ------------------------------------------------------------------
-        _latest_review = self._latest_review_report_for_task(task.id)
-        _review_verdict_terminal = state_policy.review_verdict_terminal(
-            task.status,
-            _latest_review.state if _latest_review else None,
-            _latest_review.created_at if _latest_review else None,
-            task.review_completed_at,
-            report.created_at,
-        )
-        if _review_verdict_terminal:
+        if state_policy.current_round_has_verdict(task.review_cycle, task.reviewed_cycle):
             logger.info(
                 "Skipping re-review dispatch after recorded reviewer verdict "
                 "workspace_id=%s task_id=%s session_id=%s report_state=%s "
-                "review_completed_at=%s latest_review_state=%s",
+                "review_cycle=%s reviewed_cycle=%s",
                 task.workspace_id,
                 task.id,
                 session.id,
                 report.state.value,
-                task.review_completed_at,
-                _latest_review.state.value if _latest_review else None,
+                task.review_cycle,
+                task.reviewed_cycle,
             )
             return
         if state_policy.review_in_flight(task.review_requested_at, task.review_completed_at):
@@ -799,9 +792,14 @@ class _ReportsMixin:
     ) -> None:
         now = _wm._now()
         gap_text = ", ".join(gaps)
+        # Reopen-to-worker: this hands the task back for reviewable rework, so
+        # open the next review round. The worker's subsequent gate report will
+        # be stamped with the bumped cycle and thus outranks the prior verdict.
+        next_cycle = task.review_cycle + 1
         self.tasks[task.id] = task.model_copy(
             update={
                 "status": WorkspaceTaskStatus.WORKING,
+                "review_cycle": next_cycle,
                 "reviewed_at": None,
                 "updated_at": now,
             }

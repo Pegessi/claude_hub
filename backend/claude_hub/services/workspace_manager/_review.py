@@ -98,33 +98,89 @@ class _ReviewMixin:
         # which the monitor reopen heuristic and late-report suppression then
         # turn into a permanently-stuck WORKING task. Ignore it.
         # ------------------------------------------------------------------
-        if not self._reviewer_verdict_actionable(task, report):
+        # ------------------------------------------------------------------
+        # Stale / duplicate reviewer verdict guard (implementation phase),
+        # cycle-based.
+        #
+        # A reviewer verdict applies only to the round it was stamped for.
+        # Once a reopen (continue_task after a prior failed verdict, or a goal
+        # packet approval that dispatched the implementation phase) has bumped
+        # ``task.review_cycle`` past the report's ``review_cycle``, this report
+        # is a stale echo from a closed round. Recording it as a verdict here
+        # would re-run continue_task / re-dispatch against an already-moved-on
+        # task and strand it. Ignore it.
+        #
+        # NOTE: we compare against ``task.review_cycle`` (not
+        # ``reviewed_cycle``) on purpose. The create_report fast-path already
+        # applied this round's verdict and advanced ``reviewed_cycle`` to the
+        # report's cycle *before* this handler runs, so a same-round verdict
+        # has ``report.review_cycle == task.reviewed_cycle`` — using the
+        # opens-round predicate here would wrongly drop the legitimate
+        # REVIEW_FAILED re-dispatch below. Same-round duplicates are handled
+        # idempotently by ``already_applied``.
+        # ------------------------------------------------------------------
+        if report.review_cycle < task.review_cycle:
             logger.info(
-                "Ignoring stale/duplicate reviewer verdict in _handle_review_report "
-                "(no active review) workspace_id=%s task_id=%s reviewer=%s decision=%s "
-                "status=%s review_requested_at=%s review_completed_at=%s",
+                "Ignoring stale reviewer verdict from closed round in _handle_review_report "
+                "workspace_id=%s task_id=%s reviewer=%s decision=%s "
+                "report_cycle=%s task_review_cycle=%s reviewed_cycle=%s",
                 task.workspace_id,
                 task.id,
                 reviewer.id,
                 report.state.value,
-                task.status.value,
-                task.review_requested_at,
-                task.review_completed_at,
+                report.review_cycle,
+                task.review_cycle,
+                task.reviewed_cycle,
+            )
+            return
+
+        # ------------------------------------------------------------------
+        # Same-cycle duplicate echo guard (no review in flight).
+        #
+        # A reviewer report is stamped with the task's *current* review_cycle
+        # at intake, not the round it judged. So a duplicate / stale reviewer
+        # message that arrives after continue_task already reopened the round
+        # (e.g. a second goal-packet review_passed echo, once the task was
+        # handed back to the worker for implementation) carries the new,
+        # higher review_cycle and would spuriously satisfy
+        # ``report_opens_review_round`` below — applying a phantom verdict and
+        # stranding the task. continue_task clears review_requested_at, so no
+        # review is in flight for this report; require one. (When the
+        # create_report fast-path legitimately applied this round's verdict it
+        # advanced reviewed_cycle to the report's cycle, so
+        # ``report_opens_review_round`` is already False here and this guard is
+        # skipped, leaving the idempotent / REVIEW_FAILED re-dispatch path
+        # below intact.)
+        # ------------------------------------------------------------------
+        if state_policy.report_opens_review_round(
+            report.review_cycle, task.reviewed_cycle
+        ) and not state_policy.review_in_flight(task.review_requested_at, task.review_completed_at):
+            logger.info(
+                "Ignoring duplicate reviewer verdict with no review in flight "
+                "in _handle_review_report workspace_id=%s task_id=%s reviewer=%s "
+                "decision=%s report_cycle=%s review_cycle=%s reviewed_cycle=%s",
+                task.workspace_id,
+                task.id,
+                reviewer.id,
+                report.state.value,
+                report.review_cycle,
+                task.review_cycle,
+                task.reviewed_cycle,
             )
             return
 
         now = _wm._now()
         # ------------------------------------------------------------------
-        # Idempotency guard: terminal review flags are now written
-        # synchronously in create_report() before the first save. If this
-        # task already has review_completed_at set (at or after the report
-        # timestamp), the persistent state is already correct; re-run
-        # continue_task() for REVIEW_FAILED but do not re-save the task or
-        # re-release the reviewer (would be a no-op at best, and risks
-        # clobbering newer state if any).
+        # Idempotency guard (cycle-based): terminal review flags are written
+        # synchronously in create_report() before the first save, which also
+        # advances ``reviewed_cycle`` to this report's cycle. If this round's
+        # verdict is already applied (``reviewed_cycle >= report.review_cycle``)
+        # the persistent state is correct; re-run continue_task() for
+        # REVIEW_FAILED but do not re-save the task or re-release the reviewer
+        # (a no-op at best, and risks clobbering newer state).
         # ------------------------------------------------------------------
-        already_applied = (
-            task.review_completed_at is not None and task.review_completed_at >= report.created_at
+        already_applied = not state_policy.report_opens_review_round(
+            report.review_cycle, task.reviewed_cycle
         )
         autonomous_next_phase: AutonomousRunPhase | None = None
         if not already_applied:
@@ -132,6 +188,7 @@ class _ReviewMixin:
                 report_state=report.state,
                 reviewer_session_id=reviewer.id,
                 now=now,
+                report_review_cycle=report.review_cycle,
                 existing_review_completed_at=task.review_completed_at,
                 existing_reviewed_at=task.reviewed_at,
                 existing_human_acceptance_requested_at=task.human_acceptance_requested_at,
@@ -217,8 +274,7 @@ class _ReviewMixin:
             GoalPacketStatus.REJECTED,
         }
         already_applied = (
-            task.review_completed_at is not None
-            and task.review_completed_at >= report.created_at
+            not state_policy.report_opens_review_round(report.review_cycle, task.reviewed_cycle)
             and already_terminal_packet
         )
 
@@ -241,6 +297,7 @@ class _ReviewMixin:
                 report_state=report.state,
                 reviewer_session_id=reviewer.id,
                 now=now,
+                report_review_cycle=report.review_cycle,
                 existing_review_completed_at=task.review_completed_at,
                 existing_reviewed_at=task.reviewed_at,
                 existing_human_acceptance_requested_at=task.human_acceptance_requested_at,

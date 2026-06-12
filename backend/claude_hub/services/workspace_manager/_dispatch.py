@@ -370,10 +370,16 @@ class _DispatchMixin:
                     "next_action": self._autonomous_next_action(phase),
                 }
             )
+        # Opening a fresh work round: bump review_cycle so the worker's next
+        # ready_for_review outranks the prior verdict (reviewed_cycle) and a
+        # new reviewer is dispatched. Verdict timestamp fields are cleared too,
+        # but cycle ordering — not timestamps — is what gates re-review.
+        next_cycle = task.review_cycle + 1
         self.tasks[task.id] = task.model_copy(
             update={
                 "status": WorkspaceTaskStatus.WORKING,
                 "started_at": now,
+                "review_cycle": next_cycle,
                 "review_skipped_at": None,
                 "review_skip_reason": None,
                 "human_acceptance_requested_at": None,
@@ -418,6 +424,7 @@ class _DispatchMixin:
             changed_files=[],
             validation=None,
             risks=None,
+            review_cycle=next_cycle,
             created_at=now,
         )
         self.reports[continue_report.id] = continue_report
@@ -500,6 +507,7 @@ class _DispatchMixin:
             review_decision=ReviewDecision.REQUEST,
             review_reason=message,
             risk_level=None,
+            review_cycle=task.review_cycle,
             created_at=now,
         )
         self.reports[report.id] = report
@@ -542,6 +550,7 @@ class _DispatchMixin:
             review_decision=ReviewDecision.SKIP,
             review_reason="Manual abort is an exceptional recovery action, not task completion.",
             risk_level="manual_control",
+            review_cycle=task.review_cycle,
             created_at=now,
         )
         self.reports[report.id] = report
