@@ -1,6 +1,7 @@
 import re
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from datetime import datetime
+from typing import Any, Optional, Sequence
 
 from ..models import (
     AgentReportState,
@@ -346,6 +347,146 @@ def completion_evidence_gaps(
 
 def is_review_gate_state(state: AgentReportState) -> bool:
     return state in REVIEW_GATE_STATES
+
+
+# --------------------------------------------------------------------------
+# Reviewer verdict predicates.
+#
+# These pure helpers replace inline copies that were duplicated across the
+# WorkspaceManager mixins. They decide whether a reviewer terminal report
+# (review_passed / review_failed / review_needs_input) should mutate task
+# state, and build the canonical task-field update for that verdict. Keeping
+# the rules in one place is what makes the review state machine maintainable
+# instead of a set of hand-synchronized copies.
+# --------------------------------------------------------------------------
+
+TERMINAL_REVIEW_STATES = {
+    AgentReportState.REVIEW_PASSED,
+    AgentReportState.REVIEW_FAILED,
+    AgentReportState.REVIEW_NEEDS_INPUT,
+}
+
+
+def review_in_flight(
+    review_requested_at: Optional[datetime],
+    review_completed_at: Optional[datetime],
+) -> bool:
+    """True while a review has been requested but no verdict is recorded yet."""
+
+    return review_requested_at is not None and review_completed_at is None
+
+
+def reviewer_verdict_already_applied(
+    review_completed_at: Optional[datetime],
+    report_created_at: datetime,
+) -> bool:
+    """True when a verdict at or after this report is already persisted."""
+
+    return review_completed_at is not None and review_completed_at >= report_created_at
+
+
+def reviewer_verdict_actionable(
+    review_requested_at: Optional[datetime],
+    review_completed_at: Optional[datetime],
+    report_created_at: datetime,
+) -> bool:
+    """Whether a reviewer terminal report should mutate task state.
+
+    A reviewer verdict is authoritative either while a review is genuinely in
+    flight (requested, no verdict yet) or when the verdict for this report was
+    already recorded (idempotency / REVIEW_FAILED re-dispatch). A stale or
+    duplicate verdict arriving after ``continue_task`` reopened the task — no
+    review in flight and no matching verdict — is not actionable and must be
+    ignored to avoid stranding the task.
+    """
+
+    return reviewer_verdict_already_applied(
+        review_completed_at, report_created_at
+    ) or review_in_flight(review_requested_at, review_completed_at)
+
+
+def reviewer_verdict_still_authoritative(
+    status: WorkspaceTaskStatus,
+    review_completed_at: Optional[datetime],
+    now: datetime,
+) -> bool:
+    """True when a recorded verdict still governs the task (status==REVIEW)."""
+
+    return (
+        status == WorkspaceTaskStatus.REVIEW
+        and review_completed_at is not None
+        and now >= review_completed_at
+    )
+
+
+def review_verdict_terminal(
+    status: WorkspaceTaskStatus,
+    latest_review_state: Optional[AgentReportState],
+    latest_review_created_at: Optional[datetime],
+    review_completed_at: Optional[datetime],
+    report_created_at: datetime,
+) -> bool:
+    """True when the latest reviewer verdict still gates re-review dispatch."""
+
+    return (
+        status == WorkspaceTaskStatus.REVIEW
+        and latest_review_state in TERMINAL_REVIEW_STATES
+        and review_completed_at is not None
+        and latest_review_created_at is not None
+        and latest_review_created_at <= report_created_at
+    )
+
+
+def compute_reviewer_verdict_task_update(
+    *,
+    report_state: AgentReportState,
+    reviewer_session_id: str,
+    now: datetime,
+    existing_review_completed_at: Optional[datetime],
+    existing_reviewed_at: Optional[datetime],
+    existing_human_acceptance_requested_at: Optional[datetime],
+    preserve_existing_review_completed_at: bool,
+    preserve_existing_reviewed_at: bool,
+    preserve_existing_human_acceptance_requested_at: bool,
+    human_acceptance_for_passed: bool = True,
+) -> dict[str, Any]:
+    """Build the task-field update dict for a reviewer terminal verdict.
+
+    Excludes the goal-packet transition, autonomous_run recompute, and
+    continue_task side effects, which require mixin/self/async context and stay
+    in the calling mixin. The ``preserve_*`` / ``human_acceptance_for_passed``
+    flags let each call site keep its exact historical timestamp policy:
+
+    - create_report fast-path: completed=existing-or-now, reviewed=now,
+      human=existing-or-now (passed).
+    - _handle_review_report: completed=now, reviewed=existing-or-now, human=now.
+    - _handle_goal_packet_review_report: as the impl handler but human is always
+      None (``human_acceptance_for_passed=False``).
+    """
+
+    is_passed = report_state == AgentReportState.REVIEW_PASSED
+    review_completed_at = (
+        (existing_review_completed_at or now) if preserve_existing_review_completed_at else now
+    )
+    reviewed_at = (existing_reviewed_at or now) if preserve_existing_reviewed_at else now
+    if not (is_passed and human_acceptance_for_passed):
+        human_acceptance_requested_at = None
+    elif preserve_existing_human_acceptance_requested_at:
+        human_acceptance_requested_at = existing_human_acceptance_requested_at or now
+    else:
+        human_acceptance_requested_at = now
+    return {
+        "status": WorkspaceTaskStatus.REVIEW,
+        "review_session_id": reviewer_session_id,
+        "review_completed_at": review_completed_at,
+        "review_skipped_at": None,
+        "review_skip_reason": None,
+        "reviewed_at": reviewed_at,
+        "completed_at": None,
+        "human_acceptance_requested_at": human_acceptance_requested_at,
+        "human_accepted_at": None,
+        "updated_at": now,
+    }
 
 
 def can_skip_task_review(context: ReviewSkipContext) -> bool:

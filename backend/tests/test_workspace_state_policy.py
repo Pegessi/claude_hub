@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+
 import pytest
 
 from claude_hub.models import (
@@ -418,3 +420,284 @@ def test_auto_continue_output_looks_busy() -> None:
     assert policy.auto_continue_output_looks_busy("running...")
     assert policy.auto_continue_output_looks_busy("press esc to interrupt")
     assert not policy.auto_continue_output_looks_busy("Validation: passed\n\u276f ")
+
+
+# --------------------------------------------------------------------------
+# Reviewer verdict predicates.
+# --------------------------------------------------------------------------
+
+_T0 = datetime(2026, 6, 12, 12, 0, 0)
+_BEFORE = _T0 - timedelta(minutes=5)
+_AFTER = _T0 + timedelta(minutes=5)
+
+
+@pytest.mark.parametrize(
+    ("requested", "completed", "expected"),
+    [
+        (_T0, None, True),
+        (None, None, False),
+        (_T0, _T0, False),
+        (None, _T0, False),
+    ],
+)
+def test_review_in_flight(
+    requested: datetime | None,
+    completed: datetime | None,
+    expected: bool,
+) -> None:
+    assert policy.review_in_flight(requested, completed) is expected
+
+
+@pytest.mark.parametrize(
+    ("completed", "report_created", "expected"),
+    [
+        (_AFTER, _T0, True),
+        (_T0, _T0, True),
+        (_BEFORE, _T0, False),
+        (None, _T0, False),
+    ],
+)
+def test_reviewer_verdict_already_applied(
+    completed: datetime | None,
+    report_created: datetime,
+    expected: bool,
+) -> None:
+    assert policy.reviewer_verdict_already_applied(completed, report_created) is expected
+
+
+@pytest.mark.parametrize(
+    ("requested", "completed", "report_created", "expected"),
+    [
+        # Review in flight (requested, no verdict) -> actionable.
+        (_T0, None, _T0, True),
+        # Verdict already recorded at/after report -> actionable (idempotent).
+        (None, _AFTER, _T0, True),
+        # Stale verdict from a prior cycle, task reopened -> not actionable.
+        (None, _BEFORE, _T0, False),
+        (None, None, _T0, False),
+    ],
+)
+def test_reviewer_verdict_actionable(
+    requested: datetime | None,
+    completed: datetime | None,
+    report_created: datetime,
+    expected: bool,
+) -> None:
+    assert policy.reviewer_verdict_actionable(requested, completed, report_created) is expected
+
+
+@pytest.mark.parametrize(
+    ("status", "completed", "now", "expected"),
+    [
+        (WorkspaceTaskStatus.REVIEW, _T0, _AFTER, True),
+        (WorkspaceTaskStatus.REVIEW, _T0, _T0, True),
+        (WorkspaceTaskStatus.REVIEW, _T0, _BEFORE, False),
+        (WorkspaceTaskStatus.REVIEW, None, _T0, False),
+        (WorkspaceTaskStatus.WORKING, _T0, _AFTER, False),
+    ],
+)
+def test_reviewer_verdict_still_authoritative(
+    status: WorkspaceTaskStatus,
+    completed: datetime | None,
+    now: datetime,
+    expected: bool,
+) -> None:
+    assert policy.reviewer_verdict_still_authoritative(status, completed, now) is expected
+
+
+@pytest.mark.parametrize(
+    ("status", "latest_state", "latest_created", "completed", "report_created", "expected"),
+    [
+        (
+            WorkspaceTaskStatus.REVIEW,
+            AgentReportState.REVIEW_PASSED,
+            _BEFORE,
+            _T0,
+            _T0,
+            True,
+        ),
+        (
+            WorkspaceTaskStatus.REVIEW,
+            AgentReportState.REVIEW_FAILED,
+            _T0,
+            _T0,
+            _T0,
+            True,
+        ),
+        # latest review newer than this report -> not terminal for it.
+        (
+            WorkspaceTaskStatus.REVIEW,
+            AgentReportState.REVIEW_PASSED,
+            _AFTER,
+            _T0,
+            _T0,
+            False,
+        ),
+        # Non-terminal latest state.
+        (
+            WorkspaceTaskStatus.REVIEW,
+            AgentReportState.REVIEW_STARTED,
+            _BEFORE,
+            _T0,
+            _T0,
+            False,
+        ),
+        # No latest review state.
+        (WorkspaceTaskStatus.REVIEW, None, None, _T0, _T0, False),
+        # Not in REVIEW status.
+        (
+            WorkspaceTaskStatus.WORKING,
+            AgentReportState.REVIEW_PASSED,
+            _BEFORE,
+            _T0,
+            _T0,
+            False,
+        ),
+        # No recorded verdict.
+        (
+            WorkspaceTaskStatus.REVIEW,
+            AgentReportState.REVIEW_PASSED,
+            _BEFORE,
+            None,
+            _T0,
+            False,
+        ),
+    ],
+)
+def test_review_verdict_terminal(
+    status: WorkspaceTaskStatus,
+    latest_state: AgentReportState | None,
+    latest_created: datetime | None,
+    completed: datetime | None,
+    report_created: datetime,
+    expected: bool,
+) -> None:
+    assert (
+        policy.review_verdict_terminal(
+            status,
+            latest_state,
+            latest_created,
+            completed,
+            report_created,
+        )
+        is expected
+    )
+
+
+def test_compute_reviewer_verdict_task_update_excludes_mixin_fields() -> None:
+    update = policy.compute_reviewer_verdict_task_update(
+        report_state=AgentReportState.REVIEW_PASSED,
+        reviewer_session_id="rev-1",
+        now=_T0,
+        existing_review_completed_at=None,
+        existing_reviewed_at=None,
+        existing_human_acceptance_requested_at=None,
+        preserve_existing_review_completed_at=False,
+        preserve_existing_reviewed_at=False,
+        preserve_existing_human_acceptance_requested_at=False,
+    )
+    assert "goal_packet" not in update
+    assert "autonomous_run" not in update
+    assert update["status"] == WorkspaceTaskStatus.REVIEW
+    assert update["review_session_id"] == "rev-1"
+    assert update["review_skipped_at"] is None
+    assert update["review_skip_reason"] is None
+    assert update["completed_at"] is None
+    assert update["human_accepted_at"] is None
+    assert update["updated_at"] == _T0
+
+
+def test_compute_reviewer_verdict_task_update_fast_path_flags() -> None:
+    """Fast-path: completed=existing-or-now, reviewed=now, human=existing-or-now."""
+
+    update = policy.compute_reviewer_verdict_task_update(
+        report_state=AgentReportState.REVIEW_PASSED,
+        reviewer_session_id="rev-1",
+        now=_T0,
+        existing_review_completed_at=_BEFORE,
+        existing_reviewed_at=_BEFORE,
+        existing_human_acceptance_requested_at=_BEFORE,
+        preserve_existing_review_completed_at=True,
+        preserve_existing_reviewed_at=False,
+        preserve_existing_human_acceptance_requested_at=True,
+    )
+    assert update["review_completed_at"] == _BEFORE  # existing kept
+    assert update["reviewed_at"] == _T0  # always now
+    assert update["human_acceptance_requested_at"] == _BEFORE  # existing kept
+
+
+def test_compute_reviewer_verdict_task_update_fast_path_no_existing() -> None:
+    update = policy.compute_reviewer_verdict_task_update(
+        report_state=AgentReportState.REVIEW_PASSED,
+        reviewer_session_id="rev-1",
+        now=_T0,
+        existing_review_completed_at=None,
+        existing_reviewed_at=None,
+        existing_human_acceptance_requested_at=None,
+        preserve_existing_review_completed_at=True,
+        preserve_existing_reviewed_at=False,
+        preserve_existing_human_acceptance_requested_at=True,
+    )
+    assert update["review_completed_at"] == _T0
+    assert update["reviewed_at"] == _T0
+    assert update["human_acceptance_requested_at"] == _T0
+
+
+def test_compute_reviewer_verdict_task_update_impl_handler_flags() -> None:
+    """Impl handler: completed=now, reviewed=existing-or-now, human=now (passed)."""
+
+    update = policy.compute_reviewer_verdict_task_update(
+        report_state=AgentReportState.REVIEW_PASSED,
+        reviewer_session_id="rev-1",
+        now=_T0,
+        existing_review_completed_at=_BEFORE,
+        existing_reviewed_at=_BEFORE,
+        existing_human_acceptance_requested_at=_BEFORE,
+        preserve_existing_review_completed_at=False,
+        preserve_existing_reviewed_at=True,
+        preserve_existing_human_acceptance_requested_at=False,
+    )
+    assert update["review_completed_at"] == _T0  # always now
+    assert update["reviewed_at"] == _BEFORE  # existing kept
+    assert update["human_acceptance_requested_at"] == _T0  # always now (passed)
+
+
+@pytest.mark.parametrize(
+    "report_state",
+    [AgentReportState.REVIEW_FAILED, AgentReportState.REVIEW_NEEDS_INPUT],
+)
+def test_compute_reviewer_verdict_task_update_non_passed_clears_human(
+    report_state: AgentReportState,
+) -> None:
+    update = policy.compute_reviewer_verdict_task_update(
+        report_state=report_state,
+        reviewer_session_id="rev-1",
+        now=_T0,
+        existing_review_completed_at=None,
+        existing_reviewed_at=None,
+        existing_human_acceptance_requested_at=_BEFORE,
+        preserve_existing_review_completed_at=False,
+        preserve_existing_reviewed_at=True,
+        preserve_existing_human_acceptance_requested_at=False,
+    )
+    assert update["human_acceptance_requested_at"] is None
+
+
+def test_compute_reviewer_verdict_task_update_goal_packet_never_requests_human() -> None:
+    """Goal-packet handler: human_acceptance always None, even on pass."""
+
+    update = policy.compute_reviewer_verdict_task_update(
+        report_state=AgentReportState.REVIEW_PASSED,
+        reviewer_session_id="rev-1",
+        now=_T0,
+        existing_review_completed_at=None,
+        existing_reviewed_at=_BEFORE,
+        existing_human_acceptance_requested_at=None,
+        preserve_existing_review_completed_at=False,
+        preserve_existing_reviewed_at=True,
+        preserve_existing_human_acceptance_requested_at=False,
+        human_acceptance_for_passed=False,
+    )
+    assert update["human_acceptance_requested_at"] is None
+    assert update["review_completed_at"] == _T0
+    assert update["reviewed_at"] == _BEFORE

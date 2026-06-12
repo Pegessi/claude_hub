@@ -462,7 +462,7 @@ class _DispatchMixin:
             raise KeyError(task_id)
         if task.status == WorkspaceTaskStatus.DONE:
             raise RuntimeError("Done tasks cannot request review")
-        if task.review_requested_at and not task.review_completed_at:
+        if state_policy.review_in_flight(task.review_requested_at, task.review_completed_at):
             # Only suppress re-dispatch when an assigned reviewer is actively
             # working on this task. If the reviewer session is idle, stopped,
             # or missing entirely, the prior review dispatch got stuck and we
