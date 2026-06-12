@@ -5,6 +5,101 @@
 
 ## Unreleased
 
+### ci: add pytest-cov backend coverage reporting
+
+- Added `pytest-cov>=5.0` to the `backend/pyproject.toml` `dev` optional
+  dependencies so any developer can produce a coverage report locally with
+  the same flags CI uses.
+- The CI `backend` job now appends
+  `--cov=claude_hub --cov-report=xml:coverage.xml --cov-report=term-missing`
+  to its existing `pytest` invocation (no extra pytest execution — coverage
+  is collected on the same run). Per-test pass/fail still short-circuits via
+  `-x` and the terminal-replay E2E file is still ignored; nothing changes
+  functionally.
+- Added a follow-up `Upload backend coverage to Codecov` step that ships
+  `backend/coverage.xml` to codecov.io with `flags: backend` and
+  `fail_ci_if_error: false`, so coverage reporting is visible in PRs even
+  before the repo has a Codecov token configured.
+- **Frontend coverage is explicitly out of scope for this round** — it is
+  gated on T1 migrating the suite to Vitest. A `// TODO(T1)` comment was
+  added above the `test:unit` script in `frontend/package.json` documenting
+  the target (`Vitest + @vitest/coverage-v8`) and a matching `TODO(T1)`
+  comment was added in the `frontend` CI job right above the unit-test step
+  so nobody adds coverage ad-hoc with the node:test runner.
+- **Files**: `backend/pyproject.toml`, `.github/workflows/ci.yml`,
+  `frontend/package.json`
+
+### ci: add security-audit job + Dependabot config
+
+- New informational-only CI job `security-audit` — named to make it clear it
+  **never fails the pipeline**. Steps:
+  1. Install backend deps (Python + uv, same caching pattern as the backend
+     job, suffixed `-security-` so the caches don't collide).
+  2. Install Bandit inside the step only (no bloat in `dev` deps / the
+     local lockfile), run it recursively over `backend/claude_hub` writing
+     `bandit-report.txt`, `|| true` because many Bandit rules fire false
+     positives against tmux / file-management code.
+  3. Python dep CVE audit step is stubbed with a `TODO(PY-AUDIT)` comment
+     because `uv` does not yet expose a first-class `uv audit` subcommand.
+     Once that lands, the stub can be replaced with the real invocation.
+  4. Install frontend deps (Node 20 + pnpm 9, same caching pattern,
+     `-security-` suffix).
+  5. `pnpm audit --prod --audit-level high || true` — production-only,
+     high-severity threshold, never red.
+  6. `actions/upload-artifact@v4` uploads `backend/bandit-report.txt` if
+     present, with `if-no-files-found: ignore` and `if: always()` so the
+     artifact survives any failing step and can be inspected post-hoc.
+- Added `.github/dependabot.yml` with three weekly updaters, each grouping
+  every dependency change into a single PR to avoid PR spam:
+  - `pip` → `/backend`
+  - `npm` → `/frontend`
+  - `github-actions` → `/`
+- **Files**: `.github/workflows/ci.yml`, `.github/dependabot.yml` (new)
+
+### chore: fix Dockerfile build and expand docker-compose with env/volume/healthcheck
+
+- **`docker/Dockerfile` (backend)** — two build-blocking bugs fixed:
+  1. `apt-get install` was effectively just `curl`. Added the missing
+     **hard runtime requirement `tmux`** (without it, creating a terminal
+     tab fails at runtime), plus `git`, `python3`, and `build-essential` so
+     agents running inside the container can clone repos, compile wheels,
+     and invoke system Python. `ca-certificates` also added so HTTPS fetches
+     (ttyd / uv / curl) stay trusted on the base slim image.
+  2. `RUN uv sync --no-dev --frozen` was failing because `uv.lock` was
+     never copied into the layer. Added `COPY backend/uv.lock ./` right
+     after the `pyproject.toml` / `README.md` copy so `--frozen` is
+     satisfiable. Also reordered COPY lines for optimal layer caching:
+     manifest + lock first → `uv sync` → source code last, so source-only
+     commits reuse the (expensive) dependency layer.
+  3. Added a comment on the `EXPOSE 8173` line documenting that it is the
+     FastAPI/uvicorn HTTP + WebSocket port.
+- **`docker/Dockerfile.frontend`** — `node:20-slim` lacks basic system
+  packages that make Node builds flaky on networks with TLS proxies or
+  localised timestamps. Added `ca-certificates` and `tzdata` via the same
+  `apt-get install` pattern used in the backend image. COPY lines were
+  also reordered for layer caching (manifest + config → `pnpm install` →
+  source → build); `EXPOSE 5173` now carries a comment explaining it is
+  the Vite preview server port.
+- **`docker/docker-compose.yml`** — four functional gaps closed:
+  1. **`env_file: ../.env`** on the `backend` service so Settings env vars
+     (`ANTHROPIC_API_KEY`, `DATABASE_URL`, proxy env, etc.) actually reach
+     the container instead of only the host.
+  2. **Named volume `claude_hub_state`** mounted at `/root/.claude_hub` in
+     the backend container so `tabs.json`, workspace state, tmux sockets,
+     logs and feedback lessons survive `docker compose restart` /
+     re-builds. The volume is declared at the top-level `volumes:` key
+     with an explanatory comment.
+  3. **Backend `healthcheck`** using `curl -f http://localhost:8173/api/health`
+     with `interval: 30s`, `timeout: 10s`, `retries: 5`, and a 20 s
+     `start_period` so docker and downstream orchestrators know when the
+     FastAPI app is actually serving instead of just the process being up.
+  4. **TODO(prod)** comment on the `frontend` service explicitly calling
+     out that `pnpm preview` is the dev-mode Vite preview server and a
+     real deployment should use a multi-stage build copying `dist/` into
+     an Nginx/Caddy container — kept as a clear marker, not removed, per
+     the task scope.
+- **Files**: `docker/Dockerfile`, `docker/Dockerfile.frontend`,
+  `docker/docker-compose.yml`
 
 ### fix: remove hardcoded developer laptop path from workspace form defaults
 
