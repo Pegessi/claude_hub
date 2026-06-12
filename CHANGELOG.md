@@ -5,6 +5,41 @@
 
 ## Unreleased
 
+### docs: add CONTRIBUTING.md, refresh ARCHITECTURE.md module map, add CI docs integrity check
+
+- Added `CONTRIBUTING.md` with the mandatory worktree development workflow,
+  commit conventions, validation steps, and CHANGELOG rules — information
+  previously scattered across `CLAUDE.md`/`AGENTS.md` and README now has a
+  single community-facing home. README links to it from the Reference Docs
+  section.
+- Rewrote the `ARCHITECTURE.md` system diagram, backend module table (now lists
+  9 new API routers, 6 new services, and the 19-file WorkspaceManager mixin
+  package with per-mixin responsibilities), frontend module table (8 new
+  components, 2 Pinia stores, 2 composables, 1 utility), and the state
+  persistence table (workspace index, per-workspace state + artifacts +
+  attachments + lessons, session store file-backed details).
+- Added a `repo-docs` CI job that enforces the `AGENTS.md` ≡ `CLAUDE.md`
+  byte-identity invariant with `diff` so the two files can no longer drift
+  silently on merge.
+- Removed stale absolute test counts from `docs/test-completeness-assessment.md`
+  to prevent them from drifting again with each new test.
+- **Files**: `CONTRIBUTING.md` (new), `ARCHITECTURE.md`, `README.md`,
+  `.github/workflows/ci.yml`, `docs/test-completeness-assessment.md`
+
+### chore: expand .gitignore with IDE, runtime, and ad-hoc artifact patterns
+
+- Added `.cursor/` to the IDE ignore block (Cursor is a first-class agent type
+  in the product, so its config dir is expected locally).
+- Added ignore rules for the runtime state directories produced locally:
+  `log/`, `tasks/`, `tmp_remote_media/`, and `backend/log/`.
+- Added patterns for root-level ad-hoc GPU debug / NCCL probe artifacts that
+  accumulate on developer machines: `abl_*.json`, `nccl_*`, `pure_pytorch_*`,
+  `run_nccl_*`, `run_pure_pytorch_*`, `summarize_mem*.py`, `sweep_*.sh`.
+- Added explicit log-filename patterns (`*_nohup.log`, `nohup.out`) and
+  `*.bak` for extra belt-and-suspenders protection next to the existing `*.log`
+  rule.
+- **Files**: `.gitignore`
+
 ### fix: keep reviewers task-bound and clean up temporary reviewers
 
 - Reviewer sessions now remain bound to their task while the task is still in

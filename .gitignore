@@ -52,6 +52,7 @@ dmypy.json
 # IDE
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 *~
@@ -69,3 +70,25 @@ docker-compose.override.yml
 
 # Local agent artifacts
 .agent_office/
+
+# Root-level ad-hoc NCCL / memory probe / GPU ablation artifacts
+abl_*.json
+nccl_*
+pure_pytorch_*
+run_nccl_*
+run_pure_pytorch_*
+summarize_mem*.py
+sweep_*.sh
+
+# Runtime state directories (generated locally)
+log/
+tasks/
+tmp_remote_media/
+
+# Backend local state dirs
+backend/log/
+backend/docs/
+
+# Additional log filename conventions (belt-and-suspenders alongside *.log)
+*_nohup.log
+nohup.out

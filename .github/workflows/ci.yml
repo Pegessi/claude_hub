@@ -40,6 +40,20 @@ jobs:
       - name: Run pytest (tests)
         run: uv run pytest -xvs --ignore=tests/test_terminal_replay.py
 
+  repo-docs:
+    name: Repo hygiene & docs integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify AGENTS.md and CLAUDE.md stay in sync
+        run: |
+          if ! diff -q AGENTS.md CLAUDE.md >/dev/null 2>&1; then
+            echo "::error::AGENTS.md and CLAUDE.md differ. These files must remain byte-identical. Update both in the same commit."
+            diff AGENTS.md CLAUDE.md || true
+            exit 1
+          fi
+          echo "✓ AGENTS.md == CLAUDE.md"
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
