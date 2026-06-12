@@ -5,6 +5,30 @@
 
 ## Unreleased
 
+### fix: stop stale duplicate reviewer verdict from stranding a reviewed task in WORKING
+
+- A reviewed task that posted `completed` could get stuck in the "Working"
+  board column and never enter "Review". Root cause: after a goal-packet
+  `review_passed`, `continue_task` reopens the task to WORKING and clears
+  `review_requested_at` / `review_completed_at`. A second (duplicate / stale)
+  goal-packet `review_passed` arriving while the agent was still implementing
+  was misrouted as an implementation-phase verdict, writing a phantom
+  `review_completed_at` / `reviewed_at` / `status=REVIEW`. The monitor
+  runtime-reopen heuristic then flipped the task back to WORKING and the
+  late-report suppression guard dropped the genuine `completed` report,
+  permanently stranding the task.
+- Fix: a shared invariant `_reviewer_verdict_actionable(task, report)` — a
+  reviewer terminal verdict may only mutate task state when it idempotently
+  replays an already-recorded verdict (`review_completed_at >= report.created_at`)
+  or a review is genuinely in flight (`review_requested_at` set and
+  `review_completed_at` None). Enforced at both chokepoints: the `create_report`
+  reviewer fast-path (gated, with `task_status` zeroed) and
+  `_handle_review_report` (early return). Stale verdicts are still recorded for
+  audit but mutate no task state.
+- **Files**: `backend/claude_hub/services/workspace_manager/_reports.py`,
+  `backend/claude_hub/services/workspace_manager/_review.py`,
+  `backend/tests/test_workspaces.py`
+
 ### fix: keep reviewers task-bound and clean up temporary reviewers
 
 - Reviewer sessions now remain bound to their task while the task is still in
