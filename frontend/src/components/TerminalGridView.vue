@@ -13,23 +13,14 @@
 </template>
 
 <script setup lang="ts">
-import { watchEffect } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useTerminalStore } from '@/stores/terminalStore'
 import TerminalPane from '@/components/TerminalPane.vue'
 
 const store = useTerminalStore()
-const { layoutType, panes, activePaneId } = storeToRefs(store)
+const { layoutType, panes } = storeToRefs(store)
 
-// Expose the active pane's tab id on window so downstream components can
-// cheaply check whether they're the active terminal without creating
-// reactive dependencies on the whole panes array.
-watchEffect(() => {
-  const activePane = panes.value.find(p => p.id === activePaneId.value)
-  if (typeof window !== 'undefined') {
-    window.__activePaneTabId = activePane?.tabId ?? null
-  }
-})
+// (F8) activePaneTabId is now written to window.__claudeHub by App.vue
 
 function setActivePane(paneId: string) {
   store.setActivePane(paneId)

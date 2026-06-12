@@ -1,9 +1,18 @@
 # Dockerfile for Claude Hub
 FROM python:3.11-slim
 
-# Install dependencies
+# Install runtime and build dependencies.
+# - tmux is a HARD runtime requirement: terminal tabs are tmux sessions.
+# - curl is used to install ttyd and for container healthchecks.
+# - git / python3 / build-essential make the container useful for running
+#   agents (cloning repos, compiling wheels, invoking system Python).
 RUN apt-get update && apt-get install -y \
     curl \
+    tmux \
+    git \
+    python3 \
+    build-essential \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Install ttyd
@@ -18,14 +27,18 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 # Set working directory
 WORKDIR /app
 
-# Copy backend files
+# Copy manifest + lockfile first for optimal layer caching (dep layer
+# invalidates only when pyproject/README/uv.lock change, not on source changes).
 COPY backend/pyproject.toml backend/README.md ./
-COPY backend/claude_hub ./claude_hub
+COPY backend/uv.lock ./
 
 # Install Python dependencies
 RUN uv sync --no-dev --frozen
 
-# Expose ports
+# Source code last: invalidates every commit but the dep layer is reused.
+COPY backend/claude_hub ./claude_hub
+
+# Backend HTTP + WebSocket API port (FastAPI/uvicorn).
 EXPOSE 8173
 
 # Run the application

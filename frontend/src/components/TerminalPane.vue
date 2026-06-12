@@ -83,9 +83,7 @@ const isDragOver = ref(false)
 const isRefreshingHistory = ref(false)
 let refreshFeedbackTimer: number | null = null
 
-type WindowWithTerminalHistory = Window & {
-  __refreshTerminalHistory?: (tabId?: string) => void
-}
+// (F8) WindowWithTerminalHistory no longer needed — globals are typed via Window.__claudeHub in types/index.ts
 
 function getTabName(): string {
   return tabName.value
@@ -117,7 +115,7 @@ function stopRefreshFeedbackAfter(delayMs: number) {
 function refreshHistory() {
   if (!props.pane.tabId) return
   isRefreshingHistory.value = true
-  const refreshTerminalHistory = (window as WindowWithTerminalHistory).__refreshTerminalHistory
+  const refreshTerminalHistory = window.__claudeHub.refreshTerminalHistory
   refreshTerminalHistory?.(props.pane.tabId)
   stopRefreshFeedbackAfter(3000)
 }

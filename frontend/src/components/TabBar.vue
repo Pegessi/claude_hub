@@ -483,6 +483,36 @@
       :visible="showEnvManager"
       @close="closeEnvPresetManager"
     />
+
+    <!-- Notification / toast stack (F5: replaces single mutable error string) -->
+    <div
+      v-if="notifications.length"
+      class="toast-stack"
+      role="region"
+      aria-label="Notifications"
+    >
+      <div
+        v-for="n in notifications"
+        :key="n.id"
+        :class="['toast', `toast--${n.type}`]"
+        role="status"
+      >
+        <span class="toast__message">{{ n.message }}</span>
+        <button
+          type="button"
+          class="toast__close"
+          :aria-label="'Dismiss ' + n.type + ' notification'"
+          @click="dismissNotification(n.id)"
+        >
+          ×
+        </button>
+        <div
+          v-if="n.autoDismissMs"
+          class="toast__timer"
+          :style="{ animationDuration: `${n.autoDismissMs}ms` }"
+        />
+      </div>
+    </div>
   </div>
 </template>
 
@@ -523,8 +553,10 @@ const appStore = useAppStore()
 const { envPresets, getPresetText, defaultPresetTextForAgent } =
   useLaunchEnvPresets()
 const { isPending, runPending } = usePendingActions()
-const { tabs, manualTabs, managedTabs, activeTabId, isLoading, agentStatuses } = storeToRefs(store)
+const { tabs, manualTabs, managedTabs, activeTabId, isLoading, agentStatuses, notifications } = storeToRefs(store)
 const { mode, colorScheme } = storeToRefs(appStore)
+// Expose notification actions so template can call them (F5 toast stack)
+const { dismissNotification } = store
 
 const tabStatusById = computed<Record<string, AgentRuntimeStatus>>(() => {
   const map: Record<string, AgentRuntimeStatus> = {}
@@ -1858,4 +1890,123 @@ async function handleCreateTab() {
     flex: 0 0 auto;
   }
 }
+
+/* ----------------------------------------------------------------
+ * Toast / notification stack (F5: replaces single mutable `error`).
+ * Top-right, fixed inside TabBar so it only shows in terminal mode.
+ * ---------------------------------------------------------------- */
+.toast-stack {
+  position: fixed;
+  top: 72px;
+  right: 16px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(420px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.toast {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--ch-radius-md);
+  border: 1px solid var(--ch-color-border-strong);
+  background: var(--ch-color-surface-raised);
+  color: var(--ch-color-text);
+  box-shadow: var(--ch-shadow-popover);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow: hidden;
+  pointer-events: auto;
+  animation: toast-in 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.toast__message {
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.toast__close {
+  flex: 0 0 auto;
+  background: transparent;
+  border: none;
+  color: var(--ch-color-text-muted);
+  font-size: 20px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+  transition: color var(--ch-motion-fast);
+}
+
+.toast__close:hover {
+  color: var(--ch-color-text);
+}
+
+.toast__timer {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  background: currentColor;
+  opacity: 0.45;
+  transform-origin: left center;
+  animation-name: toast-timer;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+
+@keyframes toast-timer {
+  from { width: 100%; }
+  to { width: 0%; }
+}
+
+.toast--error {
+  background: var(--ch-color-danger-bg);
+  border-color: var(--ch-color-danger-border);
+  color: var(--ch-color-danger-text);
+}
+
+.toast--warning {
+  background: var(--ch-color-warning-bg);
+  border-color: var(--ch-color-warning);
+  color: var(--ch-color-warning);
+}
+
+.toast--success {
+  background: var(--ch-color-success-bg);
+  border-color: var(--ch-color-success);
+  color: var(--ch-color-success);
+}
+
+.toast--info {
+  background: rgba(56, 189, 248, 0.1);
+  border-color: var(--ch-color-info);
+  color: var(--ch-color-info);
+}
+
+@media (max-width: 768px) {
+  .toast-stack {
+    top: 12px;
+    right: 8px;
+    left: 8px;
+    max-width: none;
+  }
+}
+
 </style>

@@ -594,3 +594,48 @@ export interface AuthCheckResponse {
   auth_required: boolean
   user: User | null
 }
+
+// Namespaced globals hung off window.__claudeHub to avoid top-level pollution.
+// See: F8 cleanup — consolidate stray window globals.
+export interface TerminalKeyItem {
+  key: string
+  ctrl: boolean
+  shift: boolean
+}
+
+export interface TerminalKeyState {
+  iframes: Record<string, HTMLIFrameElement | null>
+  ready: Record<string, boolean>
+  queues: Record<string, TerminalKeyItem[]>
+  inputRing: Record<string, unknown>
+}
+
+export type TerminalKeySender = (key: string, ctrl?: boolean, shift?: boolean) => void
+export type TerminalHistoryRefresher = (tabId?: string) => void
+export type TerminalIframeRegistrar = (el: HTMLIFrameElement | null, tabId: string) => void
+
+export interface ClaudeHubNamespace {
+  activePaneTabId?: string | null
+  terminalState?: TerminalKeyState
+  registerTerminalIframe?: TerminalIframeRegistrar
+  refreshTerminalHistory?: TerminalHistoryRefresher
+  sendTerminalKey?: TerminalKeySender
+}
+
+declare global {
+  interface Window {
+    __claudeHub: ClaudeHubNamespace
+  }
+}
+
+// Cross-store notification (toast) shape — replaces single mutable `error: string`
+// anti-pattern so concurrent failures stack instead of overwrite each other.
+export type NotificationType = 'error' | 'success' | 'warning' | 'info'
+
+export interface StoreNotification {
+  id: string
+  type: NotificationType
+  message: string
+  /** If set, the toast auto-dismisses after this many milliseconds. */
+  autoDismissMs?: number
+}
