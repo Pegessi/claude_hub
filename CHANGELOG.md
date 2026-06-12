@@ -5,6 +5,51 @@
 
 ## Unreleased
 
+### chore: fix Dockerfile build and expand docker-compose with env/volume/healthcheck
+
+- **`docker/Dockerfile` (backend)** — two build-blocking bugs fixed:
+  1. `apt-get install` was effectively just `curl`. Added the missing
+     **hard runtime requirement `tmux`** (without it, creating a terminal
+     tab fails at runtime), plus `git`, `python3`, and `build-essential` so
+     agents running inside the container can clone repos, compile wheels,
+     and invoke system Python. `ca-certificates` also added so HTTPS fetches
+     (ttyd / uv / curl) stay trusted on the base slim image.
+  2. `RUN uv sync --no-dev --frozen` was failing because `uv.lock` was
+     never copied into the layer. Added `COPY backend/uv.lock ./` right
+     after the `pyproject.toml` / `README.md` copy so `--frozen` is
+     satisfiable. Also reordered COPY lines for optimal layer caching:
+     manifest + lock first → `uv sync` → source code last, so source-only
+     commits reuse the (expensive) dependency layer.
+  3. Added a comment on the `EXPOSE 8173` line documenting that it is the
+     FastAPI/uvicorn HTTP + WebSocket port.
+- **`docker/Dockerfile.frontend`** — `node:20-slim` lacks basic system
+  packages that make Node builds flaky on networks with TLS proxies or
+  localised timestamps. Added `ca-certificates` and `tzdata` via the same
+  `apt-get install` pattern used in the backend image. COPY lines were
+  also reordered for layer caching (manifest + config → `pnpm install` →
+  source → build); `EXPOSE 5173` now carries a comment explaining it is
+  the Vite preview server port.
+- **`docker/docker-compose.yml`** — four functional gaps closed:
+  1. **`env_file: ../.env`** on the `backend` service so Settings env vars
+     (`ANTHROPIC_API_KEY`, `DATABASE_URL`, proxy env, etc.) actually reach
+     the container instead of only the host.
+  2. **Named volume `claude_hub_state`** mounted at `/root/.claude_hub` in
+     the backend container so `tabs.json`, workspace state, tmux sockets,
+     logs and feedback lessons survive `docker compose restart` /
+     re-builds. The volume is declared at the top-level `volumes:` key
+     with an explanatory comment.
+  3. **Backend `healthcheck`** using `curl -f http://localhost:8173/api/health`
+     with `interval: 30s`, `timeout: 10s`, `retries: 5`, and a 20 s
+     `start_period` so docker and downstream orchestrators know when the
+     FastAPI app is actually serving instead of just the process being up.
+  4. **TODO(prod)** comment on the `frontend` service explicitly calling
+     out that `pnpm preview` is the dev-mode Vite preview server and a
+     real deployment should use a multi-stage build copying `dist/` into
+     an Nginx/Caddy container — kept as a clear marker, not removed, per
+     the task scope.
+- **Files**: `docker/Dockerfile`, `docker/Dockerfile.frontend`,
+  `docker/docker-compose.yml`
+
 ### docs: add CONTRIBUTING.md, refresh ARCHITECTURE.md module map, add CI docs integrity check
 
 - Added `CONTRIBUTING.md` with the mandatory worktree development workflow,

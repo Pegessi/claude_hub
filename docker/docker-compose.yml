@@ -9,7 +9,20 @@ services:
       - "8173:8173"
     environment:
       - FRONTEND_URL=http://localhost:5173
+    # Load Settings env vars (ANTHROPIC_API_KEY, DATABASE_URL, etc.)
+    # from the repo root .env file (add vars locally; never commit secrets).
+    env_file: ../.env
+    # Persist tabs.json, workspace state, and tmux sockets across container
+    # restarts. Without this, state is wiped every `docker compose up`.
+    volumes:
+      - claude_hub_state:/root/.claude_hub
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8173/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
 
   frontend:
     build:
@@ -20,3 +33,13 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+    # TODO(prod): `pnpm preview` is the Vite dev-mode preview server, not a
+    #   production-grade static host. For a real deployment replace this with
+    #   a multi-stage build that copies the dist/ output into an Nginx (or
+    #   Caddy) container and serves it there — this also lets the reverse
+    #   proxy terminate TLS, inject security headers, and route /api to the
+    #   backend service over the compose network instead of via host ports.
+
+volumes:
+  # Named volume for persistent claude_hub runtime state.
+  claude_hub_state:
