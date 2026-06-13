@@ -5,6 +5,34 @@
 
 ## Unreleased
 
+### perf: speed up agent-workspace board, add loading skeleton, smooth mobile input
+
+- **Board latency (backend)**: loading/switching workspaces felt slow (the
+  board API took 2-3s). Root cause was a blocking `os.system("tmux has-session")`
+  spawned **per tab** inside the async status refresh, serializing the event
+  loop on every board poll. Fixes: (1) batch existence into a single
+  `tmux list-sessions` call (`_tmux_list_sessions`) whose result set is passed
+  down to each `get_tab_agent_status`; (2) convert remaining async-context
+  callers to a non-blocking `_tmux_session_exists_async`; (3) drop the redundant
+  per-tab existence check inside `_classify_agent_status` (the caller already
+  verified aliveness); (4) make the sync startup fallback use `subprocess.run`
+  (no shell) instead of `os.system`. Measured board latency dropped to ~115-170ms
+  warm (274ms cold) from the reported 2-3s.
+- **Loading animation (frontend)**: the board had no loading state on workspace
+  switch. Added a shimmering skeleton overlay (`boardLoading`) with a fade
+  transition, collapsed to a single-column layout on mobile and disabled under
+  `prefers-reduced-motion`.
+- **Mobile input lag (frontend)**: typing in the task-detail compose field felt
+  laggy on mobile. The 2.5s board poll replaces the entire `board` object,
+  forcing Vue to re-render the large open detail subtree (which hosts the focused
+  textarea) and competing with keystroke handling on weaker mobile CPUs. Fix:
+  `refreshBoard` now skips a background tick while a text field is focused and
+  resumes on blur; explicit refreshes are unaffected.
+- Also removed a stray `//` JS comment from `frontend/package.json` that made the
+  file invalid JSON and broke all `pnpm` commands (lint/type-check/build) in CI.
+- **Files**: `backend/claude_hub/services/ttyd_manager.py`,
+  `frontend/src/components/AgentWorkspaceView.vue`, `frontend/package.json`.
+
 ### fix: replace reviewer-verdict timestamp heuristics with an ordinal review-cycle model
 
 - A passed/parked task could be silently stranded in the "Working" column and
