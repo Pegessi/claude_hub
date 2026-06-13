@@ -12,6 +12,8 @@ from pytest import MonkeyPatch
 from claude_hub.auth.dependencies import get_current_user
 from claude_hub.main import app
 from claude_hub.models import (
+    AgentReport,
+    AgentReportState,
     AgentRuntimeStatus,
     AgentType,
     ExecutionTarget,
@@ -21,6 +23,7 @@ from claude_hub.models import (
     TerminalAgentStatus,
     TerminalTab,
     User,
+    Workspace,
     WorkspaceSessionRole,
     WorkspaceTaskStatus,
 )
@@ -6630,7 +6633,11 @@ def test_continue_task_marks_working_before_send_verification_failure(
     assert board["sessions"][0]["status"] == "working"
     assert board["sessions"][0]["runtime_status"] == "working"
     assert board["sessions"][0]["current_task_id"] == task["id"]
-    assert [report["state"] for report in board["reports"]] == [
+    # The board carries only the latest report per task; the full history lives
+    # behind the on-demand per-task endpoint.
+    assert [report["state"] for report in board["reports"]] == ["working"]
+    history = client.get(f"/api/workspaces/{workspace['id']}/tasks/{task['id']}/reports").json()
+    assert [report["state"] for report in history] == [
         "ready_for_review",
         "review_needs_input",
         "working",
@@ -7725,3 +7732,93 @@ def test_update_task_rejects_title_prompt_edit_after_todo(tmp_path: Path) -> Non
     assert stored_task.title == "Original task"
     assert stored_task.prompt == "Original description"
     assert stored_task.status == WorkspaceTaskStatus.DONE
+
+
+def _seed_workspace_with_reports() -> str:
+    """Register a workspace and a spread of reports directly in the manager."""
+    now = datetime.now()
+    workspace_id = "ws-reports"
+    workspace_manager.workspaces[workspace_id] = Workspace(
+        id=workspace_id,
+        name="Reports WS",
+        path="/tmp/reports-ws",
+        default_branch="main",
+        session_prefix="rep",
+        created_at=now,
+        updated_at=now,
+    )
+
+    def _add(report_id: str, task_id: Optional[str], offset_seconds: int) -> None:
+        workspace_manager.reports[report_id] = AgentReport(
+            id=report_id,
+            workspace_id=workspace_id,
+            task_id=task_id,
+            session_id="rep-session",
+            state=AgentReportState.WORKING,
+            message=report_id,
+            created_at=now + timedelta(seconds=offset_seconds),
+        )
+
+    # task-a: three reports; task-b: one; plus a task_id=None report and a
+    # report belonging to another workspace that must never leak in.
+    _add("a1", "task-a", 0)
+    _add("a2", "task-a", 1)
+    _add("a3", "task-a", 2)
+    _add("b1", "task-b", 1)
+    _add("none1", None, 3)
+    workspace_manager.reports["other"] = AgentReport(
+        id="other",
+        workspace_id="ws-other",
+        task_id="task-a",
+        session_id="rep-session",
+        state=AgentReportState.WORKING,
+        message="other",
+        created_at=now,
+    )
+    return workspace_id
+
+
+def test_latest_reports_per_task_keeps_newest_per_task() -> None:
+    workspace_id = _seed_workspace_with_reports()
+
+    latest = workspace_manager.latest_reports_per_task_for_workspace(workspace_id)
+    by_task = {report.task_id: report.id for report in latest}
+
+    # One entry per task_id (including the None-task bucket), newest wins.
+    assert by_task == {"task-a": "a3", "task-b": "b1", None: "none1"}
+    # Sorted ascending by created_at, and no cross-workspace leakage.
+    assert [report.id for report in latest] == ["b1", "a3", "none1"]
+    assert all(report.workspace_id == workspace_id for report in latest)
+
+
+def test_reports_for_task_returns_full_history() -> None:
+    workspace_id = _seed_workspace_with_reports()
+
+    history = workspace_manager.reports_for_task(workspace_id, "task-a")
+
+    # Full ascending history for the task, scoped to this workspace only.
+    assert [report.id for report in history] == ["a1", "a2", "a3"]
+
+
+def test_reports_for_task_unknown_workspace_raises() -> None:
+    with pytest.raises(KeyError):
+        workspace_manager.reports_for_task("missing-ws", "task-a")
+
+
+def test_get_task_reports_endpoint_returns_history(tmp_path: Path) -> None:
+    workspace_id = _seed_workspace_with_reports()
+    client = TestClient(app)
+
+    response = client.get(f"/api/workspaces/{workspace_id}/tasks/task-a/reports")
+
+    assert response.status_code == 200
+    assert [report["id"] for report in response.json()] == ["a1", "a2", "a3"]
+
+
+def test_get_task_reports_endpoint_unknown_workspace_returns_404() -> None:
+    client = TestClient(app)
+
+    response = client.get("/api/workspaces/missing-ws/tasks/task-a/reports")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Workspace not found"

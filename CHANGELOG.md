@@ -107,8 +107,28 @@
   resumes on blur; explicit refreshes are unaffected.
 - Also removed a stray `//` JS comment from `frontend/package.json` that made the
   file invalid JSON and broke all `pnpm` commands (lint/type-check/build) in CI.
+- **Board payload (backend + frontend)**: even after the latency fix, mobile/LAN
+  users still felt multi-second lag on load and every 2.5s poll. Root cause was
+  **payload size**: `GET /workspaces/{id}/board` shipped ~2.6 MB uncompressed
+  every tick, of which report history was ~87% (1138 reports), while the UI only
+  needs the latest report per task for board cards plus the open task's full
+  history for the detail panel. Fixes: (1) enable `GZipMiddleware`
+  (`minimum_size=1024`), placed inside `CoopCoepMiddleware` so COOP/COEP headers
+  still apply and the WebSocket scope is untouched; (2) trim `board.reports` to
+  the latest report per task (new `latest_reports_per_task_for_workspace`);
+  `markdown_documents` stays complete (built server-side from full history);
+  (3) add an on-demand `GET /workspaces/{id}/tasks/{task_id}/reports` endpoint
+  the detail panel hydrates from when a task is opened, with the 2.5s poll
+  refetching a task's history only when its latest report id changes. Measured on
+  a ~40-session production-like state: board dropped from 2.6 MB → 657 KB
+  uncompressed (1138 → 80 reports) → **164 KB on the wire with gzip** (~94%
+  reduction).
 - **Files**: `backend/claude_hub/services/ttyd_manager.py`,
-  `frontend/src/components/AgentWorkspaceView.vue`, `frontend/package.json`.
+  `frontend/src/components/AgentWorkspaceView.vue`, `frontend/package.json`,
+  `backend/claude_hub/main.py`,
+  `backend/claude_hub/services/workspace_manager/_tmux_queries.py`,
+  `backend/claude_hub/api/workspaces.py`,
+  `frontend/src/stores/workspaceStore.ts`.
 
 ### fix: replace reviewer-verdict timestamp heuristics with an ordinal review-cycle model
 
