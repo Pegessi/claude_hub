@@ -5,6 +5,32 @@
 
 ## Unreleased
 
+### perf: remove per-frame layout reflow from terminal output path (input latency v3)
+
+- **Symptom**: terminal typing felt laggy / detached ("不跟手") again, despite a
+  prior optimization round. Root cause: the injected `term.write` wrapper in
+  `backend/claude_hub/api/terminal.py` consulted "is the viewport at the bottom?"
+  on **every output frame** (`viewportIsAtBottom()`/`needsBottomScroll()`), and
+  each call read `scrollTop`/`scrollHeight`/`clientHeight` off `.xterm-viewport`
+  — forcing a synchronous layout reflow per frame. Under fast output the main
+  thread spent its time in layout instead of processing keystrokes.
+- **Why the earlier round didn't help**: the prior SharedArrayBuffer/Atomics
+  keystroke path only carries *synthetic*/mobile keys; focused desktop typing
+  goes straight xterm.js → ttyd WS → tmux, so that work was off the real hot
+  path. WebGL/TCP_NODELAY/COOP-COEP are all still present.
+- **Fix**: replace the per-frame DOM geometry read with an event-driven cached
+  flag (`domAtBottomCached`) plus a cached viewport node (`cachedViewportEl`).
+  `recomputeDomAtBottom()` is the single geometry-reading function, called only
+  at state-changing edges: the viewport `scroll` listener, each programmatic
+  scroll-to-bottom (bottom-follow `run()`, history-snapshot done, auto-resync
+  completion), and the resize/fit paths. The hot path now does zero DOM reads.
+- **Resize staleness**: the closure exposes `term.__claudeHubRecomputeBottom` so
+  the sibling `setupResizeGuard` can refresh the flag after a debounced
+  `onResize` or mobile-keyboard `fit()` (layout changes that don't fire a scroll
+  event). Behavior-preserving for scroll/bottom-follow.
+- **Files**: `backend/claude_hub/api/terminal.py`. See
+  `docs/working-logs/2026-06-14-terminal-input-latency-v3.md`.
+
 ### perf: speed up agent-workspace board, add loading skeleton, smooth mobile input
 
 - **Board latency (backend)**: loading/switching workspaces felt slow (the

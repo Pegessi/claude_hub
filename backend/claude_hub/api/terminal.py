@@ -1020,6 +1020,11 @@ async def proxy_terminal_request(
                 pending = false;
                 if (lastArgs) origOnResize.apply(term, lastArgs);
                 lastArgs = null;
+                // Layout changed without a scroll event: refresh the
+                // resync closure's cached "at bottom" flag if available.
+                if (typeof term.__claudeHubRecomputeBottom === 'function') {{
+                  term.__claudeHubRecomputeBottom();
+                }}
               }}, DEBOUNCE_MS);
             }};
           }}
@@ -1045,6 +1050,11 @@ async def proxy_terminal_request(
                   try {{
                     if (term.fitAddon) term.fitAddon.fit();
                     else if (typeof term.fit === 'function') term.fit();
+                    // Keyboard show/hide resized the viewport without a
+                    // scroll event: refresh the cached "at bottom" flag.
+                    if (typeof term.__claudeHubRecomputeBottom === 'function') {{
+                      term.__claudeHubRecomputeBottom();
+                    }}
                   }} catch(e) {{}}
                 }}
                 // Keyboard state unchanged = transient jank, ignore
@@ -1091,6 +1101,33 @@ async def proxy_terminal_request(
           let nextAutoResyncId = 1;
           let activeAutoResyncId = null;
           const cancelledAutoResyncIds = new Set();
+          // Hot-path optimization: cache the viewport element and an event-driven
+          // "at bottom" flag so per-frame term.write does not force a synchronous
+          // layout reflow (querySelector + scrollTop/scrollHeight/clientHeight).
+          let cachedViewportEl = null;
+          let domAtBottomCached = true;
+
+          function viewportElement() {{
+            if (!cachedViewportEl || !cachedViewportEl.isConnected) {{
+              cachedViewportEl = document.querySelector('.xterm-viewport');
+            }}
+            return cachedViewportEl;
+          }}
+
+          function recomputeDomAtBottom() {{
+            const el = viewportElement();
+            domAtBottomCached = !el ||
+              el.scrollTop >= el.scrollHeight - el.clientHeight - 1;
+            return domAtBottomCached;
+          }}
+
+          // Expose the recompute so the (sibling-scope) resize guard can
+          // refresh the cached flag after a layout change that alters
+          // scrollHeight/clientHeight without firing a scroll event
+          // (window/pane resize, mobile keyboard fit()). The DOM geometry
+          // read forces a synchronous reflow, so calling this immediately
+          // after fit() reads the post-resize layout.
+          term.__claudeHubRecomputeBottom = recomputeDomAtBottom;
 
           function bufferService() {{
             return term._core && term._core._bufferService;
@@ -1106,10 +1143,7 @@ async def proxy_terminal_request(
           function viewportIsAtBottom() {{
             const buffer = term.buffer && term.buffer.active;
             if (!buffer) return true;
-            const viewportEl = document.querySelector('.xterm-viewport');
-            const domAtBottom = !viewportEl ||
-              viewportEl.scrollTop >= viewportEl.scrollHeight - viewportEl.clientHeight - 1;
-            return buffer.viewportY === buffer.baseY && domAtBottom;
+            return buffer.viewportY === buffer.baseY && domAtBottomCached;
           }}
 
           function terminalDataText(data) {{
@@ -1221,10 +1255,7 @@ async def proxy_terminal_request(
             function needsBottomScroll() {{
               const buffer = term.buffer && term.buffer.active;
               if (!buffer) return false;
-              const viewportEl = document.querySelector('.xterm-viewport');
-              const domAtBottom = !viewportEl ||
-                viewportEl.scrollTop >= viewportEl.scrollHeight - viewportEl.clientHeight - 1;
-              return buffer.viewportY !== buffer.baseY || !domAtBottom;
+              return buffer.viewportY !== buffer.baseY || !domAtBottomCached;
             }}
 
             function run() {{
@@ -1232,6 +1263,7 @@ async def proxy_terminal_request(
               if (userScrollGeneration !== bottomFollowGeneration) return;
               if (needsBottomScroll()) {{
                 scrollTerminalToBottom(term, {{ refresh: false }});
+                domAtBottomCached = true;
               }}
               if (Date.now() < bottomFollowUntil) {{
                 scheduleBottomFollow(generationAtWrite, false);
@@ -1262,6 +1294,7 @@ async def proxy_terminal_request(
               flushResyncBuffer();
               if (shouldScrollToBottom) {{
                 scrollTerminalToBottom(term, {{ refresh: true }});
+                domAtBottomCached = true;
               }}
               if (cb) cb(ok);
             }}
@@ -1369,9 +1402,10 @@ async def proxy_terminal_request(
             refreshAgentHistoryViewWhenBottom();
           }};
 
-          const viewportEl = document.querySelector('.xterm-viewport');
+          const viewportEl = viewportElement();
           if (viewportEl) {{
             viewportEl.addEventListener('scroll', function() {{
+              recomputeDomAtBottom();
               if (pendingWhenBottom && (agentHistoryViewNeedsSnapshot ? viewportIsAtBottom() : isAtBottom())) {{
                 if (agentHistoryViewNeedsSnapshot) {{
                   refreshAgentHistoryViewWhenBottom();
@@ -1482,6 +1516,7 @@ async def proxy_terminal_request(
               resetResyncPressure();
               flushResyncBuffer();
               scrollTerminalToBottom(term, {{ refresh: true }});
+              domAtBottomCached = true;
               // If new live writes arrived after the snapshot was taken,
               // schedule another reconciliation so they're picked up.
               if (resyncBuffer.length > 0) {{
