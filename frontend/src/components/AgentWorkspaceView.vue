@@ -327,6 +327,37 @@
         </div>
 
         <template v-else>
+          <transition name="board-skeleton-fade">
+            <div
+              v-if="boardLoading"
+              class="board-skeleton"
+              role="status"
+              aria-live="polite"
+              aria-label="Loading workspace"
+            >
+              <div
+                v-for="column in columns"
+                :key="`skeleton-${column.status}`"
+                class="board-skeleton-column"
+              >
+                <div class="board-skeleton-header">
+                  <span class="board-skeleton-line board-skeleton-line--title" />
+                </div>
+                <div class="board-skeleton-list">
+                  <div
+                    v-for="card in 3"
+                    :key="card"
+                    class="board-skeleton-card"
+                  >
+                    <span class="board-skeleton-line board-skeleton-line--lg" />
+                    <span class="board-skeleton-line board-skeleton-line--sm" />
+                    <span class="board-skeleton-line board-skeleton-line--md" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </transition>
+
           <section
             v-for="column in columns"
             :key="column.status"
@@ -2473,6 +2504,17 @@ const columns: { status: WorkspaceTaskStatus; label: string }[] = [
   { status: 'done', label: 'Done' },
 ]
 
+// Show a graceful skeleton over the board while a workspace switch is in
+// flight, or on the very first board load (board still null) for the active
+// workspace. Background polling refreshes do not trigger this — once a board
+// has been rendered the columns stay visible and update in place.
+const boardLoading = computed(
+  () =>
+    !!activeWorkspaceId.value &&
+    (isPending('workspace:switch') ||
+      (board.value === null && isLoading.value)),
+)
+
 const workspaceForm = reactive({
   name: 'Claude Hub',
   path: '',
@@ -4271,7 +4313,28 @@ async function handleWorkspaceChange() {
   })
 }
 
+function isTextEntryFocused(): boolean {
+  // While the user is actively typing in a text field (most importantly the
+  // task-detail compose textarea), a background board poll would replace the
+  // entire `board` object and force Vue to re-render the large detail subtree
+  // that hosts the focused input. On mobile that periodic re-render competes
+  // with keystroke handling and is felt as input lag, so we skip the poll tick
+  // until the field is blurred — the next tick (or any explicit action) then
+  // refreshes the board normally.
+  const active = document.activeElement as HTMLElement | null
+  if (!active) return false
+  const tag = active.tagName
+  if (tag === 'TEXTAREA') return true
+  if (tag === 'INPUT') {
+    const type = (active as HTMLInputElement).type
+    return type !== 'checkbox' && type !== 'radio' && type !== 'range'
+  }
+  return active.isContentEditable
+}
+
 async function refreshBoard() {
+  // Defer background refreshes while the user is typing to keep input smooth.
+  if (isTextEntryFocused()) return
   try {
     await workspaceStore.fetchBoard()
   } catch {
@@ -5368,6 +5431,7 @@ onUnmounted(() => {
 }
 
 .board {
+  position: relative;
   min-width: 0;
   min-height: 0;
   display: grid;
@@ -5375,6 +5439,110 @@ onUnmounted(() => {
   gap: 12px;
   overflow: auto;
   padding: 14px;
+}
+
+/* Graceful loading skeleton shown over the board during a workspace switch
+   or first load. Mirrors the 5-column layout so the transition into real
+   content does not shift the page. */
+.board-skeleton {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(220px, 1fr));
+  gap: 12px;
+  padding: 14px;
+  background: var(--ch-color-surface);
+  overflow: hidden;
+}
+
+.board-skeleton-column {
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-lg);
+  background: var(--ch-color-surface-raised);
+  overflow: hidden;
+}
+
+.board-skeleton-header {
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--ch-color-border-muted);
+  background: var(--ch-color-surface);
+}
+
+.board-skeleton-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+}
+
+.board-skeleton-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface);
+}
+
+.board-skeleton-line {
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    var(--ch-color-border-muted) 25%,
+    var(--ch-color-surface-raised) 37%,
+    var(--ch-color-border-muted) 63%
+  );
+  background-size: 400% 100%;
+  animation: board-skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+.board-skeleton-line--title {
+  width: 45%;
+  height: 12px;
+}
+
+.board-skeleton-line--lg {
+  width: 85%;
+}
+
+.board-skeleton-line--md {
+  width: 60%;
+}
+
+.board-skeleton-line--sm {
+  width: 35%;
+  height: 8px;
+}
+
+@keyframes board-skeleton-shimmer {
+  0% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0 50%;
+  }
+}
+
+.board-skeleton-fade-enter-active,
+.board-skeleton-fade-leave-active {
+  transition: opacity 240ms ease;
+}
+
+.board-skeleton-fade-enter-from,
+.board-skeleton-fade-leave-to {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .board-skeleton-line {
+    animation: none;
+  }
 }
 
 .empty-board {
@@ -7526,6 +7694,19 @@ onUnmounted(() => {
     gap: 8px;
     overflow: visible;
     padding: 8px;
+  }
+
+  /* On mobile the board stacks vertically; keep the skeleton overlay in sync
+     and only hint at the first couple of columns so it stays compact. */
+  .board-skeleton {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px;
+  }
+
+  .board-skeleton-column:nth-child(n + 3) {
+    display: none;
   }
 
   .task-column {
