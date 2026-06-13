@@ -2695,7 +2695,7 @@ const selectedTaskSendKey = computed(() =>
 )
 
 const selectedReports = computed<AgentReport[]>(() =>
-  selectedTask.value ? workspaceStore.reportsForTask(selectedTask.value) : []
+  selectedTask.value ? workspaceStore.reportsForTaskId(selectedTask.value.id) : []
 )
 
 const selectedMarkdownDocuments = computed<WorkspaceMarkdownDocument[]>(() => {
@@ -4337,6 +4337,19 @@ async function refreshBoard() {
   if (isTextEntryFocused()) return
   try {
     await workspaceStore.fetchBoard()
+    // Keep the open task's full timeline live without polling its whole history:
+    // the trimmed board carries the latest report per task, so refetch the
+    // on-demand history only when that latest report id has changed.
+    const task = selectedTask.value
+    const workspaceId = activeWorkspaceId.value
+    if (task && workspaceId) {
+      const boardLatestId = workspaceStore.latestReportForTask(task)?.id ?? null
+      const cached = workspaceStore.reportsForTaskId(task.id)
+      const cachedLatestId = cached.length ? cached[cached.length - 1].id : null
+      if (boardLatestId !== cachedLatestId) {
+        await workspaceStore.fetchTaskReports(workspaceId, task.id)
+      }
+    }
   } catch {
     // Error state is owned by the workspace store.
   }
@@ -4464,9 +4477,24 @@ watch(tasks, value => {
   }
 })
 
+// Hydrate the detail panel's full report history on demand. The board payload
+// only carries the latest report per task, so opening a task fetches its
+// complete history; switching away drops the prior task's cache.
+watch(selectedTaskId, (taskId, prevTaskId) => {
+  if (prevTaskId && prevTaskId !== taskId) {
+    workspaceStore.clearTaskReports(prevTaskId)
+  }
+  if (taskId && activeWorkspaceId.value) {
+    workspaceStore.fetchTaskReports(activeWorkspaceId.value, taskId).catch(() => {
+      // Error state is owned by the workspace store.
+    })
+  }
+})
+
 watch(activeWorkspaceId, value => {
   selectedWorkspaceId.value = value || ''
   workspaceSessionView.value = 'agents'
+  workspaceStore.clearTaskReports()
   closeTaskDetail()
 })
 

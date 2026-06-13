@@ -82,6 +82,26 @@ async def get_workspace_board(
         raise HTTPException(status_code=404, detail="Workspace not found") from e
 
 
+@router.get(
+    "/{workspace_id}/tasks/{task_id}/reports",
+    response_model=List[AgentReport],
+)
+async def get_task_reports(
+    workspace_id: str,
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+) -> List[AgentReport]:
+    """Full report history for a single task (detail panel, on-demand).
+
+    The board response only carries the latest report per task; the detail
+    panel fetches the complete history here when a task is opened.
+    """
+    try:
+        return workspace_manager.reports_for_task(workspace_id, task_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Workspace not found") from e
+
+
 @router.post("/{workspace_id}/tasks", response_model=WorkspaceTask, status_code=201)
 async def create_task(
     workspace_id: str,

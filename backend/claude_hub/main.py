@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import Response
 
 from .api import api_router
@@ -73,6 +74,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# GZip compression. The workspace board and other large JSON responses are
+# highly repetitive and compress ~10x, which is the dominant cost when the
+# frontend loads/polls over LAN or mobile. Added after CORS but before the
+# CoopCoep middleware so that (later-added middleware runs outermost in
+# Starlette) the effective response order is CoopCoep -> GZip -> CORS -> app:
+# COOP/COEP headers are still applied over the compressed body, and only HTTP
+# responses are touched (the WebSocket/ttyd upgrade scope is passed through).
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
 class CoopCoepMiddleware(BaseHTTPMiddleware):

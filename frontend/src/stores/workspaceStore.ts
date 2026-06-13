@@ -73,6 +73,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     notifications.value.find(n => n.type === ('error' as NotificationType))?.message ?? null
   )
   const boardFetches = new Map<string, Promise<void>>()
+  // Full per-task report history, fetched on demand when a task detail panel is
+  // opened. The board response only carries the latest report per task, so the
+  // detail panel hydrates from here instead of the (trimmed) board payload.
+  const taskReports = ref<Record<string, AgentReport[]>>({})
+  const taskReportFetches = new Map<string, Promise<void>>()
 
   const activeWorkspace = computed(() =>
     workspaces.value.find(workspace => workspace.id === activeWorkspaceId.value) || null
@@ -111,6 +116,23 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   function latestReportForTask(task: WorkspaceTask): AgentReport | null {
     const taskReports = reportsForTask(task)
     return taskReports.length > 0 ? taskReports[taskReports.length - 1] : null
+  }
+
+  // ---- On-demand full report history (detail panel) ----
+  function reportsForTaskId(taskId: string): AgentReport[] {
+    return taskReports.value[taskId] || []
+  }
+
+  function clearTaskReports(taskId?: string) {
+    if (!taskId) {
+      taskReports.value = {}
+      return
+    }
+    if (taskId in taskReports.value) {
+      const next = { ...taskReports.value }
+      delete next[taskId]
+      taskReports.value = next
+    }
   }
 
   async function fetchWorkspaces() {
@@ -164,6 +186,36 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       throw e
     } finally {
       boardFetches.delete(workspaceId)
+    }
+  }
+
+  async function fetchTaskReports(
+    workspaceId = activeWorkspaceId.value,
+    taskId?: string,
+  ) {
+    if (!workspaceId || !taskId) return
+    const key = `${workspaceId}:${taskId}`
+    const existing = taskReportFetches.get(key)
+    if (existing) return existing
+
+    const request = (async () => {
+      const response = await fetch(
+        `${API_BASE}/workspaces/${workspaceId}/tasks/${taskId}/reports`,
+      )
+      if (!response.ok) throw new Error(await readError(response))
+      // Reassign (spread) so the keyed object is a new reference and Pinia
+      // reactivity reliably re-derives selectedReports.
+      taskReports.value = { ...taskReports.value, [taskId]: await response.json() }
+    })()
+
+    taskReportFetches.set(key, request)
+    try {
+      await request
+    } catch (e) {
+      notifyError(e instanceof Error ? e.message : 'Failed to fetch task reports')
+      throw e
+    } finally {
+      taskReportFetches.delete(key)
     }
   }
 
@@ -524,6 +576,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     sessionForTask,
     reportsForTask,
     latestReportForTask,
+    taskReports,
+    reportsForTaskId,
+    clearTaskReports,
+    fetchTaskReports,
     fetchWorkspaces,
     setActiveWorkspace,
     fetchBoard,
