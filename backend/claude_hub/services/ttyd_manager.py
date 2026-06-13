@@ -168,9 +168,63 @@ def _ensure_tmux_server() -> bool:
 
 
 def _tmux_session_exists(session_name: str) -> bool:
-    """Check if a tmux session exists (sync, used during startup)."""
-    ret = os.system(f"tmux has-session -t {session_name} 2>/dev/null")
+    """Check if a tmux session exists (sync, used during startup).
+
+    Uses ``subprocess.run`` rather than ``os.system`` so it does not spawn a
+    shell and does not block the asyncio event loop via the shell's own
+    waitpid. Hot async paths should prefer :func:`_tmux_session_exists_async`
+    or batch existence via :func:`_tmux_list_sessions`.
+    """
+    try:
+        ret = subprocess.run(
+            ["tmux", "has-session", "-t", session_name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode
+    except FileNotFoundError:
+        return False
     return ret == 0
+
+
+async def _tmux_session_exists_async(session_name: str) -> bool:
+    """Async, non-blocking check for whether a tmux session exists."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "tmux",
+            "has-session",
+            "-t",
+            session_name,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return False
+    return await proc.wait() == 0
+
+
+async def _tmux_list_sessions() -> set[str]:
+    """Return the set of live tmux session names in a single subprocess call.
+
+    Batching existence into one call lets board refreshes check many tabs
+    against an in-memory set instead of spawning one ``has-session`` process
+    per tab (previously a blocking ``os.system`` per tab that serialized the
+    event loop).
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "tmux",
+            "list-sessions",
+            "-F",
+            "#{session_name}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return set()
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return set()
+    return {line for line in stdout.decode("utf-8", errors="ignore").splitlines() if line}
 
 
 async def _tmux_kill_session(session_name: str) -> None:
@@ -525,7 +579,7 @@ asyncio.run(_main())
         orchestration needs to send prompts before the user opens the tab, so it
         must ensure the tmux session exists independently.
         """
-        if _tmux_session_exists(self.tmux_session):
+        if await _tmux_session_exists_async(self.tmux_session):
             return False
 
         _ensure_tmux_server()
@@ -584,7 +638,7 @@ asyncio.run(_main())
         _ensure_tmux_server()
 
         # Check if tmux session already exists
-        session_exists = _tmux_session_exists(self.tmux_session)
+        session_exists = await _tmux_session_exists_async(self.tmux_session)
         if session_exists:
             logger.info(f"tmux session {self.tmux_session} exists, will reattach")
         else:
@@ -1005,7 +1059,7 @@ asyncio.run(_main())
         Returns an empty string if the tmux session does not exist yet
         (ttyd creates sessions lazily on first WebSocket connection).
         """
-        if not _tmux_session_exists(self.tmux_session):
+        if not await _tmux_session_exists_async(self.tmux_session):
             return ""
         safe_lines = max(100, min(lines, 100000))
         start = f"-{safe_lines}"
@@ -1045,7 +1099,7 @@ asyncio.run(_main())
 
     async def _capture_local_cursor_position(self) -> Optional[CursorPosition]:
         """Capture tmux pane cursor position as zero-based x/y coordinates."""
-        if not _tmux_session_exists(self.tmux_session):
+        if not await _tmux_session_exists_async(self.tmux_session):
             return None
 
         proc = await asyncio.create_subprocess_exec(
@@ -1112,7 +1166,7 @@ asyncio.run(_main())
 
     async def capture_foreground_command(self) -> Optional[str]:
         """Capture the foreground command currently running in the tmux pane."""
-        if not _tmux_session_exists(self.tmux_session):
+        if not await _tmux_session_exists_async(self.tmux_session):
             return None
 
         proc = await asyncio.create_subprocess_exec(
@@ -1606,8 +1660,10 @@ class TTYDManager:
         # else: identical frame — keep the existing frame_first_seen_at so we can
         # measure how long the screen has been frozen.
 
-        if not _tmux_session_exists(process.tmux_session):
-            return AgentRuntimeStatus.OFFLINE, "Offline", "tmux session is not available", None
+        # Aliveness is verified by the caller (``get_tab_agent_status``) before
+        # classification, so we avoid a redundant per-tab ``tmux has-session``
+        # subprocess here — that check previously blocked the event loop on
+        # every board refresh.
 
         def working_or_stale() -> tuple[AgentRuntimeStatus, str, Optional[str], Optional[datetime]]:
             # A live agent repaints its spinner/elapsed counter every second, so
@@ -1697,8 +1753,14 @@ class TTYDManager:
         self,
         tab_id: str,
         use_cache: bool = True,
+        live_sessions: Optional[set[str]] = None,
     ) -> Optional[TerminalAgentStatus]:
-        """Get a best-effort terminal agent status for one tab."""
+        """Get a best-effort terminal agent status for one tab.
+
+        When ``live_sessions`` is provided (a snapshot of live tmux session
+        names from a single ``tmux list-sessions`` call), tmux existence is
+        checked against that set instead of spawning a per-tab subprocess.
+        """
         process = self.processes.get(tab_id)
         if not process:
             return None
@@ -1712,7 +1774,11 @@ class TTYDManager:
         ):
             return cached
 
-        if not _tmux_session_exists(process.tmux_session):
+        if live_sessions is not None:
+            session_alive = process.tmux_session in live_sessions
+        else:
+            session_alive = await _tmux_session_exists_async(process.tmux_session)
+        if not session_alive:
             status = TerminalAgentStatus(
                 tab_id=process.tab_id,
                 tab_name=process.name,
@@ -1773,8 +1839,12 @@ class TTYDManager:
                     ordered_ids.append(tab_id)
                     seen.add(tab_id)
 
+        live_sessions = await _tmux_list_sessions()
         results = await asyncio.gather(
-            *(self.get_tab_agent_status(tab_id) for tab_id in ordered_ids)
+            *(
+                self.get_tab_agent_status(tab_id, live_sessions=live_sessions)
+                for tab_id in ordered_ids
+            )
         )
         return [status for status in results if status]
 
@@ -1872,7 +1942,9 @@ class TTYDManager:
             try:
                 await process.start()
                 session_status = (
-                    "reattached" if _tmux_session_exists(process.tmux_session) else "created"
+                    "reattached"
+                    if await _tmux_session_exists_async(process.tmux_session)
+                    else "created"
                 )
                 logger.info(
                     f"Tab {process.tab_id} started (tmux session {process.tmux_session} {session_status})"
