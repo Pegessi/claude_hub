@@ -93,6 +93,41 @@ def test_hot_path_function_uses_cached_flag(name: str) -> None:
     )
 
 
+def _extract_js_function_body_single(source: str, name: str) -> str:
+    """Like ``_extract_js_function_body`` but returns only this function's body.
+
+    ``_extract_js_function_body`` returns text from the opening brace to the
+    matching close, which already isolates one function. This thin alias names
+    the intent at the call site for the v4 per-frame-cost guard.
+    """
+    return _extract_js_function_body(source, name)
+
+
+# The per-output-frame stats scan (``terminalDataStats``) runs on every
+# ``term.write`` via ``noteLiveWrite`` -> ``noteResyncPressure``. Decoding the
+# whole frame (``TextDecoder``) or running regex passes (``.replace(`` /
+# ``.match(``) over it on that path starves keystroke echo under heavy output —
+# the v4 regression ("不跟手" under load). The fix replaced it with an
+# allocation-free byte/char scan; this guard keeps the heavy ops out.
+FORBIDDEN_PER_FRAME_OPS = ("TextDecoder", ".replace(", ".match(")
+
+
+def test_per_frame_stats_scan_has_no_decode_or_regex() -> None:
+    """``terminalDataStats`` must stay an O(n) scan — no decode/regex per frame."""
+    body = _extract_js_function_body_single(TERMINAL_SOURCE, "terminalDataStats")
+    # Strip ``//`` line comments so the forbidden tokens are only matched in
+    # real code — the function body documents what it replaced ("old TextDecoder
+    # + regex passes"), and that prose must not trip the guard.
+    code = "\n".join(line.split("//", 1)[0] for line in body.splitlines())
+    offenders = [token for token in FORBIDDEN_PER_FRAME_OPS if token in code]
+    assert not offenders, (
+        f"terminalDataStats() regained per-frame {offenders}; it runs on every "
+        f"output frame and decoding/regex over the whole frame starves keystroke "
+        f"echo under heavy output. Keep it an allocation-free byte/char scan. See "
+        f"docs/working-logs/2026-06-14-terminal-input-latency-v4.md"
+    )
+
+
 def test_cached_flag_recompute_helper_exists() -> None:
     """The single geometry-reading helper that maintains the cache must exist."""
     assert "function recomputeDomAtBottom(" in TERMINAL_SOURCE, (

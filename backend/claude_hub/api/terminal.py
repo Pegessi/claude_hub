@@ -1146,27 +1146,30 @@ async def proxy_terminal_request(
             return buffer.viewportY === buffer.baseY && domAtBottomCached;
           }}
 
-          function terminalDataText(data) {{
-            if (data instanceof Uint8Array && typeof TextDecoder !== 'undefined') {{
-              try {{
-                return new TextDecoder('utf-8').decode(data);
-              }} catch (error) {{
-                return '';
-              }}
-            }}
-            return String(data || '');
-          }}
-
           function terminalDataStats(data) {{
-            const text = terminalDataText(data)
-              .replace(/\\x1b\\][^\\x07]*(?:\\x07|\\x1b\\\\)/g, '')
-              .replace(/\\x1b\\[[0-?]*[ -/]*[@-~]/g, '')
-              .replace(/\\x1b[()][A-Za-z0-9]/g, '')
-              .replace(/[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f]/g, '');
-            return {{
-              chars: text.replace(/[\\r\\n]/g, '').length,
-              lineBreaks: (text.match(/\\n/g) || []).length,
-            }};
+            // Runs on EVERY output frame via noteLiveWrite -> noteResyncPressure,
+            // so it must stay allocation-free and O(n) with a tiny constant. A
+            // raw byte/char scan replaces the old TextDecoder + 4 regex passes,
+            // which dominated the main thread under heavy output and starved
+            // keystroke echo (see docs/working-logs/2026-06-14-terminal-input-latency-v4.md).
+            // The only consumers are the coarse burst thresholds in
+            // hasEnoughResyncPressure() (chars >= 4096 OR lineBreaks >= 8), so an
+            // approximate `chars` (raw length, incl. ANSI/multibyte) is fine; it
+            // merely arms the idle resync marginally earlier. `lineBreaks` stays
+            // exact because 0x0a is single-byte and never a UTF-8 continuation.
+            if (data instanceof Uint8Array) {{
+              let lineBreaks = 0;
+              for (let i = 0; i < data.length; i++) {{
+                if (data[i] === 10) lineBreaks++;
+              }}
+              return {{ chars: data.length, lineBreaks: lineBreaks }};
+            }}
+            const text = String(data || '');
+            let lineBreaks = 0;
+            for (let i = 0; i < text.length; i++) {{
+              if (text.charCodeAt(i) === 10) lineBreaks++;
+            }}
+            return {{ chars: text.length, lineBreaks: lineBreaks }};
           }}
 
           function noteResyncPressure(data) {{
