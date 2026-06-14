@@ -25,6 +25,37 @@
 - **Files**: `backend/claude_hub/services/workspace_manager/_review.py`,
   `backend/tests/test_workspaces.py`.
 
+### perf: remove per-frame regex/decode from terminal output path (input latency v4)
+
+- **Symptom**: terminal typing still felt laggy ("不跟手") *under heavy output*
+  even after the v3 layout-reflow fix. Measured with a new Playwright
+  keystroke-to-glyph harness: idle was fine (p50 18ms) but under a wide-line
+  flood it ballooned to **p50 151ms / p95 613ms** (n=45) — exactly the felt lag.
+- **Root cause**: the v3 round removed the per-frame DOM reflow but left a second
+  per-frame cost. On **every output frame** the injected `term.write` wrapper ran
+  `noteResyncPressure(data)` → `terminalDataStats(data)`, which did a
+  `TextDecoder().decode()` + **four regex `.replace()` passes** + a `.match(/\n/g)`
+  over the whole frame. Under fast output that dominated the main thread and
+  starved keystroke echo.
+- **Fix**: replace `terminalDataStats` with an allocation-free O(n) byte/char
+  scan — count `0x0a` for exact `lineBreaks`, use raw length as an approximate
+  `chars`. The only consumers are the coarse burst thresholds in
+  `hasEnoughResyncPressure()` (`chars >= 4096` OR `lineBreaks >= 8`), so an
+  approximate `chars` merely arms the idle resync marginally earlier — harmless.
+  Removed the now-dead `terminalDataText` helper.
+- **Result** (same harness, after): under-load **p50 79ms / p95 225ms**
+  (from 151 / 613) — ~48% / ~63% lower; idle unchanged. Resync E2E correctness
+  guards (`test_terminal_replay.py`) still pass.
+- **Diagnostic harness**: `backend/tests/test_terminal_input_latency_perf.py` —
+  opt-in, run-on-demand (`uv run pytest … -s`), **not** a CI timing gate
+  (absolute latencies are machine-dependent). The static guard
+  `test_terminal_input_latency_guard.py` now also asserts `terminalDataStats`
+  contains no `TextDecoder`/`.replace(`/`.match(`.
+- **Files**: `backend/claude_hub/api/terminal.py`,
+  `backend/tests/test_terminal_input_latency_perf.py`,
+  `backend/tests/test_terminal_input_latency_guard.py`. See
+  `docs/working-logs/2026-06-14-terminal-input-latency-v4.md`.
+
 ### perf: remove per-frame layout reflow from terminal output path (input latency v3)
 
 - **Symptom**: terminal typing felt laggy / detached ("不跟手") again, despite a
