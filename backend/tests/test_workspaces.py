@@ -1876,6 +1876,117 @@ def test_reviewer_bound_to_working_task_is_not_reused_for_other_review(
     assert second_reviewer_id != first_reviewer_id
 
 
+def test_shared_review_session_id_does_not_steal_busy_reviewer(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When two tasks both carry the same review_session_id (from a prior round)
+    and both request review, the second task must NOT steal the busy reviewer
+    from the first task. Instead it should fall through to the next available
+    reviewer or create a new one.
+
+    This is the root cause of the "only one task gets reviewed while others
+    wait" bug: every task was reviewed by reviewer-1 historically, so every
+    task has review_session_id=reviewer-1, and the _select_or_create_reviewer
+    fast path would unconditionally return reviewer-1, letting the last
+    request "win" and strand the others.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="shared-rev-tab",
+        port=12813,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Shared Reviewer", "path": str(repo), "session_prefix": "sr"},
+    ).json()
+    first_worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    second_worker = client.post(
+        f"/api/workspaces/{workspace['id']}/agent",
+        json={"reuse_existing": False},
+    ).json()
+
+    first_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "First", "prompt": "First task"},
+    ).json()
+    second_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Second", "prompt": "Second task"},
+    ).json()
+
+    # First task: start and complete to get a reviewer assigned.
+    client.post(
+        f"/api/workspaces/tasks/{first_task['id']}/start",
+        json={"target_session_id": first_worker["id"]},
+    )
+    client.post(
+        f"/api/workspaces/sessions/{first_worker['id']}/reports",
+        json={"task_id": first_task["id"], "state": "completed", "message": "v1"},
+    )
+    first_reviewer_id = workspace_manager.tasks[first_task["id"]].review_session_id
+    assert first_reviewer_id is not None
+
+    # Simulate the historical scenario: both tasks share the same
+    # review_session_id because they were both reviewed by the same
+    # reviewer in a prior round (before more reviewers were added).
+    second_task_obj = workspace_manager.tasks[second_task["id"]]
+    workspace_manager.tasks[second_task["id"]] = second_task_obj.model_copy(
+        update={"review_session_id": first_reviewer_id}
+    )
+
+    # Now have both workers request review for their tasks.
+    # First worker requests review → should get first_reviewer_id.
+    client.post(
+        f"/api/workspaces/tasks/{first_task['id']}/start",
+        json={"target_session_id": first_worker["id"]},
+    )
+    first_ready = client.post(
+        f"/api/workspaces/sessions/{first_worker['id']}/reports",
+        json={"task_id": first_task["id"], "state": "ready_for_review", "message": "Done"},
+    )
+    assert first_ready.status_code == 201
+    assert (
+        workspace_manager.tasks[first_task["id"]].review_session_id == first_reviewer_id
+    )
+    assert workspace_manager.sessions[first_reviewer_id].task_id == first_task["id"]
+
+    # Second worker requests review → should NOT steal first_reviewer_id
+    # from the first task. It should fall through and get a different reviewer.
+    client.post(
+        f"/api/workspaces/tasks/{second_task['id']}/start",
+        json={"target_session_id": second_worker["id"]},
+    )
+    second_ready = client.post(
+        f"/api/workspaces/sessions/{second_worker['id']}/reports",
+        json={"task_id": second_task["id"], "state": "ready_for_review", "message": "Done"},
+    )
+    assert second_ready.status_code == 201
+
+    second_reviewer_id = workspace_manager.tasks[second_task["id"]].review_session_id
+    assert second_reviewer_id is not None
+    assert second_reviewer_id != first_reviewer_id, (
+        "Second task must NOT steal the busy reviewer from the first task; "
+        "it should get its own reviewer instead"
+    )
+
+    # First task's reviewer binding must remain intact.
+    assert (
+        workspace_manager.tasks[first_task["id"]].review_session_id == first_reviewer_id
+    )
+    assert workspace_manager.sessions[first_reviewer_id].task_id == first_task["id"]
+
+    # Second task must have its own reviewer that is actually assigned to it.
+    assert workspace_manager.sessions[second_reviewer_id].task_id == second_task["id"]
+
+
 def test_failed_review_continues_reviewed_task_after_repeated_attempts(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
