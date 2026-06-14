@@ -73,6 +73,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     notifications.value.find(n => n.type === ('error' as NotificationType))?.message ?? null
   )
   const boardFetches = new Map<string, Promise<void>>()
+  // Last board ETag per workspace. Sent back as If-None-Match so an unchanged
+  // board resolves to a bodyless 304 and we skip re-parsing the payload.
+  const boardETags = new Map<string, string>()
   // Full per-task report history, fetched on demand when a task detail panel is
   // opened. The board response only carries the latest report per task, so the
   // detail panel hydrates from here instead of the (trimmed) board payload.
@@ -172,8 +175,20 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     if (existing) return existing
 
     const request = (async () => {
-      const response = await fetch(`${API_BASE}/workspaces/${workspaceId}/board`)
+      const headers: Record<string, string> = {}
+      const knownETag = boardETags.get(workspaceId)
+      if (knownETag && board.value?.workspace.id === workspaceId) {
+        headers['If-None-Match'] = knownETag
+      }
+      const response = await fetch(`${API_BASE}/workspaces/${workspaceId}/board`, { headers })
+      if (response.status === 304) {
+        // Board unchanged since the last fetch — keep the existing board.value.
+        await fetchFeedbackLessons(workspaceId)
+        return
+      }
       if (!response.ok) throw new Error(await readError(response))
+      const etag = response.headers.get('ETag')
+      if (etag) boardETags.set(workspaceId, etag)
       board.value = await response.json()
       await fetchFeedbackLessons(workspaceId)
     })()

@@ -1,6 +1,8 @@
-from typing import List
+import hashlib
+import json
+from typing import Any, List
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 
 from ..auth.dependencies import get_current_user
@@ -35,6 +37,40 @@ from ..models import (
 from ..services import workspace_manager
 
 router = APIRouter(prefix="/api/workspaces", tags=["workspaces"])
+
+# Per-session timestamps that tick on every status refresh without reflecting any
+# content the board UI renders. Excluding them from the ETag lets idle 2.5s polls
+# resolve to a 304 instead of re-shipping the whole (gzipped) board body.
+_VOLATILE_SESSION_FIELDS = ("updated_at", "last_activity_at")
+_VOLATILE_MARKDOWN_FIELDS = ("updated_at",)
+
+
+def _board_etag(board: WorkspaceBoard) -> str:
+    """Compute a stable, order-independent ETag over board *content*.
+
+    Volatile per-session/markdown timestamps are stripped so that an idle board
+    (heavy content byte-stable, only cosmetic timestamps churning) keeps the same
+    ETag across polls. Lists are sorted by id so server-side ordering jitter does
+    not change the hash.
+    """
+    payload: dict[str, Any] = json.loads(board.model_dump_json())
+
+    for session in payload.get("sessions") or []:
+        for field in _VOLATILE_SESSION_FIELDS:
+            session.pop(field, None)
+
+    for document in payload.get("markdown_documents") or []:
+        for field in _VOLATILE_MARKDOWN_FIELDS:
+            document.pop(field, None)
+
+    for key in ("tasks", "sessions", "reports", "markdown_documents"):
+        items = payload.get(key)
+        if isinstance(items, list):
+            items.sort(key=lambda item: item.get("id") or "")
+
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+    return f'"{digest}"'
 
 
 @router.get("", response_model=List[Workspace])
@@ -73,13 +109,29 @@ async def update_workspace(
 @router.get("/{workspace_id}/board", response_model=WorkspaceBoard)
 async def get_workspace_board(
     workspace_id: str,
+    request: Request,
+    response: Response,
     current_user: User = Depends(get_current_user),
-) -> WorkspaceBoard:
-    """Return tasks and managed sessions for one workspace."""
+) -> Any:
+    """Return tasks and managed sessions for one workspace.
+
+    Sends a content-based ETag; an idle 2.5s poll whose ``If-None-Match`` still
+    matches gets a bodyless 304 instead of the (gzipped) board payload.
+    """
     try:
-        return await workspace_manager.get_board(workspace_id)
+        board = await workspace_manager.get_board(workspace_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Workspace not found") from e
+
+    etag = _board_etag(board)
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = "no-cache"
+
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match and etag in {tag.strip() for tag in if_none_match.split(",")}:
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
+
+    return board
 
 
 @router.get(
