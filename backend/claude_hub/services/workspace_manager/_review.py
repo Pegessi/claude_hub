@@ -6,6 +6,60 @@ from ._constants import *  # noqa: F401,F403
 
 
 class _ReviewMixin:
+    def _reviewer_is_busy_with_other_task(
+        self, reviewer: "ManagedSession", current_task_id: str
+    ) -> bool:
+        """Return True when the reviewer session is actively working on a
+        review for a task other than ``current_task_id``. Used to decide
+        whether we can reuse the task's previously-assigned reviewer or
+        must fall through to an available one.
+
+        A reviewer is considered busy when:
+        - its session still carries another task's id (task_id / current_task_id)
+          AND that task is still in a working or review state with an active
+          review in flight.
+        - OR another task in the workspace lists this reviewer as its
+          review_session_id and has an active (non-completed) review.
+        """
+        # Session-level check: the terminal session itself is bound to
+        # another task and is not idle.
+        other_id = reviewer.task_id or reviewer.current_task_id
+        if other_id and other_id != current_task_id:
+            other_task = self.tasks.get(other_id)
+            if (
+                other_task
+                and other_task.status
+                in {
+                    WorkspaceTaskStatus.WORKING,
+                    WorkspaceTaskStatus.REVIEW,
+                }
+                and state_policy.review_in_flight(
+                    other_task.review_requested_at, other_task.review_completed_at
+                )
+            ):
+                return True
+
+        # Task-level check: any other task in the workspace claims this
+        # reviewer as its review_session_id with a review in flight.
+        for task in self.tasks.values():
+            if task.id == current_task_id:
+                continue
+            if task.review_session_id != reviewer.id:
+                continue
+            if task.workspace_id != reviewer.workspace_id:
+                continue
+            if task.status not in {
+                WorkspaceTaskStatus.WORKING,
+                WorkspaceTaskStatus.REVIEW,
+            }:
+                continue
+            if state_policy.review_in_flight(
+                task.review_requested_at, task.review_completed_at
+            ):
+                return True
+
+        return False
+
     async def _select_or_create_reviewer(
         self,
         workspace: Workspace,
@@ -18,8 +72,16 @@ class _ReviewMixin:
                 and reviewer.workspace_id == workspace.id
                 and reviewer.role == WorkspaceSessionRole.REVIEWER
                 and reviewer.status != ManagedSessionStatus.STOPPED
+                and not self._reviewer_is_busy_with_other_task(reviewer, task.id)
             ):
                 return reviewer
+            if reviewer and reviewer.status != ManagedSessionStatus.STOPPED:
+                logger.info(
+                    "Reviewer %s is busy with another task; falling through to first "
+                    "available reviewer for task_id=%s",
+                    reviewer.id,
+                    task.id,
+                )
         reviewer = self._first_available_reviewer(workspace.id)
         if reviewer:
             return reviewer
