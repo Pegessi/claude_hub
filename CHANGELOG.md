@@ -5,6 +5,26 @@
 
 ## Unreleased
 
+### fix: prevent reviewer dispatch from stealing a busy reviewer
+
+- **Symptom**: multiple tasks waiting for review would all be bound to the
+  same reviewer (e.g. `cb-reviewer-1`), but only one would actually progress
+  — the others appeared stuck in "Awaiting AI review" until the fallback
+  reaper recovered them after ~60s.
+- **Root cause**: `_select_or_create_reviewer` unconditionally reused
+  `task.review_session_id` (the reviewer from a prior round) without checking
+  whether that reviewer was already busy with another task's active review.
+  Since every task historically used the first created reviewer, all tasks
+  carried `review_session_id=<first-reviewer>` and the last one to request
+  review "won", stranding the rest.
+- **Fix**: add `_reviewer_is_busy_with_other_task()` that checks both the
+  reviewer session's own task binding and whether any other task in the
+  workspace claims this reviewer with an in-flight review. When the
+  historically-assigned reviewer is busy, fall through to
+  `_first_available_reviewer` instead of stealing the session.
+- **Files**: `backend/claude_hub/services/workspace_manager/_review.py`,
+  `backend/tests/test_workspaces.py`.
+
 ### perf: remove per-frame layout reflow from terminal output path (input latency v3)
 
 - **Symptom**: terminal typing felt laggy / detached ("不跟手") again, despite a
