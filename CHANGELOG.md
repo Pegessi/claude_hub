@@ -5,6 +5,24 @@
 
 ## Unreleased
 
+### fix: stop.sh now reliably kills the backend worker and all ttyd processes
+
+- **Symptom**: restarting the backend appeared to "not take effect" — after
+  running `stop.sh` and relaunching, the served terminal JS was still the old
+  version, and stale `ttyd` processes piled up across runs.
+- **Root cause**: two pattern bugs in `stop.sh`. (1) With `--reload`, uvicorn
+  runs a 3-process tree; the process that actually binds the port is a
+  multiprocessing-spawned worker whose command line is `python -c from
+  multiprocessing.spawn import spawn_main; ...` — it contains no `uvicorn`
+  token, so `pkill -f "uvicorn claude_hub.main:app"` killed the launcher and
+  supervisor but left the worker holding the port (the supervisor would then
+  resurrect it). (2) `pkill -f "ttyd --port 100"` only matched ports `100xx`,
+  while ttyd is spawned across `10xxx`–`11xxx`, so nearly every ttyd survived.
+- **Fix**: after the pattern kill, reap whatever still LISTENs on the backend
+  port (`lsof -tiTCP:$PORT -sTCP:LISTEN`, TERM then KILL); broaden the ttyd
+  pattern to `ttyd --port`. Backend port is configurable via `CLAUDE_HUB_PORT`.
+- **Files**: `stop.sh`.
+
 ### fix: prevent reviewer dispatch from stealing a busy reviewer
 
 - **Symptom**: multiple tasks waiting for review would all be bound to the
