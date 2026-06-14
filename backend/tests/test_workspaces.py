@@ -238,6 +238,51 @@ def test_workspace_task_flow(tmp_path: Path) -> None:
     assert board["sessions"] == []
 
 
+def test_board_etag_returns_304_when_unchanged(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "ETag Repo", "path": str(repo), "session_prefix": "etag"},
+    ).json()
+
+    first = client.get(f"/api/workspaces/{workspace['id']}/board")
+    assert first.status_code == 200
+    etag = first.headers.get("etag")
+    assert etag
+
+    # A matching If-None-Match short-circuits to a bodyless 304.
+    cached = client.get(
+        f"/api/workspaces/{workspace['id']}/board",
+        headers={"If-None-Match": etag},
+    )
+    assert cached.status_code == 304
+    assert cached.headers.get("etag") == etag
+    assert cached.content == b""
+
+    # A mismatching tag still returns the full board with a fresh ETag.
+    stale = client.get(
+        f"/api/workspaces/{workspace['id']}/board",
+        headers={"If-None-Match": '"deadbeef"'},
+    )
+    assert stale.status_code == 200
+    assert stale.headers.get("etag") == etag
+
+    # Content change (new task) rotates the ETag so the client re-fetches.
+    client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "New task", "prompt": "Do a thing"},
+    )
+    changed = client.get(
+        f"/api/workspaces/{workspace['id']}/board",
+        headers={"If-None-Match": etag},
+    )
+    assert changed.status_code == 200
+    assert changed.headers.get("etag") != etag
+
+
 def test_task_goal_packet_create_update_and_legacy_normalization(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()

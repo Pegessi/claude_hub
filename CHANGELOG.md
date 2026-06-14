@@ -123,12 +123,26 @@
   a ~40-session production-like state: board dropped from 2.6 MB → 657 KB
   uncompressed (1138 → 80 reports) → **164 KB on the wire with gzip** (~94%
   reduction).
+- **Conditional board requests (ETag / 304)**: the board endpoint now sends a
+  content-based `ETag` and honors `If-None-Match`. The tag is hashed over
+  normalized, order-independent board content with volatile per-session
+  timestamps excluded (`sessions[].updated_at`, `sessions[].last_activity_at`,
+  `markdown_documents[].updated_at`) — at idle these tick every refresh but
+  change nothing the UI renders, so excluding them lets an unchanged board match.
+  An idle 2.5s poll now returns a **bodyless `304`** instead of re-shipping the
+  gzipped payload (verified against the ~40-session state: steady-state polls
+  drop from ~176 KB to 0 bytes on the wire); the tag rotates the instant real
+  content changes, so a new report still surfaces within one poll. `Cache-Control:
+  no-cache` forces revalidation each tick rather than blind caching. Frontend
+  `fetchBoard` stores the per-workspace ETag, sends it back, and keeps the
+  existing `board.value` on a 304.
 - **Files**: `backend/claude_hub/services/ttyd_manager.py`,
   `frontend/src/components/AgentWorkspaceView.vue`, `frontend/package.json`,
   `backend/claude_hub/main.py`,
   `backend/claude_hub/services/workspace_manager/_tmux_queries.py`,
   `backend/claude_hub/api/workspaces.py`,
-  `frontend/src/stores/workspaceStore.ts`.
+  `frontend/src/stores/workspaceStore.ts`,
+  `backend/tests/test_workspaces.py`.
 
 ### fix: replace reviewer-verdict timestamp heuristics with an ordinal review-cycle model
 
