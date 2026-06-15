@@ -221,8 +221,7 @@ def build_status_card(workspace_id: str, board: Any, *, limit: int = 8) -> Dict[
     if tasks:
         elements.append({"tag": "hr"})
         rows = "\n".join(
-            f"- `{_get(t, 'id', '?')}` {_get(t, 'title', '')} "
-            f"**[{_get(t, 'status', '?')}]**"
+            f"- `{_get(t, 'id', '?')}` {_get(t, 'title', '')} " f"**[{_get(t, 'status', '?')}]**"
             for t in tasks[:limit]
         )
         elements.append(_markdown(rows))

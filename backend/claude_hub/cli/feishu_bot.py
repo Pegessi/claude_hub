@@ -27,6 +27,7 @@ import click
 
 from claude_hub.cli.client import HubClient
 from claude_hub.cli.config import Settings
+from claude_hub.cli.feishu_cards import ACTION_KEY, TOKEN_KEY
 from claude_hub.cli.hub_commands import run_hub_chat_command
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime lark dependency
@@ -92,6 +93,89 @@ def handle_message_event(
         logger.exception("feishu: failed to handle incoming message")
 
 
+def _extract_card_action(data: Any) -> Optional[dict]:
+    """Extract a normalized card-action payload from a ``card.action.trigger`` event.
+
+    Returns a dict with ``token`` (required), ``action``, ``form``, ``operator_id``,
+    and ``chat_id`` — or ``None`` when the event carries no correlation token (a
+    foreign card, or a non-interactive control). Never raises.
+
+    The lark SDK exposes the action under ``event.action`` with the control's
+    ``value`` (our reserved ``hub_token`` / ``hub_action`` payload) and, for form
+    submits, ``form_value`` mapping field-name -> entered text. ``operator`` and
+    the source chat are read defensively because their exact shape varies by SDK
+    version and event source.
+    """
+    try:
+        event = getattr(data, "event", None)
+        action = getattr(event, "action", None)
+        if action is None:
+            return None
+
+        value = getattr(action, "value", None)
+        if not isinstance(value, dict):
+            return None
+        token = value.get(TOKEN_KEY)
+        if not token:
+            return None
+
+        form = getattr(action, "form_value", None)
+        if not isinstance(form, dict):
+            form = {}
+
+        operator = getattr(event, "operator", None)
+        operator_id = (
+            getattr(operator, "open_id", None)
+            or getattr(operator, "operator_id", None)
+            or getattr(operator, "union_id", None)
+        )
+
+        context = getattr(event, "context", None)
+        chat_id = getattr(context, "open_chat_id", None) or getattr(event, "open_chat_id", None)
+
+        return {
+            "token": str(token),
+            "action": value.get(ACTION_KEY),
+            "form": dict(form),
+            "operator_id": operator_id,
+            "chat_id": chat_id,
+        }
+    except Exception:  # noqa: BLE001 - never crash on a malformed callback
+        logger.exception("feishu: failed to parse card action event")
+        return None
+
+
+def handle_card_action_event(
+    data: Any,
+    hub_client_factory: HubClientFactory,
+) -> None:
+    """Pure adapter for a ``card.action.trigger`` event.
+
+    Extracts the correlation token and the human's decision and POSTs it to the
+    backend result store (keyed by token), unblocking a waiting CLI poll. Events
+    without a token (foreign cards) are ignored. Never raises, so it is safe on a
+    worker thread.
+    """
+    payload = _extract_card_action(data)
+    if payload is None:
+        return
+    try:
+        client = hub_client_factory()
+        try:
+            client.submit_card_result(
+                {
+                    "token": payload["token"],
+                    "action": payload.get("action"),
+                    "form": payload.get("form", {}),
+                    "operator_id": payload.get("operator_id"),
+                }
+            )
+        finally:
+            client.close()
+    except Exception:  # noqa: BLE001 - a 409 (already resolved) or transport error is non-fatal
+        logger.exception("feishu: failed to submit card action result")
+
+
 def _send_reply(api_client: "lark.Client", chat_id: str, reply: str) -> None:
     """Send a plain-text reply into ``chat_id`` via the IM CreateMessage API."""
     from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
@@ -142,6 +226,28 @@ def _build_message_handler(
     return on_message
 
 
+def _build_card_action_handler(
+    executor: ThreadPoolExecutor,
+    hub_client_factory: HubClientFactory,
+) -> Callable[[Any], Any]:
+    """Build a non-blocking ``card.action.trigger`` callback.
+
+    Submits the decision-recording work to a worker thread and returns
+    immediately so the lark loop stays responsive. The return value (``None``)
+    tells lark to leave the card unchanged; the human's client already reflects
+    the click.
+    """
+
+    def on_card_action(data: Any) -> Any:
+        try:
+            executor.submit(handle_card_action_event, data, hub_client_factory)
+        except Exception:  # noqa: BLE001 - never crash the listener on submit failure
+            logger.exception("feishu: failed to dispatch card action")
+        return None
+
+    return on_card_action
+
+
 def _run_bot(
     executor: ThreadPoolExecutor,
     hub_client_factory: HubClientFactory,
@@ -153,13 +259,26 @@ def _run_bot(
 
     api_client = lark.Client.builder().app_id(app_id).app_secret(app_secret).build()
 
-    handler = (
-        lark.EventDispatcherHandler.builder("", "")
-        .register_p2_im_message_receive_v1(
-            _build_message_handler(executor, hub_client_factory, api_client)
-        )
-        .build()
+    builder = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(
+        _build_message_handler(executor, hub_client_factory, api_client)
     )
+    # Card action callbacks (``card.action.trigger``) route a human's button /
+    # form decision back to the blocked CLI. Registration differs across lark
+    # SDK builds, so probe for the available registrar and skip gracefully if
+    # this SDK build does not expose one (the message path still works).
+    card_handler = _build_card_action_handler(executor, hub_client_factory)
+    registrar = getattr(builder, "register_p2_card_action_trigger", None) or getattr(
+        builder, "register_p2_application_card_action_trigger", None
+    )
+    if registrar is not None:
+        builder = registrar(card_handler)
+    else:
+        logger.warning(
+            "feishu: this lark-oapi build exposes no card.action.trigger registrar; "
+            "interactive card replies will not be collected"
+        )
+
+    handler = builder.build()
 
     ws_client = lark.ws.Client(
         app_id,

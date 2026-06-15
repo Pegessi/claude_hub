@@ -15,7 +15,12 @@ from typing import Callable, List, Tuple
 import httpx
 
 from claude_hub.cli.client import HubClient
-from claude_hub.cli.feishu_bot import handle_message_event
+from claude_hub.cli.feishu_bot import (
+    _extract_card_action,
+    handle_card_action_event,
+    handle_message_event,
+)
+from claude_hub.cli.feishu_cards import ACTION_KEY, TOKEN_KEY
 from claude_hub.cli.hub_commands import run_hub_chat_command
 
 
@@ -220,3 +225,103 @@ def test_adapter_swallows_reply_errors() -> None:
         lambda: make_client(lambda req: httpx.Response(200, json=[])),
         reply_fn,
     )
+
+
+# -- Card action adapter (_extract_card_action / handle_card_action_event) ------
+#
+# These exercise the pure card.action.trigger adapter. lark is never imported:
+# we inject a fake event object carrying our reserved hub_token/hub_action value
+# and assert the decision is POSTed to the backend result store.
+
+
+def _fake_card_event(
+    value: object,
+    *,
+    form_value: object = None,
+    operator_open_id: str = "ou_1",
+    chat_id: str = "oc_1",
+) -> SimpleNamespace:
+    """Build a P2CardActionTrigger-like object for the adapter."""
+    action = SimpleNamespace(value=value, form_value=form_value)
+    operator = SimpleNamespace(open_id=operator_open_id)
+    context = SimpleNamespace(open_chat_id=chat_id)
+    return SimpleNamespace(event=SimpleNamespace(action=action, operator=operator, context=context))
+
+
+def test_extract_card_action_button() -> None:
+    data = _fake_card_event({TOKEN_KEY: "tok1", ACTION_KEY: "approve"})
+    payload = _extract_card_action(data)
+    assert payload is not None
+    assert payload["token"] == "tok1"
+    assert payload["action"] == "approve"
+    assert payload["form"] == {}
+    assert payload["operator_id"] == "ou_1"
+    assert payload["chat_id"] == "oc_1"
+
+
+def test_extract_card_action_form_submit() -> None:
+    data = _fake_card_event(
+        {TOKEN_KEY: "tok2", ACTION_KEY: "submit"},
+        form_value={"reply": "ship it"},
+    )
+    payload = _extract_card_action(data)
+    assert payload is not None
+    assert payload["action"] == "submit"
+    assert payload["form"] == {"reply": "ship it"}
+
+
+def test_extract_card_action_without_token_is_none() -> None:
+    # A foreign card / control with no hub_token must be ignored.
+    assert _extract_card_action(_fake_card_event({"other": "x"})) is None
+
+
+def test_extract_card_action_non_dict_value_is_none() -> None:
+    assert _extract_card_action(_fake_card_event("not-a-dict")) is None
+
+
+def test_extract_card_action_malformed_event_is_none() -> None:
+    assert _extract_card_action(SimpleNamespace(event=None)) is None
+
+
+def test_handle_card_action_posts_result() -> None:
+    bodies: List[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/feishu/cards/result"
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"token": "tok1", "status": "resolved"})
+
+    data = _fake_card_event({TOKEN_KEY: "tok1", ACTION_KEY: "approve"})
+    handle_card_action_event(data, lambda: make_client(handler))
+
+    assert len(bodies) == 1
+    assert bodies[0]["token"] == "tok1"
+    assert bodies[0]["action"] == "approve"
+    assert bodies[0]["operator_id"] == "ou_1"
+
+
+def test_handle_card_action_no_token_does_not_post() -> None:
+    posted: List[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posted.append(1)
+        return httpx.Response(200, json={})
+
+    data = _fake_card_event({"other": "x"})
+    handle_card_action_event(data, lambda: make_client(handler))
+    assert posted == []
+
+
+def test_handle_card_action_swallows_409() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"detail": "already resolved"})
+
+    data = _fake_card_event({TOKEN_KEY: "tok1", ACTION_KEY: "approve"})
+    # A 409 (already resolved / double click) must not raise.
+    handle_card_action_event(data, lambda: make_client(handler))
+
+
+def test_feishu_group_registered() -> None:
+    from claude_hub.cli.main import cli
+
+    assert "feishu" in cli.commands
