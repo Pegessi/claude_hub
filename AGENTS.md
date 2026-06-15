@@ -123,6 +123,7 @@ task.
 | Active lessons / workspace feedback | `docs/working-logs/lessons-catalog.md` |
 | Terminal replay, ttyd, tmux, Playwright terminal debug | `docs/terminal-debugging.md` |
 | Deployment | `docs/DEPLOYMENT.md` |
+| CLI (`claude-hub`) | `docs/working-logs/2026-06-15-claude-hub-cli.md` |
 
 ## Common Edit Areas
 
