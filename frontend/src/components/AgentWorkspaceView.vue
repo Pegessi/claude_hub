@@ -6314,33 +6314,16 @@ onUnmounted(() => {
 }
 
 .attachment-thumb--clickable {
-  padding: 0;
-  cursor: pointer;
-  flex: none;
-  transition: border-color 0.15s ease;
-}
-
-.attachment-thumb--clickable:hover {
-  border-color: var(--ch-color-accent);
-}
-
-.attachment-thumb img {
-  width: 100%;
-  height: 100%;
-  display: block;
-  object-fit: cover;
-}
-
-.attachment-thumb--clickable {
   /* Rendered as a <button> for keyboard/click affordance; strip the native
      button chrome so it matches the surrounding thumbnail styling. */
   padding: 0;
+  flex: none;
   cursor: pointer;
   transition: border-color var(--ch-motion-fast), transform var(--ch-motion-fast);
 }
 
 .attachment-thumb--clickable:hover {
-  border-color: var(--ch-color-border-strong);
+  border-color: var(--ch-color-accent);
   transform: scale(1.04);
 }
 
@@ -6349,25 +6332,11 @@ onUnmounted(() => {
   outline-offset: 2px;
 }
 
-.image-lightbox-overlay {
-  z-index: 1200;
-  padding: 32px;
-}
-
-.image-lightbox-img {
-  max-width: 100%;
-  max-height: calc(100dvh - 64px);
-  object-fit: contain;
-  border-radius: 6px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
-  cursor: default;
-}
-
-.image-lightbox-close {
-  position: fixed;
-  top: 16px;
-  right: 16px;
-  z-index: 1;
+.attachment-thumb img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
 }
 
 .attachment-meta {
