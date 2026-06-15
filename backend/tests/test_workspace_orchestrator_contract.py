@@ -124,7 +124,7 @@ def test_autonomous_block_empty_for_non_autonomous():
     assert workspace_manager._autonomous_assignment_block(task) == ""
 
 
-def test_autonomous_block_complex_includes_orchestrator_contract_and_examples():
+def test_autonomous_block_complex_includes_orchestrator_contract_and_skeleton():
     task = _make_task(
         mode=WorkspaceTaskMode.AUTONOMOUS,
         complexity=WorkspaceTaskExecutionComplexity.COMPLEX,
@@ -136,10 +136,10 @@ def test_autonomous_block_complex_includes_orchestrator_contract_and_examples():
     assert "Orchestrator Contract" in block
     assert "P-PLAN" in block and "P-EXECUTE" in block and "P-JUDGE" in block
     assert "P-INTEGRATE" in block and "P-VALIDATE" in block and "P-RESEARCH" in block
-    # Two worked examples
-    assert "Example 1" in block and "Example 2" in block
+    # Compact skeleton (shape, not a verbatim template)
+    assert "Compact skeleton" in block
     assert "soft-delete" in block.lower() or "/api/orders" in block
-    assert "image" in block.lower() and "external:t2i.v3" in block
+    assert "external:<api>" in block
     # Envelope schema
     assert "subtask-envelope" in block
     assert "return_mode: final-only" in block
