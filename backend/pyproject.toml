@@ -15,7 +15,11 @@ dependencies = [
     "pydantic>=2.9.0",
     "pydantic-settings>=2.6.0",
     "python-multipart>=0.0.12",
+    "click>=8.1.0",
 ]
+
+[project.scripts]
+claude-hub = "claude_hub.cli.main:cli"
 
 [project.optional-dependencies]
 dev = [

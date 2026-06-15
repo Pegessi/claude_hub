@@ -117,6 +117,50 @@ auth is enabled.
 
 For persistent deployment options, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
+## CLI
+
+`claude-hub` is a terminal client over the Agent Workspace REST API, useful for
+both humans and agents driving the hub from a shell.
+
+```bash
+cd backend
+uv sync                       # installs the `claude-hub` entry point
+uv run claude-hub --help      # or: uv run python -m claude_hub.cli --help
+```
+
+Configuration precedence: flags > env > config file > defaults.
+
+```bash
+export CLAUDE_HUB_URL=http://127.0.0.1:8173   # default
+export CLAUDE_HUB_TOKEN=...                    # only for remote/non-loopback backends
+# or ~/.config/claude-hub/config.toml:  [default] \n base_url = "..." \n token = "..."
+```
+
+Common commands (add `--json` to any for machine-readable output):
+
+```bash
+uv run claude-hub workspace list
+uv run claude-hub workspace create --name demo --path /path/to/repo
+uv run claude-hub workspace board <WORKSPACE_ID>            # alias: status
+uv run claude-hub task list <WORKSPACE_ID>
+uv run claude-hub task create <WORKSPACE_ID> --title "Fix bug" --prompt "..."
+uv run claude-hub task start <TASK_ID>
+uv run claude-hub task send <WORKSPACE_ID> <TASK_ID> --message "also add a test"
+uv run claude-hub task continue <TASK_ID> --message "keep going"
+uv run claude-hub task abort <TASK_ID> --reason "superseded"
+uv run claude-hub agent list <WORKSPACE_ID>
+uv run claude-hub agent create <WORKSPACE_ID> --type claude
+uv run claude-hub session send <SESSION_ID> --message "continue"
+uv run claude-hub session report <SESSION_ID> --state working --message "..."
+uv run claude-hub lessons list <WORKSPACE_ID> --query terminal
+uv run claude-hub lessons get <WORKSPACE_ID> <LESSON_ID>
+```
+
+Loopback requests bypass auth, so a local backend needs no token; commands exit
+non-zero on API errors. Global options: `--base-url` / `CLAUDE_HUB_URL`,
+`--token` / `CLAUDE_HUB_TOKEN`, `--cookie`, `--json`, `--config`, and `-v` /
+`--verbose` (logs each request URL to stderr).
+
 ## Authentication
 
 Feishu OAuth is optional. For public access, configure either an Open ID
