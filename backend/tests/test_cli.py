@@ -393,3 +393,85 @@ def test_config_ignores_non_string_base_url(tmp_path, monkeypatch):
     # Non-string values are ignored; fall through to default / None.
     assert s.base_url == DEFAULT_BASE_URL
     assert s.token is None
+
+
+def test_limit_validation_error_formatted():
+    detail = [
+        {
+            "type": "greater_than_equal",
+            "loc": ["query", "limit"],
+            "msg": "Input should be greater than or equal to 1",
+        }
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, json={"detail": detail})
+
+    client = make_client(handler)
+    with pytest.raises(HubError) as exc:
+        client.list_lessons("ws1", {"limit": 0})
+    msg = str(exc.value)
+    assert "Input should be greater than or equal to 1" in msg
+    assert "{'type'" not in msg
+    assert "limit:" in msg
+
+
+def test_limit_out_of_range_exits(monkeypatch):
+    captured = patch_get_client(monkeypatch, lambda r: httpx.Response(200, json=[]))
+    runner = CliRunner()
+    result = runner.invoke(cli, ["lessons", "list", "ws1", "--limit", "0"])
+    assert result.exit_code == 2
+    assert captured == []  # no HTTP call was made
+
+
+def test_request_review_body(monkeypatch):
+    paths: List[str] = []
+    bodies: List[Dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": "t1"})
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["task", "request-review", "t1", "--message", "pls review"])
+    assert result.exit_code == 0, result.output
+    assert paths[0] == "/api/workspaces/tasks/t1/request-review"
+    assert bodies[0] == {"message": "pls review"}
+
+
+def test_request_review_omits_message(monkeypatch):
+    bodies: List[Dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": "t1"})
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["task", "request-review", "t1"])
+    assert result.exit_code == 0, result.output
+    assert bodies[0] == {}
+
+
+@pytest.mark.parametrize("status", [200, 204])
+def test_lessons_delete(monkeypatch, status):
+    paths: List[str] = []
+    methods: List[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        methods.append(request.method)
+        if status == 204:
+            return httpx.Response(204)
+        return httpx.Response(200, json={"id": "l1", "status": "archived"})
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["lessons", "delete", "ws1", "l1"])
+    assert result.exit_code == 0, result.output
+    assert paths[0] == "/api/workspaces/ws1/lessons/l1"
+    assert methods[0] == "DELETE"
+    if status == 204:
+        assert "deleted l1" in result.output

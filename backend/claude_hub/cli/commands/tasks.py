@@ -203,3 +203,20 @@ def task_abort(ctx: click.Context, task_id: str, reason: str) -> None:
     except HubError as e:
         raise click.ClickException(str(e)) from e
     emit(data, cli_main.as_json(ctx))
+
+
+@task.command("request-review")
+@click.argument("task_id")
+@click.option("--message", default=None, help="Optional note for the reviewer.")
+@click.pass_context
+def task_request_review(ctx: click.Context, task_id: str, message: Optional[str]) -> None:
+    """Manually request reviewer checks for a task."""
+    body: Dict[str, Any] = {}
+    if message is not None:
+        body["message"] = message
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.request_task_review(task_id, body)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(data, cli_main.as_json(ctx))
