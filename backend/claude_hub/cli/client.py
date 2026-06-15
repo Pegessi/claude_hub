@@ -216,3 +216,29 @@ class HubClient:
         with 204 No Content.
         """
         return self._request("DELETE", f"/api/workspaces/{workspace_id}/lessons/{lesson_id}")
+
+    # -- Feishu card bridge -------------------------------------------------
+
+    def register_card(self, body: Dict[str, Any]) -> Any:
+        """POST /api/feishu/cards/register.
+
+        Registers an opaque correlation token as pending just before a card is
+        pushed to a human, so a later poll can resolve the human's decision.
+        """
+        return self._request("POST", "/api/feishu/cards/register", json=body)
+
+    def submit_card_result(self, body: Dict[str, Any]) -> Any:
+        """POST /api/feishu/cards/result.
+
+        Records a human's card decision keyed by token (posted by the bot's
+        ``card.action.trigger`` callback).
+        """
+        return self._request("POST", "/api/feishu/cards/result", json=body)
+
+    def get_card_result(self, token: str) -> Any:
+        """GET /api/feishu/cards/result/{token}.
+
+        Returns the current status payload (``pending`` / ``resolved`` /
+        ``unknown``) for a correlation token.
+        """
+        return self._request("GET", f"/api/feishu/cards/result/{token}")

@@ -161,6 +161,41 @@ non-zero on API errors. Global options: `--base-url` / `CLAUDE_HUB_URL`,
 `--token` / `CLAUDE_HUB_TOKEN`, `--cookie`, `--json`, `--config`, and `-v` /
 `--verbose` (logs each request URL to stderr).
 
+### Feishu interactive cards
+
+The `feishu` group lets an agent ask a human for a decision over Feishu and
+block until they answer — push an interactive card to a chat, then long-poll
+for the click. The Feishu long-connection bot (`claude-hub feishu-bot`) must be
+running to relay the human's choice back; set `$FEISHU_APP_ID` /
+`$FEISHU_APP_SECRET` (or pass `--app-id`/`--app-secret`).
+
+```bash
+# Alias a chat id so agents don't paste oc_… everywhere.
+uv run claude-hub feishu bind ops --chat-id oc_abc123
+uv run claude-hub feishu bindings            # list   /  feishu unbind ops
+
+# Ask a human and BLOCK until they click (the agent's main use):
+uv run claude-hub --json feishu send-card --kind approval --to ops \
+    --title "Deploy v2?" --body "All checks pass." --wait --timeout 120
+#  → {"status":"resolved","action":"approve","operator_id":"ou_…"}  (or "timeout")
+
+# Free-text reply, custom field name, or a plan confirmation:
+uv run claude-hub --json feishu send-card --kind needs_input --to ops \
+    --title "Release note?" --body "One line" --field-name note --wait
+uv run claude-hub feishu send-card --kind plan_confirm --to ops --title T --body "..." --wait
+
+# Display-only cards render live workspace data (--wait is rejected for these):
+uv run claude-hub feishu send-card --kind status --to ops --workspace-id <WS>
+uv run claude-hub feishu send-card --kind task   --to ops --workspace-id <WS> --task-id <T>
+
+uv run claude-hub feishu send-card --kind approval --title T --body B --dry-run  # print JSON, don't send
+uv run claude-hub --json feishu result <TOKEN>                                   # poll a decision
+```
+
+Interactive kinds (`approval`, `needs_input`, `plan_confirm`) embed a correlation
+token; display kinds (`status`, `task`) carry none. See
+`docs/working-logs/2026-06-16-feishu-card-cli.md` for the design and a smoke test.
+
 ## Authentication
 
 Feishu OAuth is optional. For public access, configure either an Open ID

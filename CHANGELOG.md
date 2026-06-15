@@ -100,6 +100,28 @@
   preserves the intentional reviewer-binding design while stopping the stall.
 - **Files**: `backend/claude_hub/services/workspace_manager/_monitor.py`,
   `backend/tests/test_workspaces.py`.
+### feat: Feishu interactive cards over the `claude-hub` CLI
+
+- **What**: a `feishu` CLI group that pushes interactive cards to a human over
+  Feishu and (with `--wait`) blocks until they respond, so an external agent can
+  request a decision and collect the answer back in one command ("Scenario A").
+  Kinds: `approval`, `needs_input`, `plan_confirm` (interactive, carry a
+  correlation token) and `status`, `task` (display live workspace data).
+  Adds `feishu bind`/`bindings`/`unbind` for chat-id aliases and
+  `feishu result <token>` to poll a decision.
+- **How**: the CLI registers an opaque token in a new backend result store
+  before sending the card; the long-connection bot relays the human's
+  `card.action.trigger` callback to `POST /api/feishu/cards/result`, which
+  unblocks the long-polling CLI. The store is in-memory, TTL-pruned, and
+  first-write-wins (double-clicks / re-registers can't overwrite a decision).
+- **Files**: `backend/claude_hub/services/feishu_card_results.py`,
+  `backend/claude_hub/api/feishu.py`, `backend/claude_hub/cli/feishu_cards.py`,
+  `backend/claude_hub/cli/feishu_sender.py`,
+  `backend/claude_hub/cli/feishu_store.py`,
+  `backend/claude_hub/cli/feishu_bot.py`,
+  `backend/claude_hub/cli/commands/feishu.py`,
+  `backend/claude_hub/cli/client.py`, `README.md`,
+  `docs/working-logs/2026-06-16-feishu-card-cli.md`, and `backend/tests/test_feishu_*.py`.
 
 ### fix: reviewer /clear decision keyed off the reviewer session, not other tasks' fields
 
