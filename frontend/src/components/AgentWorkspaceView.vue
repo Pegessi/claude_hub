@@ -628,12 +628,17 @@
                   :key="attachment.id"
                   class="attachment-row"
                 >
-                  <div class="attachment-thumb">
+                  <button
+                    type="button"
+                    class="attachment-thumb attachment-thumb--clickable"
+                    :aria-label="`Preview ${attachment.filename}`"
+                    @click="openImageLightbox(`/api/workspaces/attachments/${attachment.id}`, attachment.filename)"
+                  >
                     <img
                       :src="`/api/workspaces/attachments/${attachment.id}`"
                       :alt="attachment.filename"
                     >
-                  </div>
+                  </button>
                   <div class="attachment-meta">
                     <strong>{{ attachment.filename }}</strong>
                     <span>{{ persistedAttachmentMeta(attachment) }}</span>
@@ -1351,6 +1356,29 @@
             </div>
           </template>
         </div>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <div
+        v-if="imageLightboxUrl"
+        class="workspace-modal-overlay image-lightbox-overlay"
+        @click.self="closeImageLightbox"
+      >
+        <button
+          type="button"
+          class="icon-button image-lightbox-close"
+          aria-label="Close image preview"
+          @click="closeImageLightbox"
+        >
+          x
+        </button>
+        <img
+          class="image-lightbox-img"
+          :src="imageLightboxUrl"
+          :alt="imageLightboxAlt"
+          @click.stop
+        >
       </div>
     </Teleport>
 
@@ -2485,6 +2513,8 @@ const markdownPreviewModalReportId = ref<string | null>(null)
 const markdownPreviewModalContent = ref<WorkspaceArtifactPreview | null>(null)
 const markdownPreviewModalError = ref<string | null>(null)
 const markdownPreviewModalLoading = ref(false)
+const imageLightboxUrl = ref<string | null>(null)
+const imageLightboxAlt = ref('')
 const mobileCollapsedColumns = reactive<Record<WorkspaceTaskStatus, boolean>>({
   todo: false,
   queued: false,
@@ -3026,6 +3056,22 @@ function closeMarkdownPreviewModal() {
   markdownPreviewModalContent.value = null
   markdownPreviewModalError.value = null
   markdownPreviewModalLoading.value = false
+}
+
+function openImageLightbox(url: string, alt: string) {
+  imageLightboxUrl.value = url
+  imageLightboxAlt.value = alt
+}
+
+function closeImageLightbox() {
+  imageLightboxUrl.value = null
+  imageLightboxAlt.value = ''
+}
+
+function handleLightboxKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && imageLightboxUrl.value) {
+    closeImageLightbox()
+  }
 }
 
 const reviewerSessions = computed<ManagedSession[]>(() => [
@@ -4562,6 +4608,7 @@ watch(
 
 onMounted(async () => {
   document.addEventListener('pointerdown', handleWorkspaceDocumentPointerDown)
+  document.addEventListener('keydown', handleLightboxKeydown)
   await fetchRemoteProfiles()
   await workspaceStore.fetchWorkspaces()
   terminalStore.startAgentStatusPolling()
@@ -4573,6 +4620,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   document.removeEventListener('pointerdown', handleWorkspaceDocumentPointerDown)
+  document.removeEventListener('keydown', handleLightboxKeydown)
   if (boardPollTimer !== null) {
     window.clearInterval(boardPollTimer)
     boardPollTimer = null
@@ -6265,11 +6313,61 @@ onUnmounted(() => {
   background: var(--ch-color-surface-sunken);
 }
 
+.attachment-thumb--clickable {
+  padding: 0;
+  cursor: pointer;
+  flex: none;
+  transition: border-color 0.15s ease;
+}
+
+.attachment-thumb--clickable:hover {
+  border-color: var(--ch-color-accent);
+}
+
 .attachment-thumb img {
   width: 100%;
   height: 100%;
   display: block;
   object-fit: cover;
+}
+
+.attachment-thumb--clickable {
+  /* Rendered as a <button> for keyboard/click affordance; strip the native
+     button chrome so it matches the surrounding thumbnail styling. */
+  padding: 0;
+  cursor: pointer;
+  transition: border-color var(--ch-motion-fast), transform var(--ch-motion-fast);
+}
+
+.attachment-thumb--clickable:hover {
+  border-color: var(--ch-color-border-strong);
+  transform: scale(1.04);
+}
+
+.attachment-thumb--clickable:focus-visible {
+  outline: 2px solid var(--ch-color-accent);
+  outline-offset: 2px;
+}
+
+.image-lightbox-overlay {
+  z-index: 1200;
+  padding: 32px;
+}
+
+.image-lightbox-img {
+  max-width: 100%;
+  max-height: calc(100dvh - 64px);
+  object-fit: contain;
+  border-radius: 6px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  cursor: default;
+}
+
+.image-lightbox-close {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 1;
 }
 
 .attachment-meta {
@@ -6827,6 +6925,28 @@ onUnmounted(() => {
 
 .markdown-preview-modal-content {
   max-height: min(70dvh, 720px);
+}
+
+.image-lightbox-overlay {
+  z-index: 1400;
+}
+
+.image-lightbox-img {
+  /* Fit within the viewport (minus the overlay padding) while preserving the
+     intrinsic aspect ratio; scale down large images, never up small ones. */
+  max-width: min(1200px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: var(--ch-radius-sm);
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.45);
+}
+
+.image-lightbox-close {
+  position: fixed;
+  top: 16px;
+  right: 16px;
 }
 
 .artifact-preview-error {
