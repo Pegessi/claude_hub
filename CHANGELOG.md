@@ -5,6 +5,31 @@
 
 ## Unreleased
 
+### fix: reviewer /clear decision keyed off the reviewer session, not other tasks' fields
+
+- **What**: when a reviewer session was reused for an unrelated new task, it
+  sometimes started reviewing without first clearing its terminal context, so
+  the prior task's conversation leaked into the new review (wasted context and
+  risk of mid-review auto-compact).
+- **Root cause**: the cross-task `/clear` decision relied on
+  `_has_prior_review_history`, which scanned other tasks for one whose
+  `review_session_id` pointed back at the reviewer. That field is nulled by the
+  abort (`_dispatch.py`), review-skip, and stale-reviewer-release paths, so a
+  reviewer that genuinely still held a prior task's context could appear to have
+  no history — and the unrelated review dispatched without `/clear`.
+- **Fix**: track the reviewer's last-dispatched review task on the session
+  itself (`ManagedSession.last_review_task_id`), set whenever a review prompt is
+  actually sent. `_request_task_review` now clears iff that value is set and
+  differs from the incoming task id. New task → clear; same task re-review
+  (review_failed→fix→completed, or goal-packet then implementation) → keep;
+  brand-new reviewer with no prior review → no `/clear` round-trip. Removed the
+  now-unused `_has_prior_review_history`.
+- **Files**: `backend/claude_hub/models/schemas.py`,
+  `backend/claude_hub/services/workspace_manager/_reports.py`,
+  `backend/claude_hub/services/workspace_manager/_dispatch.py`,
+  `backend/claude_hub/services/workspace_manager/_normalize.py`,
+  `backend/tests/test_workspaces.py`.
+
 ### feat: click task attachment image to preview at full size
 
 - **What**: task attachment thumbnails in the task detail panel were not

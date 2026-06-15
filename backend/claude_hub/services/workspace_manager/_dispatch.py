@@ -278,17 +278,6 @@ class _DispatchMixin:
             for task in self.tasks.values()
         )
 
-    def _has_prior_review_history(
-        self, reviewer_id: str, *, exclude_task_id: Optional[str] = None
-    ) -> bool:
-        for task in self.tasks.values():
-            if task.review_session_id != reviewer_id:
-                continue
-            if exclude_task_id is not None and task.id == exclude_task_id:
-                continue
-            return True
-        return False
-
     async def _request_dispatch_decision(self, workspace: Workspace, task: WorkspaceTask) -> None:
         dispatcher = await self.ensure_workspace_agent(
             workspace.id,
