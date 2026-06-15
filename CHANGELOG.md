@@ -41,6 +41,27 @@
   border on hover.
 - **Files**: `frontend/src/components/AgentWorkspaceView.vue`.
 
+### feat: add the `claude-hub` command-line interface
+
+- **What**: a new `claude-hub` CLI (Click-based, installed as a console script
+  via `[project.scripts]`) that drives the Agent Workspace REST API from a
+  shell. Command groups: `workspace` (list/create/board, with `status` as an
+  alias), `task` (list/create/start/send/continue/abort), `agent`
+  (list/create), `session` (send/report), and `lessons` (list/get). Global
+  options `--base-url`/`CLAUDE_HUB_URL`, `--token`/`CLAUDE_HUB_TOKEN`,
+  `--cookie`, `--json`, `--config`/`CLAUDE_HUB_CONFIG`, and `-v`/`--verbose`.
+- **Convenience**: `task send` lets a human or agent push a follow-up message
+  to a running task without finding the underlying session id.
+- **Hardening**: defensive rendering for non-dict rows in table output,
+  real request-URL logging under `--verbose`, and cookie/config edge handling
+  (config precedence flags > env > TOML file > defaults; loopback bypasses
+  auth so a local backend needs no token). The HTTP client uses
+  `trust_env=False` so ambient proxy env vars do not hijack loopback requests.
+  Commands exit non-zero on API errors.
+- **Files**: `backend/claude_hub/cli/` (package), `backend/tests/test_cli.py`,
+  `backend/pyproject.toml` (adds `click` + the `claude-hub` script), `README.md`,
+  `docs/working-logs/2026-06-15-claude-hub-cli.md`.
+
 ### fix: stop.sh now reliably kills the backend worker and all ttyd processes
 
 - **Symptom**: restarting the backend appeared to "not take effect" — after
