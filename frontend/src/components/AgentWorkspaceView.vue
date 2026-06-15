@@ -7051,6 +7051,12 @@ onUnmounted(() => {
 .lessons-list {
   display: grid;
   gap: 8px;
+  /* Bound the list to a viewport-relative height so it stays compact and
+     scrolls internally instead of growing with every lesson. */
+  max-height: 46dvh;
+  overflow-y: auto;
+  /* Avoid scrollbar overlapping the lesson row borders. */
+  padding-right: 2px;
 }
 
 .lesson-row {
