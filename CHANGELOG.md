@@ -5,6 +5,17 @@
 
 ## Unreleased
 
+### feat: click task attachment image to preview at full size
+
+- **What**: task attachment thumbnails in the task detail panel were not
+  clickable, so users could not view the image at full size. Clicking a
+  persisted attachment thumbnail now opens a full-screen lightbox preview.
+- **Behavior**: the enlarged image is scaled to fit the viewport while
+  preserving aspect ratio; the overlay closes on backdrop click, the `Escape`
+  key, or the close button. The thumbnail shows a pointer cursor and an accent
+  border on hover.
+- **Files**: `frontend/src/components/AgentWorkspaceView.vue`.
+
 ### fix: stop.sh now reliably kills the backend worker and all ttyd processes
 
 - **Symptom**: restarting the backend appeared to "not take effect" — after
