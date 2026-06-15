@@ -22,6 +22,36 @@ class HubError(Exception):
         self.status = status
 
 
+def _format_detail(detail: Any) -> str:
+    """Render a FastAPI error ``detail`` into a readable string.
+
+    FastAPI validation errors (HTTP 422) carry a *list* of error dicts in
+    ``detail``; str()-ing that verbatim yields an ugly raw repr. For lists we
+    extract each item's ``msg`` (prefixed with the offending field name from the
+    last element of ``loc`` when available) and join with ``"; "``. Plain string
+    details are returned unchanged.
+    """
+    if isinstance(detail, str):
+        return detail
+    if isinstance(detail, list):
+        parts = []
+        for item in detail:
+            if isinstance(item, dict):
+                msg = item.get("msg")
+                loc = item.get("loc")
+                field = None
+                if isinstance(loc, (list, tuple)) and loc:
+                    field = str(loc[-1])
+                if msg is not None:
+                    parts.append(f"{field}: {msg}" if field else str(msg))
+                else:
+                    parts.append(str(item))
+            else:
+                parts.append(str(item))
+        return "; ".join(parts)
+    return str(detail)
+
+
 def _parse_cookie_string(cookie: str) -> Dict[str, str]:
     """Parse a ``"k=v; k2=v2"`` cookie header into a dict."""
     jar: Dict[str, str] = {}
@@ -108,7 +138,7 @@ class HubClient:
             try:
                 body = resp.json()
                 if isinstance(body, dict) and "detail" in body:
-                    detail = str(body["detail"])
+                    detail = _format_detail(body["detail"])
                 else:
                     detail = resp.text
             except ValueError:
@@ -151,6 +181,10 @@ class HubClient:
         """POST /api/workspaces/tasks/{task_id}/abort."""
         return self._request("POST", f"/api/workspaces/tasks/{task_id}/abort", json=body)
 
+    def request_task_review(self, task_id: str, body: Dict[str, Any]) -> Any:
+        """POST /api/workspaces/tasks/{task_id}/request-review."""
+        return self._request("POST", f"/api/workspaces/tasks/{task_id}/request-review", json=body)
+
     # -- Agents / sessions --------------------------------------------------
 
     def ensure_agent(self, workspace_id: str, body: Dict[str, Any]) -> Any:
@@ -174,3 +208,11 @@ class HubClient:
     def get_lesson(self, workspace_id: str, lesson_id: str) -> Any:
         """GET /api/workspaces/{workspace_id}/lessons/{lesson_id}."""
         return self._request("GET", f"/api/workspaces/{workspace_id}/lessons/{lesson_id}")
+
+    def delete_lesson(self, workspace_id: str, lesson_id: str) -> Any:
+        """DELETE /api/workspaces/{workspace_id}/lessons/{lesson_id}.
+
+        Returns the archived lesson JSON, or ``None`` when the server replies
+        with 204 No Content.
+        """
+        return self._request("DELETE", f"/api/workspaces/{workspace_id}/lessons/{lesson_id}")

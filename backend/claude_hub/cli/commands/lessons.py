@@ -21,7 +21,9 @@ def lessons() -> None:
 @lessons.command("list")
 @click.argument("workspace_id")
 @click.option("--query", default="", help="Keyword search.")
-@click.option("--limit", default=20, type=int, help="Max lessons to return.")
+@click.option(
+    "--limit", default=20, type=click.IntRange(1, 50), help="Max lessons to return (1-50)."
+)
 @click.option("--include-inactive", is_flag=True, default=False, help="Include inactive lessons.")
 @click.pass_context
 def lessons_list(
@@ -72,3 +74,20 @@ def lessons_get(ctx: click.Context, workspace_id: str, lesson_id: str) -> None:
     except HubError as e:
         raise click.ClickException(str(e)) from e
     emit(data, cli_main.as_json(ctx))
+
+
+@lessons.command("delete")
+@click.argument("workspace_id")
+@click.argument("lesson_id")
+@click.pass_context
+def lessons_delete(ctx: click.Context, workspace_id: str, lesson_id: str) -> None:
+    """Archive (delete) a feedback lesson."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.delete_lesson(workspace_id, lesson_id)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    if data is None:
+        click.echo(f"deleted {lesson_id}")
+    else:
+        emit(data, cli_main.as_json(ctx))
