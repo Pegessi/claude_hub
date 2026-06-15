@@ -16,6 +16,7 @@ dependencies = [
     "pydantic-settings>=2.6.0",
     "python-multipart>=0.0.12",
     "click>=8.1.0",
+    "lark-oapi>=1.6.8",
 ]
 
 [project.scripts]
@@ -64,6 +65,11 @@ disallow_untyped_defs = false
 [[tool.mypy.overrides]]
 module = "claude_hub.services.workspace_manager.*"
 disable_error_code = ["attr-defined", "no-any-return"]
+
+# lark-oapi ships no type stubs; it is imported lazily inside the feishu bot.
+[[tool.mypy.overrides]]
+module = "lark_oapi.*"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

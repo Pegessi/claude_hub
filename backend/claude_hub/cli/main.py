@@ -83,12 +83,14 @@ def _register() -> None:
     from claude_hub.cli.commands.sessions import session
     from claude_hub.cli.commands.tasks import task
     from claude_hub.cli.commands.workspaces import agent, workspace
+    from claude_hub.cli.feishu_bot import feishu_bot
 
     cli.add_command(workspace)
     cli.add_command(agent)
     cli.add_command(task)
     cli.add_command(session)
     cli.add_command(lessons)
+    cli.add_command(feishu_bot)
 
 
 _register()
