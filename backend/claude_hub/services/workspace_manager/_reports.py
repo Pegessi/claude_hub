@@ -945,6 +945,12 @@ class _ReportsMixin:
                 "updated_at": now,
             }
         )
+        # Capture the reviewer's previously-reviewed task before we overwrite it
+        # below. The cross-task /clear decision keys off this session-local value
+        # rather than scanning other tasks' review_session_id (which abort/skip/
+        # stale-release paths null out, silently dropping the prior-history
+        # signal and letting an unrelated review start without /clear).
+        previous_review_task_id = reviewer.last_review_task_id
         self.sessions[reviewer.id] = reviewer.model_copy(
             update={
                 "task_id": task.id,
@@ -953,14 +959,18 @@ class _ReportsMixin:
                 "runtime_status": AgentRuntimeStatus.WORKING,
                 "prompt_retry_task_id": None,
                 "prompt_retry_attempted_at": None,
+                "last_review_task_id": task.id,
                 "updated_at": now,
                 "last_activity_at": now,
             }
         )
         self._save_state()
-        is_same_task_continuation = task.review_session_id == reviewer.id
-        should_clear_context = not is_same_task_continuation and self._has_prior_review_history(
-            reviewer.id, exclude_task_id=task.id
+        # Clear only when this reviewer last reviewed a *different* task. Same-task
+        # re-review cycles (review_failed -> fix -> completed, or goal-packet then
+        # implementation review) keep their context; a brand-new reviewer with no
+        # prior review (previous_review_task_id is None) pays no /clear round-trip.
+        should_clear_context = (
+            previous_review_task_id is not None and previous_review_task_id != task.id
         )
         if should_clear_context:
             logger.info(

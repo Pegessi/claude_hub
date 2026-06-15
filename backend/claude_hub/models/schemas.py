@@ -600,6 +600,10 @@ class ManagedSession(BaseModel):
     last_auto_continue_at: Optional[datetime] = None
     prompt_retry_task_id: Optional[str] = None
     prompt_retry_attempted_at: Optional[datetime] = None
+    # For reviewer sessions: the id of the task this session was last dispatched
+    # a review prompt for. Drives the cross-task /clear decision independently of
+    # any task's mutable review_session_id (which abort/skip/stale-release null).
+    last_review_task_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     last_activity_at: Optional[datetime] = None

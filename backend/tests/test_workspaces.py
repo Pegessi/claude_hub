@@ -2155,6 +2155,94 @@ def test_reviewer_keeps_context_when_re_reviewing_same_task(
     ), "Re-reviewing the same task on the same reviewer must keep prior context"
 
 
+def test_reviewer_clears_context_even_when_prior_task_review_session_id_nulled(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Regression: the cross-task /clear must still fire when the previously
+    reviewed task's ``review_session_id`` has been nulled (as abort, skip, and
+    stale-reviewer-release paths do). The decision keys off the reviewer
+    session's ``last_review_task_id``, not a scan of other tasks' fields."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="rev-nulled-tab",
+        port=12830,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Reviewer Nulled", "path": str(repo), "session_prefix": "rn"},
+    ).json()
+    worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    persistent_reviewer = client.post(
+        f"/api/workspaces/{workspace['id']}/agent",
+        json={"role": "reviewer", "reuse_existing": False},
+    ).json()
+
+    first_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "First", "prompt": "Implement first"},
+    ).json()
+    client.post(
+        f"/api/workspaces/tasks/{first_task['id']}/start",
+        json={"target_session_id": worker["id"]},
+    )
+    client.post(
+        f"/api/workspaces/sessions/{worker['id']}/reports",
+        json={"task_id": first_task["id"], "state": "completed", "message": "Done"},
+    )
+
+    first_reviewer_id = workspace_manager.tasks[first_task["id"]].review_session_id
+    assert first_reviewer_id == persistent_reviewer["id"]
+    # The reviewer session now remembers it reviewed the first task.
+    assert workspace_manager.sessions[first_reviewer_id].last_review_task_id == first_task["id"]
+
+    # Simulate a terminal path (skip / abort / stale-release) nulling the first
+    # task's review_session_id back-reference. The old task-scan heuristic would
+    # now see no prior history and skip /clear.
+    first = workspace_manager.tasks[first_task["id"]]
+    workspace_manager.tasks[first_task["id"]] = first.model_copy(
+        update={"review_session_id": None}
+    )
+
+    second_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Second", "prompt": "Implement second"},
+    ).json()
+    client.post(
+        f"/api/workspaces/tasks/{second_task['id']}/start",
+        json={"target_session_id": worker["id"]},
+    )
+    sent_messages.clear()
+    client.post(
+        f"/api/workspaces/sessions/{worker['id']}/reports",
+        json={"task_id": second_task["id"], "state": "completed", "message": "Done"},
+    )
+
+    second_reviewer_id = workspace_manager.tasks[second_task["id"]].review_session_id
+    assert second_reviewer_id == first_reviewer_id
+    second_messages = [m for _sess, m in sent_messages]
+    clear_index = next(
+        (i for i, m in enumerate(second_messages) if m == "/clear"),
+        None,
+    )
+    prompt_index = next(
+        (i for i, m in enumerate(second_messages) if "Review workspace task" in m),
+        None,
+    )
+    assert (
+        clear_index is not None
+    ), "Reviewer must /clear before an unrelated review even if the prior task's review_session_id was nulled"
+    assert prompt_index is not None
+    assert clear_index < prompt_index
+
+
 @pytest.mark.parametrize("report_state", ["ready_for_review", "blocked", "needs_input"])
 def test_agent_review_gate_states_trigger_reviewer(
     monkeypatch: MonkeyPatch,

@@ -358,6 +358,7 @@ class _NormalizeMixin:
         normalized.setdefault("last_auto_continue_at", None)
         normalized.setdefault("prompt_retry_task_id", None)
         normalized.setdefault("prompt_retry_attempted_at", None)
+        normalized.setdefault("last_review_task_id", None)
         return normalized
 
     def _runtime_from_managed_status(self, item: dict[str, Any]) -> str:
