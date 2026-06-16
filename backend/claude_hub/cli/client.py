@@ -230,8 +230,9 @@ class HubClient:
     def submit_card_result(self, body: Dict[str, Any]) -> Any:
         """POST /api/feishu/cards/result.
 
-        Records a human's card decision keyed by token (posted by the bot's
-        ``card.action.trigger`` callback).
+        Records a human's card decision keyed by token. Your own Feishu bot
+        calls this from its ``card.action.trigger`` handler after extracting the
+        decision with :func:`claude_hub.cli.feishu_cards.parse_card_action`.
         """
         return self._request("POST", "/api/feishu/cards/result", json=body)
 

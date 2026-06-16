@@ -165,9 +165,15 @@ non-zero on API errors. Global options: `--base-url` / `CLAUDE_HUB_URL`,
 
 The `feishu` group lets an agent ask a human for a decision over Feishu and
 block until they answer — push an interactive card to a chat, then long-poll
-for the click. The Feishu long-connection bot (`claude-hub feishu-bot`) must be
-running to relay the human's choice back; set `$FEISHU_APP_ID` /
+for the click. Sending cards needs Feishu credentials: set `$FEISHU_APP_ID` /
 `$FEISHU_APP_SECRET` (or pass `--app-id`/`--app-secret`).
+
+Relaying the human's click back is handled by **your own Feishu bot**: in its
+`card.action.trigger` handler, call
+`claude_hub.cli.feishu_cards.parse_card_action(payload)` to extract the
+`{token, action, form, operator_id}`, then POST them to
+`/api/feishu/cards/result` (the `HubClient.submit_card_result` helper does
+this). No bundled long-connection bot is required.
 
 ```bash
 # Alias a chat id so agents don't paste oc_… everywhere.
