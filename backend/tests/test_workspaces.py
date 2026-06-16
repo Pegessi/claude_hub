@@ -2001,9 +2001,7 @@ def test_shared_review_session_id_does_not_steal_busy_reviewer(
         json={"task_id": first_task["id"], "state": "ready_for_review", "message": "Done"},
     )
     assert first_ready.status_code == 201
-    assert (
-        workspace_manager.tasks[first_task["id"]].review_session_id == first_reviewer_id
-    )
+    assert workspace_manager.tasks[first_task["id"]].review_session_id == first_reviewer_id
     assert workspace_manager.sessions[first_reviewer_id].task_id == first_task["id"]
 
     # Second worker requests review → should NOT steal first_reviewer_id
@@ -2026,9 +2024,7 @@ def test_shared_review_session_id_does_not_steal_busy_reviewer(
     )
 
     # First task's reviewer binding must remain intact.
-    assert (
-        workspace_manager.tasks[first_task["id"]].review_session_id == first_reviewer_id
-    )
+    assert workspace_manager.tasks[first_task["id"]].review_session_id == first_reviewer_id
     assert workspace_manager.sessions[first_reviewer_id].task_id == first_task["id"]
 
     # Second task must have its own reviewer that is actually assigned to it.
@@ -2207,9 +2203,7 @@ def test_reviewer_clears_context_even_when_prior_task_review_session_id_nulled(
     # task's review_session_id back-reference. The old task-scan heuristic would
     # now see no prior history and skip /clear.
     first = workspace_manager.tasks[first_task["id"]]
-    workspace_manager.tasks[first_task["id"]] = first.model_copy(
-        update={"review_session_id": None}
-    )
+    workspace_manager.tasks[first_task["id"]] = first.model_copy(update={"review_session_id": None})
 
     second_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
@@ -5130,6 +5124,181 @@ def test_idle_working_agent_with_review_in_flight_is_not_prompted(
     session = workspace_manager.sessions[started["session_id"]]
     assert sent_messages == []
     assert session.auto_continue_attempts == 0
+
+
+def test_bound_reviewer_on_reopened_task_is_not_auto_prompted(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A reviewer bound to a reopened WORKING task must not be auto-prompted.
+
+    Regression for "后面那个reviewer的上报始终收不到完成信号": after a
+    ``review_failed`` reopen the reviewer session intentionally keeps
+    ``current_task_id`` on the task (so the same reviewer handles the next
+    cycle), but the task is now WORKING and owned by the *worker*. The monitor
+    used to treat the idle reviewer as a worker owing a report and endlessly
+    auto-prompted it (action=report_missing); the reviewer re-posted its verdict,
+    which was dropped as a stale duplicate, stranding the task until the fallback
+    reaper fired ~5 min later. The monitor must only auto-continue the worker
+    (``task.session_id``), never the bound reviewer.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    status_samples: list[TerminalAgentStatus] = []
+    sent_messages: list[tuple[str, str]] = []
+
+    async def fake_create_tab(
+        name: str,
+        shell: Optional[str] = None,
+        cwd: Optional[str] = None,
+        solo_mode: bool = False,
+        agent_type: AgentType = AgentType.CLAUDE,
+        target: ExecutionTarget = ExecutionTarget.LOCAL,
+        remote_profile_id: Optional[str] = None,
+        remote_cwd: Optional[str] = None,
+        remote_reconnect: bool = True,
+        remote_forward_port: Optional[int] = None,
+        workspace_id: Optional[str] = None,
+        workspace_name: Optional[str] = None,
+        workspace_role: WorkspaceSessionRole | None = None,
+    ) -> TerminalTab:
+        suffix = "reviewer" if workspace_role == WorkspaceSessionRole.REVIEWER else "worker"
+        return TerminalTab(
+            id=f"tab-bound-{suffix}",
+            name=name,
+            shell=shell,
+            cwd=cwd,
+            solo_mode=solo_mode,
+            agent_type=agent_type,
+            target=target,
+            remote_profile_id=remote_profile_id,
+            remote_cwd=remote_cwd,
+            remote_reconnect=remote_reconnect,
+            port=12367,
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+            workspace_role=workspace_role,
+        )
+
+    async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
+        sent_messages.append((tmux_session, message))
+
+    async def fake_ensure_session_ready(_session) -> None:
+        return None
+
+    async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
+        return status_samples
+
+    async def fake_capture_output(_tmux_session: str) -> str:
+        # Completion-shaped output proven to trigger the auto report-missing
+        # prompt (same shape as test_completed_idle_working_agent_is_prompted_to_report).
+        # If the reviewer guard were absent, the bound reviewer would be prompted.
+        return "\n".join(
+            [
+                "Implemented status transition fix.",
+                "Validation: tests passed.",
+                "Risks: no known risk.",
+                "",
+                "› ",
+            ]
+        )
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
+    monkeypatch.setattr(
+        workspace_module.ttyd_manager,
+        "list_tab_agent_statuses",
+        fake_list_statuses,
+    )
+    monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+    monkeypatch.setattr(
+        workspace_manager,
+        "_ensure_session_ready_for_send",
+        fake_ensure_session_ready,
+    )
+    monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture_output)
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Bound Reviewer Repo", "path": str(repo), "session_prefix": "br"},
+    ).json()
+    worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Reopened task", "prompt": "Address the review feedback"},
+    ).json()
+    started = client.post(
+        f"/api/workspaces/tasks/{task['id']}/start",
+        json={"target_session_id": worker["id"]},
+    ).json()
+
+    # Simulate the post-``review_failed`` reopen: task is WORKING and owned by
+    # the worker, while a separate reviewer session stays bound to it.
+    now = datetime.now()
+    reviewer = ManagedSession(
+        id="br-reviewer-1",
+        workspace_id=workspace["id"],
+        task_id=task["id"],
+        tab_id="tab-bound-reviewer",
+        role=WorkspaceSessionRole.REVIEWER,
+        agent_type=AgentType.CODEX,
+        status=ManagedSessionStatus.IDLE,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        current_task_id=task["id"],
+        queued_count=0,
+        title="Bound Reviewer 1",
+        branch=None,
+        workspace_path=str(repo),
+        tmux_session="claude-hub-tab-bound-reviewer",
+        target=ExecutionTarget.LOCAL,
+        remote_profile_id=None,
+        remote_cwd=None,
+        remote_reconnect=True,
+        solo_mode=True,
+        remote_forward_port=None,
+        created_at=now,
+        updated_at=now,
+    )
+    workspace_manager.sessions[reviewer.id] = reviewer
+    workspace_manager.tasks[started["id"]] = workspace_manager.tasks[started["id"]].model_copy(
+        update={
+            "status": WorkspaceTaskStatus.WORKING,
+            "review_session_id": reviewer.id,
+            "review_requested_at": now - timedelta(seconds=30),
+            "review_completed_at": now - timedelta(seconds=20),
+            "updated_at": now,
+        }
+    )
+    sent_messages.clear()
+
+    sampled_at = datetime.now()
+    status_samples[:] = [
+        TerminalAgentStatus(
+            tab_id="tab-bound-reviewer",
+            tab_name="Bound Reviewer 1",
+            agent_type=AgentType.CODEX,
+            status=AgentRuntimeStatus.IDLE,
+            status_text="Idle",
+            detail="reviewer prompt visible",
+            tmux_session="claude-hub-tab-bound-reviewer",
+            last_changed_at=sampled_at - timedelta(seconds=30),
+            sampled_at=sampled_at,
+        )
+    ]
+
+    asyncio.run(
+        workspace_manager._refresh_session_statuses(
+            workspace["id"],
+            run_auto_continue=True,
+        )
+    )
+
+    # The bound reviewer must not be prompted to report.
+    reviewer_after = workspace_manager.sessions[reviewer.id]
+    assert sent_messages == []
+    assert reviewer_after.auto_continue_attempts == 0
 
 
 def test_monitor_surfaces_worker_prompt_stuck_in_input(
