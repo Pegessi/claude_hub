@@ -4163,6 +4163,201 @@ def test_reassigns_auto_queued_task_off_busy_working_agent(
     assert "Run on the next available agent" in sent_messages[-1][1]
 
 
+def test_reassigns_related_pinned_task_off_review_parked_agent(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A related-task-pinned queued task must not starve forever behind an agent
+    that is runtime-idle but still bound to a non-DONE review-parked task. When a
+    different agent is free, the pinned task migrates to it instead of waiting
+    indefinitely for a human to accept the parked review.
+
+    This reproduces the live deadlock: the related-pinned task carried
+    dispatch_reason="Related to task ..." (not "Queued behind existing workspace
+    agent"), so the original rebalancer skipped it entirely; the assigned agent
+    was idle on paper yet locked by a review-parked task, while other agents sat
+    idle."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="related-pinned-tab",
+        port=12352,
+        sent_messages=sent_messages,
+    )
+
+    async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
+        return []
+
+    monkeypatch.setattr(
+        workspace_module.ttyd_manager,
+        "list_tab_agent_statuses",
+        fake_list_statuses,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Related Pinned Repo",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "related-pinned",
+        },
+    ).json()
+    first_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+
+    # First agent runs a task and gets it parked in REVIEW (review passed but not
+    # human-accepted), so it stays runtime-idle yet bound to a non-DONE task.
+    # _can_dispatch_to is False for it indefinitely, but _can_assign_or_queue_to
+    # is True (it is holding an unresolved review task), so related-task dispatch
+    # still pins new work to it.
+    parked_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Review parked task", "prompt": "Hold first agent in review"},
+    ).json()
+    client.post(
+        f"/api/workspaces/tasks/{parked_task['id']}/start",
+        json={"target_session_id": first_agent["id"]},
+    )
+    client.post(
+        f"/api/workspaces/sessions/{first_agent['id']}/reports",
+        json={
+            "task_id": parked_task["id"],
+            "state": "ready_for_review",
+            "message": "Ready",
+        },
+    )
+    assert pass_task_review(client, parked_task["id"]).status_code == 201
+    parked = workspace_manager.tasks[parked_task["id"]]
+    assert parked.status == WorkspaceTaskStatus.REVIEW
+    assert workspace_manager.sessions[first_agent["id"]].current_task_id == parked_task["id"]
+    assert not workspace_manager._can_dispatch_to(workspace_manager.sessions[first_agent["id"]])
+
+    # A follow-up task related to the parked one gets pinned to the same agent
+    # for context continuity (dispatch_reason "Related to task ...").
+    related_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Follow-up fix", "prompt": "Continue from the related task"},
+    ).json()
+    related_start = client.post(
+        f"/api/workspaces/tasks/{related_task['id']}/start",
+        json={"related_task_id": parked_task["id"]},
+    )
+
+    assert related_start.status_code == 201
+    queued = related_start.json()
+    assert queued["status"] == "queued"
+    assert queued["session_id"] == first_agent["id"]
+    assert queued["dispatch_reason"] == f"Related to task {parked_task['id']}"
+
+    # A second idle agent comes online; a dispatch pass should migrate the
+    # related-pinned task off the review-parked first agent onto the free one.
+    second_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    dispatch_response = client.post(f"/api/workspaces/{workspace['id']}/dispatch")
+    assert dispatch_response.status_code == 204
+
+    rebalanced = workspace_manager.tasks[related_task["id"]]
+    assert rebalanced.status == WorkspaceTaskStatus.WORKING
+    assert rebalanced.session_id == second_agent["id"]
+    assert rebalanced.dispatch_reason == "Reassigned to newly available workspace agent"
+    assert rebalanced.clear_context is True
+    # The parked agent keeps holding its review task untouched.
+    assert workspace_manager.sessions[first_agent["id"]].current_task_id == parked_task["id"]
+    assert workspace_manager.sessions[second_agent["id"]].current_task_id == related_task["id"]
+    assert "Continue from the related task" in sent_messages[-1][1]
+
+
+def test_user_pinned_task_never_migrates_off_review_parked_agent(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An explicit operator target pin ("User selected target agent") must wait
+    for exactly that agent and never migrate to a free one, even when the pinned
+    agent is stuck holding a review-parked task. This guards the one
+    dispatch_reason that stays non-migratable."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="user-pinned-tab",
+        port=12353,
+        sent_messages=sent_messages,
+    )
+
+    async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
+        return []
+
+    monkeypatch.setattr(
+        workspace_module.ttyd_manager,
+        "list_tab_agent_statuses",
+        fake_list_statuses,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={
+            "name": "User Pinned Repo",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "user-pinned",
+        },
+    ).json()
+    first_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+
+    parked_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Review parked task", "prompt": "Hold first agent in review"},
+    ).json()
+    client.post(
+        f"/api/workspaces/tasks/{parked_task['id']}/start",
+        json={"target_session_id": first_agent["id"]},
+    )
+    client.post(
+        f"/api/workspaces/sessions/{first_agent['id']}/reports",
+        json={
+            "task_id": parked_task["id"],
+            "state": "ready_for_review",
+            "message": "Ready",
+        },
+    )
+    assert pass_task_review(client, parked_task["id"]).status_code == 201
+
+    # Operator explicitly targets the busy first agent.
+    pinned_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Operator pinned fix", "prompt": "Must run on first agent only"},
+    ).json()
+    pinned_start = client.post(
+        f"/api/workspaces/tasks/{pinned_task['id']}/start",
+        json={"target_session_id": first_agent["id"]},
+    )
+    assert pinned_start.status_code == 201
+    queued = pinned_start.json()
+    assert queued["status"] == "queued"
+    assert queued["session_id"] == first_agent["id"]
+    assert queued["dispatch_reason"] == "User selected target agent"
+
+    # A second idle agent comes online and a dispatch pass runs; the explicit
+    # user pin must NOT migrate.
+    second_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    dispatch_response = client.post(f"/api/workspaces/{workspace['id']}/dispatch")
+    assert dispatch_response.status_code == 204
+
+    held = workspace_manager.tasks[pinned_task["id"]]
+    assert held.status == WorkspaceTaskStatus.QUEUED
+    assert held.session_id == first_agent["id"]
+    assert held.dispatch_reason == "User selected target agent"
+    assert workspace_manager.sessions[second_agent["id"]].current_task_id is None
+
+
 def test_dispatch_holds_agent_during_in_flight_review(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,

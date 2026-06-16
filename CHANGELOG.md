@@ -5,6 +5,29 @@
 
 ## Unreleased
 
+### fix: related/continuity-pinned queued tasks migrate off a stuck agent
+
+- **What**: a queued task pinned to a specific agent for context continuity
+  (`dispatch_reason` "Related to task ...", "Continuing previous task
+  assignment", or a prior reassignment) could starve forever when that agent was
+  runtime-idle but still bound to a non-`DONE` task parked in `REVIEW`
+  (review passed yet awaiting human acceptance). The board showed the task
+  `Queued` and the agent `idle`, while other agents sat free — the live "queue
+  排不上" symptom that survived the earlier WORKING-agent fix.
+- **Root cause**: the rebalancer (`_next_reassignable_queued_task`) only
+  migrated tasks whose `dispatch_reason` was exactly "Queued behind existing
+  workspace agent". Every continuity-pinned task was skipped, so it waited
+  indefinitely for an agent that `_can_dispatch_to` rejects until a human
+  resolves its review task.
+- **Fix**: invert the gate. A queued task is now migratable under any
+  `dispatch_reason` *except* an explicit operator pin ("User selected target
+  agent"), and only when its assigned agent currently cannot be dispatched to
+  (`not _can_dispatch_to`). Agent preference is preserved: an available pinned
+  agent still picks the task up itself via `_next_queued_task`; migration (with
+  `clear_context=True`) only happens when the pinned agent is genuinely stuck.
+- **Files**: `backend/claude_hub/services/workspace_manager/_dispatch.py`,
+  `backend/tests/test_workspaces.py`.
+
 ### fix: auto-queued tasks migrate off a busy WORKING agent, not only a REVIEW-held one
 
 - **What**: a task that auto-queued behind a busy agent could stay stuck in the
