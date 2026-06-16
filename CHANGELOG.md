@@ -102,29 +102,27 @@
   `backend/tests/test_workspaces.py`.
 ### feat: Feishu interactive cards over the `claude-hub` CLI
 
-- **What**: a `feishu` CLI group that pushes interactive cards to a human over
-  Feishu and (with `--wait`) blocks until they respond, so an external agent can
-  request a decision and collect the answer back in one command ("Scenario A").
+- **What**: a `feishu` CLI group with two stateless, IO-free helpers for an
+  external agent that is itself a Feishu bot — it sends cards to a human and
+  receives the `card.action.trigger` callback in the same process, then drives
+  Hub through the CLI ("Scenario A"). `feishu build-card` prints a card's JSON
+  for the agent to send; `feishu parse-action` parses a raw callback into a
+  normalized `{token, action, form, operator_id, chat_id}` decision (payload as
+  an argument or on stdin; foreign cards exit non-zero with a `null` line).
   Kinds: `approval`, `needs_input`, `plan_confirm` (interactive, carry a
-  correlation token) and `status`, `task` (display live workspace data).
-  Adds `feishu bind`/`bindings`/`unbind` for chat-id aliases and
-  `feishu result <token>` to poll a decision.
-- **How**: the CLI registers an opaque token in a new backend result store
-  before sending the card; your own Feishu bot relays the human's
-  `card.action.trigger` callback to `POST /api/feishu/cards/result` (extracting
-  the decision with `feishu_cards.parse_card_action`), which unblocks the
-  long-polling CLI. No bundled long-connection bot is required. The store is
-  in-memory, TTL-pruned, and first-write-wins (double-clicks / re-registers
-  can't overwrite a decision).
-- **Files**: `backend/claude_hub/services/feishu_card_results.py`,
-  `backend/claude_hub/api/feishu.py`, `backend/claude_hub/cli/feishu_cards.py`
-  (card builders + `parse_card_action`),
-  `backend/claude_hub/cli/feishu_sender.py`,
-  `backend/claude_hub/cli/feishu_store.py`,
-  `backend/claude_hub/cli/hub_commands.py` (reusable `/hub` dispatcher),
-  `backend/claude_hub/cli/commands/feishu.py`,
-  `backend/claude_hub/cli/client.py`, `README.md`,
-  `docs/working-logs/2026-06-16-feishu-card-cli.md`, and `backend/tests/test_feishu_*.py`.
+  correlation token) and `status`, `task` (render live workspace data, no token).
+- **How**: card construction and callback parsing are pure functions in
+  `feishu_cards.py`; the two CLI commands just shell them out as JSON. Because
+  the agent sends and receives in one process, Hub is not in the Feishu loop —
+  no outbound sender, no token/result store, no `/api/feishu/cards/*` endpoints,
+  and no chat-id bindings. `build-card` reaches the backend only to read live
+  board data for the display kinds.
+- **Files**: `backend/claude_hub/cli/feishu_cards.py` (card builders +
+  `parse_card_action`), `backend/claude_hub/cli/commands/feishu.py` (the two
+  thin commands), `README.md`,
+  `docs/working-logs/2026-06-16-feishu-card-cli.md`,
+  `backend/tests/test_feishu_parse.py`, and
+  `backend/tests/test_feishu_commands.py`.
 
 ### fix: reviewer /clear decision keyed off the reviewer session, not other tasks' fields
 

@@ -163,39 +163,36 @@ non-zero on API errors. Global options: `--base-url` / `CLAUDE_HUB_URL`,
 
 ### Feishu interactive cards
 
-The `feishu` group lets an agent ask a human for a decision over Feishu and
-block until they answer — push an interactive card to a chat, then long-poll
-for the click. Sending cards needs Feishu credentials: set `$FEISHU_APP_ID` /
-`$FEISHU_APP_SECRET` (or pass `--app-id`/`--app-secret`).
+These helpers are for an **external agent that is itself a Feishu bot** — it
+sends cards to a human and receives the `card.action.trigger` callback in the
+same process, then drives Hub through this CLI. Hub is not in the Feishu loop, so
+it ships no sender, no token store, and no callback endpoint — just two
+stateless, IO-free helpers that print JSON on stdout:
 
-Relaying the human's click back is handled by **your own Feishu bot**: in its
-`card.action.trigger` handler, call
-`claude_hub.cli.feishu_cards.parse_card_action(payload)` to extract the
-`{token, action, form, operator_id}`, then POST them to
-`/api/feishu/cards/result` (the `HubClient.submit_card_result` helper does
-this). No bundled long-connection bot is required.
+- `feishu build-card` — build a card's JSON (the agent sends it to Feishu itself).
+- `feishu parse-action` — parse a raw `card.action.trigger` callback into a
+  normalized `{token, action, form, operator_id, chat_id}` decision.
 
 ```bash
-# Alias a chat id so agents don't paste oc_… everywhere.
-uv run claude-hub feishu bind ops --chat-id oc_abc123
-uv run claude-hub feishu bindings            # list   /  feishu unbind ops
+# Build a card; the printed `token` is embedded in every control so the later
+# callback can be correlated. The agent POSTs `card` to Feishu's CreateMessage.
+uv run claude-hub feishu build-card --kind approval --title "Deploy v2?" --body "All checks pass."
+#  → {"kind":"approval","token":"x9…","card":{…}}
 
-# Ask a human and BLOCK until they click (the agent's main use):
-uv run claude-hub --json feishu send-card --kind approval --to ops \
-    --title "Deploy v2?" --body "All checks pass." --wait --timeout 120
-#  → {"status":"resolved","action":"approve","operator_id":"ou_…"}  (or "timeout")
+uv run claude-hub feishu build-card --kind needs_input --title "Release note?" \
+    --body "One line" --field-name note
+uv run claude-hub feishu build-card --kind plan_confirm --title T --body "..."
 
-# Free-text reply, custom field name, or a plan confirmation:
-uv run claude-hub --json feishu send-card --kind needs_input --to ops \
-    --title "Release note?" --body "One line" --field-name note --wait
-uv run claude-hub feishu send-card --kind plan_confirm --to ops --title T --body "..." --wait
+# Display-only cards render live workspace data and carry no token:
+uv run claude-hub feishu build-card --kind status --workspace-id <WS>
+uv run claude-hub feishu build-card --kind task   --workspace-id <WS> --task-id <T>
 
-# Display-only cards render live workspace data (--wait is rejected for these):
-uv run claude-hub feishu send-card --kind status --to ops --workspace-id <WS>
-uv run claude-hub feishu send-card --kind task   --to ops --workspace-id <WS> --task-id <T>
-
-uv run claude-hub feishu send-card --kind approval --title T --body B --dry-run  # print JSON, don't send
-uv run claude-hub --json feishu result <TOKEN>                                   # poll a decision
+# In the bot's card.action.trigger handler, parse the callback (arg or stdin).
+# Match the returned `token` against the card you sent. Foreign cards → exit 1
+# and a `null` line, so you can branch on the exit code.
+uv run claude-hub feishu parse-action "$CALLBACK_JSON"
+echo "$CALLBACK_JSON" | uv run claude-hub feishu parse-action
+#  → {"token":"x9…","action":"approve","form":{},"operator_id":"ou_…","chat_id":"oc_…"}
 ```
 
 Interactive kinds (`approval`, `needs_input`, `plan_confirm`) embed a correlation

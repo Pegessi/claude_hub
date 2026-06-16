@@ -5,10 +5,10 @@ These are PURE functions that return Feishu interactive-card JSON (the classic
 ``CreateMessage`` API with ``msg_type="interactive"``). They take no lark-oapi
 dependency and never perform IO, so they are fully unit-testable.
 
-Scenario A (an external agent drives the CLI, which pushes a card to a human and
-blocks for the human's decision) needs every *interactive* control to carry a
-correlation token so the ``card.action.trigger`` callback can route the human's
-decision back to the originating CLI invocation. The contract is:
+Scenario A (an external agent drives the CLI; the agent is itself the Feishu bot,
+so it sends the card and receives the ``card.action.trigger`` callback in one
+process) needs every *interactive* control to carry a correlation token so the
+callback can be matched back to the card the agent sent. The contract is:
 
 * Every actionable control's ``value`` is a dict with two reserved keys:
   ``hub_token`` (the opaque correlation token) and ``hub_action`` (a short
@@ -65,12 +65,11 @@ def _attr_or_key(obj: Any, name: str) -> Any:
 def parse_card_action(payload: Any) -> Optional[Dict[str, Any]]:
     """Extract a normalized decision from a ``card.action.trigger`` callback.
 
-    This is the inverse of the card-building contract above and the single
-    integration point for an EXTERNAL bot: when your own Feishu bot receives a
-    ``card.action.trigger`` event, pass the raw callback body here to pull out
-    the correlation token and the human's choice, then POST the result to
-    ``/api/feishu/cards/result`` (e.g. via
-    :meth:`claude_hub.cli.client.HubClient.submit_card_result`).
+    This is the inverse of the card-building contract above. When the agent's bot
+    receives a ``card.action.trigger`` event, pass the raw callback body here to
+    pull out the correlation token and the human's choice, then match the
+    ``token`` against the card it sent (exposed by the CLI as ``feishu
+    parse-action``).
 
     ``payload`` may be the raw JSON dict Feishu delivers, the inner ``event``
     object, or a lark-oapi event object — attribute and key access are both

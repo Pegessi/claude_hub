@@ -1,18 +1,16 @@
-"""Tests for the ``feishu`` CLI command group (bind/send-card/result)."""
+"""Tests for the ``feishu`` CLI command group (build-card / parse-action)."""
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Callable, List
 
 import httpx
-import pytest
 from click.testing import CliRunner
 
 from claude_hub.cli import main as cli_main
 from claude_hub.cli.client import HubClient
-from claude_hub.cli.commands import feishu as feishu_cmd
+from claude_hub.cli.feishu_cards import ACTION_KEY, TOKEN_KEY
 from claude_hub.cli.main import cli
 
 
@@ -32,66 +30,47 @@ def patch_get_client(monkeypatch, handler) -> List[httpx.Request]:
     return captured
 
 
-@pytest.fixture
-def config_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("CLAUDE_HUB_CONFIG_DIR", str(tmp_path))
-    return tmp_path
+# -- build-card -------------------------------------------------------------
 
 
-# -- bindings ---------------------------------------------------------------
-
-
-def test_bind_and_list(config_dir: Path) -> None:
-    runner = CliRunner()
-    result = runner.invoke(cli, ["feishu", "bind", "ops", "--chat-id", "oc_123"])
-    assert result.exit_code == 0, result.output
-    assert "oc_123" in result.output
-
-    listed = runner.invoke(cli, ["feishu", "bindings"])
-    assert listed.exit_code == 0
-    assert "ops" in listed.output
-    assert "oc_123" in listed.output
-
-
-def test_bindings_empty(config_dir: Path) -> None:
-    runner = CliRunner()
-    result = runner.invoke(cli, ["feishu", "bindings"])
-    assert result.exit_code == 0
-    assert "(none)" in result.output
-
-
-def test_unbind(config_dir: Path) -> None:
-    runner = CliRunner()
-    runner.invoke(cli, ["feishu", "bind", "ops", "--chat-id", "oc_123"])
-    result = runner.invoke(cli, ["feishu", "unbind", "ops"])
-    assert result.exit_code == 0
-    assert "unbound ops" in result.output
-
-
-def test_unbind_missing_errors(config_dir: Path) -> None:
-    runner = CliRunner()
-    result = runner.invoke(cli, ["feishu", "unbind", "ghost"])
-    assert result.exit_code != 0
-    assert "no binding" in result.output
-
-
-# -- send-card --dry-run ----------------------------------------------------
-
-
-def test_send_card_dry_run_approval() -> None:
+def test_build_card_approval_has_token() -> None:
     runner = CliRunner()
     result = runner.invoke(
-        cli,
-        ["feishu", "send-card", "--kind", "approval", "--title", "T", "--body", "B", "--dry-run"],
+        cli, ["feishu", "build-card", "--kind", "approval", "--title", "T", "--body", "B"]
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["kind"] == "approval"
     assert payload["token"]  # interactive kinds get a token
     assert "header" in payload["card"]
+    # The token is embedded in a control's value per the card contract.
+    assert payload["token"] in result.output
 
 
-def test_send_card_dry_run_status_fetches_board(monkeypatch) -> None:
+def test_build_card_accepts_explicit_token() -> None:
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["feishu", "build-card", "--kind", "approval", "--title", "T", "--token", "fixedtok"],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["token"] == "fixedtok"
+
+
+def test_build_card_needs_input_field_name() -> None:
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["feishu", "build-card", "--kind", "needs_input", "--title", "T", "--field-name", "note"],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["kind"] == "needs_input"
+    assert "note" in result.output  # the named input field
+
+
+def test_build_card_status_fetches_board(monkeypatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/workspaces/ws1/board"
         return httpx.Response(200, json={"tasks": [{"id": "t1", "title": "A", "status": "done"}]})
@@ -99,8 +78,7 @@ def test_send_card_dry_run_status_fetches_board(monkeypatch) -> None:
     patch_get_client(monkeypatch, handler)
     runner = CliRunner()
     result = runner.invoke(
-        cli,
-        ["feishu", "send-card", "--kind", "status", "--workspace-id", "ws1", "--dry-run"],
+        cli, ["feishu", "build-card", "--kind", "status", "--workspace-id", "ws1"]
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -108,173 +86,77 @@ def test_send_card_dry_run_status_fetches_board(monkeypatch) -> None:
     assert payload["token"] is None  # display kinds carry no token
 
 
-def test_send_card_wait_invalid_for_display() -> None:
+def test_build_card_status_requires_workspace_id() -> None:
     runner = CliRunner()
-    result = runner.invoke(
-        cli,
-        ["feishu", "send-card", "--kind", "status", "--workspace-id", "ws1", "--wait"],
-    )
-    assert result.exit_code != 0
-    assert "--wait is only valid" in result.output
-
-
-def test_send_card_status_requires_workspace_id() -> None:
-    runner = CliRunner()
-    result = runner.invoke(cli, ["feishu", "send-card", "--kind", "status", "--dry-run"])
+    result = runner.invoke(cli, ["feishu", "build-card", "--kind", "status"])
     assert result.exit_code != 0
     assert "--workspace-id is required" in result.output
 
 
-# -- send-card (real send path, mocked sender) ------------------------------
-
-
-def test_send_card_registers_then_sends(monkeypatch, config_dir: Path) -> None:
-    """Interactive send registers the token before pushing the card."""
-    feishu_store_calls: List[dict] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/feishu/cards/register":
-            feishu_store_calls.append(json.loads(request.content))
-            return httpx.Response(200, json={"token": "x", "status": "pending"})
-        raise AssertionError(f"unexpected path {request.url.path}")
-
-    patch_get_client(monkeypatch, handler)
-
-    sent: List[tuple] = []
-
-    def fake_send(app_id, app_secret, chat_id, card) -> str:
-        sent.append((app_id, app_secret, chat_id, card))
-        return "om_999"
-
-    monkeypatch.setattr(feishu_cmd, "send_card", fake_send)
-    monkeypatch.setattr(feishu_cmd, "_resolve_credentials", lambda a, b: ("app", "secret"))
-
+def test_build_card_task_requires_ids() -> None:
     runner = CliRunner()
-    result = runner.invoke(
-        cli,
-        [
-            "feishu",
-            "send-card",
-            "--kind",
-            "approval",
-            "--to",
-            "oc_direct",
-            "--title",
-            "T",
-            "--body",
-            "B",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    assert len(feishu_store_calls) == 1
-    assert feishu_store_calls[0]["chat_id"] == "oc_direct"
-    assert feishu_store_calls[0]["kind"] == "approval"
-    assert len(sent) == 1
-    assert sent[0][2] == "oc_direct"
-    assert "om_999" in result.output
-
-
-def test_send_card_requires_target_when_not_dry_run(monkeypatch) -> None:
-    runner = CliRunner()
-    result = runner.invoke(
-        cli, ["feishu", "send-card", "--kind", "approval", "--title", "T", "--body", "B"]
-    )
+    result = runner.invoke(cli, ["feishu", "build-card", "--kind", "task", "--workspace-id", "ws1"])
     assert result.exit_code != 0
-    assert "--to is required" in result.output
+    assert "--task-id" in result.output
 
 
-def test_send_card_wait_polls_until_resolved(monkeypatch, config_dir: Path) -> None:
-    calls = {"n": 0}
+# -- parse-action -----------------------------------------------------------
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/feishu/cards/register":
-            return httpx.Response(200, json={"status": "pending"})
-        if request.url.path.startswith("/api/feishu/cards/result/"):
-            calls["n"] += 1
-            if calls["n"] < 2:
-                return httpx.Response(200, json={"token": "t", "status": "pending"})
-            return httpx.Response(
-                200, json={"token": "t", "status": "resolved", "action": "approve"}
-            )
-        raise AssertionError(f"unexpected path {request.url.path}")
 
-    patch_get_client(monkeypatch, handler)
-    monkeypatch.setattr(feishu_cmd, "send_card", lambda *a: "om_1")
-    monkeypatch.setattr(feishu_cmd, "_resolve_credentials", lambda a, b: ("app", "secret"))
-    monkeypatch.setattr(feishu_cmd.time, "sleep", lambda s: None)
+def _callback(token: str = "tok1", action: str = "approve") -> dict:
+    return {
+        "event": {
+            "action": {"value": {TOKEN_KEY: token, ACTION_KEY: action}},
+            "operator": {"open_id": "ou_42"},
+            "context": {"open_chat_id": "oc_9"},
+        }
+    }
 
+
+def test_parse_action_from_argument() -> None:
     runner = CliRunner()
-    result = runner.invoke(
-        cli,
-        [
-            "--json",
-            "feishu",
-            "send-card",
-            "--kind",
-            "approval",
-            "--to",
-            "oc_1",
-            "--title",
-            "T",
-            "--body",
-            "B",
-            "--wait",
-        ],
-    )
+    result = runner.invoke(cli, ["feishu", "parse-action", json.dumps(_callback())])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload["status"] == "resolved"
+    assert payload["token"] == "tok1"
     assert payload["action"] == "approve"
+    assert payload["operator_id"] == "ou_42"
+    assert payload["chat_id"] == "oc_9"
 
 
-def test_send_card_wait_timeout(monkeypatch, config_dir: Path) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/feishu/cards/register":
-            return httpx.Response(200, json={"status": "pending"})
-        return httpx.Response(200, json={"token": "t", "status": "pending"})
-
-    patch_get_client(monkeypatch, handler)
-    monkeypatch.setattr(feishu_cmd, "send_card", lambda *a: "om_1")
-    monkeypatch.setattr(feishu_cmd, "_resolve_credentials", lambda a, b: ("app", "secret"))
-    monkeypatch.setattr(feishu_cmd.time, "sleep", lambda s: None)
-
+def test_parse_action_from_stdin() -> None:
     runner = CliRunner()
-    result = runner.invoke(
-        cli,
-        [
-            "--json",
-            "feishu",
-            "send-card",
-            "--kind",
-            "approval",
-            "--to",
-            "oc_1",
-            "--title",
-            "T",
-            "--body",
-            "B",
-            "--wait",
-            "--timeout",
-            "0",
-        ],
-    )
+    result = runner.invoke(cli, ["feishu", "parse-action"], input=json.dumps(_callback("t2")))
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert payload["status"] == "timeout"
+    assert json.loads(result.output)["token"] == "t2"
 
 
-# -- result -----------------------------------------------------------------
-
-
-def test_result_reads_token(monkeypatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/feishu/cards/result/tok1"
-        return httpx.Response(
-            200, json={"token": "tok1", "status": "resolved", "action": "approve"}
-        )
-
-    patch_get_client(monkeypatch, handler)
+def test_parse_action_foreign_card_exits_1() -> None:
     runner = CliRunner()
-    result = runner.invoke(cli, ["--json", "feishu", "result", "tok1"])
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["action"] == "approve"
+    foreign = {"event": {"action": {"value": {"something": "else"}}}}
+    result = runner.invoke(cli, ["feishu", "parse-action", json.dumps(foreign)])
+    assert result.exit_code == 1
+    assert result.output.strip() == "null"
+
+
+def test_parse_action_invalid_json_errors() -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli, ["feishu", "parse-action", "{not json"])
+    assert result.exit_code != 0
+    assert "invalid JSON" in result.output
+
+
+def test_parse_action_empty_errors() -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli, ["feishu", "parse-action"], input="")
+    assert result.exit_code != 0
+    assert "no callback payload" in result.output
+
+
+# -- group wiring -----------------------------------------------------------
+
+
+def test_feishu_group_has_only_two_commands() -> None:
+    from claude_hub.cli.commands.feishu import feishu
+
+    assert set(feishu.commands) == {"build-card", "parse-action"}
