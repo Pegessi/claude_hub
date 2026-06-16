@@ -637,6 +637,40 @@ class _ReportsMixin:
             task.id,
             task.autonomy_policy.max_iterations if task.autonomy_policy else 3,
         )
+        # ------------------------------------------------------------------
+        # Post-PASS idempotency guard.
+        #
+        # Once the autonomous run has reached PASSED for the current verdict
+        # round, further worker completed/working/ready_for_review reports are
+        # stale echoes — the worker re-emitting after human acceptance was
+        # already requested. Re-running evaluation here would flip the phase
+        # off PASSED (PASSED → EVALUATING/WORKING); once a later review_cycle
+        # bump makes ``current_round_has_verdict`` lapse, those stale reports
+        # go on to reopen review and clear ``human_acceptance_requested_at``,
+        # stranding the task in REVIEW with no usable Done button. Ignore them
+        # so the run stays PASSED and acceptance-able.
+        #
+        # A genuine reopen (continue_task after a FAIL/REVISING verdict) sets
+        # phase = WORKING and bumps review_cycle *before* the worker reports
+        # again, so report_opens_review_round is True there and legitimate
+        # revision rounds proceed untouched.
+        # ------------------------------------------------------------------
+        if run.phase == AutonomousRunPhase.PASSED and not state_policy.report_opens_review_round(
+            report.review_cycle, task.reviewed_cycle
+        ):
+            logger.info(
+                "Ignoring stale post-PASS worker report in _autonomous_run_after_worker_report "
+                "workspace_id=%s task_id=%s session_id=%s report_state=%s "
+                "report_cycle=%s review_cycle=%s reviewed_cycle=%s",
+                task.workspace_id,
+                task.id,
+                session.id,
+                report.state.value,
+                report.review_cycle,
+                task.review_cycle,
+                task.reviewed_cycle,
+            )
+            return None
         active_session_ids = list(dict.fromkeys([*run.active_session_ids, session.id]))
         iterations = list(run.iterations)
         if report.state in {AgentReportState.READY_FOR_REVIEW, AgentReportState.COMPLETED}:
