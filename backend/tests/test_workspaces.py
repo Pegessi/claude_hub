@@ -556,6 +556,130 @@ def test_autonomous_task_passes_after_evaluator_review(
     assert passed_task.autonomous_run.evaluation_reports[-1].decision.value == "pass"
 
 
+def test_autonomous_passed_ignores_stale_worker_reports(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Regression: once an autonomous run reaches PASSED for a review cycle,
+    late/stale worker ``completed``/``working`` reports for that same cycle
+    must NOT reopen review or clear ``human_acceptance_requested_at``.
+
+    Repro of the stuck-in-review/no-Done bug (task 33f033b3): an autonomous
+    worker kept re-emitting ``completed`` after the evaluator's
+    ``review_passed``. Each stale report flipped ``autonomous_run.phase``
+    PASSED → EVALUATING and eventually reopened a fresh review round,
+    clearing ``human_acceptance_requested_at`` — so the card was stranded in
+    the REVIEW column with no usable Done button.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="auto-stale-tab",
+        port=12533,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Auto Stale", "path": str(repo), "session_prefix": "autos"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={
+            "title": "Auto stale",
+            "prompt": "Complete and evaluate",
+            "task_mode": "autonomous",
+        },
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+
+    goal_packet = {
+        "objective": "Complete autonomous task.",
+        "acceptance_criteria": ["Evaluator passes"],
+        "validation_plan": ["Report inspection"],
+        "assumptions": [],
+        "out_of_scope": [],
+        "handoff_requirements": [],
+    }
+    client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "completed",
+            "message": "Done",
+            "goal_packet": goal_packet,
+            "acceptance_check": [
+                {
+                    "criterion": "Evaluator passes",
+                    "status": "passed",
+                    "evidence": "Ready for evaluator",
+                }
+            ],
+            "review_decision": "skip",
+        },
+    )
+    evaluating_task = workspace_manager.tasks[task["id"]]
+    assert evaluating_task.autonomous_run.phase.value == "evaluating"
+
+    # Evaluator passes → run reaches PASSED, human acceptance requested.
+    client.post(
+        f"/api/workspaces/sessions/{evaluating_task.review_session_id}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "review_passed",
+            "message": "Evaluation passed",
+            "evaluation_report": {
+                "id": "eval-pass",
+                "decision": "pass",
+                "overall_score": 0.95,
+                "iteration": 1,
+            },
+        },
+    )
+    passed_task = workspace_manager.tasks[task["id"]]
+    assert passed_task.status == WorkspaceTaskStatus.REVIEW
+    assert passed_task.human_acceptance_requested_at is not None
+    assert passed_task.autonomous_run.phase.value == "passed"
+    accepted_at = passed_task.human_acceptance_requested_at
+    passed_cycle = passed_task.review_cycle
+    passed_reviewed_cycle = passed_task.reviewed_cycle
+
+    # The worker re-emits stale reports for the SAME cycle, several times.
+    for note in ("still working", "completed again", "more progress"):
+        state = "working" if note == "more progress" else "completed"
+        resp = client.post(
+            f"/api/workspaces/sessions/{started['session_id']}/reports",
+            json={
+                "task_id": task["id"],
+                "state": state,
+                "message": note,
+                "acceptance_check": [
+                    {
+                        "criterion": "Evaluator passes",
+                        "status": "passed",
+                        "evidence": "echo",
+                    }
+                ],
+                "review_decision": "skip",
+            },
+        )
+        assert resp.status_code == 201
+
+    after = workspace_manager.tasks[task["id"]]
+    # Stale post-PASS reports leave the task acceptance-able and unchanged.
+    assert after.status == WorkspaceTaskStatus.REVIEW
+    assert after.human_acceptance_requested_at == accepted_at
+    assert after.autonomous_run is not None
+    assert after.autonomous_run.phase.value == "passed"
+    # No spurious new review round was opened.
+    assert after.review_cycle == passed_cycle
+    assert after.reviewed_cycle == passed_reviewed_cycle
+
+
 def test_autonomous_task_exhausts_iteration_budget(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
