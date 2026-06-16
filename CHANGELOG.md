@@ -5,6 +5,27 @@
 
 ## Unreleased
 
+### fix: auto-queued tasks migrate off a busy WORKING agent, not only a REVIEW-held one
+
+- **What**: a task that auto-queued behind a busy agent could stay stuck in the
+  `Queued` column (board showed "task queued" while its agent showed "runtime
+  working") even when another agent sat idle. This is the reported "queue排不上"
+  symptom.
+- **Root cause**: dispatch pins each auto-queued task to a specific agent and
+  only launches it when that agent is `IDLE`. The rebalancing path
+  (`_next_reassignable_queued_task`) that migrates a queued task to a newly free
+  agent only triggered when the originally-assigned agent was holding an
+  unresolved `REVIEW` task — a task queued behind a genuinely `WORKING` agent
+  was never rebalanced and starved until that one agent went idle.
+- **Fix**: broaden the rebalance condition from "assigned agent is holding a
+  REVIEW task" to "assigned agent cannot currently be dispatched to"
+  (`not _can_dispatch_to`), covering WORKING / REVIEW-held / STOPPED / OFFLINE.
+  Only auto-queued tasks (`dispatch_reason == "Queued behind existing workspace
+  agent"`) are eligible, so user-selected and related-task-pinned tasks stay
+  bound to their agent for context continuity.
+- **Files**: `backend/claude_hub/services/workspace_manager/_dispatch.py`,
+  `backend/tests/test_workspaces.py`.
+
 ### fix: bound reviewer on a reopened task is no longer auto-prompted as a pseudo-worker
 
 - **What**: after a `review_failed` reopen, the task could stall for ~5 minutes
