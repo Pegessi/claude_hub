@@ -24,7 +24,10 @@ no response.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional, Sequence
+
+logger = logging.getLogger(__name__)
 
 # Reserved keys embedded in every interactive control's ``value`` payload. The
 # card.action.trigger handler reads these to correlate a human decision with the
@@ -45,6 +48,84 @@ _TEMPLATES = {
     "status": "turquoise",
     "task": "grey",
 }
+
+
+def _attr_or_key(obj: Any, name: str) -> Any:
+    """Read ``name`` from ``obj`` whether it is a mapping or an attribute object.
+
+    Feishu callbacks arrive as raw JSON (plain dicts) when your own bot forwards
+    the webhook body, but the lark-oapi SDK delivers attribute-style event
+    objects. Supporting both lets one parser serve every relay.
+    """
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def parse_card_action(payload: Any) -> Optional[Dict[str, Any]]:
+    """Extract a normalized decision from a ``card.action.trigger`` callback.
+
+    This is the inverse of the card-building contract above and the single
+    integration point for an EXTERNAL bot: when your own Feishu bot receives a
+    ``card.action.trigger`` event, pass the raw callback body here to pull out
+    the correlation token and the human's choice, then POST the result to
+    ``/api/feishu/cards/result`` (e.g. via
+    :meth:`claude_hub.cli.client.HubClient.submit_card_result`).
+
+    ``payload`` may be the raw JSON dict Feishu delivers, the inner ``event``
+    object, or a lark-oapi event object — attribute and key access are both
+    supported. Returns a dict with:
+
+    * ``token`` — the reserved ``hub_token`` (required; ``None`` is returned for
+      foreign cards or non-interactive controls that carry no token),
+    * ``action`` — the reserved ``hub_action`` decision key,
+    * ``form`` — ``form_value`` field-name -> entered text (``{}`` when absent),
+    * ``operator_id`` — the clicker's open/union id when present,
+    * ``chat_id`` — the source chat id when present.
+
+    Never raises: a malformed payload yields ``None``.
+    """
+    try:
+        # Accept the full callback body, or the inner event directly.
+        event = _attr_or_key(payload, "event")
+        if event is None:
+            event = payload
+
+        action = _attr_or_key(event, "action")
+        if action is None:
+            return None
+
+        value = _attr_or_key(action, "value")
+        if not isinstance(value, dict):
+            return None
+        token = value.get(TOKEN_KEY)
+        if not token:
+            return None
+
+        form = _attr_or_key(action, "form_value")
+        if not isinstance(form, dict):
+            form = {}
+
+        operator = _attr_or_key(event, "operator")
+        operator_id = (
+            _attr_or_key(operator, "open_id")
+            or _attr_or_key(operator, "operator_id")
+            or _attr_or_key(operator, "union_id")
+        )
+
+        context = _attr_or_key(event, "context")
+        chat_id = _attr_or_key(context, "open_chat_id") or _attr_or_key(event, "open_chat_id")
+
+        return {
+            "token": str(token),
+            "action": value.get(ACTION_KEY),
+            "form": dict(form),
+            "operator_id": operator_id,
+            "chat_id": chat_id,
+        }
+    except Exception:  # noqa: BLE001 - never crash on a malformed callback
+        logger.exception("feishu: failed to parse card action payload")
+        return None
 
 
 def _plain_text(content: str) -> Dict[str, Any]:

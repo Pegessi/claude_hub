@@ -110,15 +110,18 @@
   Adds `feishu bind`/`bindings`/`unbind` for chat-id aliases and
   `feishu result <token>` to poll a decision.
 - **How**: the CLI registers an opaque token in a new backend result store
-  before sending the card; the long-connection bot relays the human's
-  `card.action.trigger` callback to `POST /api/feishu/cards/result`, which
-  unblocks the long-polling CLI. The store is in-memory, TTL-pruned, and
-  first-write-wins (double-clicks / re-registers can't overwrite a decision).
+  before sending the card; your own Feishu bot relays the human's
+  `card.action.trigger` callback to `POST /api/feishu/cards/result` (extracting
+  the decision with `feishu_cards.parse_card_action`), which unblocks the
+  long-polling CLI. No bundled long-connection bot is required. The store is
+  in-memory, TTL-pruned, and first-write-wins (double-clicks / re-registers
+  can't overwrite a decision).
 - **Files**: `backend/claude_hub/services/feishu_card_results.py`,
-  `backend/claude_hub/api/feishu.py`, `backend/claude_hub/cli/feishu_cards.py`,
+  `backend/claude_hub/api/feishu.py`, `backend/claude_hub/cli/feishu_cards.py`
+  (card builders + `parse_card_action`),
   `backend/claude_hub/cli/feishu_sender.py`,
   `backend/claude_hub/cli/feishu_store.py`,
-  `backend/claude_hub/cli/feishu_bot.py`,
+  `backend/claude_hub/cli/hub_commands.py` (reusable `/hub` dispatcher),
   `backend/claude_hub/cli/commands/feishu.py`,
   `backend/claude_hub/cli/client.py`, `README.md`,
   `docs/working-logs/2026-06-16-feishu-card-cli.md`, and `backend/tests/test_feishu_*.py`.

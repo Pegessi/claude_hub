@@ -3,9 +3,9 @@
 Scenario A: an external agent invokes ``claude-hub feishu send-card --wait``.
 The CLI generates an opaque token, registers it here, pushes an interactive
 card to a human over Feishu, and then long-polls for the human's decision. When
-the human clicks a button (or submits a form), the long-connection bot receives
-a ``card.action.trigger`` callback and POSTs the decision back, keyed by the
-same token. The blocked CLI poll then returns the result.
+the human clicks a button (or submits a form), the user's own Feishu bot
+receives a ``card.action.trigger`` callback and POSTs the decision back, keyed
+by the same token. The blocked CLI poll then returns the result.
 
 The data is intentionally transient: a correlation token lives only for the
 duration of one CLI invocation's wait. An in-memory dict with a TTL is the
@@ -13,9 +13,9 @@ right scope -- nothing here needs to survive a backend restart, and persisting
 half-answered prompts would be a liability, not a feature. Entries are pruned
 opportunistically on every access and explicitly via :meth:`prune`.
 
-Thread-safety: the long-connection bot posts results from a worker thread while
-FastAPI serves polls from the event loop's threadpool, so all mutating access
-is guarded by a single lock.
+Thread-safety: a result POST may land from a request thread while FastAPI
+serves polls from the event loop's threadpool, so all mutating access is guarded
+by a single lock.
 """
 
 from __future__ import annotations

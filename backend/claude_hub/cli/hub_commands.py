@@ -1,4 +1,4 @@
-"""Shared ``/hub`` chat command logic for the Feishu long-connection bot.
+"""Shared ``/hub`` chat command logic for Feishu bot integrations.
 
 The single public entry point, :func:`run_hub_chat_command`, strips Feishu
 mention tokens, parses a whitelisted ``/hub`` command, executes it by calling
@@ -8,8 +8,10 @@ short ``error: ...`` string and unknown / malformed commands fall back to the
 help text. Messages not addressed to the bot (no ``/hub`` prefix) return the
 empty string so the bot stays quiet in group chats.
 
-Keeping this logic free of any lark-oapi dependency makes it unit-testable with
-an ``httpx.MockTransport``-backed client (see ``tests/test_feishu_bot.py``).
+This is a reusable, lark-independent helper: a user's own Feishu bot can call
+it directly to turn an incoming chat message into a backend action and a reply.
+Keeping it free of any lark-oapi dependency also makes it unit-testable with an
+``httpx.MockTransport``-backed client (see ``tests/test_hub_commands.py``).
 """
 
 from __future__ import annotations

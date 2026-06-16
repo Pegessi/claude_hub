@@ -6,14 +6,17 @@ These endpoints back the ``claude-hub feishu`` CLI's wait/collect loop:
   pending right before it pushes a card to a human.
 * ``GET  /api/feishu/cards/result/{token}`` -- the CLI polls for the human's
   decision (status ``pending`` until answered, then ``resolved``).
-* ``POST /api/feishu/cards/result`` -- the long-connection bot posts the human's
-  decision (from a ``card.action.trigger`` callback), keyed by the same token.
+* ``POST /api/feishu/cards/result`` -- your own Feishu bot posts the human's
+  decision, keyed by the same token. The bot receives the
+  ``card.action.trigger`` callback, extracts the fields with
+  :func:`claude_hub.cli.feishu_cards.parse_card_action`, and POSTs them here.
 
 Access is gated by :func:`get_current_user`, which already bypasses auth for
-loopback / local-network callers. Both the CLI and the co-located bot run on the
-same host as the backend, so in the default single-host deployment the opaque,
-unguessable token is the capability and local-only access is the perimeter. When
-auth is enabled, remote callers must additionally present a valid session.
+loopback / local-network callers. The CLI runs on the same host as the backend,
+so in the default single-host deployment the opaque, unguessable token is the
+capability and local-only access is the perimeter. When auth is enabled, remote
+callers (including a bot on another host) must additionally present a valid
+session.
 """
 
 from __future__ import annotations
@@ -70,7 +73,7 @@ async def submit_card_result(
     payload: CardSubmitRequest,
     current_user: User = Depends(get_current_user),
 ) -> CardActionResult:
-    """Record a human's card decision (posted by the bot callback)."""
+    """Record a human's card decision (posted by your bot's callback)."""
     stored = card_result_store.submit(
         payload.token,
         action=payload.action,
