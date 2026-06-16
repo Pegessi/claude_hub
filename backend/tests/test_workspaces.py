@@ -3955,6 +3955,90 @@ def test_reassigns_auto_queued_task_when_another_agent_becomes_free(
     assert "Run on the next available agent" in sent_messages[-1][1]
 
 
+def test_reassigns_auto_queued_task_off_busy_working_agent(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A task auto-queued behind a genuinely WORKING agent should migrate to a
+    freshly available agent instead of starving until that one specific agent
+    goes idle."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="queue-working-tab",
+        port=12349,
+        sent_messages=sent_messages,
+    )
+
+    async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
+        return []
+
+    monkeypatch.setattr(
+        workspace_module.ttyd_manager,
+        "list_tab_agent_statuses",
+        fake_list_statuses,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Queue Working Repo",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "queue-working",
+        },
+    ).json()
+    first_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+
+    # First agent picks up a task and stays WORKING (no live status sample flips
+    # it back to idle), so the next task has nowhere free to land.
+    first_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Long running task", "prompt": "Keep first agent busy"},
+    ).json()
+    client.post(
+        f"/api/workspaces/tasks/{first_task['id']}/start",
+        json={"target_session_id": first_agent["id"]},
+    )
+    assert (
+        workspace_manager.sessions[first_agent["id"]].runtime_status == AgentRuntimeStatus.WORKING
+    )
+
+    queued_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Queued task", "prompt": "Run on the next available agent"},
+    ).json()
+    queued_start = client.post(
+        f"/api/workspaces/tasks/{queued_task['id']}/start",
+        json={},
+    )
+
+    assert queued_start.status_code == 201
+    queued = queued_start.json()
+    assert queued["status"] == "queued"
+    assert queued["session_id"] == first_agent["id"]
+    assert queued["dispatch_reason"] == "Queued behind existing workspace agent"
+
+    # A second agent comes online; a dispatch pass should migrate the queued
+    # task off the still-WORKING first agent onto the now-idle second agent.
+    second_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    dispatch_response = client.post(f"/api/workspaces/{workspace['id']}/dispatch")
+    assert dispatch_response.status_code == 204
+
+    rebalanced = workspace_manager.tasks[queued_task["id"]]
+    assert rebalanced.status == WorkspaceTaskStatus.WORKING
+    assert rebalanced.session_id == second_agent["id"]
+    assert rebalanced.dispatch_reason == "Reassigned to newly available workspace agent"
+    assert workspace_manager.sessions[first_agent["id"]].current_task_id == first_task["id"]
+    assert workspace_manager.sessions[second_agent["id"]].current_task_id == queued_task["id"]
+    assert "Run on the next available agent" in sent_messages[-1][1]
+
+
 def test_dispatch_holds_agent_during_in_flight_review(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
