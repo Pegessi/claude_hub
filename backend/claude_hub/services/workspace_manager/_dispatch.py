@@ -4,6 +4,14 @@ import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time pa
 
 from ._constants import *  # noqa: F401,F403
 
+# Dispatch reasons that pin a queued task to one specific agent so firmly that
+# the task must NEVER be migrated to a different free agent — only the operator's
+# explicit target selection qualifies. Every other reason (auto queued-behind,
+# related-task continuity, previous-assignment continuity, prior reassignment)
+# expresses a *preference* for its agent that may yield to a free agent when the
+# pinned agent is stuck. See _next_reassignable_queued_task.
+_NON_MIGRATABLE_DISPATCH_REASONS = frozenset({"User selected target agent"})
+
 
 class _DispatchMixin:
     async def start_task(
@@ -735,18 +743,27 @@ class _DispatchMixin:
                 continue
             if task.session_id == free_session_id:
                 continue
-            if task.dispatch_reason != "Queued behind existing workspace agent":
+            # Hard, explicit user pins wait for exactly the agent the operator
+            # chose — never migrate them. Every other queued task (auto
+            # queued-behind, related-task continuity, previous-assignment
+            # continuity, or a prior reassignment) prefers its assigned agent
+            # but may migrate when that agent is stuck. Preference is preserved
+            # below: we only migrate when the assigned agent CANNOT dispatch, so
+            # an available pinned agent still picks the task up itself via
+            # _next_queued_task.
+            if task.dispatch_reason in _NON_MIGRATABLE_DISPATCH_REASONS:
                 continue
             assigned = self.sessions.get(task.session_id or "")
-            # Only auto-queued tasks (dispatch_reason above) reach here, so the
-            # task is not pinned to its agent for context continuity (user- and
-            # related-task-pinned tasks carry different dispatch_reasons and are
-            # intentionally left to wait for their specific agent). Migrate the
-            # task to the now-free agent whenever its currently-assigned agent
-            # cannot take it: genuinely busy WORKING, holding an unresolved
-            # REVIEW task, or gone (STOPPED/OFFLINE). Without this, a task
-            # queued behind a long-running WORKING agent would starve while
-            # other agents sit idle.
+            # Migrate to the now-free agent whenever the currently-assigned
+            # agent cannot take the task: genuinely busy WORKING, idle but
+            # holding a non-DONE task parked in REVIEW (review_passed yet
+            # awaiting human acceptance keeps the agent locked indefinitely),
+            # or gone (STOPPED/OFFLINE). Without this, a continuity-pinned task
+            # starves forever behind an agent that is idle on paper but will
+            # never free up until a human resolves its review task, while other
+            # agents sit idle. The migration block sets clear_context=True, so
+            # the fresh agent starts clean rather than inheriting absent
+            # related-task context.
             if not assigned or self._can_dispatch_to(assigned):
                 continue
             candidates.append(task)
