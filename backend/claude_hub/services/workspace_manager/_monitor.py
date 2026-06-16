@@ -308,6 +308,17 @@ class _MonitorMixin:
         task: WorkspaceTask,
         sampled_at: datetime,
     ) -> dict[str, Any] | None:
+        # Only the worker that owns a WORKING task may be auto-continued. After a
+        # ``review_failed`` reopen the reviewer session intentionally stays bound
+        # to the task (``current_task_id``) so the same reviewer handles the next
+        # cycle — but it is NOT the task's worker. Without this guard the monitor
+        # treats the idle reviewer as a worker owing a report and endlessly
+        # auto-prompts it (action=report_missing); the reviewer re-posts its
+        # verdict, which is correctly dropped as a stale duplicate, stranding the
+        # task until the fallback reaper fires (~5 min later). The worker is
+        # ``task.session_id``; the reviewer is ``task.review_session_id``.
+        if task.session_id and task.session_id != session.id:
+            return None
         if state_policy.review_in_flight(task.review_requested_at, task.review_completed_at):
             return None
         latest_state = self._latest_report_state(task.id)
