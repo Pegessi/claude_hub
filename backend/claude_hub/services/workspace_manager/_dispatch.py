@@ -738,7 +738,16 @@ class _DispatchMixin:
             if task.dispatch_reason != "Queued behind existing workspace agent":
                 continue
             assigned = self.sessions.get(task.session_id or "")
-            if not assigned or not self._is_holding_unresolved_review_task(assigned):
+            # Only auto-queued tasks (dispatch_reason above) reach here, so the
+            # task is not pinned to its agent for context continuity (user- and
+            # related-task-pinned tasks carry different dispatch_reasons and are
+            # intentionally left to wait for their specific agent). Migrate the
+            # task to the now-free agent whenever its currently-assigned agent
+            # cannot take it: genuinely busy WORKING, holding an unresolved
+            # REVIEW task, or gone (STOPPED/OFFLINE). Without this, a task
+            # queued behind a long-running WORKING agent would starve while
+            # other agents sit idle.
+            if not assigned or self._can_dispatch_to(assigned):
                 continue
             candidates.append(task)
         if not candidates:
