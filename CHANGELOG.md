@@ -5,6 +5,27 @@
 
 ## Unreleased
 
+### fix: bound reviewer on a reopened task is no longer auto-prompted as a pseudo-worker
+
+- **What**: after a `review_failed` reopen, the task could stall for ~5 minutes
+  — the system repeatedly auto-prompted the reviewer to "report" while silently
+  dropping every verdict it re-posted, until the fallback reaper finally
+  unstuck it. This is the reported "reviewer被占据 / 上报始终收不到完成信号"
+  symptom.
+- **Root cause**: after `review_failed`, the reviewer session intentionally
+  stays bound to the task (`current_task_id`) so the same reviewer handles the
+  next cycle. But the monitor's `_auto_continue_stopped_task` treated *any* idle
+  session bound to a `WORKING` task as the task's worker, so it auto-prompted
+  the bound reviewer (`action=report_missing`). The reviewer re-posted
+  `review_failed`, which is correctly dropped as a stale duplicate (no review in
+  flight), stranding the task until `_reap_stuck_reviews` fired.
+- **Fix**: guard `_auto_continue_stopped_task` so only the task's worker
+  (`task.session_id`) is auto-continued; an idle reviewer
+  (`task.review_session_id`) bound to the reopened task is skipped. This
+  preserves the intentional reviewer-binding design while stopping the stall.
+- **Files**: `backend/claude_hub/services/workspace_manager/_monitor.py`,
+  `backend/tests/test_workspaces.py`.
+
 ### fix: reviewer /clear decision keyed off the reviewer session, not other tasks' fields
 
 - **What**: when a reviewer session was reused for an unrelated new task, it
