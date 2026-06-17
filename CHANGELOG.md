@@ -5,6 +5,37 @@
 
 ## Unreleased
 
+### feat: reviewer prompt hardened against sycophancy / low defect-detection
+
+- **What**: the independent reviewer agent caught bugs/risks too rarely and
+  deferred too easily to the implementation agent (user体感 report). The
+  reviewer prompt is reframed from confirmatory ("review against criteria") to
+  adversarial defect-hunting.
+- **Changes** (prompt-only, in
+  `backend/claude_hub/services/workspace_manager/_prompts.py`):
+  - **Bootstrap contract** (`_build_reviewer_bootstrap_prompt`) gains a
+    "Reviewer mindset" preamble: the reviewer's primary job is to FIND defects,
+    not confirm success; approval is the exception not the default; do not defer
+    to the implementation agent's confidence/tone/report polish; disregard
+    formatting and verbosity and judge substance. Self-reported validation is
+    reframed as "claims to verify, not proof" with a requirement to
+    independently inspect the highest-risk claims.
+  - **Standard implementation review** (`_review_workflow_block`, non-Goal-Packet
+    branch) gains a forced pre-verdict "Adversarial defect hunt" step that
+    enumerates concrete failure modes (edge/boundary inputs, error paths,
+    concurrency/races, regressions, scope leakage, security assumptions) and
+    requires checking each against the code before any verdict.
+  - **`review_passed` bar tightened** in both the bootstrap exit rules and the
+    workflow exit criteria: passing now requires having actively attempted to
+    break the change and found no blocking defect; passing on the absence of an
+    attempt or on a confident-looking report is disallowed.
+- **Why**: grounded in LLM-as-a-Judge research (forced reasoning before verdict,
+  adversarial verification, disregard-style/leniency-bias mitigation) and common
+  community AI-review practice (treat self-reported validation skeptically).
+  Changes are additive wording; the Goal Packet approval gate and all verdict /
+  state-machine logic are unchanged.
+- **Files**: `backend/claude_hub/services/workspace_manager/_prompts.py`.
+
 ### fix: related/continuity-pinned queued tasks migrate off a stuck agent
 
 - **What**: a queued task pinned to a specific agent for context continuity
