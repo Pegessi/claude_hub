@@ -1,10 +1,10 @@
 """Tests for :func:`parse_card_action`, the external-bot callback parser.
 
-``parse_card_action`` is the single integration point for a user's own Feishu
+``parse_card_action`` is the single integration point for the agent's own Feishu
 bot: it turns a raw ``card.action.trigger`` callback into the normalized
-decision the backend result store expects. It must work on the raw JSON dict a
-webhook delivers AND on attribute-style lark-oapi event objects, and must never
-raise.
+decision the agent matches back (by token) to the card it sent. It must work on
+the raw JSON dict a webhook delivers AND on attribute-style lark-oapi event
+objects, and must never raise.
 """
 
 from __future__ import annotations
@@ -120,8 +120,8 @@ def test_feishu_group_registered() -> None:
 
 
 def test_feishu_bot_command_removed() -> None:
-    # The long-connection bot was removed; relay is handled by the user's own
-    # bot via parse_card_action + the /api/feishu/cards/result endpoint.
+    # The long-connection bot was removed; the agent (which is itself the Feishu
+    # bot) handles the relay in-process via parse_card_action. Hub ships no bot.
     from claude_hub.cli.main import cli
 
     assert "feishu-bot" not in cli.commands
