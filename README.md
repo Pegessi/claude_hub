@@ -161,6 +161,44 @@ non-zero on API errors. Global options: `--base-url` / `CLAUDE_HUB_URL`,
 `--token` / `CLAUDE_HUB_TOKEN`, `--cookie`, `--json`, `--config`, and `-v` /
 `--verbose` (logs each request URL to stderr).
 
+### Feishu interactive cards
+
+These helpers are for an **external agent that is itself a Feishu bot** — it
+sends cards to a human and receives the `card.action.trigger` callback in the
+same process, then drives Hub through this CLI. Hub is not in the Feishu loop, so
+it ships no sender, no token store, and no callback endpoint — just two
+stateless, IO-free helpers that print JSON on stdout:
+
+- `feishu build-card` — build a card's JSON (the agent sends it to Feishu itself).
+- `feishu parse-action` — parse a raw `card.action.trigger` callback into a
+  normalized `{token, action, form, operator_id, chat_id}` decision.
+
+```bash
+# Build a card; the printed `token` is embedded in every control so the later
+# callback can be correlated. The agent POSTs `card` to Feishu's CreateMessage.
+uv run claude-hub feishu build-card --kind approval --title "Deploy v2?" --body "All checks pass."
+#  → {"kind":"approval","token":"x9…","card":{…}}
+
+uv run claude-hub feishu build-card --kind needs_input --title "Release note?" \
+    --body "One line" --field-name note
+uv run claude-hub feishu build-card --kind plan_confirm --title T --body "..."
+
+# Display-only cards render live workspace data and carry no token:
+uv run claude-hub feishu build-card --kind status --workspace-id <WS>
+uv run claude-hub feishu build-card --kind task   --workspace-id <WS> --task-id <T>
+
+# In the bot's card.action.trigger handler, parse the callback (arg or stdin).
+# Match the returned `token` against the card you sent. Foreign cards → exit 1
+# and a `null` line, so you can branch on the exit code.
+uv run claude-hub feishu parse-action "$CALLBACK_JSON"
+echo "$CALLBACK_JSON" | uv run claude-hub feishu parse-action
+#  → {"token":"x9…","action":"approve","form":{},"operator_id":"ou_…","chat_id":"oc_…"}
+```
+
+Interactive kinds (`approval`, `needs_input`, `plan_confirm`) embed a correlation
+token; display kinds (`status`, `task`) carry none. See
+`docs/working-logs/2026-06-16-feishu-card-cli.md` for the design and a smoke test.
+
 ## Authentication
 
 Feishu OAuth is optional. For public access, configure either an Open ID

@@ -100,6 +100,29 @@
   preserves the intentional reviewer-binding design while stopping the stall.
 - **Files**: `backend/claude_hub/services/workspace_manager/_monitor.py`,
   `backend/tests/test_workspaces.py`.
+### feat: Feishu interactive cards over the `claude-hub` CLI
+
+- **What**: a `feishu` CLI group with two stateless, IO-free helpers for an
+  external agent that is itself a Feishu bot — it sends cards to a human and
+  receives the `card.action.trigger` callback in the same process, then drives
+  Hub through the CLI ("Scenario A"). `feishu build-card` prints a card's JSON
+  for the agent to send; `feishu parse-action` parses a raw callback into a
+  normalized `{token, action, form, operator_id, chat_id}` decision (payload as
+  an argument or on stdin; foreign cards exit non-zero with a `null` line).
+  Kinds: `approval`, `needs_input`, `plan_confirm` (interactive, carry a
+  correlation token) and `status`, `task` (render live workspace data, no token).
+- **How**: card construction and callback parsing are pure functions in
+  `feishu_cards.py`; the two CLI commands just shell them out as JSON. Because
+  the agent sends and receives in one process, Hub is not in the Feishu loop —
+  no outbound sender, no token/result store, no `/api/feishu/cards/*` endpoints,
+  and no chat-id bindings. `build-card` reaches the backend only to read live
+  board data for the display kinds.
+- **Files**: `backend/claude_hub/cli/feishu_cards.py` (card builders +
+  `parse_card_action`), `backend/claude_hub/cli/commands/feishu.py` (the two
+  thin commands), `README.md`,
+  `docs/working-logs/2026-06-16-feishu-card-cli.md`,
+  `backend/tests/test_feishu_parse.py`, and
+  `backend/tests/test_feishu_commands.py`.
 
 ### fix: reviewer /clear decision keyed off the reviewer session, not other tasks' fields
 
