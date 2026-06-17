@@ -30,12 +30,12 @@ from typing import Any, Dict, List, Optional, Sequence
 logger = logging.getLogger(__name__)
 
 # Reserved keys embedded in every interactive control's ``value`` payload. The
-# card.action.trigger handler reads these to correlate a human decision with the
-# blocked CLI invocation.
+# agent's card.action.trigger handler reads these to correlate a human decision
+# with the card it sent.
 TOKEN_KEY = "hub_token"
 ACTION_KEY = "hub_action"
 
-# The kinds of card ``feishu send-card`` can build.
+# The kinds of card ``feishu build-card`` can build.
 INTERACTIVE_KINDS = ("approval", "needs_input", "plan_confirm")
 DISPLAY_KINDS = ("status", "task")
 CARD_KINDS = INTERACTIVE_KINDS + DISPLAY_KINDS
