@@ -381,6 +381,29 @@ class _TmuxQueriesMixin:
                 continue
             if task.system_internal:
                 continue
+            # Sealed-round guard: once this work round already has a reviewer
+            # verdict (``reviewed_cycle >= review_cycle``) the round is closed.
+            # It only moves forward via a reopen (continue_task / review_failed,
+            # which BUMP review_cycle) or human acceptance — never via re-review.
+            # Re-dispatching here is the infinite-loop bug: _request_task_review
+            # clears review_completed_at / human_acceptance_requested_at without
+            # bumping review_cycle, so the reviewer's re-emitted verdict is
+            # stamped at the already-judged cycle and dropped as a closed-round
+            # echo by _reviewer_verdict_actionable. review_completed_at is never
+            # rewritten, review_in_flight stays true, and the reaper re-fires
+            # every loop forever (observed: review_passed applied 14×, zero diff).
+            # A genuinely-stuck *unjudged* round has reviewed_cycle < review_cycle
+            # and is unaffected, so legitimate crashed-reviewer recovery still
+            # runs.
+            if state_policy.current_round_has_verdict(task.review_cycle, task.reviewed_cycle):
+                logger.debug(
+                    "Skipping fallback reaper for task_id=%s: current round already "
+                    "has a verdict (review_cycle=%s reviewed_cycle=%s)",
+                    task.id,
+                    task.review_cycle,
+                    task.reviewed_cycle,
+                )
+                continue
             needs_review_dispatch = False
             if state_policy.review_in_flight(
                 task.review_requested_at, task.review_completed_at
