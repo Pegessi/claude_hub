@@ -91,7 +91,14 @@ class _DispatchMixin:
             task = task.model_copy(
                 update={
                     "session_id": None,
-                    "clear_context": payload.clear_context,
+                    # Preserve the stored clear-context flag when the start call
+                    # does not override it, so the dispatcher decision later
+                    # still applies the user's "Clear context" choice.
+                    "clear_context": (
+                        payload.clear_context
+                        if payload.clear_context is not None
+                        else task.clear_context
+                    ),
                     "dispatch_reason": "Waiting for dispatcher agent decision",
                     "dispatch_pending": True,
                     "updated_at": _wm._now(),
@@ -153,6 +160,16 @@ class _DispatchMixin:
         payload: StartTaskRequest,
     ) -> Optional[tuple[ManagedSession, bool, str]]:
         agents = self._workspace_agents(workspace.id, include_stopped=True)
+        # The "Clear context" checkbox is stored on the task at creation
+        # (task.clear_context) but a start call may also override it inline
+        # (payload.clear_context). Resolve the explicit request once so every
+        # dispatch branch below honors it: an inline payload value wins, then
+        # the stored task flag, then None (let each branch fall back to its
+        # default/heuristic). Without this fallback, continuity and related-task
+        # branches dropped the stored flag and never sent /clear.
+        requested_clear = (
+            payload.clear_context if payload.clear_context is not None else task.clear_context
+        )
         if payload.target_session_id:
             target = self.sessions.get(payload.target_session_id)
             if not target or target.workspace_id != workspace.id:
@@ -170,7 +187,7 @@ class _DispatchMixin:
                 raise RuntimeError("Selected workspace agent cannot accept tasks yet")
             return (
                 target,
-                bool(payload.clear_context),
+                bool(requested_clear),
                 "User selected target agent",
             )
 
@@ -191,7 +208,7 @@ class _DispatchMixin:
                     )
                     return (
                         target,
-                        False,
+                        bool(requested_clear),
                         f"Related to task {related_task_id}",
                     )
             logger.info(
@@ -207,7 +224,11 @@ class _DispatchMixin:
         if task.session_id:
             existing = self.sessions.get(task.session_id)
             if existing and self._can_assign_or_queue_to(existing):
-                return existing, False, "Continuing previous task assignment"
+                return (
+                    existing,
+                    bool(requested_clear),
+                    "Continuing previous task assignment",
+                )
 
         free_agents = [agent for agent in agents if self._can_dispatch_to(agent)]
         if len(free_agents) == 1:
@@ -215,7 +236,7 @@ class _DispatchMixin:
             should_clear = self._has_prior_task_history(target.id)
             return (
                 target,
-                payload.clear_context if payload.clear_context is not None else should_clear,
+                requested_clear if requested_clear is not None else should_clear,
                 "Only one workspace agent is available",
             )
         if len(free_agents) > 1:
@@ -223,7 +244,7 @@ class _DispatchMixin:
             should_clear = self._has_prior_task_history(target.id)
             return (
                 target,
-                payload.clear_context if payload.clear_context is not None else should_clear,
+                requested_clear if requested_clear is not None else should_clear,
                 "Selected least queued available workspace agent",
             )
 
@@ -241,7 +262,7 @@ class _DispatchMixin:
             should_clear = self._has_prior_task_history(target.id)
             return (
                 target,
-                payload.clear_context if payload.clear_context is not None else should_clear,
+                requested_clear if requested_clear is not None else should_clear,
                 "Queued behind existing workspace agent",
             )
 
@@ -318,7 +339,10 @@ class _DispatchMixin:
             update={
                 "status": WorkspaceTaskStatus.QUEUED,
                 "session_id": target.id,
-                "clear_context": payload.clear_context,
+                # A user opt-in ("Clear context" checkbox -> task.clear_context)
+                # must not be overridden by the dispatcher agent's discretion:
+                # OR the stored flag so an explicit clear request always wins.
+                "clear_context": bool(payload.clear_context) or bool(task.clear_context),
                 "dispatch_reason": payload.reason or "Dispatcher selected target agent",
                 "dispatch_pending": False,
                 "queued_at": task.queued_at or _wm._now(),
