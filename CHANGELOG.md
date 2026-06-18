@@ -5,6 +5,36 @@
 
 ## Unreleased
 
+### fix: "Clear context" checkbox now honored on every dispatch path
+
+- **What**: a task created with the "Clear context" checkbox often did not
+  actually clear the delegated worker agent's context. The send mechanism was
+  fine (`/clear` works for claude, codex, and cursor — verified live), but the
+  dispatch decision logic silently dropped the stored `task.clear_context`
+  flag on the most common paths.
+- **Root cause** (`backend/claude_hub/services/workspace_manager/_dispatch.py`,
+  `_choose_dispatch_target`): the related-task continuity branch and the
+  "Continuing previous task assignment" branch returned a hardcoded
+  `clear_context=False`; the user-selected-target branch and the
+  dispatcher-decision paths read only `payload.clear_context`, ignoring the
+  flag persisted on the task at creation. So a checkbox set at task-creation
+  time never reached `_dispatch_task_to_session`, which is the code that sends
+  `/clear`.
+- **Changes**:
+  - `_choose_dispatch_target` resolves an explicit `requested_clear` once
+    (inline `payload.clear_context` wins, then stored `task.clear_context`,
+    then `None` → each branch's existing default/prior-history heuristic) and
+    applies it consistently across all five dispatch branches.
+  - The dispatcher-decision wait path preserves the stored flag instead of
+    overwriting it with `payload.clear_context`.
+  - `apply_dispatch_decision` ORs the stored flag so an explicit user opt-in is
+    never overridden by the dispatcher agent's discretion.
+  - New regression test `test_related_task_clear_context_checkbox_sends_clear`
+    asserts `/clear` precedes the task prompt on the related-task path.
+- **Not changed**: `/clear` is the correct clear command for all three agent
+  types (no per-agent divergence needed); the reviewer cross-task `/clear`
+  heuristic and the tmux send/paste mechanism are untouched.
+
 ### feat: reviewer prompt hardened against sycophancy / low defect-detection
 
 - **What**: the independent reviewer agent caught bugs/risks too rarely and
