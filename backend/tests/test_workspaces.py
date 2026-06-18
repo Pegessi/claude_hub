@@ -6153,6 +6153,156 @@ def test_fallback_reaper_grace_skips_recently_dispatched_idle_reviewer(
     ), "fallback reaper should redispatch once dispatch grace has elapsed"
 
 
+def test_fallback_reaper_does_not_redispatch_already_judged_round(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Regression: the fallback reaper must not re-dispatch a review whose
+    current round already has a verdict (``reviewed_cycle >= review_cycle``).
+
+    This reproduces the infinite re-dispatch loop ("pass bug"): once a round is
+    judged, ``_request_task_review`` clears ``review_completed_at`` /
+    ``human_acceptance_requested_at`` without bumping ``review_cycle``, so the
+    reviewer's re-emitted ``review_passed`` is stamped at the already-judged
+    cycle and dropped as a closed-round echo by ``_reviewer_verdict_actionable``.
+    ``review_completed_at`` is never rewritten, ``review_in_flight`` stays true,
+    and absent the ``current_round_has_verdict`` guard the reaper re-fires every
+    loop forever (observed in the field: ``review_passed`` applied 14×, zero
+    diff). The guard must skip this task while still recovering a genuinely
+    stuck *unjudged* round (asserted at the end)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="tab-reaper-judged",
+        port=12379,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Reaper Judged Repo", "path": str(repo), "session_prefix": "reapj"},
+    ).json()
+    client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Already judged", "prompt": "Finish then request review"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": started["id"],
+            "state": "ready_for_review",
+            "message": "Done; please review",
+        },
+    )
+
+    pass_resp = pass_task_review(client, started["id"])
+    assert pass_resp.status_code == 201
+
+    judged_task = workspace_manager.tasks[started["id"]]
+    review_session_id = judged_task.review_session_id
+    assert review_session_id is not None
+    # Pass advanced reviewed_cycle to the current round: the round is sealed.
+    assert judged_task.reviewed_cycle >= judged_task.review_cycle, (
+        f"precondition: round must be judged; review_cycle={judged_task.review_cycle} "
+        f"reviewed_cycle={judged_task.reviewed_cycle}"
+    )
+    initial_attempts = judged_task.review_attempts
+
+    # Drive the task into the self-sustaining limbo state the reaper itself
+    # produces: status=REVIEW, a stale review_requested_at, verdict timestamps
+    # cleared, but reviewed_cycle still == review_cycle (round already judged).
+    stale = datetime.now() - timedelta(
+        seconds=workspace_module.REVIEW_REAPER_DISPATCH_GRACE_SECONDS + 30
+    )
+    workspace_manager.tasks[started["id"]] = judged_task.model_copy(
+        update={
+            "status": WorkspaceTaskStatus.REVIEW,
+            "review_requested_at": stale,
+            "review_completed_at": None,
+            "human_acceptance_requested_at": None,
+            "updated_at": stale,
+        }
+    )
+    # Reviewer is idle/unbound so _reviewer_is_active() returns False — without
+    # the guard, condition 1 (review_in_flight + inactive reviewer) would fire.
+    reviewer = workspace_manager.sessions[review_session_id]
+    workspace_manager.sessions[review_session_id] = reviewer.model_copy(
+        update={
+            "status": ManagedSessionStatus.IDLE,
+            "runtime_status": AgentRuntimeStatus.IDLE,
+            "task_id": None,
+            "current_task_id": None,
+            "last_activity_at": stale,
+            "updated_at": stale,
+        }
+    )
+
+    review_reports_before = [
+        r
+        for r in workspace_manager.reports.values()
+        if r.task_id == started["id"] and r.review_decision is not None
+    ]
+    sent_messages.clear()
+
+    asyncio.run(workspace_manager.dispatch_workspace(workspace["id"], refresh_sessions=False))
+
+    looped_task = workspace_manager.tasks[started["id"]]
+    assert looped_task.review_attempts == initial_attempts, (
+        "fallback reaper must NOT re-dispatch a round that already has a verdict "
+        f"(loop bug); attempts went {initial_attempts} -> {looped_task.review_attempts}"
+    )
+    assert all(
+        "fallback reaper" not in msg.lower() for _, msg in sent_messages
+    ), "reviewer must not be re-prompted for an already-judged round"
+    review_reports_after = [
+        r
+        for r in workspace_manager.reports.values()
+        if r.task_id == started["id"] and r.review_decision is not None
+    ]
+    assert len(review_reports_after) == len(review_reports_before), (
+        "fallback reaper must not spawn a new review trigger report for a sealed "
+        f"round; before={len(review_reports_before)} after={len(review_reports_after)}"
+    )
+
+    # Precision check: a genuinely stuck *unjudged* round (reviewed_cycle behind
+    # review_cycle) must STILL be recovered, so the guard is not over-broad.
+    workspace_manager.tasks[started["id"]] = workspace_manager.tasks[started["id"]].model_copy(
+        update={
+            "reviewed_cycle": looped_task.review_cycle - 1,
+            "review_requested_at": stale,
+            "review_completed_at": None,
+            "human_acceptance_requested_at": None,
+            "updated_at": stale,
+        }
+    )
+    reviewer = workspace_manager.sessions[review_session_id]
+    workspace_manager.sessions[review_session_id] = reviewer.model_copy(
+        update={
+            "status": ManagedSessionStatus.IDLE,
+            "runtime_status": AgentRuntimeStatus.IDLE,
+            "task_id": None,
+            "current_task_id": None,
+            "last_activity_at": stale,
+            "updated_at": stale,
+        }
+    )
+
+    asyncio.run(workspace_manager.dispatch_workspace(workspace["id"], refresh_sessions=False))
+
+    recovered_task = workspace_manager.tasks[started["id"]]
+    assert recovered_task.review_attempts == initial_attempts + 1, (
+        "fallback reaper must still recover a genuinely stuck UNjudged round "
+        f"(reviewed_cycle < review_cycle); attempts={recovered_task.review_attempts}"
+    )
+
+
 def test_interrupted_idle_working_agent_auto_continue_stops_after_limit(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
