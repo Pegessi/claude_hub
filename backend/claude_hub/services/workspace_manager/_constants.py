@@ -88,6 +88,13 @@ PROMPT_DISPATCH_RETRY_GRACE_SECONDS = 10
 REVIEW_REAPER_DISPATCH_GRACE_SECONDS = 60
 PROMPT_STUCK_RISK_LEVEL = "prompt_dispatch_stalled"
 WORKSPACE_MONITOR_INTERVAL_SECONDS = 5
+# How long after a managed terminal tab is created we refuse to prune it as an
+# orphan. Tab creation (ttyd_manager.create_tab) and ManagedSession
+# registration (_create_managed_session) are two separate steps; the orphan
+# reconciler can observe the tab before its session row exists. This grace
+# window keeps the reconciler from deleting a tab that belongs to an agent
+# whose session is still being registered.
+ORPHAN_TAB_PRUNE_GRACE_SECONDS = 60
 AUTO_CONTINUE_MESSAGE = (
     "Please inspect the current task state. If the task was interrupted or is unfinished, "
     "continue from the last actionable step. If the task is already complete and only missed "
@@ -203,6 +210,7 @@ __all__ = [
     "ManagedSessionStatus",
     "ManualTaskControlRequest",
     "Optional",
+    "ORPHAN_TAB_PRUNE_GRACE_SECONDS",
     "PROMPT_DISPATCH_RETRY_GRACE_SECONDS",
     "PROMPT_DISPATCH_STALL_GRACE_SECONDS",
     "PROMPT_STUCK_RISK_LEVEL",

@@ -342,6 +342,68 @@ class _TmuxQueriesMixin:
             changed = True
         return changed
 
+    async def _prune_orphan_workspace_tabs(self, workspace_id: str) -> int:
+        """Delete managed terminal tabs for this workspace that have no backing
+        ManagedSession.
+
+        Terminal tabs (ttyd_manager) and managed sessions (workspace_manager)
+        persist to separate state files. When a session is removed without its
+        tab — e.g. historical temporary-reviewer lifecycle desync — the tab is
+        left behind with ``workspace_id``/``workspace_role`` set but no session
+        row. Such orphan tabs show up in the terminal tab bar yet are absent
+        from the "Manage Agents" board (which lists sessions), so they cannot
+        respond to dispatch and cannot be deleted from that UI.
+
+        This reconciler removes those orphans. It is deliberately conservative:
+
+        * Only tabs that carry this ``workspace_id`` are considered, so manual
+          terminal tabs (no ``workspace_id``) are never touched.
+        * A tab whose id backs a live session is kept.
+        * A tab created within ``ORPHAN_TAB_PRUNE_GRACE_SECONDS`` is kept, to
+          avoid racing the gap between ``create_tab`` and session registration
+          in ``_create_managed_session``.
+
+        Returns the number of orphan tabs pruned.
+        """
+        live_tab_ids = {
+            session.tab_id
+            for session in self.sessions.values()
+            if session.workspace_id == workspace_id
+        }
+        now = _wm._now()
+        orphan_tab_ids: list[str] = []
+        for tab in ttyd_manager.list_tabs():
+            if tab.workspace_id != workspace_id:
+                continue
+            if tab.id in live_tab_ids:
+                continue
+            created_at = tab.created_at
+            if created_at is not None:
+                # Tab timestamps and _now() are both naive local datetimes.
+                age_seconds = (now - created_at).total_seconds()
+                if age_seconds < ORPHAN_TAB_PRUNE_GRACE_SECONDS:
+                    continue
+            orphan_tab_ids.append(tab.id)
+
+        pruned = 0
+        for tab_id in orphan_tab_ids:
+            logger.warning(
+                "Pruning orphan managed terminal tab with no backing session "
+                "workspace_id=%s tab_id=%s",
+                workspace_id,
+                tab_id,
+            )
+            try:
+                await ttyd_manager.delete_tab(tab_id)
+                pruned += 1
+            except Exception:
+                logger.exception(
+                    "Failed to prune orphan managed tab workspace_id=%s tab_id=%s",
+                    workspace_id,
+                    tab_id,
+                )
+        return pruned
+
     def _review_dispatch_in_reaper_grace(self, task: WorkspaceTask, *, now: datetime) -> bool:
         """Return True when a review dispatch is recent enough that the
         reviewer may simply be slow to emit first tokens. The fallback
@@ -537,6 +599,7 @@ class _TmuxQueriesMixin:
 
         await self._refresh_session_statuses(workspace_id)
         self._reconcile_task_report_statuses(workspace_id)
+        await self._prune_orphan_workspace_tabs(workspace_id)
         self._sync_workspace_tab_metadata(workspace_id)
         tasks = [
             task

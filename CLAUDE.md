@@ -124,6 +124,7 @@ task.
 | Terminal replay, ttyd, tmux, Playwright terminal debug | `docs/terminal-debugging.md` |
 | Deployment | `docs/DEPLOYMENT.md` |
 | CLI (`claude-hub`) | `docs/working-logs/2026-06-15-claude-hub-cli.md` |
+| Orphan reviewer tabs / tab-session reconciliation | `docs/working-logs/2026-06-19-orphan-reviewer-tab-reconcile.md` |
 
 ## Common Edit Areas
 
