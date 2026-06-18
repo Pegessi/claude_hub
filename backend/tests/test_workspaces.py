@@ -4645,6 +4645,122 @@ def test_start_task_prefers_related_task_agent(
     assert "Continue with the related agent" in sent_messages[-1][1]
 
 
+def test_related_task_clear_context_checkbox_sends_clear(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A task created with the 'Clear context' checkbox must send /clear even
+    when it is dispatched via the related-task continuity path (which used to
+    hardcode clear_context=False and silently drop the user's choice)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    created_tabs: list[str] = []
+
+    async def fake_create_tab(
+        name: str,
+        shell: Optional[str] = None,
+        cwd: Optional[str] = None,
+        solo_mode: bool = False,
+        agent_type: AgentType = AgentType.CLAUDE,
+        target: ExecutionTarget = ExecutionTarget.LOCAL,
+        remote_profile_id: Optional[str] = None,
+        remote_cwd: Optional[str] = None,
+        remote_reconnect: bool = True,
+        remote_forward_port: Optional[int] = None,
+        workspace_id: Optional[str] = None,
+        workspace_name: Optional[str] = None,
+        workspace_role: WorkspaceSessionRole | None = None,
+    ) -> TerminalTab:
+        tab_id = f"clrctx{len(created_tabs) + 1}-tab"
+        created_tabs.append(tab_id)
+        return TerminalTab(
+            id=tab_id,
+            name=name,
+            shell=shell,
+            cwd=cwd,
+            solo_mode=solo_mode,
+            agent_type=agent_type,
+            target=target,
+            remote_profile_id=remote_profile_id,
+            remote_cwd=remote_cwd,
+            remote_reconnect=remote_reconnect,
+            port=12480 + len(created_tabs),
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+            workspace_role=workspace_role,
+        )
+
+    sent_messages: list[tuple[str, str]] = []
+
+    async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
+        sent_messages.append((tmux_session, message))
+
+    async def fake_ensure_session_ready(_session) -> None:
+        return None
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
+    monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+    monkeypatch.setattr(
+        workspace_manager,
+        "_ensure_session_ready_for_send",
+        fake_ensure_session_ready,
+    )
+
+    client = TestClient(app)
+    workspace_id = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Clear Context Repo",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "clrctx",
+        },
+    ).json()["id"]
+    agent = client.post(f"/api/workspaces/{workspace_id}/agent", json={}).json()
+
+    original_task = client.post(
+        f"/api/workspaces/{workspace_id}/tasks",
+        json={"title": "Original task", "prompt": "Seed the agent"},
+    ).json()
+    original_start = client.post(
+        f"/api/workspaces/tasks/{original_task['id']}/start",
+        json={"target_session_id": agent["id"]},
+    )
+    assert original_start.status_code == 201
+    client.patch(
+        f"/api/workspaces/tasks/{original_task['id']}",
+        json={"status": "done"},
+    )
+
+    # Related follow-up created with the "Clear context" checkbox ticked.
+    related_task = client.post(
+        f"/api/workspaces/{workspace_id}/tasks",
+        json={
+            "title": "Follow-up task",
+            "prompt": "Fresh context please",
+            "related_task_id": original_task["id"],
+            "clear_context": True,
+        },
+    ).json()
+    sent_messages.clear()
+    related_start = client.post(
+        f"/api/workspaces/tasks/{related_task['id']}/start",
+        json={},
+    )
+
+    assert related_start.status_code == 201
+    started = related_start.json()
+    assert started["status"] == "working"
+    assert started["session_id"] == agent["id"]
+    assert started["dispatch_reason"] == f"Related to task {original_task['id']}"
+    assert started["clear_context"] is True
+    # /clear must be sent before the task prompt on this continuity path.
+    assert sent_messages[0][1] == "/clear"
+    assert "Fresh context please" in sent_messages[1][1]
+
+
 def test_start_task_skips_offline_related_task_agent(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
