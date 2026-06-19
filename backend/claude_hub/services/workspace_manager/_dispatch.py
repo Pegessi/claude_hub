@@ -453,7 +453,7 @@ class _DispatchMixin:
 
         await self.send_session_message(
             session.id,
-            self._build_continue_prompt(self.tasks[task.id], payload),
+            self._build_continue_prompt(self.tasks[task.id], payload, session),
         )
         return self.tasks[task.id]
 

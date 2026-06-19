@@ -5,6 +5,32 @@
 
 ## Unreleased
 
+### fix: restate report endpoint in follow-up nudges so context-cleared agents can report
+
+- **What**: after an agent's context was cleared (`/clear`), follow-up messages
+  that asked it to report progress — the continue-from-review prompt and the
+  background auto-continue nudges — told the agent to "report" but no longer
+  included the report endpoint. The endpoint only appeared in the bootstrap and
+  assignment prompts, which `/clear` wipes, so a cleared agent had no curl
+  target and could not find the 上报 (report) API.
+- **Root cause**
+  (`backend/claude_hub/services/workspace_manager/_prompts.py`,
+  `_monitor.py`): `_build_continue_prompt` and the
+  `AUTO_CONTINUE_MESSAGE` / `AUTO_REPORT_MISSING_MESSAGE` nudges instructed the
+  agent to report with the same `task_id` but omitted the endpoint. The two
+  `/clear`-sending dispatch paths (assignment prompt, reviewer review prompt)
+  already re-supply it and were unaffected.
+- **Fix**: added a shared `_report_endpoint_curl(session, task_id)` helper that
+  renders the per-session curl example (honoring `remote_forward_port`), and
+  injected it into the continue prompt and both auto-continue nudges so every
+  message that asks a possibly-cleared agent to report carries a concrete curl
+  target.
+- **Tests** (`backend/tests/test_workspace_orchestrator_contract.py`): cover the
+  helper (session/task interpolation, `TASK_ID` placeholder default, remote
+  forward port), the continue prompt including the endpoint, and a behavioral
+  test driving the real `_auto_continue_stopped_task` for both the interruption
+  and report-missing branches, asserting each sent nudge restates the endpoint.
+
 ### fix: prune orphan reviewer terminal tabs invisible in Manage Agents
 
 - **What**: a workspace could accumulate reviewer terminal tabs that no longer

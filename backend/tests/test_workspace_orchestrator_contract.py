@@ -10,9 +10,15 @@ from __future__ import annotations
 from datetime import datetime
 
 from claude_hub.models import (
+    AgentRuntimeStatus,
     AgentType,
     AutonomousRun,
     AutonomyPolicy,
+    ContinueTaskRequest,
+    ExecutionTarget,
+    ManagedSession,
+    ManagedSessionStatus,
+    WorkspaceSessionRole,
     WorkspaceTask,
     WorkspaceTaskExecutionComplexity,
     WorkspaceTaskMode,
@@ -282,3 +288,132 @@ def test_continue_reminder_absent_for_non_autonomous():
         complexity=WorkspaceTaskExecutionComplexity.COMPLEX,
     )
     assert workspace_manager._autonomous_continue_orchestrator_reminder(task) == ""
+
+
+# ---------------------------------------------------------------------------
+# Report-endpoint survives /clear: the curl target must be restated in every
+# follow-up message that asks a (possibly context-cleared) agent to report.
+# ---------------------------------------------------------------------------
+
+
+def _make_session(
+    *, session_id: str = "cb-agent-9", remote_forward_port: int | None = None
+) -> ManagedSession:
+    now = datetime.utcnow()
+    return ManagedSession(
+        id=session_id,
+        workspace_id="ws-1",
+        task_id=None,
+        tab_id=f"tab-{session_id}",
+        role=WorkspaceSessionRole.ORCHESTRATOR,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.WORKING,
+        current_task_id=None,
+        queued_count=0,
+        title="Agent 9",
+        branch=None,
+        workspace_path="/tmp/ws",
+        tmux_session="claude-hub-tab-ws",
+        target=ExecutionTarget.LOCAL,
+        remote_profile_id=None,
+        remote_cwd=None,
+        remote_reconnect=True,
+        solo_mode=True,
+        remote_forward_port=remote_forward_port,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _endpoint_path(session: ManagedSession) -> str:
+    return f"/api/workspaces/sessions/{session.id}/reports"
+
+
+def test_report_endpoint_curl_uses_session_and_task():
+    session = _make_session()
+    snippet = workspace_manager._report_endpoint_curl(session, "task-42")
+    assert "curl -sS -X POST" in snippet
+    assert _endpoint_path(session) in snippet
+    assert '"task_id":"task-42"' in snippet
+    # Defaults to a placeholder when no task id is supplied.
+    assert '"task_id":"TASK_ID"' in workspace_manager._report_endpoint_curl(session)
+
+
+def test_report_endpoint_curl_honors_remote_forward_port():
+    session = _make_session(remote_forward_port=9123)
+    snippet = workspace_manager._report_endpoint_curl(session, "task-1")
+    assert "http://127.0.0.1:9123" in snippet
+
+
+def test_continue_prompt_includes_report_endpoint():
+    task = _make_task(
+        mode=WorkspaceTaskMode.REVIEWED,
+        complexity=WorkspaceTaskExecutionComplexity.AUTO,
+    )
+    session = _make_session()
+    prompt = workspace_manager._build_continue_prompt(task, ContinueTaskRequest(), session)
+    assert _endpoint_path(session) in prompt
+    assert "curl -sS -X POST" in prompt
+    assert f'"task_id":"{task.id}"' in prompt
+
+
+def test_auto_continue_messages_carry_endpoint_when_sent(monkeypatch):
+    """Both auto-continue nudges must restate the endpoint at send time.
+
+    Drives the real ``_auto_continue_stopped_task`` path with the tmux capture
+    and send helpers stubbed, asserting the message actually pushed to the agent
+    contains the report endpoint — so a context-cleared agent always has a curl
+    target. Exercises both branches: interruption (continue) and
+    report-missing (completion).
+    """
+    import asyncio
+
+    from claude_hub.services.workspace_manager import _monitor as monitor_module
+
+    session = _make_session()
+    task = _make_task(
+        mode=WorkspaceTaskMode.REVIEWED,
+        complexity=WorkspaceTaskExecutionComplexity.AUTO,
+    )
+    task = task.model_copy(update={"id": "task-7", "session_id": session.id})
+    workspace_manager.tasks[task.id] = task
+    endpoint = _endpoint_path(session)
+
+    sent: list[str] = []
+
+    async def fake_capture(_tmux_session: str) -> str:
+        return "idle output"
+
+    async def fake_send(_tmux_session: str, message: str) -> None:
+        sent.append(message)
+
+    monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture)
+    monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send)
+    monkeypatch.setattr(workspace_manager, "_auto_continue_output_looks_busy", lambda _o: False)
+    monkeypatch.setattr(workspace_manager, "_latest_report_state", lambda _t: None)
+    monkeypatch.setattr(workspace_manager, "_save_state", lambda: None)
+
+    sampled = datetime.utcnow()
+
+    # Branch 1: interruption detected -> AUTO_CONTINUE_MESSAGE.
+    monkeypatch.setattr(
+        workspace_manager, "_auto_continue_interruption_reason", lambda _o: "interrupted"
+    )
+    asyncio.run(workspace_manager._auto_continue_stopped_task(session, task, sampled))
+
+    # Branch 2: no interruption, completion detected -> AUTO_REPORT_MISSING_MESSAGE.
+    monkeypatch.setattr(workspace_manager, "_auto_continue_interruption_reason", lambda _o: None)
+    monkeypatch.setattr(workspace_manager, "_auto_continue_completion_reason", lambda _o: "done")
+    fresh_session = workspace_manager.sessions.get(session.id, session)
+    asyncio.run(workspace_manager._auto_continue_stopped_task(fresh_session, task, sampled))
+
+    workspace_manager.tasks.pop(task.id, None)
+
+    assert len(sent) == 2, "both auto-continue branches should send a nudge"
+    for message in sent:
+        assert endpoint in message, "auto-continue nudge must restate report endpoint"
+        assert "curl -sS -X POST" in message
+        assert '"task_id":"task-7"' in message
+    assert monitor_module.AUTO_CONTINUE_MESSAGE.split("\n")[0] in sent[0]
+    assert monitor_module.AUTO_REPORT_MISSING_MESSAGE.split("\n")[0] in sent[1]

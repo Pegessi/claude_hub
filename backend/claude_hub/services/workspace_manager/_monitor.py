@@ -403,6 +403,10 @@ class _MonitorMixin:
             }
 
         message = AUTO_CONTINUE_MESSAGE if interruption_reason else AUTO_REPORT_MISSING_MESSAGE
+        # The agent's context may have been cleared since it learned the report
+        # endpoint from its bootstrap/assignment prompt. Restate the endpoint so
+        # a cleared agent always has a curl target to POST its report to.
+        message = f"{message}\n\n{self._report_endpoint_curl(session, task.id)}"
         await self._send_tmux_message(session.tmux_session, message)
         attempts += 1
         logger.info(
