@@ -31,6 +31,37 @@
   test driving the real `_auto_continue_stopped_task` for both the interruption
   and report-missing branches, asserting each sent nudge restates the endpoint.
 
+### fix: fallback reaper no longer re-dispatches a genuinely-working reviewer
+
+- **What**: a review card could show a duplicate `ready_for_review` entry
+  labelled "fallback reaper" ("重新分派卡住的 review 任务（fallback
+  reaper）") posted while a reviewer was actively reviewing — a confusing
+  duplicate report and wrong-looking status.
+- **Root cause** (`backend/claude_hub/services/workspace_manager/_tmux_queries.py`):
+  the fallback reaper `_reap_stuck_reviews` gated re-dispatch on
+  `not _reviewer_is_active(task)`, which treats a bound, non-stopped reviewer
+  as inactive whenever its `runtime_status` is `IDLE`. The terminal classifier
+  reports IDLE between bursts, and a reviewer silently reading a large review
+  prompt produces no frame change for minutes, so `last_activity_at` goes stale,
+  the 60s reaper grace lapses, and the reaper re-dispatched a healthy reviewer.
+- **Fix**: the reaper now requires positive evidence of a failed dispatch. New
+  reaper-only predicate `_reviewer_dispatch_stuck(task)` returns True only when
+  there is no `review_session_id`, the reviewer session is missing, the session
+  is `STOPPED`, or the reviewer is bound to a different task. A bound,
+  not-stopped reviewer is presumed mid-review and is never reaped, no matter how
+  long it sits IDLE. A backstop `_reviewer_prompt_still_pending(task)` still
+  recovers a genuine silent send-failure by checking whether the review prompt
+  is verifiably stuck in the reviewer's tmux input box (the same signal the
+  monitor's stall detector uses). `_reviewer_is_active` is left unchanged for
+  its other callers (report-recovery, `continue_task`, task updates), where
+  IDLE-means-available is correct.
+- **Tests** (`backend/tests/test_workspaces.py`): a unit test of the
+  `_reviewer_dispatch_stuck` predicate, plus integration cases asserting the
+  reaper keeps a bound + IDLE reviewer, still re-dispatches a missing/STOPPED
+  reviewer, and re-dispatches when the review prompt is still pending in the
+  input box.
+- See `docs/working-logs/2026-06-19-review-dispatch-reaper-active-reviewer.md`.
+
 ### fix: prune orphan reviewer terminal tabs invisible in Manage Agents
 
 - **What**: a workspace could accumulate reviewer terminal tabs that no longer
