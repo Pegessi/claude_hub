@@ -25,6 +25,7 @@ from claude_hub.models import (
     User,
     Workspace,
     WorkspaceSessionRole,
+    WorkspaceTask,
     WorkspaceTaskStatus,
 )
 from claude_hub.services.workspace_manager import workspace_manager
@@ -6300,6 +6301,290 @@ def test_fallback_reaper_does_not_redispatch_already_judged_round(
     assert recovered_task.review_attempts == initial_attempts + 1, (
         "fallback reaper must still recover a genuinely stuck UNjudged round "
         f"(reviewed_cycle < review_cycle); attempts={recovered_task.review_attempts}"
+    )
+
+
+def test_reviewer_dispatch_stuck_predicate() -> None:
+    """Unit coverage for the reaper-only ``_reviewer_dispatch_stuck`` predicate:
+    a reviewer bound to THIS task and not stopped is NEVER considered stuck
+    regardless of IDLE; missing/stopped/unbound/cross-bound IS stuck."""
+    now = datetime.now()
+
+    def make_task(review_session_id: str | None) -> WorkspaceTask:
+        return WorkspaceTask(
+            id="task-x",
+            workspace_id="ws-x",
+            title="t",
+            prompt="p",
+            agent_type=AgentType.CLAUDE,
+            status=WorkspaceTaskStatus.REVIEW,
+            created_at=now,
+            updated_at=now,
+            review_session_id=review_session_id,
+        )
+
+    def make_reviewer(
+        *,
+        status: ManagedSessionStatus = ManagedSessionStatus.IDLE,
+        runtime_status: AgentRuntimeStatus = AgentRuntimeStatus.IDLE,
+        task_id: str | None = "task-x",
+    ) -> ManagedSession:
+        return ManagedSession(
+            id="rev-x",
+            workspace_id="ws-x",
+            tab_id="tab-x",
+            title="Reviewer X",
+            workspace_path="/tmp/ws-x",
+            tmux_session="claude-hub-revx",
+            role=WorkspaceSessionRole.REVIEWER,
+            agent_type=AgentType.CLAUDE,
+            status=status,
+            runtime_status=runtime_status,
+            task_id=task_id,
+            current_task_id=task_id,
+            created_at=now,
+            updated_at=now,
+        )
+
+    wm = workspace_manager
+
+    # No review_session_id -> stuck.
+    assert wm._reviewer_dispatch_stuck(make_task(None)) is True
+
+    # Bound + IDLE reviewer -> NOT stuck (the regression we are fixing).
+    wm.sessions["rev-x"] = make_reviewer()
+    try:
+        assert wm._reviewer_dispatch_stuck(make_task("rev-x")) is False
+        # Missing session -> stuck.
+        del wm.sessions["rev-x"]
+        assert wm._reviewer_dispatch_stuck(make_task("rev-x")) is True
+        # Stopped -> stuck.
+        wm.sessions["rev-x"] = make_reviewer(status=ManagedSessionStatus.STOPPED)
+        assert wm._reviewer_dispatch_stuck(make_task("rev-x")) is True
+        # Cross-bound to a different task -> stuck.
+        wm.sessions["rev-x"] = make_reviewer(task_id="other-task")
+        assert wm._reviewer_dispatch_stuck(make_task("rev-x")) is True
+    finally:
+        wm.sessions.pop("rev-x", None)
+
+
+def _setup_review_in_flight_task(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+    *,
+    tab_id: str,
+    port: int,
+    name: str,
+    prefix: str,
+    sent_messages: list[tuple[str, str]],
+) -> tuple[TestClient, str, str, str]:
+    """Drive a task to review-in-flight with a bound reviewer, then push the
+    dispatch past the reaper grace window. Returns (client, workspace_id,
+    task_id, review_session_id) ready for reaper assertions."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    stub_workspace_terminal(
+        monkeypatch, repo, tab_id=tab_id, port=port, sent_messages=sent_messages
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": name, "path": str(repo), "session_prefix": prefix},
+    ).json()
+    client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": name, "prompt": "Finish then request review"},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": started["id"],
+            "state": "ready_for_review",
+            "message": "Done; please review",
+            "review_decision": "request",
+            "review_reason": "exercise reaper",
+        },
+    )
+
+    review_session_id = workspace_manager.tasks[started["id"]].review_session_id
+    assert review_session_id is not None
+
+    # Push review_requested_at + reviewer last activity past the dispatch grace
+    # so only the stuck-detection predicate decides whether to re-dispatch.
+    stale = datetime.now() - timedelta(
+        seconds=workspace_module.REVIEW_REAPER_DISPATCH_GRACE_SECONDS + 30
+    )
+    workspace_manager.tasks[started["id"]] = workspace_manager.tasks[started["id"]].model_copy(
+        update={"review_requested_at": stale, "updated_at": stale}
+    )
+    return client, workspace["id"], started["id"], review_session_id
+
+
+def test_fallback_reaper_keeps_bound_idle_reviewer(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Regression for the duplicate "fallback reaper" card: a reviewer that is
+    bound to THIS task and merely IDLE (reading/thinking over a large review
+    prompt past the grace window) must NOT be re-dispatched. The terminal
+    classifier reports IDLE between bursts of model output, but the reviewer is
+    genuinely working — re-dispatching produced a confusing second
+    ``ready_for_review`` report."""
+    sent_messages: list[tuple[str, str]] = []
+    client, workspace_id, task_id, review_session_id = _setup_review_in_flight_task(
+        monkeypatch,
+        tmp_path,
+        tab_id="tab-reaper-bound-idle",
+        port=12381,
+        name="Bound idle reviewer",
+        prefix="reapbi",
+        sent_messages=sent_messages,
+    )
+
+    initial_attempts = workspace_manager.tasks[task_id].review_attempts
+    stale = datetime.now() - timedelta(
+        seconds=workspace_module.REVIEW_REAPER_DISPATCH_GRACE_SECONDS + 30
+    )
+    # Reviewer is bound to the task but IDLE with stale activity (silent think).
+    reviewer = workspace_manager.sessions[review_session_id]
+    workspace_manager.sessions[review_session_id] = reviewer.model_copy(
+        update={
+            "status": ManagedSessionStatus.IDLE,
+            "runtime_status": AgentRuntimeStatus.IDLE,
+            "task_id": task_id,
+            "current_task_id": task_id,
+            "last_activity_at": stale,
+            "updated_at": stale,
+        }
+    )
+
+    # Input box is empty — the reviewer already submitted the prompt and is
+    # working. The backstop must therefore NOT fire.
+    async def fake_capture_output(_tmux_session: str) -> str:
+        return "⏺ Reviewing the change...\n  ? for shortcuts\n"
+
+    monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture_output)
+    sent_messages.clear()
+
+    asyncio.run(workspace_manager.dispatch_workspace(workspace_id, refresh_sessions=False))
+
+    after = workspace_manager.tasks[task_id]
+    assert after.review_attempts == initial_attempts, (
+        "fallback reaper must NOT re-dispatch a reviewer bound to this task and "
+        f"merely IDLE; attempts {initial_attempts} -> {after.review_attempts}"
+    )
+    assert all(
+        "fallback reaper" not in msg.lower() for _, msg in sent_messages
+    ), "a genuinely-working reviewer must not be re-prompted"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        pytest.param({"__remove__": True}, id="missing"),
+        pytest.param({"status": ManagedSessionStatus.STOPPED}, id="stopped"),
+    ],
+)
+def test_fallback_reaper_redispatches_unavailable_reviewer(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+    mutation: dict,
+) -> None:
+    """The reaper must still recover a genuinely failed dispatch: reviewer
+    session missing or STOPPED. (The cross-bound case is covered by the
+    ``_review_dispatch_failed`` predicate unit test — at the dispatch-loop
+    level ``_cleanup_stale_reviewer_assignments`` rewrites a cross-bound
+    reviewer and refreshes its activity, so redispatch happens on the next
+    loop rather than immediately.)"""
+    sent_messages: list[tuple[str, str]] = []
+    client, workspace_id, task_id, review_session_id = _setup_review_in_flight_task(
+        monkeypatch,
+        tmp_path,
+        tab_id="tab-reaper-unavail",
+        port=12382,
+        name="Unavailable reviewer",
+        prefix="reapun",
+        sent_messages=sent_messages,
+    )
+
+    initial_attempts = workspace_manager.tasks[task_id].review_attempts
+    stale = datetime.now() - timedelta(
+        seconds=workspace_module.REVIEW_REAPER_DISPATCH_GRACE_SECONDS + 30
+    )
+    if mutation.get("__remove__"):
+        del workspace_manager.sessions[review_session_id]
+    else:
+        reviewer = workspace_manager.sessions[review_session_id]
+        workspace_manager.sessions[review_session_id] = reviewer.model_copy(
+            update={
+                "runtime_status": AgentRuntimeStatus.IDLE,
+                "last_activity_at": stale,
+                "updated_at": stale,
+                **mutation,
+            }
+        )
+    sent_messages.clear()
+
+    asyncio.run(workspace_manager.dispatch_workspace(workspace_id, refresh_sessions=False))
+
+    after = workspace_manager.tasks[task_id]
+    assert after.review_attempts == initial_attempts + 1, (
+        "fallback reaper must re-dispatch when the reviewer is unavailable; "
+        f"attempts {initial_attempts} -> {after.review_attempts}"
+    )
+
+
+def test_fallback_reaper_redispatches_when_prompt_still_pending(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Backstop: a reviewer bound to the task but whose review prompt never
+    left the tmux input box (send raised after binding) is still IDLE forever
+    under the strict predicate. The input-box backstop must recover it."""
+    sent_messages: list[tuple[str, str]] = []
+    client, workspace_id, task_id, review_session_id = _setup_review_in_flight_task(
+        monkeypatch,
+        tmp_path,
+        tab_id="tab-reaper-pending",
+        port=12383,
+        name="Pending prompt reviewer",
+        prefix="reappp",
+        sent_messages=sent_messages,
+    )
+
+    initial_attempts = workspace_manager.tasks[task_id].review_attempts
+    stale = datetime.now() - timedelta(
+        seconds=workspace_module.REVIEW_REAPER_DISPATCH_GRACE_SECONDS + 30
+    )
+    reviewer = workspace_manager.sessions[review_session_id]
+    workspace_manager.sessions[review_session_id] = reviewer.model_copy(
+        update={
+            "status": ManagedSessionStatus.IDLE,
+            "runtime_status": AgentRuntimeStatus.IDLE,
+            "task_id": task_id,
+            "current_task_id": task_id,
+            "last_activity_at": stale,
+            "updated_at": stale,
+        }
+    )
+
+    # The review prompt ("Review workspace task.") is still sitting unsent in
+    # the input box — _message_still_in_input must report it as pending.
+    async def fake_capture_output(_tmux_session: str) -> str:
+        return "\n› Review workspace task.\n\n  ? for shortcuts\n"
+
+    monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture_output)
+    sent_messages.clear()
+
+    asyncio.run(workspace_manager.dispatch_workspace(workspace_id, refresh_sessions=False))
+
+    after = workspace_manager.tasks[task_id]
+    assert after.review_attempts == initial_attempts + 1, (
+        "fallback reaper backstop must re-dispatch when the review prompt is "
+        f"still pending in the input box; attempts {initial_attempts} -> {after.review_attempts}"
     )
 
 
