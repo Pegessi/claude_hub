@@ -5,6 +5,30 @@
 
 ## Unreleased
 
+### fix: prune orphan reviewer terminal tabs invisible in Manage Agents
+
+- **What**: a workspace could accumulate reviewer terminal tabs that no longer
+  had a backing `ManagedSession`. They showed in the terminal tab bar but were
+  absent from the "Manage Agents" board (which lists sessions), so they could
+  not respond to dispatch and could not be deleted from that UI — appearing as
+  "many reviewers that don't work and can't be removed".
+- **Root cause**: terminal tabs (`ttyd_manager`) and managed sessions
+  (`workspace_manager`) persist to separate state files. When a session was
+  removed without its tab (e.g. historical temporary-reviewer lifecycle
+  desync), the tab was orphaned permanently — nothing reconciled tabs against
+  sessions.
+- **Fix** (`backend/claude_hub/services/workspace_manager/_tmux_queries.py`):
+  added `_prune_orphan_workspace_tabs`, an idempotent reconciler that deletes
+  managed tabs (with this `workspace_id`) that have no backing session. It is
+  conservative: manual tabs (no `workspace_id`) are never touched, tabs backing
+  a live session are kept, and tabs created within
+  `ORPHAN_TAB_PRUNE_GRACE_SECONDS` (60s) are kept to avoid racing the
+  create-tab → session-registration window. It runs on `get_board` (so opening
+  the workspace cleans up) and in `_dispatch_workspace_locked`.
+- **Tests**: `backend/tests/test_orphan_tab_reconcile.py` covers prune-orphan,
+  preserve-manual, preserve-live-session, preserve-within-grace,
+  ignore-other-workspace, and a mixed set.
+
 ### fix: "Clear context" checkbox now honored on every dispatch path
 
 - **What**: a task created with the "Clear context" checkbox often did not

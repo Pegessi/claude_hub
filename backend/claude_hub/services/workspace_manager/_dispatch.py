@@ -676,6 +676,10 @@ class _DispatchMixin:
         if self._cleanup_stale_reviewer_assignments(workspace_id):
             self._save_state()
         await self._reap_stuck_reviews(workspace_id)
+        # Drop managed terminal tabs left behind by removed sessions so leaked
+        # reviewer tabs (visible in the tab bar but absent from Manage Agents)
+        # do not accumulate.
+        await self._prune_orphan_workspace_tabs(workspace_id)
         for session in self._workspace_agents(workspace_id, include_stopped=True):
             if not self._can_dispatch_to(session):
                 logger.info(
