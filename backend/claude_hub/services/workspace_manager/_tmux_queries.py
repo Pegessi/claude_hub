@@ -251,6 +251,89 @@ class _TmuxQueriesMixin:
             return False
         return True
 
+    def _reviewer_dispatch_stuck(self, task: WorkspaceTask) -> bool:
+        """Reaper-only test: return True when the task's review dispatch has
+        positively failed and a fresh dispatch is warranted.
+
+        This is deliberately stricter than ``not _reviewer_is_active``. The
+        fallback reaper must NOT re-dispatch a reviewer that is simply slow:
+        the terminal classifier reports ``runtime_status == IDLE`` between
+        bursts of model output, and a reviewer reading/thinking over a large
+        review prompt emits no terminal frame change for minutes. Treating that
+        transient IDLE as "stuck" (the old behaviour) made the reaper re-send
+        the review prompt to a reviewer that was actively working, producing a
+        duplicate "fallback reaper" review report and a confusing status.
+
+        A dispatch is considered stuck only when the reviewer is genuinely
+        unavailable:
+
+        - the task has no ``review_session_id``;
+        - the referenced reviewer session no longer exists;
+        - the reviewer session is STOPPED;
+        - the reviewer is bound to a *different* task.
+
+        A reviewer that is bound to THIS task and not stopped is presumed
+        mid-review and is never reaped here regardless of IDLE duration. The
+        genuine "bound but the prompt never landed" failure is handled
+        separately by the input-box backstop in ``_reap_stuck_reviews``.
+        """
+        if not task.review_session_id:
+            return True
+        reviewer = self.sessions.get(task.review_session_id)
+        if not reviewer:
+            return True
+        if reviewer.status == ManagedSessionStatus.STOPPED:
+            return True
+        if reviewer.task_id != task.id and reviewer.current_task_id != task.id:
+            return True
+        return False
+
+    async def _reviewer_prompt_still_pending(self, task: WorkspaceTask) -> bool:
+        """Backstop for the genuine "bound but the prompt never landed" failure.
+
+        ``_reviewer_dispatch_stuck`` deliberately refuses to reap a reviewer that
+        is bound to THIS task and not stopped, because a slow/thinking reviewer
+        is reported IDLE by the terminal classifier. But if ``_request_task_review``
+        bound the reviewer and the review prompt never actually left the tmux
+        input box (e.g. the send raised after binding), the reviewer would sit
+        bound + IDLE forever and would never be recovered.
+
+        Return True only when the reviewer's review prompt is *still verifiably
+        sitting in the terminal input box* — the same positive signal the
+        monitor's ``_detect_prompt_dispatch_stall`` already trusts. A reviewer
+        that is genuinely working has already submitted the prompt, so its input
+        box is empty and this returns False.
+        """
+        if not task.review_session_id:
+            return False
+        reviewer = self.sessions.get(task.review_session_id)
+        if not reviewer or not reviewer.tmux_session:
+            return False
+        try:
+            output = await self._capture_tmux_output(reviewer.tmux_session)
+        except RuntimeError as exc:
+            logger.warning(
+                "Could not inspect reviewer prompt for reaper task_id=%s session_id=%s: %s",
+                task.id,
+                reviewer.id,
+                exc,
+            )
+            return False
+        return self._message_still_in_input(
+            output,
+            self._expected_pending_prompt_prefix(reviewer, task),
+        )
+
+    async def _review_dispatch_failed(self, task: WorkspaceTask) -> bool:
+        """Reaper gate: True when this task's review dispatch should be re-sent.
+
+        Combines the strict reviewer-availability predicate with the input-box
+        backstop so the fallback reaper only re-dispatches on positive evidence
+        of a failed dispatch, never on transient reviewer IDLE."""
+        if self._reviewer_dispatch_stuck(task):
+            return True
+        return await self._reviewer_prompt_still_pending(task)
+
     def _reviewer_has_active_task_binding(self, session: ManagedSession) -> bool:
         return any(
             task.workspace_id == session.workspace_id
@@ -469,15 +552,18 @@ class _TmuxQueriesMixin:
             needs_review_dispatch = False
             if state_policy.review_in_flight(
                 task.review_requested_at, task.review_completed_at
-            ) and not self._reviewer_is_active(task):
-                # Review was requested but the assigned reviewer is idle,
-                # stopped, missing, or reassigned.
+            ) and await self._review_dispatch_failed(task):
+                # Review was requested but the dispatch positively failed: the
+                # reviewer is missing/stopped/cross-bound, or the review prompt
+                # is still verifiably sitting unsent in the tmux input box. A
+                # reviewer that is bound to this task and merely IDLE (reading or
+                # thinking over a large prompt) is NOT reaped here.
                 needs_review_dispatch = True
             elif (
                 task.status == WorkspaceTaskStatus.REVIEW
                 and not task.review_completed_at
                 and not task.human_acceptance_requested_at
-                and not self._reviewer_is_active(task)
+                and await self._review_dispatch_failed(task)
             ):
                 # Task is in REVIEW state with no reviewer progress — a
                 # reconciler or manual status transition set REVIEW without
