@@ -37,6 +37,24 @@ class _PromptsMixin:
             return f"http://127.0.0.1:{session.remote_forward_port}"
         return f"http://localhost:{settings.port}"
 
+    def _report_endpoint_curl(self, session: ManagedSession, task_id: str | None = None) -> str:
+        """Render the report-endpoint curl example for a session.
+
+        The report endpoint otherwise only appears in the bootstrap/assignment/
+        review prompts. Any follow-up message that asks an agent to report after
+        its context may have been cleared must restate this endpoint, or a
+        cleared agent has no curl target to POST to.
+        """
+        task_field = task_id if task_id is not None else "TASK_ID"
+        return (
+            "Report endpoint:\n"
+            f"curl -sS -X POST {self._report_base_url(session)}"
+            f"/api/workspaces/sessions/{session.id}/reports "
+            "-H 'Content-Type: application/json' "
+            f'-d \'{{"task_id":"{task_field}","state":"working","message":"Progress update",'
+            '"message_en":"Progress update","message_zh":"进度更新"}\''
+        )
+
     def _remote_target_label(self, session: ManagedSession) -> str:
         if not session.remote_profile_id:
             return "unknown remote host"
@@ -1036,7 +1054,12 @@ class _PromptsMixin:
             "when the task has any objectively-checkable success criterion.\n\n"
         )
 
-    def _build_continue_prompt(self, task: WorkspaceTask, payload: ContinueTaskRequest) -> str:
+    def _build_continue_prompt(
+        self,
+        task: WorkspaceTask,
+        payload: ContinueTaskRequest,
+        session: ManagedSession,
+    ) -> str:
         message = payload.message.strip() if payload.message else ""
         attachments = self._persist_attachments(
             task.workspace_id,
@@ -1053,7 +1076,8 @@ class _PromptsMixin:
             f"Task title: {task.title}\n"
             f"Follow-up instructions:\n{follow_up}\n\n"
             f"{self._autonomous_continue_orchestrator_reminder(task)}"
-            "The task is back in working state. Report progress with the same task_id."
+            "The task is back in working state. Report progress with the same task_id.\n\n"
+            f"{self._report_endpoint_curl(session, task.id)}"
         )
 
     def _autonomous_continue_orchestrator_reminder(self, task: WorkspaceTask) -> str:
