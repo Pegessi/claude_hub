@@ -1,4 +1,5 @@
 import asyncio
+import glob
 import hashlib
 import json
 import logging
@@ -12,7 +13,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, TypedDict
+from typing import Dict, Iterable, List, Optional, Tuple, TypedDict
 
 from ..config import settings
 from ..models import (
@@ -238,6 +239,120 @@ async def _tmux_kill_session(session_name: str) -> None:
         stderr=asyncio.subprocess.DEVNULL,
     )
     await proc.wait()
+
+
+# Conservative session-id backfill tuning (see _backfill_agent_session_ids).
+# best candidate must start within this many seconds of the tmux session
+_BACKFILL_MATCH_WINDOW_S = 90.0
+# runner-up must be at least this far away for the best to be "isolated"
+_BACKFILL_ISOLATION_S = 600.0
+# the matched jsonl must have been written at/after this slack before session start
+_BACKFILL_MTIME_SLACK_S = 5.0
+
+
+def _tmux_session_created(session_name: str) -> Optional[float]:
+    """Return the tmux ``session_created`` epoch for a live session.
+
+    tmux survives a backend restart, so the creation time is the deploy-moment
+    anchor used to correlate a tab with the Claude conversation that started
+    alongside it. Returns ``None`` when the session is not alive (e.g. after a
+    reboot) or tmux is unavailable.
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "tmux",
+                "display-message",
+                "-p",
+                "-t",
+                session_name,
+                "#{session_created}",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except FileNotFoundError:
+        return None
+    if proc.returncode != 0:
+        return None
+    raw = proc.stdout.strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _claude_project_dir_for_cwd(cwd: str) -> Path:
+    """Map a cwd to the Claude project log dir under ``~/.claude/projects``.
+
+    Claude derives the dir name by dropping the leading slash and replacing
+    every ``/``, ``_`` and ``.`` with ``-``, then prefixing ``-``. Example:
+    ``/Users/bytedance/claude_hub`` -> ``-Users-bytedance-claude-hub``.
+    """
+    key = re.sub(r"[/_.]", "-", cwd.lstrip("/"))
+    return Path.home() / ".claude" / "projects" / f"-{key}"
+
+
+def _jsonl_start_epoch(path: str) -> Optional[float]:
+    """Epoch of the first timestamped line in a Claude conversation jsonl.
+
+    Reads only up to the first line carrying a ``timestamp`` field so we never
+    slurp whole (potentially large) conversation logs.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts = record.get("timestamp")
+                if not isinstance(ts, str):
+                    continue
+                try:
+                    return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+                except ValueError:
+                    continue
+    except OSError:
+        return None
+    return None
+
+
+def _pick_backfill_session(
+    session_created: float,
+    candidates: List[Tuple[float, str, str]],
+) -> Optional[str]:
+    """Pure decision: pick a conversation id only when the match is unambiguous.
+
+    ``candidates`` is a list of ``(delta, session_id, file)`` where ``delta`` is
+    ``abs(conversation_start - session_created)``. Returns the chosen session id
+    or ``None`` when no confident match exists. A match requires ALL of:
+
+    - best delta <= window, AND
+    - exactly one candidate OR second-best delta >= isolation threshold, AND
+    - the best file was modified at/after ``session_created`` (minus slack), so
+      the conversation actually lived during this tab's session.
+    """
+    if not candidates:
+        return None
+    ranked = sorted(candidates, key=lambda c: c[0])
+    best_delta, best_sid, best_file = ranked[0]
+    if best_delta > _BACKFILL_MATCH_WINDOW_S:
+        return None
+    if len(ranked) > 1 and ranked[1][0] < _BACKFILL_ISOLATION_S:
+        return None
+    try:
+        if os.path.getmtime(best_file) < session_created - _BACKFILL_MTIME_SLACK_S:
+            return None
+    except OSError:
+        return None
+    return best_sid
 
 
 def _agent_spawn_env() -> dict:
@@ -1987,6 +2102,72 @@ class TTYDManager:
         self._save_state()
         return process.to_schema()
 
+    def _backfill_agent_session_ids(self) -> None:
+        """Conservatively pin ``agent_session_id`` for pre-feature claude tabs.
+
+        Tabs that were already running before session-id pinning shipped have
+        ``agent_session_id is None`` and cannot resume their real conversation
+        after a reboot. While their tmux sessions are still alive (this runs at
+        startup, before any relaunch), we correlate each such tab's tmux
+        ``session_created`` time with the start time of conversations Claude
+        logged for the tab's cwd. We pin an id ONLY when the match is
+        unambiguous — cross-wiring a tab to the wrong conversation is worse than
+        a fresh start, so anything uncertain is logged and skipped.
+
+        Defensive throughout: any per-tab error is logged and never aborts
+        startup. Each jsonl is read only up to its first timestamped line.
+        """
+        backfilled = False
+        for process in list(self.processes.values()):
+            try:
+                if not (
+                    process.from_persisted_state
+                    and process.agent_type == AgentType.CLAUDE
+                    and process.target == ExecutionTarget.LOCAL
+                    and process.agent_session_id is None
+                    and process.cwd
+                ):
+                    continue
+
+                label = f"tab {process.tab_id} ({process.name})"
+
+                session_created = _tmux_session_created(process.tmux_session)
+                if session_created is None:
+                    logger.info(f"skipped session-id backfill for {label}: no live session")
+                    continue
+
+                project_dir = _claude_project_dir_for_cwd(process.cwd)
+                if not project_dir.is_dir():
+                    logger.info(f"skipped session-id backfill for {label}: dir missing")
+                    continue
+
+                candidates: List[Tuple[float, str, str]] = []
+                for jsonl_path in glob.glob(os.path.join(str(project_dir), "*.jsonl")):
+                    start_epoch = _jsonl_start_epoch(jsonl_path)
+                    if start_epoch is None:
+                        continue
+                    session_id = os.path.basename(jsonl_path)[: -len(".jsonl")]
+                    candidates.append((abs(start_epoch - session_created), session_id, jsonl_path))
+
+                within_window = [c for c in candidates if c[0] <= _BACKFILL_MATCH_WINDOW_S]
+                chosen = _pick_backfill_session(session_created, candidates)
+                if chosen is None:
+                    if not within_window:
+                        reason = "best delta too large"
+                    else:
+                        reason = f"{len(within_window)} candidates within window, ambiguous"
+                    logger.info(f"skipped session-id backfill for {label}: {reason}")
+                    continue
+
+                process.agent_session_id = chosen
+                backfilled = True
+                logger.info(f"backfilled agent_session_id for {label} -> {chosen}")
+            except Exception as e:  # never abort startup
+                logger.warning(f"error during session-id backfill for tab {process.tab_id}: {e}")
+
+        if backfilled:
+            self._save_state()
+
     async def start_all_tabs(self) -> None:
         """Start all saved tabs on startup. Tmux sessions survive backend restarts.
 
@@ -2000,6 +2181,10 @@ class TTYDManager:
         # Ensure tmux server is running before starting any tabs
         logger.info("Ensuring tmux server is running...")
         _ensure_tmux_server()
+
+        # Pin agent_session_id for unambiguous pre-feature tabs while their
+        # tmux sessions are still alive (must run before any relaunch).
+        self._backfill_agent_session_ids()
 
         # List all existing tmux sessions for debugging
         try:

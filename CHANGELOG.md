@@ -36,6 +36,18 @@
   resume-with-fallback command for each agent type, live-session reattach
   emitting no resume flag, and `agent_session_id` round-tripping through
   `to_dict`/`_load_state`.
+- **Backfill for tabs already running before this feature**: such tabs have no
+  pinned `agent_session_id`, so they could not resume on reboot. On startup,
+  while tmux sessions are still alive, `_backfill_agent_session_ids()`
+  correlates each pre-feature claude tab's `tmux session_created` time with the
+  start times of conversations logged under
+  `~/.claude/projects/<cwd-key>/<sid>.jsonl`, and pins the id **only on an
+  unambiguous match** (best within 90s, runner-up ≥ 600s away, file modified
+  during the session) — every uncertain case is logged and skipped, because
+  cross-wiring a tab to the wrong conversation is worse than a fresh start.
+  Pinned ids are persisted so the next reboot resumes. Covered by 8 tests
+  (5 pure-decision cases + 3 manager-level pin/skip cases) and an adversarial
+  safety review.
 
 ### fix: restate report endpoint in follow-up nudges so context-cleared agents can report
 
