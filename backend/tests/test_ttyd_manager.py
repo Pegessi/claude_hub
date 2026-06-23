@@ -954,3 +954,179 @@ async def test_ensure_tab_running_reuses_existing_listener(monkeypatch: MonkeyPa
     assert tab is not None
     assert tab.id == process.tab_id
     assert tab.is_active is True
+
+
+# --- Reboot recovery (resume prior conversation on machine restart) ---------
+
+
+def test_claude_fresh_launch_pins_stable_session_id() -> None:
+    process = TTYDProcess(
+        tab_id="tab-claude-fresh-session",
+        port=12360,
+        name="Claude Fresh",
+        agent_type=AgentType.CLAUDE,
+    )
+
+    # A fresh claude tab gets a stable id and pins it via --session-id so a
+    # later reboot can resume exactly this conversation.
+    assert process.agent_session_id
+    cmd = process._build_ttyd_command(session_exists=False)
+    assert f"--session-id {process.agent_session_id}" in cmd[-1]
+    assert "--resume" not in cmd[-1]
+
+
+def test_non_claude_agents_do_not_pin_session_id() -> None:
+    for agent_type in (AgentType.CODEX, AgentType.CURSOR, AgentType.TERMINAL):
+        process = TTYDProcess(
+            tab_id=f"tab-no-session-{agent_type.value}",
+            port=12361,
+            name="No Session",
+            agent_type=agent_type,
+        )
+        assert process.agent_session_id is None
+
+
+def test_should_recover_only_when_persisted_and_session_gone() -> None:
+    process = TTYDProcess(
+        tab_id="tab-recover-flag",
+        port=12362,
+        name="Recover Flag",
+        agent_type=AgentType.CLAUDE,
+        from_persisted_state=True,
+    )
+
+    # Reboot: persisted tab whose tmux session is gone -> recover.
+    assert process._should_recover(session_exists=False) is True
+    # Backend-only restart: tmux session still alive -> reattach, no resume.
+    assert process._should_recover(session_exists=True) is False
+
+
+def test_fresh_tab_never_recovers() -> None:
+    # A brand new tab (not from persisted state) must never resume.
+    process = TTYDProcess(
+        tab_id="tab-fresh-no-recover",
+        port=12363,
+        name="Fresh No Recover",
+        agent_type=AgentType.CLAUDE,
+        from_persisted_state=False,
+    )
+    assert process._should_recover(session_exists=False) is False
+
+
+def test_terminal_and_remote_tabs_never_recover() -> None:
+    terminal = TTYDProcess(
+        tab_id="tab-terminal-no-recover",
+        port=12364,
+        name="Terminal",
+        agent_type=AgentType.TERMINAL,
+        from_persisted_state=True,
+    )
+    assert terminal._should_recover(session_exists=False) is False
+
+    remote = TTYDProcess(
+        tab_id="tab-remote-no-recover",
+        port=12365,
+        name="Remote",
+        agent_type=AgentType.CLAUDE,
+        target=ExecutionTarget.REMOTE,
+        remote_profile_id="profile-x",
+        from_persisted_state=True,
+    )
+    assert remote._should_recover(session_exists=False) is False
+
+
+def test_claude_recovery_uses_resume_with_fresh_fallback() -> None:
+    process = TTYDProcess(
+        tab_id="tab-claude-recover",
+        port=12366,
+        name="Claude Recover",
+        agent_type=AgentType.CLAUDE,
+        agent_session_id="11111111-2222-3333-4444-555555555555",
+        from_persisted_state=True,
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+    launch = cmd[-1]
+    # Resume the exact prior session, falling back to a fresh pinned session.
+    assert "--resume 11111111-2222-3333-4444-555555555555" in launch
+    assert "||" in launch
+    assert "--session-id 11111111-2222-3333-4444-555555555555" in launch
+
+
+def test_claude_live_session_reattaches_without_resume() -> None:
+    process = TTYDProcess(
+        tab_id="tab-claude-reattach",
+        port=12367,
+        name="Claude Reattach",
+        agent_type=AgentType.CLAUDE,
+        agent_session_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        from_persisted_state=True,
+    )
+
+    # tmux session alive (backend restart): tmux new-session -A reattaches and
+    # no fresh agent command is appended, so nothing to resume.
+    cmd = process._build_ttyd_command(session_exists=True)
+    joined = " ".join(cmd)
+    assert "--resume" not in joined
+    assert "--session-id" not in joined
+
+
+def test_codex_recovery_resumes_last_with_fallback() -> None:
+    # Codex agents recover via the solo-mode launch path (workspace codex
+    # agents always run solo). Non-solo codex uses a bare interactive shell.
+    process = TTYDProcess(
+        tab_id="tab-codex-recover",
+        port=12368,
+        name="Codex Recover",
+        agent_type=AgentType.CODEX,
+        solo_mode=True,
+        from_persisted_state=True,
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+    launch = cmd[-1]
+    assert "codex resume --last" in launch
+    assert "||" in launch
+
+
+def test_cursor_recovery_continues_with_fallback() -> None:
+    process = TTYDProcess(
+        tab_id="tab-cursor-recover",
+        port=12369,
+        name="Cursor Recover",
+        agent_type=AgentType.CURSOR,
+        from_persisted_state=True,
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+    launch = cmd[-1]
+    assert "agent --continue" in launch
+    assert "|| agent" in launch
+
+
+def test_agent_session_id_round_trips_through_state(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    state_file = tmp_path / "tabs.json"
+    monkeypatch.setattr(ttyd_manager_module, "STATE_FILE", state_file)
+
+    process = TTYDProcess(
+        tab_id="tab-roundtrip",
+        port=12370,
+        name="Roundtrip",
+        agent_type=AgentType.CLAUDE,
+    )
+    original_id = process.agent_session_id
+    assert original_id
+
+    # Serialize and persist exactly as TTYDManager._save_state does.
+    state_file.write_text(json.dumps([process.to_dict()]), encoding="utf-8")
+
+    manager = TTYDManager.__new__(TTYDManager)
+    manager.processes = {}
+    manager._next_port = 10000
+    manager._load_state()
+
+    restored = manager.processes["tab-roundtrip"]
+    assert restored.agent_session_id == original_id
+    # A tab restored from disk is marked as persisted so it can recover.
+    assert restored.from_persisted_state is True
+    assert restored._should_recover(session_exists=False) is True
