@@ -1072,8 +1072,7 @@ def test_claude_live_session_reattaches_without_resume() -> None:
 
 
 def test_codex_recovery_resumes_last_with_fallback() -> None:
-    # Codex agents recover via the solo-mode launch path (workspace codex
-    # agents always run solo). Non-solo codex uses a bare interactive shell.
+    # Solo codex (the workspace default) recovers via the solo-mode launch path.
     process = TTYDProcess(
         tab_id="tab-codex-recover",
         port=12368,
@@ -1087,6 +1086,27 @@ def test_codex_recovery_resumes_last_with_fallback() -> None:
     launch = cmd[-1]
     assert "codex resume --last" in launch
     assert "||" in launch
+
+
+def test_non_solo_codex_recovery_resumes_last() -> None:
+    # Non-solo codex normally launches via the bare "codex" shell; on recovery
+    # it must still route through the agent command so `resume --last` runs.
+    process = TTYDProcess(
+        tab_id="tab-codex-nonsolo-recover",
+        port=12378,
+        name="Codex NonSolo Recover",
+        agent_type=AgentType.CODEX,
+        solo_mode=False,
+        from_persisted_state=True,
+    )
+
+    recover_cmd = process._build_ttyd_command(session_exists=False)
+    assert "codex resume --last" in recover_cmd[-1]
+    assert "||" in recover_cmd[-1]
+
+    # A live session (backend-only restart) must NOT resume — bare reattach.
+    live_cmd = process._build_ttyd_command(session_exists=True)
+    assert "resume" not in live_cmd[-1]
 
 
 def test_cursor_recovery_continues_with_fallback() -> None:

@@ -636,6 +636,10 @@ asyncio.run(_main())
             )
         elif self.agent_type == AgentType.CLAUDE:
             cmd.append(self._with_env(self._agent_start_command(recover=recover)))
+        elif self.agent_type == AgentType.CODEX and recover:
+            # Non-solo codex normally launches via self.shell ("codex"); on
+            # recovery route through the agent command so `resume --last` runs.
+            cmd.append(self._with_env(self._agent_start_command(recover=recover)))
         else:
             cmd.append(self._with_env(self.shell))
 
@@ -804,6 +808,10 @@ asyncio.run(_main())
                 ]
             )
         elif self.agent_type == AgentType.CLAUDE and not session_exists:
+            cmd.append(self._with_env(self._agent_start_command(recover=recover)))
+        elif self.agent_type == AgentType.CODEX and recover:
+            # Non-solo codex normally launches via self.shell ("codex"); on
+            # recovery route through the agent command so `resume --last` runs.
             cmd.append(self._with_env(self._agent_start_command(recover=recover)))
         else:
             cmd.append(self._with_env(self.shell))

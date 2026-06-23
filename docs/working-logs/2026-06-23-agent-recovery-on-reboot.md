@@ -75,8 +75,11 @@ Recovery fires only when **all** hold:
   `_claude_session_arg()` were factored out so the fresh and resume forms share
   settings/model flags and solo-mode handling.
 - **codex**: `codex resume --last || <fresh>` (codex cannot pin an id at launch,
-  so "most recent" is the best available anchor). Workspace codex always runs
-  solo, so `<fresh>` is the sandbox form.
+  so "most recent" is the best available anchor). Solo codex recovers through the
+  solo-mode launch branch; non-solo codex (which normally launches via the bare
+  `self.shell` = `"codex"`) gets an explicit `recover` branch in both launch
+  paths so it also routes through the agent command. `<fresh>` is the sandbox
+  form when solo, plain `codex` otherwise.
 - **cursor**: `agent --continue || agent`.
 - **terminal**: unchanged (`${SHELL:-/bin/bash} -l`), never recovers.
 
