@@ -297,6 +297,8 @@ class TTYDProcess:
         workspace_name: Optional[str] = None,
         workspace_role: Optional[WorkspaceSessionRole] = None,
         env: Optional[Dict[str, str]] = None,
+        agent_session_id: Optional[str] = None,
+        from_persisted_state: bool = False,
     ):
         self.tab_id = tab_id
         self.port = port
@@ -321,6 +323,24 @@ class TTYDProcess:
         self.created_at = created_at or datetime.now()
         self.is_active = False
         self.tmux_session = _tmux_session_name(tab_id)
+        # Stable per-tab agent conversation id. Pinned at first launch via the
+        # agent CLI's --session-id flag so that after a machine reboot (tmux
+        # sessions gone) we can resume EXACTLY this tab's conversation instead
+        # of a fresh one. Many tabs share one cwd, so a cwd-scoped --continue
+        # would collide across tabs; an explicit id keeps each tab distinct.
+        # Only claude exposes --session-id, so we only pin it for claude.
+        self.agent_session_id: Optional[str]
+        if agent_session_id:
+            self.agent_session_id = agent_session_id
+        elif agent_type == AgentType.CLAUDE:
+            self.agent_session_id = str(uuid.uuid4())
+        else:
+            self.agent_session_id = None
+        # True when this process was reconstructed from persisted tabs.json on
+        # startup (vs. freshly created by a user/API call). Combined with an
+        # absent tmux session, this is the signal that we are recovering after a
+        # reboot and should resume the prior conversation.
+        self.from_persisted_state = from_persisted_state
         # For terminal tabs, use the user's shell instead of an agent command.
         if shell:
             self.shell = shell
@@ -587,6 +607,9 @@ asyncio.run(_main())
         if self.cwd and self.target == ExecutionTarget.LOCAL:
             cmd.extend(["-c", self.cwd])
         cmd.append("--")
+        # Session is guaranteed absent here (we returned early if it existed),
+        # so recover whenever this tab was restored from persisted state.
+        recover = self._should_recover(session_exists=False)
         if self.target == ExecutionTarget.REMOTE:
             cmd.append(shlex.join(self._build_remote_launcher()))
         elif self.solo_mode and self.agent_type in {AgentType.CLAUDE, AgentType.CODEX}:
@@ -596,7 +619,7 @@ asyncio.run(_main())
                     [
                         user_shell,
                         "-c",
-                        f"{self._with_env(self._agent_start_command())}; exec {user_shell}",
+                        f"{self._with_env(self._agent_start_command(recover=recover))}; exec {user_shell}",
                     ]
                 )
             )
@@ -607,12 +630,12 @@ asyncio.run(_main())
                     [
                         user_shell,
                         "-c",
-                        f"{self._with_env(self._agent_start_command())}; exec {user_shell}",
+                        f"{self._with_env(self._agent_start_command(recover=recover))}; exec {user_shell}",
                     ]
                 )
             )
         elif self.agent_type == AgentType.CLAUDE:
-            cmd.append(self._with_env(self._agent_start_command()))
+            cmd.append(self._with_env(self._agent_start_command(recover=recover)))
         else:
             cmd.append(self._with_env(self.shell))
 
@@ -751,6 +774,7 @@ asyncio.run(_main())
         if self.cwd and self.target == ExecutionTarget.LOCAL:
             cmd.extend(["-c", self.cwd])
 
+        recover = self._should_recover(session_exists=session_exists)
         if self.target == ExecutionTarget.REMOTE:
             cmd.extend(self._build_remote_launcher())
         elif (
@@ -767,7 +791,7 @@ asyncio.run(_main())
                 [
                     user_shell,
                     "-c",
-                    f"{self._with_env(self._agent_start_command())}; exec {user_shell}",
+                    f"{self._with_env(self._agent_start_command(recover=recover))}; exec {user_shell}",
                 ]
             )
         elif self.agent_type == AgentType.CURSOR and not session_exists:
@@ -776,31 +800,69 @@ asyncio.run(_main())
                 [
                     user_shell,
                     "-c",
-                    f"{self._with_env(self._agent_start_command())}; exec {user_shell}",
+                    f"{self._with_env(self._agent_start_command(recover=recover))}; exec {user_shell}",
                 ]
             )
         elif self.agent_type == AgentType.CLAUDE and not session_exists:
-            cmd.append(self._with_env(self._agent_start_command()))
+            cmd.append(self._with_env(self._agent_start_command(recover=recover)))
         else:
             cmd.append(self._with_env(self.shell))
 
         return cmd
 
-    def _agent_start_command(self) -> str:
+    def _claude_session_arg(self) -> str:
+        """Fresh-launch flag pinning this tab's stable conversation id."""
+        if self.agent_type != AgentType.CLAUDE or not self.agent_session_id:
+            return ""
+        return f" --session-id {shlex.quote(self.agent_session_id)}"
+
+    def _claude_command(self, session_flag: str) -> str:
+        if self.solo_mode:
+            base = "IS_SANDBOX=1 claude --dangerously-skip-permissions"
+        else:
+            base = get_default_command()
+        return f"{base}{self._claude_settings_arg()}{self._claude_model_arg()}{session_flag}"
+
+    def _should_recover(self, session_exists: bool) -> bool:
+        """Recover (resume prior conversation) only when relaunching a tab that
+        was persisted across a restart and whose tmux session is gone — i.e. a
+        machine reboot. A live tmux session (backend-only restart) reattaches
+        and must not resume. Scoped to local agents that expose resume flags.
+        """
+        return (
+            self.from_persisted_state
+            and not session_exists
+            and self.target == ExecutionTarget.LOCAL
+            and self.agent_type in {AgentType.CLAUDE, AgentType.CODEX, AgentType.CURSOR}
+        )
+
+    def _agent_start_command(self, recover: bool = False) -> str:
         if self.agent_type == AgentType.CODEX:
             if self.solo_mode:
-                return "codex --ask-for-approval never --sandbox danger-full-access"
-            return "codex"
+                fresh = "codex --ask-for-approval never --sandbox danger-full-access"
+            else:
+                fresh = "codex"
+            if recover:
+                # Best-effort: codex does not let us pin a session id at launch,
+                # so resume the most recent recorded session and fall back to a
+                # fresh start if there is nothing to resume.
+                return f"codex resume --last || {fresh}"
+            return fresh
         if self.agent_type == AgentType.CURSOR:
+            if recover:
+                # Best-effort: cursor resumes the previous session for this cwd.
+                return "agent --continue || agent"
             return "agent"
         if self.agent_type == AgentType.TERMINAL:
             return "${SHELL:-/bin/bash} -l"
-        if self.solo_mode:
-            return (
-                "IS_SANDBOX=1 claude --dangerously-skip-permissions"
-                f"{self._claude_settings_arg()}{self._claude_model_arg()}"
-            )
-        return f"{get_default_command()}{self._claude_settings_arg()}{self._claude_model_arg()}"
+        # claude: pin a stable --session-id on first launch so a reboot can
+        # resume EXACTLY this tab's conversation via --resume. If resume fails
+        # (no such session yet, e.g. a legacy tab), fall back to a fresh start
+        # that re-pins the same id for next time.
+        if recover and self.agent_session_id:
+            resume = self._claude_command(f" --resume {shlex.quote(self.agent_session_id)}")
+            return f"{resume} || {self._claude_command(self._claude_session_arg())}"
+        return self._claude_command(self._claude_session_arg())
 
     def _remote_ssh_target(self) -> tuple[str, int]:
         if not self.remote_profile_id:
@@ -1237,6 +1299,7 @@ asyncio.run(_main())
             ),
             "port": self.port,
             "created_at": self.created_at.isoformat(),
+            "agent_session_id": self.agent_session_id,
         }
 
     def to_schema(self) -> TerminalTab:
@@ -1324,6 +1387,8 @@ class TTYDManager:
                             workspace_id=tab_data.get("workspace_id"),
                             workspace_name=tab_data.get("workspace_name"),
                             workspace_role=workspace_role,
+                            agent_session_id=tab_data.get("agent_session_id"),
+                            from_persisted_state=True,
                         )
                         self.processes[process.tab_id] = process
                         if process.port > max_port:
