@@ -1150,3 +1150,143 @@ def test_agent_session_id_round_trips_through_state(monkeypatch: MonkeyPatch, tm
     # A tab restored from disk is marked as persisted so it can recover.
     assert restored.from_persisted_state is True
     assert restored._should_recover(session_exists=False) is True
+
+
+# --- Conservative agent_session_id backfill -----------------------------------
+
+
+def _touch_jsonl(directory, session_id: str, start_epoch: float, mtime: float) -> str:
+    """Write a minimal Claude conversation jsonl and set its mtime."""
+    path = directory / f"{session_id}.jsonl"
+    ts = datetime.utcfromtimestamp(start_epoch).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    path.write_text(json.dumps({"type": "user", "timestamp": ts}) + "\n", encoding="utf-8")
+    os.utime(path, (mtime, mtime))
+    return str(path)
+
+
+def test_pick_backfill_single_candidate_within_window(tmp_path) -> None:
+    created = 1_000_000.0
+    f = _touch_jsonl(tmp_path, "sid-a", created + 10, created + 10)
+    chosen = ttyd_manager_module._pick_backfill_session(created, [(10.0, "sid-a", f)])
+    assert chosen == "sid-a"
+
+
+def test_pick_backfill_two_close_candidates_is_ambiguous(tmp_path) -> None:
+    created = 1_000_000.0
+    f1 = _touch_jsonl(tmp_path, "sid-a", created + 10, created + 10)
+    f2 = _touch_jsonl(tmp_path, "sid-b", created + 20, created + 20)
+    chosen = ttyd_manager_module._pick_backfill_session(
+        created, [(10.0, "sid-a", f1), (20.0, "sid-b", f2)]
+    )
+    assert chosen is None
+
+
+def test_pick_backfill_second_far_away_is_picked(tmp_path) -> None:
+    created = 1_000_000.0
+    f1 = _touch_jsonl(tmp_path, "sid-a", created + 10, created + 10)
+    f2 = _touch_jsonl(tmp_path, "sid-b", created + 5000, created + 5000)
+    chosen = ttyd_manager_module._pick_backfill_session(
+        created, [(10.0, "sid-a", f1), (5000.0, "sid-b", f2)]
+    )
+    assert chosen == "sid-a"
+
+
+def test_pick_backfill_best_delta_too_large(tmp_path) -> None:
+    created = 1_000_000.0
+    f = _touch_jsonl(tmp_path, "sid-a", created + 200, created + 200)
+    chosen = ttyd_manager_module._pick_backfill_session(created, [(200.0, "sid-a", f)])
+    assert chosen is None
+
+
+def test_pick_backfill_stale_mtime_is_rejected(tmp_path) -> None:
+    created = 1_000_000.0
+    # Conversation start is close, but file last modified well before session.
+    f = _touch_jsonl(tmp_path, "sid-a", created + 10, created - 100)
+    chosen = ttyd_manager_module._pick_backfill_session(created, [(10.0, "sid-a", f)])
+    assert chosen is None
+
+
+def _backfill_manager(monkeypatch: MonkeyPatch, tmp_path, process: TTYDProcess) -> TTYDManager:
+    state_file = tmp_path / "tabs.json"
+    monkeypatch.setattr(ttyd_manager_module, "STATE_FILE", state_file)
+    manager = TTYDManager.__new__(TTYDManager)
+    manager.processes = {process.tab_id: process}
+    return manager
+
+
+def test_backfill_pins_unambiguous_session(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    cwd = "/Users/tester/proj"
+    projects = tmp_path / ".claude" / "projects" / "-Users-tester-proj"
+    projects.mkdir(parents=True)
+    created = 1_700_000_000.0
+    _touch_jsonl(projects, "real-convo", created + 15, created + 60)
+
+    monkeypatch.setattr(ttyd_manager_module.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_created", lambda _session: created)
+
+    process = TTYDProcess(
+        tab_id="tab-old",
+        port=12380,
+        name="Old Claude",
+        cwd=cwd,
+        agent_type=AgentType.CLAUDE,
+        from_persisted_state=True,
+    )
+    process.agent_session_id = None
+
+    manager = _backfill_manager(monkeypatch, tmp_path, process)
+    manager._backfill_agent_session_ids()
+
+    assert process.agent_session_id == "real-convo"
+    # Pinned id persisted so a subsequent reboot can resume.
+    saved = json.loads((tmp_path / "tabs.json").read_text(encoding="utf-8"))
+    assert saved[0]["agent_session_id"] == "real-convo"
+
+
+def test_backfill_skips_when_no_live_session(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setattr(ttyd_manager_module.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_created", lambda _session: None)
+
+    process = TTYDProcess(
+        tab_id="tab-dead",
+        port=12381,
+        name="Dead Claude",
+        cwd="/Users/tester/proj",
+        agent_type=AgentType.CLAUDE,
+        from_persisted_state=True,
+    )
+    process.agent_session_id = None
+
+    manager = _backfill_manager(monkeypatch, tmp_path, process)
+    manager._backfill_agent_session_ids()
+
+    assert process.agent_session_id is None
+    assert not (tmp_path / "tabs.json").exists()
+
+
+def test_backfill_skips_ambiguous_dir(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    cwd = "/Users/tester/proj"
+    projects = tmp_path / ".claude" / "projects" / "-Users-tester-proj"
+    projects.mkdir(parents=True)
+    created = 1_700_000_000.0
+    _touch_jsonl(projects, "convo-a", created + 10, created + 30)
+    _touch_jsonl(projects, "convo-b", created + 25, created + 40)
+
+    monkeypatch.setattr(ttyd_manager_module.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_created", lambda _session: created)
+
+    process = TTYDProcess(
+        tab_id="tab-amb",
+        port=12382,
+        name="Ambiguous Claude",
+        cwd=cwd,
+        agent_type=AgentType.CLAUDE,
+        from_persisted_state=True,
+    )
+    process.agent_session_id = None
+
+    manager = _backfill_manager(monkeypatch, tmp_path, process)
+    manager._backfill_agent_session_ids()
+
+    assert process.agent_session_id is None
+    assert not (tmp_path / "tabs.json").exists()

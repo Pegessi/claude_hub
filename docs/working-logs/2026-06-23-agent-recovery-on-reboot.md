@@ -83,6 +83,45 @@ Recovery fires only when **all** hold:
 - **cursor**: `agent --continue || agent`.
 - **terminal**: unchanged (`${SHELL:-/bin/bash} -l`), never recovers.
 
+## Recovering tabs that were ALREADY running before this feature
+
+Reviewer follow-up: *"现在已经在运行的这些terminal和agent能被恢复吗 如果重启了的话"* —
+can the agents running right now be recovered on reboot?
+
+Honest answer: **not automatically for most of them, by construction** — and a
+loose guess would be unsafe. A tab created before this feature has
+`agent_session_id = None` in `tabs.json`; on reboot it has no id to resume. The
+live agent's id cannot be scraped from the running process (claude appends-and-
+closes its `.jsonl`, and the id is not in argv/env). So the only place to learn
+the id is Claude's conversation log, correlated by time.
+
+Measured on this machine: all 26 live claude tabs share just 2 project dirs
+(288 + 277 `.jsonl` files). A ±120s timestamp match gave only 10/26 confident,
+16 ambiguous; a structurally-safe (sole-jsonl / sole-live-tab) match gave 0.
+Cross-wiring a tab to the *wrong* conversation on reboot is worse than a clean
+start, so guessing is unacceptable.
+
+`TTYDManager._backfill_agent_session_ids()` (called at the top of
+`start_all_tabs`, before any relaunch, while tmux sessions are still alive)
+therefore pins an id **only on an unambiguous match** and logs every skip:
+
+- Gate: `from_persisted_state ∧ CLAUDE ∧ LOCAL ∧ agent_session_id is None ∧ cwd`.
+  Never overwrites an existing id; never touches cursor/terminal/remote tabs.
+- Anchor: `tmux session_created` (survives a backend restart; `None` after a
+  real reboot ⇒ skip, since correlation is then meaningless).
+- Candidates: each `~/.claude/projects/<cwd-key>/<sid>.jsonl` start time (first
+  timestamped line only).
+- Confident-match rule (`_pick_backfill_session`, all required): best delta
+  ≤ 90s; exactly one candidate or runner-up ≥ 600s away (temporal isolation);
+  matched file `mtime ≥ session_created − 5s` (conversation lived during this
+  session). Otherwise skip + log the reason.
+- On any pin, `_save_state()` persists the id so the *next* reboot resumes.
+
+Net: the unambiguous subset of the current fleet becomes reboot-recoverable now;
+the rest start fresh (logged), and every tab created after deploy is fully
+recoverable via its pinned id. This is a deliberate correctness-over-coverage
+trade — better a clean start than a tab resuming someone else's conversation.
+
 ## Key issues / pitfalls
 
 - **Do not resume a live tmux session.** The whole feature hinges on
@@ -106,9 +145,12 @@ Recovery fires only when **all** hold:
 ## Validation
 
 - black, isort, mypy: clean.
-- `tests/test_ttyd_manager.py`: 42 passed (includes 11 new recovery tests).
+- `tests/test_ttyd_manager.py`: 51 passed (11 recovery tests + 8 backfill tests:
+  5 pure `_pick_backfill_session` cases and 3 manager-level skip/pin cases).
+- Backfill safety re-review (adversarial): PASS, no wrong-id repro; cwd-key
+  derivation verified against real on-disk `~/.claude/projects` dirs.
 - Full suite: 24 unrelated failures (`test_workspaces.py`,
   `test_workspace_orchestrator_contract.py`, two `test_ensure_tab_running_*`)
   are pre-existing event-loop pollution under pytest-randomly ordering — they
-  pass in isolation and in combination with the new file (153 passed together),
-  and touch no code on this branch.
+  pass in isolation and in combination with the new file, and touch no code on
+  this branch.
