@@ -21,13 +21,14 @@
   was purely the frontend gate. Reporting Completed should itself permit
   transition to Done.
 - **How** (`frontend/src/components/AgentWorkspaceView.vue`): added
-  `hasReportedCompletion(task)` (latest board report state is `completed` or
-  `ready_for_review`) and OR'd it into `awaitingHumanAcceptance`. All existing
-  guards are preserved: a `pending_review` / `rejected` Goal Packet still hides
-  Done, and `hasBlockingReviewResult` (latest review verdict `review_failed` /
-  `review_needs_input`) still suppresses it. Active reviews are unaffected — while
-  a review is running the latest report is `review_started`, not `completed`, so
-  the badge still reads "AI reviewing".
+  `hasReportedCompletion(task)` (latest board report state is `completed`) and
+  OR'd it into `awaitingHumanAcceptance`. `ready_for_review` is excluded — it
+  signals the agent is asking for AI review, so the task waits for a verdict. All
+  existing guards are preserved: a `pending_review` / `rejected` Goal Packet still
+  hides Done, and `hasBlockingReviewResult` (latest review verdict `review_failed`
+  / `review_needs_input`) still suppresses it. Active reviews are unaffected —
+  while a review is running the latest report is `review_started`, not
+  `completed`, so the badge still reads "AI reviewing".
 
 ### feat: recover agent conversations on startup after a machine reboot
 
