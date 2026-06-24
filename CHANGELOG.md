@@ -5,21 +5,21 @@
 
 ## Unreleased
 
-### fix: allow Done after a reported Completed even when AI review never produced a verdict
+### fix: allow Done after a reported Completed even without a review verdict
 
 - **What**: a reviewed/auto task that reported `completed` (so it sits in `review`
-  status) now shows an enabled **Done** button even when the dispatched AI
-  reviewer never produced a verdict. Previously the Done button only appeared
-  after a reviewer verdict (`review_passed`), a review skip, or an explicit
-  human-acceptance request — so a task whose review silently stalled was stuck in
-  `review` with no way for the human to finish it.
-- **Why**: the orchestrator's `completed` report routes through review dispatch,
-  moving the task to `review`. If that reviewer never reports back,
+  status) now shows an enabled **Done** button even when no AI review verdict was
+  ever produced. Previously the Done button only appeared after a reviewer verdict
+  (`review_passed`), a review skip, or an explicit human-acceptance request — so a
+  simple task the agent just reported `completed` on was stuck in `review` with no
+  way for the human to finish it.
+- **Why**: some tasks are simple enough that the agent reports `completed`
+  directly and no review verdict is needed. In that state
   `human_acceptance_requested_at` / `review_skipped_at` stay null and there is no
   `review_passed` report, so `awaitingHumanAcceptance` returned false and hid
   Done. The backend already permits the `REVIEW → DONE` transition; the blocker
-  was purely the frontend gate. Reporting Completed should permit transition to
-  Done.
+  was purely the frontend gate. Reporting Completed should itself permit
+  transition to Done.
 - **How** (`frontend/src/components/AgentWorkspaceView.vue`): added
   `hasReportedCompletion(task)` (latest board report state is `completed` or
   `ready_for_review`) and OR'd it into `awaitingHumanAcceptance`. All existing

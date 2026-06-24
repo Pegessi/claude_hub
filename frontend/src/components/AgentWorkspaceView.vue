@@ -3350,10 +3350,12 @@ function awaitingHumanAcceptance(task: WorkspaceTask) {
     Boolean(task.human_acceptance_requested_at) ||
     Boolean(task.review_skipped_at) ||
     latestReviewReport?.state === 'review_passed' ||
-    // A task whose orchestrator reported Completed (status=review) but whose AI
-    // review never produced a verdict is otherwise stuck with no Done button.
-    // Reporting Completed should permit transition to Done; hasBlockingReviewResult
-    // still suppresses Done when the latest review verdict is failed/needs_input.
+    // Some tasks are simple enough that the agent just reports Completed without
+    // a review verdict ever being produced (no review_passed, no skip flag, no
+    // human-acceptance request). Reporting Completed should itself permit the
+    // human to mark the task Done — otherwise it is stuck in review with no
+    // actionable control. hasBlockingReviewResult still suppresses Done when a
+    // review verdict of failed/needs_input exists.
     hasReportedCompletion(task)
   )
 }
