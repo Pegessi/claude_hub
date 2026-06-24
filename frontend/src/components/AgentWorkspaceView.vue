@@ -3330,6 +3330,14 @@ function activeReviewBadge(
   return null
 }
 
+function hasReportedCompletion(task: WorkspaceTask) {
+  // The orchestrator signalled it is done: the latest report for the task is a
+  // completion-style gate report. board.reports carries the latest report per
+  // task, so latestReportForTask reflects the task's current report state.
+  const latestReport = workspaceStore.latestReportForTask(task)
+  return latestReport?.state === 'completed' || latestReport?.state === 'ready_for_review'
+}
+
 function awaitingHumanAcceptance(task: WorkspaceTask) {
   const latestReviewReport = latestReviewReportForTask(task)
   if (
@@ -3341,7 +3349,12 @@ function awaitingHumanAcceptance(task: WorkspaceTask) {
   return task.status === 'review' && (
     Boolean(task.human_acceptance_requested_at) ||
     Boolean(task.review_skipped_at) ||
-    latestReviewReport?.state === 'review_passed'
+    latestReviewReport?.state === 'review_passed' ||
+    // A task whose orchestrator reported Completed (status=review) but whose AI
+    // review never produced a verdict is otherwise stuck with no Done button.
+    // Reporting Completed should permit transition to Done; hasBlockingReviewResult
+    // still suppresses Done when the latest review verdict is failed/needs_input.
+    hasReportedCompletion(task)
   )
 }
 
