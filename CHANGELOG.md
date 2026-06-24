@@ -5,6 +5,50 @@
 
 ## Unreleased
 
+### feat: recover agent conversations on startup after a machine reboot
+
+- **What**: when the backend starts and restores tabs from `~/.claude_hub/tabs.json`,
+  any agent tab whose tmux session is gone (the signature of a machine reboot, as
+  opposed to a backend-only restart where tmux survives) now relaunches by
+  **resuming its prior conversation** instead of starting fresh. Claude, Codex,
+  and Cursor agent tabs are covered; terminal and remote tabs are unaffected.
+- **Why**: tmux sessions (`claude-hub-<tab_id>`) survive a backend restart — the
+  tab reattaches and no resume is needed — but die on a full machine reboot.
+  Previously a reboot relaunched every agent as a brand-new conversation, losing
+  all prior context. Agents already expose CLI resume, so startup recovery just
+  wires it up.
+- **How** (`backend/claude_hub/services/ttyd_manager.py`):
+  - Each claude tab gets a stable `agent_session_id` (UUID) pinned at first
+    launch via `claude --session-id <id>`, persisted in `tabs.json`, and used on
+    recovery via `claude --resume <id> || <fresh-pinned>`. A per-tab id is
+    required because many agent tabs share one cwd, so the cwd-scoped
+    `--continue` would collide across tabs; `--session-id`/`--resume` keeps each
+    tab's conversation distinct. The `|| <fresh>` fallback re-pins the same id so
+    a legacy tab with no recorded session still recovers cleanly next time.
+  - Codex (cannot pin an id at launch) recovers via `codex resume --last || <fresh>`;
+    Cursor via `agent --continue || agent`.
+  - Recovery is gated by `_should_recover()` = restored-from-persisted-state AND
+    tmux session absent AND local target AND a resumable agent type — so live
+    reattaches (backend restart), terminal tabs, and remote tabs never resume.
+- **Tests** (`backend/tests/test_ttyd_manager.py`): cover stable id pinning on
+  fresh claude launch, non-claude agents not pinning an id, the `_should_recover`
+  gate (persisted + session-gone only; fresh/terminal/remote never), the
+  resume-with-fallback command for each agent type, live-session reattach
+  emitting no resume flag, and `agent_session_id` round-tripping through
+  `to_dict`/`_load_state`.
+- **Backfill for tabs already running before this feature**: such tabs have no
+  pinned `agent_session_id`, so they could not resume on reboot. On startup,
+  while tmux sessions are still alive, `_backfill_agent_session_ids()`
+  correlates each pre-feature claude tab's `tmux session_created` time with the
+  start times of conversations logged under
+  `~/.claude/projects/<cwd-key>/<sid>.jsonl`, and pins the id **only on an
+  unambiguous match** (best within 90s, runner-up ≥ 600s away, file modified
+  during the session) — every uncertain case is logged and skipped, because
+  cross-wiring a tab to the wrong conversation is worse than a fresh start.
+  Pinned ids are persisted so the next reboot resumes. Covered by 8 tests
+  (5 pure-decision cases + 3 manager-level pin/skip cases) and an adversarial
+  safety review.
+
 ### fix: restate report endpoint in follow-up nudges so context-cleared agents can report
 
 - **What**: after an agent's context was cleared (`/clear`), follow-up messages

@@ -954,3 +954,339 @@ async def test_ensure_tab_running_reuses_existing_listener(monkeypatch: MonkeyPa
     assert tab is not None
     assert tab.id == process.tab_id
     assert tab.is_active is True
+
+
+# --- Reboot recovery (resume prior conversation on machine restart) ---------
+
+
+def test_claude_fresh_launch_pins_stable_session_id() -> None:
+    process = TTYDProcess(
+        tab_id="tab-claude-fresh-session",
+        port=12360,
+        name="Claude Fresh",
+        agent_type=AgentType.CLAUDE,
+    )
+
+    # A fresh claude tab gets a stable id and pins it via --session-id so a
+    # later reboot can resume exactly this conversation.
+    assert process.agent_session_id
+    cmd = process._build_ttyd_command(session_exists=False)
+    assert f"--session-id {process.agent_session_id}" in cmd[-1]
+    assert "--resume" not in cmd[-1]
+
+
+def test_non_claude_agents_do_not_pin_session_id() -> None:
+    for agent_type in (AgentType.CODEX, AgentType.CURSOR, AgentType.TERMINAL):
+        process = TTYDProcess(
+            tab_id=f"tab-no-session-{agent_type.value}",
+            port=12361,
+            name="No Session",
+            agent_type=agent_type,
+        )
+        assert process.agent_session_id is None
+
+
+def test_should_recover_only_when_persisted_and_session_gone() -> None:
+    process = TTYDProcess(
+        tab_id="tab-recover-flag",
+        port=12362,
+        name="Recover Flag",
+        agent_type=AgentType.CLAUDE,
+        from_persisted_state=True,
+    )
+
+    # Reboot: persisted tab whose tmux session is gone -> recover.
+    assert process._should_recover(session_exists=False) is True
+    # Backend-only restart: tmux session still alive -> reattach, no resume.
+    assert process._should_recover(session_exists=True) is False
+
+
+def test_fresh_tab_never_recovers() -> None:
+    # A brand new tab (not from persisted state) must never resume.
+    process = TTYDProcess(
+        tab_id="tab-fresh-no-recover",
+        port=12363,
+        name="Fresh No Recover",
+        agent_type=AgentType.CLAUDE,
+        from_persisted_state=False,
+    )
+    assert process._should_recover(session_exists=False) is False
+
+
+def test_terminal_and_remote_tabs_never_recover() -> None:
+    terminal = TTYDProcess(
+        tab_id="tab-terminal-no-recover",
+        port=12364,
+        name="Terminal",
+        agent_type=AgentType.TERMINAL,
+        from_persisted_state=True,
+    )
+    assert terminal._should_recover(session_exists=False) is False
+
+    remote = TTYDProcess(
+        tab_id="tab-remote-no-recover",
+        port=12365,
+        name="Remote",
+        agent_type=AgentType.CLAUDE,
+        target=ExecutionTarget.REMOTE,
+        remote_profile_id="profile-x",
+        from_persisted_state=True,
+    )
+    assert remote._should_recover(session_exists=False) is False
+
+
+def test_claude_recovery_uses_resume_with_fresh_fallback() -> None:
+    process = TTYDProcess(
+        tab_id="tab-claude-recover",
+        port=12366,
+        name="Claude Recover",
+        agent_type=AgentType.CLAUDE,
+        agent_session_id="11111111-2222-3333-4444-555555555555",
+        from_persisted_state=True,
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+    launch = cmd[-1]
+    # Resume the exact prior session, falling back to a fresh pinned session.
+    assert "--resume 11111111-2222-3333-4444-555555555555" in launch
+    assert "||" in launch
+    assert "--session-id 11111111-2222-3333-4444-555555555555" in launch
+
+
+def test_claude_live_session_reattaches_without_resume() -> None:
+    process = TTYDProcess(
+        tab_id="tab-claude-reattach",
+        port=12367,
+        name="Claude Reattach",
+        agent_type=AgentType.CLAUDE,
+        agent_session_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        from_persisted_state=True,
+    )
+
+    # tmux session alive (backend restart): tmux new-session -A reattaches and
+    # no fresh agent command is appended, so nothing to resume.
+    cmd = process._build_ttyd_command(session_exists=True)
+    joined = " ".join(cmd)
+    assert "--resume" not in joined
+    assert "--session-id" not in joined
+
+
+def test_codex_recovery_resumes_last_with_fallback() -> None:
+    # Solo codex (the workspace default) recovers via the solo-mode launch path.
+    process = TTYDProcess(
+        tab_id="tab-codex-recover",
+        port=12368,
+        name="Codex Recover",
+        agent_type=AgentType.CODEX,
+        solo_mode=True,
+        from_persisted_state=True,
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+    launch = cmd[-1]
+    assert "codex resume --last" in launch
+    assert "||" in launch
+
+
+def test_non_solo_codex_recovery_resumes_last() -> None:
+    # Non-solo codex normally launches via the bare "codex" shell; on recovery
+    # it must still route through the agent command so `resume --last` runs.
+    process = TTYDProcess(
+        tab_id="tab-codex-nonsolo-recover",
+        port=12378,
+        name="Codex NonSolo Recover",
+        agent_type=AgentType.CODEX,
+        solo_mode=False,
+        from_persisted_state=True,
+    )
+
+    recover_cmd = process._build_ttyd_command(session_exists=False)
+    assert "codex resume --last" in recover_cmd[-1]
+    assert "||" in recover_cmd[-1]
+
+    # A live session (backend-only restart) must NOT resume — bare reattach.
+    live_cmd = process._build_ttyd_command(session_exists=True)
+    assert "resume" not in live_cmd[-1]
+
+
+def test_cursor_recovery_continues_with_fallback() -> None:
+    process = TTYDProcess(
+        tab_id="tab-cursor-recover",
+        port=12369,
+        name="Cursor Recover",
+        agent_type=AgentType.CURSOR,
+        from_persisted_state=True,
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+    launch = cmd[-1]
+    assert "agent --continue" in launch
+    assert "|| agent" in launch
+
+
+def test_agent_session_id_round_trips_through_state(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    state_file = tmp_path / "tabs.json"
+    monkeypatch.setattr(ttyd_manager_module, "STATE_FILE", state_file)
+
+    process = TTYDProcess(
+        tab_id="tab-roundtrip",
+        port=12370,
+        name="Roundtrip",
+        agent_type=AgentType.CLAUDE,
+    )
+    original_id = process.agent_session_id
+    assert original_id
+
+    # Serialize and persist exactly as TTYDManager._save_state does.
+    state_file.write_text(json.dumps([process.to_dict()]), encoding="utf-8")
+
+    manager = TTYDManager.__new__(TTYDManager)
+    manager.processes = {}
+    manager._next_port = 10000
+    manager._load_state()
+
+    restored = manager.processes["tab-roundtrip"]
+    assert restored.agent_session_id == original_id
+    # A tab restored from disk is marked as persisted so it can recover.
+    assert restored.from_persisted_state is True
+    assert restored._should_recover(session_exists=False) is True
+
+
+# --- Conservative agent_session_id backfill -----------------------------------
+
+
+def _touch_jsonl(directory, session_id: str, start_epoch: float, mtime: float) -> str:
+    """Write a minimal Claude conversation jsonl and set its mtime."""
+    path = directory / f"{session_id}.jsonl"
+    ts = datetime.utcfromtimestamp(start_epoch).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    path.write_text(json.dumps({"type": "user", "timestamp": ts}) + "\n", encoding="utf-8")
+    os.utime(path, (mtime, mtime))
+    return str(path)
+
+
+def test_pick_backfill_single_candidate_within_window(tmp_path) -> None:
+    created = 1_000_000.0
+    f = _touch_jsonl(tmp_path, "sid-a", created + 10, created + 10)
+    chosen = ttyd_manager_module._pick_backfill_session(created, [(10.0, "sid-a", f)])
+    assert chosen == "sid-a"
+
+
+def test_pick_backfill_two_close_candidates_is_ambiguous(tmp_path) -> None:
+    created = 1_000_000.0
+    f1 = _touch_jsonl(tmp_path, "sid-a", created + 10, created + 10)
+    f2 = _touch_jsonl(tmp_path, "sid-b", created + 20, created + 20)
+    chosen = ttyd_manager_module._pick_backfill_session(
+        created, [(10.0, "sid-a", f1), (20.0, "sid-b", f2)]
+    )
+    assert chosen is None
+
+
+def test_pick_backfill_second_far_away_is_picked(tmp_path) -> None:
+    created = 1_000_000.0
+    f1 = _touch_jsonl(tmp_path, "sid-a", created + 10, created + 10)
+    f2 = _touch_jsonl(tmp_path, "sid-b", created + 5000, created + 5000)
+    chosen = ttyd_manager_module._pick_backfill_session(
+        created, [(10.0, "sid-a", f1), (5000.0, "sid-b", f2)]
+    )
+    assert chosen == "sid-a"
+
+
+def test_pick_backfill_best_delta_too_large(tmp_path) -> None:
+    created = 1_000_000.0
+    f = _touch_jsonl(tmp_path, "sid-a", created + 200, created + 200)
+    chosen = ttyd_manager_module._pick_backfill_session(created, [(200.0, "sid-a", f)])
+    assert chosen is None
+
+
+def test_pick_backfill_stale_mtime_is_rejected(tmp_path) -> None:
+    created = 1_000_000.0
+    # Conversation start is close, but file last modified well before session.
+    f = _touch_jsonl(tmp_path, "sid-a", created + 10, created - 100)
+    chosen = ttyd_manager_module._pick_backfill_session(created, [(10.0, "sid-a", f)])
+    assert chosen is None
+
+
+def _backfill_manager(monkeypatch: MonkeyPatch, tmp_path, process: TTYDProcess) -> TTYDManager:
+    state_file = tmp_path / "tabs.json"
+    monkeypatch.setattr(ttyd_manager_module, "STATE_FILE", state_file)
+    manager = TTYDManager.__new__(TTYDManager)
+    manager.processes = {process.tab_id: process}
+    return manager
+
+
+def test_backfill_pins_unambiguous_session(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    cwd = "/Users/tester/proj"
+    projects = tmp_path / ".claude" / "projects" / "-Users-tester-proj"
+    projects.mkdir(parents=True)
+    created = 1_700_000_000.0
+    _touch_jsonl(projects, "real-convo", created + 15, created + 60)
+
+    monkeypatch.setattr(ttyd_manager_module.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_created", lambda _session: created)
+
+    process = TTYDProcess(
+        tab_id="tab-old",
+        port=12380,
+        name="Old Claude",
+        cwd=cwd,
+        agent_type=AgentType.CLAUDE,
+        from_persisted_state=True,
+    )
+    process.agent_session_id = None
+
+    manager = _backfill_manager(monkeypatch, tmp_path, process)
+    manager._backfill_agent_session_ids()
+
+    assert process.agent_session_id == "real-convo"
+    # Pinned id persisted so a subsequent reboot can resume.
+    saved = json.loads((tmp_path / "tabs.json").read_text(encoding="utf-8"))
+    assert saved[0]["agent_session_id"] == "real-convo"
+
+
+def test_backfill_skips_when_no_live_session(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setattr(ttyd_manager_module.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_created", lambda _session: None)
+
+    process = TTYDProcess(
+        tab_id="tab-dead",
+        port=12381,
+        name="Dead Claude",
+        cwd="/Users/tester/proj",
+        agent_type=AgentType.CLAUDE,
+        from_persisted_state=True,
+    )
+    process.agent_session_id = None
+
+    manager = _backfill_manager(monkeypatch, tmp_path, process)
+    manager._backfill_agent_session_ids()
+
+    assert process.agent_session_id is None
+    assert not (tmp_path / "tabs.json").exists()
+
+
+def test_backfill_skips_ambiguous_dir(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    cwd = "/Users/tester/proj"
+    projects = tmp_path / ".claude" / "projects" / "-Users-tester-proj"
+    projects.mkdir(parents=True)
+    created = 1_700_000_000.0
+    _touch_jsonl(projects, "convo-a", created + 10, created + 30)
+    _touch_jsonl(projects, "convo-b", created + 25, created + 40)
+
+    monkeypatch.setattr(ttyd_manager_module.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_created", lambda _session: created)
+
+    process = TTYDProcess(
+        tab_id="tab-amb",
+        port=12382,
+        name="Ambiguous Claude",
+        cwd=cwd,
+        agent_type=AgentType.CLAUDE,
+        from_persisted_state=True,
+    )
+    process.agent_session_id = None
+
+    manager = _backfill_manager(monkeypatch, tmp_path, process)
+    manager._backfill_agent_session_ids()
+
+    assert process.agent_session_id is None
+    assert not (tmp_path / "tabs.json").exists()
