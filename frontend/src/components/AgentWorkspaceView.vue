@@ -292,7 +292,7 @@
             </span>
           </button>
           <div
-            v-if="agent.role !== 'dispatcher'"
+            v-if="agent.role !== 'dispatcher' && agent.role !== 'resident'"
             class="agent-status-actions"
           >
             <LoadingButton
@@ -2063,7 +2063,7 @@
                 @click="agentManagerView = 'agents'"
               >
                 <span>Agents</span>
-                <strong>{{ workspaceAgents.length + (dispatcherAgent ? 1 : 0) }}</strong>
+                <strong>{{ workspaceAgents.length + (dispatcherAgent ? 1 : 0) + (residentAgent ? 1 : 0) }}</strong>
               </button>
               <button
                 type="button"
@@ -2114,7 +2114,7 @@
                   ⚙ Env
                 </LoadingButton>
                 <LoadingButton
-                  v-if="agent.role !== 'dispatcher'"
+                  v-if="agent.role !== 'dispatcher' && agent.role !== 'resident'"
                   type="button"
                   class="danger-button"
                   :disabled="!canDeleteAgent(agent)"
@@ -2687,6 +2687,7 @@ const {
   reviewerAgents,
   temporaryReviewers,
   dispatcherAgent,
+  residentAgent,
   isLoading,
   error,
   notifications: wsNotifications,
@@ -3329,6 +3330,7 @@ const managedWorkspaceSessions = computed<ManagedSession[]>(() => [
   ...workspaceAgents.value,
   ...reviewerSessions.value,
   ...(dispatcherAgent.value ? [dispatcherAgent.value] : []),
+  ...(residentAgent.value ? [residentAgent.value] : []),
 ])
 
 const agentManagerView = ref<'agents' | 'reviewers'>('agents')
@@ -3336,7 +3338,11 @@ const agentManagerView = ref<'agents' | 'reviewers'>('agents')
 const agentManagerSessions = computed<ManagedSession[]>(() =>
   agentManagerView.value === 'reviewers'
     ? reviewerSessions.value
-    : [...workspaceAgents.value, ...(dispatcherAgent.value ? [dispatcherAgent.value] : [])],
+    : [
+        ...workspaceAgents.value,
+        ...(dispatcherAgent.value ? [dispatcherAgent.value] : []),
+        ...(residentAgent.value ? [residentAgent.value] : []),
+      ],
 )
 
 const agentManagerEmptyText = computed(() =>
@@ -3667,6 +3673,7 @@ function reviewerTitle(sessionId?: string | null) {
 
 function agentRoleLabel(agent: ManagedSession) {
   if (agent.role === 'dispatcher') return 'Dispatcher'
+  if (agent.role === 'resident') return 'Resident'
   if (agent.role === 'reviewer') return agent.ephemeral ? 'Temporary Reviewer' : 'Reviewer'
   return 'Agent'
 }
