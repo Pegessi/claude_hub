@@ -51,6 +51,31 @@
   semi-transparent, fixing the visual overlap where badges/buttons behind the
   toast showed through.
 
+### feat: per-workspace resident self-driven agent + delete-workspace endpoint
+
+- **What**: workspaces can now opt into a **resident self-driven agent** — a
+  standing Claude session that wakes on a configurable interval to maintain the
+  workspace. Each cycle it performs the user's recurring-task directive, curates
+  the workspace lesson catalog (create/merge new lessons, archive stale ones),
+  and **proposes** new tasks in `TODO` for the user to approve. It never
+  auto-starts work, spawns workers, merges branches, or takes destructive
+  actions. A new `DELETE /api/workspaces/{workspace_id}` endpoint (204) also
+  fully removes a workspace and all of its state.
+- **Why**: long-lived workspaces accumulate maintenance work (lesson hygiene,
+  recurring checks, surfacing follow-up tasks) that no one explicitly dispatches;
+  a resident agent keeps that work moving without taking risky autonomous action.
+  Workspaces previously had no delete path at all.
+- **How**: new `WorkspaceSessionRole.RESIDENT = "resident"` role (excluded from
+  task dispatch and review). `Workspace` / `WorkspaceCreate` / `WorkspaceUpdate`
+  gain `resident_agent_enabled`, `resident_agent_interval_minutes`, and
+  `resident_agent_directive` (plus server-managed `resident_agent_session_id` /
+  `resident_agent_last_run_at`). The background monitor calls a new
+  `_tick_resident_agents()` each loop; due workspaces ensure a resident session,
+  receive `build_resident_agent_prompt(...)`, and stamp the last-run time.
+  `delete_workspace(...)` tears down sessions + ttyd tabs unconditionally and
+  removes the on-disk state dir. See
+  `docs/working-logs/2026-06-25-workspace-resident-agent.md`.
+
 ### fix: allow Done after a reported Completed even without a review verdict
 
 - **What**: a reviewed/auto task that reported `completed` (so it sits in `review`

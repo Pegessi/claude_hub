@@ -30,6 +30,8 @@ class _PromptsMixin:
             return self._build_dispatcher_bootstrap_prompt(workspace, session)
         if session.role == WorkspaceSessionRole.REVIEWER:
             return self._build_reviewer_bootstrap_prompt(workspace, session)
+        if session.role == WorkspaceSessionRole.RESIDENT:
+            return _wm.build_resident_agent_prompt(workspace, self._report_base_url(session))
         return self._build_workspace_agent_prompt(workspace, session)
 
     def _report_base_url(self, session: ManagedSession) -> str:

@@ -106,6 +106,18 @@ async def update_workspace(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+@router.delete("/{workspace_id}", status_code=204)
+async def delete_workspace(
+    workspace_id: str,
+    current_user: User = Depends(get_current_user),
+) -> None:
+    """Delete a workspace, its sessions/tasks/reports, and its terminal tabs."""
+    try:
+        await workspace_manager.delete_workspace(workspace_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Workspace not found") from e
+
+
 @router.get("/{workspace_id}/board", response_model=WorkspaceBoard)
 async def get_workspace_board(
     workspace_id: str,

@@ -140,6 +140,11 @@ export interface Workspace {
   remote_profile_id?: string | null
   remote_cwd?: string | null
   remote_reconnect: boolean
+  resident_agent_enabled: boolean
+  resident_agent_interval_minutes: number
+  resident_agent_session_id?: string | null
+  resident_agent_directive?: string | null
+  resident_agent_last_run_at?: string | null
   created_at: string
   updated_at: string
 }
@@ -153,6 +158,9 @@ export interface WorkspaceCreate {
   remote_profile_id?: string | null
   remote_cwd?: string | null
   remote_reconnect?: boolean
+  resident_agent_enabled?: boolean
+  resident_agent_interval_minutes?: number
+  resident_agent_directive?: string
 }
 
 export interface WorkspaceUpdate {
@@ -161,6 +169,9 @@ export interface WorkspaceUpdate {
   default_branch?: string
   remote_cwd?: string | null
   remote_reconnect?: boolean
+  resident_agent_enabled?: boolean
+  resident_agent_interval_minutes?: number
+  resident_agent_directive?: string
 }
 
 export interface WorkspaceAttachment {

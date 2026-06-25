@@ -31,7 +31,7 @@ from ._state import _StateMixin
 from ._task_updates import _TaskUpdatesMixin
 from ._tasks import _TasksMixin
 from ._tmux_queries import _TmuxQueriesMixin
-from ._workspaces import _WorkspacesMixin
+from ._workspaces import _WorkspacesMixin, build_resident_agent_prompt  # noqa: F401
 
 
 class WorkspaceManager(
