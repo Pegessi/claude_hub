@@ -1532,6 +1532,14 @@
               placeholder="Describe recurring tasks or what the resident agent should focus on each run."
             />
           </div>
+          <AgentConfigFields
+            v-if="workspaceForm.resident_agent_enabled"
+            v-model:agent-type="workspaceForm.resident_agent_type"
+            v-model:solo-mode="workspaceForm.resident_agent_solo_mode"
+            v-model:env-preset="workspaceForm.resident_env_preset"
+            v-model:env-text="workspaceForm.resident_env_text"
+            variant="modal"
+          />
           <div class="modal-actions">
             <button
               v-if="workspaceModalMode === 'edit'"
@@ -2163,25 +2171,15 @@
                 </option>
               </select>
             </div>
-
-            <div class="modal-field">
-              <label>Agent Type</label>
-              <select v-model="agentOptionsForm.agent_type">
-                <option value="codex">
-                  Codex
-                </option>
-                <option value="claude">
-                  Claude
-                </option>
-                <option value="cursor">
-                  Cursor
-                </option>
-                <option value="terminal">
-                  Terminal
-                </option>
-              </select>
-            </div>
           </div>
+
+          <AgentConfigFields
+            v-model:agent-type="agentOptionsForm.agent_type"
+            v-model:solo-mode="agentOptionsForm.solo_mode"
+            v-model:env-preset="agentOptionsForm.env_preset"
+            v-model:env-text="agentOptionsForm.env_text"
+            variant="modal"
+          />
 
           <div class="modal-field">
             <label>Run On</label>
@@ -2252,22 +2250,6 @@
           </div>
 
           <div
-            v-if="agentSupportsSoloMode"
-            class="modal-field"
-          >
-            <label class="checkbox-label">
-              <input
-                v-model="agentOptionsForm.solo_mode"
-                type="checkbox"
-              >
-              YOLO mode
-            </label>
-            <p class="modal-hint">
-              {{ agentYoloHint }}
-            </p>
-          </div>
-
-          <div
             v-if="agentOptionsForm.target === 'remote'"
             class="modal-field"
           >
@@ -2278,34 +2260,6 @@
               >
               Auto reconnect
             </label>
-          </div>
-
-          <div class="modal-field env-editor">
-            <label>Environment Preset</label>
-            <div class="env-preset-row">
-              <select
-                v-model="agentOptionsForm.env_preset"
-                @change="applyAgentEnvPreset(agentOptionsForm.env_preset)"
-              >
-                <option
-                  v-for="preset in envPresets"
-                  :key="preset.id"
-                  :value="preset.id"
-                >
-                  {{ preset.name }}
-                </option>
-              </select>
-              <button
-                type="button"
-                class="tool-button env-manage-button"
-                @click="openEnvPresetManager"
-              >
-                Manage
-              </button>
-            </div>
-            <p class="modal-hint">
-              Pick a preset for this launch. Click "Manage" to create, edit, or delete presets. Values are not printed in logs.
-            </p>
           </div>
 
           <div class="modal-actions">
@@ -2430,13 +2384,6 @@
       </div>
     </div>
   </section>
-
-  <!-- Env Preset Manager Modal -->
-  <EnvPresetManager
-    v-model:model-value="agentOptionsForm.env_preset"
-    :visible="showEnvManager"
-    @close="closeEnvPresetManager"
-  />
 
   <!-- Switch Env Preset Manager (for the Switch Env modal) -->
   <EnvPresetManager
@@ -2591,6 +2538,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import AgentAvatar from '@/components/AgentAvatar.vue'
+import AgentConfigFields from '@/components/AgentConfigFields.vue'
 import EnvPresetManager from '@/components/EnvPresetManager.vue'
 import LoadingButton from '@/components/LoadingButton.vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
@@ -2598,6 +2546,7 @@ import NetworkAccessMenu from '@/components/NetworkAccessMenu.vue'
 import {
   defaultLaunchEnvPresetForAgent,
   parseLaunchEnv,
+  serializeLaunchEnv,
   useLaunchEnvPresets,
 } from '@/composables/useLaunchEnvPresets'
 import { usePendingActions } from '@/composables/usePendingActions'
@@ -2673,8 +2622,7 @@ function dismissWorkspaceErrors() {
   for (const id of ids) workspaceStore.dismissNotification(id)
 }
 
-const { envPresets, getPresetText, defaultPresetTextForAgent } =
-  useLaunchEnvPresets()
+const { envPresets, getPresetText, defaultPresetTextForAgent } = useLaunchEnvPresets()
 const { isPending, runPending } = usePendingActions()
 const { colorScheme } = storeToRefs(appStore)
 const {
@@ -2724,7 +2672,6 @@ const showAgentOptionsModal = ref(false)
 const showLessonsModal = ref(false)
 const lastFeedbackSummaryRun = ref<FeedbackSummaryRun | null>(null)
 const showAgentFileBrowser = ref(false)
-const showEnvManager = ref(false)
 // Switch Env modal state (for hot-swapping env/solo on running Claude agents)
 const showSwitchEnvModal = ref(false)
 const showSwitchEnvManager = ref(false)
@@ -2801,6 +2748,11 @@ const workspaceForm = reactive({
   resident_agent_enabled: false,
   resident_agent_interval_minutes: 60,
   resident_agent_directive: '',
+  // Resident agent CLI/env config (UI-side; resolved to resident_agent_env at submit).
+  resident_agent_type: 'claude' as AgentType,
+  resident_agent_solo_mode: true,
+  resident_env_preset: defaultLaunchEnvPresetForAgent('claude'),
+  resident_env_text: defaultPresetTextForAgent('claude'),
 })
 
 const agentOptionsForm = reactive({
@@ -3376,18 +3328,6 @@ const selectedRemoteProfile = computed(() =>
 const selectedAgentRemoteProfile = computed(() =>
   remoteProfiles.value.find(profile => profile.id === agentOptionsForm.remote_profile_id) || null
 )
-const agentSupportsSoloMode = computed(
-  () =>
-    agentOptionsForm.agent_type !== 'cursor' &&
-    agentOptionsForm.agent_type !== 'terminal',
-)
-
-const agentYoloHint = computed(() => {
-  if (agentOptionsForm.agent_type === 'codex') {
-    return 'Runs Codex with --ask-for-approval never and --sandbox danger-full-access'
-  }
-  return 'Runs Claude with IS_SANDBOX=1 and --dangerously-skip-permissions'
-})
 
 const isAgentOptionsCreateDisabled = computed(
   () =>
@@ -4170,6 +4110,9 @@ async function handleCreateWorkspace() {
       resident_agent_enabled: workspaceForm.resident_agent_enabled,
       resident_agent_interval_minutes: workspaceForm.resident_agent_interval_minutes,
       resident_agent_directive: workspaceForm.resident_agent_directive.trim() || undefined,
+      resident_agent_type: workspaceForm.resident_agent_type,
+      resident_agent_env: parseLaunchEnv(workspaceForm.resident_env_text) ?? {},
+      resident_agent_solo_mode: workspaceForm.resident_agent_solo_mode,
     })
   )
   if (workspace) {
@@ -4193,6 +4136,9 @@ async function handleSaveWorkspace() {
       resident_agent_enabled: workspaceForm.resident_agent_enabled,
       resident_agent_interval_minutes: workspaceForm.resident_agent_interval_minutes,
       resident_agent_directive: workspaceForm.resident_agent_directive.trim() || undefined,
+      resident_agent_type: workspaceForm.resident_agent_type,
+      resident_agent_env: parseLaunchEnv(workspaceForm.resident_env_text) ?? {},
+      resident_agent_solo_mode: workspaceForm.resident_agent_solo_mode,
     })
   )
   if (workspace) {
@@ -4212,6 +4158,10 @@ function resetWorkspaceForm() {
   workspaceForm.resident_agent_enabled = false
   workspaceForm.resident_agent_interval_minutes = 60
   workspaceForm.resident_agent_directive = ''
+  workspaceForm.resident_agent_type = 'claude'
+  workspaceForm.resident_agent_solo_mode = true
+  workspaceForm.resident_env_preset = defaultLaunchEnvPresetForAgent('claude')
+  workspaceForm.resident_env_text = defaultPresetTextForAgent('claude')
 }
 
 function openWorkspaceModal() {
@@ -4235,6 +4185,14 @@ function openEditWorkspaceModal() {
   workspaceForm.resident_agent_enabled = workspace.resident_agent_enabled ?? false
   workspaceForm.resident_agent_interval_minutes = workspace.resident_agent_interval_minutes ?? 60
   workspaceForm.resident_agent_directive = workspace.resident_agent_directive || ''
+  workspaceForm.resident_agent_type = workspace.resident_agent_type ?? 'claude'
+  workspaceForm.resident_agent_solo_mode = workspace.resident_agent_solo_mode ?? true
+  // Preset ids are localStorage-only; default the select to the agent-type
+  // default and treat the serialized env text as the source of truth.
+  workspaceForm.resident_env_preset = defaultLaunchEnvPresetForAgent(
+    workspaceForm.resident_agent_type
+  )
+  workspaceForm.resident_env_text = serializeLaunchEnv(workspace.resident_agent_env)
   workspaceModalMode.value = 'edit'
   editingWorkspaceId.value = workspace.id
   showWorkspaceModal.value = true
@@ -4319,22 +4277,6 @@ function workspaceDefaultCwd(target: ExecutionTarget): string {
     return workspace.remote_cwd || selectedAgentRemoteProfile.value?.default_cwd || ''
   }
   return workspace.path || ''
-}
-
-function applyAgentEnvPreset(presetId: string) {
-  const text = getPresetText(presetId)
-  if (text === null) return
-  agentOptionsForm.env_text = text
-}
-
-function openEnvPresetManager() {
-  showEnvManager.value = true
-}
-
-function closeEnvPresetManager() {
-  showEnvManager.value = false
-  // Sync env_text with potentially updated preset
-  applyAgentEnvPreset(agentOptionsForm.env_preset)
 }
 
 // ---- Switch Env (hot-swap on running Claude agents) ----
@@ -4942,18 +4884,6 @@ watch(
     if (workspaceForm.target === 'remote' && !workspaceForm.remote_cwd) {
       workspaceForm.remote_cwd = selectedRemoteProfile.value?.default_cwd || ''
     }
-  }
-)
-
-watch(
-  () => agentOptionsForm.agent_type,
-  agentType => {
-    if (agentType === 'cursor' || agentType === 'terminal') {
-      agentOptionsForm.solo_mode = false
-    } else if (!showAgentOptionsModal.value) {
-      agentOptionsForm.solo_mode = true
-    }
-    resetAgentEnvForType(agentType)
   }
 )
 

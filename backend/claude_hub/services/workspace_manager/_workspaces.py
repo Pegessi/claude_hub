@@ -128,6 +128,9 @@ class _WorkspacesMixin:
             resident_agent_session_id=None,
             resident_agent_directive=directive,
             resident_agent_last_run_at=None,
+            resident_agent_type=payload.resident_agent_type,
+            resident_agent_env=dict(payload.resident_agent_env or {}),
+            resident_agent_solo_mode=payload.resident_agent_solo_mode,
             created_at=now,
             updated_at=now,
         )
@@ -175,6 +178,38 @@ class _WorkspacesMixin:
         if payload.resident_agent_directive is not None:
             directive = payload.resident_agent_directive.strip()
             update_kwargs["resident_agent_directive"] = directive or None
+        if payload.resident_agent_type is not None:
+            update_kwargs["resident_agent_type"] = payload.resident_agent_type
+        if payload.resident_agent_env is not None:
+            update_kwargs["resident_agent_env"] = dict(payload.resident_agent_env)
+        if payload.resident_agent_solo_mode is not None:
+            update_kwargs["resident_agent_solo_mode"] = payload.resident_agent_solo_mode
+
+        # Resident launch-config invalidation
+        # ------------------------------------
+        # The resident's agent_type/env/solo_mode are LAUNCH-TIME properties: they
+        # are only applied on the CREATE path (inside the EnsureWorkspaceAgentRequest
+        # in _run_resident_agent). The reuse path re-drives whatever live session is
+        # tracked by resident_agent_session_id and does NOT rebuild the request, so a
+        # config change here would otherwise be silently ignored while a session is
+        # alive — worst case claude->terminal keeps prompting the stale claude session
+        # forever. To make any of type/env/solo_mode changes actually take effect, we
+        # clear resident_agent_session_id (and drop the old ManagedSession row) so the
+        # next tick recreates the resident with the new launch config.
+        #
+        # Tab teardown: delete_session / delete_workspace tear down the old tab via
+        # `await ttyd_manager.delete_tab(...)` — but BOTH are async and update_workspace
+        # is SYNC, so we cannot await an async teardown here. Per design we therefore do
+        # NOT call delete_tab from this sync path; instead we only drop the ManagedSession
+        # row, which makes the old tab a session-less orphan that the existing
+        # _prune_orphan_workspace_tabs reconciler (run on the monitor loop) cleans up.
+        # This keeps sync code sync-safe and reuses the established orphan-tab pruner.
+        old_resident_session_id = workspace.resident_agent_session_id
+        if old_resident_session_id is not None and self._resident_launch_config_changed(
+            workspace, update_kwargs
+        ):
+            update_kwargs["resident_agent_session_id"] = None
+            self.sessions.pop(old_resident_session_id, None)
 
         if not update_kwargs:
             return workspace
@@ -183,6 +218,27 @@ class _WorkspacesMixin:
         self.workspaces[workspace_id] = updated
         self._save_state()
         return updated
+
+    @staticmethod
+    def _resident_launch_config_changed(
+        workspace: "Workspace", update_kwargs: dict[str, Any]
+    ) -> bool:
+        """True when this update changes the resident's launch config to a DIFFERENT value.
+
+        Launch config = agent_type / env / solo_mode (the three properties applied only
+        when the resident session/tab is created). We compare the proposed new value
+        (present in ``update_kwargs`` only when the caller supplied a non-None field)
+        against the current workspace value, so a no-op write of the same value does NOT
+        trigger a needless recreation.
+        """
+        for field in (
+            "resident_agent_type",
+            "resident_agent_env",
+            "resident_agent_solo_mode",
+        ):
+            if field in update_kwargs and update_kwargs[field] != getattr(workspace, field):
+                return True
+        return False
 
     @staticmethod
     def _resident_jitter_seconds(workspace: "Workspace", interval_seconds: int) -> int:
@@ -324,6 +380,22 @@ class _WorkspacesMixin:
                 logger.exception("Resident agent tick failed for workspace_id=%s", workspace_id)
 
     async def _run_resident_agent(self, workspace: Workspace) -> None:
+        """Create or reuse the workspace's resident agent and self-drive it.
+
+        The resident is created with the workspace's configured
+        ``resident_agent_type`` / ``resident_agent_env`` / ``resident_agent_solo_mode``
+        (parity with normal workspace agents) rather than a hardcoded CLAUDE
+        session with no env.
+
+        TERMINAL edge case: a TERMINAL resident is a plain user shell with no LLM
+        agent listening, so the self-drive prompt is pointless/harmful (it would
+        be dumped as literal shell input). For TERMINAL we still create/track an
+        openable tab and advance ``resident_agent_last_run_at`` (so it does not
+        churn every tick), but we do NOT send the self-drive prompt on either the
+        create path (suppressed in _build_session_bootstrap_prompt) or the reuse
+        path (guarded below). CLAUDE/CURSOR/CODEX are CLI LLM agents and receive
+        the same curl-based resident prompt as normal.
+        """
         existing = self.sessions.get(workspace.resident_agent_session_id or "")
         if existing is not None and existing.status == ManagedSessionStatus.STOPPED:
             existing = None
@@ -344,11 +416,15 @@ class _WorkspacesMixin:
             # which for the RESIDENT role IS build_resident_agent_prompt (see
             # _prompts._build_session_bootstrap_prompt routing). So a freshly
             # created resident has already received the self-drive prompt this
-            # cycle and must NOT be sent a second copy below.
+            # cycle and must NOT be sent a second copy below. (For a TERMINAL
+            # resident the bootstrap is suppressed to an empty string, so no
+            # prompt is sent on create either.)
             session = await self.ensure_workspace_agent(
                 workspace.id,
                 EnsureWorkspaceAgentRequest(
-                    agent_type=AgentType.CLAUDE,
+                    agent_type=workspace.resident_agent_type,
+                    env=dict(workspace.resident_agent_env or {}),
+                    solo_mode=workspace.resident_agent_solo_mode,
                     role=WorkspaceSessionRole.RESIDENT,
                     reuse_existing=False,
                     title=f"{workspace.name} Resident",
@@ -368,6 +444,11 @@ class _WorkspacesMixin:
             }
         )
         self._save_state()
+
+        # A TERMINAL resident has no LLM agent to drive: advance the timer (done
+        # above) and keep the tab, but never send the self-drive prompt.
+        if workspace.resident_agent_type == AgentType.TERMINAL:
+            return
 
         if not reused:
             # Bootstrap already delivered the resident prompt this cycle.

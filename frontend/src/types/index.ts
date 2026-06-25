@@ -150,6 +150,9 @@ export interface Workspace {
   resident_agent_session_id?: string | null
   resident_agent_directive?: string | null
   resident_agent_last_run_at?: string | null
+  resident_agent_type: AgentType
+  resident_agent_env: Record<string, string>
+  resident_agent_solo_mode: boolean
   created_at: string
   updated_at: string
 }
@@ -166,6 +169,9 @@ export interface WorkspaceCreate {
   resident_agent_enabled?: boolean
   resident_agent_interval_minutes?: number
   resident_agent_directive?: string
+  resident_agent_type?: AgentType
+  resident_agent_env?: Record<string, string>
+  resident_agent_solo_mode?: boolean
 }
 
 export interface WorkspaceUpdate {
@@ -177,6 +183,9 @@ export interface WorkspaceUpdate {
   resident_agent_enabled?: boolean
   resident_agent_interval_minutes?: number
   resident_agent_directive?: string
+  resident_agent_type?: AgentType
+  resident_agent_env?: Record<string, string>
+  resident_agent_solo_mode?: boolean
 }
 
 export interface WorkspaceAttachment {

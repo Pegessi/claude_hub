@@ -139,6 +139,17 @@ export function defaultLaunchEnvPresetForAgent(agentType: AgentType): string {
   return agentType === 'claude' ? DEFAULT_CLAUDE_ENV_PRESET_ID : 'none'
 }
 
+/**
+ * Serialize a launch-env dict back into the `KEY=VALUE` newline text format
+ * used by the textarea / preset editors. Inverse of {@link parseLaunchEnv}.
+ */
+export function serializeLaunchEnv(env: LaunchEnv | null | undefined): string {
+  if (!env) return ''
+  return Object.entries(env)
+    .map(([key, value]) => `${key}=${value}`)
+    .join('\n')
+}
+
 export function useLaunchEnvPresets() {
   const envPresets = computed(() => {
     const all = [...builtInPresets, ...customPresets.value]
