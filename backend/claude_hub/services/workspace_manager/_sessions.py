@@ -61,10 +61,9 @@ class _SessionsMixin:
                 return existing
 
         session = await self._create_managed_session(workspace, payload)
-        await self.send_session_message(
-            session.id,
-            self._build_session_bootstrap_prompt(workspace, session),
-        )
+        bootstrap_prompt = self._build_session_bootstrap_prompt(workspace, session)
+        if bootstrap_prompt:
+            await self.send_session_message(session.id, bootstrap_prompt)
         return session
 
     async def _create_managed_session(

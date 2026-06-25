@@ -613,3 +613,360 @@ def test_run_resident_agent_persists_session_before_send_failure(
     # Persisted before the send raised, so no respawn / immediate retry storm.
     assert persisted.resident_agent_session_id == session.id
     assert persisted.resident_agent_last_run_at is not None
+
+
+# ---------------------------------------------------------------------------
+# Resident agent_type / env / solo_mode parity (configurable like normal agents)
+# ---------------------------------------------------------------------------
+
+
+def test_create_workspace_resident_agent_config_parity(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """agent_type / env / solo_mode persist and round-trip from disk."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_enabled=True,
+            resident_agent_type=AgentType.CURSOR,
+            resident_agent_env={"FOO": "bar"},
+            resident_agent_solo_mode=False,
+        )
+    )
+    assert workspace.resident_agent_type == AgentType.CURSOR
+    assert workspace.resident_agent_env == {"FOO": "bar"}
+    assert workspace.resident_agent_solo_mode is False
+
+    # Defaults when unspecified.
+    other = manager.create_workspace(
+        WorkspaceCreate(name="WS2", path=str(repo), session_prefix="res2")
+    )
+    assert other.resident_agent_type == AgentType.CLAUDE
+    assert other.resident_agent_env == {}
+    assert other.resident_agent_solo_mode is True
+
+    # Round-trip from disk.
+    reloaded = WorkspaceManager()
+    persisted = reloaded.workspaces[workspace.id]
+    assert persisted.resident_agent_type == AgentType.CURSOR
+    assert persisted.resident_agent_env == {"FOO": "bar"}
+    assert persisted.resident_agent_solo_mode is False
+
+
+def test_update_workspace_resident_agent_config_parity(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """update can change type/env/solo_mode; None leaves them unchanged; env replaces."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_type=AgentType.CLAUDE,
+            resident_agent_env={"A": "1", "B": "2"},
+            resident_agent_solo_mode=True,
+        )
+    )
+
+    updated = manager.update_workspace(
+        workspace.id,
+        WorkspaceUpdate(
+            resident_agent_type=AgentType.CODEX,
+            resident_agent_env={"C": "3"},
+            resident_agent_solo_mode=False,
+        ),
+    )
+    assert updated.resident_agent_type == AgentType.CODEX
+    # env is replaced wholesale, not merged.
+    assert updated.resident_agent_env == {"C": "3"}
+    assert updated.resident_agent_solo_mode is False
+
+    # None leaves all three unchanged.
+    unchanged = manager.update_workspace(
+        workspace.id, WorkspaceUpdate(resident_agent_directive="noop")
+    )
+    assert unchanged.resident_agent_type == AgentType.CODEX
+    assert unchanged.resident_agent_env == {"C": "3"}
+    assert unchanged.resident_agent_solo_mode is False
+
+
+def test_run_resident_agent_uses_workspace_agent_config(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """LLM resident (CURSOR): ensure request carries type/env/solo_mode; bootstrap
+    delivers the self-drive prompt (so no second send on create)."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_enabled=True,
+            resident_agent_type=AgentType.CURSOR,
+            resident_agent_env={"FOO": "bar"},
+            resident_agent_solo_mode=False,
+        )
+    )
+    workspace = manager.workspaces[workspace.id]
+
+    created = _resident_session(workspace)
+    created = created.model_copy(update={"agent_type": AgentType.CURSOR})
+    captured: list[object] = []
+
+    async def fake_ensure(workspace_id: str, payload: object) -> ManagedSession:
+        captured.append(payload)
+        manager.sessions[created.id] = created
+        return created
+
+    sends: list[tuple[str, str]] = []
+
+    async def fake_send(session_id: str, message: str) -> None:
+        sends.append((session_id, message))
+
+    monkeypatch.setattr(manager, "ensure_workspace_agent", fake_ensure)
+    monkeypatch.setattr(manager, "send_session_message", fake_send)
+
+    asyncio.run(manager._run_resident_agent(workspace))
+
+    assert len(captured) == 1
+    req = captured[0]
+    assert req.agent_type == AgentType.CURSOR
+    assert req.env == {"FOO": "bar"}
+    assert req.solo_mode is False
+    assert req.role == WorkspaceSessionRole.RESIDENT
+    assert req.reuse_existing is False
+    # Bootstrap delivers the resident prompt inside ensure_workspace_agent (mocked
+    # here), so the create path must NOT send a second copy.
+    assert sends == []
+    persisted = manager.workspaces[workspace.id]
+    assert persisted.resident_agent_session_id == created.id
+    assert persisted.resident_agent_last_run_at is not None
+
+
+def test_run_resident_agent_terminal_skips_self_drive_prompt(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """A TERMINAL resident gets a tab but NO self-drive prompt on either path;
+    last_run_at still advances and the session id persists."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_enabled=True,
+            resident_agent_type=AgentType.TERMINAL,
+        )
+    )
+    workspace = manager.workspaces[workspace.id]
+
+    sends: list[tuple[str, str]] = []
+
+    async def fake_send(session_id: str, message: str) -> None:
+        sends.append((session_id, message))
+
+    monkeypatch.setattr(manager, "send_session_message", fake_send)
+
+    # --- Create path: no existing resident session. ---
+    created = _resident_session(workspace).model_copy(update={"agent_type": AgentType.TERMINAL})
+    captured: list[object] = []
+
+    async def fake_ensure(workspace_id: str, payload: object) -> ManagedSession:
+        captured.append(payload)
+        manager.sessions[created.id] = created
+        return created
+
+    monkeypatch.setattr(manager, "ensure_workspace_agent", fake_ensure)
+
+    asyncio.run(manager._run_resident_agent(workspace))
+
+    assert len(captured) == 1
+    assert captured[0].agent_type == AgentType.TERMINAL
+    assert sends == []  # no self-drive prompt for TERMINAL
+    persisted = manager.workspaces[workspace.id]
+    assert persisted.resident_agent_session_id == created.id
+    assert persisted.resident_agent_last_run_at is not None
+
+    # --- Reuse path: existing idle TERMINAL resident, still no prompt. ---
+    reuse_ws = persisted
+
+    async def fail_ensure(*args: object, **kwargs: object) -> ManagedSession:
+        raise AssertionError("ensure_workspace_agent must not be called on reuse path")
+
+    monkeypatch.setattr(manager, "ensure_workspace_agent", fail_ensure)
+
+    asyncio.run(manager._run_resident_agent(reuse_ws))
+
+    assert sends == []  # reuse path also skips the prompt for TERMINAL
+    persisted2 = manager.workspaces[workspace.id]
+    assert persisted2.resident_agent_session_id == created.id
+    assert persisted2.resident_agent_last_run_at is not None
+
+
+# ---------------------------------------------------------------------------
+# Resident launch-config change invalidates the live session (recreate next tick)
+# ---------------------------------------------------------------------------
+
+
+def test_update_workspace_type_change_clears_resident_session(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """Changing resident_agent_type claude->terminal clears the tracked session id
+    AND drops the stale ManagedSession, so the old claude session can no longer be
+    prompted; the next tick recreates with the new type."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_enabled=True,
+            resident_agent_type=AgentType.CLAUDE,
+        )
+    )
+    # A live claude resident session is tracked.
+    session = _resident_session(workspace)  # agent_type CLAUDE
+    manager.sessions[session.id] = session
+    workspace = workspace.model_copy(update={"resident_agent_session_id": session.id})
+    manager.workspaces[workspace.id] = workspace
+
+    updated = manager.update_workspace(
+        workspace.id, WorkspaceUpdate(resident_agent_type=AgentType.TERMINAL)
+    )
+
+    assert updated.resident_agent_type == AgentType.TERMINAL
+    # Session id cleared so the next tick recreates with the new type.
+    assert updated.resident_agent_session_id is None
+    # Stale claude session removed so it cannot keep receiving the self-drive prompt.
+    assert session.id not in manager.sessions
+
+
+def test_update_workspace_env_change_clears_resident_session(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """Changing resident_agent_env clears the tracked session id (recreate next tick)."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_enabled=True,
+            resident_agent_type=AgentType.CLAUDE,
+            resident_agent_env={"A": "1"},
+        )
+    )
+    session = _resident_session(workspace)
+    manager.sessions[session.id] = session
+    workspace = workspace.model_copy(update={"resident_agent_session_id": session.id})
+    manager.workspaces[workspace.id] = workspace
+
+    updated = manager.update_workspace(workspace.id, WorkspaceUpdate(resident_agent_env={"A": "2"}))
+
+    assert updated.resident_agent_env == {"A": "2"}
+    assert updated.resident_agent_session_id is None
+    assert session.id not in manager.sessions
+
+
+def test_update_workspace_solo_mode_change_clears_resident_session(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """Changing resident_agent_solo_mode clears the tracked session id."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_enabled=True,
+            resident_agent_type=AgentType.CLAUDE,
+            resident_agent_solo_mode=True,
+        )
+    )
+    session = _resident_session(workspace)
+    manager.sessions[session.id] = session
+    workspace = workspace.model_copy(update={"resident_agent_session_id": session.id})
+    manager.workspaces[workspace.id] = workspace
+
+    updated = manager.update_workspace(
+        workspace.id, WorkspaceUpdate(resident_agent_solo_mode=False)
+    )
+
+    assert updated.resident_agent_solo_mode is False
+    assert updated.resident_agent_session_id is None
+    assert session.id not in manager.sessions
+
+
+def test_update_workspace_unchanged_config_keeps_resident_session(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """Re-writing the SAME type/env/solo (or unrelated fields) must NOT clear the
+    tracked session id — no needless recreation."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_enabled=True,
+            resident_agent_type=AgentType.CLAUDE,
+            resident_agent_env={"A": "1"},
+            resident_agent_solo_mode=True,
+        )
+    )
+    session = _resident_session(workspace)
+    manager.sessions[session.id] = session
+    workspace = workspace.model_copy(update={"resident_agent_session_id": session.id})
+    manager.workspaces[workspace.id] = workspace
+
+    # No-op writes of identical values + an unrelated field change.
+    updated = manager.update_workspace(
+        workspace.id,
+        WorkspaceUpdate(
+            resident_agent_type=AgentType.CLAUDE,
+            resident_agent_env={"A": "1"},
+            resident_agent_solo_mode=True,
+            resident_agent_directive="keep going",
+        ),
+    )
+
+    assert updated.resident_agent_session_id == session.id
+    assert session.id in manager.sessions
+    assert updated.resident_agent_directive == "keep going"
+
+
+def test_update_workspace_type_change_without_live_session_is_noop_on_sessions(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """When no resident session is tracked, a type change just updates config
+    (nothing to clear/remove)."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_enabled=True,
+            resident_agent_type=AgentType.CLAUDE,
+        )
+    )
+    assert workspace.resident_agent_session_id is None
+
+    updated = manager.update_workspace(
+        workspace.id, WorkspaceUpdate(resident_agent_type=AgentType.TERMINAL)
+    )
+    assert updated.resident_agent_type == AgentType.TERMINAL
+    assert updated.resident_agent_session_id is None

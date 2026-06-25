@@ -189,6 +189,52 @@ debounce) OR elapsed >= interval + jitter)`.
 
 ## Coherence contract (frontend must match)
 - User-editable field names: `resident_agent_enabled`,
-  `resident_agent_interval_minutes`, `resident_agent_directive`.
+  `resident_agent_interval_minutes`, `resident_agent_directive`,
+  `resident_agent_type`, `resident_agent_env`, `resident_agent_solo_mode`.
 - Role string: `"resident"`.
 - Delete route: `DELETE /api/workspaces/{workspace_id}` → 204.
+
+## Update: configurable agent_type / env / solo_mode (parity with normal agents)
+The resident is no longer hardcoded to `AgentType.CLAUDE` with no env. The
+`Workspace` model carries `resident_agent_type` (default `CLAUDE`),
+`resident_agent_env` (default `{}`), and `resident_agent_solo_mode` (default
+`True`); `WorkspaceCreate` accepts them (same defaults) and `WorkspaceUpdate`
+exposes them as `Optional[...] = None` (None = unchanged; `resident_agent_env`
+replaces wholesale when provided). `_run_resident_agent` builds the
+`EnsureWorkspaceAgentRequest` from these workspace fields, so the resident gets
+the same agent runtime, env vars, and solo-mode treatment as any normal
+workspace agent (the session/ttyd layer already consumed `agent_type`/`env`/
+`solo_mode`, so no change there).
+
+- **TERMINAL resident = no self-drive prompt.** A `TERMINAL` resident is a plain
+  user shell with no LLM agent listening, so the self-drive prompt would just be
+  dumped as literal shell input. For `TERMINAL` we still create/track an openable
+  tab and advance `resident_agent_last_run_at` (so it does not churn every tick),
+  but skip the prompt on BOTH paths: the create path is suppressed in
+  `_build_session_bootstrap_prompt` (returns `""` for TERMINAL+RESIDENT, and
+  `ensure_workspace_agent` skips sending an empty bootstrap), and the reuse path
+  is guarded directly in `_run_resident_agent`. `CLAUDE` / `CURSOR` / `CODEX`
+  are CLI LLM agents and receive the same curl-based resident prompt as before
+  (bootstrap routing is by `role`, independent of `agent_type`).
+
+- **Changing resident launch config invalidates and recreates the session.**
+  `agent_type` / `env` / `solo_mode` are launch-time properties applied only on
+  the CREATE path (the `EnsureWorkspaceAgentRequest` in `_run_resident_agent`);
+  the reuse path re-drives the live `resident_agent_session_id` session and does
+  NOT rebuild the request. So if `update_workspace` only stored the new config it
+  would be silently ignored while a session is alive — worst case `claude ->
+  terminal` would keep sending the self-drive prompt to the stale `claude`
+  session forever (TERMINAL suppression never triggers because the live session
+  is still `claude`). Fix: when an update changes any of
+  `resident_agent_type` / `resident_agent_env` / `resident_agent_solo_mode` to a
+  DIFFERENT value (helper `_resident_launch_config_changed`), `update_workspace`
+  clears `resident_agent_session_id` (set to `None`) and drops the old
+  `ManagedSession` from `self.sessions`, so the next monitor tick recreates the
+  resident with the new launch config. A no-op write of the same value does NOT
+  recreate. Tab teardown: `delete_session`/`delete_workspace` tear down the tab
+  with `await ttyd_manager.delete_tab(...)`, but both are async and
+  `update_workspace` is sync — so we deliberately do NOT call the async teardown
+  here. Dropping the `ManagedSession` row leaves the old tab as a session-less
+  orphan, which the existing `_prune_orphan_workspace_tabs` reconciler removes on
+  the monitor loop. This keeps sync code sync-safe and reuses the established
+  orphan-tab pruner instead of inventing a second teardown path.

@@ -31,6 +31,12 @@ class _PromptsMixin:
         if session.role == WorkspaceSessionRole.REVIEWER:
             return self._build_reviewer_bootstrap_prompt(workspace, session)
         if session.role == WorkspaceSessionRole.RESIDENT:
+            # A TERMINAL resident is a plain shell with no LLM agent listening,
+            # so the self-drive prompt would just be dumped as shell input. Skip
+            # it; the user still gets an openable tab. (Mirrors the send guard in
+            # _run_resident_agent for the reuse path.)
+            if session.agent_type == AgentType.TERMINAL:
+                return ""
             return _wm.build_resident_agent_prompt(workspace, self._report_base_url(session))
         return self._build_workspace_agent_prompt(workspace, session)
 

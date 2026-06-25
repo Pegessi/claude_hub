@@ -453,6 +453,9 @@ class WorkspaceCreate(BaseModel):
     resident_agent_enabled: bool = False
     resident_agent_interval_minutes: int = 60
     resident_agent_directive: Optional[str] = None
+    resident_agent_type: AgentType = AgentType.CLAUDE
+    resident_agent_env: Dict[str, str] = Field(default_factory=dict)
+    resident_agent_solo_mode: bool = True
 
 
 class Workspace(BaseModel):
@@ -473,6 +476,9 @@ class Workspace(BaseModel):
     resident_agent_session_id: Optional[str] = None
     resident_agent_directive: Optional[str] = None
     resident_agent_last_run_at: Optional[datetime] = None
+    resident_agent_type: AgentType = AgentType.CLAUDE
+    resident_agent_env: Dict[str, str] = Field(default_factory=dict)
+    resident_agent_solo_mode: bool = True
     created_at: datetime
     updated_at: datetime
 
@@ -488,6 +494,9 @@ class WorkspaceUpdate(BaseModel):
     resident_agent_enabled: Optional[bool] = None
     resident_agent_interval_minutes: Optional[int] = None
     resident_agent_directive: Optional[str] = None
+    resident_agent_type: Optional[AgentType] = None
+    resident_agent_env: Optional[Dict[str, str]] = None
+    resident_agent_solo_mode: Optional[bool] = None
 
 
 class WorkspaceTaskCreate(BaseModel):

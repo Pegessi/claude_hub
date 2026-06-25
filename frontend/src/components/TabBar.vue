@@ -289,43 +289,14 @@
               </LoadingButton>
             </div>
           </div>
-          <div class="form-group">
-            <label for="agentType">Agent Type</label>
-            <select
-              id="agentType"
-              v-model="form.agent_type"
-              class="select-input"
-            >
-              <option value="claude">
-                Claude
-              </option>
-              <option value="codex">
-                Codex
-              </option>
-              <option value="cursor">
-                Cursor
-              </option>
-              <option value="terminal">
-                Terminal
-              </option>
-            </select>
-          </div>
-          <div
-            v-if="supportsSoloMode"
-            class="form-group"
-          >
-            <label class="checkbox-label">
-              <div class="checkbox-row">
-                <input
-                  v-model="form.solo_mode"
-                  type="checkbox"
-                  class="checkbox-input"
-                >
-                <span class="checkbox-text">Solo Mode</span>
-              </div>
-              <span class="checkbox-desc">{{ soloModeDescription }}</span>
-            </label>
-          </div>
+          <AgentConfigFields
+            v-model:agent-type="form.agent_type"
+            v-model:solo-mode="form.solo_mode"
+            v-model:env-preset="form.env_preset"
+            v-model:env-text="form.env_text"
+            variant="form"
+            solo-label="Solo Mode"
+          />
           <div
             v-if="form.target === 'remote'"
             class="form-group"
@@ -341,34 +312,6 @@
               </div>
               <span class="checkbox-desc">Reconnect SSH automatically if the network drops</span>
             </label>
-          </div>
-          <div class="form-group env-editor">
-            <label>Environment Preset</label>
-            <div class="env-preset-row">
-              <select
-                v-model="form.env_preset"
-                class="select-input"
-                @change="applyEnvPreset(form.env_preset)"
-              >
-                <option
-                  v-for="preset in envPresets"
-                  :key="preset.id"
-                  :value="preset.id"
-                >
-                  {{ preset.name }}
-                </option>
-              </select>
-              <button
-                type="button"
-                class="btn btn-secondary env-manage-button"
-                @click="openEnvPresetManager"
-              >
-                Manage
-              </button>
-            </div>
-            <p class="form-hint">
-              Pick a preset for this launch. Click "Manage" to create, edit, or delete presets. Values are not printed in backend logs.
-            </p>
           </div>
           <div class="modal-actions">
             <button
@@ -650,11 +593,6 @@
 
     <!-- Env Preset Manager Modal -->
     <EnvPresetManager
-      v-model:model-value="form.env_preset"
-      :visible="showEnvManager"
-      @close="closeEnvPresetManager"
-    />
-    <EnvPresetManager
       v-model:model-value="switchEnvForm.env_preset"
       :visible="showSwitchEnvManager"
       @close="closeSwitchEnvPresetManager"
@@ -709,6 +647,7 @@ import {
   parseLaunchEnv,
   useLaunchEnvPresets,
 } from '@/composables/useLaunchEnvPresets'
+import AgentConfigFields from '@/components/AgentConfigFields.vue'
 import EnvPresetManager from '@/components/EnvPresetManager.vue'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { useAppStore } from '@/stores/appStore'
@@ -731,8 +670,7 @@ interface DirectoryListing {
 
 const store = useTerminalStore()
 const appStore = useAppStore()
-const { envPresets, getPresetText, defaultPresetTextForAgent } =
-  useLaunchEnvPresets()
+const { envPresets, getPresetText, defaultPresetTextForAgent } = useLaunchEnvPresets()
 const { isPending, runPending } = usePendingActions()
 const { tabs, manualTabs, managedTabs, activeTabId, isLoading, agentStatuses, notifications } = storeToRefs(store)
 const { mode, colorScheme } = storeToRefs(appStore)
@@ -759,7 +697,6 @@ const fromIndex = ref<number | null>(null)
 const showModal = ref(false)
 const showCloseConfirm = ref(false)
 const showFileBrowser = ref(false)
-const showEnvManager = ref(false)
 const showSwitchEnv = ref(false)
 const showSwitchEnvManager = ref(false)
 const tabToClose = ref<TerminalTab | null>(null)
@@ -851,12 +788,6 @@ const switchEnvForm = reactive({
 })
 
 const supportsSoloMode = computed(() => form.agent_type === 'claude' || form.agent_type === 'codex')
-const soloModeDescription = computed(() => {
-  if (form.agent_type === 'codex') {
-    return 'Start Codex with --ask-for-approval never and --sandbox danger-full-access'
-  }
-  return 'Start Claude with IS_SANDBOX=1 and --dangerously-skip-permissions'
-})
 
 // File browser state
 const browserCurrentPath = ref('')
@@ -881,22 +812,6 @@ const isCreateDisabled = computed(
 
 function tabActionKey(action: string, tabId: string | null | undefined) {
   return `tab:${tabId || 'none'}:${action}`
-}
-
-function applyEnvPreset(presetId: string) {
-  const text = getPresetText(presetId)
-  if (text === null) return
-  form.env_text = text
-}
-
-function openEnvPresetManager() {
-  showEnvManager.value = true
-}
-
-function closeEnvPresetManager() {
-  showEnvManager.value = false
-  // Sync env_text with potentially updated preset
-  applyEnvPreset(form.env_preset)
 }
 
 function resetEnvForAgentType(agentType: AgentType) {
@@ -1288,7 +1203,6 @@ watch(
     if (agentType === 'cursor' || agentType === 'terminal') {
       form.solo_mode = false
     }
-    resetEnvForAgentType(agentType)
   }
 )
 
