@@ -18,11 +18,14 @@
       soloLabel    label for the solo toggle (default 'YOLO mode')
   -->
   <div :class="['agent-config-fields', `agent-config-fields--${variant}`]">
-    <div :class="fieldClass">
-      <label :for="`${uid}-agent-type`">Agent Type</label>
+    <div :class="['acf-field', fieldClass]">
+      <label
+        class="acf-label"
+        :for="`${uid}-agent-type`"
+      >Agent Type</label>
       <select
         :id="`${uid}-agent-type`"
-        :class="selectClass"
+        :class="['acf-select', selectClass]"
         :value="agentType"
         @change="onAgentTypeChange(($event.target as HTMLSelectElement).value)"
       >
@@ -46,27 +49,27 @@
 
     <div
       v-if="supportsSoloMode"
-      :class="fieldClass"
+      :class="['acf-field', fieldClass]"
     >
-      <label class="checkbox-label">
+      <label class="acf-checkbox-label checkbox-label">
         <input
           type="checkbox"
-          :class="checkboxClass"
+          :class="['acf-checkbox', checkboxClass]"
           :checked="soloMode"
           @change="emit('update:soloMode', ($event.target as HTMLInputElement).checked)"
         >
-        {{ soloLabel }}
+        <span>{{ soloLabel }}</span>
       </label>
-      <p :class="hintClass">
+      <p :class="['acf-hint', hintClass]">
         {{ yoloHint }}
       </p>
     </div>
 
-    <div :class="[fieldClass, 'env-editor']">
-      <label>Environment Preset</label>
+    <div :class="['acf-field', fieldClass, 'env-editor']">
+      <label class="acf-label">Environment Preset</label>
       <div class="env-preset-row">
         <select
-          :class="selectClass"
+          :class="['acf-select', selectClass]"
           :value="envPreset"
           @change="onPresetChange(($event.target as HTMLSelectElement).value)"
         >
@@ -86,7 +89,7 @@
           Manage
         </button>
       </div>
-      <p :class="hintClass">
+      <p :class="['acf-hint', hintClass]">
         Pick a preset for this launch. Click "Manage" to create, edit, or delete
         presets. Values are not printed in logs.
       </p>
@@ -208,6 +211,94 @@ function onAgentTypeChange(value: string) {
 </script>
 
 <style scoped>
+/*
+  Self-contained styling so the component renders correctly REGARDLESS of the
+  parent. Vue scoped styles in the parent (AgentWorkspaceView / TabBar) do not
+  pierce into this child's inner elements, so the label/select/checkbox/hint are
+  styled here using stable component-owned classes (acf-*). The variant classes
+  remain on the elements for outer spacing parity but the inner visuals no
+  longer depend on parent rules.
+*/
+.agent-config-fields .acf-field {
+  margin-bottom: 14px;
+}
+
+.agent-config-fields--form .acf-field {
+  margin-bottom: 16px;
+}
+
+.agent-config-fields .acf-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--ch-color-text-muted);
+  font-size: 13px;
+}
+
+.agent-config-fields--form .acf-label {
+  color: var(--ch-color-text);
+  font-size: 14px;
+}
+
+.agent-config-fields .acf-select {
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  font-size: 14px;
+  box-sizing: border-box;
+  cursor: pointer;
+}
+
+.agent-config-fields--form .acf-select {
+  height: auto;
+  padding: 10px 12px;
+  border-radius: 4px;
+}
+
+.agent-config-fields .acf-select:hover {
+  border-color: var(--ch-color-border-hover);
+}
+
+.agent-config-fields .acf-select:focus {
+  outline: none;
+  border-color: var(--ch-color-accent);
+  box-shadow: 0 0 0 2px var(--ch-color-accent-ring);
+}
+
+.agent-config-fields .acf-checkbox-label {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 0;
+  color: var(--ch-color-text);
+  cursor: pointer;
+}
+
+.agent-config-fields .acf-checkbox {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.agent-config-fields .acf-hint {
+  margin: 6px 0 0;
+  color: var(--ch-color-text-soft);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.env-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .env-preset-row {
   display: flex;
   gap: 8px;

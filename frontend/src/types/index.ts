@@ -146,6 +146,7 @@ export interface Workspace {
   remote_cwd?: string | null
   remote_reconnect: boolean
   resident_agent_enabled: boolean
+  resident_agent_paused: boolean
   resident_agent_interval_minutes: number
   resident_agent_session_id?: string | null
   resident_agent_directive?: string | null
@@ -167,6 +168,7 @@ export interface WorkspaceCreate {
   remote_cwd?: string | null
   remote_reconnect?: boolean
   resident_agent_enabled?: boolean
+  resident_agent_paused?: boolean
   resident_agent_interval_minutes?: number
   resident_agent_directive?: string
   resident_agent_type?: AgentType
@@ -181,6 +183,7 @@ export interface WorkspaceUpdate {
   remote_cwd?: string | null
   remote_reconnect?: boolean
   resident_agent_enabled?: boolean
+  resident_agent_paused?: boolean
   resident_agent_interval_minutes?: number
   resident_agent_directive?: string
   resident_agent_type?: AgentType

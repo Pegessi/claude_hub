@@ -451,6 +451,7 @@ class WorkspaceCreate(BaseModel):
     remote_cwd: Optional[str] = None
     remote_reconnect: bool = True
     resident_agent_enabled: bool = False
+    resident_agent_paused: bool = False
     resident_agent_interval_minutes: int = 60
     resident_agent_directive: Optional[str] = None
     resident_agent_type: AgentType = AgentType.CLAUDE
@@ -472,6 +473,7 @@ class Workspace(BaseModel):
     remote_cwd: Optional[str] = None
     remote_reconnect: bool = True
     resident_agent_enabled: bool = False
+    resident_agent_paused: bool = False
     resident_agent_interval_minutes: int = 60
     resident_agent_session_id: Optional[str] = None
     resident_agent_directive: Optional[str] = None
@@ -492,6 +494,7 @@ class WorkspaceUpdate(BaseModel):
     remote_cwd: Optional[str] = None
     remote_reconnect: Optional[bool] = None
     resident_agent_enabled: Optional[bool] = None
+    resident_agent_paused: Optional[bool] = None
     resident_agent_interval_minutes: Optional[int] = None
     resident_agent_directive: Optional[str] = None
     resident_agent_type: Optional[AgentType] = None

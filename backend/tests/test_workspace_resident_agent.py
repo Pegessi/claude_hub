@@ -970,3 +970,134 @@ def test_update_workspace_type_change_without_live_session_is_noop_on_sessions(
     )
     assert updated.resident_agent_type == AgentType.TERMINAL
     assert updated.resident_agent_session_id is None
+
+
+# ---------------------------------------------------------------------------
+# Three-state lifecycle: ENABLE master switch, PAUSE, DELETE
+# ---------------------------------------------------------------------------
+
+
+def test_resident_due_false_when_paused(manager: WorkspaceManager) -> None:
+    """Paused => not due even if enabled and otherwise due; unpausing restores it."""
+    now = datetime.now()
+    # Overdue (last_run None bootstraps to due) but paused => not due.
+    paused = _due_workspace(None).model_copy(update={"resident_agent_paused": True})
+    # Paused suppresses the bootstrap due.
+    assert manager._resident_agent_due(paused, now) is False
+    # Unpaused + due again.
+    unpaused = paused.model_copy(update={"resident_agent_paused": False})
+    assert manager._resident_agent_due(unpaused, now) is True
+
+
+def test_update_workspace_disable_tears_down_resident(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """Disabling (enabled True->False) clears the session id, drops the
+    ManagedSession (orphan tab -> pruner), and resets last_run_at to None."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_enabled=True,
+        )
+    )
+    session = _resident_session(workspace)
+    manager.sessions[session.id] = session
+    workspace = workspace.model_copy(
+        update={
+            "resident_agent_session_id": session.id,
+            "resident_agent_last_run_at": datetime.now(),
+        }
+    )
+    manager.workspaces[workspace.id] = workspace
+
+    updated = manager.update_workspace(workspace.id, WorkspaceUpdate(resident_agent_enabled=False))
+
+    assert updated.resident_agent_enabled is False
+    assert updated.resident_agent_session_id is None
+    assert updated.resident_agent_last_run_at is None
+    assert session.id not in manager.sessions
+
+
+def test_update_workspace_pause_keeps_resident_session(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """Pausing must NOT clear/pop the session — it stays alive for manual chat."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_enabled=True,
+        )
+    )
+    session = _resident_session(workspace)
+    manager.sessions[session.id] = session
+    last_run = datetime.now()
+    workspace = workspace.model_copy(
+        update={
+            "resident_agent_session_id": session.id,
+            "resident_agent_last_run_at": last_run,
+        }
+    )
+    manager.workspaces[workspace.id] = workspace
+
+    updated = manager.update_workspace(workspace.id, WorkspaceUpdate(resident_agent_paused=True))
+
+    assert updated.resident_agent_paused is True
+    assert updated.resident_agent_enabled is True
+    # Session and pointer untouched; last_run not reset.
+    assert updated.resident_agent_session_id == session.id
+    assert session.id in manager.sessions
+    assert updated.resident_agent_last_run_at == last_run
+
+
+def test_delete_session_clears_resident_pointer_and_disables(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """Deleting the resident session clears the workspace resident pointer, resets
+    last_run_at, and sets resident_agent_enabled=False (Delete means stop, not
+    restart-next-tick)."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_enabled=True,
+        )
+    )
+    session = _resident_session(workspace)
+    manager.sessions[session.id] = session
+    workspace = workspace.model_copy(
+        update={
+            "resident_agent_session_id": session.id,
+            "resident_agent_last_run_at": datetime.now(),
+        }
+    )
+    manager.workspaces[workspace.id] = workspace
+
+    deleted_tabs: list[str] = []
+
+    async def fake_delete_tab(tab_id: str) -> None:
+        deleted_tabs.append(tab_id)
+
+    original = _wm.ttyd_manager.delete_tab
+    _wm.ttyd_manager.delete_tab = fake_delete_tab  # type: ignore[assignment]
+    try:
+        asyncio.run(manager.delete_session(session.id))
+    finally:
+        _wm.ttyd_manager.delete_tab = original  # type: ignore[assignment]
+
+    assert session.id not in manager.sessions
+    persisted = manager.workspaces[workspace.id]
+    assert persisted.resident_agent_session_id is None
+    assert persisted.resident_agent_last_run_at is None
+    assert persisted.resident_agent_enabled is False
+    assert deleted_tabs == [session.tab_id]

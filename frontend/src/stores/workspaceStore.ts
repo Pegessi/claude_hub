@@ -385,7 +385,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
-  async function createTask(payload: WorkspaceTaskCreate) {    if (!activeWorkspaceId.value) return
+  async function createTask(payload: WorkspaceTaskCreate) {
+    if (!activeWorkspaceId.value) return
     isLoading.value = true
     try {
       const response = await fetch(`${API_BASE}/workspaces/${activeWorkspaceId.value}/tasks`, {
