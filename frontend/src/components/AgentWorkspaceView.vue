@@ -265,6 +265,10 @@
                 <span class="agent-status-name">{{ agent.title }}</span>
                 <span class="agent-status-kind">{{ agentRoleLabel(agent) }}</span>
                 <span
+                  v-if="isResidentAgent(agent) && isResidentPaused"
+                  class="agent-status-kind agent-status-paused-badge"
+                >Paused</span>
+                <span
                   class="agent-status-cli"
                   :data-kind="agent.agent_type || 'terminal'"
                 >{{ agent.agent_type || 'terminal' }}</span>
@@ -292,7 +296,7 @@
             </span>
           </button>
           <div
-            v-if="agent.role !== 'dispatcher' && agent.role !== 'resident'"
+            v-if="agent.role !== 'dispatcher'"
             class="agent-status-actions"
           >
             <LoadingButton
@@ -305,6 +309,16 @@
               @click.stop="openSwitchEnvModal(agent)"
             >
               ⚙ Env
+            </LoadingButton>
+            <LoadingButton
+              v-if="isResidentAgent(agent)"
+              type="button"
+              class="agent-status-pause"
+              :loading="isPending('workspace:resident-pause')"
+              :loading-label="isResidentPaused ? 'Resuming agent' : 'Pausing agent'"
+              @click="toggleResidentPaused"
+            >
+              {{ isResidentPaused ? 'Resume' : 'Pause' }}
             </LoadingButton>
             <LoadingButton
               type="button"
@@ -1506,7 +1520,25 @@
             </label>
             <p class="modal-hint">
               When enabled, a background agent runs on a schedule to maintain
-              lessons and propose follow-up tasks for this workspace.
+              lessons and propose follow-up tasks for this workspace. Turning
+              this off stops and removes the running resident session
+              (关闭将停止并移除常驻 agent 会话).
+            </p>
+          </div>
+          <div
+            v-if="workspaceForm.resident_agent_enabled"
+            class="modal-field"
+          >
+            <label class="checkbox-label">
+              <input
+                v-model="workspaceForm.resident_agent_paused"
+                type="checkbox"
+              >
+              Pause auto-scheduling (keep the agent for manual chat)
+            </label>
+            <p class="modal-hint">
+              When paused, the resident session stays available for manual chat
+              but won't auto-run on its schedule (暂停自动调度，保留会话用于手动对话).
             </p>
           </div>
           <div
@@ -2098,6 +2130,10 @@
                 <span :class="['runtime-pill', `runtime-pill--${agent.runtime_status}`]">
                   {{ agent.runtime_status }}
                 </span>
+                <span
+                  v-if="isResidentAgent(agent) && isResidentPaused"
+                  class="runtime-pill runtime-pill--paused"
+                >paused</span>
                 <span v-if="agent.ephemeral">temporary</span>
                 <span>current {{ taskTitle(agent.current_task_id) }}</span>
                 <span>queued {{ agent.queued_count }}</span>
@@ -2122,7 +2158,16 @@
                   ⚙ Env
                 </LoadingButton>
                 <LoadingButton
-                  v-if="agent.role !== 'dispatcher' && agent.role !== 'resident'"
+                  v-if="isResidentAgent(agent)"
+                  type="button"
+                  :loading="isPending('workspace:resident-pause')"
+                  :loading-label="isResidentPaused ? 'Resuming agent' : 'Pausing agent'"
+                  @click="toggleResidentPaused"
+                >
+                  {{ isResidentPaused ? 'Resume' : 'Pause' }}
+                </LoadingButton>
+                <LoadingButton
+                  v-if="agent.role !== 'dispatcher'"
                   type="button"
                   class="danger-button"
                   :disabled="!canDeleteAgent(agent)"
@@ -2746,6 +2791,7 @@ const workspaceForm = reactive({
   remote_cwd: '',
   remote_reconnect: true,
   resident_agent_enabled: false,
+  resident_agent_paused: false,
   resident_agent_interval_minutes: 60,
   resident_agent_directive: '',
   // Resident agent CLI/env config (UI-side; resolved to resident_agent_env at submit).
@@ -3304,7 +3350,12 @@ const agentManagerEmptyText = computed(() =>
 )
 
 const visibleWorkspaceSessions = computed<ManagedSession[]>(() =>
-  workspaceSessionView.value === 'reviewers' ? reviewerSessions.value : workspaceAgents.value
+  workspaceSessionView.value === 'reviewers'
+    ? reviewerSessions.value
+    : [
+        ...workspaceAgents.value,
+        ...(residentAgent.value ? [residentAgent.value] : []),
+      ]
 )
 
 const visibleWorkspaceSessionsEmptyText = computed(() =>
@@ -4108,6 +4159,7 @@ async function handleCreateWorkspace() {
         workspaceForm.target === 'remote' ? workspaceForm.remote_cwd.trim() || null : null,
       remote_reconnect: workspaceForm.remote_reconnect,
       resident_agent_enabled: workspaceForm.resident_agent_enabled,
+      resident_agent_paused: workspaceForm.resident_agent_paused,
       resident_agent_interval_minutes: workspaceForm.resident_agent_interval_minutes,
       resident_agent_directive: workspaceForm.resident_agent_directive.trim() || undefined,
       resident_agent_type: workspaceForm.resident_agent_type,
@@ -4134,6 +4186,7 @@ async function handleSaveWorkspace() {
       remote_reconnect:
         workspaceForm.target === 'remote' ? workspaceForm.remote_reconnect : undefined,
       resident_agent_enabled: workspaceForm.resident_agent_enabled,
+      resident_agent_paused: workspaceForm.resident_agent_paused,
       resident_agent_interval_minutes: workspaceForm.resident_agent_interval_minutes,
       resident_agent_directive: workspaceForm.resident_agent_directive.trim() || undefined,
       resident_agent_type: workspaceForm.resident_agent_type,
@@ -4156,6 +4209,7 @@ function resetWorkspaceForm() {
   workspaceForm.remote_cwd = ''
   workspaceForm.remote_reconnect = true
   workspaceForm.resident_agent_enabled = false
+  workspaceForm.resident_agent_paused = false
   workspaceForm.resident_agent_interval_minutes = 60
   workspaceForm.resident_agent_directive = ''
   workspaceForm.resident_agent_type = 'claude'
@@ -4183,6 +4237,7 @@ function openEditWorkspaceModal() {
   workspaceForm.remote_cwd = workspace.remote_cwd || ''
   workspaceForm.remote_reconnect = workspace.remote_reconnect
   workspaceForm.resident_agent_enabled = workspace.resident_agent_enabled ?? false
+  workspaceForm.resident_agent_paused = workspace.resident_agent_paused ?? false
   workspaceForm.resident_agent_interval_minutes = workspace.resident_agent_interval_minutes ?? 60
   workspaceForm.resident_agent_directive = workspace.resident_agent_directive || ''
   workspaceForm.resident_agent_type = workspace.resident_agent_type ?? 'claude'
@@ -4837,6 +4892,23 @@ async function deleteAgent(agent: ManagedSession) {
     await workspaceStore.deleteSession(agent.id)
     await terminalStore.fetchTabs()
   })
+}
+
+// Three-state resident lifecycle: Enable (exists + auto-works), Pause (session
+// stays for manual chat but won't auto-run), Delete (teardown + clear pointers).
+const isResidentPaused = computed(() => activeWorkspace.value?.resident_agent_paused ?? false)
+
+function isResidentAgent(agent: ManagedSession) {
+  return agent.role === 'resident'
+}
+
+async function toggleResidentPaused() {
+  const workspaceId = activeWorkspaceId.value
+  if (!workspaceId) return
+  const next = !isResidentPaused.value
+  await runPending('workspace:resident-pause', () =>
+    workspaceStore.updateWorkspace(workspaceId, { resident_agent_paused: next })
+  )
 }
 
 watch(tasks, value => {
@@ -5520,8 +5592,34 @@ onUnmounted(() => {
 }
 
 .agent-status-actions {
+  display: flex;
+  gap: 6px;
   justify-content: flex-end;
   padding-left: 22px;
+}
+
+.agent-status-pause {
+  height: 26px;
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 9px;
+}
+
+.agent-status-pause:hover {
+  border-color: var(--ch-color-border-hover);
+}
+
+.agent-status-paused-badge {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 1px 7px;
+  background: var(--ch-color-surface-sunken);
+  color: var(--ch-color-text-muted);
+  font-weight: 700;
 }
 
 .agent-status-delete {
@@ -5829,6 +5927,11 @@ onUnmounted(() => {
 
 .runtime-pill--offline {
   background: var(--ch-color-surface-muted);
+  color: var(--ch-color-text-muted);
+}
+
+.runtime-pill--paused {
+  background: var(--ch-color-surface-sunken);
   color: var(--ch-color-text-muted);
 }
 

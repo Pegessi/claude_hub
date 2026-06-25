@@ -169,6 +169,8 @@ class _WorkspacesMixin:
             update_kwargs["remote_reconnect"] = payload.remote_reconnect
         if payload.resident_agent_enabled is not None:
             update_kwargs["resident_agent_enabled"] = payload.resident_agent_enabled
+        if payload.resident_agent_paused is not None:
+            update_kwargs["resident_agent_paused"] = payload.resident_agent_paused
         if payload.resident_agent_interval_minutes is not None:
             if payload.resident_agent_interval_minutes < 1:
                 raise ValueError("resident_agent_interval_minutes must be >= 1")
@@ -204,12 +206,28 @@ class _WorkspacesMixin:
         # row, which makes the old tab a session-less orphan that the existing
         # _prune_orphan_workspace_tabs reconciler (run on the monitor loop) cleans up.
         # This keeps sync code sync-safe and reuses the established orphan-tab pruner.
+        #
+        # Disable teardown: when resident_agent_enabled flips True -> False in this
+        # update, we tear the resident down the SAME way (clear the pointer + drop the
+        # ManagedSession so the orphan-tab pruner removes the tab) and additionally
+        # reset resident_agent_last_run_at so a future re-enable starts clean. This is
+        # the ENABLE master switch: OFF means "stop AND tear down", no orphan left
+        # running. PAUSE (resident_agent_paused) deliberately does NOT come through
+        # here — pausing keeps resident_agent_session_id and the ManagedSession intact
+        # so the user can still open the resident terminal and chat manually; it only
+        # stops automatic scheduling (handled in _resident_agent_due).
+        disabling_resident = (
+            workspace.resident_agent_enabled is True
+            and update_kwargs.get("resident_agent_enabled") is False
+        )
         old_resident_session_id = workspace.resident_agent_session_id
-        if old_resident_session_id is not None and self._resident_launch_config_changed(
-            workspace, update_kwargs
+        if old_resident_session_id is not None and (
+            disabling_resident or self._resident_launch_config_changed(workspace, update_kwargs)
         ):
             update_kwargs["resident_agent_session_id"] = None
             self.sessions.pop(old_resident_session_id, None)
+            if disabling_resident:
+                update_kwargs["resident_agent_last_run_at"] = None
 
         if not update_kwargs:
             return workspace
@@ -341,6 +359,10 @@ class _WorkspacesMixin:
                                   OR elapsed >= interval + jitter)``.
         """
         if not workspace.resident_agent_enabled:
+            return False
+        # Paused = keep the session alive for manual chat, but stop automatic
+        # scheduling (no self-drive runs). disabled OR paused -> not due.
+        if workspace.resident_agent_paused:
             return False
 
         last_run = workspace.resident_agent_last_run_at

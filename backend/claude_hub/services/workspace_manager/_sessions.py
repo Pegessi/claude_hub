@@ -235,10 +235,23 @@ class _SessionsMixin:
 
         self.sessions.pop(session_id, None)
         workspace = self.workspaces.get(session.workspace_id)
-        if workspace and workspace.dispatcher_session_id == session_id:
-            self.workspaces[workspace.id] = workspace.model_copy(
-                update={"dispatcher_session_id": None, "updated_at": _wm._now()}
-            )
+        if workspace:
+            ws_update: dict[str, Any] = {}
+            if workspace.dispatcher_session_id == session_id:
+                ws_update["dispatcher_session_id"] = None
+            # Resident teardown via Delete: if this session is the workspace's
+            # resident, clear the resident pointer and reset last_run_at. We ALSO
+            # set resident_agent_enabled=False so that Delete means "stop it", not
+            # "restart next tick" — otherwise the next resident tick would simply
+            # recreate the session the user just deleted (surprising). Pause is the
+            # way to keep the session disabled-for-auto but alive.
+            if workspace.resident_agent_session_id == session_id:
+                ws_update["resident_agent_session_id"] = None
+                ws_update["resident_agent_last_run_at"] = None
+                ws_update["resident_agent_enabled"] = False
+            if ws_update:
+                ws_update["updated_at"] = _wm._now()
+                self.workspaces[workspace.id] = workspace.model_copy(update=ws_update)
         self._save_state()
         try:
             await ttyd_manager.delete_tab(session.tab_id)
