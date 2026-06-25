@@ -184,19 +184,128 @@ class _WorkspacesMixin:
         self._save_state()
         return updated
 
+    @staticmethod
+    def _resident_jitter_seconds(workspace: "Workspace", interval_seconds: int) -> int:
+        """Stable, deterministic per-workspace jitter in ``[0, interval_seconds)``.
+
+        Spreads resident wake-ups across the interval so that many workspaces
+        sharing the same interval do not all fire on the same monitor tick (the
+        classic thundering-herd / synchronized-poll problem). The offset is
+        derived from a SHA-256 of the workspace id, NOT Python's builtin
+        ``hash()`` (which is randomized per process via PYTHONHASHSEED) nor any
+        time/random source — so it is identical across processes and restarts,
+        and unit-testable.
+        """
+        if interval_seconds <= 0:
+            return 0
+        digest = hashlib.sha256(workspace.id.encode("utf-8")).digest()
+        return int.from_bytes(digest[:8], "big") % interval_seconds
+
+    def _workspace_activity_since(self, workspace_id: str, since: Optional[datetime]) -> bool:
+        """True when this workspace saw a real task OUTCOME or external progress.
+
+        "Activity" deliberately means a real *outcome* to learn from, NOT mere
+        task creation/update. For a NON ``system_internal`` task we look ONLY at
+        its terminal/progress timestamps — ``completed_at``, ``reviewed_at`` and
+        ``human_accepted_at`` — and treat the task as activity when any of those
+        is newer than ``since``. A freshly-proposed TODO task has all three set
+        to ``None``, so it does NOT trip the gate. This is what prevents the
+        resident self-retrigger loop: the resident's prompt makes it PROPOSE
+        tasks via ``POST /tasks`` (non-``system_internal`` tasks whose
+        ``created_at``/``updated_at`` are newer than the just-stamped
+        ``last_run``); gating on outcomes rather than creations means those
+        proposals never re-arm the activity fast-path.
+
+        A non-resident report created after ``since`` also counts as activity:
+        worker agents post reports (the resident's prompt uses ``/tasks`` and
+        ``/lessons``, not ``/sessions/{id}/reports``), so a fresh report is
+        genuine progress. As defense-in-depth we still exclude reports and tasks
+        whose ``session_id`` matches the workspace's
+        ``resident_agent_session_id`` in case a future prompt makes the resident
+        emit them. ``system_internal`` tasks are excluded entirely. When
+        ``since`` is ``None`` any existing outcome/report counts.
+        """
+        workspace = self.workspaces.get(workspace_id)
+        resident_session_id = workspace.resident_agent_session_id if workspace is not None else None
+
+        def _after(value: Optional[datetime]) -> bool:
+            if value is None:
+                return False
+            return since is None or value > since
+
+        for task in self.tasks.values():
+            if task.workspace_id != workspace_id or task.system_internal:
+                continue
+            if resident_session_id is not None and task.session_id == resident_session_id:
+                # Defense-in-depth: ignore tasks owned by the resident itself so
+                # its own proposals can never count as activity.
+                continue
+            # Gate on real outcomes only (completed/reviewed/accepted), never on
+            # creation/update — a freshly-proposed TODO has these all None.
+            if (
+                _after(task.completed_at)
+                or _after(task.reviewed_at)
+                or _after(task.human_accepted_at)
+            ):
+                return True
+        for report in self.reports.values():
+            if report.workspace_id != workspace_id:
+                continue
+            if resident_session_id is not None and report.session_id == resident_session_id:
+                # The resident does not post reports, but guard anyway so a
+                # future prompt change cannot let it re-trigger itself.
+                continue
+            if _after(report.created_at):
+                return True
+        return False
+
     def _resident_agent_due(self, workspace: Workspace, now: datetime) -> bool:
         """Return True when a resident agent should run this tick.
 
-        Due immediately when never run before; otherwise due once at least
-        ``resident_agent_interval_minutes`` have elapsed since the last run.
+        Event-gated ("Option C") trigger. The cheap 5s monitor tick is only the
+        wakeup; whether the resident actually fires is decided here:
+
+        * **Disabled** -> never due.
+        * **Bootstrap** (``last_run_at is None``) -> due once. The first run
+          establishes the activity/timer baseline; it does not fire instantly on
+          every empty boot because once it runs the baseline is stamped.
+        * **Activity-gated fast path** -> if there has been real workspace
+          activity since the last run AND at least
+          ``RESIDENT_ACTIVITY_DEBOUNCE_SECONDS`` have elapsed, fire now. The
+          debounce floor coalesces bursts so a flurry of task updates triggers at
+          most one run per debounce window instead of one per event.
+        * **Overdue backstop** -> even with no activity, fire once the full
+          ``resident_agent_interval_minutes`` (plus a stable per-workspace jitter
+          offset) have elapsed, so idle-but-enabled workspaces still get a
+          periodic pass. This is the legacy fixed-interval path, demoted to a
+          backstop.
+
+        Net: ``due = enabled AND (last_run is None
+                                  OR (activity_since AND elapsed >= debounce)
+                                  OR elapsed >= interval + jitter)``.
         """
         if not workspace.resident_agent_enabled:
             return False
+
         last_run = workspace.resident_agent_last_run_at
         if last_run is None:
+            # Bootstrap: run once to establish the baseline.
             return True
-        interval = timedelta(minutes=max(1, workspace.resident_agent_interval_minutes))
-        return now - last_run >= interval
+
+        elapsed = now - last_run
+        interval_seconds = max(1, workspace.resident_agent_interval_minutes) * 60
+
+        # Activity-gated fast path: react to real work, but no more than once per
+        # debounce window.
+        debounce = timedelta(seconds=RESIDENT_ACTIVITY_DEBOUNCE_SECONDS)
+        if elapsed >= debounce and self._workspace_activity_since(workspace.id, last_run):
+            return True
+
+        # Overdue backstop: fixed interval + stable jitter keeps idle workspaces
+        # ticking and desynchronizes wake-ups across workspaces.
+        jitter = self._resident_jitter_seconds(workspace, interval_seconds)
+        backstop = timedelta(seconds=interval_seconds + jitter)
+        return elapsed >= backstop
 
     async def _tick_resident_agents(self) -> None:
         """Fire due resident agents across all workspaces.
