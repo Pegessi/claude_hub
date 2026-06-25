@@ -352,8 +352,37 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
-  async function createTask(payload: WorkspaceTaskCreate) {
-    if (!activeWorkspaceId.value) return
+  async function deleteWorkspace(workspaceId: string) {
+    isLoading.value = true
+    try {
+      const response = await fetch(`${API_BASE}/workspaces/${workspaceId}`, {
+        method: 'DELETE',
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      const index = workspaces.value.findIndex(item => item.id === workspaceId)
+      if (index >= 0) {
+        workspaces.value.splice(index, 1)
+      }
+      if (activeWorkspaceId.value === workspaceId) {
+        const next = workspaces.value[0]
+        if (next) {
+          setActiveWorkspace(next.id)
+          await fetchBoard(next.id)
+        } else {
+          activeWorkspaceId.value = null
+          localStorage.removeItem(STORAGE_KEY_ACTIVE_WORKSPACE)
+          board.value = null
+        }
+      }
+    } catch (e) {
+      notifyError(e instanceof Error ? e.message : 'Failed to delete workspace')
+      throw e
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  async function createTask(payload: WorkspaceTaskCreate) {    if (!activeWorkspaceId.value) return
     isLoading.value = true
     try {
       const response = await fetch(`${API_BASE}/workspaces/${activeWorkspaceId.value}/tasks`, {
@@ -604,6 +633,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     summarizeFeedbackLessons,
     createWorkspace,
     updateWorkspace,
+    deleteWorkspace,
     createTask,
     updateTask,
     updateTaskStatus,

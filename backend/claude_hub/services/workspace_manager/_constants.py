@@ -4,9 +4,10 @@ import binascii
 import json
 import logging
 import re
+import shutil
 import tempfile
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -261,8 +262,10 @@ __all__ = [
     "re",
     "remote_profile_manager",
     "settings",
+    "shutil",
     "state_policy",
     "tempfile",
+    "timedelta",
     "ttyd_manager",
     "uuid",
 ]

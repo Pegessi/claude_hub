@@ -1496,7 +1496,52 @@
               >
             </div>
           </div>
+          <div class="modal-field resident-agent-section">
+            <label class="checkbox-label">
+              <input
+                v-model="workspaceForm.resident_agent_enabled"
+                type="checkbox"
+              >
+              Enable resident self-driven agent (周期性维护 lessons / 提出任务)
+            </label>
+            <p class="modal-hint">
+              When enabled, a background agent runs on a schedule to maintain
+              lessons and propose follow-up tasks for this workspace.
+            </p>
+          </div>
+          <div
+            v-if="workspaceForm.resident_agent_enabled"
+            class="modal-field"
+          >
+            <label>Run interval (minutes)</label>
+            <input
+              v-model.number="workspaceForm.resident_agent_interval_minutes"
+              type="number"
+              min="1"
+              placeholder="60"
+            >
+          </div>
+          <div
+            v-if="workspaceForm.resident_agent_enabled"
+            class="modal-field"
+          >
+            <label>Resident agent directive (optional)</label>
+            <textarea
+              v-model="workspaceForm.resident_agent_directive"
+              rows="3"
+              placeholder="Describe recurring tasks or what the resident agent should focus on each run."
+            />
+          </div>
           <div class="modal-actions">
+            <button
+              v-if="workspaceModalMode === 'edit'"
+              type="button"
+              class="danger-button workspace-delete-button"
+              :disabled="isLoading || isPending('workspace:delete')"
+              @click="handleDeleteWorkspace"
+            >
+              Delete Workspace
+            </button>
             <button
               type="button"
               class="tool-button"
@@ -2752,6 +2797,9 @@ const workspaceForm = reactive({
   remote_profile_id: '',
   remote_cwd: '',
   remote_reconnect: true,
+  resident_agent_enabled: false,
+  resident_agent_interval_minutes: 60,
+  resident_agent_directive: '',
 })
 
 const agentOptionsForm = reactive({
@@ -4112,6 +4160,9 @@ async function handleCreateWorkspace() {
       remote_cwd:
         workspaceForm.target === 'remote' ? workspaceForm.remote_cwd.trim() || null : null,
       remote_reconnect: workspaceForm.remote_reconnect,
+      resident_agent_enabled: workspaceForm.resident_agent_enabled,
+      resident_agent_interval_minutes: workspaceForm.resident_agent_interval_minutes,
+      resident_agent_directive: workspaceForm.resident_agent_directive.trim() || undefined,
     })
   )
   if (workspace) {
@@ -4132,6 +4183,9 @@ async function handleSaveWorkspace() {
         workspaceForm.target === 'remote' ? workspaceForm.remote_cwd.trim() || null : undefined,
       remote_reconnect:
         workspaceForm.target === 'remote' ? workspaceForm.remote_reconnect : undefined,
+      resident_agent_enabled: workspaceForm.resident_agent_enabled,
+      resident_agent_interval_minutes: workspaceForm.resident_agent_interval_minutes,
+      resident_agent_directive: workspaceForm.resident_agent_directive.trim() || undefined,
     })
   )
   if (workspace) {
@@ -4148,6 +4202,9 @@ function resetWorkspaceForm() {
   workspaceForm.remote_profile_id = remoteProfiles.value[0]?.id || ''
   workspaceForm.remote_cwd = ''
   workspaceForm.remote_reconnect = true
+  workspaceForm.resident_agent_enabled = false
+  workspaceForm.resident_agent_interval_minutes = 60
+  workspaceForm.resident_agent_directive = ''
 }
 
 function openWorkspaceModal() {
@@ -4168,6 +4225,9 @@ function openEditWorkspaceModal() {
   workspaceForm.remote_profile_id = workspace.remote_profile_id || ''
   workspaceForm.remote_cwd = workspace.remote_cwd || ''
   workspaceForm.remote_reconnect = workspace.remote_reconnect
+  workspaceForm.resident_agent_enabled = workspace.resident_agent_enabled ?? false
+  workspaceForm.resident_agent_interval_minutes = workspace.resident_agent_interval_minutes ?? 60
+  workspaceForm.resident_agent_directive = workspace.resident_agent_directive || ''
   workspaceModalMode.value = 'edit'
   editingWorkspaceId.value = workspace.id
   showWorkspaceModal.value = true
@@ -4180,6 +4240,22 @@ function closeWorkspaceModal() {
   showWorkspaceModal.value = false
   workspaceModalMode.value = 'create'
   editingWorkspaceId.value = null
+}
+
+async function handleDeleteWorkspace() {
+  const workspaceId = editingWorkspaceId.value
+  if (!workspaceId) return
+  const name = workspaceForm.name.trim() || 'this workspace'
+  const confirmed = window.confirm(
+    `Delete workspace "${name}"? This cannot be undone.`,
+  )
+  if (!confirmed) return
+  try {
+    await runPending('workspace:delete', () => workspaceStore.deleteWorkspace(workspaceId))
+    closeWorkspaceModal()
+  } catch {
+    // Error already surfaced via store notification; keep the modal open.
+  }
 }
 
 function closeWorkspaceMobileMenu() {
@@ -7713,6 +7789,16 @@ onUnmounted(() => {
   justify-content: flex-end;
   gap: 10px;
   margin-top: 18px;
+}
+
+.modal-actions .workspace-delete-button {
+  margin-right: auto;
+}
+
+.resident-agent-section {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--ch-color-border);
 }
 
 .modal-section {

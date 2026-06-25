@@ -37,6 +37,7 @@ class WorkspaceSessionRole(str, Enum):
     ORCHESTRATOR = "orchestrator"
     REVIEWER = "reviewer"
     DISPATCHER = "dispatcher"
+    RESIDENT = "resident"
 
 
 class WorkspaceTaskStatus(str, Enum):
@@ -449,6 +450,9 @@ class WorkspaceCreate(BaseModel):
     remote_profile_id: Optional[str] = None
     remote_cwd: Optional[str] = None
     remote_reconnect: bool = True
+    resident_agent_enabled: bool = False
+    resident_agent_interval_minutes: int = 60
+    resident_agent_directive: Optional[str] = None
 
 
 class Workspace(BaseModel):
@@ -464,6 +468,11 @@ class Workspace(BaseModel):
     remote_profile_id: Optional[str] = None
     remote_cwd: Optional[str] = None
     remote_reconnect: bool = True
+    resident_agent_enabled: bool = False
+    resident_agent_interval_minutes: int = 60
+    resident_agent_session_id: Optional[str] = None
+    resident_agent_directive: Optional[str] = None
+    resident_agent_last_run_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 
@@ -476,6 +485,9 @@ class WorkspaceUpdate(BaseModel):
     default_branch: Optional[str] = None
     remote_cwd: Optional[str] = None
     remote_reconnect: Optional[bool] = None
+    resident_agent_enabled: Optional[bool] = None
+    resident_agent_interval_minutes: Optional[int] = None
+    resident_agent_directive: Optional[str] = None
 
 
 class WorkspaceTaskCreate(BaseModel):
