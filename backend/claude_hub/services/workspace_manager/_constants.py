@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import binascii
+import hashlib
 import json
 import logging
 import re
@@ -89,6 +90,13 @@ PROMPT_DISPATCH_RETRY_GRACE_SECONDS = 10
 REVIEW_REAPER_DISPATCH_GRACE_SECONDS = 60
 PROMPT_STUCK_RISK_LEVEL = "prompt_dispatch_stalled"
 WORKSPACE_MONITOR_INTERVAL_SECONDS = 5
+# Event-gated resident trigger: minimum gap between activity-triggered resident
+# runs. When real workspace activity is detected, the resident may fire as soon
+# as this debounce floor has elapsed since its last run (far shorter than the
+# configured interval), so the agent reacts promptly to bursts without firing
+# once per burst event. The idle backstop still uses the full
+# resident_agent_interval_minutes (+ jitter).
+RESIDENT_ACTIVITY_DEBOUNCE_SECONDS = 300
 # How long after a managed terminal tab is created we refuse to prune it as an
 # orphan. Tab creation (ttyd_manager.create_tab) and ManagedSession
 # registration (_create_managed_session) are two separate steps; the orphan
@@ -217,6 +225,7 @@ __all__ = [
     "PROMPT_STUCK_RISK_LEVEL",
     "Path",
     "REMOTE_FORWARD_PORT_BASE",
+    "RESIDENT_ACTIVITY_DEBOUNCE_SECONDS",
     "REVIEW_REAPER_DISPATCH_GRACE_SECONDS",
     "REVIEW_RUNTIME_REOPEN_GRACE_SECONDS",
     "RequestTaskReviewRequest",
@@ -256,6 +265,7 @@ __all__ = [
     "base64",
     "binascii",
     "datetime",
+    "hashlib",
     "json",
     "logger",
     "logging",

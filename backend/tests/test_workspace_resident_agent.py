@@ -142,18 +142,251 @@ def _due_workspace(last_run_at, *, enabled: bool = True, interval: int = 60) -> 
 
 def test_resident_due_check(manager: WorkspaceManager) -> None:
     now = datetime.now()
-    # Never run => due immediately.
+    # Never run => due immediately (bootstrap).
     assert manager._resident_agent_due(_due_workspace(None), now) is True
     # Just run => not due.
     assert manager._resident_agent_due(_due_workspace(now), now) is False
-    # Ran longer ago than the interval => due.
-    old = now - timedelta(minutes=61)
-    assert manager._resident_agent_due(_due_workspace(old), now) is True
+    # No activity recorded, so the activity fast-path never fires; only the
+    # interval+jitter backstop applies. For id "ws" / interval 60 the jitter is
+    # ~342s, so the backstop is ~65.7min. 61min ago is still inside it.
+    interval_seconds = 60 * 60
+    jitter = manager._resident_jitter_seconds(_due_workspace(None), interval_seconds)
+    backstop = timedelta(seconds=interval_seconds + jitter)
+    just_inside = now - (backstop - timedelta(seconds=30))
+    assert manager._resident_agent_due(_due_workspace(just_inside), now) is False
+    # Past the backstop => due even with no activity.
+    past_backstop = now - (backstop + timedelta(seconds=30))
+    assert manager._resident_agent_due(_due_workspace(past_backstop), now) is True
     # Within the interval => not due.
     recent = now - timedelta(minutes=5)
     assert manager._resident_agent_due(_due_workspace(recent), now) is False
     # Disabled => never due even if overdue.
-    assert manager._resident_agent_due(_due_workspace(old, enabled=False), now) is False
+    assert manager._resident_agent_due(_due_workspace(past_backstop, enabled=False), now) is False
+
+
+def test_resident_jitter_is_deterministic_and_in_range() -> None:
+    interval_seconds = 60 * 60
+    ws_a = _due_workspace(None)  # id "ws"
+    # Deterministic: same id => same offset across calls.
+    first = WorkspaceManager._resident_jitter_seconds(ws_a, interval_seconds)
+    second = WorkspaceManager._resident_jitter_seconds(ws_a, interval_seconds)
+    assert first == second
+    # In range [0, interval_seconds).
+    assert 0 <= first < interval_seconds
+    # Differs across ids (so workspaces desynchronize).
+    ws_b = ws_a.model_copy(update={"id": "ws-other"})
+    other = WorkspaceManager._resident_jitter_seconds(ws_b, interval_seconds)
+    assert other != first
+    assert 0 <= other < interval_seconds
+
+
+def _activity_task(
+    workspace: Workspace,
+    *,
+    updated_at: datetime,
+    system_internal: bool = False,
+    completed_at: datetime | None = None,
+    reviewed_at: datetime | None = None,
+    human_accepted_at: datetime | None = None,
+    session_id: str | None = None,
+) -> WorkspaceTask:
+    return WorkspaceTask(
+        id=f"task-{updated_at.timestamp()}-{system_internal}",
+        workspace_id=workspace.id,
+        title="t",
+        prompt="p",
+        agent_type=AgentType.CLAUDE,
+        task_mode=WorkspaceTaskMode.REVIEWED,
+        status=WorkspaceTaskStatus.WORKING,
+        system_internal=system_internal,
+        session_id=session_id,
+        completed_at=completed_at,
+        reviewed_at=reviewed_at,
+        human_accepted_at=human_accepted_at,
+        created_at=updated_at,
+        updated_at=updated_at,
+    )
+
+
+def test_resident_activity_gate_fires_after_debounce(manager: WorkspaceManager) -> None:
+    """Recent non-system task OUTCOME + elapsed >= debounce => due via fast path."""
+    now = datetime.now()
+    last_run = now - timedelta(seconds=_wm.RESIDENT_ACTIVITY_DEBOUNCE_SECONDS + 60)
+    workspace = _due_workspace(last_run)
+    # A task that actually COMPLETED after last_run (real work to learn from).
+    manager.tasks["task-1"] = _activity_task(
+        workspace,
+        updated_at=last_run + timedelta(seconds=10),
+        completed_at=last_run + timedelta(seconds=10),
+    )
+    assert manager._resident_agent_due(workspace, now) is True
+
+
+def test_resident_activity_gate_held_within_debounce(manager: WorkspaceManager) -> None:
+    """Outcome present but elapsed < debounce => NOT due (burst coalescing)."""
+    now = datetime.now()
+    last_run = now - timedelta(seconds=_wm.RESIDENT_ACTIVITY_DEBOUNCE_SECONDS - 60)
+    workspace = _due_workspace(last_run)
+    manager.tasks["task-1"] = _activity_task(
+        workspace,
+        updated_at=last_run + timedelta(seconds=10),
+        completed_at=last_run + timedelta(seconds=10),
+    )
+    assert manager._resident_agent_due(workspace, now) is False
+
+
+def test_resident_system_internal_activity_ignored(manager: WorkspaceManager) -> None:
+    """system_internal-only activity does not trigger the fast path; backstop rules."""
+    now = datetime.now()
+    last_run = now - timedelta(seconds=_wm.RESIDENT_ACTIVITY_DEBOUNCE_SECONDS + 60)
+    workspace = _due_workspace(last_run)
+    manager.tasks["task-1"] = _activity_task(
+        workspace, updated_at=last_run + timedelta(seconds=10), system_internal=True
+    )
+    # Debounce has passed but the only activity is system_internal, and the
+    # backstop is far off, so it must NOT be due.
+    assert manager._resident_agent_due(workspace, now) is False
+
+
+def test_resident_newly_created_todo_does_not_trip_gate(manager: WorkspaceManager) -> None:
+    """A freshly-PROPOSED TODO task (no outcome timestamps) must NOT count as
+    activity — this directly encodes the self-retrigger bug fix.
+
+    created_at/updated_at are after last_run but completed_at/reviewed_at/
+    human_accepted_at are all None, mirroring a task the resident just POSTed.
+    The activity fast path must stay closed; only the far-off backstop applies,
+    so the workspace is NOT due.
+    """
+    now = datetime.now()
+    last_run = now - timedelta(seconds=_wm.RESIDENT_ACTIVITY_DEBOUNCE_SECONDS + 60)
+    workspace = _due_workspace(last_run)
+    # Newly-created TODO: created/updated after last_run, but no outcome yet.
+    manager.tasks["task-1"] = _activity_task(
+        workspace,
+        updated_at=last_run + timedelta(seconds=10),
+    )
+    # Activity gate must NOT fire; falls through to the (far-off) backstop.
+    assert manager._workspace_activity_since(workspace.id, last_run) is False
+    assert manager._resident_agent_due(workspace, now) is False
+
+
+def test_resident_completed_task_trips_gate(manager: WorkspaceManager) -> None:
+    """A task that COMPLETED since last_run + elapsed >= debounce => due."""
+    now = datetime.now()
+    last_run = now - timedelta(seconds=_wm.RESIDENT_ACTIVITY_DEBOUNCE_SECONDS + 60)
+    workspace = _due_workspace(last_run)
+    manager.tasks["task-1"] = _activity_task(
+        workspace,
+        updated_at=last_run + timedelta(seconds=10),
+        completed_at=last_run + timedelta(seconds=20),
+    )
+    assert manager._workspace_activity_since(workspace.id, last_run) is True
+    assert manager._resident_agent_due(workspace, now) is True
+
+
+def test_resident_activity_since_none_with_outcome(manager: WorkspaceManager) -> None:
+    """since=None => any existing outcome/report counts as activity."""
+    now = datetime.now()
+    workspace = _due_workspace(None)
+    # No outcome yet => no activity.
+    manager.tasks["task-1"] = _activity_task(workspace, updated_at=now)
+    assert manager._workspace_activity_since(workspace.id, None) is False
+    # An outcome on a task => activity.
+    manager.tasks["task-1"] = _activity_task(workspace, updated_at=now, completed_at=now)
+    assert manager._workspace_activity_since(workspace.id, None) is True
+    # A report also counts.
+    del manager.tasks["task-1"]
+    manager.reports["rep-1"] = AgentReport(
+        id="rep-1",
+        workspace_id=workspace.id,
+        task_id="task-1",
+        session_id="worker-1",
+        state=AgentReportState.WORKING,
+        message="m",
+        created_at=now,
+    )
+    assert manager._workspace_activity_since(workspace.id, None) is True
+
+
+def test_resident_own_report_not_activity(manager: WorkspaceManager) -> None:
+    """A report whose session_id == the resident's own session must NOT count.
+
+    Defense-in-depth against a future prompt that makes the resident post
+    reports: such a report cannot re-arm the activity fast path.
+    """
+    now = datetime.now()
+    last_run = now - timedelta(seconds=_wm.RESIDENT_ACTIVITY_DEBOUNCE_SECONDS + 60)
+    workspace = _due_workspace(last_run).model_copy(
+        update={"resident_agent_session_id": "res-agent-1"}
+    )
+    manager.workspaces[workspace.id] = workspace
+    # Report posted by the resident's own session after last_run => ignored.
+    manager.reports["rep-self"] = AgentReport(
+        id="rep-self",
+        workspace_id=workspace.id,
+        task_id=None,
+        session_id="res-agent-1",
+        state=AgentReportState.WORKING,
+        message="self",
+        created_at=last_run + timedelta(seconds=10),
+    )
+    assert manager._workspace_activity_since(workspace.id, last_run) is False
+    assert manager._resident_agent_due(workspace, now) is False
+    # A report from a real worker session DOES count.
+    manager.reports["rep-worker"] = AgentReport(
+        id="rep-worker",
+        workspace_id=workspace.id,
+        task_id=None,
+        session_id="worker-1",
+        state=AgentReportState.WORKING,
+        message="work",
+        created_at=last_run + timedelta(seconds=20),
+    )
+    assert manager._workspace_activity_since(workspace.id, last_run) is True
+    assert manager._resident_agent_due(workspace, now) is True
+
+
+def test_resident_own_proposed_task_not_activity(manager: WorkspaceManager) -> None:
+    """Defense-in-depth: a task whose session_id == the resident's session is
+    excluded from the activity scan even if it later gains an outcome."""
+    now = datetime.now()
+    last_run = now - timedelta(seconds=_wm.RESIDENT_ACTIVITY_DEBOUNCE_SECONDS + 60)
+    workspace = _due_workspace(last_run).model_copy(
+        update={"resident_agent_session_id": "res-agent-1"}
+    )
+    manager.workspaces[workspace.id] = workspace
+    manager.tasks["task-1"] = _activity_task(
+        workspace,
+        updated_at=last_run + timedelta(seconds=10),
+        completed_at=last_run + timedelta(seconds=10),
+        session_id="res-agent-1",
+    )
+    assert manager._workspace_activity_since(workspace.id, last_run) is False
+    assert manager._resident_agent_due(workspace, now) is False
+
+
+def test_resident_backstop_fires_without_activity(manager: WorkspaceManager) -> None:
+    """No activity, elapsed >= interval + jitter => due via backstop."""
+    now = datetime.now()
+    workspace = _due_workspace(None)
+    interval_seconds = 60 * 60
+    jitter = manager._resident_jitter_seconds(workspace, interval_seconds)
+    last_run = now - timedelta(seconds=interval_seconds + jitter + 30)
+    workspace = _due_workspace(last_run)
+    assert manager._resident_agent_due(workspace, now) is True
+
+
+def test_resident_not_due_between_debounce_and_backstop(manager: WorkspaceManager) -> None:
+    """No activity, debounce < elapsed < interval + jitter => NOT due."""
+    now = datetime.now()
+    workspace = _due_workspace(None)
+    interval_seconds = 60 * 60
+    jitter = manager._resident_jitter_seconds(workspace, interval_seconds)
+    # Past the debounce window but short of the backstop, with no activity.
+    last_run = now - timedelta(seconds=_wm.RESIDENT_ACTIVITY_DEBOUNCE_SECONDS + 120)
+    assert _wm.RESIDENT_ACTIVITY_DEBOUNCE_SECONDS + 120 < interval_seconds + jitter
+    workspace = _due_workspace(last_run)
+    assert manager._resident_agent_due(workspace, now) is False
 
 
 def test_delete_workspace_purges_state_and_dir(
