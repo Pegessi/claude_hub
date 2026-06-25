@@ -103,6 +103,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const dispatcherAgent = computed(() =>
     sessions.value.find(session => session.role === 'dispatcher') || null
   )
+  const residentAgent = computed(() =>
+    sessions.value.find(session => session.role === 'resident') || null
+  )
   const workspaceAgent = computed(() =>
     workspaceAgents.value[0] || null
   )
@@ -611,6 +614,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     reviewerAgents,
     temporaryReviewers,
     dispatcherAgent,
+    residentAgent,
     workspaceAgent,
     isLoading,
     error,

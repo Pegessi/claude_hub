@@ -30,7 +30,12 @@ export type ManagedSessionStatus =
   | 'done'
   | 'stopped'
   | 'error'
-export type WorkspaceSessionRole = 'worker' | 'orchestrator' | 'reviewer' | 'dispatcher'
+export type WorkspaceSessionRole =
+  | 'worker'
+  | 'orchestrator'
+  | 'reviewer'
+  | 'dispatcher'
+  | 'resident'
 export type AgentReportState =
   | 'started'
   | 'working'
