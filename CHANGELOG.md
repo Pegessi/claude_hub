@@ -5,6 +5,31 @@
 
 ## Unreleased
 
+### fix: allow Done after a reported Completed even without a review verdict
+
+- **What**: a reviewed/auto task that reported `completed` (so it sits in `review`
+  status) now shows an enabled **Done** button even when no AI review verdict was
+  ever produced. Previously the Done button only appeared after a reviewer verdict
+  (`review_passed`), a review skip, or an explicit human-acceptance request — so a
+  simple task the agent just reported `completed` on was stuck in `review` with no
+  way for the human to finish it.
+- **Why**: some tasks are simple enough that the agent reports `completed`
+  directly and no review verdict is needed. In that state
+  `human_acceptance_requested_at` / `review_skipped_at` stay null and there is no
+  `review_passed` report, so `awaitingHumanAcceptance` returned false and hid
+  Done. The backend already permits the `REVIEW → DONE` transition; the blocker
+  was purely the frontend gate. Reporting Completed should itself permit
+  transition to Done.
+- **How** (`frontend/src/components/AgentWorkspaceView.vue`): added
+  `hasReportedCompletion(task)` (latest board report state is `completed`) and
+  OR'd it into `awaitingHumanAcceptance`. `ready_for_review` is excluded — it
+  signals the agent is asking for AI review, so the task waits for a verdict. All
+  existing guards are preserved: a `pending_review` / `rejected` Goal Packet still
+  hides Done, and `hasBlockingReviewResult` (latest review verdict `review_failed`
+  / `review_needs_input`) still suppresses it. Active reviews are unaffected —
+  while a review is running the latest report is `review_started`, not
+  `completed`, so the badge still reads "AI reviewing".
+
 ### feat: recover agent conversations on startup after a machine reboot
 
 - **What**: when the backend starts and restores tabs from `~/.claude_hub/tabs.json`,

@@ -3330,6 +3330,18 @@ function activeReviewBadge(
   return null
 }
 
+function hasReportedCompletion(task: WorkspaceTask) {
+  // The agent reported it is done: the latest report for the task is a plain
+  // `completed`. board.reports carries the latest report per task, so
+  // latestReportForTask reflects the task's current report state.
+  //
+  // `ready_for_review` is intentionally excluded — it signals the agent is
+  // explicitly asking for AI review, so the task should wait for a verdict
+  // rather than be human-accepted directly.
+  const latestReport = workspaceStore.latestReportForTask(task)
+  return latestReport?.state === 'completed'
+}
+
 function awaitingHumanAcceptance(task: WorkspaceTask) {
   const latestReviewReport = latestReviewReportForTask(task)
   if (
@@ -3341,7 +3353,16 @@ function awaitingHumanAcceptance(task: WorkspaceTask) {
   return task.status === 'review' && (
     Boolean(task.human_acceptance_requested_at) ||
     Boolean(task.review_skipped_at) ||
-    latestReviewReport?.state === 'review_passed'
+    latestReviewReport?.state === 'review_passed' ||
+    // Some tasks are simple enough that the agent just reports `completed`
+    // without ever requesting review, so no verdict is produced (no
+    // review_passed, no skip flag, no human-acceptance request). Reporting
+    // `completed` should itself permit the human to mark the task Done —
+    // otherwise it is stuck in review with no actionable control.
+    // `ready_for_review` is excluded (it asks for AI review). And
+    // hasBlockingReviewResult still suppresses Done when a review verdict of
+    // failed/needs_input exists.
+    hasReportedCompletion(task)
   )
 }
 
