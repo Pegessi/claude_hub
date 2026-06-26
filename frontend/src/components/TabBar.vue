@@ -628,6 +628,10 @@
         :class="['toast', `toast--${n.type}`]"
         role="status"
       >
+        <span
+          class="toast__icon"
+          aria-hidden="true"
+        />
         <span class="toast__message">{{ n.message }}</span>
         <button
           type="button"
@@ -2226,9 +2230,9 @@ async function handleCreateTab() {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 10px 14px;
+  padding: 10px 12px 10px 14px;
   border-radius: var(--ch-radius-md);
-  border: 1px solid var(--ch-color-border-strong);
+  border: 1px solid var(--ch-color-border);
   background: var(--ch-color-surface-raised);
   color: var(--ch-color-text);
   box-shadow: var(--ch-shadow-popover);
@@ -2250,26 +2254,53 @@ async function handleCreateTab() {
   }
 }
 
+.toast::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--ch-color-text-muted);
+}
+
+.toast__icon {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
+
 .toast__message {
   flex: 1 1 auto;
   min-width: 0;
   word-break: break-word;
+  padding-top: 1px;
 }
 
 .toast__close {
   flex: 0 0 auto;
   background: transparent;
   border: none;
-  color: var(--ch-color-text-muted);
-  font-size: 20px;
+  color: var(--ch-color-text-subtle);
+  font-size: 16px;
   line-height: 1;
-  padding: 0 2px;
+  padding: 2px;
+  margin-top: -1px;
   cursor: pointer;
   transition: color var(--ch-motion-fast);
+  border-radius: 3px;
 }
 
 .toast__close:hover {
   color: var(--ch-color-text);
+  background: var(--ch-color-row-hover);
 }
 
 .toast__timer {
@@ -2278,7 +2309,7 @@ async function handleCreateTab() {
   bottom: 0;
   height: 2px;
   background: currentColor;
-  opacity: 0.45;
+  opacity: 0.35;
   transform-origin: left center;
   animation-name: toast-timer;
   animation-timing-function: linear;
@@ -2290,49 +2321,27 @@ async function handleCreateTab() {
   to { width: 0%; }
 }
 
+.toast--error::before { background: var(--ch-color-danger); }
+.toast--error .toast__icon { color: var(--ch-color-danger); }
+.toast--error .toast__icon::after { content: '!'; }
+
+.toast--warning::before { background: var(--ch-color-warning); }
+.toast--warning .toast__icon { color: var(--ch-color-warning); }
+.toast--warning .toast__icon::after { content: '△'; }
+
+.toast--success::before { background: var(--ch-color-success); }
+.toast--success .toast__icon { color: var(--ch-color-success); }
+.toast--success .toast__icon::after { content: '✓'; }
+
+.toast--info::before { background: var(--ch-color-info); }
+.toast--info .toast__icon { color: var(--ch-color-info); }
+.toast--info .toast__icon::after { content: 'i'; }
+
+/* Error keeps a tinted background because it needs to command attention */
 .toast--error {
   background: var(--ch-color-danger-bg);
   border-color: var(--ch-color-danger-border);
   color: var(--ch-color-danger-text);
-}
-
-.toast--warning {
-  background: var(--ch-color-warning-bg);
-  border-color: var(--ch-color-warning);
-  color: var(--ch-color-warning);
-}
-
-.toast--success {
-  background: var(--ch-color-success-bg);
-  border-color: var(--ch-color-success);
-  color: var(--ch-color-success);
-}
-
-.toast--info {
-  background: rgba(56, 189, 248, 0.1);
-  border-color: var(--ch-color-info);
-  color: var(--ch-color-info);
-}
-
-/* Toast backgrounds must be opaque so they don't visually clash with the
-   content (badges, buttons) behind the fixed-position stack. The global
-   `*-bg` tokens are intentionally translucent for inline highlights (badges,
-   status chips), so we override them here with surface-blended opaque colors
-   per theme, mirroring the density of --ch-color-danger-bg. */
-:root[data-theme='dark'] .toast--warning {
-  background: #2f2a15;
-  color: #fde68a;
-}
-:root[data-theme='dark'] .toast--success {
-  background: #1a2f1f;
-  color: #86efac;
-}
-:root[data-theme='dark'] .toast--info {
-  background: #122838;
-  color: #7dd3fc;
-}
-:root[data-theme='light'] .toast--info {
-  background: #e0eef5;
 }
 
 @media (max-width: 768px) {
