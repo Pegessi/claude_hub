@@ -296,6 +296,17 @@
             class="agent-status-actions"
           >
             <LoadingButton
+              v-if="canSwitchAgentEnv(agent)"
+              type="button"
+              class="agent-status-switch-env"
+              title="Switch Env / Model"
+              :loading="isPending(sessionActionKey('switch-env', agent.id))"
+              loading-label="Switching env"
+              @click.stop="openSwitchEnvModal(agent)"
+            >
+              ⚙ Env
+            </LoadingButton>
+            <LoadingButton
               type="button"
               class="agent-status-delete"
               :disabled="!canDeleteAgent(agent)"
@@ -2048,6 +2059,16 @@
                   Open
                 </LoadingButton>
                 <LoadingButton
+                  v-if="canSwitchAgentEnv(agent)"
+                  type="button"
+                  title="Switch Env / Model"
+                  :loading="isPending(sessionActionKey('switch-env', agent.id))"
+                  loading-label="Switching env"
+                  @click="openSwitchEnvModal(agent)"
+                >
+                  ⚙ Env
+                </LoadingButton>
+                <LoadingButton
                   v-if="agent.role !== 'dispatcher'"
                   type="button"
                   class="danger-button"
@@ -2371,6 +2392,128 @@
     :visible="showEnvManager"
     @close="closeEnvPresetManager"
   />
+
+  <!-- Switch Env Preset Manager (for the Switch Env modal) -->
+  <EnvPresetManager
+    v-model:model-value="switchEnvForm.env_preset"
+    :visible="showSwitchEnvManager"
+    @close="closeSwitchEnvPresetManager"
+  />
+
+  <!-- Switch Env Modal (for hot-swapping env/solo on running Claude agents) -->
+  <div
+    v-if="showSwitchEnvModal"
+    class="workspace-modal-overlay"
+    @click.self="closeSwitchEnvModal"
+  >
+    <div class="workspace-modal">
+      <h3>Switch Environment — {{ switchEnvAgent?.title }}</h3>
+      <p class="modal-hint switch-env-warning">
+        This will restart the Claude agent. In-flight work will be interrupted,
+        but conversation history will be resumed automatically.
+      </p>
+      <form @submit.prevent="handleSwitchEnv">
+        <div class="modal-field env-editor">
+          <label>Environment Preset</label>
+          <div class="env-preset-row">
+            <select
+              v-model="switchEnvForm.env_preset"
+              @change="applySwitchEnvPreset(switchEnvForm.env_preset)"
+            >
+              <option
+                v-for="preset in envPresets"
+                :key="preset.id"
+                :value="preset.id"
+              >
+                {{ preset.name }}
+              </option>
+              <option value="custom">
+                Custom (current values)
+              </option>
+            </select>
+            <button
+              type="button"
+              class="tool-button env-manage-button"
+              @click="openSwitchEnvPresetManager"
+            >
+              Manage
+            </button>
+          </div>
+        </div>
+        <div class="modal-field">
+          <label for="wsSwitchEnvText">Environment Variables (KEY=VALUE, one per line)</label>
+          <textarea
+            id="wsSwitchEnvText"
+            v-model="switchEnvForm.env_text"
+            class="env-textarea"
+            rows="6"
+            placeholder="ANTHROPIC_MODEL=claude-sonnet-4-5&#10;ANTHROPIC_BASE_URL=https://..."
+          />
+          <p class="modal-hint">
+            These fully replace the agent's current environment. Include
+            ANTHROPIC_MODEL to switch models.
+          </p>
+        </div>
+        <div class="modal-field">
+          <label class="checkbox-label">
+            <input
+              v-model="switchEnvForm.solo_mode"
+              type="checkbox"
+            >
+            <span>Solo Mode</span>
+            <span class="checkbox-desc">Relaunch with IS_SANDBOX=1 and --dangerously-skip-permissions</span>
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button
+            type="button"
+            class="tool-button"
+            @click="closeSwitchEnvModal"
+          >
+            Cancel
+          </button>
+          <LoadingButton
+            type="submit"
+            class="primary-button"
+            :loading="switchEnvAgent ? isPending(sessionActionKey('switch-env', switchEnvAgent.id)) : false"
+            loading-label="Restarting agent"
+          >
+            Restart Agent
+          </LoadingButton>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Toast / notification stack for workspace mode -->
+  <div
+    v-if="workspaceNotifications.length"
+    class="toast-stack"
+    role="region"
+    aria-label="Notifications"
+  >
+    <div
+      v-for="n in workspaceNotifications"
+      :key="n.id"
+      :class="['toast', `toast--${n.type}`]"
+      role="status"
+    >
+      <span class="toast__message">{{ n.message }}</span>
+      <button
+        type="button"
+        class="toast__close"
+        :aria-label="'Dismiss ' + n.type + ' notification'"
+        @click="dismissToast(n)"
+      >
+        ×
+      </button>
+      <div
+        v-if="n.autoDismissMs"
+        class="toast__timer"
+        :style="{ animationDuration: `${n.autoDismissMs}ms` }"
+      />
+    </div>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -2475,7 +2618,27 @@ const {
   dispatcherAgent,
   isLoading,
   error,
+  notifications: wsNotifications,
 } = storeToRefs(workspaceStore)
+
+// Combine workspace and terminal store notifications so toasts fire regardless
+// of which store pushed them (terminalStore.switchEnv pushes to itself; most
+// workspace actions push to workspaceStore).
+const terminalNotificationsRefs = storeToRefs(terminalStore)
+const workspaceNotifications = computed(() => [
+  ...wsNotifications.value,
+  ...terminalNotificationsRefs.notifications.value,
+])
+
+function dismissToast(n: { id: string }) {
+  // Route dismiss to whichever store owns the notification (ws-* prefix is
+  // assigned by workspaceStore; everything else goes to terminalStore).
+  if (n.id.startsWith('ws-')) {
+    workspaceStore.dismissNotification(n.id)
+  } else {
+    terminalStore.dismissNotification(n.id)
+  }
+}
 
 const selectedWorkspaceId = ref(activeWorkspaceId.value || '')
 const selectedTaskId = ref<string | null>(null)
@@ -2490,6 +2653,15 @@ const showLessonsModal = ref(false)
 const lastFeedbackSummaryRun = ref<FeedbackSummaryRun | null>(null)
 const showAgentFileBrowser = ref(false)
 const showEnvManager = ref(false)
+// Switch Env modal state (for hot-swapping env/solo on running Claude agents)
+const showSwitchEnvModal = ref(false)
+const showSwitchEnvManager = ref(false)
+const switchEnvAgent = ref<ManagedSession | null>(null)
+const switchEnvForm = reactive({
+  env_preset: 'custom',
+  env_text: '',
+  solo_mode: false,
+})
 const showTaskModal = ref(false)
 const showEditTaskModal = ref(false)
 const editingTaskId = ref<string | null>(null)
@@ -3682,6 +3854,15 @@ function canDeleteAgent(agent: ManagedSession) {
   return agentDeleteDisabledReason(agent) === ''
 }
 
+function canSwitchAgentEnv(agent: ManagedSession) {
+  // Switch-env is Claude-only, requires a live local tmux session (not
+  // offline/stopped), and is only available on local targets (remote sessions
+  // aren't supported by the backend respawn flow).
+  return agent.agent_type === 'claude'
+    && agent.target === 'local'
+    && agent.runtime_status !== 'offline'
+}
+
 function agentDeleteTitle(agent: ManagedSession) {
   return agentDeleteDisabledReason(agent) || `Delete ${agent.title}`
 }
@@ -4045,6 +4226,75 @@ function closeEnvPresetManager() {
   showEnvManager.value = false
   // Sync env_text with potentially updated preset
   applyAgentEnvPreset(agentOptionsForm.env_preset)
+}
+
+// ---- Switch Env (hot-swap on running Claude agents) ----
+
+function serializeAgentEnv(env: Record<string, string> | undefined | null): string {
+  if (!env) return ''
+  return Object.entries(env)
+    .map(([k, v]) => `${k}=${v}`)
+    .join('\n')
+}
+
+function applySwitchEnvPreset(presetId: string) {
+  const text = getPresetText(presetId)
+  if (text === null) return
+  switchEnvForm.env_text = text
+}
+
+function openSwitchEnvModal(agent: ManagedSession) {
+  switchEnvAgent.value = agent
+  switchEnvForm.env_preset = 'custom'
+  switchEnvForm.env_text = serializeAgentEnv(agent.env)
+  switchEnvForm.solo_mode = agent.solo_mode ?? false
+  showSwitchEnvModal.value = true
+}
+
+function closeSwitchEnvModal() {
+  showSwitchEnvModal.value = false
+  showSwitchEnvManager.value = false
+  switchEnvAgent.value = null
+}
+
+function openSwitchEnvPresetManager() {
+  showSwitchEnvManager.value = true
+}
+
+function closeSwitchEnvPresetManager() {
+  showSwitchEnvManager.value = false
+  applySwitchEnvPreset(switchEnvForm.env_preset)
+}
+
+async function handleSwitchEnv() {
+  const agent = switchEnvAgent.value
+  if (!agent) return
+  const env = parseLaunchEnv(switchEnvForm.env_text)
+  if (!env) {
+    workspaceStore.pushNotification({
+      type: 'error',
+      message: 'Please provide at least one KEY=VALUE environment variable, or pick a preset.',
+      autoDismissMs: 6000,
+    })
+    return
+  }
+  try {
+    await runPending(sessionActionKey('switch-env', agent.id), async () => {
+      await terminalStore.switchEnv(agent.tab_id, {
+        env,
+        solo_mode: switchEnvForm.solo_mode,
+      })
+    })
+    workspaceStore.pushNotification({
+      type: 'success',
+      message: `Environment switched for "${agent.title}". Agent is resuming conversation.`,
+      autoDismissMs: 4000,
+    })
+    closeSwitchEnvModal()
+  } catch (e) {
+    // terminalStore.switchEnv already pushes an error notification; log too.
+    console.error('switch env failed', e)
+  }
 }
 
 function resetAgentEnvForType(agentType: AgentType) {
@@ -5244,6 +5494,27 @@ onUnmounted(() => {
   cursor: pointer;
   font-size: 12px;
   padding: 0 9px;
+}
+
+.agent-status-switch-env {
+  height: 26px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-surface-raised);
+  color: var(--ch-color-text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 9px;
+  transition:
+    color var(--ch-motion-fast),
+    border-color var(--ch-motion-fast),
+    background var(--ch-motion-fast);
+}
+
+.agent-status-switch-env:hover {
+  color: var(--ch-color-accent);
+  border-color: var(--ch-color-accent);
+  background: var(--ch-color-surface);
 }
 
 .agent-status-delete:disabled {
@@ -8099,6 +8370,150 @@ onUnmounted(() => {
     grid-column: 2;
     width: fit-content;
     margin-top: 2px;
+  }
+}
+
+/* ----------------------------------------------------------------
+ * Toast / notification stack for workspace mode.
+ * Mirrors TabBar.vue so toasts render consistently across modes.
+ * ---------------------------------------------------------------- */
+.switch-env-warning {
+  background: var(--ch-color-attention-bg, rgba(192, 132, 255, 0.12));
+  border: 1px solid var(--ch-color-attention, #c084fc);
+  color: var(--ch-color-attention, #c084fc);
+  border-radius: var(--ch-radius-md);
+  padding: 8px 12px;
+  margin: 0 0 12px 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.toast-stack {
+  position: fixed;
+  top: 72px;
+  right: 16px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(420px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.toast {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--ch-radius-md);
+  border: 1px solid var(--ch-color-border-strong);
+  background: var(--ch-color-surface-raised);
+  color: var(--ch-color-text);
+  box-shadow: var(--ch-shadow-popover);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow: hidden;
+  pointer-events: auto;
+  animation: ws-toast-in 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+@keyframes ws-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.toast__message {
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.toast__close {
+  flex: 0 0 auto;
+  background: transparent;
+  border: none;
+  color: var(--ch-color-text-muted);
+  font-size: 20px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+  transition: color var(--ch-motion-fast);
+}
+
+.toast__close:hover {
+  color: var(--ch-color-text);
+}
+
+.toast__timer {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  background: currentColor;
+  opacity: 0.45;
+  transform-origin: left center;
+  animation-name: ws-toast-timer;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+
+@keyframes ws-toast-timer {
+  from { width: 100%; }
+  to { width: 0%; }
+}
+
+.toast--error {
+  background: var(--ch-color-danger-bg);
+  border-color: var(--ch-color-danger-border);
+  color: var(--ch-color-danger-text);
+}
+
+.toast--warning {
+  background: #2f2a15;
+  border-color: var(--ch-color-warning);
+  color: #fde68a;
+}
+
+.toast--success {
+  background: #1a2f1f;
+  border-color: var(--ch-color-success);
+  color: #86efac;
+}
+
+.toast--info {
+  background: #122838;
+  border-color: var(--ch-color-info);
+  color: #7dd3fc;
+}
+
+:root[data-theme='light'] .toast--warning {
+  background: var(--ch-color-warning-bg);
+  color: var(--ch-color-warning);
+}
+
+:root[data-theme='light'] .toast--success {
+  background: var(--ch-color-success-bg);
+  color: var(--ch-color-success);
+}
+
+:root[data-theme='light'] .toast--info {
+  background: #e0eef5;
+  color: var(--ch-color-info);
+}
+
+@media (max-width: 768px) {
+  .toast-stack {
+    top: 12px;
+    right: 8px;
+    left: 8px;
+    max-width: none;
   }
 }
 </style>

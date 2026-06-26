@@ -52,6 +52,7 @@ from .schemas import (
     SendSessionMessageRequest,
     SpawnWorkerRequest,
     StartTaskRequest,
+    SwitchEnvRequest,
     TerminalAgentStatus,
     TerminalTab,
     TerminalTabBase,
@@ -151,5 +152,6 @@ __all__ = [
     "WorkspaceBoard",
     "SpawnWorkerRequest",
     "StartTaskRequest",
+    "SwitchEnvRequest",
     "SendSessionMessageRequest",
 ]

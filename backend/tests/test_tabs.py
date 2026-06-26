@@ -92,3 +92,82 @@ async def test_duplicate_tab_route_returns_404_for_missing_tab(
     response = await client.post("/api/tabs/missing-id/duplicate")
 
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_switch_env_route_returns_404_for_missing_tab(
+    client: AsyncClient, monkeypatch: MonkeyPatch
+) -> None:
+    async def fake_switch_env(tab_id: str, env, solo_mode=None):
+        raise KeyError(tab_id)
+
+    monkeypatch.setattr(
+        "claude_hub.api.tabs.ttyd_manager.switch_env",
+        fake_switch_env,
+    )
+
+    response = await client.post(
+        "/api/tabs/missing-id/switch-env",
+        json={"env": {"ANTHROPIC_MODEL": "x"}},
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_switch_env_route_returns_400_for_invalid_tab(
+    client: AsyncClient, monkeypatch: MonkeyPatch
+) -> None:
+    async def fake_switch_env(tab_id: str, env, solo_mode=None):
+        raise ValueError("switch_env is only supported for Claude tabs")
+
+    monkeypatch.setattr(
+        "claude_hub.api.tabs.ttyd_manager.switch_env",
+        fake_switch_env,
+    )
+
+    response = await client.post(
+        "/api/tabs/codex-tab/switch-env",
+        json={"env": {"ANTHROPIC_MODEL": "x"}},
+    )
+    assert response.status_code == 400
+    assert "Claude tabs" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_switch_env_route_returns_200_on_success(
+    client: AsyncClient, monkeypatch: MonkeyPatch
+) -> None:
+    async def fake_switch_env(tab_id: str, env, solo_mode=None):
+        return TerminalTab(
+            id=tab_id,
+            name="Switched",
+            cwd=None,
+            solo_mode=bool(solo_mode),
+            agent_type=AgentType.CLAUDE,
+            target=ExecutionTarget.LOCAL,
+            remote_profile_id=None,
+            remote_cwd=None,
+            remote_reconnect=True,
+            port=12345,
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=None,
+            workspace_name=None,
+            workspace_role=None,
+            env=env,
+        )
+
+    monkeypatch.setattr(
+        "claude_hub.api.tabs.ttyd_manager.switch_env",
+        fake_switch_env,
+    )
+
+    response = await client.post(
+        "/api/tabs/live-tab/switch-env",
+        json={"env": {"ANTHROPIC_MODEL": "claude-opus"}, "solo_mode": True},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["id"] == "live-tab"
+    assert data["solo_mode"] is True
+    assert data["env"]["ANTHROPIC_MODEL"] == "claude-opus"

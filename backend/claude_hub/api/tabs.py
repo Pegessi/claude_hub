@@ -5,7 +5,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ..auth.dependencies import get_current_user
-from ..models import TerminalAgentStatus, TerminalTab, TerminalTabCreate, TerminalTabUpdate, User
+from ..models import (
+    SwitchEnvRequest,
+    TerminalAgentStatus,
+    TerminalTab,
+    TerminalTabCreate,
+    TerminalTabUpdate,
+    User,
+)
 from ..services import ttyd_manager
 
 logger = logging.getLogger(__name__)
@@ -75,6 +82,36 @@ async def duplicate_tab(
     tab = await ttyd_manager.duplicate_tab(tab_id)
     if not tab:
         raise HTTPException(status_code=404, detail="Tab not found")
+    return tab
+
+
+@router.post("/{tab_id}/switch-env", response_model=TerminalTab)
+async def switch_tab_env(
+    tab_id: str,
+    req: SwitchEnvRequest,
+    current_user: User = Depends(get_current_user),
+) -> TerminalTab:
+    """Hot-swap environment variables and/or solo mode for a live local Claude tab.
+
+    Rewrites the launch wrapper/settings and uses ``tmux respawn-pane -k`` to
+    relaunch Claude with ``--resume`` so conversation history is preserved.
+    Returns 400 for non-Claude, remote, or stopped tabs.
+    """
+    logger.info(
+        "switch_env for tab %s: %d env vars, solo_mode=%s, user=%s",
+        tab_id,
+        len(req.env),
+        req.solo_mode,
+        current_user.email,
+    )
+    try:
+        tab = await ttyd_manager.switch_env(tab_id, req.env, solo_mode=req.solo_mode)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Tab not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return tab
 
 
