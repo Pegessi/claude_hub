@@ -54,17 +54,17 @@
           >
             {{ getPaneCountForTab(tab.id) }}
           </span>
-          <!-- Tab actions dropdown (⋯) — replaces the clutter of inline icons -->
+          <!-- Hover-revealed ⋯ dropdown for secondary actions; × close stays always visible on hover -->
           <details
+            :ref="(el: unknown) => setTabMenuRef(tab.id, el)"
             class="tab-menu"
-            :open="openTabMenuId === tab.id"
-            @click.stop
             @toggle="onTabMenuToggle(tab.id, $event)"
           >
             <summary
               class="tab-menu-trigger"
               :aria-label="`${tab.name} actions`"
               title="Tab actions"
+              @click.stop
             >
               ⋯
             </summary>
@@ -113,21 +113,15 @@
                 >⚙</span>
                 <span>Switch Env / Model…</span>
               </LoadingButton>
-              <div class="tab-menu-divider" />
-              <button
-                type="button"
-                class="tab-menu-item tab-menu-item--danger"
-                role="menuitem"
-                @click="handleTabClose(tab.id); closeTabMenu(tab.id)"
-              >
-                <span
-                  class="tab-menu-item-icon"
-                  aria-hidden="true"
-                >×</span>
-                <span>Close</span>
-              </button>
             </div>
           </details>
+          <button
+            class="tab-close"
+            title="Close tab"
+            @click.stop="handleTabClose(tab.id)"
+          >
+            ×
+          </button>
         </div>
       </div>
     </div>
@@ -768,9 +762,42 @@ const editingTabName = ref('')
 const renameInputRef = ref<HTMLInputElement | null>(null)
 const mobileAppMenuRef = ref<HTMLDetailsElement | null>(null)
 const tabsContainerRef = ref<HTMLDivElement | null>(null)
-// Track the currently open tab-actions dropdown so we can:
-// (a) close others when one opens, (b) close on outside click / Escape.
+// Track the currently open tab-actions dropdown so we can close it on outside
+// click / Escape / when another menu opens. We don't bind :open — we let
+// <details> natively toggle, then sync openTabMenuId via the @toggle event
+// and imperatively close via removeAttribute('open') when needed.
 const openTabMenuId = ref<string | null>(null)
+const tabMenuRefs = new Map<string, HTMLDetailsElement>()
+
+function setTabMenuRef(tabId: string, el: unknown) {
+  if (el instanceof HTMLDetailsElement) {
+    tabMenuRefs.set(tabId, el)
+  } else {
+    tabMenuRefs.delete(tabId)
+  }
+}
+
+function onTabMenuToggle(tabId: string, event: Event) {
+  const details = event.currentTarget as HTMLDetailsElement | null
+  if (details && details.open) {
+    // Close any other open tab menu before marking this one open.
+    if (openTabMenuId.value && openTabMenuId.value !== tabId) {
+      const prev = tabMenuRefs.get(openTabMenuId.value)
+      if (prev) prev.open = false
+    }
+    openTabMenuId.value = tabId
+  } else if (openTabMenuId.value === tabId) {
+    openTabMenuId.value = null
+  }
+}
+
+function closeTabMenu(tabId: string | null) {
+  const targetId = tabId ?? openTabMenuId.value
+  if (!targetId) return
+  const el = tabMenuRefs.get(targetId)
+  if (el && el.open) el.open = false
+  if (openTabMenuId.value === targetId) openTabMenuId.value = null
+}
 const showLeftFade = ref(false)
 const showRightFade = ref(false)
 const form = reactive({
@@ -1201,21 +1228,6 @@ function handleDocumentPointerDown(event: PointerEvent) {
   }
 }
 
-function onTabMenuToggle(tabId: string, event: Event) {
-  const details = event.currentTarget as HTMLDetailsElement | null
-  if (details && details.open) {
-    openTabMenuId.value = tabId
-  } else if (openTabMenuId.value === tabId) {
-    openTabMenuId.value = null
-  }
-}
-
-function closeTabMenu(tabId: string | null) {
-  if (!tabId || openTabMenuId.value === tabId) {
-    openTabMenuId.value = null
-  }
-}
-
 function closeCreateModal() {
   showModal.value = false
   showFileBrowser.value = false
@@ -1641,15 +1653,37 @@ async function handleCreateTab() {
 
 .tab-menu {
   position: relative;
-  margin-left: auto;
   opacity: 0;
   transition: opacity var(--ch-motion-standard);
 }
 
+.tab-close {
+  background: none;
+  border: none;
+  color: var(--ch-color-text-soft);
+  font-size: 17px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  border-radius: var(--ch-radius-sm);
+  opacity: 0;
+  transition:
+    color var(--ch-motion-fast),
+    background var(--ch-motion-fast),
+    opacity var(--ch-motion-standard);
+}
+
 .tab:hover .tab-menu,
 .tab.active .tab-menu,
-.tab-menu[open] {
+.tab-menu[open],
+.tab:hover .tab-close,
+.tab.active .tab-close {
   opacity: 1;
+}
+
+.tab-close:hover {
+  background: var(--ch-color-chip-bg);
+  color: var(--ch-color-text);
 }
 
 .tab-menu summary {
