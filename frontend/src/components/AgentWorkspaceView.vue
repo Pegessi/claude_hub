@@ -2406,11 +2406,30 @@
     class="workspace-modal-overlay"
     @click.self="closeSwitchEnvModal"
   >
-    <div class="workspace-modal">
-      <h3>Switch Environment — {{ switchEnvAgent?.title }}</h3>
-      <p class="modal-hint switch-env-warning">
-        This will restart the Claude agent. In-flight work will be interrupted,
-        but conversation history will be resumed automatically.
+    <div class="workspace-modal switch-env-modal">
+      <div class="switch-env-header">
+        <div
+          class="switch-env-icon"
+          aria-hidden="true"
+        >
+          ⚙
+        </div>
+        <div class="switch-env-title-block">
+          <h3>Switch Environment</h3>
+          <p class="switch-env-subtitle">
+            {{ switchEnvAgent?.title }}
+          </p>
+        </div>
+      </div>
+      <p class="switch-env-callout">
+        <span
+          class="switch-env-callout-icon"
+          aria-hidden="true"
+        >↻</span>
+        <span>
+          The agent will restart and automatically resume its conversation.
+          In-flight generation will be interrupted.
+        </span>
       </p>
       <form @submit.prevent="handleSwitchEnv">
         <div class="modal-field env-editor">
@@ -2441,7 +2460,7 @@
           </div>
         </div>
         <div class="modal-field">
-          <label for="wsSwitchEnvText">Environment Variables (KEY=VALUE, one per line)</label>
+          <label for="wsSwitchEnvText">Environment Variables <span class="field-hint-inline">(KEY=VALUE, one per line)</span></label>
           <textarea
             id="wsSwitchEnvText"
             v-model="switchEnvForm.env_text"
@@ -2451,7 +2470,7 @@
           />
           <p class="modal-hint">
             These fully replace the agent's current environment. Include
-            ANTHROPIC_MODEL to switch models.
+            <code>ANTHROPIC_MODEL</code> to switch models.
           </p>
         </div>
         <div class="modal-field">
@@ -2461,8 +2480,11 @@
               type="checkbox"
             >
             <span>Solo Mode</span>
-            <span class="checkbox-desc">Relaunch with IS_SANDBOX=1 and --dangerously-skip-permissions</span>
           </label>
+          <p class="modal-hint">
+            Relaunch with <code>IS_SANDBOX=1</code> and
+            <code>--dangerously-skip-permissions</code>.
+          </p>
         </div>
         <div class="modal-actions">
           <button
@@ -2474,9 +2496,9 @@
           </button>
           <LoadingButton
             type="submit"
-            class="primary-button"
+            class="primary-button switch-env-submit"
             :loading="switchEnvAgent ? isPending(sessionActionKey('switch-env', switchEnvAgent.id)) : false"
-            loading-label="Restarting agent"
+            loading-label="Restarting…"
           >
             Restart Agent
           </LoadingButton>
@@ -8374,19 +8396,95 @@ onUnmounted(() => {
 }
 
 /* ----------------------------------------------------------------
+ * Switch Env modal
+ * ---------------------------------------------------------------- */
+.switch-env-modal {
+  width: min(480px, 100%);
+}
+
+.switch-env-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.switch-env-icon {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-accent-soft);
+  color: var(--ch-color-accent);
+  font-size: 18px;
+}
+
+.switch-env-title-block {
+  min-width: 0;
+}
+
+.switch-env-title-block h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.switch-env-subtitle {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--ch-color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.switch-env-callout {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 0 0 18px;
+  padding: 10px 12px;
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-soft);
+  border: 1px solid var(--ch-color-border-muted);
+  border-left: 3px solid var(--ch-color-accent);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ch-color-text-muted);
+}
+
+.switch-env-callout-icon {
+  flex: 0 0 auto;
+  color: var(--ch-color-accent);
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.field-hint-inline {
+  color: var(--ch-color-text-soft);
+  font-weight: 400;
+}
+
+.switch-env-submit {
+  min-width: 124px;
+}
+
+.switch-env-modal .modal-field label code,
+.switch-env-modal .modal-hint code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+}
+
+/* ----------------------------------------------------------------
  * Toast / notification stack for workspace mode.
  * Mirrors TabBar.vue so toasts render consistently across modes.
  * ---------------------------------------------------------------- */
-.switch-env-warning {
-  background: var(--ch-color-attention-bg, rgba(192, 132, 255, 0.12));
-  border: 1px solid var(--ch-color-attention, #c084fc);
-  color: var(--ch-color-attention, #c084fc);
-  border-radius: var(--ch-radius-md);
-  padding: 8px 12px;
-  margin: 0 0 12px 0;
-  font-size: 13px;
-  line-height: 1.45;
-}
 
 .toast-stack {
   position: fixed;
