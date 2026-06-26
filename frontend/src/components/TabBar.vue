@@ -54,35 +54,80 @@
           >
             {{ getPaneCountForTab(tab.id) }}
           </span>
-          <LoadingButton
-            type="button"
-            class="tab-duplicate"
-            title="Duplicate tab"
-            :loading="isPending(tabActionKey('duplicate', tab.id))"
-            hide-content-while-loading
-            loading-label="Duplicating tab"
-            @click.stop="handleTabDuplicate(tab.id)"
+          <!-- Tab actions dropdown (⋯) — replaces the clutter of inline icons -->
+          <details
+            class="tab-menu"
+            :open="openTabMenuId === tab.id"
+            @click.stop
+            @toggle="onTabMenuToggle(tab.id, $event)"
           >
-            📋
-          </LoadingButton>
-          <LoadingButton
-            v-if="tab.agent_type === 'claude'"
-            type="button"
-            class="tab-switch-env"
-            title="Switch Env / Model"
-            :loading="isPending(tabActionKey('switch-env', tab.id))"
-            hide-content-while-loading
-            loading-label="Switching env"
-            @click.stop="openSwitchEnvModal(tab)"
-          >
-            ⚙
-          </LoadingButton>
-          <button
-            class="tab-close"
-            @click.stop="handleTabClose(tab.id)"
-          >
-            ×
-          </button>
+            <summary
+              class="tab-menu-trigger"
+              :aria-label="`${tab.name} actions`"
+              title="Tab actions"
+            >
+              ⋯
+            </summary>
+            <div
+              class="tab-menu-panel"
+              role="menu"
+            >
+              <button
+                type="button"
+                class="tab-menu-item"
+                role="menuitem"
+                @click="startRename(tab); closeTabMenu(tab.id)"
+              >
+                <span
+                  class="tab-menu-item-icon"
+                  aria-hidden="true"
+                >✎</span>
+                <span>Rename</span>
+              </button>
+              <LoadingButton
+                type="button"
+                class="tab-menu-item"
+                role="menuitem"
+                :loading="isPending(tabActionKey('duplicate', tab.id))"
+                loading-label="Duplicating…"
+                @click="handleTabDuplicate(tab.id); closeTabMenu(tab.id)"
+              >
+                <span
+                  class="tab-menu-item-icon"
+                  aria-hidden="true"
+                >📋</span>
+                <span>Duplicate</span>
+              </LoadingButton>
+              <LoadingButton
+                v-if="tab.agent_type === 'claude'"
+                type="button"
+                class="tab-menu-item"
+                role="menuitem"
+                :loading="isPending(tabActionKey('switch-env', tab.id))"
+                loading-label="Switching env…"
+                @click="openSwitchEnvModal(tab); closeTabMenu(tab.id)"
+              >
+                <span
+                  class="tab-menu-item-icon"
+                  aria-hidden="true"
+                >⚙</span>
+                <span>Switch Env / Model…</span>
+              </LoadingButton>
+              <div class="tab-menu-divider" />
+              <button
+                type="button"
+                class="tab-menu-item tab-menu-item--danger"
+                role="menuitem"
+                @click="handleTabClose(tab.id); closeTabMenu(tab.id)"
+              >
+                <span
+                  class="tab-menu-item-icon"
+                  aria-hidden="true"
+                >×</span>
+                <span>Close</span>
+              </button>
+            </div>
+          </details>
         </div>
       </div>
     </div>
@@ -723,6 +768,9 @@ const editingTabName = ref('')
 const renameInputRef = ref<HTMLInputElement | null>(null)
 const mobileAppMenuRef = ref<HTMLDetailsElement | null>(null)
 const tabsContainerRef = ref<HTMLDivElement | null>(null)
+// Track the currently open tab-actions dropdown so we can:
+// (a) close others when one opens, (b) close on outside click / Escape.
+const openTabMenuId = ref<string | null>(null)
 const showLeftFade = ref(false)
 const showRightFade = ref(false)
 const form = reactive({
@@ -1138,8 +1186,33 @@ function toggleColorScheme() {
 
 function handleDocumentPointerDown(event: PointerEvent) {
   const target = event.target
-  if (target instanceof Node && mobileAppMenuRef.value && !mobileAppMenuRef.value.contains(target)) {
-    closeMobileAppMenu()
+  if (target instanceof Node) {
+    // Close the mobile app menu when clicking outside.
+    if (mobileAppMenuRef.value && !mobileAppMenuRef.value.contains(target)) {
+      closeMobileAppMenu()
+    }
+    // Close the tab actions menu when clicking outside any .tab-menu.
+    if (openTabMenuId.value) {
+      const openMenuEl = document.querySelector('.tab-menu[open]')
+      if (openMenuEl && !openMenuEl.contains(target)) {
+        closeTabMenu(null)
+      }
+    }
+  }
+}
+
+function onTabMenuToggle(tabId: string, event: Event) {
+  const details = event.currentTarget as HTMLDetailsElement | null
+  if (details && details.open) {
+    openTabMenuId.value = tabId
+  } else if (openTabMenuId.value === tabId) {
+    openTabMenuId.value = null
+  }
+}
+
+function closeTabMenu(tabId: string | null) {
+  if (!tabId || openTabMenuId.value === tabId) {
+    openTabMenuId.value = null
   }
 }
 
@@ -1217,12 +1290,20 @@ onMounted(() => {
   })
   window.addEventListener('resize', updateScrollFadeState)
   document.addEventListener('pointerdown', handleDocumentPointerDown)
+  document.addEventListener('keydown', handleDocumentKeyDown)
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', updateScrollFadeState)
   document.removeEventListener('pointerdown', handleDocumentPointerDown)
+  document.removeEventListener('keydown', handleDocumentKeyDown)
 })
+
+function handleDocumentKeyDown(e: KeyboardEvent) {
+  if (e.key === 'Escape' && openTabMenuId.value) {
+    closeTabMenu(null)
+  }
+}
 
 async function handleCreateTab() {
   const defaultName = `Tab ${manualTabs.value.length + 1}`
@@ -1558,61 +1639,111 @@ async function handleCreateTab() {
   text-align: center;
 }
 
-.tab-close {
-  background: none;
+.tab-menu {
+  position: relative;
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity var(--ch-motion-standard);
+}
+
+.tab:hover .tab-menu,
+.tab.active .tab-menu,
+.tab-menu[open] {
+  opacity: 1;
+}
+
+.tab-menu summary {
+  list-style: none;
+  cursor: pointer;
+  background: transparent;
   border: none;
   color: var(--ch-color-text-soft);
-  font-size: 17px;
-  cursor: pointer;
-  padding: 0 4px;
+  font-size: 16px;
   line-height: 1;
+  padding: 2px 6px;
   border-radius: var(--ch-radius-sm);
-  transition: color var(--ch-motion-fast), background var(--ch-motion-fast), font-size 180ms cubic-bezier(0.2, 0, 0, 1), padding 180ms cubic-bezier(0.2, 0, 0, 1);
+  transition: color var(--ch-motion-fast), background var(--ch-motion-fast);
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.tab-close:hover {
+.tab-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.tab-menu summary:hover,
+.tab-menu[open] summary {
+  color: var(--ch-color-text);
   background: var(--ch-color-chip-bg);
-  color: var(--ch-color-text);
 }
 
-.tab-duplicate {
-  background: none;
+.tab-menu-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 200;
+  min-width: 190px;
+  padding: 6px;
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-raised);
+  border: 1px solid var(--ch-color-border);
+  box-shadow: var(--ch-shadow-popover);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tab-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
   border: none;
-  color: var(--ch-color-text-soft);
-  font-size: 12px;
-  cursor: pointer;
-  padding: 0 4px;
-  line-height: 1;
-  opacity: 0;
-  transition: opacity 0.2s;
-}
-
-.tab:hover .tab-duplicate {
-  opacity: 1;
-}
-
-.tab-duplicate:hover {
   color: var(--ch-color-text);
-}
-
-.tab-switch-env {
-  background: none;
-  border: none;
-  color: var(--ch-color-text-soft);
-  font-size: 12px;
+  font-size: 13px;
+  line-height: 1.2;
+  padding: 7px 10px;
+  border-radius: var(--ch-radius-sm);
   cursor: pointer;
-  padding: 0 4px;
-  line-height: 1;
-  opacity: 0;
-  transition: opacity 0.2s;
+  transition: background var(--ch-motion-fast), color var(--ch-motion-fast);
 }
 
-.tab:hover .tab-switch-env {
-  opacity: 1;
+.tab-menu-item:hover {
+  background: var(--ch-color-row-hover);
 }
 
-.tab-switch-env:hover {
-  color: var(--ch-color-text);
+.tab-menu-item:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.tab-menu-item-icon {
+  flex: 0 0 auto;
+  width: 16px;
+  text-align: center;
+  color: var(--ch-color-text-muted);
+  font-size: 13px;
+}
+
+.tab-menu-item--danger {
+  color: var(--ch-color-danger);
+}
+
+.tab-menu-item--danger .tab-menu-item-icon {
+  color: var(--ch-color-danger);
+}
+
+.tab-menu-item--danger:hover {
+  background: var(--ch-color-danger-bg);
+}
+
+.tab-menu-divider {
+  height: 1px;
+  background: var(--ch-color-border-muted);
+  margin: 4px 2px;
 }
 
 .switch-env-modal {
