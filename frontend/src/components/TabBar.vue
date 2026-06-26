@@ -495,11 +495,30 @@
       class="modal-overlay"
       @click.self="closeSwitchEnvModal"
     >
-      <div class="modal">
-        <h3>Switch Environment — {{ switchEnvTab?.name }}</h3>
-        <p class="form-hint switch-env-warning">
-          This will restart the Claude agent in this tab. In-flight work will be interrupted,
-          but conversation history will be resumed automatically.
+      <div class="modal switch-env-modal">
+        <div class="switch-env-header">
+          <div
+            class="switch-env-icon"
+            aria-hidden="true"
+          >
+            ⚙
+          </div>
+          <div class="switch-env-title-block">
+            <h3>Switch Environment</h3>
+            <p class="switch-env-subtitle">
+              {{ switchEnvTab?.name }}
+            </p>
+          </div>
+        </div>
+        <p class="switch-env-callout">
+          <span
+            class="switch-env-callout-icon"
+            aria-hidden="true"
+          >↻</span>
+          <span>
+            The agent will restart and automatically resume its conversation.
+            In-flight generation will be interrupted.
+          </span>
         </p>
         <form @submit.prevent="handleSwitchEnv">
           <div class="form-group env-editor">
@@ -531,7 +550,10 @@
             </div>
           </div>
           <div class="form-group">
-            <label for="switchEnvText">Environment Variables (KEY=VALUE, one per line)</label>
+            <label for="switchEnvText">
+              Environment Variables
+              <span class="field-hint-inline">(KEY=VALUE, one per line)</span>
+            </label>
             <textarea
               id="switchEnvText"
               v-model="switchEnvForm.env_text"
@@ -540,8 +562,8 @@
               placeholder="ANTHROPIC_MODEL=claude-sonnet-4-5&#10;ANTHROPIC_BASE_URL=https://..."
             />
             <p class="form-hint">
-              These fully replace the tab's current environment. Include ANTHROPIC_MODEL to
-              switch models.
+              These fully replace the tab's current environment. Include
+              <code>ANTHROPIC_MODEL</code> to switch models.
             </p>
           </div>
           <div class="form-group">
@@ -554,7 +576,10 @@
                 >
                 <span class="checkbox-text">Solo Mode</span>
               </div>
-              <span class="checkbox-desc">Relaunch with IS_SANDBOX=1 and --dangerously-skip-permissions</span>
+              <span class="checkbox-desc">
+                Relaunch with <code>IS_SANDBOX=1</code> and
+                <code>--dangerously-skip-permissions</code>.
+              </span>
             </label>
           </div>
           <div class="modal-actions">
@@ -567,9 +592,9 @@
             </button>
             <LoadingButton
               type="submit"
-              class="btn btn-primary"
+              class="btn btn-primary switch-env-submit"
               :loading="switchEnvTab ? isPending(tabActionKey('switch-env', switchEnvTab.id)) : false"
-              loading-label="Restarting agent"
+              loading-label="Restarting…"
             >
               Restart Agent
             </LoadingButton>
@@ -1586,14 +1611,88 @@ async function handleCreateTab() {
   color: var(--ch-color-text);
 }
 
-.switch-env-warning {
-  color: var(--ch-color-warning, #b08000);
-  margin: 0 0 16px 0;
+.switch-env-modal {
+  width: min(480px, calc(100vw - 32px));
+}
+
+.switch-env-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.switch-env-icon {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-accent-soft);
+  color: var(--ch-color-accent);
+  font-size: 18px;
+}
+
+.switch-env-title-block {
+  min-width: 0;
+}
+
+.switch-env-title-block h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.switch-env-subtitle {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--ch-color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.switch-env-callout {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 0 0 18px;
   padding: 10px 12px;
-  background: var(--ch-color-warning-bg, rgba(176, 128, 0, 0.08));
-  border: 1px solid var(--ch-color-warning, #b08000);
-  border-radius: var(--ch-radius-sm, 4px);
-  font-size: 13px;
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-soft, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--ch-color-border-muted);
+  border-left: 3px solid var(--ch-color-accent);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ch-color-text-muted);
+}
+
+.switch-env-callout-icon {
+  flex: 0 0 auto;
+  color: var(--ch-color-accent);
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.field-hint-inline {
+  color: var(--ch-color-text-soft);
+  font-weight: 400;
+}
+
+.switch-env-submit {
+  min-width: 124px;
+}
+
+.switch-env-modal .form-group label code,
+.switch-env-modal .checkbox-desc code,
+.switch-env-modal .form-hint code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
 }
 
 .add-tab {
