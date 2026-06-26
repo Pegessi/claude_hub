@@ -5,6 +5,7 @@ import type {
   TerminalTab,
   TerminalTabCreate,
   TerminalTabUpdate,
+  SwitchEnvRequest,
   LayoutType,
   Pane,
   StoreNotification,
@@ -357,6 +358,34 @@ export const useTerminalStore = defineStore('terminal', () => {
     }
   }
 
+  async function switchEnv(tabId: string, data: SwitchEnvRequest) {
+    isLoading.value = true
+    try {
+      const response = await fetch(`${API_BASE}/tabs/${tabId}/switch-env`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      })
+      if (!response.ok) {
+        const errText = await response.text().catch(() => '')
+        throw new Error(errText || `Failed to switch env (${response.status})`)
+      }
+      const updatedTab = await response.json()
+      const index = tabs.value.findIndex(t => t.id === tabId)
+      if (index !== -1) {
+        tabs.value[index] = updatedTab
+      }
+      // Also re-fetch to make sure env/solo_mode are in sync with the backend.
+      await fetchTabs()
+      return updatedTab
+    } catch (e) {
+      notifyError(e instanceof Error ? e.message : 'Unknown error')
+      throw e
+    } finally {
+      isLoading.value = false
+    }
+  }
+
   function setActiveTab(tabId: string) {
     if (tabs.value.some(tab => tab.id === tabId)) {
       activeTabId.value = tabId
@@ -432,6 +461,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     duplicateTab,
     updateTab,
     deleteTab,
+    switchEnv,
     setActiveTab,
     reorderTabs,
     setLayout,

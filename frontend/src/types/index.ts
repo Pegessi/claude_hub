@@ -93,6 +93,11 @@ export interface TerminalTabUpdate {
   env?: LaunchEnv
 }
 
+export interface SwitchEnvRequest {
+  env: LaunchEnv
+  solo_mode?: boolean
+}
+
 export interface RemoteProfile {
   id: string
   name: string

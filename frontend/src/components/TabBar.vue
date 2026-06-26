@@ -65,6 +65,18 @@
           >
             📋
           </LoadingButton>
+          <LoadingButton
+            v-if="tab.agent_type === 'claude'"
+            type="button"
+            class="tab-switch-env"
+            title="Switch Env / Model"
+            :loading="isPending(tabActionKey('switch-env', tab.id))"
+            hide-content-while-loading
+            loading-label="Switching env"
+            @click.stop="openSwitchEnvModal(tab)"
+          >
+            ⚙
+          </LoadingButton>
           <button
             class="tab-close"
             @click.stop="handleTabClose(tab.id)"
@@ -477,11 +489,105 @@
       </div>
     </div>
 
+    <!-- Switch Env Modal -->
+    <div
+      v-if="showSwitchEnv"
+      class="modal-overlay"
+      @click.self="closeSwitchEnvModal"
+    >
+      <div class="modal">
+        <h3>Switch Environment — {{ switchEnvTab?.name }}</h3>
+        <p class="form-hint switch-env-warning">
+          This will restart the Claude agent in this tab. In-flight work will be interrupted,
+          but conversation history will be resumed automatically.
+        </p>
+        <form @submit.prevent="handleSwitchEnv">
+          <div class="form-group env-editor">
+            <label>Environment Preset</label>
+            <div class="env-preset-row">
+              <select
+                v-model="switchEnvForm.env_preset"
+                class="select-input"
+                @change="applySwitchEnvPreset(switchEnvForm.env_preset)"
+              >
+                <option
+                  v-for="preset in envPresets"
+                  :key="preset.id"
+                  :value="preset.id"
+                >
+                  {{ preset.name }}
+                </option>
+                <option value="custom">
+                  Custom (current values)
+                </option>
+              </select>
+              <button
+                type="button"
+                class="btn btn-secondary env-manage-button"
+                @click="openSwitchEnvPresetManager"
+              >
+                Manage
+              </button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="switchEnvText">Environment Variables (KEY=VALUE, one per line)</label>
+            <textarea
+              id="switchEnvText"
+              v-model="switchEnvForm.env_text"
+              class="select-input env-textarea"
+              rows="6"
+              placeholder="ANTHROPIC_MODEL=claude-sonnet-4-5&#10;ANTHROPIC_BASE_URL=https://..."
+            />
+            <p class="form-hint">
+              These fully replace the tab's current environment. Include ANTHROPIC_MODEL to
+              switch models.
+            </p>
+          </div>
+          <div class="form-group">
+            <label class="checkbox-label">
+              <div class="checkbox-row">
+                <input
+                  v-model="switchEnvForm.solo_mode"
+                  type="checkbox"
+                  class="checkbox-input"
+                >
+                <span class="checkbox-text">Solo Mode</span>
+              </div>
+              <span class="checkbox-desc">Relaunch with IS_SANDBOX=1 and --dangerously-skip-permissions</span>
+            </label>
+          </div>
+          <div class="modal-actions">
+            <button
+              type="button"
+              class="btn btn-secondary"
+              @click="closeSwitchEnvModal"
+            >
+              Cancel
+            </button>
+            <LoadingButton
+              type="submit"
+              class="btn btn-primary"
+              :loading="switchEnvTab ? isPending(tabActionKey('switch-env', switchEnvTab.id)) : false"
+              loading-label="Restarting agent"
+            >
+              Restart Agent
+            </LoadingButton>
+          </div>
+        </form>
+      </div>
+    </div>
+
     <!-- Env Preset Manager Modal -->
     <EnvPresetManager
       v-model:model-value="form.env_preset"
       :visible="showEnvManager"
       @close="closeEnvPresetManager"
+    />
+    <EnvPresetManager
+      v-model:model-value="switchEnvForm.env_preset"
+      :visible="showSwitchEnvManager"
+      @close="closeSwitchEnvPresetManager"
     />
 
     <!-- Notification / toast stack (F5: replaces single mutable error string) -->
@@ -533,7 +639,7 @@ import { usePendingActions } from '@/composables/usePendingActions'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import type { AppMode, RemoteProfile, TerminalTab } from '@/types'
-import type { AgentRuntimeStatus, AgentType } from '@/types'
+import type { AgentRuntimeStatus, AgentType, SwitchEnvRequest } from '@/types'
 
 interface FileInfo {
   name: string
@@ -579,7 +685,10 @@ const showModal = ref(false)
 const showCloseConfirm = ref(false)
 const showFileBrowser = ref(false)
 const showEnvManager = ref(false)
+const showSwitchEnv = ref(false)
+const showSwitchEnvManager = ref(false)
 const tabToClose = ref<TerminalTab | null>(null)
+const switchEnvTab = ref<TerminalTab | null>(null)
 const editingTabId = ref<string | null>(null)
 const editingTabName = ref('')
 const renameInputRef = ref<HTMLInputElement | null>(null)
@@ -597,6 +706,12 @@ const form = reactive({
   remote_reconnect: true,
   env_preset: defaultLaunchEnvPresetForAgent('claude'),
   env_text: defaultPresetTextForAgent('claude'),
+})
+
+const switchEnvForm = reactive({
+  env_preset: 'custom' as string,
+  env_text: '',
+  solo_mode: false,
 })
 
 const supportsSoloMode = computed(() => form.agent_type === 'claude' || form.agent_type === 'codex')
@@ -888,6 +1003,76 @@ async function handleRenameTab() {
 
 async function handleTabDuplicate(tabId: string) {
   await runPending(tabActionKey('duplicate', tabId), () => store.duplicateTab(tabId))
+}
+
+function serializeEnv(env: Record<string, string> | undefined): string {
+  if (!env) return ''
+  return Object.entries(env)
+    .map(([k, v]) => `${k}=${v}`)
+    .join('\n')
+}
+
+function openSwitchEnvModal(tab: TerminalTab) {
+  switchEnvTab.value = tab
+  switchEnvForm.env_preset = 'custom'
+  switchEnvForm.env_text = serializeEnv(tab.env)
+  switchEnvForm.solo_mode = tab.solo_mode ?? false
+  showSwitchEnv.value = true
+}
+
+function closeSwitchEnvModal() {
+  showSwitchEnv.value = false
+  showSwitchEnvManager.value = false
+  switchEnvTab.value = null
+}
+
+function applySwitchEnvPreset(presetId: string) {
+  if (presetId === 'custom') return
+  const text = getPresetText(presetId)
+  if (text === null) return
+  switchEnvForm.env_text = text
+}
+
+function openSwitchEnvPresetManager() {
+  showSwitchEnvManager.value = true
+}
+
+function closeSwitchEnvPresetManager() {
+  showSwitchEnvManager.value = false
+  applySwitchEnvPreset(switchEnvForm.env_preset)
+}
+
+async function handleSwitchEnv() {
+  const tab = switchEnvTab.value
+  if (!tab) return
+  const env = parseLaunchEnv(switchEnvForm.env_text)
+  if (!env) {
+    store.pushNotification({
+      type: 'error',
+      message: 'Please provide at least one KEY=VALUE environment variable, or pick a preset.',
+      autoDismissMs: 6000,
+    })
+    return
+  }
+  const payload: SwitchEnvRequest = {
+    env,
+    solo_mode: switchEnvForm.solo_mode,
+  }
+  const tabId = tab.id
+  try {
+    await runPending(tabActionKey('switch-env', tabId), async () => {
+      await store.switchEnv(tabId, payload)
+    })
+    store.pushNotification({
+      type: 'success',
+      message: `Environment switched for "${tab.name}". Agent is resuming conversation.`,
+      autoDismissMs: 4000,
+    })
+    closeSwitchEnvModal()
+  } catch (e) {
+    // switchEnv already notifies; let the error surface to console too.
+    console.error('switch env failed', e)
+  }
 }
 
 async function confirmCloseTab() {
@@ -1379,6 +1564,36 @@ async function handleCreateTab() {
 
 .tab-duplicate:hover {
   color: var(--ch-color-text);
+}
+
+.tab-switch-env {
+  background: none;
+  border: none;
+  color: var(--ch-color-text-soft);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.tab:hover .tab-switch-env {
+  opacity: 1;
+}
+
+.tab-switch-env:hover {
+  color: var(--ch-color-text);
+}
+
+.switch-env-warning {
+  color: var(--ch-color-warning, #b08000);
+  margin: 0 0 16px 0;
+  padding: 10px 12px;
+  background: var(--ch-color-warning-bg, rgba(176, 128, 0, 0.08));
+  border: 1px solid var(--ch-color-warning, #b08000);
+  border-radius: var(--ch-radius-sm, 4px);
+  font-size: 13px;
 }
 
 .add-tab {
@@ -1998,6 +2213,27 @@ async function handleCreateTab() {
   background: rgba(56, 189, 248, 0.1);
   border-color: var(--ch-color-info);
   color: var(--ch-color-info);
+}
+
+/* Toast backgrounds must be opaque so they don't visually clash with the
+   content (badges, buttons) behind the fixed-position stack. The global
+   `*-bg` tokens are intentionally translucent for inline highlights (badges,
+   status chips), so we override them here with surface-blended opaque colors
+   per theme, mirroring the density of --ch-color-danger-bg. */
+:root[data-theme='dark'] .toast--warning {
+  background: #2f2a15;
+  color: #fde68a;
+}
+:root[data-theme='dark'] .toast--success {
+  background: #1a2f1f;
+  color: #86efac;
+}
+:root[data-theme='dark'] .toast--info {
+  background: #122838;
+  color: #7dd3fc;
+}
+:root[data-theme='light'] .toast--info {
+  background: #e0eef5;
 }
 
 @media (max-width: 768px) {

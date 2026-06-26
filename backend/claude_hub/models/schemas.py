@@ -367,6 +367,19 @@ class TerminalTabCreate(TerminalTabBase):
     pass
 
 
+class SwitchEnvRequest(BaseModel):
+    """Payload for switching the environment / model of a live Claude tab."""
+
+    env: Dict[str, str] = Field(
+        ...,
+        description="New environment variables to apply (fully replaces existing env)",
+    )
+    solo_mode: Optional[bool] = Field(
+        None,
+        description="If set, also toggles solo mode; if omitted, preserves current setting",
+    )
+
+
 class TerminalTabUpdate(BaseModel):
     """Schema for updating a TerminalTab."""
 

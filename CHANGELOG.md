@@ -5,6 +5,52 @@
 
 ## Unreleased
 
+### feat: hot-switch env/model on a live Claude tab (resume conversation)
+
+- **What**: a new per-Claude-tab **Switch Env** action opens a dialog where you
+  can pick a different env preset (or edit KEY=VALUE pairs directly) and toggle
+  solo mode. Confirming kills the running `claude` process inside the tab's tmux
+  pane and relaunches it with `claude --resume <session-id>` against the new
+  env/model/base-url, preserving the conversation history. Pane scrollback and
+  the WebSocket connection survive because we use `tmux respawn-pane -k`
+  instead of restarting ttyd.
+- **Why**: previously the only way to change model or API endpoint was to open
+  a brand-new tab and lose context; ad-hoc edits via `PUT /api/tabs/{id}`
+  restarted ttyd but kept the old tmux session running, so the live agent never
+  actually saw the new env.
+- **How**:
+  - Backend (`backend/claude_hub/services/ttyd_manager.py`): new
+    `TTYDProcess.switch_env()` validates local+Claude+live-session preconditions,
+    rewrites `<tabid>.sh` and `<tabid>.settings.json`, builds the resume command
+    (solo: `IS_SANDBOX=1 claude --dangerously-skip-permissions --settings ...
+    --model ... --resume <sid> || <fresh-pinned>`; non-solo: `claude --settings
+    ... --model ... --resume <sid> || <fresh-pinned>`, both wrapped with
+    `; exec $SHELL` so the pane stays alive on error), then runs
+    `tmux respawn-pane -k -t <session> -- $SHELL -lc <wrapped>`. New
+    `TTYDManager.switch_env()` persists state and invalidates the status cache.
+  - API (`backend/claude_hub/api/tabs.py`, `models/schemas.py`): new
+    `SwitchEnvRequest { env, solo_mode? }` and
+    `POST /api/tabs/{tab_id}/switch-env` returning the updated tab; 404 for
+    missing tabs, 400 for non-Claude / remote / stopped tabs.
+  - Frontend (`frontend/src/components/TabBar.vue`, `stores/terminalStore.ts`,
+    `types/index.ts`): hover-revealed ⚙ button on each Claude tab opens a modal
+    with warning text, env preset dropdown, Manage Presets, KEY=VALUE textarea
+    pre-filled from the current tab's env, solo-mode checkbox defaulted to the
+    tab's current setting, and a Restart Agent button that calls the endpoint
+    and refreshes.
+- Out of scope: server-side preset storage, Codex/Cursor switching, cwd/remote
+  profile changes, graceful drain of in-flight work (the dialog warns and the
+  running process is killed).
+- Agent Workspace support: the same ⚙ Switch Env action is available on Claude
+  workers/reviewers/orchestrators in both the in-board agent status cards and
+  the Manage Agents modal (hidden for non-Claude agents and remote targets),
+  wired through to the same backend endpoint via the underlying `tab_id`.
+  Workspace mode now also renders its own toast stack (combining workspace and
+  terminal-store notifications) so success/error feedback shows up there.
+- Toast backgrounds (warning/success/info) are now opaque instead of
+  semi-transparent, fixing the visual overlap where badges/buttons behind the
+  toast showed through.
+
 ### fix: allow Done after a reported Completed even without a review verdict
 
 - **What**: a reviewed/auto task that reported `completed` (so it sits in `review`

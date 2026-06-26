@@ -1290,3 +1290,286 @@ def test_backfill_skips_ambiguous_dir(monkeypatch: MonkeyPatch, tmp_path) -> Non
 
     assert process.agent_session_id is None
     assert not (tmp_path / "tabs.json").exists()
+
+
+# --- switch_env (hot-swap env / model for live Claude tabs) ---------------------
+
+
+class _FakeProcess:
+    """Minimal asyncio.subprocess.Process stand-in for tmux respawn calls."""
+
+    def __init__(self, returncode: int = 0, stderr: bytes = b"") -> None:
+        self.returncode = returncode
+        self._stderr = stderr
+
+    async def communicate(self):
+        return (b"", self._stderr)
+
+
+def _make_claude_process(
+    monkeypatch: MonkeyPatch, solo_mode: bool = False, tmp_path=None
+) -> TTYDProcess:
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    if tmp_path is not None:
+        monkeypatch.setattr(ttyd_manager_module, "LAUNCH_ENV_DIR", tmp_path)
+    process = TTYDProcess(
+        tab_id="tab-switch-env",
+        port=12390,
+        name="Switch Env Test",
+        solo_mode=solo_mode,
+        agent_type=AgentType.CLAUDE,
+        env=dict(DEFAULT_CLAUDE_LAUNCH_ENV),
+    )
+    # Pin a deterministic session id so the command is easy to assert on.
+    process.agent_session_id = "test-session-id-abc"
+    return process
+
+
+@pytest.mark.asyncio
+async def test_switch_env_rejects_non_claude_tabs(monkeypatch: MonkeyPatch) -> None:
+    process = TTYDProcess(
+        tab_id="tab-codex",
+        port=12391,
+        name="Codex",
+        agent_type=AgentType.CODEX,
+    )
+    with pytest.raises(ValueError, match="Claude tabs"):
+        await process.switch_env({"ANTHROPIC_MODEL": "x"})
+
+
+@pytest.mark.asyncio
+async def test_switch_env_rejects_remote_tabs(monkeypatch: MonkeyPatch) -> None:
+    process = TTYDProcess(
+        tab_id="tab-remote",
+        port=12392,
+        name="Remote",
+        agent_type=AgentType.CLAUDE,
+        target=ExecutionTarget.REMOTE,
+        remote_profile_id="prof",
+    )
+    with pytest.raises(ValueError, match="local tabs"):
+        await process.switch_env({"ANTHROPIC_MODEL": "x"})
+
+
+@pytest.mark.asyncio
+async def test_switch_env_rejects_stopped_tabs(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    process = _make_claude_process(monkeypatch, tmp_path=tmp_path)
+
+    async def _fake_exists(_session: str) -> bool:
+        return False
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", _fake_exists)
+
+    with pytest.raises(RuntimeError, match="tmux session is not running"):
+        await process.switch_env({"ANTHROPIC_MODEL": "claude-sonnet-4-5"})
+
+
+@pytest.mark.asyncio
+async def test_switch_env_non_solo_respawn_command(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    process = _make_claude_process(monkeypatch, solo_mode=False, tmp_path=tmp_path)
+    new_env = {
+        "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+        "ANTHROPIC_MODEL": "claude-sonnet-4-5",
+    }
+    captured: dict = {}
+
+    async def _fake_exists(_session: str) -> bool:
+        return True
+
+    async def _fake_spawn(*args, **kwargs):
+        captured["args"] = args
+        return _FakeProcess(0)
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", _fake_exists)
+    monkeypatch.setattr(
+        ttyd_manager_module.asyncio, "create_subprocess_exec", _fake_spawn, raising=False
+    )
+
+    await process.switch_env(new_env)
+
+    args = captured["args"]
+    assert args[0] == "tmux"
+    assert "respawn-pane" in args
+    assert "-k" in args
+    lc_index = args.index("-lc")
+    respawn_cmd = args[lc_index + 1]
+
+    assert "IS_SANDBOX=1" not in respawn_cmd
+    assert "--dangerously-skip-permissions" not in respawn_cmd
+    assert "claude" in respawn_cmd
+    assert "--resume test-session-id-abc" in respawn_cmd
+    assert "--session-id test-session-id-abc" in respawn_cmd
+    assert "||" in respawn_cmd
+    assert "--model claude-sonnet-4-5" in respawn_cmd
+    assert process.env["ANTHROPIC_MODEL"] == "claude-sonnet-4-5"
+    assert process.solo_mode is False
+
+
+@pytest.mark.asyncio
+async def test_switch_env_solo_respawn_command(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    process = _make_claude_process(monkeypatch, solo_mode=True, tmp_path=tmp_path)
+    new_env = dict(DEFAULT_CLAUDE_LAUNCH_ENV)
+    new_env["ANTHROPIC_MODEL"] = "claude-opus-4-5"
+    captured: dict = {}
+
+    async def _fake_exists(_session: str) -> bool:
+        return True
+
+    async def _fake_spawn(*args, **kwargs):
+        captured["args"] = args
+        return _FakeProcess(0)
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", _fake_exists)
+    monkeypatch.setattr(
+        ttyd_manager_module.asyncio, "create_subprocess_exec", _fake_spawn, raising=False
+    )
+
+    await process.switch_env(new_env)
+
+    args = captured["args"]
+    lc_index = args.index("-lc")
+    respawn_cmd = args[lc_index + 1]
+
+    assert "IS_SANDBOX=1 claude --dangerously-skip-permissions" in respawn_cmd
+    assert "--resume test-session-id-abc" in respawn_cmd
+    assert "--model claude-opus-4-5" in respawn_cmd
+    assert respawn_cmd.rstrip().endswith("; exec /bin/zsh")
+    assert process.solo_mode is True
+
+
+@pytest.mark.asyncio
+async def test_switch_env_toggles_solo_mode(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    process = _make_claude_process(monkeypatch, solo_mode=False, tmp_path=tmp_path)
+    captured: dict = {}
+
+    async def _fake_exists(_session: str) -> bool:
+        return True
+
+    async def _fake_spawn(*args, **kwargs):
+        captured["args"] = args
+        return _FakeProcess(0)
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", _fake_exists)
+    monkeypatch.setattr(
+        ttyd_manager_module.asyncio, "create_subprocess_exec", _fake_spawn, raising=False
+    )
+
+    await process.switch_env(dict(DEFAULT_CLAUDE_LAUNCH_ENV), solo_mode=True)
+
+    args = captured["args"]
+    lc_index = args.index("-lc")
+    respawn_cmd = args[lc_index + 1]
+    assert "IS_SANDBOX=1 claude --dangerously-skip-permissions" in respawn_cmd
+    assert process.solo_mode is True
+
+
+@pytest.mark.asyncio
+async def test_switch_env_propagates_tmux_failure(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    process = _make_claude_process(monkeypatch, tmp_path=tmp_path)
+
+    async def _fake_exists(_session: str) -> bool:
+        return True
+
+    async def _fake_spawn(*args, **kwargs):
+        return _FakeProcess(1, stderr=b"tmux: failed")
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", _fake_exists)
+    monkeypatch.setattr(
+        ttyd_manager_module.asyncio, "create_subprocess_exec", _fake_spawn, raising=False
+    )
+
+    with pytest.raises(RuntimeError, match="tmux: failed"):
+        await process.switch_env(dict(DEFAULT_CLAUDE_LAUNCH_ENV))
+
+    # Rollback must restore in-memory state to the previous env/solo so the
+    # still-running pane matches what the Python object thinks is active.
+    assert process.solo_mode is False
+    assert process.env["ANTHROPIC_MODEL"] == DEFAULT_CLAUDE_LAUNCH_ENV["ANTHROPIC_MODEL"]
+
+
+@pytest.mark.asyncio
+async def test_switch_env_rolls_back_on_spawn_exception(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    process = _make_claude_process(monkeypatch, tmp_path=tmp_path)
+
+    async def _fake_exists(_session: str) -> bool:
+        return True
+
+    async def _fake_spawn(*args, **kwargs):
+        raise OSError("spawn failed")
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", _fake_exists)
+    monkeypatch.setattr(
+        ttyd_manager_module.asyncio, "create_subprocess_exec", _fake_spawn, raising=False
+    )
+
+    with pytest.raises(OSError, match="spawn failed"):
+        await process.switch_env({"ANTHROPIC_MODEL": "should-not-stick"})
+
+    assert process.env["ANTHROPIC_MODEL"] == DEFAULT_CLAUDE_LAUNCH_ENV["ANTHROPIC_MODEL"]
+
+
+@pytest.mark.asyncio
+async def test_switch_env_manager_persists_state(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    state_file = tmp_path / "tabs.json"
+    monkeypatch.setattr(ttyd_manager_module, "STATE_FILE", state_file)
+    # Also redirect launch-env writes to tmp_path so we don't leak files.
+    monkeypatch.setattr(ttyd_manager_module, "LAUNCH_ENV_DIR", tmp_path / "launch_env")
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+
+    manager = TTYDManager.__new__(TTYDManager)
+    manager.processes = {}
+    manager._next_port = 12400
+    manager._tab_order = []
+    manager._status_snapshots = {}
+    manager._status_cache = {}
+    manager._start_locks = {}
+
+    process = TTYDProcess(
+        tab_id="tab-persist",
+        port=12400,
+        name="Persist Test",
+        agent_type=AgentType.CLAUDE,
+    )
+    process.agent_session_id = "persist-sid"
+    manager.processes[process.tab_id] = process
+    manager._tab_order.append(process.tab_id)
+
+    new_env = {"ANTHROPIC_MODEL": "new-model", "ANTHROPIC_BASE_URL": "https://example.com"}
+
+    async def _fake_exists(_session: str) -> bool:
+        return True
+
+    async def _fake_spawn(*args, **kwargs):
+        return _FakeProcess(0)
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", _fake_exists)
+    monkeypatch.setattr(
+        ttyd_manager_module.asyncio, "create_subprocess_exec", _fake_spawn, raising=False
+    )
+
+    result = await manager.switch_env(process.tab_id, new_env, solo_mode=True)
+
+    assert result.solo_mode is True
+    assert result.env["ANTHROPIC_MODEL"] == "new-model"
+    assert state_file.exists()
+    saved = json.loads(state_file.read_text())
+    assert len(saved) == 1
+    assert saved[0]["id"] == process.tab_id
+    assert saved[0]["solo_mode"] is True
+    assert saved[0]["env"]["ANTHROPIC_MODEL"] == "new-model"
+
+
+@pytest.mark.asyncio
+async def test_switch_env_manager_missing_tab_raises(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    state_file = tmp_path / "tabs.json"
+    monkeypatch.setattr(ttyd_manager_module, "STATE_FILE", state_file)
+    monkeypatch.setattr(ttyd_manager_module, "LAUNCH_ENV_DIR", tmp_path / "launch_env")
+    manager = TTYDManager.__new__(TTYDManager)
+    manager.processes = {}
+    manager._next_port = 12500
+    manager._tab_order = []
+    manager._status_snapshots = {}
+    manager._status_cache = {}
+    manager._start_locks = {}
+    with pytest.raises(KeyError):
+        await manager.switch_env("nonexistent", {"X": "Y"})
