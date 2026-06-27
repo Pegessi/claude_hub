@@ -28,14 +28,21 @@ from claude_hub.cli.commands.tasks import _find_task_board
 from claude_hub.cli.feishu_cards import (
     CARD_KINDS,
     INTERACTIVE_KINDS,
+    build_action_catalog_card,
     build_agents_card,
     build_approval_card,
+    build_filesystem_card,
     build_lessons_card,
     build_needs_input_card,
+    build_network_card,
     build_overview_card,
     build_plan_confirm_card,
+    build_remote_profiles_card,
     build_reports_card,
+    build_result_card,
     build_status_card,
+    build_tab_status_card,
+    build_tabs_card,
     build_task_card,
     build_task_detail_card,
     build_terminal_card,
@@ -70,6 +77,11 @@ def _resolve_task_board(
     return ws_id, match
 
 
+def _compact_params(**params: Optional[str]) -> Dict[str, str]:
+    """Drop empty query params so optional API defaults still apply."""
+    return {key: value for key, value in params.items() if value}
+
+
 def _build_card(
     ctx: click.Context,
     kind: str,
@@ -81,6 +93,8 @@ def _build_card(
     task_id: Optional[str],
     field_name: str,
     tab_id: Optional[str],
+    path: Optional[str],
+    remote_profile_id: Optional[str],
     lines: int,
 ) -> Dict[str, Any]:
     """Build the card JSON for ``kind``.
@@ -215,6 +229,76 @@ def _build_card(
             raise click.ClickException(str(e)) from e
         return build_lessons_card(workspace_id, lessons)
 
+    if kind == "tabs":
+        try:
+            with cli_main.get_client(ctx) as client:
+                tabs = client._request("GET", "/api/tabs")
+                try:
+                    statuses = client._request("GET", "/api/tabs/status")
+                except HubError:
+                    statuses = []
+        except HubError as e:
+            raise click.ClickException(str(e)) from e
+        return build_tabs_card(tabs, statuses)
+
+    if kind == "tab_status":
+        try:
+            with cli_main.get_client(ctx) as client:
+                statuses = client._request("GET", "/api/tabs/status")
+        except HubError as e:
+            raise click.ClickException(str(e)) from e
+        return build_tab_status_card(statuses)
+
+    if kind == "network":
+        try:
+            with cli_main.get_client(ctx) as client:
+                network = client._request("GET", "/api/system/network-access")
+        except HubError as e:
+            raise click.ClickException(str(e)) from e
+        return build_network_card(network)
+
+    if kind == "filesystem":
+        try:
+            with cli_main.get_client(ctx) as client:
+                listing = client._request(
+                    "GET", "/api/filesystem/list", params=_compact_params(path=path)
+                )
+        except HubError as e:
+            raise click.ClickException(str(e)) from e
+        return build_filesystem_card(listing, title="Filesystem")
+
+    if kind == "remote_profiles":
+        try:
+            with cli_main.get_client(ctx) as client:
+                profiles = client._request("GET", "/api/remote/profiles")
+        except HubError as e:
+            raise click.ClickException(str(e)) from e
+        return build_remote_profiles_card(profiles)
+
+    if kind == "remote_filesystem":
+        if not remote_profile_id:
+            raise click.ClickException("--remote-profile-id is required for kind=remote_filesystem")
+        try:
+            with cli_main.get_client(ctx) as client:
+                listing = client._request(
+                    "GET",
+                    "/api/remote/filesystem/list",
+                    params=_compact_params(profile_id=remote_profile_id, path=path),
+                )
+        except HubError as e:
+            raise click.ClickException(str(e)) from e
+        return build_filesystem_card(
+            listing, title=f"Remote FS · {remote_profile_id}", kind="remote_filesystem"
+        )
+
+    if kind == "result":
+        return build_result_card(
+            title or "Command result", body or "_No result body supplied._", kind="result"
+        )
+
+    if kind == "action_catalog":
+        return build_action_catalog_card()
+
     raise click.ClickException(f"unknown kind: {kind}")
 
 
@@ -236,6 +320,14 @@ def _build_card(
 @click.option("--field-name", default="reply", help="Form field name (for kind=needs_input).")
 @click.option("--tab-id", default=None, help="Terminal tab id (for kind=terminal).")
 @click.option(
+    "--path", default=None, help="Directory path (for kind=filesystem/remote_filesystem)."
+)
+@click.option(
+    "--remote-profile-id",
+    default=None,
+    help="Remote profile id (for kind=remote_filesystem).",
+)
+@click.option(
     "--lines",
     type=int,
     default=100,
@@ -256,6 +348,8 @@ def feishu_build_card(
     task_id: Optional[str],
     field_name: str,
     tab_id: Optional[str],
+    path: Optional[str],
+    remote_profile_id: Optional[str],
     lines: int,
     token: Optional[str],
 ) -> None:
@@ -281,6 +375,8 @@ def feishu_build_card(
         task_id=task_id,
         field_name=field_name,
         tab_id=tab_id,
+        path=path,
+        remote_profile_id=remote_profile_id,
         lines=lines,
     )
     emit({"kind": kind, "token": card_token or None, "card": card}, as_json=True)

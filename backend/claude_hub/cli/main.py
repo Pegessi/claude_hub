@@ -81,10 +81,30 @@ def _register() -> None:
     """Attach subcommand groups. Imported here to avoid circular imports."""
     from claude_hub.cli.commands.feishu import feishu
     from claude_hub.cli.commands.lessons import lessons
+    from claude_hub.cli.commands.rest import (
+        api,
+        auth,
+        clipboard,
+        filesystem,
+        fs,
+        remote,
+        system,
+        tab,
+        terminal,
+    )
     from claude_hub.cli.commands.sessions import session
     from claude_hub.cli.commands.tasks import task
     from claude_hub.cli.commands.workspaces import agent, workspace
 
+    cli.add_command(auth)
+    cli.add_command(system)
+    cli.add_command(tab)
+    cli.add_command(terminal)
+    cli.add_command(filesystem)
+    cli.add_command(fs, name="fs")
+    cli.add_command(remote)
+    cli.add_command(clipboard)
+    cli.add_command(api)
     cli.add_command(workspace)
     cli.add_command(agent)
     cli.add_command(task)
