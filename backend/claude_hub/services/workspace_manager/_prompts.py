@@ -37,7 +37,9 @@ class _PromptsMixin:
             # _run_resident_agent for the reuse path.)
             if session.agent_type == AgentType.TERMINAL:
                 return ""
-            return _wm.build_resident_agent_prompt(workspace, self._report_base_url(session))
+            return _wm.build_resident_agent_prompt(
+                workspace, self._report_base_url(session), session.id
+            )
         return self._build_workspace_agent_prompt(workspace, session)
 
     def _report_base_url(self, session: ManagedSession) -> str:

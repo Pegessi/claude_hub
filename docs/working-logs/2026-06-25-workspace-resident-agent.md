@@ -190,7 +190,8 @@ debounce) OR elapsed >= interval + jitter)`.
 ## Coherence contract (frontend must match)
 - User-editable field names: `resident_agent_enabled`,
   `resident_agent_interval_minutes`, `resident_agent_directive`,
-  `resident_agent_type`, `resident_agent_env`, `resident_agent_solo_mode`.
+  `resident_agent_type`, `resident_agent_env`, `resident_agent_solo_mode`,
+  `resident_agent_master_mode`.
 - Role string: `"resident"`.
 - Delete route: `DELETE /api/workspaces/{workspace_id}` → 204.
 
@@ -238,3 +239,59 @@ workspace agent (the session/ttyd layer already consumed `agent_type`/`env`/
   orphan, which the existing `_prune_orphan_workspace_tabs` reconciler removes on
   the monitor loop. This keeps sync code sync-safe and reuses the established
   orphan-tab pruner instead of inventing a second teardown path.
+
+## Update: master mode (opt-in self-iteration on the resident's own worktree)
+The base resident is deliberately read-only: it proposes `TODO` tasks and curates
+lessons but posts no reports, so a healthy idle resident is visually
+indistinguishable from a stuck one ("looks busy but nothing shows"). **Master
+mode** is an opt-in answer to that: a new boolean `resident_agent_master_mode`
+(default `False`) on `Workspace` / `WorkspaceCreate` (concrete `bool = False`) and
+`WorkspaceUpdate` (`Optional[bool] = None`, None = unchanged), wired through
+`create_workspace` (constructor copy) and `update_workspace` (guarded block).
+
+- **Two prompts, one builder.** `build_resident_agent_prompt(workspace, base_url,
+  session_id)` gained a third arg (`session_id`) and branches on
+  `workspace.resident_agent_master_mode`. OFF returns the legacy prompt **byte-for-
+  byte unchanged**; ON delegates to `_build_resident_master_prompt(...)`. Both call
+  sites pass the live session id: the create/bootstrap path
+  (`_prompts._build_session_bootstrap_prompt` → `self._report_base_url(session)`,
+  `session.id`) and the reuse path (`_run_resident_agent`, `session.id`). The id is
+  needed so the master prompt can hand the resident a **session-scoped** report
+  curl (`POST /api/workspaces/sessions/{session_id}/reports`).
+- **What master mode authorizes.** The prompt tells the resident to (1)
+  **self-provision its own git worktree** on a `resident/<slug>` branch and work
+  ONLY inside it — provisioning is **idempotent** (reuse the dir if present; else
+  re-attach the branch without `-b` if the branch survived a removed dir; else
+  create both fresh), matching CLAUDE.md RULE #1; (2) do **one bounded enrichment
+  iteration per wake** then stop (no tight loop); (3) commit only on its own
+  branch; and (4) post a **heartbeat report** every cycle. Hard constraints are
+  absolute: NEVER merge / rebase-onto-shared / push / force-push / delete outside
+  the worktree, NEVER touch the main checkout, NEVER auto-start or dispatch tasks
+  or spawn workers. A human integrates the branch later. The agent self-provisions,
+  so **no backend git/worktree machinery and no cleanup code were added.**
+- **`_resident_worktree_slug` is workspace-unique.** `session_prefix` is derived
+  from the (non-unique) workspace name, so the slug appends a short `workspace.id`
+  suffix to avoid two same-named workspaces colliding on `resident/<slug>` /
+  `../resident-<slug>` when they share a parent repo.
+- **Toggling master mode does NOT respawn the resident.** Unlike the launch-config
+  fields above, `resident_agent_master_mode` is deliberately **excluded** from
+  `_resident_launch_config_changed` and from the `disabling_resident` path. The
+  prompt is recomputed fresh every cycle (both paths funnel through
+  `build_resident_agent_prompt`), so flipping the flag takes effect on the next
+  tick with no disruptive session/tab teardown. The worktree is agent-owned, so no
+  cwd/launch property changes either.
+- **Heartbeat cannot self-retrigger the activity gate.** The resident now posts
+  reports, but `_workspace_activity_since` already excludes reports whose
+  `session_id == resident_agent_session_id` (and `resident_agent_session_id` is
+  persisted BEFORE the prompt is sent), so a heartbeat never re-arms the
+  activity fast-path. The transient `state:"working"` heartbeat does not stall the
+  resident either: `_refresh_session_statuses` overwrites `runtime_status` from live
+  ttyd state on every tick before `_tick_resident_agents` runs.
+- **Frontend legibility.** `AgentWorkspaceView.vue` adds the Master-mode checkbox
+  (mirrors the paused toggle through form default / create+save payload / reset /
+  edit-hydrate), a `· Master` pill on the summary row, a **Master** badge on the
+  resident status card, and a `latestResidentReport` computed (newest report whose
+  `session_id` matches the resident) rendered as a "last run … ago" + latest-
+  heartbeat meta line — reusing the existing `parseTimestampMs` /
+  `formatElapsedDuration` / `elapsedClockMs` helpers. This is what finally makes the
+  resident's per-cycle work visible on the board.
