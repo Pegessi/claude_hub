@@ -100,6 +100,25 @@
   preserves the intentional reviewer-binding design while stopping the stall.
 - **Files**: `backend/claude_hub/services/workspace_manager/_monitor.py`,
   `backend/tests/test_workspaces.py`.
+
+### feat: CLI task/session inspection and richer Feishu collaboration cards
+
+- **What**: expands the `claude-hub` CLI surface used by third-party agents such
+  as Hermes. `task get/report/review/accept` expose task detail, progress,
+  review history, and human-acceptance transitions; `session list/logs` expose
+  managed-session inventory and recent terminal output; `session report` can now
+  submit bilingual messages and structured report fields via `--payload-json`.
+- **Feishu cards**: `feishu build-card` now covers display kinds for
+  `workspaces`, `overview`, `agents`, `task_detail`, `reports`, `terminal`, and
+  `lessons` in addition to the existing interactive/status/task cards, giving
+  Feishu-facing agents card-ready JSON for the main Claude Hub workflows.
+- **Files**: `backend/claude_hub/cli/client.py`,
+  `backend/claude_hub/cli/commands/tasks.py`,
+  `backend/claude_hub/cli/commands/sessions.py`,
+  `backend/claude_hub/cli/commands/feishu.py`,
+  `backend/claude_hub/cli/feishu_cards.py`,
+  `backend/tests/test_cli.py`, and `backend/tests/test_feishu_commands.py`.
+
 ### feat: Feishu interactive cards over the `claude-hub` CLI
 
 - **What**: a `feishu` CLI group with two stateless, IO-free helpers for an
