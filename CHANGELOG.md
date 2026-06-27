@@ -5,6 +5,16 @@
 
 ## Unreleased
 
+### docs: ADHD skill analysis — absorbable ideas for claude_hub
+
+- **What**: a deep code-read of [github.com/UditAkhourii/adhd](https://github.com/UditAkhourii/adhd) (MIT) — a parallel divergent-ideation skill for coding agents that spawns N isolated LLM branches under distinct cognitive frames, then runs a separate critic pass to score, cluster, prune traps, and deepen top survivors.
+- **Why**: ADHD's load-bearing architecture (mechanical generator/critic split in separate sessions) is exactly how claude_hub's worker-vs-reviewer loop already works — external validation of that choice. Concrete prompt assets (the 15 cognitive frames), a pre-flight cost gate, and the three-axis novelty/viability/fit rubric are directly liftable for open-ended design/naming/architecture tasks where our current orchestrator converges early.
+- **How (deliverable in this PR)**:
+  - New doc: `docs/working-logs/2026-06-26-adhd-skill-analysis.md` (561 LOC) summarizing the mechanism with ADHD-side file:line citations, mapping every phase onto claude_hub components with our file:line targets, and giving per-idea adopt/adapt/skip verdicts.
+  - Cheap adopts (A1–A4, prompt/doc only, no runtime change): curated ~8-frame prompt asset, Codex-compatible ≤600-char SKILL.md rule, cite ADHD as critic-split validation, add cognitive-trap bullets to the reviewer adversarial defect-hunt list.
+  - Scoped follow-ups (B1–B6, deferred to future reviewed tasks, dependency-ordered in doc §7): pre-flight cost gate + P-DIVERGE/P-CLUSTER/P-DEEPEN primitives → IDEATION review profile → vendored `/adhd` skill → creative-strategy lessons → progress events → optional first-class `--mode ideate` task mode.
+- **No runtime code, schema, config, CI, or test changes in this PR.** Full analysis doc only.
+
 ### feat: hot-switch env/model on a live Claude tab (resume conversation)
 
 - **What**: a new per-Claude-tab **Switch Env** action opens a dialog where you
