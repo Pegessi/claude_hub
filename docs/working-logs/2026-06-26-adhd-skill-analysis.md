@@ -27,34 +27,43 @@ isolated stateless LLM calls under deliberately distorted "cognitive frames"
 with the critic disabled, then run a single separate critic pass to score,
 cluster, prune traps, and deepen the survivors.**
 
-The strongest finding for claude_hub: **we already own the two load-bearing
-pieces** — (a) an orchestrator that can fan out parallel sub-agents and (b) a
-fully independent reviewer session acting as a mechanical critic. ADHD is
-external validation that our worker-vs-reviewer split is correct and worth
-keeping strict. What we do *not* have is the *ideation orchestration shape*
+The strongest finding for claude_hub: **we already own the three load-bearing
+pieces** — (a) an orchestrator that can fan out parallel sub-agents, (b) a
+fully independent reviewer session acting as a mechanical critic, and
+(c) **Claude Code's own `Workflow` tool (`parallel()` / `pipeline()` /
+`agent()` / `phase()`) which is exactly the fan-out DSL ADHD hand-rolls
+in TypeScript** with `Promise.all + p-limit(n)`; our current
+`_subagent_capability_hint` doesn't tell the orchestrator this tool exists,
+so our primitives read as a rigid linear template instead of a composable
+set of shapes. What we do *not* have is the *ideation orchestration shape*
 that sits on top: deliberate frame-driven divergence, isolation-as-feature,
 scoring rubric, clustering, the `nonObviousPick` heuristic, the pre-flight cost
 gate, and a lessons system that captures *successful creative patterns* rather
 than only avoidance patterns.
 
-**Top 5 adoptable ideas, ordered by ROI:**
+**Top 6 adoptable ideas, ordered by ROI:**
 
-1. **Cognitive frames as a reusable prompt asset** — lift a curated ~8-frame
-   subset of ADHD's 15 frames as a static reference our orchestrator/reviewer
-   can inject when a task is open-ended. Zero runtime cost, pure prompt text,
-   MIT-friendly with attribution.
-2. **Pre-flight cost gate** before fanning out — extend the existing
-   "judge complexity first" instruction in the orchestrator contract with
-   ADHD's sharper three-question check (open-ended? high-stakes? open-phrased?).
-3. **A new `P-DIVERGE` workflow primitive + an `IDEATION` review profile** so
-   open-ended design/naming/architecture tasks get the divergent-then-convergent
-   treatment instead of being forced into P-PLAN→P-EXECUTE→P-VALIDATE.
-4. **Trap-detection rubric extension for reviewers** — our reviewer already
-   hunts defect-traps (edge cases, races, security); add "cognitive traps"
-   (premature convergence, echo-chamber ideas, missing contrarian frames).
-5. **Creative-strategy lessons** — extend the feedback harness to capture
-   what *worked* (which frames/analogies unlocked the problem) rather than only
-   what broke.
+1. **Point orchestrators at the Workflow tool (A5).** ~20 tokens added to
+   `_subagent_capability_hint`; unlocks genuine parallel fan-out for
+   research/validation today without any new primitives, and is the
+   runtime primitive that P-DIVERGE will later ride on.
+2. **Cognitive frames as a reusable prompt asset (A1)** — lift a curated
+   ~8-frame subset of ADHD's 15 frames as a static, conditionally-injected
+   reference. Zero runtime cost, pure prompt text, MIT-friendly with
+   attribution.
+3. **Pre-flight cost gate (B1)** before fanning out — extend the existing
+   "judge complexity first" instruction with ADHD's sharper three-question
+   check (open-ended? high-stakes? open-phrased?).
+4. **A new `P-DIVERGE` workflow primitive built on Workflow.parallel + an
+   `IDEATION` review profile (B2+B3)** so open-ended design/naming/architecture
+   tasks get the divergent-then-convergent treatment, with DIVERGE branches
+   pinned to Sonnet/Haiku and synthesis (CLUSTER/DEEPEN) pinned to Opus.
+5. **Trap-detection rubric extension for reviewers (A4)** — our reviewer
+   already hunts defect-traps; add "cognitive traps" (premature convergence,
+   echo-chamber ideas, missing contrarian frames).
+6. **Creative-strategy lessons (B4)** — extend the feedback harness to
+   capture what *worked* (which frames/analogies unlocked the problem)
+   rather than only avoidance patterns.
 
 Section 4 gives concrete files/line numbers for each. Section 5 lists skips.
 
@@ -192,8 +201,8 @@ references:
 | ADHD mechanism | claude_hub component | Status |
 |---|---|---|
 | Mechanical generator/critic split (separate sessions, opposite stances) | Worker (orchestrator) session + independent `cb-reviewer-*` ManagedSession; reviewer bootstrap is explicitly adversarial ("approval is the exception, not the default", `_prompts.py:153-163`) | ✅ **Already have it.** ADHD is external validation; keep it strict. |
-| Parallel fan-out of sub-agents | Orchestrator can spawn multiple P-EXECUTE sub-agents via the CLI runtime's native Task tool; orchestrator contract lists "breadth-first parallel across ≥3 independent threads" as an orchestrator-mode trigger (`_prompts.py:481-486`). V1 contract recommends serial P-EXECUTE (`2026-06-01` log Q4); parallel is deferred to the V2 team design (`docs/working-logs/2026-05-27-auto-mode-team-design.md`). | 🟡 Partial — possible at the sub-agent layer, not at the Hub-session layer, and not prompted/structured for ideation. |
-| Isolation between branches | Native to the Task tool (each sub-agent call is a fresh context). | ✅ Already the default; our prompts just don't *name* isolation as a deliberate feature or forbid cross-branch reading. |
+| Parallel fan-out of sub-agents | Orchestrator contract lists "breadth-first parallel across ≥3 independent threads" as an orchestrator-mode trigger (`_prompts.py:481-482`), and our `_subagent_capability_hint` (`_prompts.py:494-524`) documents Task-tool invocation per runtime. **But** we only hint at the `Task` tool — we do NOT mention Claude Code's higher-level `Workflow` tool (`parallel()`, `pipeline()`, `agent()`, `phase()`) which is purpose-built for exactly ADHD-style fan-out/converge. ADHD's `Promise.all + p-limit(n)` in `src/engine.ts` is literally the TS equivalent of `Workflow.parallel()`. V1 contract also implicitly serializes P-EXECUTE (per `2026-06-01` log Q4) and pins P-DIVERGE-style work to Opus, ignoring that fan-out branches should run on the cheaper Sonnet/Haiku tier. | 🟡 Runtime can parallelize via Task, but (a) our contract doesn't point the orchestrator at the Workflow tool, (b) the primitive list is a linear code-task template, not a fan-out shape, (c) model pinning doesn't reflect divergence's volume/cheapness. |
+| Isolation between branches | Native to Task/Workflow sub-agent calls (each gets a fresh context). | ✅ Already the default; our prompts don't *name* isolation as a deliberate feature or forbid cross-branch reading. |
 | A structured critic pass with numeric rubric | `EvaluationReport` + `RubricCriterion` + `CriterionResult` (`schemas.py:267-308`); reviewer produces numeric scores per criterion and an `overall_score` (pass threshold 0.8, `schemas.py:335`). | 🟡 Structure exists but all 7 shipping rubric axes are code-correctness / scope / integration / regression / validation / handoff focused (`_prompts.py:974-981`). No novelty/diversity/trap-detection axes. |
 | A convergence / integrate step | `P-INTEGRATE` primitive (`_prompts.py:623`) — "combine partial outputs into the final deliverable." | ✅ Primitive exists, but tuned for code-artifact merge, not idea clustering. |
 | A judge / evaluate step | `P-JUDGE` primitive + the external reviewer. | 🟡 Tuned for defect finding; no cognitive-trap lens. |
@@ -203,6 +212,21 @@ references:
 | Trap detection (cognitive: premature convergence, anchoring, echo chambers, missed frames) | Adversarial defect hunt (`_prompts.py:961-969`) covers edge cases, error paths, races, regressions, scope leaks, security/permission assumptions. | 🟡 Defect-traps are covered, cognitive-traps are not. |
 | Pre-flight cost gate | The orchestrator contract already says "before implementation, judge whether this task is simple or complex. State the chosen execution strategy in your first working report." | 🟡 We have a binary simple/complex gate; ADHD's three-question gate is sharper (open-ended AND high-stakes AND open-phrased) and includes a one-line "don't use this" advertisement when it refuses. |
 | A reusable frame library | — | ❌ No equivalent. |
+| Workflow-aware sub-agent orchestration (the shape ADHD is written in) | Claude Code's own **Workflow tool** (`parallel()`, `pipeline()`, `agent()`, `phase()`) provides exactly the fan-out / synchronize / deepen primitives ADHD implements manually in TS. Our `_subagent_capability_hint` and primitive contract do not reference it. | ❌ **Blind spot.** Our contract is a rigid linear P-* template that doesn't tell the orchestrator about the native fan-out DSL it already owns. |
+
+**Key insight from this review pass:** we do NOT need to build a new engine or
+a new multi-agent framework to absorb ADHD. The Claude Code Workflow tool is
+already ADHD's runtime — `parallel(...agent()...)` IS the Diverge phase, a
+single `agent()` after the parallel returns IS the Focus/Score/Cluster pass,
+and a second `parallel(...agent()...)` IS the Deepen phase. What we lack is
+(a) telling the orchestrator the Workflow tool exists and when to reach for
+it, (b) a divergent-ideation *shape* (frames + gate + rubric + output
+contract) layered on top of the generic tool, and (c) model pinning that
+reflects divergence (fan-out branches = Sonnet/Haiku; synthesis = Opus).
+This moves B2 from "add new primitives + orchestration machinery" down to
+"document an additional workflow shape in the contract and point the
+orchestrator at the Workflow tool for fan-out" — substantially cheaper.
+
 | Fine-grained progress events during a multi-step fan-out | Backend reports (state: started/working/blocked/ready_for_review/completed) are coarse (task-level only); worker sub-agent fan-out does not emit frame-level events to the frontend. | ❌ Sub-agent progress is invisible to the task UI today. |
 | Structured output rendering (score chips, labeled clusters, ★ non-obvious pick, ⚠ traps, provocation) | Frontend renders reports as free-form markdown; Feishu card rendering (`backend/claude_hub/cli/feishu_cards.py`) is structured but does not have ideation-specific blocks. | ❌ No ideation-shaped rendering. |
 | A skill system (SKILL.md) that end-users can invoke | The only SKILL.md in the repo (`backend/claude_hub/cli/SKILL.md`) teaches an external Feishu-bot agent how to drive the `claude-hub` CLI — it's a consumer skill, not a plugin registry. Hub itself has no extensible skill/agent registry. | ❌ Hub does not ship user-invocable skills; skills are left to the CLI runtime (Claude Code `.claude/agents/`, Cursor sub-agents). |
@@ -288,6 +312,40 @@ reject a premature-convergence answer on *ideation-shaped* tasks without
 adding new rubric structure. Useful even before we add a formal IDEATION
 profile.
 
+**A5. Point orchestrators at Claude Code's Workflow tool. Prompt-only, ~XS.**
+
+Today our `_subagent_capability_hint` (`_prompts.py:494-524`) documents the
+`Task` tool per runtime but never mentions the higher-level **Workflow**
+tool that Claude Code ships natively — `parallel()`, `pipeline()`,
+`agent()`, `phase()`. This is the fan-out/synchronise DSL that ADHD hand-
+rolls in TypeScript. Even without adding P-DIVERGE or any ideation
+primitives, the orchestrator can benefit from knowing this tool exists
+for **parallel research** (multiple independent reads/searches) and
+**parallel validation** (multiple independent checks), which are already
+named primitives but whose parallel execution the current contract
+doesn't encourage.
+
+Add a short paragraph to the Claude-runtime branch of
+`_subagent_capability_hint`:
+
+> - The **Workflow** tool provides higher-level orchestration than raw
+>   `Task` calls. Use `Workflow.parallel(...)` to fan out N independent
+>   sub-agents (research, validation, or ideation branches) with a
+>   concurrency cap; each `agent()` inside gets an isolated fresh
+>   context by default, which is the right isolation invariant for
+>   fan-out work. Use `Workflow.pipeline(...)` when one stage's output
+>   feeds the next. Do NOT simulate parallelism by writing sequential
+>   Task calls in one context — that shares state between branches and
+>   collapses to a wider single thought.
+> - Always cap `concurrency` in `parallel()` to ≤4 unless there is a
+>   concrete reason to go higher; this mirrors the cost control in
+>   ADHD's own `p-limit(4)`.
+
+This is a pure prompt change in the capability hint; no enums, no schema,
+no new primitives. It is the cheapest possible absorption of ADHD's
+"isolate branches, fan out genuinely in parallel" lesson and gives
+immediate value on non-ideation parallel research/validation work.
+
 ### 4.2 Adapt — concrete follow-up work, each worthy of its own reviewed task
 
 These are behavioral changes; they should NOT be done in this task (which is
@@ -321,29 +379,71 @@ This is a tiny prompt edit. It (a) prevents paying ADHD cost on trivia and
 (b) surfaces the capability to users.
 
 **B2. Add `P-DIVERGE` / `P-CLUSTER` / `P-DEEPEN` primitives to the orchestrator
-contract. Effort: ~S, prompt + enums.**
+contract, and tell the orchestrator about Claude Code's Workflow tool.
+Effort: ~S, prompt + enum updates only — no new engine.**
+
+Critical realisation (raised in review): **Claude Code already ships a
+`Workflow` tool** with `parallel()`, `pipeline()`, `agent()`, `phase()` —
+this is exactly the fan-out/synchronise/deepen DSL that ADHD hand-rolls
+in TypeScript with `Promise.all + p-limit(n)`. We don't need new Hub-side
+parallelism machinery. What we need is:
 
 Files:
 - `backend/claude_hub/services/workspace_manager/_prompts.py` lines 618-624
-  (the primitives list). Add P-DIVERGE (fan out N parallel ideation
-  sub-agents under distinct frames from the frame asset, critic disabled by
-  instruction), P-CLUSTER (synthesis step — group ideas by underlying angle
-  and surface shape), P-DEEPEN (take top-K clustered ideas, produce sketch +
-  risk + first step + child ideas).
-- Same file, `_model_evidence_contract_block` (~lines 527-555): pin models per
-  new primitive. Suggest: Sonnet for P-DIVERGE branches (volume job), Opus
-  for P-CLUSTER and P-DEEPEN (synthesis/focus job).
-- Same file, cost-guard (~lines 481-486): allow parallel P-DIVERGE fan-out
-  (V1 currently serializes P-EXECUTE; P-DIVERGE is explicitly parallelizable
-  because branches must be isolated). Cap concurrency to N (default 4,
-  mirroring ADHD's `p-limit(4)`) to avoid runaway sub-agent creation.
-- Model-pinning precedent: existing primitives are already pinned (Opus for
-  PLAN/EXECUTE/JUDGE/INTEGRATE, Sonnet for VALIDATE/RESEARCH).
+  (the primitives list). Add **P-DIVERGE** (fan out N parallel ideation
+  sub-agents under distinct frames from the frame asset, critic disabled
+  by instruction, strict isolation), **P-CLUSTER** (synthesis — group
+  ideas by underlying angle and surface shape), **P-DEEPEN** (take top-K
+  clustered ideas, produce sketch + risk + first step + child ideas).
+  These are additions to the primitives vocabulary, not a replacement.
+  P-INTEGRATE still covers convergence; P-JUDGE still covers scoring.
+- Same file, `_subagent_capability_hint` (~lines 494-524): for the Claude
+  runtime, document the **Workflow tool** as the preferred mechanism for
+  fan-out patterns (P-DIVERGE and other breadth-first parallel work):
+  > - When a workflow calls for parallel isolated branches (P-DIVERGE,
+  >   parallel research, parallel validation), prefer the Workflow tool
+  >   with `parallel(...)` over serial `Task(...)` calls. Use
+  >   `pipeline(...)` when one stage's output feeds the next
+  >   (CLUSTER→JUDGE→DEEPEN). Each `agent()` inside a parallel block
+  >   receives an isolated context — use this to enforce the ADHD
+  >   isolation invariant (branches must not see each other's output).
+  >   Cap `concurrency` in Workflow.parallel to ≤4 (matching ADHD's
+  >   `p-limit(4)` default) to avoid runaway sub-agent creation.
+  Cursor/codex fallbacks remain as they are today.
+- Same file, `_model_evidence_contract_block` (~lines 527-555): pin models
+  per new primitive. Divergent branches are volume work on short inputs
+  and benefit more from speed/cost than peak reasoning — pin them to
+  **Sonnet** (Haiku acceptable when the problem is cheap). CLUSTER and
+  DEEPEN are synthesis/focus passes that reward reasoning — pin to
+  **Opus**. Existing pins (Opus for PLAN/EXECUTE/JUDGE/INTEGRATE, Sonnet
+  for VALIDATE/RESEARCH) stay.
+- Same file, cost-guard (~lines 481-486): explicitly allow parallel fan-out
+  for P-DIVERGE (V1 currently implicitly serialises P-EXECUTE; DIVERGE is
+  parallel *by construction* and isolation is load-bearing). Cap via the
+  Workflow tool concurrency limit above, not via a Hub-side semaphore.
+- Same file, in the workflow-shape section around lines 632-648: add a
+  short list of recognised workflow *shapes* alongside the existing
+  linear shape, so the orchestrator knows when to reach for which tool:
+  > - **linear implement**: P-PLAN → P-EXECUTE → (P-VALIDATE) → P-JUDGE → P-INTEGRATE.
+  >   Default for bug fixes, features, refactors with one answer.
+  > - **divergent ideate**: P-DIVERGE (parallel via Workflow.parallel) →
+  >   P-CLUSTER → P-JUDGE (score/trap) → P-DEEPEN (parallel via Workflow.parallel)
+  >   → P-INTEGRATE. Use for open-ended design, naming, strategy, fuzzy
+  >   debugging when the pre-flight gate passes.
+  > - **parallel research / parallel validate**: P-RESEARCH or P-VALIDATE
+  >   fan-out via Workflow.parallel when sources/checks are independent;
+  >   P-INTEGRATE merges.
 
-P-INTEGRATE already covers converge; P-JUDGE already covers scoring. The three
-new primitives let an orchestrator compose an explicit
-DIVERGE→CLUSTER→JUDGE(score/trap)→DEEPEN→INTEGRATE workflow for open-ended
-tasks without inventing a new execution engine.
+The three new primitives plus Workflow-tool awareness let the orchestrator
+compose an explicit DIVERGE→CLUSTER→JUDGE(score/trap)→DEEPEN→INTEGRATE
+shape for open-ended tasks, using the runtime's own native parallelism
+instead of inventing a new execution engine. ADHD's `engine.ts` maps
+line-for-line onto Workflow calls:
+`run()` = orchestrator script using Workflow, `Promise.all` with p-limit =
+`parallel(..., { concurrency: 4 })`, `scoreIdeas/clusterIdeas` = one
+`agent()` after the parallel returns, `deepenIdea` top-K = a second
+`parallel()`.
+
 
 **B3. Add an `IDEATION` review profile. Effort: ~S, schema + policy + prompt.**
 
@@ -462,21 +562,23 @@ A question that came up in review: *"How much prompt overhead does this
 add, and when does the agent decide to use the ideation workflow?"*
 Concrete numbers below so we can size the change honestly.
 
-**Always-on overhead (every task, once A1–A4 are in): ~100 tokens.**
+**Always-on overhead (every task, once A1–A5 are in): ~200 tokens.**
 
 | Item | Tokens (approx.) | Injected on every task? |
 |---|---:|---|
 | A2 SKILL.md ≤600-char rule | 0 (comment in our SKILL.md, not a model prompt) | no |
 | A3 critic-split citation sentence | ~20 tokens, added to reviewer bootstrap (`_prompts.py:~153`) | yes |
 | A4 reviewer cognitive-trap bullets (anchoring, echo-chamber) | ~80 tokens, appended to the existing adversarial defect-hunt list (`_prompts.py:963-968`) | yes |
+| A5 Workflow-tool mention in `_subagent_capability_hint` | ~100 tokens, added to Claude-runtime branch | yes (Claude runtime only) |
 | A1 curated frame library (~8 frames × 2–3 sentences) | ~350 tokens if injected unconditionally — **must be conditional** | only on ideation-shaped tasks |
 
-That is, the default prompt growth from A1–A4 is **well under 100 tokens**
-against orchestrator/reviewer system prompts that are already ~3–4k tokens.
-The frame library must not be unconditionally appended to every prompt;
-it should be gated behind the pre-flight check (B1) or an explicit opt-in,
-otherwise it is pure noise on the 90%+ of tasks that are convergent bug
-fixes / small features.
+That is, the default prompt growth from A1–A5 is **~200 tokens**
+against orchestrator/reviewer system prompts that are already ~3–4k tokens
+(and only ~100 tokens on non-Claude runtimes that don't receive the A5
+hint). The frame library must not be unconditionally appended to every
+prompt; it should be gated behind the pre-flight check (B1) or an
+explicit opt-in, otherwise it is pure noise on the 90%+ of tasks that are
+convergent bug fixes / small features.
 
 **Triggered overhead (when the DIVERGE workflow actually fires):**
 
@@ -567,10 +669,26 @@ branch captured the high-level thesis correctly. This v2 adds:
 - The A/B split (cheap adopt-now vs adapt-via-follow-up-task vs skip).
 - Two paths for delivering `/adhd` to users (skill-only first vs first-class
   Hub mode) with an explicit recommendation.
+- **(Added in review pass — Workflow tool blind spot)** Our
+  `_subagent_capability_hint` (`_prompts.py:494-524`) documents per-runtime
+  `Task`-tool calls but does NOT mention Claude Code's native **Workflow**
+  tool (`parallel() / pipeline() / agent() / phase()`), which is exactly the
+  fan-out/synchronise DSL that ADHD implements by hand in TypeScript with
+  `Promise.all + p-limit(n)`. ADHD's `engine.ts` maps line-for-line onto
+  Workflow calls. This drops B2's cost from "build new orchestration
+  machinery" to "prompt the orchestrator to use the DSL it already owns",
+  and lets parallel research/validation benefit immediately from A5 before
+  DIVERGE exists.
+- **(Added in review pass — token cost + rollout policy)** §4.4 concrete
+  prompt-token budget (always-on ~200 tokens once A1–A5 land; ~2.5–3k
+  tokens across ~10 LLM calls when DIVERGE fires) and §4.5 conservative
+  three-stage rollout (cheap adopts → explicit opt-in only → gated auto
+  behind a flag after usage data), with hard never-trigger rules.
 
 The high-level verdict ("we already own the mechanical critic split; add
 frames, a pre-flight gate, and an ideation primitive/profile") is unchanged
-from v1; this v2 makes it implementable without another research pass.
+from v1; this v2 makes it implementable without another research pass, and
+adds the Workflow-tool insight that materially shrinks B2's scope.
 
 ---
 
@@ -585,6 +703,13 @@ from v1; this v2 makes it implementable without another research pass.
   The pre-flight gate is not optional nice-to-have; without it, the ideation
   path will burn money on trivia. This is why B1 is XS and should land at
   the same time as any divergent capability.
+- **The orchestrator prompt is currently blind to Claude Code's native
+  Workflow tool.** Our `_subagent_capability_hint` documents the `Task` tool
+  per runtime but never mentions `Workflow.parallel/pipeline/agent/phase`.
+  Until A5/B2 land, orchestrators default to linear serial decomposition
+  even when the runtime offers a native fan-out DSL. This is a prompt gap,
+  not a missing feature — and the cheapest finding in this entire analysis
+  to fix.
 - **"Weird-for-weird's-sake" is a failure mode.** ADHD explicitly names this
   in its anti-patterns (`SKILL.md:167-168`): a pile of unsorted absurdities
   is as useless as one safe answer. The critic/convergence step must be
@@ -606,22 +731,29 @@ from v1; this v2 makes it implementable without another research pass.
 ## 7. Suggested follow-up task ordering
 
 If/when the team picks up adapt work, recommended order (dependency-aware),
-mapped to the three-stage rollout in §4.5:
+mapped to the three-stage rollout in §4.5. The Workflow-tool insight
+(A5/B2) shrinks the work considerably: fan-out is a prompt-level change,
+not new Hub machinery.
 
 **Stage 1 — cheap adopts only (this PR + one follow-up docs/prompt PR).**
 
-1. **A1–A4** (docs/prompt-only adopts) — one reviewed task, low risk, no
-   behavior change. Always-on prompt overhead ≲100 tokens (see §4.4).
-   Can ship immediately.
+1. **A1–A5** (docs/prompt-only adopts) — one reviewed task, low risk, no
+   behavior change beyond the orchestrator now knowing it can call
+   `Workflow.parallel` for independent sub-work. Always-on prompt overhead
+   stays ≲120 tokens (A2:0, A3:~20, A4:~80, A5:~100, A1 frames:~350
+   conditional-injected). Can ship immediately.
 
 **Stage 2 — explicit opt-in only (no auto-trigger).**
 
 2. **B1 + B2** (pre-flight gate contract + P-DIVERGE/P-CLUSTER/P-DEEPEN
-   primitives with concurrency cap, model pinning Sonnet for DIVERGE,
-   Opus for CLUSTER/DEEPEN) — one reviewed task; primitive without gate
-   = wasted cost, gate without primitive = no way to act on "yes" answers.
-   The gate is a *self-check contract inside an invoked ideation run*, not
-   an auto-trigger yet.
+   primitives + Workflow-tool parallel shape, with P-DIVERGE pinned to
+   Sonnet and CLUSTER/DEEPEN pinned to Opus, concurrency cap ≤4 in
+   `Workflow.parallel`) — one reviewed task. Primitive without gate =
+   wasted cost; gate without primitive = no way to act on "yes" answers.
+   The gate is a *self-check inside an invoked ideation run*, not an
+   auto-trigger yet. Critically, B2 is prompt/enum-only: it tells the
+   orchestrator to compose Workflow-tool calls, not to build new Hub
+   parallelism.
 3. **B3** (IDEATION review profile + novelty/diversity/trap axes) — after
    B2 lands, so reviewers can judge divergent output against a suitable
    rubric instead of the code-correctness rubric.
