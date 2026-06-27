@@ -196,6 +196,277 @@ def test_task_send_missing_task_errors(monkeypatch):
     assert "not found" in result.output
 
 
+def test_task_get_scans_workspaces_and_includes_reports(monkeypatch):
+    reports = [{"created_at": "t1", "state": "working", "message": "progress"}]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/workspaces":
+            return httpx.Response(200, json=[{"id": "wsA"}, {"id": "wsB"}])
+        if path == "/api/workspaces/wsA/board":
+            return httpx.Response(200, json={"tasks": []})
+        if path == "/api/workspaces/wsB/board":
+            return httpx.Response(
+                200,
+                json={"tasks": [{"id": "t9", "title": "T", "status": "working"}]},
+            )
+        if path == "/api/workspaces/wsB/tasks/t9/reports":
+            return httpx.Response(200, json=reports)
+        raise AssertionError(f"unexpected path {path}")
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--json", "task", "get", "t9"])
+    assert result.exit_code == 0, result.output
+    detail = json.loads(result.output)
+    assert detail["workspace_id"] == "wsB"
+    assert detail["reports"] == reports
+
+
+def test_task_report_newest_first_and_review_filter(monkeypatch):
+    reports = [
+        {"created_at": "t0", "state": "working", "message": "progress"},
+        {
+            "created_at": "t1",
+            "state": "review_failed",
+            "session_id": "cb-reviewer-1",
+            "review_cycle": 1,
+            "review_reason": "needs work",
+        },
+        {"created_at": "t2", "state": "review_passed", "session_id": "cb-reviewer-1"},
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/workspaces/wsA/board":
+            return httpx.Response(200, json={"tasks": [{"id": "t9", "status": "review"}]})
+        assert request.url.path == "/api/workspaces/wsA/tasks/t9/reports"
+        return httpx.Response(200, json=reports)
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--json", "task", "report", "t9", "--workspace-id", "wsA", "--limit", "2"]
+    )
+    assert result.exit_code == 0, result.output
+    assert [r["created_at"] for r in json.loads(result.output)] == ["t2", "t1"]
+
+    result = runner.invoke(cli, ["--json", "task", "review", "t9", "--workspace-id", "wsA"])
+    assert result.exit_code == 0, result.output
+    rounds = json.loads(result.output)
+    assert [r["verdict"] for r in rounds] == ["review_failed", "review_passed"]
+    assert rounds[0]["notes"] == "needs work"
+
+
+def test_task_report_with_workspace_id_requires_task(monkeypatch):
+    calls: List[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/api/workspaces/wsA/board":
+            return httpx.Response(200, json={"tasks": []})
+        raise AssertionError(f"unexpected path {request.url.path}")
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["task", "report", "missing", "--workspace-id", "wsA"])
+    assert result.exit_code != 0
+    assert "not found in workspace wsA" in result.output
+    assert calls == ["/api/workspaces/wsA/board"]
+
+
+def test_task_accept_marks_review_task_done(monkeypatch):
+    patches: List[Dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/workspaces/wsA/board":
+            return httpx.Response(
+                200,
+                json={
+                    "tasks": [
+                        {
+                            "id": "t9",
+                            "status": "review",
+                            "human_acceptance_requested_at": "2026-06-28T01:00:00",
+                        }
+                    ]
+                },
+            )
+        if path == "/api/workspaces/tasks/t9" and request.method == "PATCH":
+            patches.append(json.loads(request.content))
+            return httpx.Response(200, json={"id": "t9", "status": "done"})
+        raise AssertionError(f"unexpected {request.method} {path}")
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--json", "task", "accept", "t9", "--workspace-id", "wsA"])
+    assert result.exit_code == 0, result.output
+    assert patches == [{"status": "done"}]
+    assert json.loads(result.output)["status"] == "done"
+
+
+def test_task_accept_rejects_non_review(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        return httpx.Response(200, json={"tasks": [{"id": "t9", "status": "working"}]})
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["task", "accept", "t9", "--workspace-id", "wsA"])
+    assert result.exit_code != 0
+    assert "not 'review'" in result.output
+
+
+def test_task_accept_rejects_review_without_human_acceptance(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        return httpx.Response(200, json={"tasks": [{"id": "t9", "status": "review"}]})
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["task", "accept", "t9", "--workspace-id", "wsA"])
+    assert result.exit_code != 0
+    assert "not awaiting human acceptance" in result.output
+
+
+def test_session_list_and_logs(monkeypatch):
+    history = "\n".join(f"line{i}" for i in range(1, 121))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/workspaces/wsA/board":
+            return httpx.Response(
+                200,
+                json={
+                    "sessions": [
+                        {"id": "s1", "role": "orchestrator", "tab_id": "tab1"},
+                        {"id": "s2", "role": "reviewer", "tab_id": "tab2"},
+                    ]
+                },
+            )
+        if path == "/api/workspaces":
+            return httpx.Response(200, json=[{"id": "wsA"}])
+        if path == "/api/terminal/history/tab2":
+            assert request.url.params.get("lines") == "100"
+            return httpx.Response(200, json={"history": history})
+        raise AssertionError(f"unexpected path {path}")
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--json", "session", "list", "wsA", "--role", "reviewer"])
+    assert result.exit_code == 0, result.output
+    assert [row["id"] for row in json.loads(result.output)] == ["s2"]
+
+    result = runner.invoke(cli, ["session", "logs", "s2", "--lines", "2"])
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines() == ["line119", "line120"]
+
+
+def test_session_report_payload_json_and_bilingual_fields(monkeypatch):
+    bodies: List[Dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/workspaces/sessions/s1/reports"
+        bodies.append(json.loads(request.content))
+        return httpx.Response(201, json={"id": "r1"})
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    payload = {
+        "goal_packet": {"objective": "ship"},
+        "acceptance_check": [{"criterion": "tests", "status": "passed", "evidence": "ok"}],
+        "review_decision": "skip",
+        "changed_files": ["ignored.py"],
+    }
+    result = runner.invoke(
+        cli,
+        [
+            "--json",
+            "session",
+            "report",
+            "s1",
+            "--state",
+            "completed",
+            "--message",
+            "Done",
+            "--message-en",
+            "Done",
+            "--message-zh",
+            "完成",
+            "--task-id",
+            "t1",
+            "--changed-file",
+            "kept.py",
+            "--review-decision",
+            "request",
+            "--review-reason",
+            "nontrivial",
+            "--risk-level",
+            "medium",
+            "--payload-json",
+            json.dumps(payload),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    body = bodies[0]
+    assert body["goal_packet"] == {"objective": "ship"}
+    assert body["acceptance_check"][0]["criterion"] == "tests"
+    assert body["message_en"] == "Done"
+    assert body["message_zh"] == "完成"
+    assert body["task_id"] == "t1"
+    assert body["changed_files"] == ["kept.py"]  # explicit flags override payload
+    assert body["review_decision"] == "request"
+    assert body["review_reason"] == "nontrivial"
+    assert body["risk_level"] == "medium"
+
+
+def test_session_report_payload_json_requires_object():
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "session",
+            "report",
+            "s1",
+            "--state",
+            "working",
+            "--message",
+            "m",
+            "--payload-json",
+            "[]",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "JSON object" in result.output
+
+
+def test_session_report_payload_json_can_supply_changed_files(monkeypatch):
+    bodies: List[Dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(201, json={"id": "r1"})
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "session",
+            "report",
+            "s1",
+            "--state",
+            "working",
+            "--message",
+            "m",
+            "--payload-json",
+            json.dumps({"changed_files": ["from-json.py"]}),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert bodies[0]["changed_files"] == ["from-json.py"]
+
+
 def test_invalid_choice_exits(monkeypatch):
     called = {"hit": False}
 

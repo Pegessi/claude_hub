@@ -36,8 +36,17 @@ TOKEN_KEY = "hub_token"
 ACTION_KEY = "hub_action"
 
 # The kinds of card ``feishu build-card`` can build.
-INTERACTIVE_KINDS = ("approval", "needs_input", "plan_confirm")
-DISPLAY_KINDS = ("status", "task")
+INTERACTIVE_KINDS = ("approval", "needs_input", "plan_confirm", "task_detail")
+DISPLAY_KINDS = (
+    "status",
+    "task",
+    "workspaces",
+    "overview",
+    "agents",
+    "reports",
+    "terminal",
+    "lessons",
+)
 CARD_KINDS = INTERACTIVE_KINDS + DISPLAY_KINDS
 
 # Header colours per kind (Feishu template names).
@@ -47,6 +56,13 @@ _TEMPLATES = {
     "plan_confirm": "purple",
     "status": "turquoise",
     "task": "grey",
+    "workspaces": "turquoise",
+    "overview": "turquoise",
+    "agents": "turquoise",
+    "task_detail": "blue",
+    "reports": "turquoise",
+    "terminal": "blue",
+    "lessons": "turquoise",
 }
 
 
@@ -118,6 +134,7 @@ def parse_card_action(payload: Any) -> Optional[Dict[str, Any]]:
         return {
             "token": str(token),
             "action": value.get(ACTION_KEY),
+            "value": dict(value),
             "form": dict(form),
             "operator_id": operator_id,
             "chat_id": chat_id,
@@ -281,33 +298,258 @@ def _get(obj: Any, key: str, default: Any = "") -> Any:
     return default
 
 
+_ACTIVE_STATUSES = frozenset({"working", "review", "todo", "queued", "needs_input", "attention"})
+_STATUS_SORT = {"review": 0, "todo": 1, "queued": 2, "done": 5}
+_STATUS_SORT_DEFAULT = 3
+
+
+def _workspace_name(workspace_id: str, board: Any) -> str:
+    """Resolve a human workspace name from a board, falling back to the id."""
+    if isinstance(board, dict):
+        ws = board.get("workspace")
+        if isinstance(ws, dict):
+            name = ws.get("name")
+            if name:
+                return str(name)
+    return workspace_id
+
+
+def _column(content: str) -> Dict[str, Any]:
+    """Build a single weighted ``column`` wrapping one markdown cell."""
+    return {
+        "tag": "column",
+        "width": "weighted",
+        "weight": 1,
+        "elements": [_markdown(content)],
+    }
+
+
+def _row(left: str, right: str) -> Dict[str, Any]:
+    """Build a two-column ``column_set`` grid row."""
+    return {"tag": "column_set", "columns": [_column(left), _column(right)]}
+
+
 def build_status_card(workspace_id: str, board: Any, *, limit: int = 8) -> Dict[str, Any]:
     """Build a display-only status board card for a workspace.
 
     No token: this card requires no human response.
     """
+    name = _workspace_name(workspace_id, board)
     tasks = list(_get(board, "tasks", []) or []) if isinstance(board, dict) else []
-    counts: Dict[str, int] = {}
-    for task in tasks:
-        status = str(_get(task, "status", "?"))
-        counts[status] = counts.get(status, 0) + 1
+    ordered = sorted(
+        tasks,
+        key=lambda t: _STATUS_SORT.get(str(_get(t, "status", "")), _STATUS_SORT_DEFAULT),
+    )
 
-    summary = ", ".join(f"**{status}**: {n}" for status, n in sorted(counts.items()))
     elements: List[Dict[str, Any]] = [
-        _markdown(f"Workspace `{workspace_id}` — {len(tasks)} task(s)"),
+        _markdown(f"**{name}** — {len(tasks)} task(s)"),
     ]
-    if summary:
-        elements.append(_markdown(summary))
-    if tasks:
-        elements.append({"tag": "hr"})
+    if ordered:
+        elements.append(_row("**Title**", "**Status**"))
+        for t in ordered[:limit]:
+            elements.append(_row(str(_get(t, "title", "")), str(_get(t, "status", "?"))))
+        if len(ordered) > limit:
+            elements.append(_note(f"… and {len(ordered) - limit} more"))
+    return _wrap(_header(f"Status · {name}", "status"), elements)
+
+
+def build_result_card(title: str, body: str, *, kind: str = "status") -> Dict[str, Any]:
+    """Build a generic display card with a title and a markdown body."""
+    return _wrap(_header(title, kind), [_markdown(body)])
+
+
+def build_workspaces_card(workspaces: Any) -> Dict[str, Any]:
+    """Build a display-only list of workspaces with `/cd` hints."""
+    items = [ws for ws in (workspaces or []) if isinstance(ws, dict)]
+    if not items:
+        return build_result_card("Workspaces", "_No workspaces yet._", kind="status")
+    rows = "\n".join(
+        f"- `{_get(ws, 'id', '?')}` **{_get(ws, 'name', '')}** "
+        f"— `/cd {_get(ws, 'name', _get(ws, 'id', ''))}`".rstrip()
+        for ws in items
+    )
+    return _wrap(_header("Workspaces", "status"), [_markdown(rows)])
+
+
+def build_overview_card(
+    workspace_id: str, tasks: Any, sessions: Any, *, name: Optional[str] = None
+) -> Dict[str, Any]:
+    """Build a workspace overview: active/recent tasks plus an agent summary."""
+    label = name or workspace_id
+    task_items = [t for t in (tasks or []) if isinstance(t, dict)]
+    session_items = [s for s in (sessions or []) if isinstance(s, dict)]
+
+    active = [t for t in task_items if str(_get(t, "status", "")) in _ACTIVE_STATUSES]
+    recent = [t for t in task_items if str(_get(t, "status", "")) not in _ACTIVE_STATUSES]
+
+    elements: List[Dict[str, Any]] = []
+    if active:
         rows = "\n".join(
-            f"- `{_get(t, 'id', '?')}` {_get(t, 'title', '')} " f"**[{_get(t, 'status', '?')}]**"
-            for t in tasks[:limit]
+            f"- `{_get(t, 'id', '?')}` {_get(t, 'title', '')} "
+            f"**[{_get(t, 'status', '?')}]**".rstrip()
+            for t in active
         )
-        elements.append(_markdown(rows))
-        if len(tasks) > limit:
-            elements.append(_note(f"… and {len(tasks) - limit} more"))
-    return _wrap(_header(f"Status · {workspace_id}", "status"), elements)
+        elements.append(_markdown(f"**Active tasks**\n{rows}"))
+    if recent:
+        rows = "\n".join(
+            f"- `{_get(t, 'id', '?')}` {_get(t, 'title', '')} "
+            f"**[{_get(t, 'status', '?')}]**".rstrip()
+            for t in recent[:5]
+        )
+        elements.append(_markdown(f"**Recent**\n{rows}"))
+    if not active and not recent:
+        elements.append(_markdown("_No tasks yet._"))
+
+    elements.append(_note(f"{len(session_items)} agent(s) · `/ag` to list · `/t` for tasks"))
+    return _wrap(_header(f"Workspace · {label}", "status"), elements)
+
+
+_ROLE_GROUPS = (
+    ("Orchestrator", ("orchestrator",)),
+    ("Reviewer", ("reviewer",)),
+    ("Terminal", ("worker", "terminal", "dispatcher")),
+)
+
+
+def build_agents_card(
+    workspace_id: str, sessions: Any, *, name: Optional[str] = None
+) -> Dict[str, Any]:
+    """Build an agent roster grouped by role."""
+    items = [s for s in (sessions or []) if isinstance(s, dict)]
+
+    def _role(sess: Dict[str, Any]) -> str:
+        return str(_get(sess, "role", "")).lower()
+
+    elements: List[Dict[str, Any]] = []
+    seen: set[int] = set()
+    for label, roles in _ROLE_GROUPS:
+        group = [s for s in items if _role(s) in roles]
+        seen.update(id(s) for s in group)
+        if not group:
+            continue
+        lines = [f"**{label}**"]
+        for s in group:
+            sid = _get(s, "id", "?")
+            agent_type = _get(s, "agent_type", "?")
+            runtime = _get(s, "runtime_status", "?")
+            line = f"- `{sid}` · {agent_type} · {runtime}"
+            current = _get(s, "current_task_id", "")
+            if current:
+                line += f" · task `{current}`"
+            lines.append(line)
+        elements.append(_markdown("\n".join(lines)))
+
+    other = [s for s in items if id(s) not in seen]
+    if other:
+        elements.append(
+            _markdown(
+                "**Other**\n"
+                + "\n".join(
+                    f"- `{_get(s, 'id', '?')}` · {_get(s, 'agent_type', '?')} · "
+                    f"{_get(s, 'runtime_status', '?')}"
+                    for s in other
+                )
+            )
+        )
+    if not elements:
+        elements.append(_markdown("_No agents in this workspace yet._"))
+    return _wrap(_header(f"Agents · {name or workspace_id}", "status"), elements)
+
+
+def _report_line(report: Dict[str, Any]) -> str:
+    """Render one progress report as a markdown bullet."""
+    state = _get(report, "state", "?")
+    message = _get(report, "message_zh", "") or _get(report, "message", "")
+    when = _get(report, "created_at", "")
+    head = f"**[{state}]** {message}".rstrip()
+    return f"{head}\n_{when}_" if when else head
+
+
+def build_reports_card(task: Any, reports: Any) -> Dict[str, Any]:
+    """Build a newest-first progress-report history card for a task."""
+    task_id = _get(task, "id", "?")
+    items = [r for r in (reports or []) if isinstance(r, dict)]
+    items.sort(key=lambda r: str(_get(r, "created_at", "")), reverse=True)
+
+    elements: List[Dict[str, Any]] = []
+    if items:
+        elements.append(_markdown("\n\n".join(_report_line(r) for r in items)))
+    else:
+        elements.append(_markdown("_No progress reports yet._"))
+    return _wrap(_header(f"Reports · {task_id}", "status"), elements)
+
+
+def build_task_detail_card(
+    task: Any,
+    session: Any,
+    latest_report: Any,
+    *,
+    token: str,
+) -> Dict[str, Any]:
+    """Build a task detail card with status, latest progress, and action buttons."""
+    task_id = _get(task, "id", "?")
+    workspace_id = _get(task, "workspace_id", "")
+    session_id = _get(session, "id", "") if isinstance(session, dict) else ""
+    if not session_id:
+        session_id = _get(task, "session_id", "")
+    tab_id = _get(session, "tab_id", "") if isinstance(session, dict) else ""
+    fields = [
+        ("Status", _get(task, "status", "?")),
+        ("Mode", _get(task, "task_mode", _get(task, "mode", ""))),
+        ("Agent", _get(task, "agent_type", "")),
+    ]
+    body = "\n".join(f"**{label}**: {value}" for label, value in fields if value not in ("", None))
+    elements: List[Dict[str, Any]] = [
+        _markdown(f"**{_get(task, 'title', '(untitled)')}**\n`{task_id}`"),
+    ]
+    if body:
+        elements.append(_markdown(body))
+
+    if latest_report:
+        elements.append({"tag": "hr"})
+        elements.append(_markdown(f"**Latest progress**\n{_report_line(latest_report)}"))
+
+    buttons = [
+        {
+            "tag": "button",
+            "text": _plain_text("Focus"),
+            "type": "primary",
+            "value": _action_value(token, "focus", workspace_id=workspace_id, task_id=task_id),
+        },
+        {
+            "tag": "button",
+            "text": _plain_text("Terminal"),
+            "type": "default",
+            "value": _action_value(token, "terminal", tab_id=tab_id),
+        },
+        {
+            "tag": "button",
+            "text": _plain_text("Send"),
+            "type": "default",
+            "value": _action_value(token, "send", session_id=session_id, task_id=task_id),
+        },
+    ]
+    elements.append({"tag": "action", "actions": buttons})
+    return _wrap(_header(f"Task · {task_id}", "task"), elements)
+
+
+def build_terminal_card(tab_id: str, text: str, *, max_lines: int = 40) -> Dict[str, Any]:
+    """Build a display-only terminal snapshot card."""
+    lines = (text or "").splitlines()
+    if max_lines > 0:
+        lines = lines[-max_lines:]
+    snapshot = "\n".join(lines)
+    body = f"```\n{snapshot}\n```" if snapshot else "_(no output)_"
+    return _wrap(_header(f"Terminal · {tab_id}", "task"), [_markdown(body)])
+
+
+def build_lessons_card(workspace_id: str, lessons: Any) -> Dict[str, Any]:
+    """Build a display-only list of lessons for a workspace."""
+    items = [le for le in (lessons or []) if isinstance(le, dict)]
+    if not items:
+        return build_result_card(f"Lessons · {workspace_id}", "_No lessons found._", kind="status")
+    rows = "\n".join(f"- `{_get(le, 'id', '?')}` {_get(le, 'title', '')}".rstrip() for le in items)
+    return _wrap(_header(f"Lessons · {workspace_id}", "status"), [_markdown(rows)])
 
 
 def build_task_card(task: Any) -> Dict[str, Any]:

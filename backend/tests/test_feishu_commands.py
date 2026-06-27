@@ -100,6 +100,82 @@ def test_build_card_task_requires_ids() -> None:
     assert "--task-id" in result.output
 
 
+def test_build_card_new_display_kinds(monkeypatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/workspaces":
+            return httpx.Response(200, json=[{"id": "ws1", "name": "Alpha"}])
+        if path == "/api/workspaces/ws1/board":
+            return httpx.Response(
+                200,
+                json={
+                    "workspace": {"name": "Alpha"},
+                    "tasks": [
+                        {"id": "t1", "title": "Fix it", "status": "working", "session_id": "s1"}
+                    ],
+                    "sessions": [
+                        {
+                            "id": "s1",
+                            "role": "orchestrator",
+                            "agent_type": "claude",
+                            "runtime_status": "working",
+                            "tab_id": "tab9",
+                        }
+                    ],
+                },
+            )
+        if path == "/api/workspaces/ws1/tasks/t1/reports":
+            return httpx.Response(
+                200,
+                json=[
+                    {"state": "working", "message": "old", "created_at": "2026-01-01T00:00:00"},
+                    {"state": "completed", "message": "new", "created_at": "2026-01-02T00:00:00"},
+                ],
+            )
+        if path == "/api/terminal/history/tab9":
+            return httpx.Response(200, json={"history": "line1\nline2"})
+        if path == "/api/workspaces/ws1/lessons":
+            return httpx.Response(200, json=[{"id": "l1", "title": "Use locks"}])
+        raise AssertionError(f"unexpected path {path}")
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    cases = [
+        (["--kind", "workspaces"], "Alpha"),
+        (["--kind", "overview", "--workspace-id", "ws1"], "Active tasks"),
+        (["--kind", "agents", "--workspace-id", "ws1"], "Orchestrator"),
+        (["--kind", "task_detail", "--workspace-id", "ws1", "--task-id", "t1"], "new"),
+        (["--kind", "reports", "--workspace-id", "ws1", "--task-id", "t1"], "completed"),
+        (["--kind", "terminal", "--tab-id", "tab9"], "line2"),
+        (["--kind", "lessons", "--workspace-id", "ws1"], "Use locks"),
+    ]
+    for args, expected in cases:
+        result = runner.invoke(cli, ["feishu", "build-card", *args])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        if "--kind" in args and args[args.index("--kind") + 1] == "task_detail":
+            assert payload["token"]
+            assert payload["token"] in result.output
+        else:
+            assert payload["token"] is None
+        assert expected in result.output
+
+
+def test_build_card_new_display_kinds_validate_required_ids() -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli, ["feishu", "build-card", "--kind", "overview"])
+    assert result.exit_code != 0
+    assert "--workspace-id is required for kind=overview" in result.output
+
+    result = runner.invoke(cli, ["feishu", "build-card", "--kind", "task_detail"])
+    assert result.exit_code != 0
+    assert "--task-id is required for kind=task_detail" in result.output
+
+    result = runner.invoke(cli, ["feishu", "build-card", "--kind", "terminal"])
+    assert result.exit_code != 0
+    assert "--tab-id is required for kind=terminal" in result.output
+
+
 # -- parse-action -----------------------------------------------------------
 
 
@@ -120,6 +196,7 @@ def test_parse_action_from_argument() -> None:
     payload = json.loads(result.output)
     assert payload["token"] == "tok1"
     assert payload["action"] == "approve"
+    assert payload["value"][TOKEN_KEY] == "tok1"
     assert payload["operator_id"] == "ou_42"
     assert payload["chat_id"] == "oc_9"
 

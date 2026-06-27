@@ -185,6 +185,14 @@ class HubClient:
         """POST /api/workspaces/tasks/{task_id}/request-review."""
         return self._request("POST", f"/api/workspaces/tasks/{task_id}/request-review", json=body)
 
+    def update_task(self, task_id: str, body: Dict[str, Any]) -> Any:
+        """PATCH /api/workspaces/tasks/{task_id}."""
+        return self._request("PATCH", f"/api/workspaces/tasks/{task_id}", json=body)
+
+    def get_task_reports(self, workspace_id: str, task_id: str) -> Any:
+        """GET /api/workspaces/{workspace_id}/tasks/{task_id}/reports."""
+        return self._request("GET", f"/api/workspaces/{workspace_id}/tasks/{task_id}/reports")
+
     # -- Agents / sessions --------------------------------------------------
 
     def ensure_agent(self, workspace_id: str, body: Dict[str, Any]) -> Any:
@@ -194,6 +202,10 @@ class HubClient:
     def send_session(self, session_id: str, body: Dict[str, Any]) -> None:
         """POST /api/workspaces/sessions/{session_id}/send (204)."""
         self._request("POST", f"/api/workspaces/sessions/{session_id}/send", json=body)
+
+    def get_terminal_history(self, tab_id: str, lines: int = 100) -> Any:
+        """GET /api/terminal/history/{tab_id}?lines=N."""
+        return self._request("GET", f"/api/terminal/history/{tab_id}", params={"lines": lines})
 
     def create_report(self, session_id: str, body: Dict[str, Any]) -> Any:
         """POST /api/workspaces/sessions/{session_id}/reports."""
