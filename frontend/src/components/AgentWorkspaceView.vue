@@ -8152,6 +8152,43 @@ onUnmounted(() => {
   z-index: 1050;
 }
 
+/* Fixed-height flex column so the popup keeps a stable size regardless of
+   how many fields the Enable toggle reveals, and never exceeds the viewport.
+   Mirrors the .agent-manager-modal pattern (pinned header + scrolling body). */
+.resident-agent-modal {
+  display: flex;
+  flex-direction: column;
+  /* Fixed target height clamped to the viewport: the modal does not
+     shrink-to-fit when Enable is unchecked vs checked. Width stays the
+     inherited min(520px, 100%) from .workspace-modal. */
+  height: min(720px, calc(100dvh - 32px));
+  overflow: hidden;
+}
+
+/* Title pinned at the top. */
+.resident-agent-modal > h3 {
+  flex-shrink: 0;
+}
+
+/* Enable checkbox is the master toggle; keep it pinned above the scroll. */
+.resident-agent-modal .resident-agent-section--first {
+  flex-shrink: 0;
+}
+
+/* The config fieldset is the only scrolling region (min-height: 0 lets the
+   flex child actually scroll instead of growing the modal). */
+.resident-agent-modal .resident-config-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* Done button pinned at the bottom, separated from the scrolling body. */
+.resident-agent-modal .modal-actions {
+  flex-shrink: 0;
+  margin-top: 16px;
+}
+
 /*
   The resident config keeps every field visible at all times; the native
   <fieldset disabled> attribute makes all descendant inputs non-interactive
@@ -8162,7 +8199,8 @@ onUnmounted(() => {
 .resident-config-body {
   min-width: 0;
   margin: 0;
-  padding: 0;
+  /* Small right padding so the internal scrollbar doesn't overlap inputs. */
+  padding: 2px 4px 2px 0;
   border: 0;
 }
 

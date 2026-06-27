@@ -89,7 +89,9 @@
   `resident_agent_remote_reconnect`; these placement fields flow into the
   resident `EnsureWorkspaceAgentRequest` and a change to any of them invalidates
   the live resident session so the next monitor tick respawns it with the new
-  placement.
+  placement. The popup is a **fixed-height** flex column (pinned title + Enable
+  toggle, scrolling config body, pinned Done footer) so it keeps a stable size
+  whether or not Enable is checked and never exceeds the viewport.
 
 ### fix: allow Done after a reported Completed even without a review verdict
 
