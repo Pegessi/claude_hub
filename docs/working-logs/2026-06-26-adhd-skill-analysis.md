@@ -456,6 +456,87 @@ Low priority for a v1; ergonomics only.
   pinning, permission sandboxing) that should be driven by a concrete need,
   not by one project's SKILL.md.
 
+### 4.4 Prompt-token cost: always-on vs triggered
+
+A question that came up in review: *"How much prompt overhead does this
+add, and when does the agent decide to use the ideation workflow?"*
+Concrete numbers below so we can size the change honestly.
+
+**Always-on overhead (every task, once A1–A4 are in): ~100 tokens.**
+
+| Item | Tokens (approx.) | Injected on every task? |
+|---|---:|---|
+| A2 SKILL.md ≤600-char rule | 0 (comment in our SKILL.md, not a model prompt) | no |
+| A3 critic-split citation sentence | ~20 tokens, added to reviewer bootstrap (`_prompts.py:~153`) | yes |
+| A4 reviewer cognitive-trap bullets (anchoring, echo-chamber) | ~80 tokens, appended to the existing adversarial defect-hunt list (`_prompts.py:963-968`) | yes |
+| A1 curated frame library (~8 frames × 2–3 sentences) | ~350 tokens if injected unconditionally — **must be conditional** | only on ideation-shaped tasks |
+
+That is, the default prompt growth from A1–A4 is **well under 100 tokens**
+against orchestrator/reviewer system prompts that are already ~3–4k tokens.
+The frame library must not be unconditionally appended to every prompt;
+it should be gated behind the pre-flight check (B1) or an explicit opt-in,
+otherwise it is pure noise on the 90%+ of tasks that are convergent bug
+fixes / small features.
+
+**Triggered overhead (when the DIVERGE workflow actually fires):**
+
+- System-prompt side: 5 DIVERGE branches × ~200 tokens (generator stance +
+  one frame) + P-CLUSTER ~150 + P-JUDGE(scoring) ~200 + 3 DEEPEN calls ×
+  ~200 ≈ **~1,950 system-prompt tokens spread across ~10 LLM calls**.
+- User-prompt side: ~30 short idea-phrases collected from the branches and
+  forwarded into scoring/clustering/deepening ≈ **500–800 tokens**.
+- Total ≈ **2,500–3,000 extra prompt tokens** on top of a normal answer,
+  and **9 extra LLM calls** per run. This matches ADHD's own claim of
+  5–10× a single-shot answer and 30–90s wall clock. Cost is linear in
+  branches `O(N × per_branch)`, not quadratic, because branches are
+  isolated.
+
+The pre-flight gate is therefore not optional nice-to-have — it is the
+cost-control mechanism. Ship it together with the primitive (B1+B2 in one
+PR), not after.
+
+### 4.5 When does the agent decide to use this workflow? (rollout plan)
+
+We should NOT start with auto-detection. Recommended three-stage rollout,
+from safest to most autonomous:
+
+1. **Stage 1 — cheap adopts only (this PR + one follow-up docs/prompt PR).**
+   Ship A1–A4. No new workflow primitive, no new task mode, no auto-trigger.
+   The frame library exists as a reference file but is not injected by
+   default; human agents (or the orchestrator on a specific contract) can
+   still reference it manually. Overhead: ~100 tokens always-on as above.
+2. **Stage 2 — explicit opt-in only (one reviewed task, ~S–M effort).**
+   Implement B1 (pre-flight gate as a *contract* the orchestrator must
+   ask but not auto-fire), B2 (P-DIVERGE / P-CLUSTER / P-DEEPEN
+   primitives with concurrency cap), B3 (IDEATION review profile), and
+   B5a (vendored `/adhd`-equivalent skill or `claude-hub task create
+   --mode ideate`). The workflow fires **only** on explicit invocation:
+   user types `/diverge "<problem>"`, or passes `--mode ideate` at task
+   creation. There is zero auto-judgment; zero risk of burning 10 calls
+   on a typo fix. The pre-flight gate in this stage is used *within*
+   an invoked ideation run as a self-check (e.g. "did the user phrase
+   this openly enough for fan-out to be worth it?" → if no, answer
+   directly with a one-line suggestion to rephrase), not as a trigger.
+3. **Stage 3 — gated auto-trigger (only after real usage validates Stages
+   1–2).** Wire the three-question pre-flight gate (open-ended? high-
+   stakes? open phrasing?) into the orchestrator's existing "judge
+   simple vs complex first" step (`_prompts.py:~481`). All three must be
+   "yes" to pick DIVERGE; any "no" falls back to the normal
+   P-PLAN→P-EXECUTE path. Ship behind a feature flag or workspace-level
+   config knob, and collect metrics (trigger rate, false-positive rate
+   measured by human override) before enabling by default.
+
+**Hard rules at every stage:**
+
+- If the user's prompt contains `quick / just / standard / canonical /
+  textbook / one-line`, never auto-trigger.
+- Syntax fixes, typo fixes, known-root-cause bugs, lookups, and pure
+  refactors with no design dimension never trigger.
+- If the workflow fires but produces shortlists that all share one
+  underlying assumption, the IDEATION reviewer must call "convergence
+  disguised as divergence" and fail review back for another frame (see
+  anti-patterns in SKILL.md:164-166).
+
 ---
 
 ## 5. Prior v1 analysis deltas
@@ -524,25 +605,45 @@ from v1; this v2 makes it implementable without another research pass.
 
 ## 7. Suggested follow-up task ordering
 
-If/when the team picks up adapt work, recommended order (dependency-aware):
+If/when the team picks up adapt work, recommended order (dependency-aware),
+mapped to the three-stage rollout in §4.5:
 
-1. **A1–A4** (docs/prompt-only adopts) — batch into one reviewed task, low
-   risk, no behavior change. Can ship immediately.
-2. **B1 + B2** (pre-flight gate + P-DIVERGE/P-CLUSTER/P-DEEPEN primitives) —
-   one reviewed task; these are prompt/enum changes and must ship together
-   (primitive without gate = wasted cost; gate without primitive = no way to
-   act on "yes" answers).
-3. **B3** (IDEATION review profile) — after B2 lands, so reviewers can judge
-   divergent output properly.
-4. **B5a** (skill-only `/adhd` via vendored SKILL.md) — after B2/B3; end-users
-   can then invoke it.
-5. **B4** (creative-strategy lessons) — after B2 ships and there are real
-   ideation runs to learn from; requires examples to tune the lesson-kind
-   criteria.
-6. **B6** (progress events) — whenever UX complaints about long silent runs
-   justify it.
-7. **B5b** (first-class `--mode ideate` Hub task mode with Feishu rendering)
-   — only if B5a usage shows demand; defer.
+**Stage 1 — cheap adopts only (this PR + one follow-up docs/prompt PR).**
+
+1. **A1–A4** (docs/prompt-only adopts) — one reviewed task, low risk, no
+   behavior change. Always-on prompt overhead ≲100 tokens (see §4.4).
+   Can ship immediately.
+
+**Stage 2 — explicit opt-in only (no auto-trigger).**
+
+2. **B1 + B2** (pre-flight gate contract + P-DIVERGE/P-CLUSTER/P-DEEPEN
+   primitives with concurrency cap, model pinning Sonnet for DIVERGE,
+   Opus for CLUSTER/DEEPEN) — one reviewed task; primitive without gate
+   = wasted cost, gate without primitive = no way to act on "yes" answers.
+   The gate is a *self-check contract inside an invoked ideation run*, not
+   an auto-trigger yet.
+3. **B3** (IDEATION review profile + novelty/diversity/trap axes) — after
+   B2 lands, so reviewers can judge divergent output against a suitable
+   rubric instead of the code-correctness rubric.
+4. **B5a** (vendored `/adhd` or `claude-hub task create --mode ideate`
+   as an *explicit* entry point) — after B2/B3; end-users can invoke the
+   workflow, but it never fires without an explicit signal.
+
+**Stage 3 — gated auto-trigger (only after Stage 2 ships and usage data
+justifies it).**
+
+5. **B4** (creative-strategy lessons) — after Stage 2 has real ideation
+   runs to learn from; needs examples to tune the positive-pattern signal.
+6. **Wire pre-flight gate into auto-judgment** at `_prompts.py:~481`
+   (the existing simple/complex choice) — only auto-fire DIVERGE when all
+   three gate questions are "yes"; ship behind a workspace-level flag;
+   monitor trigger rate and false-positive rate (human override) before
+   enabling by default.
+7. **B6** (onEvent-style progress events: "diverging (2/5) … scoring …")
+   — whenever UX complaints about 30–90s silent runs justify it.
+8. **B5b** (first-class `--mode ideate` Hub task mode with structured
+   Feishu rendering, score chips, ★ non-obvious pick, ⚠ traps) — only if
+   Stage 2 usage shows real demand; defer.
 
 No code is changed by this PR. The deliverable is this document.
 
