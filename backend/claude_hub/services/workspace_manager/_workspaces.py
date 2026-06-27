@@ -112,6 +112,8 @@ class _WorkspacesMixin:
         prefix = payload.session_prefix or _slug(payload.name)
         interval_minutes = max(1, payload.resident_agent_interval_minutes)
         directive = (payload.resident_agent_directive or "").strip() or None
+        resident_title = (payload.resident_agent_title or "").strip() or None
+        resident_cwd = (payload.resident_agent_cwd or "").strip() or None
         workspace = Workspace(
             id=workspace_id,
             name=payload.name,
@@ -124,6 +126,7 @@ class _WorkspacesMixin:
             remote_cwd=payload.remote_cwd,
             remote_reconnect=payload.remote_reconnect,
             resident_agent_enabled=payload.resident_agent_enabled,
+            resident_agent_paused=payload.resident_agent_paused,
             resident_agent_interval_minutes=interval_minutes,
             resident_agent_session_id=None,
             resident_agent_directive=directive,
@@ -131,6 +134,11 @@ class _WorkspacesMixin:
             resident_agent_type=payload.resident_agent_type,
             resident_agent_env=dict(payload.resident_agent_env or {}),
             resident_agent_solo_mode=payload.resident_agent_solo_mode,
+            resident_agent_title=resident_title,
+            resident_agent_target=payload.resident_agent_target,
+            resident_agent_remote_profile_id=payload.resident_agent_remote_profile_id,
+            resident_agent_cwd=resident_cwd,
+            resident_agent_remote_reconnect=payload.resident_agent_remote_reconnect,
             created_at=now,
             updated_at=now,
         )
@@ -186,6 +194,21 @@ class _WorkspacesMixin:
             update_kwargs["resident_agent_env"] = dict(payload.resident_agent_env)
         if payload.resident_agent_solo_mode is not None:
             update_kwargs["resident_agent_solo_mode"] = payload.resident_agent_solo_mode
+        if payload.resident_agent_title is not None:
+            title = payload.resident_agent_title.strip()
+            update_kwargs["resident_agent_title"] = title or None
+        if payload.resident_agent_target is not None:
+            update_kwargs["resident_agent_target"] = payload.resident_agent_target
+        if payload.resident_agent_remote_profile_id is not None:
+            profile_id = payload.resident_agent_remote_profile_id.strip()
+            update_kwargs["resident_agent_remote_profile_id"] = profile_id or None
+        if payload.resident_agent_cwd is not None:
+            cwd = payload.resident_agent_cwd.strip()
+            update_kwargs["resident_agent_cwd"] = cwd or None
+        if payload.resident_agent_remote_reconnect is not None:
+            update_kwargs["resident_agent_remote_reconnect"] = (
+                payload.resident_agent_remote_reconnect
+            )
 
         # Resident launch-config invalidation
         # ------------------------------------
@@ -253,6 +276,10 @@ class _WorkspacesMixin:
             "resident_agent_type",
             "resident_agent_env",
             "resident_agent_solo_mode",
+            "resident_agent_target",
+            "resident_agent_remote_profile_id",
+            "resident_agent_cwd",
+            "resident_agent_remote_reconnect",
         ):
             if field in update_kwargs and update_kwargs[field] != getattr(workspace, field):
                 return True
@@ -449,7 +476,12 @@ class _WorkspacesMixin:
                     solo_mode=workspace.resident_agent_solo_mode,
                     role=WorkspaceSessionRole.RESIDENT,
                     reuse_existing=False,
-                    title=f"{workspace.name} Resident",
+                    title=(workspace.resident_agent_title or f"{workspace.name} Resident"),
+                    target=workspace.resident_agent_target,
+                    cwd=workspace.resident_agent_cwd,
+                    remote_profile_id=workspace.resident_agent_remote_profile_id,
+                    remote_cwd=workspace.resident_agent_cwd,
+                    remote_reconnect=workspace.resident_agent_remote_reconnect,
                 ),
             )
 

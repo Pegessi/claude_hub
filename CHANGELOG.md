@@ -75,6 +75,21 @@
   `delete_workspace(...)` tears down sessions + ttyd tabs unconditionally and
   removes the on-disk state dir. See
   `docs/working-logs/2026-06-25-workspace-resident-agent.md`.
+- **UI**: the resident config lives in a dedicated **Resident Agent** popup
+  (opened from a summary row on the Create/Edit Workspace modal) that mirrors the
+  Add-Agent form — Title, Agent Type / YOLO / Env Preset (shared
+  `AgentConfigFields`), Run On (Local/Remote), Remote Server, Working Directory
+  with a reused directory browser, and Auto reconnect. Every field stays visible
+  at all times; the block is disabled/grayed via a `<fieldset disabled>` until
+  **Enable** is checked, so the resident config reads like the normal agent
+  launcher but its role is fixed to `resident` and it never dispatches normal
+  tasks. `Workspace` / `WorkspaceCreate` / `WorkspaceUpdate` gain
+  `resident_agent_title` / `resident_agent_target` /
+  `resident_agent_remote_profile_id` / `resident_agent_cwd` /
+  `resident_agent_remote_reconnect`; these placement fields flow into the
+  resident `EnsureWorkspaceAgentRequest` and a change to any of them invalidates
+  the live resident session so the next monitor tick respawns it with the new
+  placement.
 
 ### fix: allow Done after a reported Completed even without a review verdict
 

@@ -17,7 +17,7 @@
       allowTerminal  show the Terminal agent-type option (default true)
       soloLabel    label for the solo toggle (default 'YOLO mode')
   -->
-  <div :class="['agent-config-fields', `agent-config-fields--${variant}`]">
+  <div :class="['agent-config-fields', `agent-config-fields--${variant}`, { 'agent-config-fields--disabled': disabled }]">
     <div :class="['acf-field', fieldClass]">
       <label
         class="acf-label"
@@ -27,6 +27,7 @@
         :id="`${uid}-agent-type`"
         :class="['acf-select', selectClass]"
         :value="agentType"
+        :disabled="disabled"
         @change="onAgentTypeChange(($event.target as HTMLSelectElement).value)"
       >
         <option value="claude">
@@ -56,6 +57,7 @@
           type="checkbox"
           :class="['acf-checkbox', checkboxClass]"
           :checked="soloMode"
+          :disabled="disabled"
           @change="emit('update:soloMode', ($event.target as HTMLInputElement).checked)"
         >
         <span>{{ soloLabel }}</span>
@@ -71,6 +73,7 @@
         <select
           :class="['acf-select', selectClass]"
           :value="envPreset"
+          :disabled="disabled"
           @change="onPresetChange(($event.target as HTMLSelectElement).value)"
         >
           <option
@@ -84,6 +87,7 @@
         <button
           type="button"
           :class="manageButtonClass"
+          :disabled="disabled"
           @click="openEnvPresetManager"
         >
           Manage
@@ -121,12 +125,14 @@ interface Props {
   variant?: 'modal' | 'form'
   allowTerminal?: boolean
   soloLabel?: string
+  disabled?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
   variant: 'modal',
   allowTerminal: true,
   soloLabel: 'YOLO mode',
+  disabled: false,
 })
 
 const emit = defineEmits<{
@@ -187,6 +193,7 @@ function onPresetChange(presetId: string) {
 }
 
 function openEnvPresetManager() {
+  if (props.disabled) return
   showEnvManager.value = true
 }
 
@@ -221,6 +228,18 @@ function onAgentTypeChange(value: string) {
 */
 .agent-config-fields .acf-field {
   margin-bottom: 14px;
+}
+
+/* Grayed-out state when the parent disables the whole block (e.g. the resident
+   agent config before "Enable" is checked). Individual controls also receive
+   :disabled so they are non-interactive; this just dims the labels/hints. */
+.agent-config-fields--disabled {
+  opacity: 0.5;
+}
+
+.agent-config-fields--disabled .acf-label,
+.agent-config-fields--disabled .acf-checkbox-label {
+  cursor: not-allowed;
 }
 
 .agent-config-fields--form .acf-field {

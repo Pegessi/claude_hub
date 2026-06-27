@@ -154,6 +154,11 @@ export interface Workspace {
   resident_agent_type: AgentType
   resident_agent_env: Record<string, string>
   resident_agent_solo_mode: boolean
+  resident_agent_title?: string | null
+  resident_agent_target: ExecutionTarget
+  resident_agent_remote_profile_id?: string | null
+  resident_agent_cwd?: string | null
+  resident_agent_remote_reconnect: boolean
   created_at: string
   updated_at: string
 }
@@ -174,6 +179,11 @@ export interface WorkspaceCreate {
   resident_agent_type?: AgentType
   resident_agent_env?: Record<string, string>
   resident_agent_solo_mode?: boolean
+  resident_agent_title?: string
+  resident_agent_target?: ExecutionTarget
+  resident_agent_remote_profile_id?: string | null
+  resident_agent_cwd?: string
+  resident_agent_remote_reconnect?: boolean
 }
 
 export interface WorkspaceUpdate {
@@ -189,6 +199,11 @@ export interface WorkspaceUpdate {
   resident_agent_type?: AgentType
   resident_agent_env?: Record<string, string>
   resident_agent_solo_mode?: boolean
+  resident_agent_title?: string | null
+  resident_agent_target?: ExecutionTarget
+  resident_agent_remote_profile_id?: string | null
+  resident_agent_cwd?: string | null
+  resident_agent_remote_reconnect?: boolean
 }
 
 export interface WorkspaceAttachment {
