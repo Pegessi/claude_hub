@@ -107,6 +107,20 @@
   card now shows a **Master** badge plus a "last run … ago" + latest-heartbeat
   meta line; the config popup gains the Master-mode checkbox and a `· Master`
   pill in the summary row.
+- **Resident lifecycle buttons**: the Resident Agent config popup's bottom row
+  now carries three lifecycle buttons (replacing the single "Done") plus a Done
+  to dismiss the sub-modal. In **edit mode** each button acts immediately via
+  `PATCH /api/workspaces/{id}` through the Pinia store and refreshes the board —
+  no separate Save needed: **Create resident** sends the full resident payload
+  with `resident_agent_enabled: true` (disabled once a resident already exists),
+  **Pause/Resume** toggles `resident_agent_paused`, and **Delete resident**
+  confirms then sends `resident_agent_enabled: false` to tear down **only** the
+  resident (its session/tab) while keeping the workspace. In **create mode**
+  (no workspace id yet) the three buttons are disabled and a hint notes the
+  resident is created together with the workspace via the parent "Create
+  workspace" button. A directive-timing hint under the directive textarea
+  clarifies a changed directive is saved immediately but only takes effect on
+  the resident's next scheduled cycle (保存后于下个周期生效，不会立即重新运行).
 
 ### fix: allow Done after a reported Completed even without a review verdict
 

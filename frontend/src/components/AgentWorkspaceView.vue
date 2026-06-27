@@ -1654,6 +1654,11 @@
               rows="3"
               placeholder="Describe recurring tasks or what the resident agent should focus on each run."
             />
+            <p class="modal-hint">
+              Saved immediately, but a changed directive takes effect on the
+              resident's next scheduled cycle — it does not re-run right away
+              (保存后于下个周期生效，不会立即重新运行).
+            </p>
           </div>
           <div class="modal-field">
             <label>Title</label>
@@ -1751,14 +1756,61 @@
           </div>
         </fieldset>
 
+        <!--
+          Resident lifecycle buttons. In EDIT mode these act immediately via
+          PATCH (Create=enabled:true, Pause/Resume=paused toggle,
+          Delete=enabled:false resident-only teardown — never the workspace).
+          In CREATE mode there is no workspace id yet, so the three lifecycle
+          buttons are disabled and a hint explains the resident is created with
+          the workspace via the parent "Create workspace" button. Done dismisses
+          the sub-modal and returns to the parent workspace form.
+        -->
+        <p
+          v-if="isResidentCreateMode"
+          class="modal-hint"
+        >
+          The resident is configured here and created together with the
+          workspace when you press "Create workspace"
+          (常驻 agent 将随工作区一并创建).
+        </p>
         <div class="modal-actions">
           <button
             type="button"
-            class="primary-button"
+            class="tool-button"
             @click="closeResidentAgentModal"
           >
             Done
           </button>
+          <LoadingButton
+            type="button"
+            class="danger-button workspace-delete-button"
+            :disabled="isResidentCreateMode || !residentExists"
+            :loading="isPending('resident:delete')"
+            loading-label="Deleting resident"
+            @click="handleDeleteResident"
+          >
+            Delete resident
+          </LoadingButton>
+          <LoadingButton
+            type="button"
+            class="tool-button"
+            :disabled="isResidentCreateMode || !residentExists"
+            :loading="isPending('resident:pause')"
+            :loading-label="(activeWorkspace?.resident_agent_paused ?? false) ? 'Resuming resident' : 'Pausing resident'"
+            @click="handleToggleResidentPause"
+          >
+            {{ (activeWorkspace?.resident_agent_paused ?? false) ? 'Resume' : 'Pause' }}
+          </LoadingButton>
+          <LoadingButton
+            type="button"
+            class="primary-button"
+            :disabled="isResidentCreateMode || residentExists"
+            :loading="isPending('resident:create')"
+            loading-label="Creating resident"
+            @click="handleCreateResident"
+          >
+            Create resident
+          </LoadingButton>
         </div>
       </div>
     </div>
@@ -2791,6 +2843,7 @@ import type {
   WorkspaceTaskMode,
   WorkspaceTaskStatus,
   WorkspaceTaskUpdate,
+  WorkspaceUpdate,
 } from '@/types'
 
 interface TaskStartOptions {
@@ -4368,6 +4421,13 @@ async function handleCreateWorkspace() {
       remote_cwd:
         workspaceForm.target === 'remote' ? workspaceForm.remote_cwd.trim() || null : null,
       remote_reconnect: workspaceForm.remote_reconnect,
+      // NOTE: create-mode inlines the resident_agent_* fields rather than
+      // spreading buildResidentPayload() because that helper returns a
+      // WorkspaceUpdate, whose resident_agent_title / resident_agent_cwd are
+      // `string | null`. WorkspaceCreate types those as `string | undefined`
+      // (null not allowed), so the spread fails vue-tsc. For create, `undefined`
+      // is the correct "omit" value — the backend applies its defaults — so the
+      // `|| undefined` here is intentional and not a divergence bug.
       resident_agent_enabled: workspaceForm.resident_agent_enabled,
       resident_agent_paused: workspaceForm.resident_agent_paused,
       resident_agent_master_mode: workspaceForm.resident_agent_master_mode,
@@ -4392,6 +4452,32 @@ async function handleCreateWorkspace() {
   }
 }
 
+// Build the resident_agent_* slice of a WorkspaceUpdate from the current form,
+// merged with any overrides. Shared by handleSaveWorkspace and the resident
+// lifecycle buttons (handleCreateResident) so the payload shape stays in one
+// place. Field shape matches the values WorkspaceUpdate accepts.
+function buildResidentPayload(overrides: Partial<WorkspaceUpdate> = {}): WorkspaceUpdate {
+  return {
+    resident_agent_enabled: workspaceForm.resident_agent_enabled,
+    resident_agent_paused: workspaceForm.resident_agent_paused,
+    resident_agent_master_mode: workspaceForm.resident_agent_master_mode,
+    resident_agent_interval_minutes: workspaceForm.resident_agent_interval_minutes,
+    resident_agent_directive: workspaceForm.resident_agent_directive.trim() || undefined,
+    resident_agent_type: workspaceForm.resident_agent_type,
+    resident_agent_env: parseLaunchEnv(workspaceForm.resident_env_text) ?? {},
+    resident_agent_solo_mode: workspaceForm.resident_agent_solo_mode,
+    resident_agent_title: workspaceForm.resident_agent_title.trim() || null,
+    resident_agent_target: workspaceForm.resident_agent_target,
+    resident_agent_remote_profile_id:
+      workspaceForm.resident_agent_target === 'remote'
+        ? workspaceForm.resident_agent_remote_profile_id || null
+        : null,
+    resident_agent_cwd: workspaceForm.resident_agent_cwd.trim() || null,
+    resident_agent_remote_reconnect: workspaceForm.resident_agent_remote_reconnect,
+    ...overrides,
+  }
+}
+
 async function handleSaveWorkspace() {
   const workspaceId = editingWorkspaceId.value
   if (!workspaceId) return
@@ -4404,22 +4490,7 @@ async function handleSaveWorkspace() {
         workspaceForm.target === 'remote' ? workspaceForm.remote_cwd.trim() || null : undefined,
       remote_reconnect:
         workspaceForm.target === 'remote' ? workspaceForm.remote_reconnect : undefined,
-      resident_agent_enabled: workspaceForm.resident_agent_enabled,
-      resident_agent_paused: workspaceForm.resident_agent_paused,
-      resident_agent_master_mode: workspaceForm.resident_agent_master_mode,
-      resident_agent_interval_minutes: workspaceForm.resident_agent_interval_minutes,
-      resident_agent_directive: workspaceForm.resident_agent_directive.trim() || undefined,
-      resident_agent_type: workspaceForm.resident_agent_type,
-      resident_agent_env: parseLaunchEnv(workspaceForm.resident_env_text) ?? {},
-      resident_agent_solo_mode: workspaceForm.resident_agent_solo_mode,
-      resident_agent_title: workspaceForm.resident_agent_title.trim() || null,
-      resident_agent_target: workspaceForm.resident_agent_target,
-      resident_agent_remote_profile_id:
-        workspaceForm.resident_agent_target === 'remote'
-          ? workspaceForm.resident_agent_remote_profile_id || null
-          : null,
-      resident_agent_cwd: workspaceForm.resident_agent_cwd.trim() || null,
-      resident_agent_remote_reconnect: workspaceForm.resident_agent_remote_reconnect,
+      ...buildResidentPayload(),
     })
   )
   if (workspace) {
@@ -4515,6 +4586,79 @@ function openResidentAgentModal() {
 
 function closeResidentAgentModal() {
   showResidentAgentModal.value = false
+}
+
+// --- Resident lifecycle buttons (Create / Pause / Delete) ---------------
+//
+// These act immediately via PATCH /api/workspaces/{id} in EDIT mode, where the
+// workspace already exists. In CREATE mode there is no id to PATCH yet, so the
+// three lifecycle buttons are disabled and the resident config is persisted by
+// the parent "Create workspace" button (handleCreateWorkspace already sends the
+// resident_agent_* fields). "Exists" is read from the SAVED workspace
+// (activeWorkspace), not the editable form flag.
+const isResidentCreateMode = computed(() => workspaceModalMode.value !== 'edit')
+const residentExists = computed(
+  () => !isResidentCreateMode.value && (activeWorkspace.value?.resident_agent_enabled ?? false)
+)
+
+// Create / enable the resident: PATCH the full resident payload with
+// enabled:true. The next monitor tick spawns the resident session. Keep the
+// sub-modal open so the user sees the state flip (Create disables, Pause/Delete
+// enable). The override forces enabled:true regardless of the form value, so we
+// mirror the flag into the form ONLY after the PATCH succeeds (success-gated,
+// like handleToggleResidentPause / handleDeleteResident). This avoids leaving
+// the form at enabled:true after a failed PATCH, which a later parent "Save
+// workspace" would otherwise re-send and unintentionally create the resident.
+async function handleCreateResident() {
+  if (workspaceModalMode.value !== 'edit' || !editingWorkspaceId.value) return
+  if (residentExists.value) return
+  const workspaceId = editingWorkspaceId.value
+  const workspace = await runPending('resident:create', () =>
+    workspaceStore.updateWorkspace(
+      workspaceId,
+      buildResidentPayload({ resident_agent_enabled: true })
+    )
+  )
+  if (workspace) {
+    workspaceForm.resident_agent_enabled = true
+  }
+}
+
+// Toggle Pause/Resume: PATCH only resident_agent_paused. Backend keeps the
+// session + tab alive on pause (only stops auto-scheduling). Mirror the new
+// value into the form so the sub-modal checkbox/label stay in sync.
+async function handleToggleResidentPause() {
+  if (workspaceModalMode.value !== 'edit' || !editingWorkspaceId.value) return
+  if (!residentExists.value) return
+  const workspaceId = editingWorkspaceId.value
+  const next = !(activeWorkspace.value?.resident_agent_paused ?? false)
+  const workspace = await runPending('resident:pause', () =>
+    workspaceStore.updateWorkspace(workspaceId, { resident_agent_paused: next })
+  )
+  if (workspace) {
+    workspaceForm.resident_agent_paused = next
+  }
+}
+
+// Delete the resident agent ONLY (not the workspace): PATCH enabled:false. The
+// backend's disabling_resident path clears the session pointer, drops the
+// ManagedSession (the orphan-tab pruner removes the tab), and resets
+// last_run_at. The workspace itself is untouched.
+async function handleDeleteResident() {
+  if (workspaceModalMode.value !== 'edit' || !editingWorkspaceId.value) return
+  if (!residentExists.value) return
+  const confirmed = window.confirm(
+    'Remove the resident agent for this workspace? Its session will be stopped. '
+      + 'The workspace itself is kept.'
+  )
+  if (!confirmed) return
+  const workspaceId = editingWorkspaceId.value
+  const workspace = await runPending('resident:delete', () =>
+    workspaceStore.updateWorkspace(workspaceId, { resident_agent_enabled: false })
+  )
+  if (workspace) {
+    workspaceForm.resident_agent_enabled = false
+  }
 }
 
 // Compact summary shown on the workspace form's "Configure…" row.
