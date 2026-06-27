@@ -9,6 +9,7 @@ import click
 
 from claude_hub.cli import main as cli_main
 from claude_hub.cli.client import HubError
+from claude_hub.cli.commands.common import merge_payload, parse_attachment_json
 from claude_hub.cli.output import emit, print_rows
 
 REPORT_STATES = [
@@ -107,11 +108,30 @@ def _find_session_tab(client: Any, session_id: str) -> Optional[str]:
 
 @session.command("send")
 @click.argument("session_id")
-@click.option("--message", required=True, help="Message to send to the session.")
+@click.option("--message", default=None, help="Message to send to the session.")
+@click.option(
+    "--attachment-json",
+    "attachment_json",
+    multiple=True,
+    help="Attachment JSON object (repeatable).",
+)
+@click.option("--payload-json", default=None, help="Raw JSON object merged into the body.")
 @click.pass_context
-def session_send(ctx: click.Context, session_id: str, message: str) -> None:
+def session_send(
+    ctx: click.Context,
+    session_id: str,
+    message: Optional[str],
+    attachment_json: tuple,
+    payload_json: Optional[str],
+) -> None:
     """Send a message to a managed session."""
-    body: Dict[str, Any] = {"message": message, "attachments": []}
+    body = merge_payload(payload_json, message=message)
+    if attachment_json:
+        body["attachments"] = parse_attachment_json(attachment_json)
+    elif "attachments" not in body:
+        body["attachments"] = []
+    if not body.get("message"):
+        raise click.ClickException("--message is required unless supplied by --payload-json.")
     try:
         with cli_main.get_client(ctx) as client:
             client.send_session(session_id, body)
@@ -121,6 +141,22 @@ def session_send(ctx: click.Context, session_id: str, message: str) -> None:
         emit({"ok": True}, True)
     else:
         click.echo("sent")
+
+
+@session.command("delete")
+@click.argument("session_id")
+@click.pass_context
+def session_delete(ctx: click.Context, session_id: str) -> None:
+    """Delete an idle managed session and its terminal tab."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            client.delete_session(session_id)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    if cli_main.as_json(ctx):
+        emit({"ok": True}, True)
+    else:
+        click.echo(f"deleted {session_id}")
 
 
 @session.command("report")

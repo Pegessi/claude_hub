@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
+import click
 import httpx
 import pytest
 from click.testing import CliRunner
@@ -14,12 +15,16 @@ from claude_hub.cli.client import HubClient, HubError
 from claude_hub.cli.main import cli
 
 
-def make_client(handler, **kwargs) -> HubClient:
+def make_client(handler: Callable[[httpx.Request], httpx.Response], **kwargs: Any) -> HubClient:
     transport = httpx.MockTransport(handler)
     return HubClient(base_url="http://testserver", transport=transport, **kwargs)
 
 
-def patch_get_client(monkeypatch, handler, **kwargs) -> List[httpx.Request]:
+def patch_get_client(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Callable[[httpx.Request], httpx.Response],
+    **kwargs: Any,
+) -> List[httpx.Request]:
     """Make get_client return a MockTransport-backed client; record requests."""
     captured: List[httpx.Request] = []
 
@@ -27,8 +32,8 @@ def patch_get_client(monkeypatch, handler, **kwargs) -> List[httpx.Request]:
         captured.append(request)
         return handler(request)
 
-    def fake_get_client(ctx) -> HubClient:
-        return make_client(recording_handler)
+    def fake_get_client(ctx: click.Context) -> HubClient:
+        return make_client(recording_handler, **kwargs)
 
     monkeypatch.setattr(cli_main, "get_client", fake_get_client)
     return captured
@@ -38,7 +43,22 @@ def test_help_lists_groups():
     runner = CliRunner()
     result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0
-    for group in ("workspace", "task", "agent", "session", "lessons"):
+    for group in (
+        "auth",
+        "system",
+        "tab",
+        "terminal",
+        "filesystem",
+        "fs",
+        "remote",
+        "clipboard",
+        "api",
+        "workspace",
+        "task",
+        "agent",
+        "session",
+        "lessons",
+    ):
         assert group in result.output
 
 
@@ -724,6 +744,145 @@ def test_request_review_omits_message(monkeypatch):
     result = runner.invoke(cli, ["task", "request-review", "t1"])
     assert result.exit_code == 0, result.output
     assert bodies[0] == {}
+
+
+def test_api_raw_patch_with_query_and_payload(monkeypatch):
+    seen: Dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["query"] = dict(request.url.params)
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"ok": True})
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "--json",
+            "api",
+            "raw",
+            "PATCH",
+            "api/example",
+            "--query",
+            "expand=1",
+            "--payload-json",
+            json.dumps({"name": "demo"}),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert seen == {
+        "method": "PATCH",
+        "path": "/api/example",
+        "query": {"expand": "1"},
+        "body": {"name": "demo"},
+    }
+    assert json.loads(result.output) == {"ok": True}
+
+
+def test_tab_create_remote_body(monkeypatch):
+    bodies: List[Dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/tabs"
+        bodies.append(json.loads(request.content))
+        return httpx.Response(201, json={"id": "tab1"})
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "tab",
+            "create",
+            "--name",
+            "remote",
+            "--target",
+            "remote",
+            "--remote-profile-id",
+            "prod",
+            "--remote-cwd",
+            "/srv/app",
+            "--env",
+            "A=B",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert bodies[0]["target"] == "remote"
+    assert bodies[0]["remote_profile_id"] == "prod"
+    assert bodies[0]["remote_cwd"] == "/srv/app"
+    assert bodies[0]["env"] == {"A": "B"}
+
+
+def test_task_update_payload_and_flags(monkeypatch):
+    bodies: List[Dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PATCH"
+        assert request.url.path == "/api/workspaces/tasks/t1"
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": "t1", "status": "queued"})
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "task",
+            "update",
+            "t1",
+            "--status",
+            "queued",
+            "--review-profile",
+            "code",
+            "--payload-json",
+            json.dumps({"title": "from-json", "status": "todo"}),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert bodies[0] == {
+        "title": "from-json",
+        "status": "queued",
+        "review_profiles": ["code"],
+    }
+
+
+def test_session_send_payload_json_attachments(monkeypatch):
+    bodies: List[Dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/workspaces/sessions/s1/send"
+        bodies.append(json.loads(request.content))
+        return httpx.Response(204)
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    payload = {"message": "from-json", "attachments": [{"filename": "a.txt"}]}
+    result = runner.invoke(cli, ["session", "send", "s1", "--payload-json", json.dumps(payload)])
+    assert result.exit_code == 0, result.output
+    assert bodies[0] == payload
+
+
+def test_lessons_summarize(monkeypatch):
+    bodies: List[Dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/workspaces/ws1/lessons/summarize"
+        bodies.append(json.loads(request.content))
+        return httpx.Response(201, json={"id": "run1"})
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["lessons", "summarize", "ws1", "--mode", "full", "--limit", "10", "--force"],
+    )
+    assert result.exit_code == 0, result.output
+    assert bodies[0] == {"mode": "full", "limit": 10, "force": True}
 
 
 @pytest.mark.parametrize("status", [200, 204])

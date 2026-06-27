@@ -101,6 +101,38 @@
 - **Files**: `backend/claude_hub/services/workspace_manager/_monitor.py`,
   `backend/tests/test_workspaces.py`.
 
+### feat: Claude Hub CLI exposes the full REST control surface
+
+- **What**: broadens the `claude-hub` CLI from task/session inspection into a
+  full Claude Hub control plane for external agents such as Hermes. New typed
+  command groups cover auth checks, system network access, terminal tabs,
+  terminal history/proxy URLs, local filesystem browsing, remote profiles and
+  remote filesystem browsing, clipboard image upload, and a generic `api raw`
+  escape hatch for any current or future REST endpoint.
+- **Workspace/task/session/lessons coverage**: existing command groups now cover
+  workspace update/dispatch/artifact preview/attachment download, task
+  update/delete/spawn/dispatch-decision/feedback reap, session delete and
+  attachment-aware send, richer agent creation flags, and lesson create /
+  summarize flows. Complex request bodies can be supplied with `--payload-json`
+  so agents are not blocked on one flag per schema field.
+- **Feishu/Hermes surface**: `feishu build-card` adds cards for tabs, runtime
+  status, network access, filesystem, remote profiles, remote filesystem,
+  generic command results, and an action catalog. `feishu parse-action` now
+  returns a suggested CLI command when the callback contains enough IDs. The
+  Hermes `claude-hub` skill documents typed commands plus `api raw` as the
+  complete-control model and no longer advertises a nonexistent built-in
+  `feishu-bot` command.
+- **Files**: `backend/claude_hub/cli/client.py`,
+  `backend/claude_hub/cli/main.py`, `backend/claude_hub/cli/commands/common.py`,
+  `backend/claude_hub/cli/commands/rest.py`,
+  `backend/claude_hub/cli/commands/workspaces.py`,
+  `backend/claude_hub/cli/commands/tasks.py`,
+  `backend/claude_hub/cli/commands/sessions.py`,
+  `backend/claude_hub/cli/commands/lessons.py`,
+  `backend/claude_hub/cli/commands/feishu.py`,
+  `backend/claude_hub/cli/feishu_cards.py`, `backend/tests/test_cli.py`, and
+  `backend/tests/test_feishu_commands.py`.
+
 ### feat: CLI task/session inspection and richer Feishu collaboration cards
 
 - **What**: expands the `claude-hub` CLI surface used by third-party agents such

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from types import TracebackType
 from typing import Any, Dict, Optional, Type
 
@@ -120,12 +121,40 @@ class HubClient:
         path: str,
         *,
         json: Any = None,
+        data: Any = None,
+        files: Any = None,
         params: Optional[Dict[str, Any]] = None,
     ) -> Any:
+        resp = self.request_response(method, path, json=json, data=data, files=files, params=params)
+
+        if resp.status_code == 204 or not resp.content:
+            return None
+        content_type = resp.headers.get("content-type", "")
+        if "json" not in content_type:
+            return resp.text
+        return resp.json()
+
+    def request_response(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        data: Any = None,
+        files: Any = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> httpx.Response:
         # Build the request up front so verbose logging reflects the REAL
         # outgoing URL (httpx's own base_url+path joining), and so the URL is
         # available to log even when sending raises.
-        request = self._client.build_request(method, path, json=json, params=params)
+        request = self._client.build_request(
+            method,
+            path,
+            json=json,
+            data=data,
+            files=files,
+            params=params,
+        )
         if self._verbose:
             print(f"{request.method} {request.url}", file=sys.stderr)
         try:
@@ -145,9 +174,46 @@ class HubClient:
                 detail = resp.text
             raise HubError(detail or f"HTTP {resp.status_code}", resp.status_code)
 
-        if resp.status_code == 204 or not resp.content:
-            return None
-        return resp.json()
+        return resp
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Generic REST escape hatch for current and future API routes."""
+        return self._request(method, path, json=json, params=params)
+
+    # -- Auth / system ------------------------------------------------------
+
+    def auth_login_response(self) -> httpx.Response:
+        """GET /api/auth/login."""
+        return self.request_response("GET", "/api/auth/login")
+
+    def auth_callback_response(self, code: str, state: str = "") -> httpx.Response:
+        """GET /api/auth/callback."""
+        return self.request_response(
+            "GET", "/api/auth/callback", params={"code": code, "state": state}
+        )
+
+    def get_current_user(self) -> Any:
+        """GET /api/auth/me."""
+        return self._request("GET", "/api/auth/me")
+
+    def check_auth(self) -> Any:
+        """GET /api/auth/check."""
+        return self._request("GET", "/api/auth/check")
+
+    def logout(self) -> Any:
+        """POST /api/auth/logout."""
+        return self._request("POST", "/api/auth/logout")
+
+    def get_network_access(self) -> Any:
+        """GET /api/system/network-access."""
+        return self._request("GET", "/api/system/network-access")
 
     # -- Workspaces ---------------------------------------------------------
 
@@ -159,9 +225,37 @@ class HubClient:
         """POST /api/workspaces."""
         return self._request("POST", "/api/workspaces", json=body)
 
+    def update_workspace(self, workspace_id: str, body: Dict[str, Any]) -> Any:
+        """PATCH /api/workspaces/{workspace_id}."""
+        return self._request("PATCH", f"/api/workspaces/{workspace_id}", json=body)
+
     def get_board(self, workspace_id: str) -> Any:
         """GET /api/workspaces/{workspace_id}/board."""
         return self._request("GET", f"/api/workspaces/{workspace_id}/board")
+
+    def dispatch_workspace(self, workspace_id: str) -> None:
+        """POST /api/workspaces/{workspace_id}/dispatch (204)."""
+        self._request("POST", f"/api/workspaces/{workspace_id}/dispatch")
+
+    def preview_workspace_artifact(
+        self,
+        workspace_id: str,
+        path: str,
+        report_id: Optional[str] = None,
+    ) -> Any:
+        """GET /api/workspaces/{workspace_id}/artifacts/preview."""
+        params: Dict[str, Any] = {"path": path}
+        if report_id is not None:
+            params["report_id"] = report_id
+        return self._request(
+            "GET",
+            f"/api/workspaces/{workspace_id}/artifacts/preview",
+            params=params,
+        )
+
+    def get_attachment_response(self, attachment_id: str) -> httpx.Response:
+        """GET /api/workspaces/attachments/{attachment_id}."""
+        return self.request_response("GET", f"/api/workspaces/attachments/{attachment_id}")
 
     # -- Tasks --------------------------------------------------------------
 
@@ -189,6 +283,26 @@ class HubClient:
         """PATCH /api/workspaces/tasks/{task_id}."""
         return self._request("PATCH", f"/api/workspaces/tasks/{task_id}", json=body)
 
+    def delete_task(self, task_id: str) -> None:
+        """DELETE /api/workspaces/tasks/{task_id}."""
+        self._request("DELETE", f"/api/workspaces/tasks/{task_id}")
+
+    def reap_task_feedback(self, task_id: str, body: Dict[str, Any]) -> Any:
+        """POST /api/workspaces/tasks/{task_id}/feedback/reap."""
+        return self._request("POST", f"/api/workspaces/tasks/{task_id}/feedback/reap", json=body)
+
+    def spawn_worker(self, task_id: str, body: Dict[str, Any]) -> Any:
+        """POST /api/workspaces/tasks/{task_id}/spawn."""
+        return self._request("POST", f"/api/workspaces/tasks/{task_id}/spawn", json=body)
+
+    def apply_dispatch_decision(self, task_id: str, body: Dict[str, Any]) -> Any:
+        """POST /api/workspaces/tasks/{task_id}/dispatch-decision."""
+        return self._request(
+            "POST",
+            f"/api/workspaces/tasks/{task_id}/dispatch-decision",
+            json=body,
+        )
+
     def get_task_reports(self, workspace_id: str, task_id: str) -> Any:
         """GET /api/workspaces/{workspace_id}/tasks/{task_id}/reports."""
         return self._request("GET", f"/api/workspaces/{workspace_id}/tasks/{task_id}/reports")
@@ -198,6 +312,10 @@ class HubClient:
     def ensure_agent(self, workspace_id: str, body: Dict[str, Any]) -> Any:
         """POST /api/workspaces/{workspace_id}/agent."""
         return self._request("POST", f"/api/workspaces/{workspace_id}/agent", json=body)
+
+    def delete_session(self, session_id: str) -> None:
+        """DELETE /api/workspaces/sessions/{session_id}."""
+        self._request("DELETE", f"/api/workspaces/sessions/{session_id}")
 
     def send_session(self, session_id: str, body: Dict[str, Any]) -> None:
         """POST /api/workspaces/sessions/{session_id}/send (204)."""
@@ -210,6 +328,77 @@ class HubClient:
     def create_report(self, session_id: str, body: Dict[str, Any]) -> Any:
         """POST /api/workspaces/sessions/{session_id}/reports."""
         return self._request("POST", f"/api/workspaces/sessions/{session_id}/reports", json=body)
+
+    # -- Tabs / terminal / filesystem / remote -----------------------------
+
+    def list_tabs(self) -> Any:
+        """GET /api/tabs."""
+        return self._request("GET", "/api/tabs")
+
+    def list_tab_statuses(self) -> Any:
+        """GET /api/tabs/status."""
+        return self._request("GET", "/api/tabs/status")
+
+    def create_tab(self, body: Dict[str, Any]) -> Any:
+        """POST /api/tabs."""
+        return self._request("POST", "/api/tabs", json=body)
+
+    def update_tab_order(self, tab_ids: list[str]) -> Any:
+        """PUT /api/tabs/order."""
+        return self._request("PUT", "/api/tabs/order", json={"tab_ids": tab_ids})
+
+    def duplicate_tab(self, tab_id: str) -> Any:
+        """POST /api/tabs/{tab_id}/duplicate."""
+        return self._request("POST", f"/api/tabs/{tab_id}/duplicate")
+
+    def get_tab(self, tab_id: str) -> Any:
+        """GET /api/tabs/{tab_id}."""
+        return self._request("GET", f"/api/tabs/{tab_id}")
+
+    def update_tab(self, tab_id: str, body: Dict[str, Any]) -> Any:
+        """PUT /api/tabs/{tab_id}."""
+        return self._request("PUT", f"/api/tabs/{tab_id}", json=body)
+
+    def delete_tab(self, tab_id: str) -> None:
+        """DELETE /api/tabs/{tab_id}."""
+        self._request("DELETE", f"/api/tabs/{tab_id}")
+
+    def list_directory(self, path: Optional[str] = None) -> Any:
+        """GET /api/filesystem/list."""
+        params = {"path": path} if path is not None else None
+        return self._request("GET", "/api/filesystem/list", params=params)
+
+    def get_home_directory(self) -> Any:
+        """GET /api/filesystem/home."""
+        return self._request("GET", "/api/filesystem/home")
+
+    def list_remote_profiles(self) -> Any:
+        """GET /api/remote/profiles."""
+        return self._request("GET", "/api/remote/profiles")
+
+    def list_remote_directory(self, profile_id: str, path: Optional[str] = None) -> Any:
+        """GET /api/remote/filesystem/list."""
+        params: Dict[str, Any] = {"profile_id": profile_id}
+        if path is not None:
+            params["path"] = path
+        return self._request("GET", "/api/remote/filesystem/list", params=params)
+
+    def upload_clipboard_image(
+        self,
+        path: str,
+        content_type: Optional[str] = None,
+    ) -> Any:
+        """POST /api/clipboard/image."""
+        image_path = Path(path)
+        with image_path.open("rb") as f:
+            files = {
+                "image": (
+                    image_path.name,
+                    f,
+                    content_type or "application/octet-stream",
+                )
+            }
+            return self._request("POST", "/api/clipboard/image", files=files)
 
     # -- Lessons ------------------------------------------------------------
 
@@ -228,3 +417,15 @@ class HubClient:
         with 204 No Content.
         """
         return self._request("DELETE", f"/api/workspaces/{workspace_id}/lessons/{lesson_id}")
+
+    def create_lesson(self, workspace_id: str, body: Dict[str, Any]) -> Any:
+        """POST /api/workspaces/{workspace_id}/lessons."""
+        return self._request("POST", f"/api/workspaces/{workspace_id}/lessons", json=body)
+
+    def summarize_lessons(self, workspace_id: str, body: Dict[str, Any]) -> Any:
+        """POST /api/workspaces/{workspace_id}/lessons/summarize."""
+        return self._request(
+            "POST",
+            f"/api/workspaces/{workspace_id}/lessons/summarize",
+            json=body,
+        )

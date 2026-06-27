@@ -46,6 +46,14 @@ DISPLAY_KINDS = (
     "reports",
     "terminal",
     "lessons",
+    "tabs",
+    "tab_status",
+    "network",
+    "filesystem",
+    "remote_profiles",
+    "remote_filesystem",
+    "result",
+    "action_catalog",
 )
 CARD_KINDS = INTERACTIVE_KINDS + DISPLAY_KINDS
 
@@ -63,6 +71,14 @@ _TEMPLATES = {
     "reports": "turquoise",
     "terminal": "blue",
     "lessons": "turquoise",
+    "tabs": "turquoise",
+    "tab_status": "turquoise",
+    "network": "green",
+    "filesystem": "blue",
+    "remote_profiles": "purple",
+    "remote_filesystem": "purple",
+    "result": "grey",
+    "action_catalog": "blue",
 }
 
 
@@ -131,7 +147,7 @@ def parse_card_action(payload: Any) -> Optional[Dict[str, Any]]:
         context = _attr_or_key(event, "context")
         chat_id = _attr_or_key(context, "open_chat_id") or _attr_or_key(event, "open_chat_id")
 
-        return {
+        decision = {
             "token": str(token),
             "action": value.get(ACTION_KEY),
             "value": dict(value),
@@ -139,9 +155,44 @@ def parse_card_action(payload: Any) -> Optional[Dict[str, Any]]:
             "operator_id": operator_id,
             "chat_id": chat_id,
         }
+        command = action_to_cli_command(decision)
+        if command:
+            decision["cli_command"] = command
+        return decision
     except Exception:  # noqa: BLE001 - never crash on a malformed callback
         logger.exception("feishu: failed to parse card action payload")
         return None
+
+
+def action_to_cli_command(decision: Dict[str, Any]) -> Optional[str]:
+    """Return a suggested ``claude-hub`` command for a parsed card action."""
+    value = decision.get("value")
+    if not isinstance(value, dict):
+        value = {}
+    form = decision.get("form")
+    if not isinstance(form, dict):
+        form = {}
+
+    action = str(decision.get("action") or value.get(ACTION_KEY) or "")
+    workspace_id = value.get("workspace_id")
+    task_id = value.get("task_id")
+    tab_id = value.get("tab_id")
+    session_id = value.get("session_id")
+
+    if action == "focus" and task_id:
+        suffix = f" --workspace-id {workspace_id}" if workspace_id else ""
+        return f"claude-hub task get {task_id}{suffix}"
+    if action == "terminal" and tab_id:
+        return f"claude-hub feishu build-card --kind terminal --tab-id {tab_id}"
+    if action == "send" and session_id:
+        message = form.get("message") or "<message>"
+        return f"claude-hub session send {session_id} --message {message!r}"
+    if action in {"approve", "confirm"} and task_id:
+        suffix = f" --workspace-id {workspace_id}" if workspace_id else ""
+        return f"claude-hub task accept {task_id}{suffix}"
+    if action == "reject" and task_id:
+        return f"claude-hub task send {workspace_id or '<workspace_id>'} {task_id} --message '<feedback>'"
+    return None
 
 
 def _plain_text(content: str) -> Dict[str, Any]:
@@ -358,6 +409,20 @@ def build_result_card(title: str, body: str, *, kind: str = "status") -> Dict[st
     return _wrap(_header(title, kind), [_markdown(body)])
 
 
+def _item_rows(items: list[Dict[str, Any]], *, limit: int) -> list[Dict[str, Any]]:
+    """Render filesystem-style items as compact markdown rows."""
+    rows: list[Dict[str, Any]] = []
+    for item in items[:limit]:
+        marker = "[dir]" if _get(item, "is_dir", False) else "[file]"
+        suffix = " ->" if _get(item, "is_symlink", False) else ""
+        rows.append(
+            _row(f"`{marker}` {_get(item, 'name', '?')}{suffix}", str(_get(item, "path", "")))
+        )
+    if len(items) > limit:
+        rows.append(_note(f"... and {len(items) - limit} more"))
+    return rows
+
+
 def build_workspaces_card(workspaces: Any) -> Dict[str, Any]:
     """Build a display-only list of workspaces with `/cd` hints."""
     items = [ws for ws in (workspaces or []) if isinstance(ws, dict)]
@@ -369,6 +434,130 @@ def build_workspaces_card(workspaces: Any) -> Dict[str, Any]:
         for ws in items
     )
     return _wrap(_header("Workspaces", "status"), [_markdown(rows)])
+
+
+def build_tabs_card(tabs: Any, statuses: Any = None, *, limit: int = 12) -> Dict[str, Any]:
+    """Build a display-only terminal tab inventory card."""
+    items = [tab for tab in (tabs or []) if isinstance(tab, dict)]
+    status_by_tab = {
+        str(_get(status, "tab_id", "")): status
+        for status in (statuses or [])
+        if isinstance(status, dict)
+    }
+    if not items:
+        return build_result_card("Tabs", "_No terminal tabs._", kind="tabs")
+
+    elements: List[Dict[str, Any]] = [_row("**Tab**", "**Runtime**")]
+    for tab in items[:limit]:
+        tab_id = str(_get(tab, "id", "?"))
+        status = status_by_tab.get(tab_id, {})
+        name = _get(tab, "name", "")
+        agent_type = _get(tab, "agent_type", "?")
+        target = _get(tab, "target", "local")
+        workspace = _get(tab, "workspace_name", "") or _get(tab, "workspace_id", "")
+        left = f"`{tab_id}` {name}\n{agent_type} · {target}".rstrip()
+        if workspace:
+            left += f" · {workspace}"
+        runtime = _get(status, "status", "unknown") if status else "unknown"
+        detail = _get(status, "status_text", "") if status else ""
+        if not detail:
+            detail = _get(tab, "cwd", "") or _get(tab, "remote_cwd", "")
+        elements.append(_row(left, f"**{runtime}**\n{detail}".rstrip()))
+    if len(items) > limit:
+        elements.append(_note(f"... and {len(items) - limit} more"))
+    return _wrap(_header("Tabs", "tabs"), elements)
+
+
+def build_tab_status_card(statuses: Any, *, limit: int = 12) -> Dict[str, Any]:
+    """Build a display-only runtime-status card for terminal agents."""
+    items = [status for status in (statuses or []) if isinstance(status, dict)]
+    if not items:
+        return build_result_card("Tab Status", "_No runtime status samples._", kind="tab_status")
+    elements: List[Dict[str, Any]] = [_row("**Agent**", "**Status**")]
+    for status in items[:limit]:
+        left = f"`{_get(status, 'tab_id', '?')}` {_get(status, 'tab_name', '')}\n{_get(status, 'agent_type', '?')}"
+        right = f"**{_get(status, 'status', '?')}**\n{_get(status, 'status_text', '')}".rstrip()
+        detail = _get(status, "detail", "")
+        if detail:
+            right += f"\n{detail}"
+        elements.append(_row(left, right))
+    if len(items) > limit:
+        elements.append(_note(f"... and {len(items) - limit} more"))
+    return _wrap(_header("Tab Status", "tab_status"), elements)
+
+
+def build_network_card(network: Any) -> Dict[str, Any]:
+    """Build a display-only network access card."""
+    hostname = _get(network, "hostname", "localhost")
+    addresses = [addr for addr in (_get(network, "addresses", []) or []) if isinstance(addr, dict)]
+    if addresses:
+        rows = "\n".join(
+            f"- `{_get(addr, 'address', '?')}` — {_get(addr, 'label', 'LAN IP')}"
+            for addr in addresses
+        )
+    else:
+        rows = "_No non-loopback IPv4 addresses found._"
+    return _wrap(_header(f"Network · {hostname}", "network"), [_markdown(rows)])
+
+
+def build_filesystem_card(
+    listing: Any, *, title: str = "Filesystem", kind: str = "filesystem", limit: int = 12
+) -> Dict[str, Any]:
+    """Build a display-only local/remote directory listing card."""
+    current = str(_get(listing, "current_path", ""))
+    items = [item for item in (_get(listing, "items", []) or []) if isinstance(item, dict)]
+    elements: List[Dict[str, Any]] = [
+        _markdown(f"`{current}`" if current else "_No path returned._")
+    ]
+    if items:
+        elements.append(_row("**Name**", "**Path**"))
+        elements.extend(_item_rows(items, limit=limit))
+    else:
+        elements.append(_markdown("_Directory is empty._"))
+    parent = _get(listing, "parent_path", "")
+    if parent:
+        elements.append(_note(f"parent: {parent}"))
+    return _wrap(_header(title, kind), elements)
+
+
+def build_remote_profiles_card(profiles: Any, *, limit: int = 12) -> Dict[str, Any]:
+    """Build a display-only remote profile inventory card."""
+    items = [profile for profile in (profiles or []) if isinstance(profile, dict)]
+    if not items:
+        return build_result_card(
+            "Remote Profiles", "_No remote profiles configured._", kind="remote_profiles"
+        )
+    elements: List[Dict[str, Any]] = [_row("**Profile**", "**Target**")]
+    for profile in items[:limit]:
+        left = f"`{_get(profile, 'id', '?')}` {_get(profile, 'name', '')}".rstrip()
+        host = _get(profile, "ssh_host", "?")
+        user = _get(profile, "user", "")
+        port = _get(profile, "port", 22)
+        target = f"{user + '@' if user else ''}{host}:{port}"
+        cwd = _get(profile, "default_cwd", "")
+        elements.append(_row(left, f"{target}\n{cwd}".rstrip()))
+    if len(items) > limit:
+        elements.append(_note(f"... and {len(items) - limit} more"))
+    return _wrap(_header("Remote Profiles", "remote_profiles"), elements)
+
+
+def build_action_catalog_card() -> Dict[str, Any]:
+    """Build a display-only catalog of card actions and suggested CLI commands."""
+    rows = [
+        ("`focus`", "`claude-hub task get <task_id> [--workspace-id <ws_id>]`"),
+        ("`terminal`", "`claude-hub feishu build-card --kind terminal --tab-id <tab_id>`"),
+        ("`send`", "`claude-hub session send <session_id> --message ...`"),
+        ("`approve` / `confirm`", "`claude-hub task accept <task_id>` when task_id is present"),
+        (
+            "`reject`",
+            "`claude-hub task send <ws_id> <task_id> --message '<feedback>'` when task_id is present",
+        ),
+    ]
+    elements = [_row(action, command) for action, command in rows]
+    elements.append(
+        _note("parse-action returns cli_command when the callback value has enough ids")
+    )
+    return _wrap(_header("Feishu Actions", "action_catalog"), elements)
 
 
 def build_overview_card(

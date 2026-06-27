@@ -8,6 +8,11 @@ import click
 
 from claude_hub.cli import main as cli_main
 from claude_hub.cli.client import HubError
+from claude_hub.cli.commands.common import (
+    merge_payload,
+    parse_attachment_json,
+    parse_json_object,
+)
 from claude_hub.cli.output import emit, print_rows
 from claude_hub.models.schemas import WorkspaceTaskStatus
 
@@ -248,6 +253,20 @@ def task_review(ctx: click.Context, task_id: str, workspace_id: Optional[str]) -
     type=click.Choice(["general", "code", "ui", "artifact", "delivery", "boundary"]),
     help="Review profile (repeatable).",
 )
+@click.option("--related-task-id", default=None, help="Related task id.")
+@click.option("--session-id", default=None, help="Target existing session id.")
+@click.option(
+    "--clear-context/--no-clear-context",
+    default=None,
+    help="Clear agent context before starting (omitted unless set).",
+)
+@click.option(
+    "--attachment-json",
+    "attachment_json",
+    multiple=True,
+    help="Attachment JSON object (repeatable).",
+)
+@click.option("--payload-json", default=None, help="Raw JSON object merged into the body.")
 @click.pass_context
 def task_create(
     ctx: click.Context,
@@ -258,16 +277,27 @@ def task_create(
     task_mode: str,
     execution_complexity: str,
     review_profiles: tuple,
+    related_task_id: Optional[str],
+    session_id: Optional[str],
+    clear_context: Optional[bool],
+    attachment_json: tuple,
+    payload_json: Optional[str],
 ) -> None:
     """Create a task in a workspace."""
-    body: Dict[str, Any] = {
-        "title": title,
-        "prompt": prompt,
-        "agent_type": agent_type,
-        "task_mode": task_mode,
-        "execution_complexity": execution_complexity,
-        "review_profiles": list(review_profiles),
-    }
+    body = merge_payload(
+        payload_json,
+        title=title,
+        prompt=prompt,
+        agent_type=agent_type,
+        task_mode=task_mode,
+        execution_complexity=execution_complexity,
+        review_profiles=list(review_profiles),
+        related_task_id=related_task_id,
+        session_id=session_id,
+        clear_context=clear_context,
+    )
+    if attachment_json:
+        body["attachments"] = parse_attachment_json(attachment_json)
     try:
         with cli_main.get_client(ctx) as client:
             data = client.create_task(workspace_id, body)
@@ -291,6 +321,7 @@ def task_create(
     help="Clear agent context before starting (omitted unless set).",
 )
 @click.option("--related-task-id", default=None, help="Related task id.")
+@click.option("--payload-json", default=None, help="Raw JSON object merged into the body.")
 @click.pass_context
 def task_start(
     ctx: click.Context,
@@ -299,17 +330,16 @@ def task_start(
     target_session_id: Optional[str],
     clear_context: Optional[bool],
     related_task_id: Optional[str],
+    payload_json: Optional[str],
 ) -> None:
     """Queue / start a task."""
-    body: Dict[str, Any] = {}
-    if agent_type is not None:
-        body["agent_type"] = agent_type
-    if target_session_id is not None:
-        body["target_session_id"] = target_session_id
-    if clear_context is not None:
-        body["clear_context"] = clear_context
-    if related_task_id is not None:
-        body["related_task_id"] = related_task_id
+    body = merge_payload(
+        payload_json,
+        agent_type=agent_type,
+        target_session_id=target_session_id,
+        clear_context=clear_context,
+        related_task_id=related_task_id,
+    )
     try:
         with cli_main.get_client(ctx) as client:
             data = client.start_task(task_id, body)
@@ -321,15 +351,122 @@ def task_start(
 @task.command("continue")
 @click.argument("task_id")
 @click.option("--message", default=None, help="Message to send when continuing.")
+@click.option(
+    "--attachment-json",
+    "attachment_json",
+    multiple=True,
+    help="Attachment JSON object (repeatable).",
+)
+@click.option("--payload-json", default=None, help="Raw JSON object merged into the body.")
 @click.pass_context
-def task_continue(ctx: click.Context, task_id: str, message: Optional[str]) -> None:
+def task_continue(
+    ctx: click.Context,
+    task_id: str,
+    message: Optional[str],
+    attachment_json: tuple,
+    payload_json: Optional[str],
+) -> None:
     """Continue a task from review with its original agent."""
-    body: Dict[str, Any] = {"attachments": []}
-    if message is not None:
-        body["message"] = message
+    body = merge_payload(payload_json, message=message)
+    if attachment_json:
+        body["attachments"] = parse_attachment_json(attachment_json)
+    elif "attachments" not in body:
+        body["attachments"] = []
     try:
         with cli_main.get_client(ctx) as client:
             data = client.continue_task(task_id, body)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(data, cli_main.as_json(ctx))
+
+
+@task.command("update")
+@click.argument("task_id")
+@click.option("--title", default=None, help="Task title.")
+@click.option("--prompt", default=None, help="Task prompt.")
+@click.option(
+    "--status",
+    type=click.Choice(["todo", "queued", "working", "review", "done"]),
+    default=None,
+    help="Task status.",
+)
+@click.option(
+    "--task-mode",
+    type=click.Choice(["direct", "reviewed", "autonomous"]),
+    default=None,
+    help="Task automation mode.",
+)
+@click.option(
+    "--execution-complexity",
+    type=click.Choice(["auto", "simple", "complex"]),
+    default=None,
+    help="Execution complexity hint.",
+)
+@click.option(
+    "--review-profile",
+    "review_profiles",
+    multiple=True,
+    type=click.Choice(["general", "code", "ui", "artifact", "delivery", "boundary"]),
+    help="Review profile list (repeatable).",
+)
+@click.option("--related-task-id", default=None, help="Related task id.")
+@click.option("--session-id", default=None, help="Session id.")
+@click.option(
+    "--clear-context/--no-clear-context",
+    default=None,
+    help="Clear agent context before starting (omitted unless set).",
+)
+@click.option(
+    "--attachment-json",
+    "attachment_json",
+    multiple=True,
+    help="Attachment JSON object to add (repeatable).",
+)
+@click.option(
+    "--remove-attachment-id",
+    "removed_attachment_ids",
+    multiple=True,
+    help="Attachment id to remove (repeatable).",
+)
+@click.option("--payload-json", default=None, help="Raw JSON object merged into the body.")
+@click.pass_context
+def task_update(
+    ctx: click.Context,
+    task_id: str,
+    title: Optional[str],
+    prompt: Optional[str],
+    status: Optional[str],
+    task_mode: Optional[str],
+    execution_complexity: Optional[str],
+    review_profiles: tuple,
+    related_task_id: Optional[str],
+    session_id: Optional[str],
+    clear_context: Optional[bool],
+    attachment_json: tuple,
+    removed_attachment_ids: tuple,
+    payload_json: Optional[str],
+) -> None:
+    """Update task metadata or status."""
+    body = merge_payload(
+        payload_json,
+        title=title,
+        prompt=prompt,
+        status=status,
+        task_mode=task_mode,
+        execution_complexity=execution_complexity,
+        related_task_id=related_task_id,
+        session_id=session_id,
+        clear_context=clear_context,
+    )
+    if review_profiles:
+        body["review_profiles"] = list(review_profiles)
+    if attachment_json:
+        body["add_attachments"] = parse_attachment_json(attachment_json)
+    if removed_attachment_ids:
+        body["removed_attachment_ids"] = list(removed_attachment_ids)
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.update_task(task_id, body)
     except HubError as e:
         raise click.ClickException(str(e)) from e
     emit(data, cli_main.as_json(ctx))
@@ -395,8 +532,20 @@ def task_accept(
 @click.argument("workspace_id")
 @click.argument("task_id")
 @click.option("--message", required=True, help="Message to send to the task's agent.")
+@click.option(
+    "--attachment-json",
+    "attachment_json",
+    multiple=True,
+    help="Attachment JSON object (repeatable).",
+)
 @click.pass_context
-def task_send(ctx: click.Context, workspace_id: str, task_id: str, message: str) -> None:
+def task_send(
+    ctx: click.Context,
+    workspace_id: str,
+    task_id: str,
+    message: str,
+    attachment_json: tuple,
+) -> None:
     """Send a message to the agent session currently running a task.
 
     Convenience wrapper: resolves the task's session from the workspace board,
@@ -418,7 +567,10 @@ def task_send(ctx: click.Context, workspace_id: str, task_id: str, message: str)
                     f"(status: {match.get('status', '?')}). "
                     "Use `session send` directly, or `task continue` to resume from review."
                 )
-            client.send_session(session_id, {"message": message, "attachments": []})
+            client.send_session(
+                session_id,
+                {"message": message, "attachments": parse_attachment_json(attachment_json)},
+            )
     except HubError as e:
         raise click.ClickException(str(e)) from e
     if cli_main.as_json(ctx):
@@ -430,10 +582,16 @@ def task_send(ctx: click.Context, workspace_id: str, task_id: str, message: str)
 @task.command("abort")
 @click.argument("task_id")
 @click.option("--reason", required=True, help="Reason for aborting.")
+@click.option("--payload-json", default=None, help="Raw JSON object merged into the body.")
 @click.pass_context
-def task_abort(ctx: click.Context, task_id: str, reason: str) -> None:
+def task_abort(
+    ctx: click.Context,
+    task_id: str,
+    reason: str,
+    payload_json: Optional[str],
+) -> None:
     """Abort a task."""
-    body: Dict[str, Any] = {"reason": reason}
+    body = merge_payload(payload_json, reason=reason)
     try:
         with cli_main.get_client(ctx) as client:
             data = client.abort_task(task_id, body)
@@ -445,15 +603,138 @@ def task_abort(ctx: click.Context, task_id: str, reason: str) -> None:
 @task.command("request-review")
 @click.argument("task_id")
 @click.option("--message", default=None, help="Optional note for the reviewer.")
+@click.option("--payload-json", default=None, help="Raw JSON object merged into the body.")
 @click.pass_context
-def task_request_review(ctx: click.Context, task_id: str, message: Optional[str]) -> None:
+def task_request_review(
+    ctx: click.Context,
+    task_id: str,
+    message: Optional[str],
+    payload_json: Optional[str],
+) -> None:
     """Manually request reviewer checks for a task."""
-    body: Dict[str, Any] = {}
-    if message is not None:
-        body["message"] = message
+    body = merge_payload(payload_json, message=message)
     try:
         with cli_main.get_client(ctx) as client:
             data = client.request_task_review(task_id, body)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(data, cli_main.as_json(ctx))
+
+
+@task.command("delete")
+@click.argument("task_id")
+@click.pass_context
+def task_delete(ctx: click.Context, task_id: str) -> None:
+    """Delete a task and its reports."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            client.delete_task(task_id)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    if cli_main.as_json(ctx):
+        emit({"ok": True}, True)
+    else:
+        click.echo(f"deleted {task_id}")
+
+
+@task.command("spawn")
+@click.argument("task_id")
+@click.option(
+    "--agent-type",
+    type=click.Choice(["claude", "codex", "cursor", "terminal"]),
+    default=None,
+    help="Worker agent type.",
+)
+@click.option("--payload-json", default=None, help="Raw JSON object merged into the body.")
+@click.pass_context
+def task_spawn(
+    ctx: click.Context,
+    task_id: str,
+    agent_type: Optional[str],
+    payload_json: Optional[str],
+) -> None:
+    """Spawn a worker session for a task."""
+    body = merge_payload(payload_json, agent_type=agent_type)
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.spawn_worker(task_id, body)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(data, cli_main.as_json(ctx))
+
+
+@task.command("dispatch-decision")
+@click.argument("task_id")
+@click.option("--target-session-id", required=True, help="Target orchestrator session.")
+@click.option(
+    "--clear-context/--no-clear-context",
+    default=False,
+    help="Clear target agent context before dispatching.",
+)
+@click.option("--reason", default=None, help="Decision reason.")
+@click.option("--payload-json", default=None, help="Raw JSON object merged into the body.")
+@click.pass_context
+def task_dispatch_decision(
+    ctx: click.Context,
+    task_id: str,
+    target_session_id: str,
+    clear_context: bool,
+    reason: Optional[str],
+    payload_json: Optional[str],
+) -> None:
+    """Apply a structured dispatcher decision."""
+    body = merge_payload(
+        payload_json,
+        target_session_id=target_session_id,
+        clear_context=clear_context,
+        reason=reason,
+    )
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.apply_dispatch_decision(task_id, body)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(data, cli_main.as_json(ctx))
+
+
+@task.group("feedback")
+def task_feedback() -> None:
+    """Manage task feedback evidence."""
+
+
+@task_feedback.command("reap")
+@click.argument("task_id")
+@click.option("--source", default=None, help="Feedback source.")
+@click.option("--summary", default=None, help="Feedback summary.")
+@click.option("--tag", "tags", multiple=True, help="Feedback tag (repeatable).")
+@click.option(
+    "--lesson-draft-json",
+    "lesson_drafts",
+    multiple=True,
+    help="Lesson draft JSON object (repeatable).",
+)
+@click.option("--payload-json", default=None, help="Raw JSON object merged into the body.")
+@click.pass_context
+def task_feedback_reap(
+    ctx: click.Context,
+    task_id: str,
+    source: Optional[str],
+    summary: Optional[str],
+    tags: tuple,
+    lesson_drafts: tuple,
+    payload_json: Optional[str],
+) -> None:
+    """Manually collect feedback evidence and optional lesson drafts."""
+    body = merge_payload(payload_json, source=source, summary=summary)
+    if tags:
+        body["tags"] = list(tags)
+    if lesson_drafts:
+        body["lesson_drafts"] = [
+            parse_json_object(value, "--lesson-draft-json") for value in lesson_drafts
+        ]
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.reap_task_feedback(task_id, body)
     except HubError as e:
         raise click.ClickException(str(e)) from e
     emit(data, cli_main.as_json(ctx))
