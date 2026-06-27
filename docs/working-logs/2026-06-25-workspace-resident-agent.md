@@ -347,3 +347,27 @@ Note: an `activeWorkspace`-based pause toggle already existed for the resident
 sub-modal handlers (`handleToggleResidentPause` / `resident:pause`) are the
 modal-scoped equivalents and also mirror the new value back into
 `workspaceForm` so the sub-modal checkboxes stay in sync.
+
+### Update: resident modal UI polish
+
+A UI-polish pass addressed three user complaints about the Resident Agent
+sub-modal. The **Working Directory** field (the cwd input + Browse button) was
+removed entirely: the resident should just use the workspace's own directory.
+This is safe because the backend already falls back via
+`local_cwd = payload.cwd or workspace.path` (and `_resolve_remote_cwd` →
+`workspace.remote_cwd` → profile default) in
+`workspace_manager/_sessions.py`, so leaving `resident_agent_cwd` empty makes
+the resident run in the workspace dir automatically. The form field, payloads,
+reset, and hydration for `resident_agent_cwd` are kept intact (it just stays
+`''` → sent as undefined/null), so nothing round-trips incorrectly; only the UI
+control and the code that auto-populated it were removed
+(`handleResidentTargetChange` no longer touches cwd, `openResidentDirectoryBrowser`
+is deleted, and the now-dead `agentBrowserContext` ref + `'resident'`
+`browserPlacement` branch + `AgentBrowserContext` type were dropped so the
+directory browser serves only the Add-Agent form). The bottom lifecycle button
+labels were shortened from "Create resident" / "Delete resident" to **Create** /
+**Delete** (the modal title and single-word Pause already supply context), and a
+shared `.modal-actions button { white-space: nowrap; }` rule was added so action
+labels never wrap/overflow below the button. Finally all resident copy was
+rewritten to pure, concise English (no mixed Chinese), with each hint kept to
+1-2 rendered lines.

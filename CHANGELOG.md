@@ -121,6 +121,15 @@
   workspace" button. A directive-timing hint under the directive textarea
   clarifies a changed directive is saved immediately but only takes effect on
   the resident's next scheduled cycle (保存后于下个周期生效，不会立即重新运行).
+- **Resident modal UI polish**: shortened the lifecycle button labels from
+  "Create resident" / "Delete resident" to **Create** / **Delete** (the modal
+  title and single-word Pause already give context) and added
+  `white-space: nowrap` to `.modal-actions` buttons so labels never wrap or
+  overflow below the button. Removed the redundant **Working Directory** field
+  from the resident config — the resident now always runs in the workspace's
+  own directory (`resident_agent_cwd` is left empty, so the backend's
+  `payload.cwd or workspace.path` fallback applies). Rewrote the resident copy
+  to pure, concise English (no mixed Chinese), keeping each hint to 1-2 lines.
 
 ### fix: allow Done after a reported Completed even without a review verdict
 
