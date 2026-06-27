@@ -1585,56 +1585,148 @@
             When enabled, a background agent runs on a schedule to maintain
             lessons and propose follow-up tasks for this workspace. Turning
             this off stops and removes the running resident session
-            (关闭将停止并移除常驻 agent 会话).
+            (关闭将停止并移除常驻 agent 会话). This is a resident agent — it never
+            picks up normal workspace tasks.
           </p>
         </div>
-        <div
-          v-if="workspaceForm.resident_agent_enabled"
-          class="modal-field"
+
+        <!--
+          Everything below stays visible at all times; it is disabled/grayed
+          while Enable is unchecked (per the requested UX) instead of hidden.
+          The same elements and components as the Add-Agent form are reused so
+          the two interfaces match, but the role is fixed to resident.
+        -->
+        <fieldset
+          class="resident-config-body"
+          :disabled="!workspaceForm.resident_agent_enabled"
+          :class="{ 'is-disabled': !workspaceForm.resident_agent_enabled }"
         >
-          <label class="checkbox-label">
+          <div class="modal-field">
+            <label class="checkbox-label">
+              <input
+                v-model="workspaceForm.resident_agent_paused"
+                type="checkbox"
+              >
+              Pause auto-scheduling (keep the agent for manual chat)
+            </label>
+            <p class="modal-hint">
+              When paused, the resident session stays available for manual chat
+              but won't auto-run on its schedule (暂停自动调度，保留会话用于手动对话).
+            </p>
+          </div>
+          <div class="modal-field">
+            <label>Run interval (minutes)</label>
             <input
-              v-model="workspaceForm.resident_agent_paused"
-              type="checkbox"
+              v-model.number="workspaceForm.resident_agent_interval_minutes"
+              type="number"
+              min="1"
+              placeholder="60"
             >
-            Pause auto-scheduling (keep the agent for manual chat)
-          </label>
-          <p class="modal-hint">
-            When paused, the resident session stays available for manual chat
-            but won't auto-run on its schedule (暂停自动调度，保留会话用于手动对话).
-          </p>
-        </div>
-        <div
-          v-if="workspaceForm.resident_agent_enabled"
-          class="modal-field"
-        >
-          <label>Run interval (minutes)</label>
-          <input
-            v-model.number="workspaceForm.resident_agent_interval_minutes"
-            type="number"
-            min="1"
-            placeholder="60"
-          >
-        </div>
-        <div
-          v-if="workspaceForm.resident_agent_enabled"
-          class="modal-field"
-        >
-          <label>Resident agent directive (optional)</label>
-          <textarea
-            v-model="workspaceForm.resident_agent_directive"
-            rows="3"
-            placeholder="Describe recurring tasks or what the resident agent should focus on each run."
+          </div>
+          <div class="modal-field">
+            <label>Resident agent directive (optional)</label>
+            <textarea
+              v-model="workspaceForm.resident_agent_directive"
+              rows="3"
+              placeholder="Describe recurring tasks or what the resident agent should focus on each run."
+            />
+          </div>
+          <div class="modal-field">
+            <label>Title</label>
+            <input
+              v-model="workspaceForm.resident_agent_title"
+              placeholder="Workspace Resident"
+            >
+          </div>
+          <AgentConfigFields
+            v-model:agent-type="workspaceForm.resident_agent_type"
+            v-model:solo-mode="workspaceForm.resident_agent_solo_mode"
+            v-model:env-preset="workspaceForm.resident_env_preset"
+            v-model:env-text="workspaceForm.resident_env_text"
+            variant="modal"
+            :disabled="!workspaceForm.resident_agent_enabled"
           />
-        </div>
-        <AgentConfigFields
-          v-if="workspaceForm.resident_agent_enabled"
-          v-model:agent-type="workspaceForm.resident_agent_type"
-          v-model:solo-mode="workspaceForm.resident_agent_solo_mode"
-          v-model:env-preset="workspaceForm.resident_env_preset"
-          v-model:env-text="workspaceForm.resident_env_text"
-          variant="modal"
-        />
+          <div class="modal-field">
+            <label>Run On</label>
+            <div class="segmented-control">
+              <button
+                type="button"
+                :class="['segment-button', { active: workspaceForm.resident_agent_target === 'local' }]"
+                :disabled="!workspaceForm.resident_agent_enabled"
+                @click="handleResidentTargetChange('local')"
+              >
+                Local
+              </button>
+              <button
+                type="button"
+                :class="['segment-button', { active: workspaceForm.resident_agent_target === 'remote' }]"
+                :disabled="!workspaceForm.resident_agent_enabled"
+                @click="handleResidentTargetChange('remote')"
+              >
+                Remote
+              </button>
+            </div>
+          </div>
+          <div
+            v-if="workspaceForm.resident_agent_target === 'remote'"
+            class="modal-field"
+          >
+            <label>Remote Server</label>
+            <select
+              v-model="workspaceForm.resident_agent_remote_profile_id"
+              :disabled="remoteProfilesLoading"
+            >
+              <option value="">
+                Select server
+              </option>
+              <option
+                v-for="profile in remoteProfiles"
+                :key="profile.id"
+                :value="profile.id"
+              >
+                {{ profile.name }}
+              </option>
+            </select>
+            <p
+              v-if="remoteProfiles.length === 0"
+              class="modal-hint"
+            >
+              Add profiles in ~/.claude_hub/remote_profiles.json or ~/.ssh/config
+            </p>
+          </div>
+          <div class="modal-field">
+            <label>Working Directory</label>
+            <div class="path-input-row">
+              <input
+                v-model="workspaceForm.resident_agent_cwd"
+                :placeholder="workspaceForm.resident_agent_target === 'remote' ? '~/workspace/project' : '/Users/me/workspace'"
+              >
+              <LoadingButton
+                type="button"
+                class="tool-button"
+                :disabled="!workspaceForm.resident_agent_enabled || (workspaceForm.resident_agent_target === 'remote' && !workspaceForm.resident_agent_remote_profile_id)"
+                :loading="isPending('agent-browser:open')"
+                loading-label="Opening browser"
+                @click="openResidentDirectoryBrowser"
+              >
+                Browse
+              </LoadingButton>
+            </div>
+          </div>
+          <div
+            v-if="workspaceForm.resident_agent_target === 'remote'"
+            class="modal-field"
+          >
+            <label class="checkbox-label">
+              <input
+                v-model="workspaceForm.resident_agent_remote_reconnect"
+                type="checkbox"
+              >
+              Auto reconnect
+            </label>
+          </div>
+        </fieldset>
+
         <div class="modal-actions">
           <button
             type="button"
@@ -2380,7 +2472,7 @@
     >
       <div class="workspace-modal file-browser-modal">
         <div class="file-browser-header">
-          <h3>{{ agentOptionsForm.target === 'remote' ? 'Select Remote Directory' : 'Select Working Directory' }}</h3>
+          <h3>{{ browserPlacement.target === 'remote' ? 'Select Remote Directory' : 'Select Working Directory' }}</h3>
           <button
             type="button"
             class="tool-button"
@@ -2844,6 +2936,12 @@ const workspaceForm = reactive({
   resident_agent_solo_mode: true,
   resident_env_preset: defaultLaunchEnvPresetForAgent('claude'),
   resident_env_text: defaultPresetTextForAgent('claude'),
+  // Resident agent launch placement (mirrors the Add-Agent form).
+  resident_agent_title: '',
+  resident_agent_target: 'local' as ExecutionTarget,
+  resident_agent_remote_profile_id: '',
+  resident_agent_cwd: '',
+  resident_agent_remote_reconnect: true,
 })
 
 const agentOptionsForm = reactive({
@@ -3423,6 +3521,44 @@ const selectedRemoteProfile = computed(() =>
 
 const selectedAgentRemoteProfile = computed(() =>
   remoteProfiles.value.find(profile => profile.id === agentOptionsForm.remote_profile_id) || null
+)
+
+// The directory browser is shared between the Add-Agent form and the Resident
+// Agent popup. `agentBrowserContext` selects which form's target/remote/cwd the
+// browser reads and writes, so the same modal can place either agent's cwd.
+type AgentBrowserContext = 'agent' | 'resident'
+const agentBrowserContext = ref<AgentBrowserContext>('agent')
+
+interface BrowserPlacement {
+  target: ExecutionTarget
+  remoteProfileId: string
+  cwd: string
+  setCwd: (value: string) => void
+}
+
+const browserPlacement = computed<BrowserPlacement>(() => {
+  if (agentBrowserContext.value === 'resident') {
+    return {
+      target: workspaceForm.resident_agent_target,
+      remoteProfileId: workspaceForm.resident_agent_remote_profile_id,
+      cwd: workspaceForm.resident_agent_cwd,
+      setCwd: (value: string) => {
+        workspaceForm.resident_agent_cwd = value
+      },
+    }
+  }
+  return {
+    target: agentOptionsForm.target,
+    remoteProfileId: agentOptionsForm.remote_profile_id,
+    cwd: agentOptionsForm.cwd,
+    setCwd: (value: string) => {
+      agentOptionsForm.cwd = value
+    },
+  }
+})
+
+const browserRemoteProfile = computed(() =>
+  remoteProfiles.value.find(profile => profile.id === browserPlacement.value.remoteProfileId) || null
 )
 
 const isAgentOptionsCreateDisabled = computed(
@@ -4210,6 +4346,14 @@ async function handleCreateWorkspace() {
       resident_agent_type: workspaceForm.resident_agent_type,
       resident_agent_env: parseLaunchEnv(workspaceForm.resident_env_text) ?? {},
       resident_agent_solo_mode: workspaceForm.resident_agent_solo_mode,
+      resident_agent_title: workspaceForm.resident_agent_title.trim() || undefined,
+      resident_agent_target: workspaceForm.resident_agent_target,
+      resident_agent_remote_profile_id:
+        workspaceForm.resident_agent_target === 'remote'
+          ? workspaceForm.resident_agent_remote_profile_id || null
+          : null,
+      resident_agent_cwd: workspaceForm.resident_agent_cwd.trim() || undefined,
+      resident_agent_remote_reconnect: workspaceForm.resident_agent_remote_reconnect,
     })
   )
   if (workspace) {
@@ -4237,6 +4381,14 @@ async function handleSaveWorkspace() {
       resident_agent_type: workspaceForm.resident_agent_type,
       resident_agent_env: parseLaunchEnv(workspaceForm.resident_env_text) ?? {},
       resident_agent_solo_mode: workspaceForm.resident_agent_solo_mode,
+      resident_agent_title: workspaceForm.resident_agent_title.trim() || null,
+      resident_agent_target: workspaceForm.resident_agent_target,
+      resident_agent_remote_profile_id:
+        workspaceForm.resident_agent_target === 'remote'
+          ? workspaceForm.resident_agent_remote_profile_id || null
+          : null,
+      resident_agent_cwd: workspaceForm.resident_agent_cwd.trim() || null,
+      resident_agent_remote_reconnect: workspaceForm.resident_agent_remote_reconnect,
     })
   )
   if (workspace) {
@@ -4261,6 +4413,11 @@ function resetWorkspaceForm() {
   workspaceForm.resident_agent_solo_mode = true
   workspaceForm.resident_env_preset = defaultLaunchEnvPresetForAgent('claude')
   workspaceForm.resident_env_text = defaultPresetTextForAgent('claude')
+  workspaceForm.resident_agent_title = ''
+  workspaceForm.resident_agent_target = 'local'
+  workspaceForm.resident_agent_remote_profile_id = remoteProfiles.value[0]?.id || ''
+  workspaceForm.resident_agent_cwd = ''
+  workspaceForm.resident_agent_remote_reconnect = true
 }
 
 function openWorkspaceModal() {
@@ -4293,10 +4450,16 @@ function openEditWorkspaceModal() {
     workspaceForm.resident_agent_type
   )
   workspaceForm.resident_env_text = serializeLaunchEnv(workspace.resident_agent_env)
+  workspaceForm.resident_agent_title = workspace.resident_agent_title || ''
+  workspaceForm.resident_agent_target = workspace.resident_agent_target ?? 'local'
+  workspaceForm.resident_agent_remote_profile_id =
+    workspace.resident_agent_remote_profile_id || ''
+  workspaceForm.resident_agent_cwd = workspace.resident_agent_cwd || ''
+  workspaceForm.resident_agent_remote_reconnect = workspace.resident_agent_remote_reconnect ?? true
   workspaceModalMode.value = 'edit'
   editingWorkspaceId.value = workspace.id
   showWorkspaceModal.value = true
-  if (workspace.target === 'remote') {
+  if (workspace.target === 'remote' || workspace.resident_agent_target === 'remote') {
     fetchRemoteProfiles()
   }
 }
@@ -4310,6 +4473,11 @@ function closeWorkspaceModal() {
 
 function openResidentAgentModal() {
   showResidentAgentModal.value = true
+  // The Remote Server dropdown needs the profile list; load it lazily the same
+  // way the Add-Agent modal does.
+  if (remoteProfiles.value.length === 0) {
+    fetchRemoteProfiles()
+  }
 }
 
 function closeResidentAgentModal() {
@@ -4495,6 +4663,24 @@ function handleAgentTargetChange(target: ExecutionTarget) {
   }
 }
 
+function handleResidentTargetChange(target: ExecutionTarget) {
+  if (!workspaceForm.resident_agent_enabled) return
+  if (workspaceForm.resident_agent_target === target) return
+  const previousDefault = workspaceDefaultCwd(workspaceForm.resident_agent_target)
+  workspaceForm.resident_agent_target = target
+  // Mirror the Add-Agent UX: only auto-fill the cwd when it is empty or still
+  // the previous target's default, so a user-typed path is never clobbered.
+  if (!workspaceForm.resident_agent_cwd.trim() || workspaceForm.resident_agent_cwd === previousDefault) {
+    workspaceForm.resident_agent_cwd = workspaceDefaultCwd(target)
+  }
+  if (target === 'remote') {
+    if (!workspaceForm.resident_agent_remote_profile_id && remoteProfiles.value.length > 0) {
+      workspaceForm.resident_agent_remote_profile_id = remoteProfiles.value[0].id
+    }
+    fetchRemoteProfiles()
+  }
+}
+
 function openAgentOptionsModal() {
   resetAgentOptionsForm()
   if (agentOptionsForm.target === 'remote') {
@@ -4539,18 +4725,19 @@ async function handleCreateAdvancedAgent() {
 }
 
 async function listAgentDirectory(path?: string): Promise<DirectoryListing> {
+  const placement = browserPlacement.value
   const params = new URLSearchParams()
   if (path) {
     params.append('path', path)
   }
-  if (agentOptionsForm.target === 'remote') {
-    if (!agentOptionsForm.remote_profile_id) {
+  if (placement.target === 'remote') {
+    if (!placement.remoteProfileId) {
       throw new Error('Select a remote server first')
     }
-    params.append('profile_id', agentOptionsForm.remote_profile_id)
+    params.append('profile_id', placement.remoteProfileId)
   }
   const endpoint =
-    agentOptionsForm.target === 'remote' ? '/api/remote/filesystem/list' : '/api/filesystem/list'
+    placement.target === 'remote' ? '/api/remote/filesystem/list' : '/api/filesystem/list'
   const queryString = params.toString()
   const response = await fetch(`${endpoint}${queryString ? `?${queryString}` : ''}`)
   if (!response.ok) {
@@ -4579,19 +4766,31 @@ async function loadAgentDirectory(path?: string, pendingKey = 'agent-browser:loa
 }
 
 async function openAgentDirectoryBrowser() {
+  agentBrowserContext.value = 'agent'
   showAgentFileBrowser.value = true
-  if (agentOptionsForm.cwd) {
-    await loadAgentDirectory(agentOptionsForm.cwd, 'agent-browser:open')
-  } else if (agentOptionsForm.target === 'remote') {
-    await loadAgentDirectory(selectedAgentRemoteProfile.value?.default_cwd || '~', 'agent-browser:open')
+  await openDirectoryBrowserForPlacement()
+}
+
+async function openResidentDirectoryBrowser() {
+  agentBrowserContext.value = 'resident'
+  showAgentFileBrowser.value = true
+  await openDirectoryBrowserForPlacement()
+}
+
+async function openDirectoryBrowserForPlacement() {
+  const placement = browserPlacement.value
+  if (placement.cwd) {
+    await loadAgentDirectory(placement.cwd, 'agent-browser:open')
+  } else if (placement.target === 'remote') {
+    await loadAgentDirectory(browserRemoteProfile.value?.default_cwd || '~', 'agent-browser:open')
   } else {
     await loadAgentDirectory('~', 'agent-browser:open')
   }
 }
 
 function navigateAgentBrowserHome() {
-  if (agentOptionsForm.target === 'remote') {
-    loadAgentDirectory(selectedAgentRemoteProfile.value?.default_cwd || '~', 'agent-browser:home')
+  if (browserPlacement.value.target === 'remote') {
+    loadAgentDirectory(browserRemoteProfile.value?.default_cwd || '~', 'agent-browser:home')
   } else {
     loadAgentDirectory('~', 'agent-browser:home')
   }
@@ -4616,7 +4815,7 @@ function handleAgentFileItemClick(item: FileInfo) {
 }
 
 function selectAgentCurrentDirectory() {
-  agentOptionsForm.cwd = agentBrowserCurrentPath.value
+  browserPlacement.value.setCwd(agentBrowserCurrentPath.value)
   showAgentFileBrowser.value = false
 }
 
@@ -7944,6 +8143,28 @@ onUnmounted(() => {
    EnvPresetManager (1100) that AgentConfigFields opens from inside it. */
 .resident-agent-modal-overlay {
   z-index: 1050;
+}
+
+/*
+  The resident config keeps every field visible at all times; the native
+  <fieldset disabled> attribute makes all descendant inputs non-interactive
+  while "Enable" is unchecked (including controls inside the shared
+  AgentConfigFields child, since disabled fieldsets propagate by DOM tree).
+  Reset the browser's default fieldset chrome and dim it when disabled.
+*/
+.resident-config-body {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.resident-config-body.is-disabled {
+  opacity: 0.55;
+}
+
+.resident-config-body.is-disabled :deep(*) {
+  cursor: not-allowed;
 }
 
 .resident-agent-section--first {

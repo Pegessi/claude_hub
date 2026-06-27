@@ -696,6 +696,226 @@ def test_update_workspace_resident_agent_config_parity(
     assert unchanged.resident_agent_solo_mode is False
 
 
+def test_create_workspace_resident_placement_parity(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """title/target/remote_profile_id/cwd/remote_reconnect persist and round-trip."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_enabled=True,
+            resident_agent_title="  My Resident  ",
+            resident_agent_target=ExecutionTarget.REMOTE,
+            resident_agent_remote_profile_id="prof-1",
+            resident_agent_cwd="  ~/work/proj  ",
+            resident_agent_remote_reconnect=False,
+        )
+    )
+    # Title and cwd are stripped; empty -> None.
+    assert workspace.resident_agent_title == "My Resident"
+    assert workspace.resident_agent_target == ExecutionTarget.REMOTE
+    assert workspace.resident_agent_remote_profile_id == "prof-1"
+    assert workspace.resident_agent_cwd == "~/work/proj"
+    assert workspace.resident_agent_remote_reconnect is False
+
+    # Defaults when unspecified.
+    other = manager.create_workspace(
+        WorkspaceCreate(name="WS2", path=str(repo), session_prefix="res2")
+    )
+    assert other.resident_agent_title is None
+    assert other.resident_agent_target == ExecutionTarget.LOCAL
+    assert other.resident_agent_remote_profile_id is None
+    assert other.resident_agent_cwd is None
+    assert other.resident_agent_remote_reconnect is True
+
+    # Round-trip from disk.
+    reloaded = WorkspaceManager()
+    persisted = reloaded.workspaces[workspace.id]
+    assert persisted.resident_agent_title == "My Resident"
+    assert persisted.resident_agent_target == ExecutionTarget.REMOTE
+    assert persisted.resident_agent_remote_profile_id == "prof-1"
+    assert persisted.resident_agent_cwd == "~/work/proj"
+    assert persisted.resident_agent_remote_reconnect is False
+
+
+def test_update_workspace_resident_placement_parity(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """update can change placement fields; None leaves them unchanged; blanks clear."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_title="Orig",
+            resident_agent_target=ExecutionTarget.LOCAL,
+            resident_agent_cwd="/tmp/a",
+            resident_agent_remote_reconnect=True,
+        )
+    )
+
+    updated = manager.update_workspace(
+        workspace.id,
+        WorkspaceUpdate(
+            resident_agent_title="New",
+            resident_agent_target=ExecutionTarget.REMOTE,
+            resident_agent_remote_profile_id="prof-9",
+            resident_agent_cwd="/tmp/b",
+            resident_agent_remote_reconnect=False,
+        ),
+    )
+    assert updated.resident_agent_title == "New"
+    assert updated.resident_agent_target == ExecutionTarget.REMOTE
+    assert updated.resident_agent_remote_profile_id == "prof-9"
+    assert updated.resident_agent_cwd == "/tmp/b"
+    assert updated.resident_agent_remote_reconnect is False
+
+    # Blank title/cwd clear to None.
+    cleared = manager.update_workspace(
+        workspace.id,
+        WorkspaceUpdate(resident_agent_title="   ", resident_agent_cwd="  "),
+    )
+    assert cleared.resident_agent_title is None
+    assert cleared.resident_agent_cwd is None
+
+    # None leaves placement unchanged.
+    unchanged = manager.update_workspace(
+        workspace.id, WorkspaceUpdate(resident_agent_directive="noop")
+    )
+    assert unchanged.resident_agent_target == ExecutionTarget.REMOTE
+    assert unchanged.resident_agent_remote_profile_id == "prof-9"
+    assert unchanged.resident_agent_remote_reconnect is False
+
+
+def test_update_workspace_placement_change_clears_resident_session(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """Changing target/cwd/remote_profile/remote_reconnect invalidates the live
+    session so the next tick recreates the resident with the new placement."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    for field, value in (
+        ("resident_agent_target", ExecutionTarget.REMOTE),
+        ("resident_agent_remote_profile_id", "prof-2"),
+        ("resident_agent_cwd", "/tmp/other"),
+        ("resident_agent_remote_reconnect", False),
+    ):
+        workspace = manager.create_workspace(
+            WorkspaceCreate(
+                name=f"WS-{field}",
+                path=str(repo),
+                session_prefix="res",
+                resident_agent_enabled=True,
+                resident_agent_type=AgentType.CLAUDE,
+                resident_agent_target=ExecutionTarget.LOCAL,
+                resident_agent_cwd="/tmp/orig",
+                resident_agent_remote_reconnect=True,
+            )
+        )
+        session = _resident_session(workspace)
+        manager.sessions[session.id] = session
+        workspace = workspace.model_copy(update={"resident_agent_session_id": session.id})
+        manager.workspaces[workspace.id] = workspace
+
+        updated = manager.update_workspace(workspace.id, WorkspaceUpdate(**{field: value}))
+
+        assert updated.resident_agent_session_id is None, field
+        assert session.id not in manager.sessions, field
+
+
+def test_run_resident_agent_carries_placement_to_ensure_request(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """The ensure request mirrors the workspace's resident placement (title/target/
+    cwd/remote_profile/remote_reconnect), with cwd reused as remote_cwd."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_enabled=True,
+            resident_agent_type=AgentType.CLAUDE,
+            resident_agent_title="Custom Resident",
+            resident_agent_target=ExecutionTarget.REMOTE,
+            resident_agent_remote_profile_id="prof-7",
+            resident_agent_cwd="~/proj",
+            resident_agent_remote_reconnect=False,
+        )
+    )
+    workspace = manager.workspaces[workspace.id]
+
+    created = _resident_session(workspace)
+    captured: list[object] = []
+
+    async def fake_ensure(workspace_id: str, payload: object) -> ManagedSession:
+        captured.append(payload)
+        manager.sessions[created.id] = created
+        return created
+
+    async def fake_send(session_id: str, message: str) -> None:
+        return None
+
+    monkeypatch.setattr(manager, "ensure_workspace_agent", fake_ensure)
+    monkeypatch.setattr(manager, "send_session_message", fake_send)
+
+    asyncio.run(manager._run_resident_agent(workspace))
+
+    assert len(captured) == 1
+    req = captured[0]
+    assert req.title == "Custom Resident"
+    assert req.target == ExecutionTarget.REMOTE
+    assert req.remote_profile_id == "prof-7"
+    assert req.cwd == "~/proj"
+    assert req.remote_cwd == "~/proj"
+    assert req.remote_reconnect is False
+
+
+def test_run_resident_agent_default_title_when_unset(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """With no resident title, the ensure request falls back to '<name> Resident'."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="Alpha",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_enabled=True,
+            resident_agent_type=AgentType.CLAUDE,
+        )
+    )
+    workspace = manager.workspaces[workspace.id]
+
+    created = _resident_session(workspace)
+    captured: list[object] = []
+
+    async def fake_ensure(workspace_id: str, payload: object) -> ManagedSession:
+        captured.append(payload)
+        manager.sessions[created.id] = created
+        return created
+
+    async def fake_send(session_id: str, message: str) -> None:
+        return None
+
+    monkeypatch.setattr(manager, "ensure_workspace_agent", fake_ensure)
+    monkeypatch.setattr(manager, "send_session_message", fake_send)
+
+    asyncio.run(manager._run_resident_agent(workspace))
+
+    assert len(captured) == 1
+    assert captured[0].title == "Alpha Resident"
+    assert captured[0].target == ExecutionTarget.LOCAL
+
+
 def test_run_resident_agent_uses_workspace_agent_config(
     manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
