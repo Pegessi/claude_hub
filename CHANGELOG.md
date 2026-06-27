@@ -5,6 +5,42 @@
 
 ## Unreleased
 
+### fix: stop auto-continue from spamming a busy codex agent
+
+- **What**: a codex (GPT-5.5) agent that is actively working is no longer
+  misclassified as idle and re-prompted, which previously caused codex to pile
+  up "Queued follow-up inputs" — the "codex keeps infinitely sending tasks"
+  symptom.
+- **Why**: both the runtime-status classifier
+  (`ttyd_manager._classify_agent_status`) and the auto-continue busy-check
+  (`workspace_state_policy.auto_continue_output_looks_busy`) only inspected the
+  bottom ~10–12 lines of the captured pane. Codex renders its working indicator
+  (`⠞ Working  4.03k tokens` or `• Working (3s • esc to interrupt)`) **above** a
+  tall persistent bottom chrome — the `›`/`❯` composer, a "Queued follow-up
+  inputs" panel that grows per queued item, and a model footer — so a busy codex
+  frame fell outside both scan windows and read as IDLE. The 5s monitor loop
+  then auto-prompted the still-WORKING task, and codex queued each prompt.
+- **How**:
+  - New leaf module `backend/claude_hub/services/agent_status_markers.py` is the
+    single authoritative home for the codex working-marker set
+    (`CODEX_WORKING_STATUS_RE` + `codex_output_is_working`), covering both the
+    braille-spinner/token format and the legacy bullet/`esc to interrupt`
+    format. It scans a wider, bounded window (60 lines) so the indicator above
+    the chrome is seen. Keeping one explicit marker set per agent type (rather
+    than loosening the shared Claude/Cursor regexes) follows the cursor-agent
+    lesson.
+  - `_classify_agent_status` calls the codex detector (keyed on
+    `agent_type == CODEX`) after the ATTENTION check and routes through the
+    existing `working_or_stale()` guard, so a frozen codex frame past
+    `_WORKING_FRAME_STALE_SECONDS` still surfaces as ATTENTION.
+  - `auto_continue_output_looks_busy` calls the same detector first, so the
+    classifier and the busy-check agree by construction.
+  - Tests: `backend/tests/test_ttyd_manager.py` and
+    `tests/test_workspace_state_policy.py` add codex working/idle/frozen frames
+    (modeled on real `backend.log` captures) with a tall queued-inputs chrome
+    that defeats the old bottom-N window; the non-codex agent type is asserted
+    unaffected.
+
 ### feat: hot-switch env/model on a live Claude tab (resume conversation)
 
 - **What**: a new per-Claude-tab **Switch Env** action opens a dialog where you

@@ -422,6 +422,83 @@ def test_auto_continue_output_looks_busy() -> None:
     assert not policy.auto_continue_output_looks_busy("Validation: passed\n\u276f ")
 
 
+# Codex renders its working indicator ABOVE a tall persistent bottom chrome
+# (composer + "Queued follow-up inputs" panel + model footer). These frames put
+# the indicator well outside the bottom-12 window the legacy check scanned, so
+# they exercise the codex-specific wider scan. Frame text is modeled on real
+# captures in ~/.claude_hub/logs/backend.log.
+_CODEX_BUSY_BRAILLE_FRAME = "\n".join(
+    [
+        "  \u2192 gc.collect() \u548c call_malloc_trim() \u8017\u65f6\u600e\u4e48\u6837\uff1f",
+        "",
+        " \u2800\u281e Working  4.03k tokens",
+        "",
+        "",
+        "\u203a Add a follow-up",
+        "",
+        "  Queued follow-up inputs (3):",
+        "    1. \u7ee7\u7eed",
+        "    2. \u7ee7\u7eed",
+        "    3. \u7ee7\u7eed",
+        "",
+        "  GPT-5.5 272K Extra High \u00b7 MAX \u00b7 30.7% \u00b7 16 files edited      Auto-run",
+        "  ~/Projects/codex_workspace \u00b7 main",
+    ]
+)
+
+_CODEX_BUSY_BULLET_FRAME = "\n".join(
+    [
+        "  The task is back in working state. Report progress with the same task_id.",
+        "",
+        "\u2022 Working (3s \u2022 esc to interrupt)",
+        "",
+        "",
+        "\u203a Find and fix a bug in @filename",
+        "",
+        "  Queued follow-up inputs (10):",
+        "    1. \u7ee7\u7eed",
+        "    2. \u7ee7\u7eed",
+        "    3. \u7ee7\u7eed",
+        "    4. \u7ee7\u7eed",
+        "    5. \u7ee7\u7eed",
+        "    6. \u7ee7\u7eed",
+        "    7. \u7ee7\u7eed",
+        "    8. \u7ee7\u7eed",
+        "    9. \u7ee7\u7eed",
+        "    10. \u7ee7\u7eed",
+        "",
+        "  gpt-5.5 medium \u00b7 ~/claude_hub",
+    ]
+)
+
+_CODEX_IDLE_FRAME = "\n".join(
+    [
+        "  \u2192 previous answer text from the agent is shown here",
+        "",
+        "\u203a ",
+        "",
+        "  gpt-5.5 medium \u00b7 ~/claude_hub",
+        "  ? for shortcuts",
+    ]
+)
+
+
+def test_auto_continue_output_looks_busy_codex_braille_above_chrome() -> None:
+    # Braille spinner + token count, with the indicator pushed above the chrome.
+    assert policy.auto_continue_output_looks_busy(_CODEX_BUSY_BRAILLE_FRAME)
+
+
+def test_auto_continue_output_looks_busy_codex_bullet_above_chrome() -> None:
+    # Legacy bullet + "esc to interrupt", indicator above the chrome.
+    assert policy.auto_continue_output_looks_busy(_CODEX_BUSY_BULLET_FRAME)
+
+
+def test_auto_continue_output_looks_busy_codex_idle_frame() -> None:
+    # A genuine codex idle frame (composer + shortcuts hint, no indicator) must
+    # not read as busy, or a truly idle agent would never be auto-continued.
+    assert not policy.auto_continue_output_looks_busy(_CODEX_IDLE_FRAME)
+
+
 # --------------------------------------------------------------------------
 # Reviewer verdict predicates.
 # --------------------------------------------------------------------------
