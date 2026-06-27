@@ -5,6 +5,42 @@
 
 ## Unreleased
 
+### fix: resolve task markdown artifacts produced inside git worktrees
+
+- **What**: clicking a task report's markdown artifact link (e.g.
+  `docs/working-logs/2026-06-26-adhd-skill-analysis.md`) no longer shows
+  "Artifact not found" in the Markdown Preview when the file was produced inside
+  the agent's git worktree. Such worktree-only artifacts now preview correctly
+  and also appear in the workspace's "Markdown Outputs" list.
+- **Why**: agents do their work in isolated git worktrees (sibling dirs created
+  per the mandatory workflow), so a report's markdown artifact frequently lives
+  only in the worktree — not under the main workspace path. The preview
+  resolver (`_markdown_allowed_roots` in
+  `services/workspace_manager/_artifacts.py`) only allowed the workspace path and
+  the session `workspace_path` (which is also the main path) as roots, so the
+  relative ref resolved to a nonexistent file → `KeyError` → 404. The same gap
+  silently dropped those artifacts from the markdown-documents list.
+- **How**:
+  - `_markdown_allowed_roots` now also includes the workspace's git worktree
+    directories, enumerated via `git worktree list --porcelain` run from the
+    workspace path (new `_git_worktree_roots` / `_read_git_worktree_roots`
+    helpers). The existing `_ensure_path_under_roots` containment check, the
+    markdown-only suffix gate, and the `_path_looks_like_real_file` guard are all
+    preserved, so path-escape safety is unchanged.
+  - Worktree enumeration is cached per workspace for a short TTL
+    (`WORKTREE_ROOT_CACHE_TTL_SECONDS`, bounded by `WORKTREE_LIST_TIMEOUT_SECONDS`)
+    so building the board — which resolves every report ref — does not spawn one
+    `git` subprocess per ref. When git is unavailable or the path is not a repo,
+    enumeration returns empty and behavior is unchanged (graceful degradation).
+  - Fix is resolution-side only: agent reporting, the report schema, session
+    bookkeeping, and the frontend are untouched, so historical reports become
+    previewable too.
+  - Tests: `backend/tests/test_workspaces.py` adds
+    `test_preview_markdown_artifact_resolves_from_git_worktree`, which creates a
+    real git worktree, reports a markdown artifact that exists only there, and
+    asserts the preview returns 200, the doc appears in `markdown_documents`, and
+    an out-of-all-roots markdown path still 404s.
+
 ### fix: stop auto-continue from spamming a busy codex agent
 
 - **What**: a codex (GPT-5.5) agent that is actively working is no longer

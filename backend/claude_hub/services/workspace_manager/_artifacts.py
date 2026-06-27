@@ -1,5 +1,7 @@
 """Artifact previews and markdown document discovery."""
 
+import subprocess
+
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
 from ._constants import *  # noqa: F401,F403
@@ -236,6 +238,68 @@ class _ArtifactsMixin:
                     session_root = None
                 if session_root is not None and session_root not in roots:
                     roots.append(session_root)
+        # Agents work inside isolated git worktrees, so a report's markdown
+        # artifact often lives only in a worktree rather than under workspace.path
+        # or the session workspace_path. Add the workspace's git worktree
+        # directories as allowed roots so those artifacts resolve for preview.
+        for worktree_root in self._git_worktree_roots(workspace):
+            if worktree_root not in roots:
+                roots.append(worktree_root)
+        return roots
+
+    def _git_worktree_roots(self, workspace: Workspace) -> list[Path]:
+        """Return resolved git worktree directories for *workspace*.
+
+        Worktrees are enumerated via ``git worktree list --porcelain`` run from
+        the workspace path. The result is cached per workspace for a short TTL so
+        building the board (which resolves every report ref) does not spawn one
+        subprocess per ref. Returns an empty list when git is unavailable, the
+        path is not a git repository, or the call times out.
+        """
+        try:
+            base = Path(workspace.path).expanduser().resolve()
+        except (OSError, ValueError):
+            return []
+
+        cache = self._worktree_root_cache
+        now = _now().timestamp()
+        cached = cache.get(workspace.id)
+        if cached is not None:
+            cached_at, cached_roots = cached
+            if now - cached_at < WORKTREE_ROOT_CACHE_TTL_SECONDS:
+                return list(cached_roots)
+
+        roots = self._read_git_worktree_roots(base)
+        cache[workspace.id] = (now, roots)
+        return list(roots)
+
+    @staticmethod
+    def _read_git_worktree_roots(base: Path) -> list[Path]:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(base), "worktree", "list", "--porcelain"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=WORKTREE_LIST_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return []
+        if result.returncode != 0:
+            return []
+        roots: list[Path] = []
+        for line in result.stdout.decode("utf-8", errors="replace").splitlines():
+            if not line.startswith("worktree "):
+                continue
+            raw = line[len("worktree ") :].strip()
+            if not raw:
+                continue
+            try:
+                resolved = Path(raw).expanduser().resolve()
+            except (OSError, ValueError):
+                continue
+            if resolved not in roots:
+                roots.append(resolved)
         return roots
 
     def markdown_documents_for_workspace(
