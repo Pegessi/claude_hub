@@ -4,8 +4,8 @@
 > all `task_mode × execution_complexity` combinations.
 >
 > Source of truth: `backend/claude_hub/services/workspace_manager/_prompts.py`.
-> Line references in this doc are accurate as of `main@70921a7` plus
-> `feat/adhd-skill-analysis-v2@515694c`.
+> Line references in this doc are verified against `main@70921a7` (worktree
+> copy is unchanged in this PR).
 
 ---
 
@@ -13,412 +13,451 @@
 
 |                           | `simple` complexity | `complex` complexity | `auto` complexity |
 |---------------------------|--------------------|-----------------------|--------------------|
-| **`direct` mode**         | single-agent linear execution, no reviewer, no primitives | soft "act as orchestrator", no reviewer, no primitives | self-pick simple/complex, no reviewer, no primitives |
-| **`reviewed` mode**       | single-agent + **Goal Packet gate** + independent reviewer | soft "act as orchestrator" + Goal Packet gate + reviewer; **no primitive list, no ledger, no model pinning enforcement** | declare strategy in Goal Packet + gate + reviewer |
-| **`autonomous` mode**     | execute directly + **mandatory 1 P-JUDGE pre-flight**; evaluator = reviewer | **orchestrator REQUIRED**; ≥1 P-EXECUTE + ≥1 P-JUDGE; **subagent-ledger mandatory (contract violation if missing)**; evaluator = reviewer | declare simple/complex in `goal_packet.assumptions`; complex contract applies if orchestrator; still 1 P-JUDGE if single-agent |
+| **`direct` mode**         | single-agent linear, no reviewer, no primitives/hint/contract | soft "act as orchestrator" guidance only; no primitives, no ledger, no subagent hint | self-pick simple/complex, announced implicitly in first report; no primitives, no subagent hint |
+| **`reviewed` mode**       | single-agent + **Goal Packet approval gate** + independent reviewer; same soft guidance as direct | same as reviewed/simple plus the COMPLEX guidance line; **no P-* primitive list, no subagent-capability hint, no model contract, no ledger enforcement** | same as reviewed/simple plus the AUTO guidance line; same absence of hard contract |
+| **`autonomous` mode**     | execute directly + **mandatory 1 P-JUDGE pre-flight**; full Orchestrator Contract (primitives, subagent hint, model pinning, ledger, heartbeat rules) | **orchestrator mode REQUIRED**; ≥1 P-EXECUTE + ≥1 P-JUDGE; **subagent ledger mandatory (contract violation if missing)**; full contract | declare orchestrator vs single-agent in `goal_packet.assumptions`; if orchestrator → complex contract; if single-agent → still 1 P-JUDGE; full contract |
 
-Reviewer always uses the same adversarial-defect-hunt workflow. The only
-reviewer-side variation is:
+Key structural facts this doc is built on:
 
-- `direct`: no reviewer session exists.
-- `reviewed`: standard code/design/scope review.
-- `autonomous`: reviewer acts as **evaluator**, adds ledger/model/workflow
-  verification, and drives iteration toward a numeric pass threshold.
-
----
-
-## 2. Layering model
-
-Every prompt is assembled by concatenating blocks. Blocks that are always
-present (**common blocks**) are listed first; blocks that vary by mode or
-complexity (**conditional blocks**) follow.
-
-```
-┌─────────────────────────────────────────────────────────┐
-│ WORKER SESSION PROMPT (per task assignment)             │
-├─────────────────────────────────────────────────────────┤
-│ [W1] Session bootstrap      (always, once at session)   │
-│ [W2] Task header            (always, per task)          │
-│ [W3] Lesson context         (always, may be empty)      │
-│ [W4] Complexity block       (SIMPLE / COMPLEX / AUTO)   │
-│ [W5] Cost guard             (always, after W4)          │
-│ [W6] Subagent capability    (always, per runtime)       │
-│ [W7] Model evidence         (always)                    │
-│ [W8] Mode block             (direct/reviewed/autonomous)│
-│ [W9] Task footer + curl     (always)                    │
-└─────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────┐
-│ REVIEWER SESSION PROMPT (per review cycle)              │
-├─────────────────────────────────────────────────────────┤
-│ [R1] Reviewer bootstrap     (always, once at session)   │
-│ [R2] Review header          (always, per cycle)         │
-│ [R3] Complexity review ctx  (always)                    │
-│ [R4] Stored Goal Packet     (always, JSON inline)       │
-│ [R5] Autonomous eval block  (autonomous only)           │
-│ [R6] Review profiles        (always, JSON + checklist)  │
-│ [R7] Repository REVIEW.md   (when present, ≤6 files)    │
-│ [R8] Lesson context         (always, may be empty)      │
-│ [R9] Review workflow        (Goal Packet gate / full)   │
-│ [R10] Report format + curl  (always)                    │
-│ [R11] Trigger + recent reps (always, JSON inline)       │
-└─────────────────────────────────────────────────────────┘
-```
+- `_subagent_capability_hint` and `_model_evidence_contract_block` are
+  **not always-on blocks** — they are called only from inside
+  `_orchestrator_contract_block`, which fires only when `task_mode=autonomous`.
+  direct/reviewed workers never see subagent-tool or model-pinning instructions.
+- The cost-guard paragraph is **not appended after** the complexity block; it
+  is the third bullet of the complexity block itself
+  (`_execution_complexity_assignment_block`, 480–492).
+- `lesson_context_block` appears in the assignment body **between the
+  attachment note and the complexity block** (worker) and **between
+  REVIEW.md guidance and the review-workflow block** (reviewer).
+- The Goal Packet gate sentence fires for **reviewed tasks** only (literal
+  wording: "For reviewed tasks, that first Goal Packet report is an approval
+  gate …", line 303).
+- Reviewer-side message structure (Verdict/Summary/Acceptance/Required
+  fixes/Notes, ~12 lines, bilingual) is specified **twice**: once in the
+  reviewer bootstrap (190–196) and again verbatim in the per-review header
+  (866–884). The bootstrap copy is what the agent sees on session start;
+  the per-review copy restates it before every review.
 
 ---
 
-## 3. Worker-side block reference
+## 2. Worker-side assembly
 
-### W1 — Session bootstrap `_build_workspace_agent_prompt` (89–121)
-
-Key invariants told to the agent on session start (before any task arrives):
-
-- You are a **resident** workspace agent. Wait for task assignment; do not
-  pre-emptively inspect the repo.
-- Check for uncommitted changes before touching files; respect local state.
-- An **independent reviewer session** will evaluate your work; do not assume
-  your own confidence means acceptance.
-- Final reports must include `review_decision ∈ {auto, request, skip}` and
-  `review_reason`.
-- Reports are submitted via `curl -X POST
-  /api/workspaces/sessions/{session_id}/reports`.
-- Bilingual `message_en` + `message_zh` required; legacy `message` is a short
-  English fallback.
-
-### W2 — Task header `_build_task_assignment_prompt` (255–320)
+Every worker receives a one-time session bootstrap (W-BOOT), then one
+assignment prompt (W-ASGN) per task. Concatenation order inside W-ASGN is
+exact (from `_build_task_assignment_prompt`, 279–343):
 
 ```
+New workspace task assigned.
+
 Workspace: {workspace.name}
 Task ID: {task.id}
 Task title: {task.title}
-Task mode: {task.task_mode.value}           # direct | reviewed | autonomous
-Task execution complexity: {…}              # simple | auto | complex
-Environment: {env block}
+Task mode: {task.task_mode.value}            # direct | reviewed | autonomous
+Task execution complexity: {…}               # simple | auto | complex
+{_session_environment_lines(…)}
 State snapshot: {snapshot_path}
-Dispatch reason: {…}
-[clear_note: prior context is stale — …]     # when resuming after idle
-[attachments: …]                             # when attachments present
+Dispatch reason: {task.dispatch_reason or 'not specified'}
+
+{clear_note}                                  # if task.clear_context
+Task description:
+{task.prompt}
+
+{attachment_note}                             # if task.attachments
+{lesson_context_block}
+{_execution_complexity_assignment_block(task)}     # W-CPLX, §2.4
+{_autonomous_assignment_block(task, agent_type)}   # W-MODE, §2.5 (empty for direct/reviewed)
+Start by reading the state snapshot. …             # W-FOOT, §2.6
 ```
 
-### W3 — Lesson context `_lesson_context_block_from_payload` (301–312)
+### 2.1 W-BOOT — worker session bootstrap `_build_workspace_agent_prompt` (89–121)
 
-Zero or more prior lessons retrieved from `FeedbackLessonStore` that match the
-task title/prompt/context. May be empty.
-
-### W4 — Complexity block `_execution_complexity_assignment_block` (459–492)
-
-**`simple`:**
-```
-Execution complexity: simple
-Execute directly in this session. Keep your plan compact. Avoid spawning
-subagents unless you hit a blocker that genuinely requires a separate
-context.
-```
-
-**`complex`:**
-```
-Execution complexity: complex
-Act as task orchestrator. Decompose the work, delegate pieces to subagents,
-keep ownership of the plan explicit, and personally integrate, validate,
-and accept the final result before reporting ready.
-```
-
-**`auto`:**
-```
-Execution complexity: auto
-Judge whether this task is simple or complex. State your strategy in your
-first (started / working) report. If you judge complex, act as orchestrator
-(see complex instructions). If you judge simple, execute directly (see
-simple instructions).
-```
-
-### W5 — Cost guard (487–492)
-
-Appended **after every complexity variant**, verbatim:
+Emitted once when the worker session is first spawned. Verbatim opening:
 
 ```
-Treat orchestrator mode as expensive. Choose it only when at least one of
-the following holds: (1) breadth-first parallel exploration across ≥3
-threads is needed, (2) the material does not fit one context window, or
-(3) clean isolation between sub-steps matters. Otherwise prefer a single
-linear agent.
+You are a resident workspace agent.
+
+Workspace: {workspace.name}
+Session: {session.id}
+{_session_environment_lines(workspace, session)}
+State snapshot: {self.snapshot_path(workspace.id)}
+
+Stay in this terminal and wait for assigned tasks. Do not start unrelated work.
+This workspace is an environment, not necessarily a single repository.
+Do not inspect repositories, run git status, edit files, or report working until
+a task is explicitly assigned. Use each task to choose the correct project
+directory before editing.
+Before editing, read the state snapshot and check for local file changes.
+If another agent modified files you need, avoid overwriting them and ask for review.
+When you report completed, the workspace may assign an independent reviewer.
+If reviewer feedback is sent back to you, continue from that feedback and report
+completed again when the fixes are done.
+Final reports may include review_decision: auto, request, or skip. This only controls
+whether an independent AI reviewer is requested; every completed task still waits for
+human acceptance before it is done. Use request when independent reviewer checks are
+needed, skip only for no-change analysis, manual follow-up, or explicitly trivial
+low-risk changes that do not need AI reviewer checks, and include review_reason.
+Report progress to the workspace coordinator only after you receive a task,
+when you start, get blocked, need input, are ready for review, or complete the work.
+Every report should include both message_en (concise English) and message_zh
+(concise 中文) so the workspace UI can render either language; keep the legacy
+message field as a short fallback (English is fine).
+
+Report endpoint for assigned tasks:
+curl -sS -X POST {base_url}/api/workspaces/sessions/{session.id}/reports …
 ```
 
-### W6 — Subagent capability hint `_subagent_capability_hint` (494–525)
+### 2.2 W-ENV — environment lines `_session_environment_lines` (71–87)
 
-Per runtime. Claude branch (current):
-
-```
-You are running on the Claude Code runtime. To spawn subagents, use the
-Task tool, e.g.:
-  Task(subagent_type="general-purpose", model="opus", description="…",
-       prompt="…")
-Pass model explicitly: "opus" for synthesis/heaviest reasoning, "sonnet"
-for volume work and validation, "haiku" for cheap classification.
-```
-
-> **Known gap (A5 from the ADHD analysis):** this block currently does NOT
-> mention the native `Workflow` tool (`parallel / pipeline / agent / phase`).
-> Once A5 lands, this block will additionally tell orchestrators to prefer
-> `Workflow.parallel([...])` for independent fan-out (concurrency ≤ 4) over
-> serial `Task` calls.
-
-Cursor/Codex/terminal branches give runtime-native equivalents; terminal
-degrades to "no subagents available, work linearly."
-
-### W7 — Model evidence contract `_model_evidence_contract_block` (527–555)
-
-Claude runtime:
+Every prompt that includes context (bootstrap, assignment, review) uses the
+same helper. Local workspaces emit three lines:
 
 ```
-Record model evidence for every subagent in your subagent ledger:
-  P-PLAN / P-EXECUTE / P-JUDGE / P-INTEGRATE → opus
-  P-VALIDATE / P-RESEARCH                     → sonnet
-For external API calls record model_or_api=external:<api>.
-Wrong-tier model on a key primitive is a contract violation.
+Runtime target: local
+Local workspace dir: {workspace.path}
+Default working directory: {session.workspace_path}
+Custom environment variables: {sorted list of session.env keys if any}
 ```
 
-Cursor/Codex get softer fallback language; terminal gets honest-degradation
-language (no fabricated subagent claims).
+Remote workspaces replace "Default working directory" with "SSH development
+target" and "Remote working directory" lines.
 
-### W8 — Mode block
+### 2.3 W-LESSON — lesson context `_lesson_context_block_from_payload` (358–398)
 
-**`direct`** and **`reviewed`**: `_autonomous_assignment_block` returns `""` —
-**no extra text** beyond W1–W7 and W9. The Goal Packet gating sentence in W9
-still appears for reviewed.
-
-**`autonomous`** — `_autonomous_assignment_block` (557–580) +
-`_orchestrator_contract_block` (582–677):
+When no lessons match:
 
 ```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Autonomous Mode V1
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Max iterations: {policy.max_iterations}
-Evaluation strictness: {policy.evaluation_strictness.value}
-Allow web research: {policy.allow_web_research}
-Require artifact review: {policy.require_artifact_review}
-Human checkpoint policy: {policy.human_checkpoint_policy}
-Current phase: {run.current_phase if run else 'n/a'}
+Workspace lessons index: no active lessons yet for this workspace.
+You do not need to reference any lessons in your report.
+```
 
-You are running under autonomous orchestration. The reviewer acts as the
-evaluator for each iteration. You will iterate until the evaluator passes
-the run or the iteration budget is exhausted.
+When lessons match, the block begins with a table-of-contents line
+(`Workspace lessons index (id, title, tags, confidence, hits, successes):`
+with one bullet per lesson), then:
 
-Orchestrator contract:
-  simple → execute directly, but you MUST spawn one P-JUDGE subagent to do
-           a pre-flight review before you post your review-gate report.
-  complex → orchestrator mode REQUIRED. Your workflow MUST include at
-            least one P-EXECUTE and one P-JUDGE. Posting ready_for_review
-            without a complete subagent ledger is a CONTRACT VIOLATION.
-  auto → declare "orchestrator" or "single-agent" in
-         goal_packet.assumptions of your first working report. If
-         orchestrator, the complex contract applies. If single-agent, you
-         still MUST spawn one P-JUDGE before the review gate.
+```
+Lessons catalog (human-readable): `docs/working-logs/lessons-catalog.md`
+(read this file for the full do/avoid/applies_when detail of each lesson).
+To inspect a specific lesson, call
+`GET /api/workspaces/<workspace_id>/lessons/<lesson_id>` which returns the
+full lesson body (summary, do, avoid, applies_when, evidence).
+This workspace ID: `{workspace_id}`.
+Read lessons only when you judge they may apply to this task — do not
+force-fit irrelevant lessons. In the final validation or risks field,
+list the IDs of any lessons you read (or state 'no lessons needed').
+```
 
-Role primitives (compose freely — there is no fixed template):
-  P-PLAN       high-level planning and decomposition
-  P-EXECUTE    implementation subtasks
-  P-VALIDATE   independent verification (tests, checks, builds)
-  P-JUDGE      critical review of artifacts or plans before handoff
-  P-INTEGRATE  merge subtask outputs back into the main workspace state
-  P-RESEARCH   information gathering, doc reading, codebase exploration
+### 2.4 W-CPLX — complexity guidance `_execution_complexity_assignment_block` (459–492)
 
-Model pinning (Claude runtime):
-  P-PLAN/P-EXECUTE/P-JUDGE/P-INTEGRATE → opus
-  P-VALIDATE/P-RESEARCH                → sonnet
+This block always begins with the same two-line header and contains three
+bullets; the third bullet is the cost guard. **All three variants are
+emitted, never just one bullet.**
 
-Declare your workflow shape in the first working report using:
+Header (always):
+```
+Execution complexity guidance:
+- Selected complexity: {simple|complex|auto}
+```
+
+Second bullet (per complexity, exactly one):
+
+- **simple:** "- Treat this as a small task. Execute directly in this session,
+  keep the plan compact, and avoid spawning subagents unless you discover a
+  concrete blocker that requires specialist help."
+- **complex:** "- Treat this as a complex task. Act as the task orchestrator:
+  decompose the work, delegate bounded implementation, testing, research, or
+  review subtasks to subagents when your runtime supports them, keep
+  ownership and write scopes explicit, and personally integrate, validate,
+  and accept the final result before reporting completion."
+- **auto:** "- Auto mode: before implementation, judge whether this task is
+  simple or complex. State the chosen execution strategy in your first
+  working report. If complex, orchestrate and delegate bounded subtasks
+  where your runtime supports subagents; if simple, execute directly."
+
+Third bullet — cost guard (always, verbatim):
+```
+- Treat orchestrator mode as expensive. Pick it only when at least one of
+  these holds: (1) the work is breadth-first parallel across >=3 independent
+  threads, (2) a single context window cannot hold the needed material, or
+  (3) subtasks are cleanly isolated so a sub-agent's mistake will not pollute
+  the main thread. Otherwise prefer a single linear agent.
+```
+
+The block ends with a blank line.
+
+### 2.5 W-MODE — mode block `_autonomous_assignment_block` (557–580)
+
+Returns `""` for direct/reviewed. For autonomous tasks it returns header +
+worker rules + the full Orchestrator Contract (which itself contains the
+subagent hint and model contract).
+
+Autonomous header (verbatim):
+```
+Autonomous Mode V1 is enabled for this task.
+- Max iterations: {policy.max_iterations}
+- Evaluation strictness: {policy.evaluation_strictness.value}
+- Allow web research: {policy.allow_web_research}
+- Require artifact review: {policy.require_artifact_review}
+- Human checkpoints: {policy.human_checkpoint_policy.value}
+- Current autonomous phase: {run.phase.value if run else 'intake'}
+
+Worker rules for Autonomous Mode:
+- Do not decide final pass yourself; evaluator/reviewer routing is mandatory.
+- Include concrete artifacts, changed files, validation, risks, and
+  acceptance_check evidence.
+- On revision, address only the evaluator's blocking issues and preserve
+  passing work.
+```
+
+Followed by `_orchestrator_contract_block(task, agent_type)` (582–677), which
+always contains (in this exact internal order):
+
+**(a) Enforcement clause** — one of three, selected by the task's execution
+complexity (NOT by mode):
+
+- simple (589–593): "Enforcement (simple): you may execute directly, but you
+  MUST still spawn one P-JUDGE sub-agent to do an independent pre-flight
+  review before posting the review-gate report."
+- complex (595–599): "Enforcement (complex): orchestrator mode is REQUIRED.
+  Your workflow MUST include at least one P-EXECUTE and one P-JUDGE sub-agent
+  dispatch. Posting a review-gate report without a complete subagent ledger
+  is a contract violation."
+- auto (601–606): "Enforcement (auto): in your first working report declare
+  orchestrator vs single-agent mode and justify the choice in
+  goal_packet.assumptions. If you pick orchestrator mode, the contract below
+  is mandatory; if you pick single-agent, you must still spawn one P-JUDGE
+  sub-agent before posting the review-gate report."
+
+**(b) Opening paragraph** (612–616):
+```
+## Orchestrator Contract (Auto Mode)
+
+You are the orchestrator and the only voice the user hears for this task.
+You must NOT do bulk execution, validation, or judging in your own context.
+Instead, decompose the task into bounded subtasks and delegate them to
+sub-agents using your runtime's native sub-agent capability.
+```
+
+**(c) `_subagent_capability_hint(agent_type)`** (494–525), selected by
+runtime:
+
+- Claude (497–504):
+  ```
+  Sub-agent invocation on claude runtime:
+  - Use the Task tool with subagent_type set to a built-in or repo-shipped
+    agent (general-purpose, Explore, Plan, code-reviewer, or any custom
+    .claude/agents/*.md).
+  - Pass model explicitly per the Primitive->Model pinning below; do NOT
+    rely on inheritance.
+  - Example: Task(subagent_type="general-purpose", model="opus",
+    description="<role.id>", prompt="<envelope>").
+  ```
+- Cursor (506–512): sub-agent/spawn capability; YOLO on by default; per-role
+  model overrides version-dependent; if unavailable, run parent at highest
+  tier and note in `workflow.notes`.
+- Codex (514–519): subtask/fan-out capability; per-role pinning version
+  dependent; note in `workflow.notes` if unsupported.
+- Terminal fallback (520–525): no native sub-agent capability; degrade to
+  single-agent; record degradation in Goal Packet assumptions; do NOT
+  fabricate a ledger.
+
+**(d) Role primitives** (618–624):
+```
+Role primitives (domain-agnostic responsibility shapes):
+  P-PLAN      decompose, decide subtask graph, hold the spec.
+  P-EXECUTE   produce the artifact (code, prompt, image, doc, query, ...).
+  P-VALIDATE  mechanical/objective check (tests, lint, schema, hashes).
+  P-JUDGE     qualitative critique vs acceptance (review, aesthetic judge, fact check).
+  P-INTEGRATE combine partial outputs into the final deliverable.
+  P-RESEARCH  fetch external knowledge / docs / references.
+```
+
+**(e) `_model_evidence_contract_block(agent_type)`** (527–555):
+
+- Claude (530–536):
+  ```
+  Primitive -> Model pinning (claude runtime; users CANNOT override):
+    P-PLAN, P-EXECUTE, P-JUDGE, P-INTEGRATE -> opus
+    P-VALIDATE, P-RESEARCH                  -> sonnet
+    P-EXECUTE that calls an external API (image-gen, TTS, ...) records
+    model_or_api=external:<api-name> instead of an LLM model.
+  ```
+- Cursor/Codex (538–549): use native routing; opus/sonnet pinning not
+  required; record actual model or `runtime-default` or
+  `unsupported:<reason>` or `external:<api-name>`; note in workflow.notes.
+- Terminal (550–555): record `runtime-default` and explain single-agent
+  degradation; do NOT claim opus/sonnet pinning.
+
+**(f) Workflow-declaration rule + observability** (626–645):
+```
+In your first working report you MUST declare a `workflow:` block listing the
+concrete roles you allocated, the dependency edges between them, and a
+`notes:` line explaining why this schema fits the task. There is NO fixed
+enum of templates; compose roles freely from the primitives above. The
+compact example below is inspiration, not a template to copy verbatim;
+non-Claude runtimes record actual runtime model/API evidence or
+runtime-default in their ledger.
+
+Any non-trivial workflow MUST contain at least one P-EXECUTE and one P-JUDGE;
+P-VALIDATE is required when the task has any objectively-checkable success
+criterion. P-VALIDATE and P-JUDGE are SEPARATE primitives. Do NOT fold
+either into your own context.
+
+Orchestrator observability requirements:
+- For any delegated, remote, or external-API step that runs more than a few
+  minutes or produces no immediate terminal output, post a working heartbeat
+  before the wait and at each checkpoint, with role.id, primitive, elapsed
+  time, last artifact/status, and next action. While a sub-agent, image/API
+  job, or validation run is in progress, report working -- do NOT switch to
+  needs_input or blocked just because a step is long-running.
+- A blocked or needs_input report is allowed only when no autonomous next
+  action remains. It must name the blocker, include evidence for the
+  blocker, list the next action already attempted or ruled out, and specify
+  the exact user/product/environment decision required. Bare placeholders
+  such as "needs your response" are contract violations.
+```
+
+**(g) Skeleton example** (646–657):
+```
+Compact skeleton (e.g. add a soft-delete endpoint to /api/orders, reject if
+shipped, cover with tests) -- shape only, not a template:
   workflow:
     roles:
-      - id: planner
-        primitive: P-PLAN
-        objective: "…"
-        success_criteria: "…"
-        inputs: ["…"]
-        output_schema: "…"
-        tools_allowed: [Read, Bash, …]
-        context_budget: "medium"
-      - id: implementer
-        primitive: P-EXECUTE
-        …
-    deps:
-      - ["planner", "implementer"]
-      - ["implementer", "tester"]
-      …
-    notes: "…"
-
-Skeleton example (linear implement):
-  planner → implementer → tester → reviewer → integrator
-
-Record each completed subtask in the subagent ledger appended to your
-review-gate report's validation field, with:
-  - role.id
-  - primitive
-  - agent (tool/type used)
-  - model_or_api
-  - decision (1-2 sentence outcome)
-  - evidence (path / commit / short summary)
+      - id: planner       primitive: P-PLAN      duty: decompose, list acceptance, blast radius
+      - id: implementer   primitive: P-EXECUTE   duty: make the change, scoped to the module
+      - id: tester        primitive: P-VALIDATE  duty: tests covering the success criteria
+      - id: reviewer      primitive: P-JUDGE     duty: independent review vs acceptance
+      - id: integrator    primitive: P-INTEGRATE duty: collect ledger, decide ready_for_review
+    deps: planner -> implementer -> tester -> reviewer -> integrator
+    notes: add P-RESEARCH for unknowns; add a judge->execute loop for iterative artifacts;
+    use model: external:<api> for non-LLM tool steps (image/render/etc).
 ```
 
-> **B2 (ADHD follow-up):** after B2 lands, the primitives list will include
-> `P-DIVERGE`, `P-CLUSTER`, `P-DEEPEN`, a second skeleton example for
-> divergent ideation will be added (`frame-N branches (parallel, sonnet) →
-> cluster → deep(top-K) → judge → integrate`), and the text will explicitly
-> point at `Workflow.parallel()` for fan-out.
+**(h) Subtask envelope schema** (658–668):
+```
+Subtask envelope (use this schema for EVERY dispatch, regardless of runtime):
+  [subtask-envelope]
+  role.id: <as declared in workflow.roles>
+  primitive: <P-PLAN|P-EXECUTE|P-VALIDATE|P-JUDGE|P-INTEGRATE|P-RESEARCH>
+  objective: <one sentence -- your contract with the sub-agent>
+  success_criteria: <bullet list mapping to goal_packet.acceptance>
+  inputs: <files / links / prior artifacts>
+  output_schema: <patch summary | prompt string | image URI | lint report | ...>
+  tools_allowed: <whitelist; deny everything else>
+  context_budget: <approximate token / step budget>
+  return_mode: final-only      # default; opt-in to full-transcript only when auditing.
+```
 
-### W9 — Task footer (320–343)
+**(i) Subagent ledger schema** (669–675):
+```
+Subagent ledger (REQUIRED in your final report's validation field):
+  subagent-ledger:
+    - role.id=<id> primitive=<P-*> agent=<runtime:tool#kind>
+      model_or_api=<opus|sonnet|actual-model|runtime-default|unsupported:reason|external:api>
+      goal=<...>
+      decision=<accepted|rejected|retried> evidence=<paths/uris/test-names>
+    - ...
+```
 
-Always appended:
+**(j) The enforcement clause** is repeated at the end (676): `{enforcement}\n`
+— i.e. the simple/complex/auto enforcement text from step (a) closes the
+contract block.
+
+### 2.6 W-FOOT — task footer (295–342)
+
+Verbatim (the part after W-CPLX and W-MODE):
 
 ```
-Start by reading the state snapshot at {snapshot_path}. Before substantive
-work, derive a Goal Packet capturing objective, acceptance criteria,
-validation plan, assumptions, out-of-scope boundaries, editable vs
-non-editable areas, and final handoff requirements.
+Start by reading the state snapshot. This workspace may contain many projects;
+use the task description to choose the correct directory before editing.
+Check for uncommitted file changes.
+Before substantive implementation, derive a Goal Packet from the original task
+prompt and include it in your first working report. The Goal Packet must preserve
+the user's requested outcome, record assumptions instead of silently narrowing
+ambiguous scope, and include concrete reviewer-checkable acceptance criteria,
+a validation plan, out-of-scope boundaries, and final handoff requirements.
+For reviewed tasks, that first Goal Packet report is an approval gate: after
+posting it, stop and wait for reviewer approval or packet-change feedback. Do
+not begin substantive implementation until the backend continues the task after
+review_passed.
 
-[For reviewed/autonomous tasks:] For this task the first Goal Packet report
-is an APPROVAL GATE: stop after submitting it and wait for the reviewer to
-approve the packet before beginning implementation.
+Report state started, then report working as you make progress.
+If blocked or waiting for user input, report blocked or needs_input.
+When ready for human review, report ready_for_review. When you believe the
+task is fully complete, report completed. The task is not finally done until
+a human accepts it.
 
-Report state machine: started → working (→ blocked → working) →
-  needs_input OR ready_for_review → completed.
-- started: first report, acknowledge receipt.
-- working: progress updates.
-- blocked: waiting on something external; include what.
-- needs_input: need a human decision you cannot safely infer.
-- ready_for_review: implementation complete and self-validated; the
-  reviewer will take over.
-- completed: (post-review) task done.
+For completed reports, decide reviewer routing explicitly:
+- review_decision=request when this should go to an independent AI reviewer
+  before human acceptance.
+- review_decision=skip only for no-change analysis, manual follow-up, or
+  explicitly trivial low-risk changes where AI reviewer checks are
+  unnecessary; this still requires human acceptance.
+- review_decision=auto to use the workspace default reviewer policy.
+Always include review_reason when choosing request or skip. The backend may
+still force review for nontrivial changed files, failed review follow-ups,
+blocked input, runtime attention, or other higher-risk work.
 
-Every completed / ready_for_review report must include review_decision
-(auto | request | skip) and review_reason.
+Report endpoint example:
+curl -sS -X POST {base_url}/api/workspaces/sessions/{session.id}/reports …
+  -d '{"task_id":"{task.id}","state":"started","message":"Started task",…}'
 
-Examples:
-  curl -sS -X POST {report_url} -H 'Content-Type: application/json' \
-    -d '{{"task_id":"{task.id}","state":"started","message":"…"}}'
-  curl -sS -X POST {report_url} -H 'Content-Type: application/json' \
-    -d '{{"task_id":"{task.id}","state":"working","goal_packet":{{…}}}}'
+Goal Packet report example:
+curl -sS -X POST {base_url}/api/workspaces/sessions/{session.id}/reports …
+  -d '{"task_id":"{task.id}","state":"working","goal_packet":{…}}'
+
+Every report should include both message_en (concise English) and message_zh
+(concise 中文); keep the legacy message field as a short fallback.
+Final reports should include task_id, state, message, message_en, message_zh,
+changed_files, validation, risks, acceptance_check, review_decision,
+review_reason, and risk_level. acceptance_check should map each Goal Packet
+acceptance criterion to status passed, failed, partial, or not_checked with
+evidence.
 ```
+
+Note that the Goal Packet gate sentence fires only "For reviewed tasks".
+Autonomous tasks do get a reviewer/evaluator, but the gate is enforced via
+the evaluator loop rather than via this "stop and wait" sentence (the
+orchestrator contract's "evaluator/reviewer routing is mandatory" bullet
+plus backend-managed iteration takes over).
 
 ---
 
-## 4. Worker prompt by cell — concrete shape
+## 3. Worker prompt by cell — concrete concatenation
 
-### 4.1 `direct / simple`
-```
-[W1] bootstrap (resident worker, no reviewer mentioned)
-[W2] task header (mode=direct, complexity=simple)
-[W3] lesson context
-[W4] SIMPLE complexity block
-[W5] cost guard
-[W6] subagent hint (Task tool only; no Workflow pointer pre-A5)
-[W7] model contract
-[W8] (empty — no mode block for direct)
-[W9] footer (NO Goal Packet gate sentence for direct)
-```
-No reviewer session is ever started. The agent reports `completed` directly;
-no `review_decision=request` will trigger a review.
+Order for each cell is exactly W-BOOT → (W-ENV inside W-ASGN) → W-ASGN
+header → clear_note/attachment_note → W-LESSON → W-CPLX → W-MODE → W-FOOT
+→ curl examples. The only differences across cells are W-CPLX second
+bullet and W-MODE content.
 
-### 4.2 `direct / complex`
-Same as 4.1 except W4 = COMPLEX block ("act as orchestrator"). No P-*
-primitive list, no ledger schema, no model pinning enforcement. Orchestration
-is entirely soft-prompted.
+| Cell | W-CPLX second bullet | W-MODE content |
+|------|---------------------|----------------|
+| direct / simple | small/simple guidance | `""` (empty) |
+| direct / complex | complex/orchestrator guidance | `""` |
+| direct / auto | auto/judge-first guidance | `""` |
+| reviewed / simple | small/simple guidance | `""` (Goal Packet gate appears in W-FOOT) |
+| reviewed / complex | complex/orchestrator guidance | `""` (Goal Packet gate appears in W-FOOT) |
+| reviewed / auto | auto/judge-first guidance | `""` (Goal Packet gate appears in W-FOOT) |
+| autonomous / simple | small/simple guidance | Autonomous V1 header + worker rules + Orchestrator Contract w/ simple enforcement (P-JUDGE pre-flight) + capability hint + primitives + model contract + workflow/observability + skeleton + envelope + ledger |
+| autonomous / complex | complex/orchestrator guidance | Same contract structure w/ complex enforcement (≥1 P-EXECUTE + ≥1 P-JUDGE, ledger mandatory) |
+| autonomous / auto | auto/judge-first guidance | Same contract structure w/ auto enforcement (declare in goal_packet.assumptions) |
 
-### 4.3 `direct / auto`
-Same as 4.1 except W4 = AUTO block (self-pick strategy, announce in first
-report). Same lack of hard contract as 4.2.
-
-### 4.4 `reviewed / simple`
-```
-[W1] bootstrap (mentions independent reviewer)
-[W2] task header (mode=reviewed, complexity=simple)
-[W3] lesson context
-[W4] SIMPLE complexity block
-[W5] cost guard
-[W6] subagent hint (Task tool only)
-[W7] model contract
-[W8] (empty — no orchestrator contract for reviewed)
-[W9] footer WITH Goal Packet gate sentence
-```
-Flow: submit Goal Packet → wait reviewer → implement → ready_for_review →
-reviewer does full adversarial review → pass/fail/needs_input → completed or
-back to W10.
-
-### 4.5 `reviewed / complex`
-Same as 4.4 except W4 = COMPLEX block ("act as orchestrator"). **Still no
-P-* list, no ledger schema, no model pinning enforcement.** This is the
-primary "rigidity" gap: the agent is told to orchestrate but not given a
-shape or tooling pointer for non-linear fan-out.
-
-### 4.6 `reviewed / auto`
-Same as 4.4 except W4 = AUTO block (declare strategy in Goal Packet
-assumptions); same soft contract gap as 4.5.
-
-### 4.7 `autonomous / simple`
-```
-[W1] bootstrap (mentions independent reviewer = evaluator)
-[W2] task header (mode=autonomous, complexity=simple)
-[W3] lesson context
-[W4] SIMPLE complexity block
-[W5] cost guard
-[W6] subagent hint
-[W7] model contract
-[W8] Autonomous V1 header + orchestrator contract (simple enforcement):
-       execute directly, but MUST spawn 1 P-JUDGE pre-flight.
-     + P-* primitive list
-     + workflow: block shape
-     + linear skeleton example
-     + subtask envelope schema
-     + subagent-ledger schema
-[W9] footer WITH Goal Packet gate sentence
-```
-
-### 4.8 `autonomous / complex`
-Same as 4.7 except W4 = COMPLEX block and W8 enforces complex tier:
-
-```
-Orchestrator contract (complex):
-- orchestrator mode REQUIRED.
-- workflow MUST include ≥1 P-EXECUTE and ≥1 P-JUDGE.
-- posting ready_for_review without a complete subagent-ledger section in
-  validation is a CONTRACT VIOLATION → review_failed.
-- P-VALIDATE required when the task has any objectively-checkable success
-  criterion.
-```
-
-### 4.9 `autonomous / auto`
-Same as 4.7 except W4 = AUTO block and W8 enforces auto tier:
-
-```
-Orchestrator contract (auto):
-- declare "orchestrator" or "single-agent" in goal_packet.assumptions of
-  your first working report.
-- if orchestrator: complex contract (≥1 P-EXECUTE, ≥1 P-JUDGE, ledger
-  mandatory) applies.
-- if single-agent: still MUST spawn one P-JUDGE pre-flight before the
-  review gate.
-```
+Important implication for the ADHD follow-ups: because the subagent
+capability hint (W6 in the previous draft) and model contract (W7) only
+appear inside the autonomous block, **reviewed/complex workers currently
+receive zero instruction about how to spawn subagents or what models to
+use**. The soft "Act as the task orchestrator … when your runtime supports
+them" line in W-CPLX has no companion how-to; that is one of the concrete
+gaps B2 needs to close (either by extending a lighter contract to reviewed
+tasks or by upgrading the capability hint from autonomous-only to always-on).
 
 ---
 
-## 5. Reviewer-side block reference
+## 4. Reviewer-side assembly
 
-### R1 — Reviewer bootstrap `_build_reviewer_bootstrap_prompt` (141–202)
-
-Told once on session start:
-
-- Your primary job is to **find defects and risks**, not to confirm success.
-- **Approval is the exception, not the default.**
-- Do not defer to the implementation agent's confidence.
-- Post `review_started` immediately; finish with exactly one of
-  `review_passed / review_failed / review_needs_input`.
-- Keep the message body SHORT (~12 lines). Put evidence in the structured
-  fields (`validation`, `risks`, `acceptance_check`, `profile_results`,
-  `artifact_refs`), not duplicated in the message.
-- Bilingual `message_en` + `message_zh` required.
-
-### R2 — Review header `_build_review_prompt` (845–857)
+Every reviewer receives a one-time session bootstrap (R-BOOT), then one
+review prompt (R-REV) per review cycle (both Goal Packet approvals and full
+reviews use the same R-REV; only the workflow block inside it changes
+shape). Concatenation order in R-REV (from `_build_review_prompt`, 845–905):
 
 ```
 Review workspace task.
@@ -430,37 +469,140 @@ Task mode: {task.task_mode.value}
 Task execution complexity: {task.execution_complexity.value}
 Implementation agent session: {task.session_id or 'unknown'}
 Reviewer session: {reviewer.id}
-{environment lines}
+{_session_environment_lines(workspace, reviewer)}
 State snapshot: {snapshot_path}
 
 Task description:
 {task.prompt}
+
+{_execution_complexity_review_block(task)}              # R-CPLX, §4.3
+Stored Goal Packet JSON:
+{task.goal_packet.model_dump_json() if task.goal_packet else 'null'}
+
+{_autonomous_review_block(task)}                         # R-AUTO, §4.4 (empty for direct/reviewed)
+{_review_profile_prompt_block(profiles)}                 # R-PROF, §4.5
+{_review_guidance_block(workspace, trigger_report)}      # R-GUIDE, §4.6
+{lesson_context_block}                                   # same block as W-LESSON
+{_review_workflow_block(task, trigger_report)}           # R-WF, §4.7 (2 shapes)
+Required final report format: …                          # R-FMT, §4.8
+Bilingual reporting: …
+Trigger report JSON:
+{trigger_report.model_dump_json()}
+
+Recent task reports JSON:
+{json.dumps(report_payload, indent=2)}                   # last ≤12
+
+First report review_started, then finish with exactly one final review report:
+curl -sS -X POST …/api/workspaces/sessions/{reviewer.id}/reports …  # review_passed example
+
+Use review_failed when fixes are required. Use review_needs_input only for
+genuine blockers outside the implementation agent's control.
 ```
 
-### R3 — Complexity review context `_execution_complexity_review_block` (993–1002)
+### 4.1 R-BOOT — reviewer session bootstrap `_build_reviewer_bootstrap_prompt` (141–202)
+
+Emitted once per reviewer session. Verbatim opening sections (headings
+preserved):
+
+```
+You are an independent reviewer agent for this workspace.
+
+Workspace: {workspace.name}
+Session: {session.id}
+{_session_environment_lines(workspace, session)}
+State snapshot: {snapshot_path}
+
+Wait for explicit review assignments. Do not implement, refactor, format, or
+edit files.
+
+Reviewer mindset (read first):
+- Your primary job is to FIND defects and risks, not to confirm success. A
+  clean, confident, or well-written implementation report is not evidence
+  that the code is correct.
+- Approval is the exception, not the default. Assume something is wrong
+  until you have actively looked for it and failed to find it. Passing
+  without having tried to break the change is a review failure.
+- Do not defer to the implementation agent. Its confidence, tone, and
+  report polish carry no weight; only the actual code and observed state
+  do. Disregard formatting and verbosity when judging quality — judge
+  substance, not presentation.
+- It is correct and expected to fail a review or request changes when you
+  find real blocking defects. Do not soften or wave through borderline
+  issues to avoid friction.
+
+Reviewer operating contract:
+- Derive concrete acceptance criteria from the task description, user
+  intent, recent task reports, changed files, and repository conventions.
+- Review against those criteria plus regression risk, integration fit,
+  validation quality, and whether the implementation stayed within scope.
+- Treat reported validation as claims to verify, not proof. Independently
+  inspect the code and state behind the highest-risk claims; do not accept
+  self-reported validation at face value. If you cannot confirm a critical
+  claim, treat it as unverified, not as passing.
+- Report review_started when you begin.
+- Finish by reporting exactly one of review_passed, review_failed, or
+  review_needs_input.
+
+Review exit rules:
+- Use review_passed only after you have actively tried to find defects
+  (edge cases, error paths, regressions, scope leakage) and failed to find
+  any blocking one — and all acceptance criteria are met, validation is
+  adequate for the risk, and residual risks are acceptable for final human
+  acceptance. Do not pass merely because nothing obvious looked wrong.
+- Use review_failed when the implementation agent can fix concrete defects
+  or missing checks. Include required fixes specific enough for the
+  implementation agent to follow.
+- Use review_needs_input only when a product, credential, environment, or
+  requirement decision is genuinely required before review can finish.
+
+Reporting style:
+- The message field must be a SHORT scannable summary so a human can read
+  it at a glance. Do NOT dump every finding, validation log, or full
+  criterion list into message. Put detailed evidence into the structured
+  fields (validation, risks, acceptance_check, profile_results,
+  artifact_refs) instead.
+- Every report must include both message_en (concise English) and
+  message_zh (concise 中文); keep the legacy message field as a short
+  fallback.
+
+Final review message body (keep each section to 1-3 short bullets, total
+under ~12 lines):
+Verdict: review_passed | review_failed | review_needs_input
+Summary: one or two sentences describing what was actually delivered.
+Acceptance criteria: rollup like "3/4 passed (1 partial: <criterion>)";
+  full per-criterion evidence belongs in the acceptance_check field.
+Required fixes: only for review_failed; the 1-3 highest-priority concrete
+  fixes.
+Notes: at most one line for residual risk or follow-up; deeper detail goes
+  in risks.
+
+Report endpoint for assigned reviews:
+curl -sS -X POST {base_url}/api/workspaces/sessions/{session.id}/reports …
+  -d '{"task_id":"TASK_ID","state":"review_started",…}'
+```
+
+### 4.2 R-HEADER — review header (846–857)
+
+Opens with "Review workspace task." then the same metadata fields as W-ENV
+plus two extras: `Implementation agent session:` and `Reviewer session:`.
+Then `Task description:\n{task.prompt}\n\n`.
+
+### 4.3 R-CPLX — complexity review context `_execution_complexity_review_block` (993–1002)
 
 ```
 Execution complexity review context:
 - Selected complexity: {simple|complex|auto}
-- Verify the implementation strategy matched the selected complexity.
-  - simple: unnecessary delegation and process overhead are scope risks.
-  - complex: lack of decomposition, delegated specialist work, or missing
-    integrator-level validation can be blocking.
-  - auto: verify the agent explicitly chose and followed a simple or
-    complex strategy.
+- Verify the implementation strategy matched the selected complexity. For
+  simple tasks, unnecessary delegation and process overhead are scope
+  risks. For complex tasks, lack of decomposition, delegated specialist
+  work where available, or missing integrator-level validation can be
+  blocking. For auto tasks, verify the agent explicitly chose and followed
+  a simple or complex strategy.
 ```
 
-### R4 — Stored Goal Packet (859–860)
+### 4.4 R-AUTO — autonomous evaluation context `_autonomous_review_block` (1004–1055)
 
-Inline JSON:
-```
-Stored Goal Packet JSON:
-{task.goal_packet.model_dump_json() if task.goal_packet else 'null'}
-```
-
-### R5 — Autonomous evaluation context `_autonomous_review_block` (1004–1055)
-
-Empty for direct/reviewed. For autonomous:
+Returns `""` for direct/reviewed. For autonomous:
 
 ```
 Autonomous evaluation context:
@@ -470,218 +612,241 @@ Autonomous evaluation context:
 - Evaluation strictness: {policy.evaluation_strictness.value}
 - Require artifact review: {policy.require_artifact_review}
 
-For Autonomous Mode V1 you are the evaluator for this iteration. Score
-against the Goal Packet, rubric/run evidence, validation, artifacts, and
-prior evaluation history.
-  review_passed     → run moves to passed, awaits human acceptance.
-  review_failed     → targeted revision possible within budget.
-  review_needs_input → product judgment / credentials / unavailable
-                        artifact / unsafe scope prevents evaluation.
+For Autonomous Mode V1, act as the evaluator for this iteration. Score
+against the Goal Packet, any rubric/run evidence, validation, artifacts,
+and prior evaluation history. Use review_passed only when the run should
+move to passed and await human acceptance. Use review_failed when targeted
+revision is possible within budget. Use review_needs_input when product
+judgment, missing credentials, unavailable artifacts, or unsafe scope
+prevents evaluation.
 
 Subagent ledger verification (orchestrator contract enforcement):
-- Complex autonomous tasks MUST embed a `subagent-ledger:` section in the
-  review-gate report's validation field. Missing/empty ledger → contract
-  violation → review_failed with a blocking issue.
-- Each ledger entry needs: role.id, primitive
+- For complex autonomous tasks the orchestrator MUST embed a
+  `subagent-ledger:` section in its review-gate report's validation field.
+  A missing or empty ledger on a complex task is a contract violation;
+  recommend review_failed with a blocking issue stating the ledger is
+  required.
+- Each ledger entry should carry role.id, primitive
   (P-PLAN/P-EXECUTE/P-VALIDATE/P-JUDGE/P-INTEGRATE/P-RESEARCH), agent,
-  model_or_api, decision, evidence.
-{model_verification — per runtime, see below}
-- Verify workflow.roles (from the first working report) matches the ledger;
-  at least one P-EXECUTE and one P-JUDGE actually ran; P-VALIDATE ran when
-  there are objectively-checkable criteria.
+  model_or_api, decision, and evidence.
+{model_verification — see below}
+- Verify the workflow.roles declared in the first working report matches
+  the ledger and that at least one P-EXECUTE and one P-JUDGE actually ran.
+  P-VALIDATE is required when the task has any objectively-checkable
+  success criterion.
 ```
 
-**Model verification** (runtime-dependent, 1010–1030):
-- Claude runtime: P-PLAN/EXECUTE/JUDGE/INTEGRATE → opus; P-VALIDATE/RESEARCH
-  → sonnet; external APIs → `external:<api>`. Wrong tier → contract
-  violation.
-- Cursor/Codex: do NOT fail solely on missing opus/sonnet pinning. Accept
-  `runtime-default / unsupported:<reason> / <actual model> / external:<api>`
-  with explanation. Missing evidence is a ledger quality issue, not a
-  wrong-tier violation.
-- Terminal: verify honest degradation (`direct` or `runtime-default`); do
-  not accept fabricated subagent/model claims.
+**Model verification** (runtime-dependent, 1009–1030):
 
-### R6 — Review profiles `_review_profile_prompt_block` (711–717)
+- Claude (1010–1015): "- Verify model pinning: P-PLAN, P-EXECUTE, P-JUDGE,
+  and P-INTEGRATE roles must run on opus on the claude runtime; P-VALIDATE
+  and P-RESEARCH may run on sonnet. A P-EXECUTE role that calls an external
+  API may instead record model_or_api=external:<api>. Wrong-tier model on a
+  key primitive is a contract violation."
+- Cursor/Codex (1016–1024): accept `model_or_api=runtime-default`,
+  `unsupported:<reason>`, actual model name, or `external:<api>` when the
+  ledger explains the limitation. Treat missing evidence as a ledger
+  quality issue, not as a Claude wrong-tier violation.
+- Terminal (1025–1030): verify honest degradation (`direct` or
+  `runtime-default`); do NOT require opus/sonnet pinning; do not accept
+  fabricated subagent/model claims.
+
+### 4.5 R-PROF — review profiles `_review_profile_prompt_block` (711–717)
 
 ```
 Enabled review profiles JSON:
-[general, code, ui, artifact, delivery, boundary, …]   # from _effective_review_profiles
+["general","code",…]
 
 Review profile checklist:
-{review_profile_prompt_lines(profiles) — one checklist section per profile}
+{state_policy.review_profile_prompt_lines(profiles), joined by newlines}
 ```
 
-Profile selection merges:
-1. `task.review_profiles` (explicit on the task)
-2. `trigger_report.review_profiles` (explicit on the trigger report)
-3. `policy.review_profiles` (autonomous only, from autonomy policy)
+Profiles are merged from three sources (685–689): `task.review_profiles`,
+`trigger_report.review_profiles`, and (autonomous only)
+`policy.review_profiles`, then passed through
+`state_policy.infer_review_profiles(...)` which may add inferred profiles
+based on title/prompt/changed_files/risk/strictness/attachments.
 
-Then `state_policy.infer_review_profiles` adds inferred profiles based on
-task title/prompt/changed_files/state/strictness/attachments.
+### 4.6 R-GUIDE — repository review guidance `_review_guidance_block` (719–793)
 
-### R7 — Repository review guidance `_review_guidance_block` (719–793)
-
-Walks up the directory tree from each file in `changed_files` (≤12), plus
-workspace root, collecting `REVIEW.md` files. Up to 6 files, each truncated
-at 4000 chars. Empty if no REVIEW.md found or workspace is remote.
+Empty string when no REVIEW.md files found or workspace is remote.
+Otherwise:
 
 ```
 Repository review guidance:
-### path/to/REVIEW.md
-{contents}
+### {relative path}
+{REVIEW.md contents, ≤4000 chars, truncated with "\n...[truncated]"}
 
-### other/path/REVIEW.md
-{contents}
+### {next path}
+…
 ```
 
-### R8 — Lesson context
-Same block as W3 but keyed off the task+trigger report. May be empty.
+Collection walks up the directory tree from each file in
+`trigger_report.changed_files[:12]` (resolving relative paths against
+workspace root, skipping non-file/non-workspace/absolute-outside-root
+entries, deduplicating), and includes workspace root `REVIEW.md` first.
+At most six files are included.
 
-### R9 — Review workflow `_review_workflow_block` (908–991)
+### 4.7 R-WF — review workflow `_review_workflow_block` (908–991)
 
-Two shapes. The Goal Packet approval variant fires when the trigger report
-is the first Goal Packet (checked by `_is_goal_packet_approval_review`).
+Two shapes; the Goal Packet approval shape is selected when
+`_is_goal_packet_approval_review(task, trigger_report)` is true (i.e. the
+trigger report is the first working report carrying a Goal Packet and no
+implementation has begun).
 
-**Goal Packet approval review (913–945):**
+**Shape A — Goal Packet approval review (915–945):**
+
 ```
 Goal Packet approval review:
-1. Stay read-only. Do not edit files or run formatters that write changes.
+1. Stay read-only. Do not edit files, run formatters that write changes,
+   or revert work.
 2. This is a pre-implementation plan gate. Do not judge implementation
-   completeness (there should be none yet).
+   completeness; there should be no substantive implementation yet.
 3. Check whether the stored Goal Packet faithfully preserves the original
-   task prompt, attachments, ambiguity, and requested outcome. FAIL if the
-   packet narrowed or distorted scope.
-4. Verify reviewer-checkable acceptance criteria, validation plan,
-   assumptions, out-of-scope boundaries, and final handoff requirements.
-   Missing editable/non-editable boundaries or vague validation →
-   blocking.
-5. Check execution order: implementation must wait for this approval, then
-   stay within the approved packet unless a revised packet is submitted.
-6. Produce one final verdict.
+   task prompt, attachments, ambiguity, and requested outcome. Fail the
+   review if the packet narrowed or distorted scope.
+4. Verify the packet has reviewer-checkable acceptance criteria, a
+   validation plan, assumptions, out-of-scope boundaries, and final
+   handoff requirements. Treat missing editable/non-editable boundaries or
+   vague validation as blocking.
+5. Check the packet's execution order: the implementation agent must wait
+   for this approval before substantive development, then stay within the
+   approved packet unless it submits a revised packet for review.
+6. Produce one final verdict using the exit criteria below.
 
 Acceptance standards:
-- Goal fidelity: preserves original prompt, doesn't hide ambiguity.
-- Boundary quality: editable areas, non-goals, deps to avoid, rejected
-  approaches all explicit.
-- Reviewability: acceptance criteria + validation plan concrete enough for
-  a later reviewer to check without reconstructing intent.
+- Goal fidelity: the Goal Packet preserves the original prompt and does
+  not hide ambiguous scope.
+- Boundary quality: editable areas, non-goals, dependencies to avoid, and
+  rejected approaches are explicit enough to constrain implementation.
+- Reviewability: acceptance criteria and validation plan are concrete
+  enough for a reviewer to check later without reconstructing intent.
 - Handoff quality: final report requirements include changed files,
-  validation evidence, risks, acceptance_check mapping.
+  validation evidence, risks, and acceptance_check mapping.
 
-Exit criteria:
-- review_passed → implementation agent may begin development on the
-  approved packet. (Does NOT mean the task is done.)
-- review_failed → implementation agent must revise only the Goal Packet
-  and resubmit; include Required fixes.
-- review_needs_input → packet cannot be judged without user/product
-  clarification, credentials, unavailable environment, or another decision
-  the implementation agent cannot infer.
+Review exit criteria:
+- review_passed means the implementation agent may begin development from
+  the approved Goal Packet. It does not mean the task implementation is
+  complete or ready for human acceptance.
+- review_failed means the implementation agent must revise only the Goal
+  Packet and resubmit it for approval before development. Include a
+  Required fixes section.
+- review_needs_input means the packet cannot be judged without
+  user/product clarification, credentials, unavailable environment, or
+  another decision the implementation agent cannot safely infer.
 ```
 
-**Full review (946–991):**
+**Shape B — full adversarial review (947–991):**
+
 ```
 Review workflow:
-1. Stay read-only. Do not edit files or run formatters that write changes.
+1. Stay read-only. Do not edit files, run formatters that write changes,
+   or revert work.
 2. Check whether the stored Goal Packet faithfully preserves the original
-   task prompt. FAIL if the packet narrowed or distorted the requested
-   outcome.
-3. Derive a task-specific acceptance checklist using all of:
-   - task title and description,
-   - stored Goal Packet (objective, acceptance criteria, validation plan,
-     assumptions, out-of-scope, handoff),
+   task prompt. Fail the review if the packet narrowed or distorted the
+   user's requested outcome.
+3. Derive a task-specific acceptance checklist before judging the
+   implementation. Use:
+   - the task title and description,
+   - the stored Goal Packet objective, acceptance criteria, validation
+     plan, assumptions, out-of-scope boundaries, and handoff requirements,
    - explicit user requirements and attachments,
-   - changed_files, validation, risks, acceptance_check from
-     implementation reports,
+   - changed_files, validation, risks, and acceptance_check evidence from
+     the implementation reports,
    - enabled review profiles, profile-specific evidence, artifact_refs,
-     REVIEW.md guidance,
+     and any REVIEW.md guidance,
    - repository conventions and nearby behavior,
    - any blocked/needs_input context from the trigger report.
 4. Inspect changed files and related code paths enough to verify
    correctness and scope.
-5. Adversarial defect hunt (BEFORE deciding the verdict): actively try to
-   break the change. Check:
-   - edge/boundary inputs, empty/null/large values,
-   - error/exception paths, partial failures, retries,
-   - concurrency, ordering, shared-state races,
-   - regressions to existing flows, persistence, migrations,
-   - scope leakage and side effects in untouched areas,
-   - security/permission and input-trust assumptions when relevant.
-   Anything you cannot rule out by reading the code is a candidate
-   defect, NOT "fine".
+5. Adversarial defect hunt (do this BEFORE deciding the verdict): actively
+   try to break the change. Enumerate concrete failure modes and check
+   each against the actual code:
+   - edge/boundary inputs and empty/null/large values,
+   - error and exception paths, partial failures, and retries,
+   - concurrency, ordering, and shared-state races,
+   - regressions to existing flows, persistence, and migrations,
+   - scope leakage and unintended side effects in untouched areas,
+   - security/permission and input-trust assumptions where relevant.
+   Treat anything you cannot rule out by reading the code as a candidate
+   defect, not as fine.
 6. Evaluate validation evidence. Independently spot-check the highest-risk
    claimed checks instead of accepting them at face value. Decide whether
    missing tests/checks are acceptable or blocking.
-7. Produce one final verdict.
+7. Produce one final verdict using the exit criteria below.
 
 Acceptance standards:
-- Goal fidelity          - Functional correctness
-- Scope control          - Integration fit
-- Regression safety      - Validation quality
-- Handoff quality
+- Goal fidelity: the Goal Packet preserves the original prompt and does
+  not hide ambiguous scope.
+- Functional correctness: the requested behavior is implemented end to
+  end.
+- Scope control: changes are limited to the task and do not introduce
+  unrelated churn.
+- Integration fit: code follows local architecture, state flow, API
+  contracts, and UI conventions.
+- Regression safety: existing user flows, persistence, concurrency, and
+  error paths are not broken.
+- Validation quality: reported checks match the risk level; missing
+  checks are called out clearly.
+- Handoff quality: changed_files, validation, and risks are understandable
+  for a human reviewer.
 
-Exit criteria:
-- review_passed:    actively attempted to break the change (step 5) and
-                    found no blocking defect; every acceptance criterion
-                    satisfied; validation adequate or gaps explicitly
-                    non-blocking; residual risks acceptable for final
-                    human acceptance. Do NOT pass on the absence of an
-                    attempt or because the implementation report looked
-                    confident.
-- review_failed:    at least one blocking defect/regression/scope issue/
-                    missing required validation fixable by the
-                    implementation agent. Include Required fixes.
-- review_needs_input: cannot finish without user/product clarification,
-                    credentials, unavailable environment, or another
-                    decision outside the implementer's control.
+Review exit criteria:
+- review_passed: you have actively attempted to break the change (step 5)
+  and found no blocking defect; every acceptance criterion is satisfied;
+  validation is adequate or any gaps are explicitly non-blocking; residual
+  risks are acceptable for final human acceptance. Do not pass on the
+  absence of an attempt or because the implementation report looked
+  confident.
+- review_failed: at least one blocking defect, regression, scope issue, or
+  missing required validation can be fixed by the implementation agent.
+  Include a Required fixes section.
+- review_needs_input: review cannot finish without user/product
+  clarification, credentials, unavailable environment, or another decision
+  the implementation agent cannot safely infer.
 ```
 
-### R10 — Required final report format (866–905)
+### 4.8 R-FMT — report format (866–905)
 
 ```
 Required final report format:
-Keep the message SHORT and human-scannable (~≤12 lines). Detailed evidence
-belongs in structured fields (validation, risks, acceptance_check,
-profile_results, artifact_refs), not duplicated in the message.
+Keep the message itself SHORT and human-scannable. Detailed evidence
+belongs in the structured report fields (validation, risks,
+acceptance_check, profile_results, artifact_refs), not duplicated in the
+message body. Aim for under ~12 lines total.
 
 Message body sections:
-  Verdict: review_passed | review_failed | review_needs_input
-  Summary: 1–2 sentences on what was actually delivered.
-  Acceptance criteria: short rollup, e.g. "3/4 passed (1 partial: …)";
-    full per-criterion evidence → acceptance_check field.
-  Required fixes: (review_failed only) 1–3 highest-priority concrete fixes.
-  Notes: ≤1 line residual risk/gaps/follow-up; deeper detail → risks.
+Verdict: review_passed | review_failed | review_needs_input
+Summary: one or two sentences on what was actually delivered for this task.
+Acceptance criteria: a short rollup, e.g. "3/4 passed (1 partial:
+  <criterion>)"; full per-criterion evidence belongs in the
+  acceptance_check structured field.
+Required fixes: only for review_failed; the 1-3 highest-priority concrete
+  fixes.
+Notes: at most one line on residual risk, gaps, or follow-up; deeper
+  detail goes into the risks/validation fields.
 
 Bilingual reporting:
-- Include message_en AND message_zh with the structure above.
-- Legacy message field is a short English fallback.
-- Acceptance details, validation, profile results, findings, required
-  fixes → structured fields (acceptance_check, validation, risks,
-  profile_results, artifact_refs).
-
-curl -sS -X POST {reviewer_report_url} …  # review_passed example
-
-Use review_failed when fixes are required. Use review_needs_input only for
-genuine blockers outside the implementer's control.
+- Every review report must include message_en (concise English) and
+  message_zh (concise 中文) with the same structure as above. Keep the
+  legacy message field as a short fallback (English is fine).
+- Acceptance criteria details, validation logs, profile results,
+  findings, and required fixes go into the structured fields — populate
+  acceptance_check, validation, risks, profile_results, and artifact_refs
+  as before.
 ```
 
-### R11 — Trigger + recent reports (885–888)
-
-Inline JSON:
-```
-Trigger report JSON:
-{trigger_report.model_dump_json()}
-
-Recent task reports JSON:
-{json.dumps(report_payload, indent=2)}   # last ≤12 reports for the task
-```
+Followed by Trigger report JSON, Recent task reports JSON, a curl example
+for review_passed, and a closing one-liner: "Use review_failed when fixes
+are required. Use review_needs_input only for genuine blockers outside the
+implementation agent's control."
 
 ---
 
-## 6. Continue / retry prompt
+## 5. Continue / retry prompt
 
-When the reviewer returns `review_failed`, the dispatcher sends
-`_build_continue_prompt` (1057–1082) back to the worker:
+When the reviewer returns `review_failed` (or the dispatcher forwards
+human-injected feedback), `_build_continue_prompt` (1057–1081) sends:
 
 ```
 Continue workspace task from review.
@@ -689,125 +854,143 @@ Continue workspace task from review.
 Task ID: {task.id}
 Task title: {task.title}
 Follow-up instructions:
-{reviewer's Required fixes verbatim + optional attachment block}
+{follow-up message, with attachment block if payload.attachments present}
 
-{_autonomous_continue_orchestrator_reminder}
-
+{_autonomous_continue_orchestrator_reminder(task)}
 The task is back in working state. Report progress with the same task_id.
 
-{report endpoint curl}
+{_report_endpoint_curl(session, task.id)}
 ```
 
-`_autonomous_continue_orchestrator_reminder` (1083–1092) — only for autonomous
-tasks:
+If `payload.message` is empty/whitespace, `follow_up` defaults to
+"Continue addressing the review feedback." plus any attachments. The
+report endpoint curl example is re-stated via `_report_endpoint_curl`
+(40–56) because the agent's context may have been compacted/cleared.
+
+`_autonomous_continue_orchestrator_reminder` (1083–1092) returns `""` for
+non-autonomous tasks; for autonomous tasks (verbatim):
 
 ```
 Orchestrator-mode reminder: if you ran in orchestrator mode for this task,
 stay in orchestrator mode for this revision. Address the evaluator's
-blocking issues by dispatching new sub-agent subtasks (P-EXECUTE for fixes,
-P-VALIDATE for re-tests, P-JUDGE for re-review) rather than folding the
-work into your own context. Append the new ledger entries to your existing
-subagent ledger; do not restart it.
+blocking issues by dispatching new sub-agent subtasks (P-EXECUTE for
+fixes, P-VALIDATE for re-tests, P-JUDGE for re-review) rather than folding
+the work into your own context. Append the new ledger entries to your
+existing subagent ledger; do not restart it.
 ```
 
 ---
 
-## 7. Reviewer prompt by cell — concrete shape
+## 6. Reviewer prompt by cell
 
-### 7.1 `direct / *`
-No reviewer session is started. Reports progress directly from worker to
-`completed`.
+### 6.1 `direct / *`
+No reviewer session is ever started. (Exception: the backend may
+force-route a direct task to review if the report has nontrivial changed
+files or other high-risk signals — see line 317 "The backend may still
+force review …" — but that is a runtime override, not a cell-level
+contract.)
 
-### 7.2 `reviewed / *`
-```
-[R1] reviewer bootstrap (independent critic mindset)
-[R2] review header
-[R3] complexity review context
-[R4] stored Goal Packet JSON
-[R5] (empty — no autonomous block)
-[R6] review profiles (general/code/ui/artifact/delivery/boundary, inferred)
-[R7] REVIEW.md guidance (if present)
-[R8] lesson context
-[R9] review workflow (Goal Packet approval OR full adversarial review)
-[R10] report format + curl
-[R11] trigger report JSON + recent task reports JSON
-```
+### 6.2 `reviewed / *`
+Full R-BOOT + R-REV in the order given in §4, with:
+- R-AUTO = "" (no autonomous evaluator block)
+- R-CPLX present (complexity-match check)
+- R-WF has two shapes: Shape A for the first-cycle Goal Packet approval,
+  Shape B for all subsequent ready_for_review cycles.
+- No ledger / model-pinning enforcement (those live in R-AUTO).
 
-Two review cycles per task in the normal path:
-1. **Goal Packet review** (R9 = approval shape) before implementation.
-2. **Full review** (R9 = full adversarial shape) after ready_for_review.
+Typical happy path for a reviewed task produces **two** Shape B-equivalent
+review cycles if the Goal Packet approval is counted separately: first
+Shape A (packet), then Shape B (implementation). Each review_failed loops
+back through §5 and triggers another Shape B review.
 
-More cycles possible if review_failed (continue prompt → fix → another full
-review).
+### 6.3 `autonomous / *`
+Full R-BOOT + R-REV, with R-AUTO populated (evaluator role + ledger
+verification + runtime-dependent model strictness + workflow.roles
+consistency check). R-WF is still Shape A or Shape B (same gate as
+reviewed); the evaluator semantics ("act as the evaluator for this
+iteration", score against rubric/history, pass-threshold 0.8 per
+`schemas.EvaluationReport.pass_threshold`) sit in R-AUTO on top of the
+workflow's acceptance standards.
 
-### 7.3 `autonomous / *`
-```
-[R1] reviewer bootstrap (acts as evaluator)
-[R2] review header
-[R3] complexity review context
-[R4] stored Goal Packet JSON
-[R5] Autonomous evaluation context (evaluator role + ledger/model/workflow
-     verification, runtime-dependent model strictness)
-[R6] review profiles (same as reviewed + possible policy.review_profiles;
-     B3 will add 'ideation')
-[R7] REVIEW.md guidance (if present)
-[R8] lesson context
-[R9] review workflow (Goal Packet approval OR full review; on full review
-     the exit criteria effectively include the evaluation pass threshold
-     of 0.8 per schemas.EvaluationReport)
-[R10] report format + curl
-[R11] trigger report JSON + recent task reports JSON
-```
-
-Iteration count is bounded by `policy.max_iterations`; each full review is
-an evaluation cycle. `review_passed` moves the run to passed awaiting human
-acceptance; `review_failed` loops back via W10 (continue prompt +
-orchestrator-remainder reminder); `review_needs_input` pauses for human.
+Iteration count is bounded by `policy.max_iterations`. `review_passed`
+moves the autonomous run to passed; `review_failed` loops through §5
+with the orchestrator-mode reminder; `review_needs_input` pauses for
+human.
 
 ---
 
-## 8. Key schemas referenced in prompts
+## 7. Key schemas referenced by the prompts
 
-All from `backend/claude_hub/models/schemas.py`.
+From `backend/claude_hub/models/schemas.py` (line anchors verified against
+`main@70921a7`):
 
-- `WorkspaceTaskMode` (52): `direct | reviewed | autonomous`
-- `WorkspaceTaskExecutionComplexity` (in task payload): `simple | auto | complex`
+- `WorkspaceTaskMode` (≈line 52): `direct | reviewed | autonomous`
+- `WorkspaceTaskExecutionComplexity`: `simple | auto | complex`
 - `AgentType`: `claude | cursor | codex | terminal`
-- `ReviewProfile` (181): `general | code | ui | artifact | delivery | boundary`
-  (B3 adds `ideation`)
-- `RubricCriterion` (267), `CriterionResult` (279), `EvaluationReport` (289)
-  with `pass_threshold = 0.8` (335)
-- `AutonomyPolicy` fields: `max_iterations`, `evaluation_strictness`,
-  `allow_web_research`, `require_artifact_review`, `human_checkpoint_policy`,
+- `ReviewProfile` (≈line 181): `general | code | ui | artifact | delivery |
+  boundary` (B3 in the ADHD follow-up will add `ideation`)
+- `RubricCriterion` (≈line 267), `CriterionResult` (≈line 279),
+  `EvaluationReport` (≈line 289) with `pass_threshold = 0.8` (≈line 335)
+- `AutonomyPolicy` fields used by prompts: `max_iterations`,
+  `evaluation_strictness`, `allow_web_research`,
+  `require_artifact_review`, `human_checkpoint_policy`,
   `review_profiles`
-- Report `state` enum: `started | working | blocked | needs_input |
-  ready_for_review | completed | review_started | review_passed |
-  review_failed | review_needs_input`
-- `review_decision` enum: `auto | request | skip`
-- Subagent ledger entry (inlined into `validation` string):
-  `role.id`, `primitive`, `agent`, `model_or_api`, `decision`, `evidence`
+- Report `state` enum (used by both worker and reviewer):
+  `started | working | blocked | needs_input | ready_for_review |
+  completed | review_started | review_passed | review_failed |
+  review_needs_input`
+- `review_decision` enum (worker completed/ready_for_review):
+  `auto | request | skip`
+- `subagent-ledger` entry fields (inlined into validation string):
+  `role.id`, `primitive`, `agent` (form `<runtime:tool#kind>`),
+  `model_or_api` (opus | sonnet | <actual-model> | runtime-default |
+  unsupported:<reason> | external:<api>), `goal`,
+  `decision` (accepted | rejected | retried), `evidence`
 
 ---
 
-## 9. Three rigidity gaps this doc surfaces
+## 8. Prompts this doc deliberately does not cover
 
-Mapping the assembly rules above to concrete pain points:
+- Dispatcher bootstrap (`_build_dispatcher_bootstrap_prompt`, 123–139) and
+  the dispatch-decision prompt (`_build_dispatch_decision_prompt`,
+  204–253): dispatcher is a reserved smart-assignment extension point and
+  does not participate in the worker/reviewer task loop documented here.
+- `_build_goal_packet_approval_prompt` / `_build_review_prompt` cousins:
+  the only public review-assignment entry is `_build_review_prompt`, which
+  already contains both the Goal Packet approval shape and the full
+  adversarial shape via the R-WF branch.
+- Feedback lesson injection audit reports (`_record_feedback_lesson_injection`,
+  400–428) and system audit reports (`_record_system_task_audit`, 430–457):
+  these are system-emitted reports, not prompts sent to agents.
 
-1. **W6 omits the `Workflow` tool.** The Claude subagent hint only documents
-   `Task(...)`. The native `Workflow` tool (`parallel / pipeline / agent /
-   phase`) that implements fan-out without hand-rolled Promise management is
-   never mentioned, so agents default to linear/serial orchestration or
-   avoid orchestration entirely. A5 fixes this with a ~100-token addition.
-2. **P-* primitives are execution-only; the only skeleton example is linear.**
-   P-DIVERGE / P-CLUSTER / P-DEEPEN are missing, and the only example is the
-   planner→implementer→tester→reviewer→integrator chain. The "compose
-   freely" disclaimer at line 674 is too weak against the exemplar. B2
-   adds creative primitives and a divergent-ideation example that uses
-   `Workflow.parallel`.
-3. **reviewed/complex has no orchestration contract.** Only autonomous mode
-   gets the P-* list, workflow block, subtask envelope, ledger schema, and
-   model pinning. reviewed/complex relies entirely on the soft "act as
-   orchestrator" line in W4 and never sees a primitive list, ledger
-   requirement, or model pinning rule, so it effectively degenerates to
-   single-agent + reviewer review. B1/B2 together will extend a lighter
-   contract (at least workflow: block + ledger evidence) to reviewed/complex.
+---
+
+## 9. Three rigidity gaps (mapped to this doc's block ids)
+
+Cross-referencing the assembly above against the ADHD analysis's A5/B2/B3
+recommendations lands the gaps at precise blocks:
+
+1. **W6-equivalent (subagent capability hint) is autonomous-only.** The
+   Claude-runtime hint lives at W-MODE (c) inside `_orchestrator_contract_block`
+   and never reaches direct/reviewed workers. reviewed/complex gets the
+   soft "Act as the task orchestrator … when your runtime supports them"
+   line in W-CPLX but no how-to. **A5** moves a pointer to the `Workflow`
+   tool (`parallel / pipeline / agent / phase`) into a position that is
+   visible to reviewed/complex workers too — either upgraded to an
+   always-on W-hint block, or inserted into the COMPLEX variant of W-CPLX.
+2. **P-* primitives list + skeleton example are execution-only and linear.**
+   W-MODE (d) lists PLAN/EXECUTE/VALIDATE/JUDGE/INTEGRATE/RESEARCH; the
+   skeleton at W-MODE (g) is a linear
+   `planner → implementer → tester → reviewer → integrator` chain. The
+   "compose roles freely" sentence at W-MODE (f) is outweighed by the
+   single linear exemplar. **B2** adds P-DIVERGE / P-CLUSTER / P-DEEPEN
+   and a divergent-ideation example (`frame-N (parallel, sonnet) → cluster
+   → deep(top-K) → judge → integrate`) that uses `Workflow.parallel(...)`.
+3. **reviewed/complex has no orchestration contract.** direct/reviewed get
+   `""` for W-MODE, so they never see primitives, workflow-shape
+   requirement, subtask envelope, ledger schema, or model pinning. The
+   reviewer side likewise has no ledger or model-pinning check outside
+   R-AUTO. **B1** adds a lighter-weight contract (workflow: block + ledger
+   evidence) to reviewed/complex; **B3** adds the `ideation` review
+   profile so reviewers have a rubric for divergent output on top of the
+   existing code-correctness rubric.

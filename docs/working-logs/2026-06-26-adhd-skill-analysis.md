@@ -810,187 +810,219 @@ as of this PR (built on `main@70921a7`). All line references are in that file.
 
 ### 9.1 Worker-side assembly
 
-Every worker session receives three **common** layers regardless of mode:
+Every worker session receives a one-time bootstrap
+(`_build_workspace_agent_prompt`, 89–121): resident-worker posture,
+wait-for-task, "when you report completed, the workspace may assign an
+independent reviewer", report via `POST /api/workspaces/sessions/{id}/reports`,
+bilingual `message_en`+`message_zh`, `review_decision ∈ {auto, request, skip}`
++ `review_reason` required, curl example.
 
-1. **Bootstrap** (`_build_workspace_agent_prompt`, 89–121) — resident-worker
-   posture, wait-for-task, expect independent reviewer, report via
-   `POST /api/workspaces/sessions/{id}/reports`, bilingual `message_en`+`message_zh`,
-   `review_decision ∈ {auto, request, skip}` + `review_reason` required on
-   completed reports.
-2. **Per-task header** (`_build_task_assignment_prompt`, 255–320) — Workspace/Task
-   IDs, title, mode, complexity, env block, state-snapshot path, dispatch reason,
-   optional clear_note / attachment_note, lesson-context block.
-3. **Per-task footer** (320–343) — read snapshot → derive Goal Packet → report
-   state machine (`started / working / blocked / needs_input / ready_for_review /
-   completed`) → `curl` examples for `started` and the Goal Packet report. On
-   reviewed tasks a gating sentence tells the worker to stop and wait for
-   reviewer approval after the first Goal Packet report.
+Per-task assignment is assembled by `_build_task_assignment_prompt` (255–343)
+in this exact order: header (Workspace/Task IDs, title, mode, complexity,
+env block, state-snapshot path, dispatch reason) → optional `clear_note` →
+"Task description:\n{task.prompt}" → optional attachment_note →
+lesson_context_block → `_execution_complexity_assignment_block(task)` →
+`_autonomous_assignment_block(task, agent_type)` (empty for direct/reviewed)
+→ footer ("Start by reading the state snapshot… derive a Goal Packet…" +
+state machine + review_decision rules + curl examples for started and
+Goal Packet). On reviewed tasks the footer's Goal Packet gating sentence
+fires verbatim: "For reviewed tasks, that first Goal Packet report is an
+approval gate: after posting it, stop and wait for reviewer approval…".
 
-Between the header and footer, blocks are injected based on
-**execution_complexity** and **task_mode**.
+**Complexity block** (`_execution_complexity_assignment_block`, 459–492)
+always begins with the same "Execution complexity guidance:" header and
+contains three bullets: (1) "- Selected complexity: {simple|complex|auto}",
+(2) one of three guidance lines ("Treat this as a small task. Execute
+directly in this session…" / "Treat this as a complex task. Act as the
+task orchestrator…" / "Auto mode: before implementation, judge whether
+this task is simple or complex…"), and (3) the **cost guard** verbatim
+("Treat orchestrator mode as expensive. Pick it only when at least one
+of these holds: (1) breadth-first parallel across >=3 independent
+threads, (2) single context cannot hold needed material, (3) subtasks are
+cleanly isolated so a sub-agent's mistake will not pollute the main
+thread. Otherwise prefer a single linear agent."). The cost guard is
+internal to the complexity block, not appended after it.
 
-**Complexity block** (`_execution_complexity_assignment_block`, 459–492) always
-emits one of three variants:
+**Important structural fact:** `_subagent_capability_hint` (494–525) and
+`_model_evidence_contract_block` (527–555) are **not** always-on blocks.
+They are called only from inside `_orchestrator_contract_block` (582–677),
+which fires exclusively when `task_mode=autonomous`. direct/reviewed
+workers never see subagent-tool or model-pinning instructions. The
+Claude-runtime capability hint documents *only* the `Task` tool
+(`Task(subagent_type=..., model=...)`); it does **not** mention the
+`Workflow` tool (`parallel / pipeline / agent / phase`) that natively
+implements fan-out. This is the blind spot A5 fixes, and the fact that
+the hint lives inside the autonomous block is also why reviewed/complex
+currently gets zero how-to for subagent spawning.
 
-- `simple` → "Execute directly in this session, keep plan compact, avoid
-  spawning subagents unless blocker."
-- `complex` → "Act as task orchestrator: decompose, delegate to subagents, keep
-  ownership explicit, personally integrate/validate/accept final result."
-- `auto` → "Judge simple/complex first, state strategy in first report; if
-  complex orchestrate, if simple execute directly."
+**Mode block** (`_autonomous_assignment_block`, 557–580):
 
-All three variants are followed by the same **cost guard** (487–492): orchestrator
-mode is expensive; use it only when (1) breadth-first parallel ≥3 threads, (2)
-context cannot hold the material, or (3) clean isolation is needed; otherwise
-single linear agent.
-
-After the complexity block, two mode-agnostic "hints" always fire:
-
-- **Subagent capability hint** (`_subagent_capability_hint`, 494–525) — per
-  runtime. Claude branch currently documents *only* the `Task` tool
-  (`Task(subagent_type=..., model=...)`); it does **not** mention the
-  `Workflow` tool (`parallel / pipeline / agent / phase`) that natively
-  implements fan-out. This is the blind spot A5 fixes.
-- **Model evidence contract** (`_model_evidence_contract_block`, 527–555) —
-  pins P-PLAN / P-EXECUTE / P-JUDGE / P-INTEGRATE to opus and P-VALIDATE /
-  P-RESEARCH to sonnet on the Claude runtime; other runtimes get softer
-  fallbacks; requires subagent-ledger evidence.
-
-**Mode block** after the hints:
-
-- `direct` → `_autonomous_assignment_block` returns `""`. No orchestrator
-  contract, no P-* primitive list. The worker runs straight through and
-  reports `completed` with no reviewer cycle.
-- `reviewed` → `_autonomous_assignment_block` also returns `""`. No P-* list,
-  no ledger schema, no model pinning enforcement. Only the Goal Packet gate
-  and the soft "act as orchestrator" line in the complexity block push
-  reviewed/complex toward orchestration; in practice this is weak, which is
-  why reviewed/complex often collapses into single-agent-with-reviewer.
-- `autonomous` → `_autonomous_assignment_block` (557–580) emits the
-  Autonomous Mode V1 header (`max_iterations / evaluation_strictness /
-  allow_web_research / require_artifact_review / human_checkpoint_policy /
-  current phase`) and worker rules, then `_orchestrator_contract_block`
-  (582–677) which enforces complexity-dependent contracts:
-  - autonomous/simple: execute directly but MUST spawn one P-JUDGE pre-flight
-    before the review-gate report.
-  - autonomous/complex: orchestrator mode REQUIRED; workflow MUST include
-    ≥1 P-EXECUTE and ≥1 P-JUDGE; posting without a complete subagent ledger
-    is a contract violation.
-  - autonomous/auto: declare orchestrator vs single-agent in
-    `goal_packet.assumptions` in the first report; if orchestrator, the
-    complex contract applies; if single-agent, one P-JUDGE is still required.
-
-  The contract block also enumerates the six existing primitives
-  (P-PLAN / P-EXECUTE / P-VALIDATE / P-JUDGE / P-INTEGRATE / P-RESEARCH),
-  repeats model pinning, specifies a `workflow: {roles, deps, notes}`
-  block, gives one linear skeleton example (planner → implementer → tester
-  → reviewer → integrator), defines the subtask envelope schema and the
-  subagent-ledger schema, and ends with "there is NO fixed enum of templates;
-  compose roles freely." The linear example plus execution-only primitives is
-  what makes the prompt feel rigid — B2 adds DIVERGE/CLUSTER/DEEPEN and a
-  divergent ideate shape so the agent has a non-linear template to imitate.
+- `direct` → returns `""`. No orchestrator contract, no P-* primitive
+  list, no capability hint, no model pinning.
+- `reviewed` → returns `""`. Same absence; only the Goal Packet gate in
+  the footer and the soft "Act as the task orchestrator … when your
+  runtime supports them" line in the complexity block push reviewed/complex
+  toward orchestration; in practice this is why reviewed/complex often
+  collapses into single-agent-with-reviewer.
+- `autonomous` → emits the Autonomous Mode V1 header (max_iterations /
+  evaluation_strictness / allow_web_research / require_artifact_review /
+  human_checkpoints / current autonomous phase) + worker rules, then
+  calls `_orchestrator_contract_block` (582–677) which, in this order:
+  selects an enforcement clause by complexity (simple: "you may execute
+  directly but MUST still spawn one P-JUDGE pre-flight"; complex:
+  "orchestrator mode REQUIRED; ≥1 P-EXECUTE and ≥1 P-JUDGE; posting
+  without a complete subagent ledger is a contract violation"; auto:
+  "declare orchestrator vs single-agent in goal_packet.assumptions; if
+  orchestrator the contract is mandatory; if single-agent still spawn
+  one P-JUDGE"); emits the "## Orchestrator Contract (Auto Mode)" opening
+  paragraph; calls `_subagent_capability_hint(agent_type)`; lists the six
+  existing primitives (P-PLAN/EXECUTE/VALIDATE/JUDGE/INTEGRATE/RESEARCH);
+  calls `_model_evidence_contract_block(agent_type)`; emits the
+  workflow-declaration rule + observability/heartbeat requirements +
+  blocked/needs_input placeholder prohibition; gives one linear skeleton
+  example (planner → implementer → tester → reviewer → integrator);
+  defines the subtask envelope schema and the subagent-ledger schema
+  (ledger entries carry role.id / primitive / agent / model_or_api /
+  goal / decision (accepted|rejected|retried) / evidence); closes by
+  repeating the enforcement clause. The linear example plus
+  execution-only primitives is what makes the prompt feel rigid — B2
+  adds DIVERGE/CLUSTER/DEEPEN and a divergent ideate shape so the agent
+  has a non-linear template to imitate.
 
 ### 9.2 Reviewer-side assembly
 
-Every reviewer session receives a common bootstrap
-(`_build_reviewer_bootstrap_prompt`, 141–202): "Your primary job is to FIND
-defects and risks, not to confirm success"; "Approval is the exception, not
-the default"; do not defer to implementer confidence; emit `review_started`
-early; finish with exactly one of `review_passed / review_failed /
-review_needs_input`; keep the message ~12 lines and put details in structured
-fields (`validation / risks / acceptance_check / profile_results /
-artifact_refs`); bilingual `message_en` + `message_zh`.
+Every reviewer session receives a bootstrap
+(`_build_reviewer_bootstrap_prompt`, 141–202) with four sections:
+"Reviewer mindset (read first)", "Reviewer operating contract",
+"Review exit rules", "Reporting style", plus an in-bootstrap "Final
+review message body" template (Verdict / Summary / Acceptance criteria /
+Required fixes / Notes, ~12 lines, bilingual) and the report-endpoint
+curl. The in-bootstrap template is restated verbatim in every per-review
+prompt (866–884).
 
-Per-review assignment (`_build_review_prompt`, 795–906) always contains:
+Per-review assignment is assembled by `_build_review_prompt` (795–906) in
+this exact order: "Review workspace task." header (Workspace/Task IDs,
+title, mode, complexity, Implementation agent session, Reviewer session,
+env lines, snapshot) → "Task description:\n{task.prompt}" →
+`_execution_complexity_review_block(task)` → "Stored Goal Packet JSON:\n
+{…}" → `_autonomous_review_block(task)` (empty for direct/reviewed) →
+`_review_profile_prompt_block(profiles)` →
+`_review_guidance_block(workspace, trigger_report)` → lesson_context_block
+→ `_review_workflow_block(task, trigger_report)` → "Required final
+report format:" block (restating the message-body template + bilingual
+rules) → "Trigger report JSON:\n{…}" → "Recent task reports JSON:\n{…}"
+(last ≤12 reports) → "First report review_started, then finish with
+exactly one final review report:" + curl example for review_passed →
+exit-criteria one-liner.
 
-1. Header (Workspace/Task IDs, title, mode, complexity, impl session, reviewer
-   session, env lines, snapshot path) + task description.
-2. **Execution-complexity review context** (993–1002) — verify the
-   implementation strategy matched the declared complexity; unnecessary
-   delegation on simple tasks is a scope risk; missing decomposition or
-   integrator validation on complex tasks is blocking; auto tasks must have
-   explicitly declared and followed their chosen strategy.
-3. Stored Goal Packet JSON.
-4. **Autonomous evaluation context** (`_autonomous_review_block`, 1004–1055) —
-   empty for direct/reviewed. For autonomous: run JSON, runtime,
-   max_iterations, evaluation_strictness, require_artifact_review; "act as
-   the evaluator for this iteration" and score against Goal Packet + rubric +
-   validation + artifacts + prior evaluations; `review_passed` moves the run
-   to passed awaiting human acceptance; `review_failed` triggers targeted
-   revision within budget; `review_needs_input` for product judgment /
-   missing credentials / unavailable environment. Subagent-ledger
-   verification is enforced (complex autonomous MUST embed a ledger in
-   `validation`, missing/empty = contract violation → review_failed; each
-   entry needs role.id / primitive / agent / model_or_api / decision /
-   evidence). Model pinning is verified with runtime-dependent strictness:
-   hard opus/sonnet tier check on Claude, softer `runtime-default /
-   unsupported / external:<api>` acceptance on Cursor/Codex, honest
-   degradation check on terminal. Workflow consistency check:
-   `workflow.roles` must match the ledger; ≥1 P-EXECUTE and ≥1 P-JUDGE must
-   have actually run; P-VALIDATE is required when objectively checkable
-   criteria exist.
-5. **Enabled review profiles** (711–717) — profile list JSON + per-profile
-   checklist lines produced by `state_policy.review_profile_prompt_lines`.
-   Profiles are merged from the task, trigger report, and (autonomous only)
-   autonomy policy, then inferred via `state_policy.infer_review_profiles`
-   (679–709). Current six: general / code / ui / artifact / delivery /
-   boundary. B3 adds `ideation`.
-6. **Repository review guidance** (719–793) — up to six `REVIEW.md` files
-   discovered by walking up from each changed file (truncated at 4000 chars
-   each).
-7. lesson_context_block.
-8. **Review workflow** (`_review_workflow_block`, 908–991) — two shapes:
-   - *Goal Packet approval review* (913–945): read-only; do not judge
-     implementation (there is none); check goal fidelity, boundary quality,
-     reviewability, handoff quality; fail on narrowed/distorted scope,
-     missing editable/non-editable boundaries, or vague validation.
+Key block details:
+
+1. **Execution-complexity review context** (993–1002) — verify
+   implementation strategy matched selected complexity; unnecessary
+   delegation on simple is a scope risk; missing decomposition /
+   integrator validation on complex is blocking; auto tasks must have
+   explicitly declared and followed their strategy.
+2. **Autonomous evaluation context** (`_autonomous_review_block`,
+   1004–1055) — empty for direct/reviewed. For autonomous: run JSON,
+   runtime, max_iterations, evaluation_strictness, require_artifact_review;
+   "act as the evaluator for this iteration", score against Goal Packet +
+   rubric + validation + artifacts + history; complex autonomous
+   orchestrator MUST embed a `subagent-ledger:` section in validation
+   (missing/empty → contract violation → review_failed); each entry
+   needs role.id / primitive (P-PLAN/EXECUTE/VALIDATE/JUDGE/INTEGRATE/
+   RESEARCH) / agent / model_or_api / decision / evidence;
+   runtime-dependent model verification (hard opus/sonnet tier check on
+   Claude; runtime-default/unsupported/external accepted on Cursor/Codex
+   when ledger explains; honest-degradation check on terminal);
+   workflow.roles ↔ ledger consistency check with ≥1 P-EXECUTE and ≥1
+   P-JUDGE having actually run and P-VALIDATE present when objectively
+   checkable criteria exist.
+3. **Enabled review profiles** (711–717) — profile list JSON + per-profile
+   checklist from `state_policy.review_profile_prompt_lines`. Profiles
+   merged from `task.review_profiles`, `trigger_report.review_profiles`,
+   (autonomous only) `policy.review_profiles`, then inferred via
+   `state_policy.infer_review_profiles` (679–709). Current six:
+   general / code / ui / artifact / delivery / boundary. B3 adds
+   `ideation`.
+4. **Repository review guidance** (719–793) — up to six REVIEW.md files
+   discovered by walking up from each changed file (≤12 files) plus
+   workspace root, deduplicated, each truncated at 4000 chars; empty
+   when no REVIEW.md or workspace is remote.
+5. **Review workflow** (`_review_workflow_block`, 908–991) — two shapes
+   selected by `_is_goal_packet_approval_review`:
+   - *Goal Packet approval review* (913–945): read-only; pre-
+     implementation plan gate; do not judge implementation; check goal
+     fidelity / boundary quality / reviewability / handoff quality; exit
+     criteria explain what passed/failed/needs_input each mean.
    - *Full review* (946–991): 7 steps — stay read-only; check Goal Packet
-     fidelity; derive a task-specific acceptance checklist from 7 sources
-     (task description, Goal Packet, explicit user requirements, reports,
-     profiles + REVIEW.md, repository conventions, blocked/needs_input
-     context); inspect changed files and related paths; **adversarial defect
-     hunt across six failure-mode categories BEFORE deciding the verdict**
-     (edge/Null/large values, error paths/partial failures/retries,
-     concurrency/ordering/shared-state races, regressions to existing flows/
-     persistence/migrations, scope leakage / untouched-area side effects,
-     security/permission/input-trust assumptions) — anything not ruled out by
-     reading code is a candidate defect; independently spot-check the
-     highest-risk claimed validation; produce final verdict. Acceptance
-     standards cover goal fidelity, functional correctness, scope control,
-     integration fit, regression safety, validation quality, handoff quality.
-     `review_passed` requires "actively attempted to break the change and
-     found no blocking defect" — explicitly forbidden to pass on absence of
-     attempt or on implementer-report confidence.
-9. Final report format (866–905): ~12 line message with Verdict / Summary /
-   Acceptance / Required fixes / Notes; bilingual; detailed evidence in
-   structured fields; trigger report JSON; recent 12 task reports JSON; curl
-   example for `review_passed`; exit-criteria reminders.
+     fidelity; derive task-specific acceptance checklist from 7 named
+     sources (task description, Goal Packet, explicit user requirements,
+     implementation reports, profiles+REVIEW.md, repository conventions,
+     blocked/needs_input context); inspect changed files and related
+     paths; **adversarial defect hunt (BEFORE deciding verdict) across
+     six failure-mode categories: edge/boundary/empty/null/large values,
+     error paths/partial failures/retries, concurrency/ordering/shared-
+     state races, regressions to existing flows/persistence/migrations,
+     scope leakage/untouched-area side effects, security/permission/input-
+     trust assumptions** — anything not ruled out by reading code is a
+     candidate defect; independently spot-check highest-risk claimed
+     validation; produce final verdict against acceptance standards
+     (goal fidelity / functional correctness / scope control /
+     integration fit / regression safety / validation quality / handoff
+     quality); `review_passed` requires "actively attempted to break the
+     change (step 5) and found no blocking defect" — explicitly
+     forbidden to pass on absence of attempt or on implementer-report
+     confidence.
 
 When the reviewer returns `review_failed`, the worker receives
-`_build_continue_prompt` (1057–1082): Task ID / title / follow-up instructions
-(the reviewer's Required fixes), plus `_autonomous_continue_orchestrator_reminder`
-(1083–1092) for autonomous tasks: "if you ran in orchestrator mode, stay in
-orchestrator mode for this revision; address blocking issues by dispatching
-new sub-agents (P-EXECUTE for fixes, P-VALIDATE for re-tests, P-JUDGE for
-re-review) rather than folding work into your own context; append new ledger
-entries — do not restart the ledger."
+`_build_continue_prompt` (1057–1082): "Continue workspace task from
+review." + Task ID/title + "Follow-up instructions:\n{follow_up}"
+(defaults to "Continue addressing the review feedback." when reviewer
+message is empty, plus any attachments persisted to disk) +
+`_autonomous_continue_orchestrator_reminder` + "The task is back in
+working state…" + `_report_endpoint_curl` (restated because agent context
+may have compacted). `_autonomous_continue_orchestrator_reminder`
+(1083–1092) is empty for non-autonomous; for autonomous it tells the
+worker, verbatim: "if you ran in orchestrator mode for this task, stay
+in orchestrator mode for this revision. Address the evaluator's blocking
+issues by dispatching new sub-agent subtasks (P-EXECUTE for fixes,
+P-VALIDATE for re-tests, P-JUDGE for re-review) rather than folding the
+work into your own context. Append the new ledger entries to your
+existing subagent ledger; do not restart it."
 
 ### 9.3 Why the current prompt feels rigid
 
 Cross-referencing 9.1 and 9.2 surfaces the three rigidity causes A5 / B2 / B3
 are designed to relieve:
 
-1. **Capability hint blind spot** (494–525): the Claude-runtime hint tells the
-   agent only about `Task`; the `Workflow` tool that natively provides
-   `parallel / pipeline / agent / phase` fan-out is never mentioned, so the
-   agent does not know non-linear orchestration is even available.
-2. **Execution-only primitives + linear-only example** (632–662): the
-   primitive list has no creative/exploratory roles, and the only worked
-   example is a linear chain. The "compose freely" disclaimer at line 674 is
-   too weak to overcome the example.
-3. **Reviewed-mode has no orchestration contract**: orchestrator_contract_block
-   only fires for autonomous mode (line 558); reviewed/complex relies on the
-   soft COMPLEX complexity block, with no primitive list, no ledger
-   requirement, no model pinning enforcement, and (after A5 lands) no
-   Workflow-tool pointer, so reviewed/complex effectively degenerates to
-   "single agent does the work, reviewer catches errors."
+1. **Capability hint is autonomous-only and blind to Workflow.**
+   `_subagent_capability_hint` (494–525) is called only from inside
+   `_orchestrator_contract_block` (call at line 608/617), and the
+   orchestrator block is only reached when `_autonomous_assignment_block`
+   sees autonomous mode (early return `""` at line 562 for direct/reviewed).
+   So reviewed/complex workers never see any subagent-how-to at all, and
+   even on autonomous the Claude-runtime hint documents only the `Task`
+   tool, never the native `Workflow` tool (`parallel / pipeline / agent /
+   phase`) that provides fan-out. A5 fixes the Workflow blind spot; B1/B2
+   also need to move a lighter hint+contract into reviewed/complex.
+2. **Execution-only primitives + linear-only example.** The primitives
+   list (618–624) is P-PLAN/EXECUTE/VALIDATE/JUDGE/INTEGRATE/RESEARCH with
+   no creative/exploratory roles, and the only worked example is a linear
+   chain (646–657: planner → implementer → tester → reviewer → integrator).
+   The "compose roles freely" disclaimer (628–631) is outweighed by the
+   single linear exemplar. B2 adds P-DIVERGE / P-CLUSTER / P-DEEPEN and a
+   divergent-ideate example built on `Workflow.parallel`.
+3. **Reviewed-mode has no orchestration contract.** `_autonomous_assignment_block`
+   returns `""` for reviewed (562), so reviewed tasks never see the
+   primitives list, workflow-shape declaration rule, subtask envelope,
+   subagent ledger schema, observability/heartbeat rules, or model pinning
+   that autonomous tasks get. reviewed/complex relies on the one soft
+   guidance bullet "Act as the task orchestrator … when your runtime
+   supports them" in W-CPLX (467–471) and on the reviewer's
+   complexity-match check in R-CPLX; there is no ledger requirement, no
+   model pinning enforcement, and (before A5) no Workflow-tool pointer.
+   This is why reviewed/complex effectively degenerates to "single agent
+   does the work, reviewer catches errors." B1 adds a lighter-weight
+   contract (workflow block + ledger evidence) to reviewed/complex; B3
+   adds the `ideation` review profile so reviewers have a rubric for
+   divergent output on top of the existing code-correctness rubric.
