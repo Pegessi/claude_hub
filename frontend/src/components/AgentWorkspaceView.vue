@@ -1511,67 +1511,29 @@
             </div>
           </div>
           <div class="modal-field resident-agent-section">
-            <label class="checkbox-label">
-              <input
-                v-model="workspaceForm.resident_agent_enabled"
-                type="checkbox"
+            <div class="resident-summary-row">
+              <div class="resident-summary-text">
+                <span class="resident-summary-title">Resident self-driven agent</span>
+                <span
+                  :class="['resident-summary-status', workspaceForm.resident_agent_enabled ? 'is-on' : 'is-off']"
+                >
+                  {{ residentSummaryLabel }}
+                </span>
+              </div>
+              <button
+                type="button"
+                class="tool-button"
+                @click="openResidentAgentModal"
               >
-              Enable resident self-driven agent (周期性维护 lessons / 提出任务)
-            </label>
+                Configure…
+              </button>
+            </div>
             <p class="modal-hint">
-              When enabled, a background agent runs on a schedule to maintain
-              lessons and propose follow-up tasks for this workspace. Turning
-              this off stops and removes the running resident session
-              (关闭将停止并移除常驻 agent 会话).
+              An optional background agent that runs on a schedule to maintain
+              lessons and propose follow-up tasks for this workspace
+              (周期性维护 lessons / 提出任务).
             </p>
           </div>
-          <div
-            v-if="workspaceForm.resident_agent_enabled"
-            class="modal-field"
-          >
-            <label class="checkbox-label">
-              <input
-                v-model="workspaceForm.resident_agent_paused"
-                type="checkbox"
-              >
-              Pause auto-scheduling (keep the agent for manual chat)
-            </label>
-            <p class="modal-hint">
-              When paused, the resident session stays available for manual chat
-              but won't auto-run on its schedule (暂停自动调度，保留会话用于手动对话).
-            </p>
-          </div>
-          <div
-            v-if="workspaceForm.resident_agent_enabled"
-            class="modal-field"
-          >
-            <label>Run interval (minutes)</label>
-            <input
-              v-model.number="workspaceForm.resident_agent_interval_minutes"
-              type="number"
-              min="1"
-              placeholder="60"
-            >
-          </div>
-          <div
-            v-if="workspaceForm.resident_agent_enabled"
-            class="modal-field"
-          >
-            <label>Resident agent directive (optional)</label>
-            <textarea
-              v-model="workspaceForm.resident_agent_directive"
-              rows="3"
-              placeholder="Describe recurring tasks or what the resident agent should focus on each run."
-            />
-          </div>
-          <AgentConfigFields
-            v-if="workspaceForm.resident_agent_enabled"
-            v-model:agent-type="workspaceForm.resident_agent_type"
-            v-model:solo-mode="workspaceForm.resident_agent_solo_mode"
-            v-model:env-preset="workspaceForm.resident_env_preset"
-            v-model:env-text="workspaceForm.resident_env_text"
-            variant="modal"
-          />
           <div class="modal-actions">
             <button
               v-if="workspaceModalMode === 'edit'"
@@ -1600,6 +1562,88 @@
             </LoadingButton>
           </div>
         </form>
+      </div>
+    </div>
+
+    <!-- Resident self-driven agent config (nested popup over the workspace modal) -->
+    <div
+      v-if="showResidentAgentModal"
+      class="workspace-modal-overlay resident-agent-modal-overlay"
+      @click.self="closeResidentAgentModal"
+    >
+      <div class="workspace-modal resident-agent-modal">
+        <h3>Resident Agent</h3>
+        <div class="modal-field resident-agent-section--first">
+          <label class="checkbox-label">
+            <input
+              v-model="workspaceForm.resident_agent_enabled"
+              type="checkbox"
+            >
+            Enable resident self-driven agent (周期性维护 lessons / 提出任务)
+          </label>
+          <p class="modal-hint">
+            When enabled, a background agent runs on a schedule to maintain
+            lessons and propose follow-up tasks for this workspace. Turning
+            this off stops and removes the running resident session
+            (关闭将停止并移除常驻 agent 会话).
+          </p>
+        </div>
+        <div
+          v-if="workspaceForm.resident_agent_enabled"
+          class="modal-field"
+        >
+          <label class="checkbox-label">
+            <input
+              v-model="workspaceForm.resident_agent_paused"
+              type="checkbox"
+            >
+            Pause auto-scheduling (keep the agent for manual chat)
+          </label>
+          <p class="modal-hint">
+            When paused, the resident session stays available for manual chat
+            but won't auto-run on its schedule (暂停自动调度，保留会话用于手动对话).
+          </p>
+        </div>
+        <div
+          v-if="workspaceForm.resident_agent_enabled"
+          class="modal-field"
+        >
+          <label>Run interval (minutes)</label>
+          <input
+            v-model.number="workspaceForm.resident_agent_interval_minutes"
+            type="number"
+            min="1"
+            placeholder="60"
+          >
+        </div>
+        <div
+          v-if="workspaceForm.resident_agent_enabled"
+          class="modal-field"
+        >
+          <label>Resident agent directive (optional)</label>
+          <textarea
+            v-model="workspaceForm.resident_agent_directive"
+            rows="3"
+            placeholder="Describe recurring tasks or what the resident agent should focus on each run."
+          />
+        </div>
+        <AgentConfigFields
+          v-if="workspaceForm.resident_agent_enabled"
+          v-model:agent-type="workspaceForm.resident_agent_type"
+          v-model:solo-mode="workspaceForm.resident_agent_solo_mode"
+          v-model:env-preset="workspaceForm.resident_env_preset"
+          v-model:env-text="workspaceForm.resident_env_text"
+          variant="modal"
+        />
+        <div class="modal-actions">
+          <button
+            type="button"
+            class="primary-button"
+            @click="closeResidentAgentModal"
+          >
+            Done
+          </button>
+        </div>
       </div>
     </div>
 
@@ -2711,6 +2755,7 @@ const detailMessage = ref('')
 const detailAttachments = ref<DraftAttachment[]>([])
 const isDetailActionsExpanded = ref(false)
 const showWorkspaceModal = ref(false)
+const showResidentAgentModal = ref(false)
 const workspaceModalMode = ref<'create' | 'edit'>('create')
 const editingWorkspaceId = ref<string | null>(null)
 const showAgentOptionsModal = ref(false)
@@ -4258,9 +4303,25 @@ function openEditWorkspaceModal() {
 
 function closeWorkspaceModal() {
   showWorkspaceModal.value = false
+  showResidentAgentModal.value = false
   workspaceModalMode.value = 'create'
   editingWorkspaceId.value = null
 }
+
+function openResidentAgentModal() {
+  showResidentAgentModal.value = true
+}
+
+function closeResidentAgentModal() {
+  showResidentAgentModal.value = false
+}
+
+// Compact summary shown on the workspace form's "Configure…" row.
+const residentSummaryLabel = computed(() => {
+  if (!workspaceForm.resident_agent_enabled) return 'Off'
+  const every = `every ${workspaceForm.resident_agent_interval_minutes || 60}m`
+  return workspaceForm.resident_agent_paused ? `Paused · ${every}` : `On · ${every}`
+})
 
 async function handleDeleteWorkspace() {
   const workspaceId = editingWorkspaceId.value
@@ -7839,6 +7900,56 @@ onUnmounted(() => {
   margin-top: 18px;
   padding-top: 14px;
   border-top: 1px solid var(--ch-color-border);
+}
+
+/* Summary row on the workspace form that opens the resident-agent popup. */
+.resident-summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.resident-summary-text {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.resident-summary-title {
+  color: var(--ch-color-text);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.resident-summary-status {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--ch-color-border);
+  white-space: nowrap;
+}
+
+.resident-summary-status.is-on {
+  color: var(--ch-color-accent);
+  border-color: var(--ch-color-accent-ring);
+}
+
+.resident-summary-status.is-off {
+  color: var(--ch-color-text-soft);
+}
+
+/* Nested popup floats above the workspace modal (1000) but below the
+   EnvPresetManager (1100) that AgentConfigFields opens from inside it. */
+.resident-agent-modal-overlay {
+  z-index: 1050;
+}
+
+.resident-agent-section--first {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
 }
 
 .modal-section {
