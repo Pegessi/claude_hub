@@ -13,6 +13,9 @@ class _StateMixin:
         self.reports: dict[str, AgentReport] = {}
         self._dispatch_locks: dict[str, asyncio.Lock] = {}
         self._monitor_task: asyncio.Task[None] | None = None
+        # Cache of resolved git worktree roots per workspace id: (timestamp, roots).
+        # Used by artifact preview to resolve markdown produced inside a worktree.
+        self._worktree_root_cache: dict[str, tuple[float, list[Path]]] = {}
         self._load_state()
 
     def _workspace_dir(self, workspace_id: str) -> Path:

@@ -110,6 +110,14 @@ AUTO_REPORT_MISSING_MESSAGE = (
 ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024
 ARTIFACT_PREVIEW_MAX_BYTES = 512 * 1024
 MARKDOWN_ARTIFACT_SUFFIXES = {".md", ".markdown", ".mdown", ".mkd"}
+# Agents do their work inside isolated git worktrees (sibling dirs created per the
+# mandatory workflow), so a report's markdown artifact frequently lives only in a
+# worktree rather than under the main workspace path. We enumerate worktrees via
+# ``git worktree list`` so artifact previews can resolve those files. The git call
+# is bounded by this timeout and its result cached for the TTL below so building the
+# board (which resolves every report ref) does not spawn one subprocess per ref.
+WORKTREE_LIST_TIMEOUT_SECONDS = 5
+WORKTREE_ROOT_CACHE_TTL_SECONDS = 30
 # macOS NAME_MAX = 255 bytes per path component; Linux NAME_MAX is typically 255 too.
 # Any changed_files / artifact_ref entry with a path component longer than this is
 # certainly not a real filesystem path (it is a descriptive string accidentally placed
@@ -228,6 +236,8 @@ __all__ = [
     "TMUX_SUBMIT_SETTLE_SECONDS",
     "TerminalAgentStatus",
     "WORKSPACE_MONITOR_INTERVAL_SECONDS",
+    "WORKTREE_LIST_TIMEOUT_SECONDS",
+    "WORKTREE_ROOT_CACHE_TTL_SECONDS",
     "Workspace",
     "WorkspaceArtifactPreview",
     "WorkspaceAttachment",
