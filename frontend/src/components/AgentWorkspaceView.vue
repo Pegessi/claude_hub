@@ -4554,11 +4554,17 @@ function toggleThemeFromMenu() {
   closeWorkspaceMobileMenu()
 }
 
-function workspaceDefaultCwd(target: ExecutionTarget): string {
+function workspaceDefaultCwd(target: ExecutionTarget, remoteProfileId?: string): string {
   const workspace = activeWorkspace.value
   if (!workspace) return ''
   if (target === 'remote') {
-    return workspace.remote_cwd || selectedAgentRemoteProfile.value?.default_cwd || ''
+    // When a specific profile id is supplied (e.g. the resident form's own
+    // selection) resolve its default_cwd; otherwise fall back to the Add-Agent
+    // form's selected profile.
+    const profile = remoteProfileId
+      ? remoteProfiles.value.find(p => p.id === remoteProfileId) || null
+      : selectedAgentRemoteProfile.value
+    return workspace.remote_cwd || profile?.default_cwd || ''
   }
   return workspace.path || ''
 }
@@ -4666,12 +4672,13 @@ function handleAgentTargetChange(target: ExecutionTarget) {
 function handleResidentTargetChange(target: ExecutionTarget) {
   if (!workspaceForm.resident_agent_enabled) return
   if (workspaceForm.resident_agent_target === target) return
-  const previousDefault = workspaceDefaultCwd(workspaceForm.resident_agent_target)
+  const profileId = workspaceForm.resident_agent_remote_profile_id
+  const previousDefault = workspaceDefaultCwd(workspaceForm.resident_agent_target, profileId)
   workspaceForm.resident_agent_target = target
   // Mirror the Add-Agent UX: only auto-fill the cwd when it is empty or still
   // the previous target's default, so a user-typed path is never clobbered.
   if (!workspaceForm.resident_agent_cwd.trim() || workspaceForm.resident_agent_cwd === previousDefault) {
-    workspaceForm.resident_agent_cwd = workspaceDefaultCwd(target)
+    workspaceForm.resident_agent_cwd = workspaceDefaultCwd(target, profileId)
   }
   if (target === 'remote') {
     if (!workspaceForm.resident_agent_remote_profile_id && remoteProfiles.value.length > 0) {

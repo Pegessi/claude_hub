@@ -829,6 +829,45 @@ def test_update_workspace_placement_change_clears_resident_session(
         assert session.id not in manager.sessions, field
 
 
+def test_update_workspace_placement_noop_keeps_resident_session(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """Re-writing the SAME placement values must NOT clear the tracked session id —
+    locks in the !=-comparison branch of _resident_launch_config_changed."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_enabled=True,
+            resident_agent_type=AgentType.CLAUDE,
+            resident_agent_target=ExecutionTarget.REMOTE,
+            resident_agent_remote_profile_id="prof-1",
+            resident_agent_cwd="/tmp/keep",
+            resident_agent_remote_reconnect=False,
+        )
+    )
+    session = _resident_session(workspace)
+    manager.sessions[session.id] = session
+    workspace = workspace.model_copy(update={"resident_agent_session_id": session.id})
+    manager.workspaces[workspace.id] = workspace
+
+    updated = manager.update_workspace(
+        workspace.id,
+        WorkspaceUpdate(
+            resident_agent_target=ExecutionTarget.REMOTE,
+            resident_agent_remote_profile_id="prof-1",
+            resident_agent_cwd="/tmp/keep",
+            resident_agent_remote_reconnect=False,
+        ),
+    )
+
+    assert updated.resident_agent_session_id == session.id
+    assert session.id in manager.sessions
+
+
 def test_run_resident_agent_carries_placement_to_ensure_request(
     manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
