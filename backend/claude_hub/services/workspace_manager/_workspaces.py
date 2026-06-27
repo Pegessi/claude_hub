@@ -5,7 +5,7 @@ import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time pa
 from ._constants import *  # noqa: F401,F403
 
 
-def build_resident_agent_prompt(workspace: "Workspace", base_url: str) -> str:
+def build_resident_agent_prompt(workspace: "Workspace", base_url: str, session_id: str) -> str:
     """Build the self-drive prompt for a workspace's resident agent.
 
     The resident agent is a standing, self-driven Claude session that wakes on a
@@ -13,6 +13,11 @@ def build_resident_agent_prompt(workspace: "Workspace", base_url: str) -> str:
     performs any recurring tasks named in the user directive, (b) maintains the
     workspace lesson catalog, and (c) proposes new tasks in TODO status for the
     user to approve — it never auto-starts work or performs destructive actions.
+
+    When ``resident_agent_master_mode`` is enabled, the resident is additionally
+    permitted to do bounded enrichment work inside its OWN self-provisioned git
+    worktree and posts a heartbeat report each cycle so its activity is legible.
+    It still NEVER merges, pushes, or auto-starts dispatched tasks.
     """
     directive = (workspace.resident_agent_directive or "").strip()
     directive_block = (
@@ -21,6 +26,8 @@ def build_resident_agent_prompt(workspace: "Workspace", base_url: str) -> str:
         else "User directive: (none provided — focus on lesson maintenance and task proposals)."
     )
     ws = workspace.id
+    if workspace.resident_agent_master_mode:
+        return _build_resident_master_prompt(workspace, base_url, session_id, directive_block)
     return (
         "You are this workspace's RESIDENT self-driven maintenance agent. You wake up "
         "periodically to keep the workspace healthy. You are NOT assigned a single task; "
@@ -50,6 +57,105 @@ def build_resident_agent_prompt(workspace: "Workspace", base_url: str) -> str:
         "Hard constraints: do NOT merge branches, push, force-push, delete files, or take any "
         "destructive action. Do NOT auto-start proposed tasks. Keep changes to lessons and task "
         "proposals only. When this cycle's work is done, stop and wait for the next wake-up."
+    )
+
+
+def _resident_worktree_slug(workspace: "Workspace") -> str:
+    """A filesystem/branch-safe, workspace-UNIQUE slug for the resident worktree.
+
+    ``session_prefix`` is derived from the (non-unique) workspace name, so two
+    workspaces with similar names pointed at the same parent repo would otherwise
+    generate the same ``resident/<slug>`` branch and ``../resident-<slug>`` path
+    and collide. We append a short, stable workspace-id suffix to guarantee
+    uniqueness while keeping the human-readable prefix.
+    """
+    raw = (workspace.session_prefix.strip() if workspace.session_prefix else "") or (
+        workspace.name or ""
+    ).strip()
+    base = "".join(ch if (ch.isalnum() or ch in "-_") else "-" for ch in raw).strip("-_").lower()
+    suffix = (workspace.id or "").replace("-", "")[:8] or "resident"
+    return f"{base}-{suffix}" if base else suffix
+
+
+def _build_resident_master_prompt(
+    workspace: "Workspace",
+    base_url: str,
+    session_id: str,
+    directive_block: str,
+) -> str:
+    """Master-mode resident prompt: bounded self-iteration in its OWN worktree
+    plus a per-cycle heartbeat report. Never merges, pushes, or auto-starts tasks.
+    """
+    ws = workspace.id
+    base_branch = workspace.default_branch
+    slug = _resident_worktree_slug(workspace)
+    branch = f"resident/{slug}"
+    reports_endpoint = f"{base_url}/api/workspaces/sessions/{session_id}/reports"
+    return (
+        "You are this workspace's RESIDENT MASTER agent. You wake up periodically and run "
+        "ONE bounded iteration of self-directed enrichment work this cycle, then STOP. Do not "
+        "spin in a tight loop or keep working until the next wake-up — do a single bounded chunk "
+        "of work, post a heartbeat report (see below), and exit.\n\n"
+        f"Workspace id: {ws}\n"
+        f"API base URL: {base_url}\n"
+        f"This resident session id: {session_id}\n\n"
+        f"{directive_block}\n\n"
+        "## Your own worktree (self-provision once, reuse after)\n"
+        "You must do ALL of your editing, committing, and testing inside your OWN dedicated git "
+        "worktree on your OWN branch — never in the main checkout. Provisioning must be "
+        "IDEMPOTENT: it runs every cycle, so handle the case where the worktree and/or branch "
+        "already exist without erroring or recreating anything.\n"
+        f"  - Worktree path: `../resident-{slug}`   Branch: `{branch}`   "
+        f"Base (default) branch: `{base_branch}`.\n"
+        "  - Each cycle, reconcile in this order (do NOT blindly re-run `git worktree add`):\n"
+        f"      1. If `../resident-{slug}` already exists as a worktree, just `cd` into it and "
+        "reuse it.\n"
+        f"      2. Else if the branch `{branch}` already exists (e.g. the worktree dir was "
+        "removed but the branch survived), attach without `-b`:\n"
+        f"           git worktree add ../resident-{slug} {branch}\n"
+        "      3. Else create both fresh:\n"
+        f"           git worktree add ../resident-{slug} -b {branch} {base_branch}\n"
+        "  - work ONLY inside that resident worktree. Never edit, stage, commit, or run "
+        "destructive git commands in the workspace's main checkout or any other worktree.\n\n"
+        "## Allowed work\n"
+        "You MAY do real bounded enrichment work each cycle — small code improvements, adding or "
+        "fixing tests, tidying docs, or investigations — and you MAY commit that work on your OWN "
+        f"branch `{branch}` inside your worktree. Keep each cycle's change small and self-contained "
+        "so it stays reviewable.\n\n"
+        "## Hard constraints (never violate)\n"
+        "- NEVER merge your branch into the default branch or any other branch; do NOT run "
+        "git merge, git rebase onto a shared branch, push, force-push, or delete branches or files "
+        "outside your own worktree. A human integrates your work later — your job is only to "
+        "prepare it on your branch.\n"
+        "- NEVER auto-start, dispatch, or self-assign workspace tasks, and NEVER spawn worker "
+        "agents. You may still PROPOSE tasks in TODO status for the user to decide on (see below).\n"
+        "- Stay within your worktree for all file mutations.\n\n"
+        "## Also available (optional, as today)\n"
+        "- Maintain workspace lessons when genuinely justified:\n"
+        f"    curl -sS {base_url}/api/workspaces/{ws}/lessons\n"
+        f"    curl -sS -X POST {base_url}/api/workspaces/{ws}/lessons "
+        "-H 'Content-Type: application/json' "
+        '-d \'{"title":"...","summary":"one-line takeaway",'
+        '"applies_when":["when this applies"],"do":"...","avoid":"...","tags":["tag"]}\'\n'
+        "- Propose new tasks in TODO status only (never start them):\n"
+        f"    curl -sS -X POST {base_url}/api/workspaces/{ws}/tasks "
+        "-H 'Content-Type: application/json' "
+        '-d \'{"title":"...","prompt":"..."}\'\n\n'
+        "## Heartbeat report (REQUIRED at the END of EVERY cycle)\n"
+        "So your activity is legible, you MUST post one workspace-level heartbeat report at the "
+        "end of every cycle summarizing what you did this cycle (or say 'no changes this cycle'). "
+        "Use the SESSION-SCOPED report endpoint; task_id is omitted for a workspace-level "
+        "heartbeat:\n"
+        f"    curl -sS -X POST {reports_endpoint} "
+        "-H 'Content-Type: application/json' "
+        '-d \'{"state":"working","message":"Resident master cycle: <summary>",'
+        '"message_en":"Resident master cycle: <summary>",'
+        '"message_zh":"常驻 master 周期：<摘要>"}\'\n'
+        "Replace <summary> with a short description of the enrichment work you committed on your "
+        "branch this cycle, or 'no changes this cycle' if you made none. Always include message_en "
+        "(concise English) and message_zh (concise 中文); keep message as a short fallback.\n\n"
+        "When this cycle's bounded work is done and the heartbeat is posted, STOP and wait for the "
+        "next wake-up."
     )
 
 
@@ -134,6 +240,7 @@ class _WorkspacesMixin:
             resident_agent_type=payload.resident_agent_type,
             resident_agent_env=dict(payload.resident_agent_env or {}),
             resident_agent_solo_mode=payload.resident_agent_solo_mode,
+            resident_agent_master_mode=payload.resident_agent_master_mode,
             resident_agent_title=resident_title,
             resident_agent_target=payload.resident_agent_target,
             resident_agent_remote_profile_id=payload.resident_agent_remote_profile_id,
@@ -194,6 +301,8 @@ class _WorkspacesMixin:
             update_kwargs["resident_agent_env"] = dict(payload.resident_agent_env)
         if payload.resident_agent_solo_mode is not None:
             update_kwargs["resident_agent_solo_mode"] = payload.resident_agent_solo_mode
+        if payload.resident_agent_master_mode is not None:
+            update_kwargs["resident_agent_master_mode"] = payload.resident_agent_master_mode
         if payload.resident_agent_title is not None:
             title = payload.resident_agent_title.strip()
             update_kwargs["resident_agent_title"] = title or None
@@ -515,7 +624,7 @@ class _WorkspacesMixin:
         )
         await self.send_session_message(
             session.id,
-            build_resident_agent_prompt(workspace, base_url),
+            build_resident_agent_prompt(workspace, base_url, session.id),
         )
 
     async def delete_workspace(self, workspace_id: str) -> None:

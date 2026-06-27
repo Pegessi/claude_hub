@@ -269,6 +269,10 @@
                   class="agent-status-kind agent-status-paused-badge"
                 >Paused</span>
                 <span
+                  v-if="isResidentAgent(agent) && isResidentMaster"
+                  class="agent-status-kind agent-status-paused-badge"
+                >Master</span>
+                <span
                   class="agent-status-cli"
                   :data-kind="agent.agent_type || 'terminal'"
                 >{{ agent.agent_type || 'terminal' }}</span>
@@ -281,6 +285,13 @@
                 <span v-if="agent.ephemeral">temporary</span>
                 <span>{{ agentTaskLabel(agent) }}</span>
                 <span>queued {{ agent.queued_count }}</span>
+              </span>
+              <span
+                v-if="isResidentAgent(agent)"
+                class="agent-status-meta"
+              >
+                <span>last run {{ residentLastRunLabel }}</span>
+                <span v-if="latestResidentReport">{{ latestResidentReport.message }}</span>
               </span>
             </span>
             <span
@@ -1615,6 +1626,19 @@
             </p>
           </div>
           <div class="modal-field">
+            <label class="checkbox-label">
+              <input
+                v-model="workspaceForm.resident_agent_master_mode"
+                type="checkbox"
+              >
+              Master mode
+            </label>
+            <p class="modal-hint">
+              Let the resident self-iterate on its own git worktree each cycle
+              and post a heartbeat. It never merges to main.
+            </p>
+          </div>
+          <div class="modal-field">
             <label>Run interval (minutes)</label>
             <input
               v-model.number="workspaceForm.resident_agent_interval_minutes"
@@ -2270,6 +2294,10 @@
                   v-if="isResidentAgent(agent) && isResidentPaused"
                   class="runtime-pill runtime-pill--paused"
                 >paused</span>
+                <span
+                  v-if="isResidentAgent(agent) && isResidentMaster"
+                  class="runtime-pill runtime-pill--paused"
+                >master</span>
                 <span v-if="agent.ephemeral">temporary</span>
                 <span>current {{ taskTitle(agent.current_task_id) }}</span>
                 <span>queued {{ agent.queued_count }}</span>
@@ -2929,6 +2957,7 @@ const workspaceForm = reactive({
   remote_reconnect: true,
   resident_agent_enabled: false,
   resident_agent_paused: false,
+  resident_agent_master_mode: false,
   resident_agent_interval_minutes: 60,
   resident_agent_directive: '',
   // Resident agent CLI/env config (UI-side; resolved to resident_agent_env at submit).
@@ -4341,6 +4370,7 @@ async function handleCreateWorkspace() {
       remote_reconnect: workspaceForm.remote_reconnect,
       resident_agent_enabled: workspaceForm.resident_agent_enabled,
       resident_agent_paused: workspaceForm.resident_agent_paused,
+      resident_agent_master_mode: workspaceForm.resident_agent_master_mode,
       resident_agent_interval_minutes: workspaceForm.resident_agent_interval_minutes,
       resident_agent_directive: workspaceForm.resident_agent_directive.trim() || undefined,
       resident_agent_type: workspaceForm.resident_agent_type,
@@ -4376,6 +4406,7 @@ async function handleSaveWorkspace() {
         workspaceForm.target === 'remote' ? workspaceForm.remote_reconnect : undefined,
       resident_agent_enabled: workspaceForm.resident_agent_enabled,
       resident_agent_paused: workspaceForm.resident_agent_paused,
+      resident_agent_master_mode: workspaceForm.resident_agent_master_mode,
       resident_agent_interval_minutes: workspaceForm.resident_agent_interval_minutes,
       resident_agent_directive: workspaceForm.resident_agent_directive.trim() || undefined,
       resident_agent_type: workspaceForm.resident_agent_type,
@@ -4407,6 +4438,7 @@ function resetWorkspaceForm() {
   workspaceForm.remote_reconnect = true
   workspaceForm.resident_agent_enabled = false
   workspaceForm.resident_agent_paused = false
+  workspaceForm.resident_agent_master_mode = false
   workspaceForm.resident_agent_interval_minutes = 60
   workspaceForm.resident_agent_directive = ''
   workspaceForm.resident_agent_type = 'claude'
@@ -4440,6 +4472,7 @@ function openEditWorkspaceModal() {
   workspaceForm.remote_reconnect = workspace.remote_reconnect
   workspaceForm.resident_agent_enabled = workspace.resident_agent_enabled ?? false
   workspaceForm.resident_agent_paused = workspace.resident_agent_paused ?? false
+  workspaceForm.resident_agent_master_mode = workspace.resident_agent_master_mode ?? false
   workspaceForm.resident_agent_interval_minutes = workspace.resident_agent_interval_minutes ?? 60
   workspaceForm.resident_agent_directive = workspace.resident_agent_directive || ''
   workspaceForm.resident_agent_type = workspace.resident_agent_type ?? 'claude'
@@ -4488,7 +4521,8 @@ function closeResidentAgentModal() {
 const residentSummaryLabel = computed(() => {
   if (!workspaceForm.resident_agent_enabled) return 'Off'
   const every = `every ${workspaceForm.resident_agent_interval_minutes || 60}m`
-  return workspaceForm.resident_agent_paused ? `Paused · ${every}` : `On · ${every}`
+  const base = workspaceForm.resident_agent_paused ? `Paused · ${every}` : `On · ${every}`
+  return workspaceForm.resident_agent_master_mode ? `${base} · Master` : base
 })
 
 async function handleDeleteWorkspace() {
@@ -5164,6 +5198,29 @@ async function deleteAgent(agent: ManagedSession) {
 // Three-state resident lifecycle: Enable (exists + auto-works), Pause (session
 // stays for manual chat but won't auto-run), Delete (teardown + clear pointers).
 const isResidentPaused = computed(() => activeWorkspace.value?.resident_agent_paused ?? false)
+const isResidentMaster = computed(() => activeWorkspace.value?.resident_agent_master_mode ?? false)
+
+// Relative "last run" label for the resident card, mirroring the timeline's
+// "{duration} ago" style (see latestSelectedReportAgeLabel).
+const residentLastRunLabel = computed(() => {
+  const lastRunMs = parseTimestampMs(activeWorkspace.value?.resident_agent_last_run_at)
+  if (lastRunMs === null) return 'never'
+  return `${formatElapsedDuration(elapsedClockMs.value - lastRunMs)} ago`
+})
+
+// Newest report posted by the resident session, used to surface its latest
+// heartbeat on the resident card. Returns null when none exist.
+const latestResidentReport = computed<AgentReport | null>(() => {
+  const sessionId = activeWorkspace.value?.resident_agent_session_id
+  if (!sessionId) return null
+  const residentReports = workspaceStore.reports.filter(
+    report => report.session_id === sessionId
+  )
+  if (residentReports.length === 0) return null
+  return [...residentReports].sort(
+    (a, b) => (parseTimestampMs(b.created_at) ?? 0) - (parseTimestampMs(a.created_at) ?? 0)
+  )[0]
+})
 
 function isResidentAgent(agent: ManagedSession) {
   return agent.role === 'resident'

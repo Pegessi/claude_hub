@@ -92,6 +92,21 @@
   placement. The popup is a **fixed-height** flex column (pinned title + Enable
   toggle, scrolling config body, pinned Done footer) so it keeps a stable size
   whether or not Enable is checked and never exceeds the viewport.
+- **Master mode**: a new optional `resident_agent_master_mode` toggle (default
+  off) lets the resident do real **self-iteration** instead of read-only upkeep.
+  When on, `build_resident_agent_prompt(...)` (now threaded with the resident's
+  own `session_id`) emits a different prompt: the resident **self-provisions its
+  own git worktree** on a `resident/<slug>` branch (idempotent — reuse the dir,
+  re-attach an orphaned branch, or create fresh), does **one bounded enrichment
+  iteration per wake**, and commits only on that branch. It still **NEVER**
+  merges, pushes, force-pushes, touches the main checkout, or auto-starts tasks —
+  a human integrates the branch later. Each cycle it posts a **session-scoped
+  heartbeat report** so its activity is finally legible. Toggling the flag does
+  NOT respawn the resident (the prompt is recomputed every cycle), so it is
+  deliberately excluded from the launch-config invalidation set. The resident
+  card now shows a **Master** badge plus a "last run … ago" + latest-heartbeat
+  meta line; the config popup gains the Master-mode checkbox and a `· Master`
+  pill in the summary row.
 
 ### fix: allow Done after a reported Completed even without a review verdict
 

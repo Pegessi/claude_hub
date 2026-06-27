@@ -154,6 +154,7 @@ export interface Workspace {
   resident_agent_type: AgentType
   resident_agent_env: Record<string, string>
   resident_agent_solo_mode: boolean
+  resident_agent_master_mode: boolean
   resident_agent_title?: string | null
   resident_agent_target: ExecutionTarget
   resident_agent_remote_profile_id?: string | null
@@ -179,6 +180,7 @@ export interface WorkspaceCreate {
   resident_agent_type?: AgentType
   resident_agent_env?: Record<string, string>
   resident_agent_solo_mode?: boolean
+  resident_agent_master_mode?: boolean
   resident_agent_title?: string
   resident_agent_target?: ExecutionTarget
   resident_agent_remote_profile_id?: string | null
@@ -199,6 +201,7 @@ export interface WorkspaceUpdate {
   resident_agent_type?: AgentType
   resident_agent_env?: Record<string, string>
   resident_agent_solo_mode?: boolean
+  resident_agent_master_mode?: boolean
   resident_agent_title?: string | null
   resident_agent_target?: ExecutionTarget
   resident_agent_remote_profile_id?: string | null

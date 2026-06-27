@@ -1360,3 +1360,167 @@ def test_delete_session_clears_resident_pointer_and_disables(
     assert persisted.resident_agent_last_run_at is None
     assert persisted.resident_agent_enabled is False
     assert deleted_tabs == [session.tab_id]
+
+
+# ---------------------------------------------------------------------------
+# Resident master mode: persistence, prompt branch, heartbeat, no-respawn
+# ---------------------------------------------------------------------------
+
+
+def test_create_update_workspace_master_mode_persists(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """master_mode defaults False, persists through create + round-trips from disk;
+    update with None leaves it unchanged; setting True then reloading persists True."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+
+    # Default is False.
+    default_ws = manager.create_workspace(
+        WorkspaceCreate(name="WS-default", path=str(repo), session_prefix="res")
+    )
+    assert default_ws.resident_agent_master_mode is False
+
+    # Explicit True persists on create and round-trips from disk.
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_master_mode=True,
+        )
+    )
+    assert workspace.resident_agent_master_mode is True
+    reloaded = WorkspaceManager()
+    assert reloaded.workspaces[workspace.id].resident_agent_master_mode is True
+
+    # update with None leaves it unchanged.
+    unchanged = manager.update_workspace(
+        workspace.id, WorkspaceUpdate(resident_agent_directive="noop")
+    )
+    assert unchanged.resident_agent_master_mode is True
+
+    # Flip a default-False workspace to True via update, then reload -> persists True.
+    toggled = manager.update_workspace(
+        default_ws.id, WorkspaceUpdate(resident_agent_master_mode=True)
+    )
+    assert toggled.resident_agent_master_mode is True
+    reloaded2 = WorkspaceManager()
+    assert reloaded2.workspaces[default_ws.id].resident_agent_master_mode is True
+
+
+def test_build_resident_prompt_master_off_is_legacy(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """master OFF returns the existing read-only maintenance prompt (propose/TODO +
+    Hard constraints) and does NOT mention self-provisioning a worktree."""
+    workspace = _make_workspace(manager, tmp_path)
+    assert workspace.resident_agent_master_mode is False
+    prompt = _wm.build_resident_agent_prompt(workspace, "http://localhost:9999", "sid")
+    assert "RESIDENT self-driven maintenance agent" in prompt
+    assert "PROPOSE new tasks" in prompt
+    assert "TODO status only" in prompt
+    assert "Hard constraints" in prompt
+    # No worktree self-provisioning in legacy mode.
+    assert "git worktree add" not in prompt
+
+
+def test_build_resident_prompt_master_on_has_worktree_and_heartbeat(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """master ON returns the worktree/heartbeat prompt: self-provision a worktree,
+    work ONLY inside it, a never-merge constraint, and a session-scoped report URL."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_master_mode=True,
+        )
+    )
+    prompt = _wm.build_resident_agent_prompt(workspace, "http://localhost:9999", "sid")
+    assert "git worktree add" in prompt
+    assert "work ONLY" in prompt
+    # Never-merge hard constraint.
+    assert "merge" in prompt
+    assert "NEVER merge" in prompt
+    # Session-scoped heartbeat endpoint, with the session id interpolated.
+    assert "sessions/sid/reports" in prompt
+
+
+def test_run_resident_agent_master_mode_reuse_sends_heartbeat_prompt(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Reuse path in master mode: the single self-drive prompt is the master prompt
+    and references the session-scoped report endpoint for THIS session."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_enabled=True,
+            resident_agent_master_mode=True,
+        )
+    )
+    workspace = manager.workspaces[workspace.id]
+    session = _resident_session(workspace, runtime_status=AgentRuntimeStatus.IDLE)
+    manager.sessions[session.id] = session
+    workspace = workspace.model_copy(update={"resident_agent_session_id": session.id})
+    manager.workspaces[workspace.id] = workspace
+
+    sends: list[tuple[str, str]] = []
+
+    async def fake_send(session_id: str, message: str) -> None:
+        sends.append((session_id, message))
+
+    async def fail_ensure(*args: object, **kwargs: object) -> ManagedSession:
+        raise AssertionError("ensure_workspace_agent must not be called on reuse path")
+
+    monkeypatch.setattr(manager, "send_session_message", fake_send)
+    monkeypatch.setattr(manager, "ensure_workspace_agent", fail_ensure)
+
+    asyncio.run(manager._run_resident_agent(workspace))
+
+    assert len(sends) == 1
+    assert sends[0][0] == session.id
+    prompt = sends[0][1]
+    assert "RESIDENT MASTER agent" in prompt
+    assert "git worktree add" in prompt
+    assert f"sessions/{session.id}/reports" in prompt
+
+
+def test_update_workspace_master_mode_keeps_resident_session(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """Toggling resident_agent_master_mode must NOT clear the tracked session id and
+    must NOT drop the ManagedSession — the prompt is recomputed every cycle, so no
+    respawn is needed (opposite of a placement/launch-config change)."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_enabled=True,
+            resident_agent_type=AgentType.CLAUDE,
+            resident_agent_master_mode=False,
+        )
+    )
+    session = _resident_session(workspace)
+    manager.sessions[session.id] = session
+    workspace = workspace.model_copy(update={"resident_agent_session_id": session.id})
+    manager.workspaces[workspace.id] = workspace
+
+    updated = manager.update_workspace(
+        workspace.id, WorkspaceUpdate(resident_agent_master_mode=True)
+    )
+
+    assert updated.resident_agent_master_mode is True
+    # No respawn: pointer and live ManagedSession are preserved.
+    assert updated.resident_agent_session_id == session.id
+    assert session.id in manager.sessions
