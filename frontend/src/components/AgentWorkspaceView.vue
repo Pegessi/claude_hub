@@ -1541,8 +1541,7 @@
             </div>
             <p class="modal-hint">
               An optional background agent that runs on a schedule to maintain
-              lessons and propose follow-up tasks for this workspace
-              (周期性维护 lessons / 提出任务).
+              lessons and propose follow-up tasks for this workspace.
             </p>
           </div>
           <div class="modal-actions">
@@ -1590,14 +1589,11 @@
               v-model="workspaceForm.resident_agent_enabled"
               type="checkbox"
             >
-            Enable resident self-driven agent (周期性维护 lessons / 提出任务)
+            Enable resident self-driven agent
           </label>
           <p class="modal-hint">
-            When enabled, a background agent runs on a schedule to maintain
-            lessons and propose follow-up tasks for this workspace. Turning
-            this off stops and removes the running resident session
-            (关闭将停止并移除常驻 agent 会话). This is a resident agent — it never
-            picks up normal workspace tasks.
+            A background agent runs on a schedule to maintain lessons and
+            propose follow-up tasks. It never picks up normal workspace tasks.
           </p>
         </div>
 
@@ -1618,11 +1614,11 @@
                 v-model="workspaceForm.resident_agent_paused"
                 type="checkbox"
               >
-              Pause auto-scheduling (keep the agent for manual chat)
+              Pause auto-scheduling (keep the session for manual chat)
             </label>
             <p class="modal-hint">
-              When paused, the resident session stays available for manual chat
-              but won't auto-run on its schedule (暂停自动调度，保留会话用于手动对话).
+              The resident session stays available for manual chat but won't
+              auto-run on its schedule.
             </p>
           </div>
           <div class="modal-field">
@@ -1655,9 +1651,8 @@
               placeholder="Describe recurring tasks or what the resident agent should focus on each run."
             />
             <p class="modal-hint">
-              Saved immediately, but a changed directive takes effect on the
-              resident's next scheduled cycle — it does not re-run right away
-              (保存后于下个周期生效，不会立即重新运行).
+              Saved immediately, but a changed directive only takes effect on
+              the next scheduled cycle — it does not re-run right away.
             </p>
           </div>
           <div class="modal-field">
@@ -1723,25 +1718,6 @@
               Add profiles in ~/.claude_hub/remote_profiles.json or ~/.ssh/config
             </p>
           </div>
-          <div class="modal-field">
-            <label>Working Directory</label>
-            <div class="path-input-row">
-              <input
-                v-model="workspaceForm.resident_agent_cwd"
-                :placeholder="workspaceForm.resident_agent_target === 'remote' ? '~/workspace/project' : '/Users/me/workspace'"
-              >
-              <LoadingButton
-                type="button"
-                class="tool-button"
-                :disabled="!workspaceForm.resident_agent_enabled || (workspaceForm.resident_agent_target === 'remote' && !workspaceForm.resident_agent_remote_profile_id)"
-                :loading="isPending('agent-browser:open')"
-                loading-label="Opening browser"
-                @click="openResidentDirectoryBrowser"
-              >
-                Browse
-              </LoadingButton>
-            </div>
-          </div>
           <div
             v-if="workspaceForm.resident_agent_target === 'remote'"
             class="modal-field"
@@ -1770,8 +1746,7 @@
           class="modal-hint"
         >
           The resident is configured here and created together with the
-          workspace when you press "Create workspace"
-          (常驻 agent 将随工作区一并创建).
+          workspace when you press "Create workspace".
         </p>
         <div class="modal-actions">
           <button
@@ -1786,10 +1761,10 @@
             class="danger-button workspace-delete-button"
             :disabled="isResidentCreateMode || !residentExists"
             :loading="isPending('resident:delete')"
-            loading-label="Deleting resident"
+            loading-label="Deleting"
             @click="handleDeleteResident"
           >
-            Delete resident
+            Delete
           </LoadingButton>
           <LoadingButton
             type="button"
@@ -1806,10 +1781,10 @@
             class="primary-button"
             :disabled="isResidentCreateMode || residentExists"
             :loading="isPending('resident:create')"
-            loading-label="Creating resident"
+            loading-label="Creating"
             @click="handleCreateResident"
           >
-            Create resident
+            Create
           </LoadingButton>
         </div>
       </div>
@@ -3605,12 +3580,9 @@ const selectedAgentRemoteProfile = computed(() =>
   remoteProfiles.value.find(profile => profile.id === agentOptionsForm.remote_profile_id) || null
 )
 
-// The directory browser is shared between the Add-Agent form and the Resident
-// Agent popup. `agentBrowserContext` selects which form's target/remote/cwd the
-// browser reads and writes, so the same modal can place either agent's cwd.
-type AgentBrowserContext = 'agent' | 'resident'
-const agentBrowserContext = ref<AgentBrowserContext>('agent')
-
+// The directory browser is used by the Add-Agent form to place the new agent's
+// working directory. The resident agent has no cwd field — it always runs in
+// the workspace's own directory — so the browser only serves the Add-Agent form.
 interface BrowserPlacement {
   target: ExecutionTarget
   remoteProfileId: string
@@ -3619,16 +3591,6 @@ interface BrowserPlacement {
 }
 
 const browserPlacement = computed<BrowserPlacement>(() => {
-  if (agentBrowserContext.value === 'resident') {
-    return {
-      target: workspaceForm.resident_agent_target,
-      remoteProfileId: workspaceForm.resident_agent_remote_profile_id,
-      cwd: workspaceForm.resident_agent_cwd,
-      setCwd: (value: string) => {
-        workspaceForm.resident_agent_cwd = value
-      },
-    }
-  }
   return {
     target: agentOptionsForm.target,
     remoteProfileId: agentOptionsForm.remote_profile_id,
@@ -4850,14 +4812,7 @@ function handleAgentTargetChange(target: ExecutionTarget) {
 function handleResidentTargetChange(target: ExecutionTarget) {
   if (!workspaceForm.resident_agent_enabled) return
   if (workspaceForm.resident_agent_target === target) return
-  const profileId = workspaceForm.resident_agent_remote_profile_id
-  const previousDefault = workspaceDefaultCwd(workspaceForm.resident_agent_target, profileId)
   workspaceForm.resident_agent_target = target
-  // Mirror the Add-Agent UX: only auto-fill the cwd when it is empty or still
-  // the previous target's default, so a user-typed path is never clobbered.
-  if (!workspaceForm.resident_agent_cwd.trim() || workspaceForm.resident_agent_cwd === previousDefault) {
-    workspaceForm.resident_agent_cwd = workspaceDefaultCwd(target, profileId)
-  }
   if (target === 'remote') {
     if (!workspaceForm.resident_agent_remote_profile_id && remoteProfiles.value.length > 0) {
       workspaceForm.resident_agent_remote_profile_id = remoteProfiles.value[0].id
@@ -4951,13 +4906,6 @@ async function loadAgentDirectory(path?: string, pendingKey = 'agent-browser:loa
 }
 
 async function openAgentDirectoryBrowser() {
-  agentBrowserContext.value = 'agent'
-  showAgentFileBrowser.value = true
-  await openDirectoryBrowserForPlacement()
-}
-
-async function openResidentDirectoryBrowser() {
-  agentBrowserContext.value = 'resident'
   showAgentFileBrowser.value = true
   await openDirectoryBrowserForPlacement()
 }
@@ -8297,6 +8245,12 @@ onUnmounted(() => {
   justify-content: flex-end;
   gap: 10px;
   margin-top: 18px;
+}
+
+/* Keep lifecycle action labels on a single line so they never wrap/overflow
+   below the button (shared by the workspace and resident modals). */
+.modal-actions button {
+  white-space: nowrap;
 }
 
 .modal-actions .workspace-delete-button {
