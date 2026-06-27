@@ -797,6 +797,13 @@ courteous and aligned with how ADHD itself credits adopters in its README
 
 ## 9. Appendix — current prompt architecture snapshot
 
+> **Canonical format reference for implementers has moved to**
+> **[`2026-06-28-prompt-format-reference.md`](./2026-06-28-prompt-format-reference.md).**
+> That document is structured as a per-block, per-cell reference with
+> clean tables and template shapes. This appendix is retained for the
+> narrative tying each rigidity cause to a specific ADHD recommendation
+> (A5 / B2 / B3).
+
 For implementers picking up A5 / B1–B3, this section records how prompts are
 currently assembled in `backend/claude_hub/services/workspace_manager/_prompts.py`
 as of this PR (built on `main@70921a7`). All line references are in that file.

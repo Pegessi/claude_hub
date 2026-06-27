@@ -14,6 +14,7 @@
   - Cheap adopts (A1–A4, prompt/doc only, no runtime change): curated ~8-frame prompt asset, Codex-compatible ≤600-char SKILL.md rule, cite ADHD as critic-split validation, add cognitive-trap bullets to the reviewer adversarial defect-hunt list.
   - Scoped follow-ups (B1–B6, deferred to future reviewed tasks, dependency-ordered in doc §7): pre-flight cost gate + P-DIVERGE/P-CLUSTER/P-DEEPEN primitives → IDEATION review profile → vendored `/adhd` skill → creative-strategy lessons → progress events → optional first-class `--mode ideate` task mode.
 - **No runtime code, schema, config, CI, or test changes in this PR.** Full analysis doc only.
+- **Addendum**: `docs/working-logs/2026-06-28-prompt-format-reference.md` — standalone reference describing how worker/reviewer prompts are assembled across `task_mode × execution_complexity`, with per-block content, per-cell prompt shapes, and reviewer workflow variants. Supports implementers picking up B1–B3 and serves as a durable snapshot of the prompt architecture.
 
 ### feat: hot-switch env/model on a live Claude tab (resume conversation)
 
