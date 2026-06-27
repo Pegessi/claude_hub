@@ -295,3 +295,55 @@ mode** is an opt-in answer to that: a new boolean `resident_agent_master_mode`
   heartbeat meta line — reusing the existing `parseTimestampMs` /
   `formatElapsedDuration` / `elapsedClockMs` helpers. This is what finally makes the
   resident's per-cycle work visible on the board.
+
+### Update: resident lifecycle buttons
+
+The Resident Agent config popup's bottom row previously held a single **Done**
+button that only hid the sub-modal; the resident fields were persisted solely
+when the parent workspace modal was saved. That bottom row now carries three
+explicit lifecycle buttons plus a Done, all in `AgentWorkspaceView.vue`
+(frontend-only — the backend already supports everything via existing PATCH
+semantics):
+
+- **Create resident** — sends the full resident payload with
+  `resident_agent_enabled: true`. The next monitor tick spawns the resident
+  session. Disabled once a resident already exists; the "exists" check reads the
+  **saved** workspace (`activeWorkspace.value?.resident_agent_enabled`), not the
+  editable form flag.
+- **Pause / Resume** — toggles `resident_agent_paused` (label flips on
+  `activeWorkspace.value?.resident_agent_paused`). The backend deliberately
+  keeps the session + tab alive on pause; it only stops auto-scheduling.
+- **Delete resident** — confirms via `window.confirm`, then sends
+  `resident_agent_enabled: false`. The backend's `disabling_resident` path
+  clears the session pointer, drops the `ManagedSession` (the orphan-tab pruner
+  removes the tab), and resets `last_run_at`. This deletes **only** the resident
+  agent, **not** the whole workspace (no `deleteWorkspace` call).
+
+All three are just `workspaceStore.updateWorkspace(id, <partial payload>)` —
+no new endpoint. They **act immediately via PATCH in edit mode**, where the
+workspace already exists, and refresh the board through the store (each wrapped
+in `runPending('resident:create' | 'resident:pause' | 'resident:delete', …)`
+for per-button loading state via `LoadingButton`). The Create payload reuses a
+new local `buildResidentPayload(overrides)` helper that returns the resident
+`resident_agent_*` slice from the form; `handleSaveWorkspace` was refactored to
+use the same helper so the payload shape lives in one place.
+
+**Create-mode behavior (chosen: disabled, not hidden).** In create mode there
+is no workspace id to PATCH, so the three lifecycle buttons are **disabled**
+(via the `isResidentCreateMode` computed) and a hint says the resident is
+configured here and created together with the workspace by the parent "Create
+workspace" button (`handleCreateWorkspace` already sends the resident fields).
+Keeping the buttons present-but-disabled (rather than hidden) keeps the row
+layout stable between create and edit and makes the immediate-API model honest
+without faking an id or calling create from the sub-modal.
+
+**Directive-timing hint.** A `<p class="modal-hint">` under the directive
+textarea clarifies that a changed directive is saved immediately but only takes
+effect on the resident's next scheduled cycle — it does not re-run right away
+(保存后于下个周期生效，不会立即重新运行).
+
+Note: an `activeWorkspace`-based pause toggle already existed for the resident
+**status card** (`toggleResidentPaused` / `workspace:resident-pause`); the new
+sub-modal handlers (`handleToggleResidentPause` / `resident:pause`) are the
+modal-scoped equivalents and also mirror the new value back into
+`workspaceForm` so the sub-modal checkboxes stay in sync.
