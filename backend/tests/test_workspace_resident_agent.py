@@ -1423,13 +1423,17 @@ def test_build_resident_prompt_master_off_is_legacy(
     assert "Hard constraints" in prompt
     # No worktree self-provisioning in legacy mode.
     assert "git worktree add" not in prompt
+    # And no orchestrator-mode dispatch machinery leaks into the read-only prompt.
+    assert "target_session_id" not in prompt
+    assert "task_mode" not in prompt
 
 
-def test_build_resident_prompt_master_on_has_worktree_and_heartbeat(
+def test_build_resident_prompt_master_on_is_orchestrator(
     manager: WorkspaceManager, tmp_path: Path
 ) -> None:
-    """master ON returns the worktree/heartbeat prompt: self-provision a worktree,
-    work ONLY inside it, a never-merge constraint, and a session-scoped report URL."""
+    """master ON returns the orchestrator prompt: read the board, create DIRECT-mode
+    tasks, dispatch them to existing orchestrator workers via target_session_id, and
+    accept finished work (PATCH status=done) — never writing code or spawning agents."""
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)
     workspace = manager.create_workspace(
@@ -1441,13 +1445,26 @@ def test_build_resident_prompt_master_on_has_worktree_and_heartbeat(
         )
     )
     prompt = _wm.build_resident_agent_prompt(workspace, "http://localhost:9999", "sid")
-    assert "git worktree add" in prompt
-    assert "work ONLY" in prompt
-    # Never-merge hard constraint.
-    assert "merge" in prompt
-    assert "NEVER merge" in prompt
+    assert "RESIDENT MASTER agent" in prompt
+    assert "/board" in prompt
+    assert "/tasks" in prompt
+    assert "target_session_id" in prompt
+    assert '"task_mode":"direct"' in prompt
+    assert "orchestrator" in prompt
+    assert "NEVER create or delete agents" in prompt
+    assert "PATCH" in prompt
+    assert '"status":"done"' in prompt
+    assert "no worker agents available" in prompt
+    # Degrade-to-proposal-only guardrail when there is no orchestrator worker.
+    assert "MUST NOT create one" in prompt
+    assert "never auto-creates a default agent" in prompt
+    # Forbids the reviewed/autonomous modes that would spawn a reviewer session.
+    assert 'Do NOT use "reviewed" or "autonomous"' in prompt
     # Session-scoped heartbeat endpoint, with the session id interpolated.
     assert "sessions/sid/reports" in prompt
+    # No worktree / self-provisioning language in orchestrator mode.
+    assert "git worktree add" not in prompt
+    assert "work ONLY" not in prompt
 
 
 def test_run_resident_agent_master_mode_reuse_sends_heartbeat_prompt(
@@ -1489,7 +1506,8 @@ def test_run_resident_agent_master_mode_reuse_sends_heartbeat_prompt(
     assert sends[0][0] == session.id
     prompt = sends[0][1]
     assert "RESIDENT MASTER agent" in prompt
-    assert "git worktree add" in prompt
+    assert "target_session_id" in prompt
+    assert '"task_mode":"direct"' in prompt
     assert f"sessions/{session.id}/reports" in prompt
 
 

@@ -5,6 +5,40 @@
 
 ## Unreleased
 
+### refactor: resident Master mode is now an autonomous orchestrator (not a coder)
+
+- **What**: redefined the resident agent's **Master mode** from "self-iterate on
+  its own git worktree and commit code" into an **autonomous orchestrator /
+  product-owner**. With Master mode ON, each bounded cycle the resident now:
+  reads the board (`GET /api/workspaces/{ws}/board`), decides what the workspace
+  needs next from recent task outcomes + the user directive, **creates DIRECT-mode
+  tasks** (`POST /tasks` with `"task_mode":"direct"`, capped at 3/cycle),
+  **dispatches** each to an **existing orchestrator worker session** (`POST
+  /tasks/{id}/start` with an explicit `target_session_id`), and **accepts the
+  results itself** (`PATCH /tasks/{id}` → `{"status":"done"}`) or sends them back
+  with feedback (`POST /tasks/{id}/continue`). It posts a heartbeat report each
+  cycle. Master mode OFF is unchanged (read-only: propose TODO tasks + curate
+  lessons, no reports).
+- **Why**: the user wanted Master mode to let the resident drive the workspace's
+  requirements end-to-end — create work, get it executed, and validate it —
+  rather than write code on a side branch. The orchestrator framing keeps the
+  resident out of the editor and reuses the existing task/worker machinery.
+- **How**: this is a **prompt-level** change only — no new endpoints, schema
+  fields, or service methods. `_build_resident_master_prompt`
+  (`backend/claude_hub/services/workspace_manager/_workspaces.py`) was rewritten
+  to the orchestrator prompt; the now-unused `_resident_worktree_slug` helper was
+  deleted. **DIRECT mode is mandatory** for resident-created tasks: DIRECT
+  completion routes straight to `review` awaiting acceptance and **never spawns a
+  reviewer session**, whereas `reviewed`/`autonomous` modes call
+  `_select_or_create_reviewer` (which spawns an ephemeral reviewer) — that would
+  violate the resident's **never add/delete agents** rule. The resident only
+  dispatches to pre-existing `orchestrator` sessions with an explicit
+  `target_session_id` (so `start_task` never auto-creates a default agent), and
+  degrades to proposal-only (TODO tasks, no dispatch) when no worker agent exists.
+  Toggling Master mode still does **not** respawn the resident session (the prompt
+  is recomputed each cycle). The frontend Master-mode hint copy was updated to
+  describe the orchestrator behavior.
+
 ### feat: hot-switch env/model on a live Claude tab (resume conversation)
 
 - **What**: a new per-Claude-tab **Switch Env** action opens a dialog where you

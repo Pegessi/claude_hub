@@ -241,6 +241,15 @@ workspace agent (the session/ttyd layer already consumed `agent_type`/`env`/
   orphan-tab pruner instead of inventing a second teardown path.
 
 ## Update: master mode (opt-in self-iteration on the resident's own worktree)
+
+> **⚠️ SUPERSEDED — historical only.** This describes the FIRST cut of master
+> mode (resident self-iterates on its own git worktree, writes code, commits).
+> That behavior was **removed**: the `_resident_worktree_slug` helper is deleted
+> and the master prompt was fully rewritten. Master mode is now an autonomous
+> ORCHESTRATOR — see **"Update: master mode is now an orchestrator (not a
+> coder)"** below for the current design. The text in this section is kept for
+> history; do not treat it as the live contract.
+
 The base resident is deliberately read-only: it proposes `TODO` tasks and curates
 lessons but posts no reports, so a healthy idle resident is visually
 indistinguishable from a stuck one ("looks busy but nothing shows"). **Master
@@ -398,3 +407,58 @@ The decision (vs. changing the trigger to stay idle when there's no activity)
 was to keep the backstop intact and fix legibility only — the periodic idle
 pass is intentional so lesson hygiene and TODO surfacing keep moving on
 long-lived workspaces.
+
+### Update: master mode is now an orchestrator (not a coder)
+
+The first cut of Master mode made the resident **write code on its own git
+worktree** and commit there. The user redefined the feature: Master mode should
+let the resident act as an **autonomous orchestrator / product-owner** — iterate
+on the workspace's requirements, create tasks, drive their execution on existing
+worker agents, and **accept (验收)** the results — **without writing code itself
+and without adding or deleting agents/reviewers**. The whole worktree
+self-iteration behavior (and the `_resident_worktree_slug` helper) was removed;
+this is now a prompt-only change with no backend logic, schema, or route edits.
+
+**Master-mode cycle (orchestrator).** Each wake, one bounded pass:
+1. `GET /api/workspaces/{ws}/board` → read recent tasks + sessions + directive,
+   decide what's needed next.
+2. Find usable workers = sessions with `role=="orchestrator"`, not stopped,
+   runtime idle/working. **If none exist → do NOT create one; degrade to
+   proposal-only (TODO tasks, no dispatch) and say so in the heartbeat.**
+3. Create ≤3 **DIRECT-mode** tasks (`"task_mode":"direct"`).
+4. Dispatch each via `POST /tasks/{id}/start` with an explicit
+   `target_session_id` pointing at an existing orchestrator.
+5. Accept its own finished tasks: when `status=="review"`, validate then
+   `PATCH {status:"done"}`; if unsatisfactory, `POST /tasks/{id}/continue` with
+   feedback (same worker, no spawn). Only ever touches tasks it created.
+6. Post a heartbeat report.
+
+**Why DIRECT mode is mandatory.** DIRECT completion routes straight to `review`
+awaiting acceptance and **never spawns a reviewer** (`_reports.py:476-485`).
+`reviewed`/`autonomous` modes call `_request_task_review` →
+`_select_or_create_reviewer`, which **spawns an ephemeral REVIEWER session** when
+none is idle (`_review.py:88-102`) — that would violate the resident's "never add
+agents" rule. So the orchestrator prompt hard-requires `task_mode:"direct"`.
+
+**Why dispatch is safe re: no-new-agents.** `start_task` auto-creates a default
+agent **only when the workspace has zero agents** (`_dispatch.py:46-58`). The
+prompt forbids starting tasks unless ≥1 orchestrator already exists and always
+passes `target_session_id`, so dispatch reuses an existing session (queuing
+behind a busy one is allowed; no spawn). Acceptance via PATCH→done is a pure
+state change that frees the session and never spawns.
+
+**Activity-gate nuance.** `_workspace_activity_since` gates the fast-path on task
+*outcome* timestamps (not creation) and excludes the resident's own reports, so
+creating a TODO + posting a heartbeat does **not** re-arm the resident. A
+dispatched task reaching `review`/`done` belongs to the **orchestrator** session
+and DOES count as genuine workspace activity (bounded by the activity debounce) —
+by design, not a loop.
+
+**Known best-effort limitation.** "Only accept/continue tasks YOU created" is
+prompt-enforced; there is no backend ownership tag on resident-created tasks.
+Stamping them is out of scope for this change.
+
+Toggling Master mode still must NOT respawn the resident session (the prompt is
+recomputed every cycle), so `resident_agent_master_mode` remains excluded from
+`_resident_launch_config_changed`. The Master-mode UI hint copy was updated from
+the worktree wording to the orchestrator description.
