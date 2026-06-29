@@ -119,21 +119,36 @@ def _latest_report(reports: List[dict]) -> Optional[dict]:
     return max(reports, key=lambda report: str(report.get("created_at", "")))
 
 
+def _acceptance_check_items(report: Optional[dict]) -> List[dict]:
+    if not report:
+        return []
+    acceptance = report.get("acceptance_check")
+    if not isinstance(acceptance, list):
+        return []
+    return [item for item in acceptance if isinstance(item, dict)]
+
+
+def _latest_acceptance_report(reports: List[dict]) -> Optional[dict]:
+    acceptance_reports = [report for report in reports if _acceptance_check_items(report)]
+    if not acceptance_reports:
+        return None
+    return max(acceptance_reports, key=lambda report: str(report.get("created_at", "")))
+
+
 def _task_status_payload(
     workspace_id: Optional[str], task: dict, reports: List[dict]
 ) -> Dict[str, Any]:
     latest = _latest_report(reports)
+    acceptance_report = _latest_acceptance_report(reports)
     review_reports = [report for report in reports if report.get("state") in REVIEW_STATES]
-    latest_acceptance: List[dict] = []
-    acceptance = latest.get("acceptance_check") if latest else None
-    if isinstance(acceptance, list):
-        latest_acceptance = [item for item in acceptance if isinstance(item, dict)]
+    latest_acceptance = _acceptance_check_items(acceptance_report)
     return {
         "workspace_id": workspace_id,
         "task": task,
         "goal_packet": task.get("goal_packet"),
         "latest_report": latest,
         "latest_report_message": _report_message(latest),
+        "latest_acceptance_report": acceptance_report,
         "latest_acceptance_check": latest_acceptance,
         "review_reports": review_reports,
         "human_acceptance_requested_at": task.get("human_acceptance_requested_at"),
@@ -179,6 +194,13 @@ def _print_task_status(payload: Dict[str, Any]) -> None:
         click.echo("(none)")
 
     click.echo("\nAcceptance check:")
+    acceptance_report = payload.get("latest_acceptance_report")
+    if isinstance(acceptance_report, dict):
+        click.echo(
+            "source: "
+            f"{acceptance_report.get('state') or '?'} "
+            f"{acceptance_report.get('created_at') or ''}".rstrip()
+        )
     print_rows(payload.get("latest_acceptance_check", []), ACCEPTANCE_COLUMNS)
 
     click.echo("\nReview reports:")

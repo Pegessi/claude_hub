@@ -24,7 +24,7 @@ import click
 
 from claude_hub.cli import main as cli_main
 from claude_hub.cli.client import HubClient, HubError
-from claude_hub.cli.commands.tasks import _find_task_board
+from claude_hub.cli.commands.tasks import _find_task_board, _latest_acceptance_report
 from claude_hub.cli.feishu_cards import (
     CARD_KINDS,
     INTERACTIVE_KINDS,
@@ -199,9 +199,16 @@ def _build_card(
         latest_report = (
             max(reports, key=lambda r: str(r.get("created_at", ""))) if reports else None
         )
+        acceptance_report = _latest_acceptance_report(reports)
         if not match.get("workspace_id"):
             match["workspace_id"] = ws_id
-        return build_task_detail_card(match, session, latest_report, token=token)
+        return build_task_detail_card(
+            match,
+            session,
+            latest_report,
+            acceptance_report=acceptance_report,
+            token=token,
+        )
 
     if kind == "reports":
         if not task_id:

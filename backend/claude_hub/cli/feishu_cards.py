@@ -742,6 +742,7 @@ def build_task_detail_card(
     session: Any,
     latest_report: Any,
     *,
+    acceptance_report: Any = None,
     token: str,
 ) -> Dict[str, Any]:
     """Build a task detail card with status, latest progress, and action buttons."""
@@ -771,12 +772,37 @@ def build_task_detail_card(
     if latest_report:
         elements.append({"tag": "hr"})
         elements.append(_markdown(f"**Latest progress**\n{_report_line(latest_report)}"))
-        acceptance = _get(latest_report, "acceptance_check", [])
-        if isinstance(acceptance, list) and acceptance:
-            summary = ", ".join(
-                f"{_get(item, 'status', '?')}" for item in acceptance if isinstance(item, dict)
+
+    acceptance_source = acceptance_report or latest_report
+    if acceptance_source:
+        acceptance = _get(acceptance_source, "acceptance_check", [])
+        items = (
+            [item for item in acceptance if isinstance(item, dict)]
+            if isinstance(acceptance, list)
+            else []
+        )
+        if items:
+            summary = ", ".join(f"{_get(item, 'status', '?')}" for item in items)
+            rows = []
+            for item in items[:5]:
+                criterion = _get(item, "criterion", "criterion")
+                status = _get(item, "status", "?")
+                evidence = _get(item, "evidence", "")
+                suffix = f": {evidence}" if evidence else ""
+                rows.append(f"- `{status}` {criterion}{suffix}")
+            if len(items) > 5:
+                rows.append(f"- ... {len(items) - 5} more")
+            elements.append(_markdown("**Acceptance check**\n" + "\n".join(rows)))
+            source = " ".join(
+                part
+                for part in (
+                    str(_get(acceptance_source, "state", "") or ""),
+                    str(_get(acceptance_source, "created_at", "") or ""),
+                )
+                if part
             )
-            elements.append(_note(f"acceptance_check: {len(acceptance)} item(s) · {summary}"))
+            suffix = f" · source {source}" if source else ""
+            elements.append(_note(f"acceptance_check: {len(items)} item(s) · {summary}{suffix}"))
 
     buttons = [
         {

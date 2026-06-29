@@ -736,15 +736,6 @@ def test_task_status_surfaces_goal_review_and_acceptance(monkeypatch):
     reports = [
         {
             "created_at": "2026-06-29T01:00:00",
-            "state": "review_passed",
-            "session_id": "reviewer",
-            "review_cycle": 1,
-            "review_decision": "request",
-            "review_reason": "checked",
-            "message": "passed",
-        },
-        {
-            "created_at": "2026-06-29T02:00:00",
             "state": "completed",
             "session_id": "worker",
             "review_decision": "request",
@@ -756,6 +747,15 @@ def test_task_status_surfaces_goal_review_and_acceptance(monkeypatch):
                     "evidence": "test covered",
                 }
             ],
+        },
+        {
+            "created_at": "2026-06-29T02:00:00",
+            "state": "review_passed",
+            "session_id": "reviewer",
+            "review_cycle": 1,
+            "review_decision": "request",
+            "review_reason": "checked",
+            "message": "passed",
         },
     ]
 
@@ -792,7 +792,8 @@ def test_task_status_surfaces_goal_review_and_acceptance(monkeypatch):
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["goal_packet"]["status"] == "approved"
-    assert payload["latest_report_message"] == "done"
+    assert payload["latest_report_message"] == "passed"
+    assert payload["latest_acceptance_report"]["state"] == "completed"
     assert payload["latest_acceptance_check"][0]["status"] == "passed"
     assert payload["review_reports"][0]["state"] == "review_passed"
 
@@ -801,6 +802,8 @@ def test_task_status_surfaces_goal_review_and_acceptance(monkeypatch):
     assert "Goal Packet" in result.output
     assert "approved" in result.output
     assert "Acceptance check" in result.output
+    assert "source: completed 2026-06-29T01:00:00" in result.output
+    assert "test covered" in result.output
     assert "review_passed" in result.output
 
 
