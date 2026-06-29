@@ -1632,9 +1632,10 @@
             </label>
             <p class="modal-hint">
               Changes what each cycle does, not whether it runs. On: the
-              resident self-iterates on its own git worktree and posts a
-              heartbeat. Off: read-only maintenance, no reports. Never merges
-              to main.
+              resident acts as an orchestrator — it reviews the board, creates
+              and dispatches tasks to your existing worker agents, and accepts
+              finished work itself. It never writes code and never adds or
+              removes agents. Off: read-only maintenance, no reports.
             </p>
           </div>
           <div class="modal-field">
