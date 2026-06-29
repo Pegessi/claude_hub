@@ -142,14 +142,19 @@ Common commands (add `--json` to any for machine-readable output):
 uv run claude-hub workspace list
 uv run claude-hub workspace create --name demo --path /path/to/repo
 uv run claude-hub workspace board <WORKSPACE_ID>            # alias: status
+uv run claude-hub workspace summary <WORKSPACE_ID>          # typed board summary
+uv run claude-hub workspace docs <WORKSPACE_ID>             # Markdown docs + snapshot path
 uv run claude-hub task list <WORKSPACE_ID>
 uv run claude-hub task create <WORKSPACE_ID> --title "Fix bug" --prompt "..."
+uv run claude-hub task status <TASK_ID> --workspace-id <WORKSPACE_ID>
 uv run claude-hub task start <TASK_ID>
 uv run claude-hub task send <WORKSPACE_ID> <TASK_ID> --message "also add a test"
 uv run claude-hub task continue <TASK_ID> --message "keep going"
 uv run claude-hub task abort <TASK_ID> --reason "superseded"
 uv run claude-hub agent list <WORKSPACE_ID>
-uv run claude-hub agent create <WORKSPACE_ID> --type claude
+uv run claude-hub agent status <WORKSPACE_ID>
+uv run claude-hub agent create <WORKSPACE_ID> --agent-type claude
+uv run claude-hub session status <SESSION_ID>
 uv run claude-hub session send <SESSION_ID> --message "continue"
 uv run claude-hub session report <SESSION_ID> --state working --message "..."
 uv run claude-hub lessons list <WORKSPACE_ID> --query terminal
@@ -186,6 +191,8 @@ uv run claude-hub feishu build-card --kind plan_confirm --title T --body "..."
 # Display-only cards render live workspace data and carry no token:
 uv run claude-hub feishu build-card --kind status --workspace-id <WS>
 uv run claude-hub feishu build-card --kind task   --workspace-id <WS> --task-id <T>
+uv run claude-hub feishu build-card --kind overview --workspace-id <WS>
+uv run claude-hub feishu build-card --kind task_detail --workspace-id <WS> --task-id <T>
 
 # In the bot's card.action.trigger handler, parse the callback (arg or stdin).
 # Match the returned `token` against the card you sent. Foreign cards → exit 1
@@ -195,8 +202,9 @@ echo "$CALLBACK_JSON" | uv run claude-hub feishu parse-action
 #  → {"token":"x9…","action":"approve","form":{},"operator_id":"ou_…","chat_id":"oc_…"}
 ```
 
-Interactive kinds (`approval`, `needs_input`, `plan_confirm`) embed a correlation
-token; display kinds (`status`, `task`) carry none. See
+Interactive kinds (`approval`, `needs_input`, `plan_confirm`, `task_detail`)
+embed a correlation token; display-only kinds such as `status`, `overview`, and
+`reports` carry none. See
 `docs/working-logs/2026-06-16-feishu-card-cli.md` for the design and a smoke test.
 
 ## Authentication
