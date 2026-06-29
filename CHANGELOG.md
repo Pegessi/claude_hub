@@ -5,6 +5,36 @@
 
 ## Unreleased
 
+### fix: new codex agent no longer queues its bootstrap prompt line-by-line
+
+- **What**: creating a new codex (GPT-5.5) workspace agent no longer piles up the
+  initial bootstrap prompt as one "Queued follow-up input" per line, leaving the
+  agent stuck re-feeding its own startup message instead of executing. The
+  multi-line prompt now lands as a single composer entry and the agent begins
+  work normally.
+- **Why**: `_send_tmux_message`
+  (`services/workspace_manager/_tmux_queries.py`) delivered the prompt with
+  `tmux paste-buffer` and no flags. Plain `paste-buffer` (a) replaces every LF
+  with CR and (b) emits no bracketed-paste control codes. The codex TUI runs
+  with bracketed-paste mode enabled, so it read each bare CR as Enter and
+  submitted every prompt line on its own, stacking "Queued follow-up inputs".
+  Claude/Cursor masked the same byte stream by collapsing the CR burst into a
+  `[Pasted Content N chars]` placeholder; codex does not. This is distinct from
+  the whole-message auto-continue re-feed loop fixed earlier (commit `1553f9b`).
+- **How**:
+  - Paste with `paste-buffer -p -r`: `-p` wraps the buffer in bracketed-paste
+    markers (`ESC[200~ … ESC[201~`) and `-r` disables tmux's default LF→CR
+    replacement so newlines stay newlines. The pairing is required — `-p` alone
+    still converts LF→CR; `-r` alone omits the markers a non-bracketed reader
+    needs. The existing single-Enter submit + pending-input verify/retry path is
+    unchanged.
+  - Verified by a tmux byte-stream repro (before: `…H2O\rSession…\r…`; after:
+    `ESC[200~…H2O\nSession…\nESC[201~`).
+  - Tests: `backend/tests/test_workspaces.py` adds
+    `test_send_tmux_message_pastes_with_bracketed_paste_flags`, asserting
+    `paste-buffer` is invoked with both `-p` and `-r`, targets the pane, and runs
+    after `load-buffer`.
+
 ### fix: resolve task markdown artifacts produced inside git worktrees
 
 - **What**: clicking a task report's markdown artifact link (e.g.

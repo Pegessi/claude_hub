@@ -5011,6 +5011,56 @@ def test_tmux_pending_input_detection_matches_codex_paste_prompt() -> None:
     )
 
 
+def test_send_tmux_message_pastes_with_bracketed_paste_flags(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """A multi-line prompt must be pasted as one bracketed paste with newlines
+    preserved.
+
+    Regression for the codex "新建 agent 反复喂初始输入" bug: ``tmux paste-buffer``
+    with no flags replaces every LF with CR and emits no bracketed-paste control
+    codes, so a codex TUI (bracketed-paste mode on) reads each CR as Enter and
+    submits each bootstrap line separately, piling up "Queued follow-up inputs".
+    Pasting with ``-p -r`` wraps the buffer in ESC[200~ … ESC[201~ and keeps the
+    newlines as newlines, so it lands as a single composer entry and the
+    existing single Enter submits it.
+    """
+    tmux_calls: list[tuple[str, ...]] = []
+
+    async def fake_run_tmux(*args: str) -> None:
+        tmux_calls.append(args)
+
+    # The pasted prompt would otherwise look "still pending"; short-circuit the
+    # submit verification so the test focuses on the paste invocation.
+    async def fake_submit(_tmux_session: str, _message: str) -> None:
+        return None
+
+    monkeypatch.setattr(workspace_manager, "_run_tmux", fake_run_tmux)
+    monkeypatch.setattr(workspace_manager, "_submit_tmux_message", fake_submit)
+
+    asyncio.run(
+        workspace_manager._send_tmux_message(
+            "claude-hub-deadbeef",
+            "Workspace: H2O\nSession: cb-agent-9\nRuntime target: local",
+        )
+    )
+
+    paste_calls = [call for call in tmux_calls if call and call[0] == "paste-buffer"]
+    assert len(paste_calls) == 1
+    paste_call = paste_calls[0]
+    # Both flags are required: -p alone still converts LF->CR; -r alone omits the
+    # bracketed-paste markers. Assert both are present and the pane is targeted.
+    assert "-p" in paste_call
+    assert "-r" in paste_call
+    assert "-t" in paste_call
+    assert "claude-hub-deadbeef" in paste_call
+    # The buffer must be loaded before it is pasted.
+    assert any(call and call[0] == "load-buffer" for call in tmux_calls)
+    load_index = next(i for i, call in enumerate(tmux_calls) if call and call[0] == "load-buffer")
+    paste_index = next(i for i, call in enumerate(tmux_calls) if call and call[0] == "paste-buffer")
+    assert load_index < paste_index
+
+
 def test_tmux_pending_input_detection_matches_cursor_paste_prompt() -> None:
     message = "New workspace task assigned.\n\nTask description"
 
