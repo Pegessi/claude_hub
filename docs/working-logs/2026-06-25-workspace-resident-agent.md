@@ -425,27 +425,45 @@ this is now a prompt-only change with no backend logic, schema, or route edits.
 2. Find usable workers = sessions with `role=="orchestrator"`, not stopped,
    runtime idle/working. **If none exist → do NOT create one; degrade to
    proposal-only (TODO tasks, no dispatch) and say so in the heartbeat.**
-3. Create ≤3 **DIRECT-mode** tasks (`"task_mode":"direct"`).
+3. Create ≤3 tasks in the **default `reviewed` mode** (no `task_mode` override).
 4. Dispatch each via `POST /tasks/{id}/start` with an explicit
    `target_session_id` pointing at an existing orchestrator.
-5. Accept its own finished tasks: when `status=="review"`, validate then
+5. Accept its own finished tasks **after review has passed**: a reviewed task is
+   ready for acceptance when `status=="review"` AND `human_acceptance_requested_at`
+   is set AND `human_accepted_at` is null. (While the reviewer is still working
+   the task is in `review` with no `human_acceptance_requested_at` yet — the
+   resident leaves it and rechecks next cycle.) Then validate and
    `PATCH {status:"done"}`; if unsatisfactory, `POST /tasks/{id}/continue` with
    feedback (same worker, no spawn). Only ever touches tasks it created.
 6. Post a heartbeat report.
 
-**Why DIRECT mode is mandatory.** DIRECT completion routes straight to `review`
-awaiting acceptance and **never spawns a reviewer** (`_reports.py:476-485`).
-`reviewed`/`autonomous` modes call `_request_task_review` →
-`_select_or_create_reviewer`, which **spawns an ephemeral REVIEWER session** when
-none is idle (`_review.py:88-102`) — that would violate the resident's "never add
-agents" rule. So the orchestrator prompt hard-requires `task_mode:"direct"`.
+**Why `reviewed` (default) mode, and how acceptance is gated.** The user wants
+the work to actually go through review before the resident signs off, and is fine
+with the backend auto-spawning a reviewer to do it. `reviewed` completion routes
+through `_request_task_review` → `_select_or_create_reviewer`, which reuses an
+idle REVIEWER or briefly spins up an ephemeral one when none exists
+(`_review.py:63-102`). That reviewer-spawn is the **backend's** doing and is
+explicitly allowed — it is distinct from the resident provisioning a *worker*
+agent, which is still forbidden. After a reviewer **PASS** (or an auto-skipped
+low-risk review, `_reports.py:493-501` → `_mark_task_review_skipped`) the task
+lands in `status==review` with `human_acceptance_requested_at` stamped
+(`compute_reviewer_verdict_task_update`, `workspace_state_policy.py:495-510`;
+`_mark_task_review_skipped`, `_reports.py:914-932`). That timestamp is the precise
+"awaiting human/resident acceptance" signal — it is **not** set while the reviewer
+is still working, nor on a reviewer FAIL (the backend auto-re-dispatches FAILs to
+the same worker, `_review.py:299-311`). So the prompt keys acceptance off
+`human_acceptance_requested_at` rather than raw `status==review`, which avoids the
+resident PATCH-ing a task to `done` mid-review.
 
-**Why dispatch is safe re: no-new-agents.** `start_task` auto-creates a default
-agent **only when the workspace has zero agents** (`_dispatch.py:46-58`). The
-prompt forbids starting tasks unless ≥1 orchestrator already exists and always
+**Why dispatch is safe re: no-new-worker-agents.** `start_task` auto-creates a
+default agent **only when the workspace has zero agents** (`_dispatch.py:46-58`).
+The prompt forbids starting tasks unless ≥1 orchestrator already exists and always
 passes `target_session_id`, so dispatch reuses an existing session (queuing
 behind a busy one is allowed; no spawn). Acceptance via PATCH→done is a pure
-state change that frees the session and never spawns.
+state change that frees the session and never spawns. The resident's hard limit is
+specifically **never provisioning or deleting orchestrator worker sessions** — the
+ephemeral reviewer the backend may create during review is out of the resident's
+hands and permitted.
 
 **Activity-gate nuance.** `_workspace_activity_since` gates the fast-path on task
 *outcome* timestamps (not creation) and excludes the resident's own reports, so

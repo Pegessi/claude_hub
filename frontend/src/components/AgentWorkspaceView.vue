@@ -1633,9 +1633,10 @@
             <p class="modal-hint">
               Changes what each cycle does, not whether it runs. On: the
               resident acts as an orchestrator — it reviews the board, creates
-              and dispatches tasks to your existing worker agents, and accepts
-              finished work itself. It never writes code and never adds or
-              removes agents. Off: read-only maintenance, no reports.
+              and dispatches tasks to your existing worker agents, lets them go
+              through review, and accepts the finished work itself. It never
+              writes code and never adds or removes worker agents. Off:
+              read-only maintenance, no reports.
             </p>
           </div>
           <div class="modal-field">

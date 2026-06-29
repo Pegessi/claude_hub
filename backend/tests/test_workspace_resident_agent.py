@@ -1431,9 +1431,10 @@ def test_build_resident_prompt_master_off_is_legacy(
 def test_build_resident_prompt_master_on_is_orchestrator(
     manager: WorkspaceManager, tmp_path: Path
 ) -> None:
-    """master ON returns the orchestrator prompt: read the board, create DIRECT-mode
-    tasks, dispatch them to existing orchestrator workers via target_session_id, and
-    accept finished work (PATCH status=done) — never writing code or spawning agents."""
+    """master ON returns the orchestrator prompt: read the board, create tasks
+    (default reviewed mode), dispatch them to existing orchestrator workers via
+    target_session_id, and accept the work itself once review has passed (PATCH
+    status=done) — never writing code or provisioning worker agents."""
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)
     workspace = manager.create_workspace(
@@ -1449,17 +1450,23 @@ def test_build_resident_prompt_master_on_is_orchestrator(
     assert "/board" in prompt
     assert "/tasks" in prompt
     assert "target_session_id" in prompt
-    assert '"task_mode":"direct"' in prompt
     assert "orchestrator" in prompt
-    assert "NEVER create or delete agents" in prompt
+    assert "NEVER create or delete orchestrator worker sessions" in prompt
     assert "PATCH" in prompt
     assert '"status":"done"' in prompt
     assert "no worker agents available" in prompt
+    # Tasks use the default reviewed mode (a reviewer agent vets the work); the
+    # resident does the final acceptance, so it must NOT force direct mode.
+    assert '"task_mode":"direct"' not in prompt
+    assert "default (reviewed)" in prompt
+    # Acceptance is gated on the post-review awaiting-acceptance signal, not raw
+    # status == review (which is also true while the reviewer is still working).
+    assert "human_acceptance_requested_at" in prompt
     # Degrade-to-proposal-only guardrail when there is no orchestrator worker.
     assert "MUST NOT create one" in prompt
-    assert "never auto-creates a default agent" in prompt
-    # Forbids the reviewed/autonomous modes that would spawn a reviewer session.
-    assert 'Do NOT use "reviewed" or "autonomous"' in prompt
+    assert "never auto-creates a default" in prompt
+    # Reviewer auto-spawn by the backend is explicitly allowed (not forbidden).
+    assert "allowed" in prompt
     # Session-scoped heartbeat endpoint, with the session id interpolated.
     assert "sessions/sid/reports" in prompt
     # No worktree / self-provisioning language in orchestrator mode.
@@ -1507,7 +1514,7 @@ def test_run_resident_agent_master_mode_reuse_sends_heartbeat_prompt(
     prompt = sends[0][1]
     assert "RESIDENT MASTER agent" in prompt
     assert "target_session_id" in prompt
-    assert '"task_mode":"direct"' in prompt
+    assert "human_acceptance_requested_at" in prompt
     assert f"sessions/{session.id}/reports" in prompt
 
 

@@ -15,11 +15,13 @@ def build_resident_agent_prompt(workspace: "Workspace", base_url: str, session_i
     user to approve — it never auto-starts work or performs destructive actions.
 
     When ``resident_agent_master_mode`` is enabled, the resident acts as an
-    autonomous ORCHESTRATOR: each cycle it reads the board, creates DIRECT-mode
-    tasks, dispatches them to existing orchestrator worker sessions via an
-    explicit ``target_session_id``, and accepts finished work itself (PATCH
-    ``status=done``) or sends it back via ``continue``. It NEVER writes code and
-    NEVER adds or deletes agents.
+    autonomous ORCHESTRATOR: each cycle it reads the board, creates tasks
+    (default ``reviewed`` mode, so a reviewer agent vets the work), dispatches
+    them to existing orchestrator worker sessions via an explicit
+    ``target_session_id``, and performs the final acceptance itself once review
+    has passed (PATCH ``status=done``) or sends the work back via ``continue``.
+    It NEVER writes code and NEVER creates or deletes orchestrator worker
+    sessions (the backend may still spin up an ephemeral reviewer on its own).
     """
     directive = (workspace.resident_agent_directive or "").strip()
     directive_block = (
@@ -70,11 +72,14 @@ def _build_resident_master_prompt(
 ) -> str:
     """Master-mode resident prompt: an autonomous ORCHESTRATOR / product-owner.
 
-    Each cycle the resident reads the board, creates a small number of
-    DIRECT-mode tasks, dispatches them to EXISTING orchestrator worker sessions
-    via an explicit ``target_session_id``, and accepts finished work itself
-    (PATCH ``status=done``) or sends it back via ``continue``. It NEVER writes
-    code and NEVER adds or deletes agents.
+    Each cycle the resident reads the board, creates a small number of tasks
+    (default ``reviewed`` mode — a reviewer agent vets the work), dispatches them
+    to EXISTING orchestrator worker sessions via an explicit
+    ``target_session_id``, and performs the final acceptance itself once review
+    has passed (PATCH ``status=done``) or sends the work back via ``continue``.
+    It NEVER writes code and NEVER creates or deletes orchestrator worker
+    sessions (the backend may auto-spawn an ephemeral reviewer to vet a task —
+    that is allowed; the resident just never provisions worker agents itself).
     """
     ws = workspace.id
     reports_endpoint = f"{base_url}/api/workspaces/sessions/{session_id}/reports"
@@ -102,15 +107,15 @@ def _build_resident_master_prompt(
         "needed in TODO status (step 3, but WITHOUT the start call) and say so in your heartbeat "
         '("no worker agents available — proposed N tasks for the user to start"). Then skip to '
         "step 6.\n\n"
-        "3. Create the tasks you deem necessary this cycle, in DIRECT mode. Create AT MOST 3 "
+        "3. Create the tasks you deem necessary this cycle. Create AT MOST 3 "
         "tasks per cycle to avoid a runaway backlog:\n"
         f"     curl -sS -X POST {base_url}/api/workspaces/{ws}/tasks "
         "-H 'Content-Type: application/json' "
-        '-d \'{"title":"...","prompt":"detailed instructions for the worker",'
-        '"task_mode":"direct"}\'\n'
-        "   DIRECT mode is REQUIRED: it routes finished work straight to you for acceptance and "
-        'never spawns a reviewer agent. Do NOT use "reviewed" or "autonomous" mode — they would '
-        "spawn a reviewer session, which is forbidden. Record each new task id from the "
+        '-d \'{"title":"...","prompt":"detailed instructions for the worker"}\'\n'
+        "   Leave task_mode at its default (reviewed): when the worker finishes, a "
+        "reviewer agent vets the work before it returns to you for final acceptance. "
+        "The backend reuses an idle reviewer or briefly spins one up on its own — that "
+        "is fine and is NOT you creating an agent. Record each new task id from the "
         "response.\n\n"
         "4. Dispatch each task you just created onto an EXISTING orchestrator worker from step 2 "
         "(prefer an idle one; queuing behind a busy orchestrator is fine). Always pass an "
@@ -122,16 +127,20 @@ def _build_resident_master_prompt(
         "resident, dispatcher, or reviewer sessions. If the start call returns an error (e.g. the "
         "agent went offline), leave the task in TODO and note it in the heartbeat — do NOT retry "
         "against a different role and do NOT create an agent.\n\n"
-        "5. Accept finished work. Re-read the board and, for each task YOU created (this cycle or "
-        "a previous one — track their ids; do NOT touch human-created tasks), when its "
-        '`status == "review"`, read the worker\'s latest report/output for that task and validate '
-        "it against what you asked for:\n"
+        "5. Accept reviewed work. Re-read the board and, for each task YOU created (this cycle "
+        "or a previous one — track their ids; do NOT touch human-created tasks), wait until "
+        'review has finished: that is when `status == "review" AND '
+        "`human_acceptance_requested_at` is set AND `human_accepted_at` is null. (While the "
+        "reviewer is still working the task is in review with no `human_acceptance_requested_at` "
+        "yet — leave it alone and check again next cycle.) When a task reaches that "
+        "awaiting-acceptance state, read the worker's latest report/output and the reviewer's "
+        "verdict for that task, then validate it against what you asked for:\n"
         "   - If satisfactory, accept it:\n"
         f"       curl -sS -X PATCH {base_url}/api/workspaces/tasks/<task_id> "
         "-H 'Content-Type: application/json' "
         '-d \'{"status":"done"}\'\n'
         "   - If NOT satisfactory, send it back to the SAME worker with concrete feedback (this "
-        "does NOT spawn a new agent):\n"
+        "does NOT spawn a new worker; it re-dispatches to the original agent):\n"
         f"       curl -sS -X POST {base_url}/api/workspaces/tasks/<task_id>/continue "
         "-H 'Content-Type: application/json' "
         '-d \'{"message":"what is wrong and what to fix"}\'\n'
@@ -144,16 +153,18 @@ def _build_resident_master_prompt(
         '-d \'{"title":"...","summary":"one-line takeaway",'
         '"applies_when":["when this applies"],"do":"...","avoid":"...","tags":["tag"]}\'\n\n'
         "## Hard constraints (never violate)\n"
-        "- NEVER create or delete agents/sessions. Never call any agent-spawn endpoint, never "
-        "DELETE a session, never POST a worker/spawn. You may ONLY use already-existing "
-        "orchestrator sessions. If none exist, you propose tasks and stop.\n"
-        '- NEVER create tasks in "reviewed" or "autonomous" mode (they spawn a reviewer). Always '
-        'use "task_mode":"direct".\n'
-        "- NEVER start a task when no orchestrator session exists, and ALWAYS pass an explicit "
-        "target_session_id when starting (so the backend never auto-creates a default agent).\n"
+        "- NEVER create or delete orchestrator worker sessions. Never call any agent-spawn "
+        "endpoint to add a worker, never DELETE a session. You may ONLY dispatch to "
+        "already-existing orchestrator sessions. If none exist, you propose tasks and stop. "
+        "(The backend may auto-spawn a short-lived REVIEWER to vet a reviewed task — that is the "
+        "backend's doing and is allowed; you never provision agents yourself.)\n"
+        "- ALWAYS pass an explicit target_session_id when starting a task, and NEVER start a task "
+        "when no orchestrator session exists (so the backend never auto-creates a default "
+        "worker agent).\n"
         "- NEVER write code, edit files, commit, merge, push, or run destructive git commands. "
         "You are an orchestrator; the worker agents do the implementation.\n"
-        "- Only accept/continue tasks YOU created; never touch human-driven tasks.\n\n"
+        "- Only accept/continue tasks YOU created; never touch human-driven tasks. Only accept a "
+        "task after review has finished (`human_acceptance_requested_at` is set).\n\n"
         "## Heartbeat report (REQUIRED at the END of EVERY cycle)\n"
         "Post one workspace-level heartbeat summarizing this cycle. task_id is omitted for a "
         "workspace-level heartbeat:\n"
