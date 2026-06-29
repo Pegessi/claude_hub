@@ -371,3 +371,30 @@ shared `.modal-actions button { white-space: nowrap; }` rule was added so action
 labels never wrap/overflow below the button. Finally all resident copy was
 rewritten to pure, concise English (no mixed Chinese), with each hint kept to
 1-2 rendered lines.
+
+### Update: schedule-legibility copy
+
+A user asked why the resident was "working" when **Master mode was off and no
+task was running**. This is by design: `_resident_agent_due` fires on the
+**overdue backstop** (`elapsed >= interval_minutes*60 + jitter`) regardless of
+Master mode or active tasks, so an enabled-but-idle resident still wakes every
+interval to do read-only upkeep (lesson maintenance + TODO proposals, no
+reports). The confusion was a copy problem, not a behavior bug — the old
+**Enable** hint ("runs on a schedule … propose follow-up tasks") read as if it
+only acted when there was something to dispatch.
+
+Fix (copy only, no behavior change):
+
+- **Enable hint** now states it "wakes every interval on its own — even when
+  idle, with no task running — to maintain lessons and propose follow-up tasks.
+  It never picks up normal workspace tasks." This makes the backstop tick
+  explicit and reiterates the resident never takes over normal task dispatch.
+- **Master mode hint** now leads with "Changes what each cycle does, not
+  whether it runs." — disambiguating it from the Enable/interval scheduling
+  controls. On = self-iterate on its own worktree + heartbeat; Off = read-only
+  maintenance, no reports; never merges to main.
+
+The decision (vs. changing the trigger to stay idle when there's no activity)
+was to keep the backstop intact and fix legibility only — the periodic idle
+pass is intentional so lesson hygiene and TODO surfacing keep moving on
+long-lived workspaces.
