@@ -154,11 +154,16 @@ def test_build_card_new_display_kinds(monkeypatch) -> None:
                     {"state": "working", "message": "old", "created_at": "2026-01-01T00:00:00"},
                     {
                         "state": "completed",
-                        "message": "new",
+                        "message": "implementation done",
                         "created_at": "2026-01-02T00:00:00",
                         "acceptance_check": [
                             {"criterion": "builds", "status": "passed", "evidence": "pytest"}
                         ],
+                    },
+                    {
+                        "state": "review_passed",
+                        "message": "review ok",
+                        "created_at": "2026-01-03T00:00:00",
                     },
                 ],
             )
@@ -247,7 +252,7 @@ def test_build_card_new_display_kinds(monkeypatch) -> None:
         (["--kind", "workspaces"], "Alpha"),
         (["--kind", "overview", "--workspace-id", "ws1"], "Active tasks"),
         (["--kind", "agents", "--workspace-id", "ws1"], "Orchestrator"),
-        (["--kind", "task_detail", "--workspace-id", "ws1", "--task-id", "t1"], "new"),
+        (["--kind", "task_detail", "--workspace-id", "ws1", "--task-id", "t1"], "review ok"),
         (["--kind", "reports", "--workspace-id", "ws1", "--task-id", "t1"], "completed"),
         (["--kind", "terminal", "--tab-id", "tab9"], "line2"),
         (["--kind", "lessons", "--workspace-id", "ws1"], "Use locks"),
@@ -272,6 +277,8 @@ def test_build_card_new_display_kinds(monkeypatch) -> None:
             assert payload["token"] in result.output
             assert "pending_review" in result.output
             assert "acceptance_check" in result.output
+            assert "pytest" in result.output
+            assert "source completed 2026-01-02T00:00:00" in result.output
         else:
             assert payload["token"] is None
         assert expected in result.output

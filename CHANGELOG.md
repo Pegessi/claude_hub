@@ -5,6 +5,16 @@
 
 ## Unreleased
 
+### fix: CLI task detail keeps reviewed acceptance evidence visible
+
+- **What**: `task status` and Feishu `task_detail` cards now surface the most
+  recent non-empty `acceptance_check` from task report history even when a newer
+  reviewer report is the latest progress report.
+- **Files**: `backend/claude_hub/cli/commands/tasks.py`,
+  `backend/claude_hub/cli/commands/feishu.py`,
+  `backend/claude_hub/cli/feishu_cards.py`, `backend/tests/test_cli.py`,
+  `backend/tests/test_feishu_commands.py`.
+
 ### feat: typed CLI control-plane status displays
 
 - **What**: third-party agents can now inspect Claude Hub backend state without
