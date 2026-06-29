@@ -75,7 +75,15 @@ def test_build_card_needs_input_field_name() -> None:
 def test_build_card_status_fetches_board(monkeypatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/workspaces/ws1/board"
-        return httpx.Response(200, json={"tasks": [{"id": "t1", "title": "A", "status": "done"}]})
+        return httpx.Response(
+            200,
+            json={
+                "tasks": [{"id": "t1", "title": "A", "status": "done"}],
+                "sessions": [{"id": "s1", "runtime_status": "idle"}],
+                "markdown_documents": [{"id": "doc1", "path": "/state/snapshot.md"}],
+                "snapshot_path": "/state/snapshot.md",
+            },
+        )
 
     patch_get_client(monkeypatch, handler)
     runner = CliRunner()
@@ -86,6 +94,8 @@ def test_build_card_status_fetches_board(monkeypatch) -> None:
     payload = json.loads(result.output)
     assert payload["kind"] == "status"
     assert payload["token"] is None  # display kinds carry no token
+    assert "tasks: done=1" in result.output
+    assert "snapshot" in result.output
 
 
 def test_build_card_status_requires_workspace_id() -> None:
@@ -113,7 +123,18 @@ def test_build_card_new_display_kinds(monkeypatch) -> None:
                 json={
                     "workspace": {"name": "Alpha"},
                     "tasks": [
-                        {"id": "t1", "title": "Fix it", "status": "working", "session_id": "s1"}
+                        {
+                            "id": "t1",
+                            "title": "Fix it",
+                            "status": "working",
+                            "session_id": "s1",
+                            "review_cycle": 1,
+                            "reviewed_cycle": 0,
+                            "goal_packet": {
+                                "objective": "Fix it",
+                                "status": "pending_review",
+                            },
+                        }
                     ],
                     "sessions": [
                         {
@@ -131,7 +152,14 @@ def test_build_card_new_display_kinds(monkeypatch) -> None:
                 200,
                 json=[
                     {"state": "working", "message": "old", "created_at": "2026-01-01T00:00:00"},
-                    {"state": "completed", "message": "new", "created_at": "2026-01-02T00:00:00"},
+                    {
+                        "state": "completed",
+                        "message": "new",
+                        "created_at": "2026-01-02T00:00:00",
+                        "acceptance_check": [
+                            {"criterion": "builds", "status": "passed", "evidence": "pytest"}
+                        ],
+                    },
                 ],
             )
         if path == "/api/terminal/history/tab9":
@@ -242,6 +270,8 @@ def test_build_card_new_display_kinds(monkeypatch) -> None:
         if "--kind" in args and args[args.index("--kind") + 1] == "task_detail":
             assert payload["token"]
             assert payload["token"] in result.output
+            assert "pending_review" in result.output
+            assert "acceptance_check" in result.output
         else:
             assert payload["token"] is None
         assert expected in result.output
