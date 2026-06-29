@@ -1592,8 +1592,9 @@
             Enable resident self-driven agent
           </label>
           <p class="modal-hint">
-            A background agent runs on a schedule to maintain lessons and
-            propose follow-up tasks. It never picks up normal workspace tasks.
+            Wakes every interval on its own — even when idle, with no task
+            running — to maintain lessons and propose follow-up tasks. It
+            never picks up normal workspace tasks.
           </p>
         </div>
 
@@ -1630,8 +1631,10 @@
               Master mode
             </label>
             <p class="modal-hint">
-              Let the resident self-iterate on its own git worktree each cycle
-              and post a heartbeat. It never merges to main.
+              Changes what each cycle does, not whether it runs. On: the
+              resident self-iterates on its own git worktree and posts a
+              heartbeat. Off: read-only maintenance, no reports. Never merges
+              to main.
             </p>
           </div>
           <div class="modal-field">

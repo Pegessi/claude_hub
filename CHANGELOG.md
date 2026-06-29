@@ -130,6 +130,14 @@
   own directory (`resident_agent_cwd` is left empty, so the backend's
   `payload.cwd or workspace.path` fallback applies). Rewrote the resident copy
   to pure, concise English (no mixed Chinese), keeping each hint to 1-2 lines.
+- **Resident schedule legibility**: clarified the modal copy so it no longer
+  reads as if the resident only acts when there is work to dispatch. The
+  **Enable** hint now states it "wakes every interval on its own — even when
+  idle, with no task running" (matching the trigger's overdue backstop in
+  `_resident_agent_due`), and the **Master mode** hint now leads with "Changes
+  what each cycle does, not whether it runs" so the toggle is understood as
+  per-cycle behavior (self-iterate + heartbeat vs. read-only upkeep) rather
+  than an on/off switch for scheduling. Copy-only change; no behavior change.
 
 ### fix: allow Done after a reported Completed even without a review verdict
 
