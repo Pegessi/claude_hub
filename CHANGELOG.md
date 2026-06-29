@@ -5,6 +5,23 @@
 
 ## Unreleased
 
+### feat: typed CLI control-plane status displays
+
+- **What**: third-party agents can now inspect Claude Hub backend state without
+  scraping raw board JSON.
+- **Changes**:
+  - Adds typed display commands for workspace summaries, markdown/snapshot
+    discovery, agent runtime rosters, single-session runtime status, and task
+    Goal Packet / review / acceptance detail.
+  - Enriches Feishu status, overview, and task-detail cards with task/session
+    counts, runtime state, snapshot/Markdown discovery, Goal Packet status, and
+    acceptance-check summary.
+- **Files**: `backend/claude_hub/cli/commands/workspaces.py`,
+  `backend/claude_hub/cli/commands/sessions.py`,
+  `backend/claude_hub/cli/commands/tasks.py`,
+  `backend/claude_hub/cli/commands/feishu.py`,
+  `backend/claude_hub/cli/feishu_cards.py`.
+
 ### feat: reviewer prompt hardened against sycophancy / low defect-detection
 
 - **What**: the independent reviewer agent caught bugs/risks too rarely and

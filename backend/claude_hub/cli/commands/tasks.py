@@ -17,6 +17,36 @@ from claude_hub.cli.output import emit, print_rows
 from claude_hub.models.schemas import WorkspaceTaskStatus
 
 TASK_COLUMNS = ["id", "title", "status", "agent_type", "task_mode"]
+TASK_STATUS_FIELDS = [
+    "workspace_id",
+    "id",
+    "title",
+    "status",
+    "agent_type",
+    "task_mode",
+    "execution_complexity",
+    "session_id",
+    "review_session_id",
+    "review_cycle",
+    "reviewed_cycle",
+    "review_attempts",
+    "review_requested_at",
+    "review_completed_at",
+    "review_skipped_at",
+    "human_acceptance_requested_at",
+    "human_accepted_at",
+    "updated_at",
+]
+GOAL_PACKET_FIELDS = ["status", "objective", "updated_at", "source"]
+ACCEPTANCE_COLUMNS = ["criterion", "status", "evidence"]
+REVIEW_COLUMNS = [
+    "created_at",
+    "state",
+    "review_cycle",
+    "session_id",
+    "review_decision",
+    "review_reason",
+]
 
 
 @click.group()
@@ -77,6 +107,84 @@ def _find_task_board(client: Any, task_id: str) -> tuple:
     return None, None
 
 
+def _report_message(report: Optional[dict]) -> str:
+    if not report:
+        return ""
+    return str(report.get("message_zh") or report.get("message_en") or report.get("message") or "")
+
+
+def _latest_report(reports: List[dict]) -> Optional[dict]:
+    if not reports:
+        return None
+    return max(reports, key=lambda report: str(report.get("created_at", "")))
+
+
+def _task_status_payload(
+    workspace_id: Optional[str], task: dict, reports: List[dict]
+) -> Dict[str, Any]:
+    latest = _latest_report(reports)
+    review_reports = [report for report in reports if report.get("state") in REVIEW_STATES]
+    latest_acceptance: List[dict] = []
+    acceptance = latest.get("acceptance_check") if latest else None
+    if isinstance(acceptance, list):
+        latest_acceptance = [item for item in acceptance if isinstance(item, dict)]
+    return {
+        "workspace_id": workspace_id,
+        "task": task,
+        "goal_packet": task.get("goal_packet"),
+        "latest_report": latest,
+        "latest_report_message": _report_message(latest),
+        "latest_acceptance_check": latest_acceptance,
+        "review_reports": review_reports,
+        "human_acceptance_requested_at": task.get("human_acceptance_requested_at"),
+        "human_accepted_at": task.get("human_accepted_at"),
+    }
+
+
+def _print_task_status(payload: Dict[str, Any]) -> None:
+    task_obj = payload.get("task")
+    task: Dict[str, Any] = task_obj if isinstance(task_obj, dict) else {}
+    detail: Dict[str, Any] = {"workspace_id": payload.get("workspace_id")}
+    detail.update({field: task.get(field) for field in TASK_STATUS_FIELDS if field in task})
+    click.echo(f"Task: {task.get('title', '(untitled)')} ({task.get('id', '?')})")
+    emit(detail, False)
+
+    goal_packet = payload.get("goal_packet")
+    click.echo("\nGoal Packet:")
+    if isinstance(goal_packet, dict):
+        emit({field: goal_packet.get(field) for field in GOAL_PACKET_FIELDS}, False)
+        criteria = goal_packet.get("acceptance_criteria") or []
+        if criteria:
+            click.echo("acceptance_criteria:")
+            for criterion in criteria:
+                click.echo(f"- {criterion}")
+    else:
+        click.echo("(none)")
+
+    latest = payload.get("latest_report")
+    click.echo("\nLatest report:")
+    if isinstance(latest, dict):
+        emit(
+            {
+                "created_at": latest.get("created_at"),
+                "state": latest.get("state"),
+                "session_id": latest.get("session_id"),
+                "review_decision": latest.get("review_decision"),
+                "review_reason": latest.get("review_reason"),
+                "message": _report_message(latest),
+            },
+            False,
+        )
+    else:
+        click.echo("(none)")
+
+    click.echo("\nAcceptance check:")
+    print_rows(payload.get("latest_acceptance_check", []), ACCEPTANCE_COLUMNS)
+
+    click.echo("\nReview reports:")
+    print_rows(payload.get("review_reports", []), REVIEW_COLUMNS)
+
+
 @task.command("get")
 @click.argument("task_id")
 @click.option(
@@ -129,6 +237,43 @@ def task_get(
         print_rows(report_history, ["created_at", "state", "review_decision", "message"])
     else:
         click.echo("(none)")
+
+
+@task.command("status")
+@click.argument("task_id")
+@click.option(
+    "--workspace-id",
+    default=None,
+    help="Workspace to look in (skips the cross-workspace scan).",
+)
+@click.pass_context
+def task_status(
+    ctx: click.Context,
+    task_id: str,
+    workspace_id: Optional[str],
+) -> None:
+    """Show Goal Packet, review, and acceptance state for a task."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            if workspace_id is not None:
+                board = client.get_board(workspace_id)
+                tasks: List[dict] = board.get("tasks", []) if isinstance(board, dict) else []
+                match = next((t for t in tasks if t.get("id") == task_id), None)
+                ws_id = workspace_id
+            else:
+                ws_id, match = _find_task_board(client, task_id)
+            if match is None:
+                where = f" in workspace {workspace_id}" if workspace_id else ""
+                raise click.ClickException(f"Task {task_id} not found{where}.")
+            fetched = client.get_task_reports(ws_id, task_id) if ws_id else []
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    reports: List[dict] = fetched if isinstance(fetched, list) else []
+    payload = _task_status_payload(ws_id, match, reports)
+    if cli_main.as_json(ctx):
+        emit(payload, True)
+    else:
+        _print_task_status(payload)
 
 
 def _resolve_ws_id(client: Any, task_id: str, workspace_id: Optional[str]) -> str:

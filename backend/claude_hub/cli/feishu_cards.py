@@ -380,6 +380,26 @@ def _row(left: str, right: str) -> Dict[str, Any]:
     return {"tag": "column_set", "columns": [_column(left), _column(right)]}
 
 
+def _count_by(items: list[Dict[str, Any]], key: str) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for item in items:
+        label = str(_get(item, key, "unknown") or "unknown")
+        counts[label] = counts.get(label, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _counts_text(counts: Dict[str, int]) -> str:
+    return " · ".join(f"{key}={value}" for key, value in counts.items()) or "none"
+
+
+def _reports_by_task(board: Any) -> Dict[str, Dict[str, Any]]:
+    reports: Dict[str, Dict[str, Any]] = {}
+    for report in (_get(board, "reports", []) or []) if isinstance(board, dict) else []:
+        if isinstance(report, dict) and _get(report, "task_id", ""):
+            reports[str(_get(report, "task_id"))] = report
+    return reports
+
+
 def build_status_card(workspace_id: str, board: Any, *, limit: int = 8) -> Dict[str, Any]:
     """Build a display-only status board card for a workspace.
 
@@ -387,20 +407,44 @@ def build_status_card(workspace_id: str, board: Any, *, limit: int = 8) -> Dict[
     """
     name = _workspace_name(workspace_id, board)
     tasks = list(_get(board, "tasks", []) or []) if isinstance(board, dict) else []
+    sessions = [s for s in (_get(board, "sessions", []) or []) if isinstance(s, dict)]
+    documents = [d for d in (_get(board, "markdown_documents", []) or []) if isinstance(d, dict)]
+    reports = _reports_by_task(board)
     ordered = sorted(
         tasks,
         key=lambda t: _STATUS_SORT.get(str(_get(t, "status", "")), _STATUS_SORT_DEFAULT),
     )
 
     elements: List[Dict[str, Any]] = [
-        _markdown(f"**{name}** — {len(tasks)} task(s)"),
+        _markdown(
+            f"**{name}** — {len(tasks)} task(s), {len(sessions)} agent(s)\n"
+            f"tasks: {_counts_text(_count_by([t for t in tasks if isinstance(t, dict)], 'status'))}\n"
+            f"agents: {_counts_text(_count_by(sessions, 'runtime_status'))}"
+        ),
     ]
     if ordered:
-        elements.append(_row("**Title**", "**Status**"))
+        elements.append(_row("**Task**", "**Status / latest**"))
         for t in ordered[:limit]:
-            elements.append(_row(str(_get(t, "title", "")), str(_get(t, "status", "?"))))
+            report = reports.get(str(_get(t, "id", "")), {})
+            latest = _get(report, "state", "")
+            msg = _get(report, "message_zh", "") or _get(report, "message", "")
+            right = f"**{_get(t, 'status', '?')}**"
+            if latest:
+                right += f"\n{latest}: {msg}".rstrip()
+            elements.append(_row(str(_get(t, "title", "")), right))
         if len(ordered) > limit:
             elements.append(_note(f"… and {len(ordered) - limit} more"))
+    if documents or _get(board, "snapshot_path", ""):
+        elements.append(
+            _note(
+                f"{len(documents)} markdown document(s)"
+                + (
+                    f" · snapshot: {_get(board, 'snapshot_path', '')}"
+                    if _get(board, "snapshot_path", "")
+                    else ""
+                )
+            )
+        )
     return _wrap(_header(f"Status · {name}", "status"), elements)
 
 
@@ -561,7 +605,13 @@ def build_action_catalog_card() -> Dict[str, Any]:
 
 
 def build_overview_card(
-    workspace_id: str, tasks: Any, sessions: Any, *, name: Optional[str] = None
+    workspace_id: str,
+    tasks: Any,
+    sessions: Any,
+    *,
+    name: Optional[str] = None,
+    markdown_documents: Any = None,
+    snapshot_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build a workspace overview: active/recent tasks plus an agent summary."""
     label = name or workspace_id
@@ -589,7 +639,26 @@ def build_overview_card(
     if not active and not recent:
         elements.append(_markdown("_No tasks yet._"))
 
-    elements.append(_note(f"{len(session_items)} agent(s) · `/ag` to list · `/t` for tasks"))
+    if session_items:
+        rows = "\n".join(
+            f"- `{_get(s, 'id', '?')}` {_get(s, 'role', '')} · {_get(s, 'agent_type', '?')} · "
+            f"{_get(s, 'runtime_status', _get(s, 'status', '?'))}"
+            + (
+                f" · task `{_get(s, 'current_task_id', '')}`"
+                if _get(s, "current_task_id", "")
+                else ""
+            )
+            for s in session_items[:5]
+        )
+        elements.append(_markdown(f"**Agents**\n{rows}"))
+
+    documents = [d for d in (markdown_documents or []) if isinstance(d, dict)]
+    doc_note = f"{len(documents)} markdown doc(s)"
+    if snapshot_path:
+        doc_note += f" · snapshot: {snapshot_path}"
+    elements.append(
+        _note(f"{len(session_items)} agent(s) · {doc_note} · `/ag` to list · `/t` for tasks")
+    )
     return _wrap(_header(f"Workspace · {label}", "status"), elements)
 
 
@@ -686,7 +755,12 @@ def build_task_detail_card(
         ("Status", _get(task, "status", "?")),
         ("Mode", _get(task, "task_mode", _get(task, "mode", ""))),
         ("Agent", _get(task, "agent_type", "")),
+        ("Review", f"{_get(task, 'reviewed_cycle', 0)}/{_get(task, 'review_cycle', 0)}"),
+        ("Acceptance", "requested" if _get(task, "human_acceptance_requested_at", "") else ""),
     ]
+    goal_packet = _get(task, "goal_packet", None)
+    if isinstance(goal_packet, dict):
+        fields.append(("Goal Packet", _get(goal_packet, "status", "")))
     body = "\n".join(f"**{label}**: {value}" for label, value in fields if value not in ("", None))
     elements: List[Dict[str, Any]] = [
         _markdown(f"**{_get(task, 'title', '(untitled)')}**\n`{task_id}`"),
@@ -697,6 +771,12 @@ def build_task_detail_card(
     if latest_report:
         elements.append({"tag": "hr"})
         elements.append(_markdown(f"**Latest progress**\n{_report_line(latest_report)}"))
+        acceptance = _get(latest_report, "acceptance_check", [])
+        if isinstance(acceptance, list) and acceptance:
+            summary = ", ".join(
+                f"{_get(item, 'status', '?')}" for item in acceptance if isinstance(item, dict)
+            )
+            elements.append(_note(f"acceptance_check: {len(acceptance)} item(s) · {summary}"))
 
     buttons = [
         {

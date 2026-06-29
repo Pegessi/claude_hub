@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from collections import Counter
+from typing import Any, Dict, List, Optional
 
 import click
 
@@ -14,6 +15,130 @@ from claude_hub.cli.output import emit, print_rows
 WORKSPACE_COLUMNS = ["id", "name", "path", "default_branch"]
 TASK_COLUMNS = ["id", "title", "status", "agent_type", "task_mode"]
 SESSION_COLUMNS = ["id", "role", "agent_type", "status", "current_task_id"]
+SESSION_STATUS_COLUMNS = [
+    "id",
+    "role",
+    "agent_type",
+    "status",
+    "runtime_status",
+    "current_task_id",
+    "tab_id",
+    "last_activity_at",
+]
+DOCUMENT_COLUMNS = ["source", "label", "path", "task_id", "updated_at"]
+
+
+def _items(board: Any, key: str) -> List[dict]:
+    """Return dict items from a board list, ignoring malformed rows."""
+    if not isinstance(board, dict):
+        return []
+    value = board.get(key, [])
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _counts(items: List[dict], key: str) -> Dict[str, int]:
+    """Build stable string counts for a board field."""
+    return dict(sorted(Counter(str(item.get(key) or "unknown") for item in items).items()))
+
+
+def _latest_reports(board: Any) -> Dict[str, dict]:
+    """Index board latest reports by task id."""
+    reports: Dict[str, dict] = {}
+    for report in _items(board, "reports"):
+        task_id = report.get("task_id")
+        if task_id:
+            reports[str(task_id)] = report
+    return reports
+
+
+def _report_message(report: Optional[dict]) -> str:
+    """Return the most useful one-line report message."""
+    if not report:
+        return ""
+    return str(report.get("message_zh") or report.get("message_en") or report.get("message") or "")
+
+
+def _workspace_label(workspace: Any, fallback_id: str) -> str:
+    if isinstance(workspace, dict):
+        return str(workspace.get("name") or workspace.get("id") or fallback_id)
+    return fallback_id
+
+
+def _workspace_summary(workspace_id: str, board: Any) -> Dict[str, Any]:
+    """Derive a typed, scrape-free summary from the workspace board."""
+    workspace = board.get("workspace", {}) if isinstance(board, dict) else {}
+    tasks = _items(board, "tasks")
+    sessions = _items(board, "sessions")
+    documents = _items(board, "markdown_documents")
+    reports = _latest_reports(board)
+    active_statuses = {"todo", "queued", "working", "review"}
+    active_tasks = [task for task in tasks if str(task.get("status")) in active_statuses]
+    active_sessions = [
+        session
+        for session in sessions
+        if str(session.get("runtime_status") or session.get("status") or "").lower()
+        not in {"", "idle", "offline"}
+    ]
+    task_rows = []
+    for task in active_tasks[:10]:
+        latest = reports.get(str(task.get("id")))
+        task_rows.append(
+            {
+                "id": task.get("id"),
+                "title": task.get("title"),
+                "status": task.get("status"),
+                "session_id": task.get("session_id"),
+                "latest_report_state": latest.get("state") if latest else "",
+                "latest_report_message": _report_message(latest),
+            }
+        )
+    session_rows = [
+        {
+            "id": session.get("id"),
+            "role": session.get("role"),
+            "agent_type": session.get("agent_type"),
+            "status": session.get("status"),
+            "runtime_status": session.get("runtime_status"),
+            "current_task_id": session.get("current_task_id"),
+            "tab_id": session.get("tab_id"),
+            "last_activity_at": session.get("last_activity_at"),
+        }
+        for session in active_sessions[:10]
+    ]
+    return {
+        "workspace": workspace,
+        "task_counts": _counts(tasks, "status"),
+        "session_counts": _counts(sessions, "runtime_status"),
+        "active_tasks": task_rows,
+        "active_sessions": session_rows,
+        "latest_reports": list(reports.values()),
+        "markdown_document_count": len(documents),
+        "snapshot_path": board.get("snapshot_path") if isinstance(board, dict) else None,
+    }
+
+
+def _print_workspace_summary(workspace_id: str, summary: Dict[str, Any]) -> None:
+    workspace = summary.get("workspace", {})
+    click.echo(f"Workspace: {_workspace_label(workspace, workspace_id)} ({workspace_id})")
+    if isinstance(workspace, dict):
+        if workspace.get("path"):
+            click.echo(f"path: {workspace.get('path')}")
+        if workspace.get("default_branch"):
+            click.echo(f"default_branch: {workspace.get('default_branch')}")
+    click.echo(f"task_counts: {summary.get('task_counts', {})}")
+    click.echo(f"session_counts: {summary.get('session_counts', {})}")
+    click.echo(f"markdown_documents: {summary.get('markdown_document_count', 0)}")
+    if summary.get("snapshot_path"):
+        click.echo(f"snapshot: {summary['snapshot_path']}")
+    click.echo("\nActive tasks:")
+    print_rows(
+        summary.get("active_tasks", []),
+        ["id", "title", "status", "session_id", "latest_report_state", "latest_report_message"],
+    )
+    click.echo("\nActive sessions:")
+    print_rows(summary.get("active_sessions", []), SESSION_STATUS_COLUMNS)
 
 
 @click.group()
@@ -159,6 +284,48 @@ def workspace_board(ctx: click.Context, workspace_id: str) -> None:
 workspace.add_command(workspace_board, name="status")
 
 
+@workspace.command("summary")
+@click.argument("workspace_id")
+@click.pass_context
+def workspace_summary(ctx: click.Context, workspace_id: str) -> None:
+    """Show a concise typed summary of backend workspace state."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            board = client.get_board(workspace_id)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    summary = _workspace_summary(workspace_id, board)
+    if cli_main.as_json(ctx):
+        emit(summary, True)
+    else:
+        _print_workspace_summary(workspace_id, summary)
+
+
+@workspace.command("docs")
+@click.argument("workspace_id")
+@click.pass_context
+def workspace_docs(ctx: click.Context, workspace_id: str) -> None:
+    """List board-discoverable Markdown documents and the snapshot path."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            board = client.get_board(workspace_id)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    documents = _items(board, "markdown_documents")
+    payload = {
+        "workspace_id": workspace_id,
+        "snapshot_path": board.get("snapshot_path") if isinstance(board, dict) else None,
+        "markdown_documents": documents,
+    }
+    if cli_main.as_json(ctx):
+        emit(payload, True)
+        return
+    click.echo(f"Workspace: {workspace_id}")
+    click.echo(f"snapshot: {payload['snapshot_path'] or '(none)'}")
+    click.echo("\nMarkdown documents:")
+    print_rows(documents, DOCUMENT_COLUMNS)
+
+
 @workspace.command("dispatch")
 @click.argument("workspace_id")
 @click.pass_context
@@ -246,6 +413,39 @@ def agent_list(ctx: click.Context, workspace_id: str) -> None:
         emit(sessions, True)
     else:
         print_rows(sessions, SESSION_COLUMNS)
+
+
+@agent.command("status")
+@click.argument("workspace_id")
+@click.option("--role", default=None, help="Client-side filter on session role.")
+@click.pass_context
+def agent_status(ctx: click.Context, workspace_id: str, role: Optional[str]) -> None:
+    """Show resident agent/session runtime state for a workspace."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            board = client.get_board(workspace_id)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    sessions = _items(board, "sessions")
+    if role is not None:
+        sessions = [s for s in sessions if s.get("role") == role]
+    rows = [
+        {
+            "id": session.get("id"),
+            "role": session.get("role"),
+            "agent_type": session.get("agent_type"),
+            "status": session.get("status"),
+            "runtime_status": session.get("runtime_status"),
+            "current_task_id": session.get("current_task_id"),
+            "tab_id": session.get("tab_id"),
+            "last_activity_at": session.get("last_activity_at"),
+        }
+        for session in sessions
+    ]
+    if cli_main.as_json(ctx):
+        emit(rows, True)
+    else:
+        print_rows(rows, SESSION_STATUS_COLUMNS)
 
 
 @agent.command("create")

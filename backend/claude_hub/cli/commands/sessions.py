@@ -39,6 +39,22 @@ SESSION_COLUMNS = [
     "current_task_id",
     "last_activity_at",
 ]
+SESSION_STATUS_FIELDS = [
+    "workspace_id",
+    "id",
+    "role",
+    "agent_type",
+    "status",
+    "runtime_status",
+    "current_task_id",
+    "tab_id",
+    "target",
+    "remote_profile_id",
+    "remote_cwd",
+    "branch",
+    "last_activity_at",
+    "updated_at",
+]
 
 
 @session.command("list")
@@ -59,6 +75,60 @@ def session_list(ctx: click.Context, workspace_id: str, role: Optional[str]) -> 
         emit(sessions, True)
     else:
         print_rows(sessions, SESSION_COLUMNS)
+
+
+def _find_session_board(client: Any, session_id: str) -> tuple[Optional[str], Optional[dict]]:
+    """Return ``(workspace_id, session)`` for a managed session by scanning boards."""
+    workspaces = client.list_workspaces()
+    items = workspaces if isinstance(workspaces, list) else []
+    for ws in items:
+        ws_id = ws.get("id") if isinstance(ws, dict) else None
+        if not ws_id:
+            continue
+        board = client.get_board(ws_id)
+        sessions: List[dict] = board.get("sessions", []) if isinstance(board, dict) else []
+        match = next((s for s in sessions if s.get("id") == session_id), None)
+        if match is not None:
+            return str(ws_id), match
+    return None, None
+
+
+@session.command("status")
+@click.argument("session_id")
+@click.option(
+    "--workspace-id",
+    default=None,
+    help="Workspace to look in (skips the cross-workspace scan).",
+)
+@click.pass_context
+def session_status(
+    ctx: click.Context,
+    session_id: str,
+    workspace_id: Optional[str],
+) -> None:
+    """Show backend runtime state for one managed session."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            ws_id: Optional[str]
+            if workspace_id is not None:
+                board = client.get_board(workspace_id)
+                sessions: List[dict] = board.get("sessions", []) if isinstance(board, dict) else []
+                match = next((s for s in sessions if s.get("id") == session_id), None)
+                ws_id = workspace_id
+            else:
+                ws_id, match = _find_session_board(client, session_id)
+            if match is None:
+                where = f" in workspace {workspace_id}" if workspace_id else ""
+                raise click.ClickException(f"Session {session_id} not found{where}.")
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    payload: Dict[str, Any] = {"workspace_id": ws_id}
+    payload.update(match)
+    if cli_main.as_json(ctx):
+        emit(payload, True)
+        return
+    summary = {field: payload.get(field) for field in SESSION_STATUS_FIELDS if field in payload}
+    emit(summary, False)
 
 
 @session.command("logs")

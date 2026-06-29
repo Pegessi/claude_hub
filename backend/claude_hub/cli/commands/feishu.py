@@ -155,9 +155,18 @@ def _build_card(
             raise click.ClickException(str(e)) from e
         tasks = board.get("tasks", []) if isinstance(board, dict) else []
         sessions = board.get("sessions", []) if isinstance(board, dict) else []
+        markdown_documents = board.get("markdown_documents", []) if isinstance(board, dict) else []
+        snapshot_path = board.get("snapshot_path") if isinstance(board, dict) else None
         ws = board.get("workspace") if isinstance(board, dict) else None
         name = ws.get("name") if isinstance(ws, dict) else None
-        return build_overview_card(workspace_id, tasks, sessions, name=name)
+        return build_overview_card(
+            workspace_id,
+            tasks,
+            sessions,
+            name=name,
+            markdown_documents=markdown_documents,
+            snapshot_path=snapshot_path,
+        )
 
     if kind == "agents":
         if not workspace_id:
