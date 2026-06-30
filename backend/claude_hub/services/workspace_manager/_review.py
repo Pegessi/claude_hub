@@ -53,9 +53,7 @@ class _ReviewMixin:
                 WorkspaceTaskStatus.REVIEW,
             }:
                 continue
-            if state_policy.review_in_flight(
-                task.review_requested_at, task.review_completed_at
-            ):
+            if state_policy.review_in_flight(task.review_requested_at, task.review_completed_at):
                 return True
 
         return False

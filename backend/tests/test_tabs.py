@@ -141,6 +141,7 @@ async def test_switch_env_route_returns_200_on_success(
         return TerminalTab(
             id=tab_id,
             name="Switched",
+            shell=None,
             cwd=None,
             solo_mode=bool(solo_mode),
             agent_type=AgentType.CLAUDE,
