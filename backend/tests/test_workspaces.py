@@ -1,5 +1,7 @@
 import asyncio
 import json
+import shutil
+import subprocess
 from datetime import datetime, timedelta
 from importlib import import_module
 from pathlib import Path
@@ -1757,6 +1759,106 @@ async def test_preview_report_markdown_artifact_is_scoped_to_report(
     )
     assert unreadable_response.status_code == 400
     assert unreadable_response.json()["detail"] == "Artifact could not be read"
+
+
+async def test_preview_markdown_artifact_resolves_from_git_worktree(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A markdown artifact that exists only in a git worktree must still preview.
+
+    Agents work inside isolated git worktrees, so a report's markdown artifact
+    frequently lives only in a sibling worktree rather than under the main
+    workspace path. The preview endpoint must resolve those files via the
+    workspace's git worktree roots instead of returning 404.
+    """
+    if shutil.which("git") is None:
+        pytest.skip("git is required to exercise worktree resolution")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str, cwd: Path = repo) -> None:
+        subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    git("init", "-b", "main")
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "Test")
+    (repo / "README.md").write_text("# Repo\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "init")
+
+    # The artifact lives ONLY in the worktree, not under the workspace path.
+    worktree = tmp_path / "repo-worktree"
+    git("worktree", "add", "-b", "feat/work", str(worktree))
+    (worktree / "notes").mkdir()
+    (worktree / "notes" / "worktree-only.md").write_text(
+        "# Worktree Output\n\nProduced in the worktree.",
+        encoding="utf-8",
+    )
+    # A markdown file outside every allowed root must stay unreachable.
+    (tmp_path / "outside.md").write_text("# Secret", encoding="utf-8")
+
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path / "state")
+    stub_workspace_terminal(monkeypatch, repo, tab_id="worktree-tab", port=18191)
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Worktree Repo",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "worktree",
+        },
+    ).json()
+    session = await workspace_manager.ensure_workspace_agent(
+        workspace["id"],
+        workspace_module.EnsureWorkspaceAgentRequest(agent_type="claude", reuse_existing=False),
+    )
+    # The session records the main workspace path, NOT the worktree — proving the
+    # fix relies on git worktree enumeration rather than session workspace_path.
+    assert workspace_manager.sessions[session.id].workspace_path == str(repo)
+
+    report = client.post(
+        f"/api/workspaces/sessions/{session.id}/reports",
+        json={
+            "state": "completed",
+            "message": "Worktree report ready",
+            "changed_files": ["notes/worktree-only.md"],
+            "artifact_refs": [str(tmp_path / "outside.md")],
+        },
+    ).json()
+
+    # The worktree-only artifact resolves for preview (previously 404).
+    response = client.get(
+        f"/api/workspaces/{workspace['id']}/artifacts/preview",
+        params={"path": "notes/worktree-only.md", "report_id": report["id"]},
+    )
+    assert response.status_code == 200
+    preview = response.json()
+    assert preview["filename"] == "worktree-only.md"
+    assert preview["content"] == "# Worktree Output\n\nProduced in the worktree."
+
+    # It also surfaces in the workspace board's markdown documents.
+    board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
+    assert any(
+        document["source"] == "changed_file" and document["path"] == "notes/worktree-only.md"
+        for document in board["markdown_documents"]
+    )
+
+    # Path-escape safety: a markdown path outside ALL roots still 404s.
+    outside_response = client.get(
+        f"/api/workspaces/{workspace['id']}/artifacts/preview",
+        params={"path": str(tmp_path / "outside.md"), "report_id": report["id"]},
+    )
+    assert outside_response.status_code == 404
 
 
 def test_spawn_worker_is_disabled(tmp_path: Path) -> None:
@@ -4951,6 +5053,56 @@ def test_tmux_pending_input_detection_matches_codex_paste_prompt() -> None:
         "\n› Ne[Pasted Content 10513 chars]\n\n  gpt-5.5 high · ~/repo\n" + ("\n" * 30),
         message,
     )
+
+
+def test_send_tmux_message_pastes_with_bracketed_paste_flags(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """A multi-line prompt must be pasted as one bracketed paste with newlines
+    preserved.
+
+    Regression for the codex "新建 agent 反复喂初始输入" bug: ``tmux paste-buffer``
+    with no flags replaces every LF with CR and emits no bracketed-paste control
+    codes, so a codex TUI (bracketed-paste mode on) reads each CR as Enter and
+    submits each bootstrap line separately, piling up "Queued follow-up inputs".
+    Pasting with ``-p -r`` wraps the buffer in ESC[200~ … ESC[201~ and keeps the
+    newlines as newlines, so it lands as a single composer entry and the
+    existing single Enter submits it.
+    """
+    tmux_calls: list[tuple[str, ...]] = []
+
+    async def fake_run_tmux(*args: str) -> None:
+        tmux_calls.append(args)
+
+    # The pasted prompt would otherwise look "still pending"; short-circuit the
+    # submit verification so the test focuses on the paste invocation.
+    async def fake_submit(_tmux_session: str, _message: str) -> None:
+        return None
+
+    monkeypatch.setattr(workspace_manager, "_run_tmux", fake_run_tmux)
+    monkeypatch.setattr(workspace_manager, "_submit_tmux_message", fake_submit)
+
+    asyncio.run(
+        workspace_manager._send_tmux_message(
+            "claude-hub-deadbeef",
+            "Workspace: H2O\nSession: cb-agent-9\nRuntime target: local",
+        )
+    )
+
+    paste_calls = [call for call in tmux_calls if call and call[0] == "paste-buffer"]
+    assert len(paste_calls) == 1
+    paste_call = paste_calls[0]
+    # Both flags are required: -p alone still converts LF->CR; -r alone omits the
+    # bracketed-paste markers. Assert both are present and the pane is targeted.
+    assert "-p" in paste_call
+    assert "-r" in paste_call
+    assert "-t" in paste_call
+    assert "claude-hub-deadbeef" in paste_call
+    # The buffer must be loaded before it is pasted.
+    assert any(call and call[0] == "load-buffer" for call in tmux_calls)
+    load_index = next(i for i, call in enumerate(tmux_calls) if call and call[0] == "load-buffer")
+    paste_index = next(i for i, call in enumerate(tmux_calls) if call and call[0] == "paste-buffer")
+    assert load_index < paste_index
 
 
 def test_tmux_pending_input_detection_matches_cursor_paste_prompt() -> None:

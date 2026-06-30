@@ -24,6 +24,7 @@ from ..models import (
     TerminalTab,
     WorkspaceSessionRole,
 )
+from .agent_status_markers import codex_output_is_working
 from .remote_profiles import remote_profile_manager
 
 logger = logging.getLogger(__name__)
@@ -1999,6 +2000,17 @@ class TTYDManager:
                     "needs your response",
                     last_changed_at,
                 )
+
+        # Codex (GPT-5.5) renders its working indicator ("⠞ Working  4.03k
+        # tokens" / "• Working (3s • esc to interrupt)") ABOVE a tall persistent
+        # bottom chrome — the ›/❯ composer, a growing "Queued follow-up inputs"
+        # panel, and a model footer — so the indicator falls outside the
+        # bottom-10 window scanned below. Detect it against the wider frame
+        # using the codex-specific marker set. Runs after the ATTENTION check so
+        # a codex selection prompt still wins, and through working_or_stale() so
+        # the frozen-frame guard still applies.
+        if process.agent_type == AgentType.CODEX and codex_output_is_working(output):
+            return working_or_stale()
 
         for pattern in _WORKING_TAIL_PATTERNS:
             if pattern in status_tail:

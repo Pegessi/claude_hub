@@ -74,6 +74,148 @@
   frontend Master-mode hint copy was updated to describe the orchestrator
   behavior.
 
+### fix: allow Done when a task reaches final acceptance with a stale Goal Packet
+
+- **What**: a workspace task that has reached final acceptance (status
+  `review` with a final-acceptance signal — `human_acceptance_requested_at`
+  set, `review_skipped_at` set, a final `review_passed` verdict, or a reported
+  `completed`) can now be marked **Done**, even when its `goal_packet.status`
+  is still `pending_review`/`rejected`. This unblocks autonomous tasks (e.g.
+  the long-running `workspace常驻agent` task) that were stuck in `review` with
+  no actionable Done control.
+- **Why**: the Done button is gated frontend-side by
+  `awaitingHumanAcceptance()` in `AgentWorkspaceView.vue`. Its first check
+  short-circuited to `false` whenever `goal_packet.status` was
+  `pending_review`/`rejected` — *before* evaluating any final-acceptance
+  signal. That short-circuit is a **pre-implementation** plan-approval gate
+  (commit `00aecc6`), but autonomous tasks never transition their packet to
+  `approved`, so a stale `pending_review` permanently hid Done even after the
+  work was complete and review-passed. The backend already permits the
+  `review → done` transition; the blocker was purely the frontend gate.
+- **How**:
+  - Extracted the gate into a pure, store-free module
+    `frontend/src/utils/taskAcceptance.ts`
+    (`hasReportedCompletion`, `hasFinalAcceptanceSignal`,
+    `awaitingHumanAcceptance`, `hasBlockingReviewResult`, `canMarkDoneTask`),
+    each taking the task plus its resolved latest report / latest review
+    report.
+  - The Goal Packet `pending_review`/`rejected` gate is now applied **only
+    when there is no final-acceptance signal yet**, so the pre-implementation
+    plan-approval gate is preserved (during plan approval the verdict path
+    sets `human_acceptance_for_passed=False`, so no final signal exists) while
+    a post-review stale packet no longer strands the task. A blocking
+    `review_failed`/`review_needs_input` verdict still suppresses Done.
+  - `AgentWorkspaceView.vue` now delegates to the util via thin store-backed
+    wrappers; call-site signatures are unchanged.
+  - Tests: `frontend/tests/taskAcceptance.test.mjs` (node:test) covers stale
+    `pending_review` + `review_passed` → Done shown; `pending_review`/`rejected`
+    + no signal → Done hidden (plan gate preserved); `review_failed` /
+    `review_needs_input` → Done suppressed; happy `completed` path; and the
+    `ready_for_review`/non-`review`-status exclusions. `pnpm lint` + `pnpm
+    build` clean.
+
+### fix: new codex agent no longer queues its bootstrap prompt line-by-line
+
+- **What**: creating a new codex (GPT-5.5) workspace agent no longer piles up the
+  initial bootstrap prompt as one "Queued follow-up input" per line, leaving the
+  agent stuck re-feeding its own startup message instead of executing. The
+  multi-line prompt now lands as a single composer entry and the agent begins
+  work normally.
+- **Why**: `_send_tmux_message`
+  (`services/workspace_manager/_tmux_queries.py`) delivered the prompt with
+  `tmux paste-buffer` and no flags. Plain `paste-buffer` (a) replaces every LF
+  with CR and (b) emits no bracketed-paste control codes. The codex TUI runs
+  with bracketed-paste mode enabled, so it read each bare CR as Enter and
+  submitted every prompt line on its own, stacking "Queued follow-up inputs".
+  Claude/Cursor masked the same byte stream by collapsing the CR burst into a
+  `[Pasted Content N chars]` placeholder; codex does not. This is distinct from
+  the whole-message auto-continue re-feed loop fixed earlier (commit `1553f9b`).
+- **How**:
+  - Paste with `paste-buffer -p -r`: `-p` wraps the buffer in bracketed-paste
+    markers (`ESC[200~ … ESC[201~`) and `-r` disables tmux's default LF→CR
+    replacement so newlines stay newlines. The pairing is required — `-p` alone
+    still converts LF→CR; `-r` alone omits the markers a non-bracketed reader
+    needs. The existing single-Enter submit + pending-input verify/retry path is
+    unchanged.
+  - Verified by a tmux byte-stream repro (before: `…H2O\rSession…\r…`; after:
+    `ESC[200~…H2O\nSession…\nESC[201~`).
+  - Tests: `backend/tests/test_workspaces.py` adds
+    `test_send_tmux_message_pastes_with_bracketed_paste_flags`, asserting
+    `paste-buffer` is invoked with both `-p` and `-r`, targets the pane, and runs
+    after `load-buffer`.
+
+### fix: resolve task markdown artifacts produced inside git worktrees
+
+- **What**: clicking a task report's markdown artifact link (e.g.
+  `docs/working-logs/2026-06-26-adhd-skill-analysis.md`) no longer shows
+  "Artifact not found" in the Markdown Preview when the file was produced inside
+  the agent's git worktree. Such worktree-only artifacts now preview correctly
+  and also appear in the workspace's "Markdown Outputs" list.
+- **Why**: agents do their work in isolated git worktrees (sibling dirs created
+  per the mandatory workflow), so a report's markdown artifact frequently lives
+  only in the worktree — not under the main workspace path. The preview
+  resolver (`_markdown_allowed_roots` in
+  `services/workspace_manager/_artifacts.py`) only allowed the workspace path and
+  the session `workspace_path` (which is also the main path) as roots, so the
+  relative ref resolved to a nonexistent file → `KeyError` → 404. The same gap
+  silently dropped those artifacts from the markdown-documents list.
+- **How**:
+  - `_markdown_allowed_roots` now also includes the workspace's git worktree
+    directories, enumerated via `git worktree list --porcelain` run from the
+    workspace path (new `_git_worktree_roots` / `_read_git_worktree_roots`
+    helpers). The existing `_ensure_path_under_roots` containment check, the
+    markdown-only suffix gate, and the `_path_looks_like_real_file` guard are all
+    preserved, so path-escape safety is unchanged.
+  - Worktree enumeration is cached per workspace for a short TTL
+    (`WORKTREE_ROOT_CACHE_TTL_SECONDS`, bounded by `WORKTREE_LIST_TIMEOUT_SECONDS`)
+    so building the board — which resolves every report ref — does not spawn one
+    `git` subprocess per ref. When git is unavailable or the path is not a repo,
+    enumeration returns empty and behavior is unchanged (graceful degradation).
+  - Fix is resolution-side only: agent reporting, the report schema, session
+    bookkeeping, and the frontend are untouched, so historical reports become
+    previewable too.
+  - Tests: `backend/tests/test_workspaces.py` adds
+    `test_preview_markdown_artifact_resolves_from_git_worktree`, which creates a
+    real git worktree, reports a markdown artifact that exists only there, and
+    asserts the preview returns 200, the doc appears in `markdown_documents`, and
+    an out-of-all-roots markdown path still 404s.
+
+### fix: stop auto-continue from spamming a busy codex agent
+
+- **What**: a codex (GPT-5.5) agent that is actively working is no longer
+  misclassified as idle and re-prompted, which previously caused codex to pile
+  up "Queued follow-up inputs" — the "codex keeps infinitely sending tasks"
+  symptom.
+- **Why**: both the runtime-status classifier
+  (`ttyd_manager._classify_agent_status`) and the auto-continue busy-check
+  (`workspace_state_policy.auto_continue_output_looks_busy`) only inspected the
+  bottom ~10–12 lines of the captured pane. Codex renders its working indicator
+  (`⠞ Working  4.03k tokens` or `• Working (3s • esc to interrupt)`) **above** a
+  tall persistent bottom chrome — the `›`/`❯` composer, a "Queued follow-up
+  inputs" panel that grows per queued item, and a model footer — so a busy codex
+  frame fell outside both scan windows and read as IDLE. The 5s monitor loop
+  then auto-prompted the still-WORKING task, and codex queued each prompt.
+- **How**:
+  - New leaf module `backend/claude_hub/services/agent_status_markers.py` is the
+    single authoritative home for the codex working-marker set
+    (`CODEX_WORKING_STATUS_RE` + `codex_output_is_working`), covering both the
+    braille-spinner/token format and the legacy bullet/`esc to interrupt`
+    format. It scans a wider, bounded window (60 lines) so the indicator above
+    the chrome is seen. Keeping one explicit marker set per agent type (rather
+    than loosening the shared Claude/Cursor regexes) follows the cursor-agent
+    lesson.
+  - `_classify_agent_status` calls the codex detector (keyed on
+    `agent_type == CODEX`) after the ATTENTION check and routes through the
+    existing `working_or_stale()` guard, so a frozen codex frame past
+    `_WORKING_FRAME_STALE_SECONDS` still surfaces as ATTENTION.
+  - `auto_continue_output_looks_busy` calls the same detector first, so the
+    classifier and the busy-check agree by construction.
+  - Tests: `backend/tests/test_ttyd_manager.py` and
+    `tests/test_workspace_state_policy.py` add codex working/idle/frozen frames
+    (modeled on real `backend.log` captures) with a tall queued-inputs chrome
+    that defeats the old bottom-N window; the non-codex agent type is asserted
+    unaffected.
+
 ### feat: hot-switch env/model on a live Claude tab (resume conversation)
 
 - **What**: a new per-Claude-tab **Switch Env** action opens a dialog where you
@@ -388,6 +530,33 @@
   types (no per-agent divergence needed); the reviewer cross-task `/clear`
   heuristic and the tmux send/paste mechanism are untouched.
 
+### fix: CLI task detail keeps reviewed acceptance evidence visible
+
+- **What**: `task status` and Feishu `task_detail` cards now surface the most
+  recent non-empty `acceptance_check` from task report history even when a newer
+  reviewer report is the latest progress report.
+- **Files**: `backend/claude_hub/cli/commands/tasks.py`,
+  `backend/claude_hub/cli/commands/feishu.py`,
+  `backend/claude_hub/cli/feishu_cards.py`, `backend/tests/test_cli.py`,
+  `backend/tests/test_feishu_commands.py`.
+
+### feat: typed CLI control-plane status displays
+
+- **What**: third-party agents can now inspect Claude Hub backend state without
+  scraping raw board JSON.
+- **Changes**:
+  - Adds typed display commands for workspace summaries, markdown/snapshot
+    discovery, agent runtime rosters, single-session runtime status, and task
+    Goal Packet / review / acceptance detail.
+  - Enriches Feishu status, overview, and task-detail cards with task/session
+    counts, runtime state, snapshot/Markdown discovery, Goal Packet status, and
+    acceptance-check summary.
+- **Files**: `backend/claude_hub/cli/commands/workspaces.py`,
+  `backend/claude_hub/cli/commands/sessions.py`,
+  `backend/claude_hub/cli/commands/tasks.py`,
+  `backend/claude_hub/cli/commands/feishu.py`,
+  `backend/claude_hub/cli/feishu_cards.py`.
+
 ### feat: reviewer prompt hardened against sycophancy / low defect-detection
 
 - **What**: the independent reviewer agent caught bugs/risks too rarely and
@@ -483,6 +652,57 @@
   preserves the intentional reviewer-binding design while stopping the stall.
 - **Files**: `backend/claude_hub/services/workspace_manager/_monitor.py`,
   `backend/tests/test_workspaces.py`.
+
+### feat: Claude Hub CLI exposes the full REST control surface
+
+- **What**: broadens the `claude-hub` CLI from task/session inspection into a
+  full Claude Hub control plane for external agents such as Hermes. New typed
+  command groups cover auth checks, system network access, terminal tabs,
+  terminal history/proxy URLs, local filesystem browsing, remote profiles and
+  remote filesystem browsing, clipboard image upload, and a generic `api raw`
+  escape hatch for any current or future REST endpoint.
+- **Workspace/task/session/lessons coverage**: existing command groups now cover
+  workspace update/dispatch/artifact preview/attachment download, task
+  update/delete/spawn/dispatch-decision/feedback reap, session delete and
+  attachment-aware send, richer agent creation flags, and lesson create /
+  summarize flows. Complex request bodies can be supplied with `--payload-json`
+  so agents are not blocked on one flag per schema field.
+- **Feishu/Hermes surface**: `feishu build-card` adds cards for tabs, runtime
+  status, network access, filesystem, remote profiles, remote filesystem,
+  generic command results, and an action catalog. `feishu parse-action` now
+  returns a suggested CLI command when the callback contains enough IDs. The
+  Hermes `claude-hub` skill documents typed commands plus `api raw` as the
+  complete-control model and no longer advertises a nonexistent built-in
+  `feishu-bot` command.
+- **Files**: `backend/claude_hub/cli/client.py`,
+  `backend/claude_hub/cli/main.py`, `backend/claude_hub/cli/commands/common.py`,
+  `backend/claude_hub/cli/commands/rest.py`,
+  `backend/claude_hub/cli/commands/workspaces.py`,
+  `backend/claude_hub/cli/commands/tasks.py`,
+  `backend/claude_hub/cli/commands/sessions.py`,
+  `backend/claude_hub/cli/commands/lessons.py`,
+  `backend/claude_hub/cli/commands/feishu.py`,
+  `backend/claude_hub/cli/feishu_cards.py`, `backend/tests/test_cli.py`, and
+  `backend/tests/test_feishu_commands.py`.
+
+### feat: CLI task/session inspection and richer Feishu collaboration cards
+
+- **What**: expands the `claude-hub` CLI surface used by third-party agents such
+  as Hermes. `task get/report/review/accept` expose task detail, progress,
+  review history, and human-acceptance transitions; `session list/logs` expose
+  managed-session inventory and recent terminal output; `session report` can now
+  submit bilingual messages and structured report fields via `--payload-json`.
+- **Feishu cards**: `feishu build-card` now covers display kinds for
+  `workspaces`, `overview`, `agents`, `task_detail`, `reports`, `terminal`, and
+  `lessons` in addition to the existing interactive/status/task cards, giving
+  Feishu-facing agents card-ready JSON for the main Claude Hub workflows.
+- **Files**: `backend/claude_hub/cli/client.py`,
+  `backend/claude_hub/cli/commands/tasks.py`,
+  `backend/claude_hub/cli/commands/sessions.py`,
+  `backend/claude_hub/cli/commands/feishu.py`,
+  `backend/claude_hub/cli/feishu_cards.py`,
+  `backend/tests/test_cli.py`, and `backend/tests/test_feishu_commands.py`.
+
 ### feat: Feishu interactive cards over the `claude-hub` CLI
 
 - **What**: a `feishu` CLI group with two stateless, IO-free helpers for an

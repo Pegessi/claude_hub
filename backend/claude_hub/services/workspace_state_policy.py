@@ -16,6 +16,7 @@ from ..models import (
     WorkspaceTaskMode,
     WorkspaceTaskStatus,
 )
+from .agent_status_markers import codex_output_is_working
 
 AUTO_CONTINUE_INTERRUPTION_PATTERNS = (
     "api error",
@@ -665,6 +666,12 @@ def auto_continue_completion_reason(output: str) -> str | None:
 
 
 def auto_continue_output_looks_busy(output: str) -> bool:
+    # Codex renders its working indicator above a tall persistent bottom chrome,
+    # so the bottom-12 window below would miss it. Check the codex marker set
+    # against the wider frame first (shared with ttyd_manager's classifier so
+    # the two agree by construction).
+    if codex_output_is_working(output):
+        return True
     tail = "\n".join(output.lower().splitlines()[-12:])
     if re.search(
         r"^[\u273b\u2722\u2736\u2733\u2737\u2738\u2739\u273a\u273d\u2726\u2727]\s+\S+\u2026\s+\(",
