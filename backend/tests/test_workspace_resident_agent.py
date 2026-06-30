@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime, timedelta
 from importlib import import_module
 from pathlib import Path
-from typing import Generator
+from typing import Any, Generator
 
 import pytest
 from pytest import MonkeyPatch
@@ -14,6 +14,7 @@ from claude_hub.models import (
     AgentReportState,
     AgentRuntimeStatus,
     AgentType,
+    EnsureWorkspaceAgentRequest,
     ExecutionTarget,
     ManagedSession,
     ManagedSessionStatus,
@@ -538,7 +539,9 @@ def test_run_resident_agent_new_session_no_double_send(
 
     ensure_calls: list[object] = []
 
-    async def fake_ensure(workspace_id: str, payload: object) -> ManagedSession:
+    async def fake_ensure(
+        workspace_id: str, payload: EnsureWorkspaceAgentRequest
+    ) -> ManagedSession:
         ensure_calls.append(payload)
         # Mirror real ensure_workspace_agent: register the session so it exists.
         manager.sessions[created.id] = created
@@ -823,7 +826,8 @@ def test_update_workspace_placement_change_clears_resident_session(
         workspace = workspace.model_copy(update={"resident_agent_session_id": session.id})
         manager.workspaces[workspace.id] = workspace
 
-        updated = manager.update_workspace(workspace.id, WorkspaceUpdate(**{field: value}))
+        update_kwargs: dict[str, Any] = {field: value}
+        updated = manager.update_workspace(workspace.id, WorkspaceUpdate(**update_kwargs))
 
         assert updated.resident_agent_session_id is None, field
         assert session.id not in manager.sessions, field
@@ -892,9 +896,11 @@ def test_run_resident_agent_carries_placement_to_ensure_request(
     workspace = manager.workspaces[workspace.id]
 
     created = _resident_session(workspace)
-    captured: list[object] = []
+    captured: list[EnsureWorkspaceAgentRequest] = []
 
-    async def fake_ensure(workspace_id: str, payload: object) -> ManagedSession:
+    async def fake_ensure(
+        workspace_id: str, payload: EnsureWorkspaceAgentRequest
+    ) -> ManagedSession:
         captured.append(payload)
         manager.sessions[created.id] = created
         return created
@@ -935,9 +941,11 @@ def test_run_resident_agent_default_title_when_unset(
     workspace = manager.workspaces[workspace.id]
 
     created = _resident_session(workspace)
-    captured: list[object] = []
+    captured: list[EnsureWorkspaceAgentRequest] = []
 
-    async def fake_ensure(workspace_id: str, payload: object) -> ManagedSession:
+    async def fake_ensure(
+        workspace_id: str, payload: EnsureWorkspaceAgentRequest
+    ) -> ManagedSession:
         captured.append(payload)
         manager.sessions[created.id] = created
         return created
@@ -977,9 +985,11 @@ def test_run_resident_agent_uses_workspace_agent_config(
 
     created = _resident_session(workspace)
     created = created.model_copy(update={"agent_type": AgentType.CURSOR})
-    captured: list[object] = []
+    captured: list[EnsureWorkspaceAgentRequest] = []
 
-    async def fake_ensure(workspace_id: str, payload: object) -> ManagedSession:
+    async def fake_ensure(
+        workspace_id: str, payload: EnsureWorkspaceAgentRequest
+    ) -> ManagedSession:
         captured.append(payload)
         manager.sessions[created.id] = created
         return created
@@ -1036,9 +1046,11 @@ def test_run_resident_agent_terminal_skips_self_drive_prompt(
 
     # --- Create path: no existing resident session. ---
     created = _resident_session(workspace).model_copy(update={"agent_type": AgentType.TERMINAL})
-    captured: list[object] = []
+    captured: list[EnsureWorkspaceAgentRequest] = []
 
-    async def fake_ensure(workspace_id: str, payload: object) -> ManagedSession:
+    async def fake_ensure(
+        workspace_id: str, payload: EnsureWorkspaceAgentRequest
+    ) -> ManagedSession:
         captured.append(payload)
         manager.sessions[created.id] = created
         return created
