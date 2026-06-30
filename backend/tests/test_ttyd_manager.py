@@ -902,6 +902,199 @@ def test_codex_selection_prompt_classifies_as_attention(monkeypatch: MonkeyPatch
     assert detail == "needs your response"
 
 
+# Codex (GPT-5.5) renders its working indicator ABOVE a tall persistent bottom
+# chrome: the ›/❯ composer, a "Queued follow-up inputs" panel that grows one
+# line per queued item, and a model footer. That chrome exceeds the bottom-10
+# window the generic scan inspects, so these frames exercise the codex-specific
+# wider scan. Frame text is modeled on real captures in backend.log.
+_CODEX_BRAILLE_WORKING_FRAME = "\n".join(
+    [
+        "  → gc.collect() 和 call_malloc_trim() 耗时怎么样？",
+        "",
+        " ⠀⠞ Working  4.03k tokens",
+        "",
+        "",
+        "› Add a follow-up",
+        "",
+        "  Queued follow-up inputs (3):",
+        "    1. 继续",
+        "    2. 继续",
+        "    3. 继续",
+        "",
+        "  GPT-5.5 272K Extra High · MAX · 30.7% · 16 files edited      Auto-run",
+        "  ~/Projects/codex_workspace · main",
+    ]
+)
+
+_CODEX_BULLET_WORKING_FRAME = "\n".join(
+    [
+        "  The task is back in working state. Report progress with the same task_id.",
+        "",
+        "• Working (3s • esc to interrupt)",
+        "",
+        "",
+        "› Find and fix a bug in @filename",
+        "",
+        "  Queued follow-up inputs (10):",
+        "    1. 继续",
+        "    2. 继续",
+        "    3. 继续",
+        "    4. 继续",
+        "    5. 继续",
+        "    6. 继续",
+        "    7. 继续",
+        "    8. 继续",
+        "    9. 继续",
+        "    10. 继续",
+        "",
+        "  gpt-5.5 medium · ~/claude_hub",
+    ]
+)
+
+_CODEX_IDLE_FRAME = "\n".join(
+    [
+        "  → previous answer text from the agent is shown here",
+        "",
+        "› ",
+        "",
+        "  gpt-5.5 medium · ~/claude_hub",
+        "  ? for shortcuts",
+    ]
+)
+
+
+def test_codex_braille_working_above_chrome_classifies_as_working(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._status_snapshots = {}
+    process = TTYDProcess(
+        tab_id="tab-codex-braille",
+        port=12362,
+        name="Codex Braille",
+        agent_type=AgentType.CODEX,
+    )
+
+    status, status_text, detail, _last_changed_at = manager._classify_agent_status(
+        process,
+        _CODEX_BRAILLE_WORKING_FRAME,
+        "hash-codex-braille",
+        "codex",
+    )
+
+    assert status == AgentRuntimeStatus.WORKING
+    assert status_text == "Working"
+    assert detail == "agent is processing"
+
+
+def test_codex_bullet_working_above_chrome_classifies_as_working(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._status_snapshots = {}
+    process = TTYDProcess(
+        tab_id="tab-codex-bullet",
+        port=12363,
+        name="Codex Bullet",
+        agent_type=AgentType.CODEX,
+    )
+
+    status, status_text, detail, _last_changed_at = manager._classify_agent_status(
+        process,
+        _CODEX_BULLET_WORKING_FRAME,
+        "hash-codex-bullet",
+        "codex",
+    )
+
+    assert status == AgentRuntimeStatus.WORKING
+    assert status_text == "Working"
+    assert detail == "agent is processing"
+
+
+def test_codex_idle_frame_classifies_as_idle(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._status_snapshots = {}
+    process = TTYDProcess(
+        tab_id="tab-codex-idle",
+        port=12364,
+        name="Codex Idle",
+        agent_type=AgentType.CODEX,
+    )
+
+    status, status_text, _detail, _last_changed_at = manager._classify_agent_status(
+        process,
+        _CODEX_IDLE_FRAME,
+        "hash-codex-idle",
+        "codex",
+    )
+
+    assert status == AgentRuntimeStatus.IDLE
+    assert status_text == "Idle"
+
+
+def test_codex_working_marker_ignored_for_non_codex_agent(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # The codex wider-scan path is keyed on agent_type. A Claude session showing
+    # an above-chrome codex-style line must not be classified WORKING by it —
+    # only the agent's own markers (absent here) drive its status.
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._status_snapshots = {}
+    process = TTYDProcess(
+        tab_id="tab-claude-not-codex",
+        port=12365,
+        name="Claude Not Codex",
+        agent_type=AgentType.CLAUDE,
+    )
+
+    status, _status_text, _detail, _last_changed_at = manager._classify_agent_status(
+        process,
+        _CODEX_BRAILLE_WORKING_FRAME,
+        "hash-claude-not-codex",
+        "claude",
+    )
+
+    assert status != AgentRuntimeStatus.WORKING
+
+
+def test_codex_frozen_working_frame_classifies_as_stuck(monkeypatch: MonkeyPatch) -> None:
+    # A busy codex frame that has not repainted past the staleness window is a
+    # stopped agent behind a lingering "working" frame — flag ATTENTION, not
+    # working-forever. Confirms the codex path routes through working_or_stale().
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
+    manager = TTYDManager.__new__(TTYDManager)
+    first_seen = datetime.now() - timedelta(
+        seconds=ttyd_manager_module._WORKING_FRAME_STALE_SECONDS + 30
+    )
+    manager._status_snapshots = {
+        "tab-codex-frozen": {
+            "hash": "codex-frozen-hash",
+            "last_changed_at": first_seen,
+            "frame_first_seen_at": first_seen,
+        }
+    }
+    process = TTYDProcess(
+        tab_id="tab-codex-frozen",
+        port=12366,
+        name="Codex Frozen",
+        agent_type=AgentType.CODEX,
+    )
+
+    status, status_text, _detail, _last_changed_at = manager._classify_agent_status(
+        process,
+        _CODEX_BRAILLE_WORKING_FRAME,
+        "codex-frozen-hash",
+        "codex",
+    )
+
+    assert status == AgentRuntimeStatus.ATTENTION
+    assert status_text == "Agent may be stuck"
+
+
 @pytest.mark.asyncio
 async def test_ensure_tab_running_starts_missing_ttyd_listener(monkeypatch: MonkeyPatch) -> None:
     manager = TTYDManager.__new__(TTYDManager)

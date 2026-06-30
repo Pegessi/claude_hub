@@ -49,7 +49,16 @@ class _TmuxQueriesMixin:
             tmp_path = tmp.name
         try:
             await self._run_tmux("load-buffer", tmp_path)
-            await self._run_tmux("paste-buffer", "-t", tmux_session)
+            # -p wraps the paste in bracketed-paste control codes
+            # (ESC[200~ … ESC[201~); -r disables tmux's default LF->CR
+            # replacement so embedded newlines stay newlines. Without these, a
+            # multi-line prompt is delivered as bare CRs with no bracket markers,
+            # and a TUI in bracketed-paste mode (codex) treats each CR as Enter —
+            # submitting every prompt line separately and piling up "Queued
+            # follow-up inputs" so the agent never starts. The pairing is
+            # required: -p alone still converts LF->CR; -r alone omits the
+            # markers a non-bracketed reader needs to not submit on the LFs.
+            await self._run_tmux("paste-buffer", "-p", "-r", "-t", tmux_session)
             await asyncio.sleep(TMUX_PASTE_SETTLE_SECONDS)
             await self._submit_tmux_message(tmux_session, message)
         finally:
