@@ -5,6 +5,46 @@
 
 ## Unreleased
 
+### fix: allow Done when a task reaches final acceptance with a stale Goal Packet
+
+- **What**: a workspace task that has reached final acceptance (status
+  `review` with a final-acceptance signal — `human_acceptance_requested_at`
+  set, `review_skipped_at` set, a final `review_passed` verdict, or a reported
+  `completed`) can now be marked **Done**, even when its `goal_packet.status`
+  is still `pending_review`/`rejected`. This unblocks autonomous tasks (e.g.
+  the long-running `workspace常驻agent` task) that were stuck in `review` with
+  no actionable Done control.
+- **Why**: the Done button is gated frontend-side by
+  `awaitingHumanAcceptance()` in `AgentWorkspaceView.vue`. Its first check
+  short-circuited to `false` whenever `goal_packet.status` was
+  `pending_review`/`rejected` — *before* evaluating any final-acceptance
+  signal. That short-circuit is a **pre-implementation** plan-approval gate
+  (commit `00aecc6`), but autonomous tasks never transition their packet to
+  `approved`, so a stale `pending_review` permanently hid Done even after the
+  work was complete and review-passed. The backend already permits the
+  `review → done` transition; the blocker was purely the frontend gate.
+- **How**:
+  - Extracted the gate into a pure, store-free module
+    `frontend/src/utils/taskAcceptance.ts`
+    (`hasReportedCompletion`, `hasFinalAcceptanceSignal`,
+    `awaitingHumanAcceptance`, `hasBlockingReviewResult`, `canMarkDoneTask`),
+    each taking the task plus its resolved latest report / latest review
+    report.
+  - The Goal Packet `pending_review`/`rejected` gate is now applied **only
+    when there is no final-acceptance signal yet**, so the pre-implementation
+    plan-approval gate is preserved (during plan approval the verdict path
+    sets `human_acceptance_for_passed=False`, so no final signal exists) while
+    a post-review stale packet no longer strands the task. A blocking
+    `review_failed`/`review_needs_input` verdict still suppresses Done.
+  - `AgentWorkspaceView.vue` now delegates to the util via thin store-backed
+    wrappers; call-site signatures are unchanged.
+  - Tests: `frontend/tests/taskAcceptance.test.mjs` (node:test) covers stale
+    `pending_review` + `review_passed` → Done shown; `pending_review`/`rejected`
+    + no signal → Done hidden (plan gate preserved); `review_failed` /
+    `review_needs_input` → Done suppressed; happy `completed` path; and the
+    `ready_for_review`/non-`review`-status exclusions. `pnpm lint` + `pnpm
+    build` clean.
+
 ### fix: new codex agent no longer queues its bootstrap prompt line-by-line
 
 - **What**: creating a new codex (GPT-5.5) workspace agent no longer piles up the
