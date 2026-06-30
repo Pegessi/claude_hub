@@ -626,6 +626,7 @@ def test_autonomous_passed_ignores_stale_worker_reports(
         },
     )
     evaluating_task = workspace_manager.tasks[task["id"]]
+    assert evaluating_task.autonomous_run is not None
     assert evaluating_task.autonomous_run.phase.value == "evaluating"
 
     # Evaluator passes → run reaches PASSED, human acceptance requested.
@@ -646,6 +647,7 @@ def test_autonomous_passed_ignores_stale_worker_reports(
     passed_task = workspace_manager.tasks[task["id"]]
     assert passed_task.status == WorkspaceTaskStatus.REVIEW
     assert passed_task.human_acceptance_requested_at is not None
+    assert passed_task.autonomous_run is not None
     assert passed_task.autonomous_run.phase.value == "passed"
     accepted_at = passed_task.human_acceptance_requested_at
     passed_cycle = passed_task.review_cycle
