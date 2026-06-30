@@ -271,8 +271,8 @@
                 <span
                   v-if="isResidentAgent(agent) && isResidentMaster"
                   class="agent-status-kind agent-status-master-badge"
-                  title="Master mode: this resident acts as an autonomous orchestrator"
-                >Master</span>
+                  title="Autopilot: this resident drives the workspace on its own — creating, dispatching, and accepting tasks"
+                >Autopilot</span>
                 <span
                   class="agent-status-cli"
                   :data-kind="agent.agent_type || 'terminal'"
@@ -1636,14 +1636,14 @@
                 v-model="workspaceForm.resident_agent_master_mode"
                 type="checkbox"
               >
-              Master mode
+              Autopilot mode
             </label>
             <p class="modal-hint">
               Changes what each cycle does, not whether it runs. On: the
-              resident acts as an orchestrator — it reviews the board, creates
-              and dispatches tasks to your existing worker agents, lets them go
-              through review, and accepts the finished work itself. It never
-              writes code and never adds or removes worker agents. Off:
+              resident drives the workspace on its own — it reviews the board,
+              creates and dispatches tasks to your existing worker agents, lets
+              them go through review, and accepts the finished work itself. It
+              never writes code and never adds or removes worker agents. Off:
               read-only maintenance, no reports.
             </p>
           </div>
@@ -2337,7 +2337,7 @@
                 <span
                   v-if="isResidentAgent(agent) && isResidentMaster"
                   class="runtime-pill runtime-pill--paused"
-                >master</span>
+                >autopilot</span>
                 <span v-if="agent.ephemeral">temporary</span>
                 <span>current {{ taskTitle(agent.current_task_id) }}</span>
                 <span>queued {{ agent.queued_count }}</span>
@@ -4641,7 +4641,7 @@ const residentSummaryLabel = computed(() => {
   if (!workspaceForm.resident_agent_enabled) return 'Off'
   const every = `every ${workspaceForm.resident_agent_interval_minutes || 60}m`
   const base = workspaceForm.resident_agent_paused ? `Paused · ${every}` : `On · ${every}`
-  return workspaceForm.resident_agent_master_mode ? `${base} · Master` : base
+  return workspaceForm.resident_agent_master_mode ? `${base} · Autopilot` : base
 })
 
 async function handleDeleteWorkspace() {
