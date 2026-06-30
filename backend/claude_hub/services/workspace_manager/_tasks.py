@@ -54,6 +54,7 @@ class _TasksMixin:
             agent_type=payload.agent_type,
             task_mode=payload.task_mode,
             execution_complexity=payload.execution_complexity,
+            origin=payload.origin,
             autonomy_policy=autonomy_policy,
             autonomous_run=(
                 self._default_autonomous_run(task_id, autonomy_policy.max_iterations)

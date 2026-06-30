@@ -6,6 +6,7 @@ export type ColorScheme = 'dark' | 'light'
 export type WorkspaceTaskStatus = 'todo' | 'queued' | 'working' | 'review' | 'done'
 export type WorkspaceTaskMode = 'direct' | 'reviewed' | 'autonomous'
 export type WorkspaceTaskExecutionComplexity = 'auto' | 'simple' | 'complex'
+export type WorkspaceTaskOrigin = 'human' | 'resident'
 export type EvaluationStrictness = 'lenient' | 'balanced' | 'strict'
 export type HumanCheckpointPolicy = 'final_only' | 'after_rubric' | 'every_iteration'
 export type AutonomousRunPhase =
@@ -351,6 +352,7 @@ export interface WorkspaceTask {
   agent_type: AgentType
   task_mode: WorkspaceTaskMode
   execution_complexity: WorkspaceTaskExecutionComplexity
+  origin?: WorkspaceTaskOrigin
   autonomy_policy?: AutonomyPolicy | null
   autonomous_run?: AutonomousRun | null
   status: WorkspaceTaskStatus

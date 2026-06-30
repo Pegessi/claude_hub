@@ -5,6 +5,32 @@
 
 ## Unreleased
 
+### feat: tag agent-created workspace tasks + distinct resident Master badge
+
+- **What**: workspace tasks now carry an **origin** (`human` | `resident`), and
+  the task board renders an **"Agent" tag** on any task the resident self-driven
+  agent created — so human-created and resident-proposed/orchestrated tasks are
+  visually distinguishable at a glance. The resident's **Master** status badge
+  also gets its own dedicated style (violet "agent" theme) instead of reusing the
+  muted paused-badge styling, so the resident row reads clearly.
+- **Why**: with Master mode the resident now creates and dispatches its own
+  tasks; previously these were indistinguishable from human-entered tasks on the
+  board, making it hard to see what the agent was driving on its own.
+- **How**:
+  - Backend: new `WorkspaceTaskOrigin` enum (`backend/claude_hub/models/schemas.py`)
+    with an `origin` field on `WorkspaceTaskCreate` and `WorkspaceTask`
+    (defaults to `human`). `_create_task` persists the payload origin; legacy
+    normalization (`_normalize_task_item`) backfills missing/invalid values to
+    `human`. The resident prompt (`_workspaces.py`, both Master-on and read-only
+    paths) now always includes `"origin":"resident"` in its `POST /tasks`
+    payloads. The value is **self-declared by the resident** — the `POST /tasks`
+    endpoint only sees the authenticated user, not the calling session — so it is
+    a display hint, not a backend-enforced ownership guarantee.
+  - Frontend (`frontend/src/components/AgentWorkspaceView.vue`,
+    `frontend/src/types/index.ts`): `WorkspaceTaskOrigin` type + `origin?` field;
+    an `Agent` origin badge on task cards (shown when `origin === 'resident'`);
+    a dedicated `.agent-status-master-badge` style for the resident Master badge.
+
 ### refactor: resident Master mode is now an autonomous orchestrator (not a coder)
 
 - **What**: redefined the resident agent's **Master mode** from "self-iterate on

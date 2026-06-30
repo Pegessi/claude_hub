@@ -56,8 +56,10 @@ def build_resident_agent_prompt(workspace: "Workspace", base_url: str, session_i
         "do NOT start them and do NOT spawn agents:\n"
         f"   curl -sS -X POST {base_url}/api/workspaces/{ws}/tasks "
         "-H 'Content-Type: application/json' "
-        '-d \'{"title":"...","prompt":"..."}\'\n'
-        "   Newly created tasks stay in TODO; the user chooses whether to start them.\n\n"
+        '-d \'{"title":"...","prompt":"...","origin":"resident"}\'\n'
+        '   Always include "origin":"resident" so the UI tags the proposal as '
+        "agent-created. "
+        "Newly created tasks stay in TODO; the user chooses whether to start them.\n\n"
         "Hard constraints: do NOT merge branches, push, force-push, delete files, or take any "
         "destructive action. Do NOT auto-start proposed tasks. Keep changes to lessons and task "
         "proposals only. When this cycle's work is done, stop and wait for the next wake-up."
@@ -111,8 +113,11 @@ def _build_resident_master_prompt(
         "tasks per cycle to avoid a runaway backlog:\n"
         f"     curl -sS -X POST {base_url}/api/workspaces/{ws}/tasks "
         "-H 'Content-Type: application/json' "
-        '-d \'{"title":"...","prompt":"detailed instructions for the worker"}\'\n'
-        "   Leave task_mode at its default (reviewed): when the worker finishes, a "
+        '-d \'{"title":"...","prompt":"detailed instructions for the worker",'
+        '"origin":"resident"}\'\n'
+        '   Always include "origin":"resident" so the UI tags the task as '
+        "agent-created (distinguishing it from human-created tasks). "
+        "Leave task_mode at its default (reviewed): when the worker finishes, a "
         "reviewer agent vets the work before it returns to you for final acceptance. "
         "The backend reuses an idle reviewer or briefly spins one up on its own — that "
         "is fine and is NOT you creating an agent. Record each new task id from the "
