@@ -38,7 +38,13 @@ jobs:
       - name: Run mypy (type check)
         run: uv run mypy .
       - name: Run pytest (tests)
-        run: uv run pytest -xvs --ignore=tests/test_terminal_replay.py --cov=claude_hub --cov-report=xml:coverage.xml --cov-report=term-missing
+        # test_terminal_replay.py and test_terminal_input_latency_perf.py are
+        # Playwright browser E2E tests (they drive xterm.js via chromium and
+        # need tmux/ttyd). They run in the terminal-e2e job, not here — this
+        # job installs no browser/tmux/ttyd. Collecting the perf harness here
+        # also leaves a running event loop that breaks every later
+        # asyncio.run() test, so it must be ignored, not just skipped at runtime.
+        run: uv run pytest -xvs --ignore=tests/test_terminal_replay.py --ignore=tests/test_terminal_input_latency_perf.py --cov=claude_hub --cov-report=xml:coverage.xml --cov-report=term-missing
       - name: Upload backend coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
@@ -128,6 +134,14 @@ jobs:
   terminal-e2e:
     name: Terminal E2E (Playwright)
     runs-on: ubuntu-latest
+    # Non-blocking: these browser-driven xterm.js/tmux/ttyd tests pass locally
+    # (~14s) but have never been green on shared GitHub runners — under CI CPU
+    # contention the ttyd WebSocket frequently fails to create the backing tmux
+    # session ("tmux session ... was not created after connecting"), even with
+    # CLAUDE_HUB_E2E_TIMEOUT_SCALE=3 and one rerun. Until the runner-side
+    # flakiness is solved, keep the job running for signal but don't let it gate
+    # merges to main (cf. the informational security-audit job).
+    continue-on-error: true
     defaults:
       run:
         working-directory: ./backend
