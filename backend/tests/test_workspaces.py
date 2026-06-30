@@ -383,6 +383,50 @@ def test_autonomous_task_create_defaults_and_legacy_normalization(tmp_path: Path
     assert normalized["autonomous_run"] is None
 
 
+def test_task_origin_defaults_human_and_resident_roundtrip(tmp_path: Path) -> None:
+    """origin defaults to human for frontend-created tasks, accepts an explicit
+    resident value, and legacy tasks without the field normalize to human."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Origin Repo", "path": str(repo), "session_prefix": "orig"},
+    ).json()
+
+    # Default (frontend / human) create — no origin in payload.
+    human = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Human task", "prompt": "Do a thing"},
+    )
+    assert human.status_code == 201
+    assert human.json()["origin"] == "human"
+
+    # Explicit resident-created task (what the resident agent posts).
+    resident = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Resident task", "prompt": "Proposed by resident", "origin": "resident"},
+    )
+    assert resident.status_code == 201
+    assert resident.json()["origin"] == "resident"
+
+    # Legacy persisted task without the field normalizes to human.
+    normalized = workspace_manager._normalize_task_item(
+        {
+            "id": "legacy-origin-task",
+            "workspace_id": workspace["id"],
+            "title": "Legacy",
+            "prompt": "Old state",
+            "agent_type": "codex",
+            "status": "todo",
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+        }
+    )
+    assert normalized["origin"] == "human"
+
+
 def test_task_execution_complexity_prompts_and_legacy_normalization(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,

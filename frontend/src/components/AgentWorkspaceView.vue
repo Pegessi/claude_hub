@@ -270,7 +270,8 @@
                 >Paused</span>
                 <span
                   v-if="isResidentAgent(agent) && isResidentMaster"
-                  class="agent-status-kind agent-status-paused-badge"
+                  class="agent-status-kind agent-status-master-badge"
+                  title="Master mode: this resident acts as an autonomous orchestrator"
                 >Master</span>
                 <span
                   class="agent-status-cli"
@@ -433,6 +434,13 @@
                 <div class="task-card-header">
                   <h3>{{ task.title }}</h3>
                   <span class="task-card-badges">
+                    <span
+                      v-if="task.origin === 'resident'"
+                      class="origin-badge"
+                      title="Created by the resident agent"
+                    >
+                      Agent
+                    </span>
                     <span
                       v-if="task.task_mode === 'autonomous'"
                       class="autonomy-badge"
@@ -6043,6 +6051,17 @@ onUnmounted(() => {
   font-weight: 700;
 }
 
+.agent-status-master-badge {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 1px 8px;
+  border: 1px solid rgba(167, 139, 250, 0.45);
+  background: rgba(139, 92, 246, 0.16);
+  color: #c4b5fd;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
 .agent-status-delete {
   height: 26px;
   border: 1px solid var(--ch-color-danger-border);
@@ -6693,6 +6712,30 @@ onUnmounted(() => {
   line-height: 1;
   padding: 5px 7px;
   white-space: nowrap;
+}
+
+.origin-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid rgba(167, 139, 250, 0.38);
+  border-radius: var(--ch-radius-sm);
+  background: rgba(139, 92, 246, 0.14);
+  color: #c4b5fd;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  line-height: 1;
+  padding: 4px 7px;
+  white-space: nowrap;
+}
+
+.origin-badge::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: currentColor;
 }
 
 .review-badge-dot {

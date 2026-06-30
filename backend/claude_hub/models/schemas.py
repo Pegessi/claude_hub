@@ -66,6 +66,21 @@ class WorkspaceTaskExecutionComplexity(str, Enum):
     COMPLEX = "complex"
 
 
+class WorkspaceTaskOrigin(str, Enum):
+    """Who created a workspace task.
+
+    ``human`` (default) is a task created via the frontend / API by a person.
+    ``resident`` is a task created by the workspace's resident self-driven agent
+    (read-only proposal mode or master-mode orchestration). The value is
+    self-declared by the resident in its create payload — the ``POST /tasks``
+    endpoint sees only the authenticated user, not the calling agent session —
+    so this is a display hint, not a backend-enforced ownership guarantee.
+    """
+
+    HUMAN = "human"
+    RESIDENT = "resident"
+
+
 class EvaluationStrictness(str, Enum):
     """How strict autonomous evaluation should be."""
 
@@ -528,6 +543,7 @@ class WorkspaceTaskCreate(BaseModel):
     agent_type: AgentType = AgentType.CODEX
     task_mode: WorkspaceTaskMode = WorkspaceTaskMode.REVIEWED
     execution_complexity: WorkspaceTaskExecutionComplexity = WorkspaceTaskExecutionComplexity.AUTO
+    origin: WorkspaceTaskOrigin = WorkspaceTaskOrigin.HUMAN
     related_task_id: Optional[str] = None
     attachments: List["WorkspaceAttachmentCreate"] = Field(default_factory=list)
     goal_packet: Optional[GoalPacket] = None
@@ -588,6 +604,7 @@ class WorkspaceTask(BaseModel):
     agent_type: AgentType
     task_mode: WorkspaceTaskMode = WorkspaceTaskMode.REVIEWED
     execution_complexity: WorkspaceTaskExecutionComplexity = WorkspaceTaskExecutionComplexity.AUTO
+    origin: WorkspaceTaskOrigin = WorkspaceTaskOrigin.HUMAN
     autonomy_policy: Optional[AutonomyPolicy] = None
     autonomous_run: Optional[AutonomousRun] = None
     status: WorkspaceTaskStatus

@@ -25,6 +25,8 @@ class _NormalizeMixin:
             normalized["task_mode"] = WorkspaceTaskMode.REVIEWED.value
         if normalized.get("execution_complexity") not in {"auto", "simple", "complex"}:
             normalized["execution_complexity"] = WorkspaceTaskExecutionComplexity.AUTO.value
+        if normalized.get("origin") not in {"human", "resident"}:
+            normalized["origin"] = WorkspaceTaskOrigin.HUMAN.value
         normalized.setdefault("related_task_id", None)
         normalized.setdefault("attachments", [])
         normalized["review_profiles"] = self._normalize_review_profiles(

@@ -1421,6 +1421,8 @@ def test_build_resident_prompt_master_off_is_legacy(
     assert "PROPOSE new tasks" in prompt
     assert "TODO status only" in prompt
     assert "Hard constraints" in prompt
+    # Proposed tasks are tagged as agent-created so the UI can distinguish them.
+    assert '"origin":"resident"' in prompt
     # No worktree self-provisioning in legacy mode.
     assert "git worktree add" not in prompt
     # And no orchestrator-mode dispatch machinery leaks into the read-only prompt.
@@ -1459,6 +1461,9 @@ def test_build_resident_prompt_master_on_is_orchestrator(
     # resident does the final acceptance, so it must NOT force direct mode.
     assert '"task_mode":"direct"' not in prompt
     assert "default (reviewed)" in prompt
+    # Created tasks are tagged origin=resident so the UI can mark them as
+    # agent-created (vs human-created tasks).
+    assert '"origin":"resident"' in prompt
     # Acceptance is gated on the post-review awaiting-acceptance signal, not raw
     # status == review (which is also true while the reviewer is still working).
     assert "human_acceptance_requested_at" in prompt
