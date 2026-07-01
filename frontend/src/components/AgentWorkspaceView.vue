@@ -292,6 +292,7 @@
                 class="agent-status-meta"
               >
                 <span>last run {{ residentLastRunLabel }}</span>
+                <span v-if="residentNextRunLabel">next run {{ residentNextRunLabel }}</span>
                 <span v-if="latestResidentReport">{{ latestResidentReport.message }}</span>
               </span>
             </span>
@@ -331,6 +332,20 @@
               @click="toggleResidentPaused"
             >
               {{ isResidentPaused ? 'Resume' : 'Pause' }}
+            </LoadingButton>
+            <LoadingButton
+              v-if="isResidentAgent(agent)"
+              type="button"
+              class="agent-status-run-now"
+              :disabled="residentRunPending"
+              :title="residentRunPending
+                ? 'A run is already queued for the next monitor tick'
+                : 'Run the resident now using its saved directive and periodic tasks'"
+              :loading="isPending('resident:run')"
+              loading-label="Queuing run"
+              @click="handleRunResidentNow"
+            >
+              {{ residentRunPending ? 'Run queued' : 'Run now' }}
             </LoadingButton>
             <LoadingButton
               type="button"
@@ -1661,12 +1676,70 @@
             <textarea
               v-model="workspaceForm.resident_agent_directive"
               rows="3"
-              placeholder="Describe recurring tasks or what the resident agent should focus on each run."
+              placeholder="A one-shot guiding instruction for the resident (e.g. 'focus on tightening test coverage this week')."
             />
             <p class="modal-hint">
-              Saved immediately, but a changed directive only takes effect on
-              the next scheduled cycle — it does not re-run right away.
+              Saving applies on the next scheduled cycle. To apply a changed
+              directive immediately, use "Save &amp; run now" below.
             </p>
+          </div>
+          <div class="modal-field">
+            <label>
+              Recurring tasks
+              <span
+                v-if="enabledPeriodicTaskCount > 0"
+                class="modal-label-badge"
+              >{{ enabledPeriodicTaskCount }} active</span>
+            </label>
+            <p class="modal-hint">
+              The resident runs every enabled task on each wake-up (in addition
+              to its built-in maintenance). Disable a row to keep it without
+              running it; the directive above is a separate one-shot focus.
+            </p>
+            <ul
+              v-if="workspaceForm.resident_agent_periodic_tasks.length > 0"
+              class="periodic-task-list"
+            >
+              <li
+                v-for="task in workspaceForm.resident_agent_periodic_tasks"
+                :key="task.id"
+                class="periodic-task-row"
+              >
+                <input
+                  v-model="task.enabled"
+                  type="checkbox"
+                  class="periodic-task-enable"
+                  :title="task.enabled ? 'Enabled — runs every cycle' : 'Disabled — kept but not run'"
+                >
+                <input
+                  v-model="task.text"
+                  class="periodic-task-text"
+                  :class="{ 'periodic-task-text--disabled': !task.enabled }"
+                  placeholder="e.g. run the linter and open a task for any new warnings"
+                >
+                <button
+                  type="button"
+                  class="periodic-task-remove"
+                  title="Remove this recurring task"
+                  @click="removePeriodicTask(task.id)"
+                >
+                  ✕
+                </button>
+              </li>
+            </ul>
+            <p
+              v-else
+              class="modal-hint periodic-task-empty"
+            >
+              No recurring tasks yet.
+            </p>
+            <button
+              type="button"
+              class="tool-button periodic-task-add"
+              @click="addPeriodicTask"
+            >
+              + Add recurring task
+            </button>
           </div>
           <div class="modal-field">
             <label>Title</label>
@@ -1798,6 +1871,19 @@
             @click="handleCreateResident"
           >
             Create
+          </LoadingButton>
+          <LoadingButton
+            type="button"
+            class="primary-button"
+            :disabled="isResidentCreateMode || !residentExists"
+            :title="isResidentCreateMode || !residentExists
+              ? 'Create the resident first'
+              : 'Save the directive and recurring tasks, then run this cycle immediately'"
+            :loading="isPending('resident:save-run')"
+            loading-label="Saving & running"
+            @click="handleSaveResidentAndRunNow"
+          >
+            Save &amp; run now
           </LoadingButton>
         </div>
       </div>
@@ -2371,6 +2457,19 @@
                   {{ isResidentPaused ? 'Resume' : 'Pause' }}
                 </LoadingButton>
                 <LoadingButton
+                  v-if="isResidentAgent(agent)"
+                  type="button"
+                  :disabled="residentRunPending"
+                  :title="residentRunPending
+                    ? 'A run is already queued for the next monitor tick'
+                    : 'Run the resident now using its saved directive and periodic tasks'"
+                  :loading="isPending('resident:run')"
+                  loading-label="Queuing run"
+                  @click="handleRunResidentNow"
+                >
+                  {{ residentRunPending ? 'Run queued' : 'Run now' }}
+                </LoadingButton>
+                <LoadingButton
                   v-if="agent.role !== 'dispatcher'"
                   type="button"
                   class="danger-button"
@@ -2824,6 +2923,7 @@ import type {
   GoalPacket,
   ManagedSession,
   RemoteProfile,
+  ResidentPeriodicTask,
   ReviewProfile,
   ReviewProfileResult,
   TerminalAgentStatus,
@@ -3005,6 +3105,7 @@ const workspaceForm = reactive({
   resident_agent_master_mode: false,
   resident_agent_interval_minutes: 60,
   resident_agent_directive: '',
+  resident_agent_periodic_tasks: [] as ResidentPeriodicTask[],
   // Resident agent CLI/env config (UI-side; resolved to resident_agent_env at submit).
   resident_agent_type: 'claude' as AgentType,
   resident_agent_solo_mode: true,
@@ -4385,6 +4486,9 @@ async function handleCreateWorkspace() {
       resident_agent_master_mode: workspaceForm.resident_agent_master_mode,
       resident_agent_interval_minutes: workspaceForm.resident_agent_interval_minutes,
       resident_agent_directive: workspaceForm.resident_agent_directive.trim() || undefined,
+      resident_agent_periodic_tasks: sanitizePeriodicTasks(
+        workspaceForm.resident_agent_periodic_tasks,
+      ),
       resident_agent_type: workspaceForm.resident_agent_type,
       resident_agent_env: parseLaunchEnv(workspaceForm.resident_env_text) ?? {},
       resident_agent_solo_mode: workspaceForm.resident_agent_solo_mode,
@@ -4415,6 +4519,9 @@ function buildResidentPayload(overrides: Partial<WorkspaceUpdate> = {}): Workspa
     resident_agent_master_mode: workspaceForm.resident_agent_master_mode,
     resident_agent_interval_minutes: workspaceForm.resident_agent_interval_minutes,
     resident_agent_directive: workspaceForm.resident_agent_directive.trim() || undefined,
+    resident_agent_periodic_tasks: sanitizePeriodicTasks(
+      workspaceForm.resident_agent_periodic_tasks,
+    ),
     resident_agent_type: workspaceForm.resident_agent_type,
     resident_agent_env: parseLaunchEnv(workspaceForm.resident_env_text) ?? {},
     resident_agent_solo_mode: workspaceForm.resident_agent_solo_mode,
@@ -4429,6 +4536,51 @@ function buildResidentPayload(overrides: Partial<WorkspaceUpdate> = {}): Workspa
     ...overrides,
   }
 }
+
+// --- Resident periodic-task editor helpers -----------------------------------
+//
+// Periodic tasks are the recurring checklist the resident runs EVERY wake-up
+// (distinct from the one-shot guiding directive). The modal edits a draft array
+// on workspaceForm; sanitize trims + drops empties before submit, mirroring the
+// backend's _normalize_periodic_tasks so what the user sees rendered matches
+// what the resident prompt embeds.
+
+function newPeriodicTaskId() {
+  if (typeof globalThis.crypto?.randomUUID === 'function') {
+    return globalThis.crypto.randomUUID()
+  }
+  return `ptask-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+// Drop blank rows and trim text; keep ids/order so a save round-trips stable.
+function sanitizePeriodicTasks(tasks: ResidentPeriodicTask[]): ResidentPeriodicTask[] {
+  return tasks
+    .map((task) => ({ ...task, text: (task.text ?? '').trim() }))
+    .filter((task) => task.text.length > 0)
+}
+
+function addPeriodicTask() {
+  workspaceForm.resident_agent_periodic_tasks.push({
+    id: newPeriodicTaskId(),
+    text: '',
+    enabled: true,
+  })
+}
+
+function removePeriodicTask(taskId: string) {
+  const tasks = workspaceForm.resident_agent_periodic_tasks
+  const index = tasks.findIndex((task) => task.id === taskId)
+  if (index !== -1) tasks.splice(index, 1)
+}
+
+// Count of non-blank tasks currently enabled — drives the modal summary hint so
+// the user can see how many recurring items the resident will actually run.
+const enabledPeriodicTaskCount = computed(
+  () =>
+    workspaceForm.resident_agent_periodic_tasks.filter(
+      (task) => task.enabled && (task.text ?? '').trim().length > 0,
+    ).length,
+)
 
 async function handleSaveWorkspace() {
   const workspaceId = editingWorkspaceId.value
@@ -4464,6 +4616,7 @@ function resetWorkspaceForm() {
   workspaceForm.resident_agent_master_mode = false
   workspaceForm.resident_agent_interval_minutes = 60
   workspaceForm.resident_agent_directive = ''
+  workspaceForm.resident_agent_periodic_tasks = []
   workspaceForm.resident_agent_type = 'claude'
   workspaceForm.resident_agent_solo_mode = true
   workspaceForm.resident_env_preset = defaultLaunchEnvPresetForAgent('claude')
@@ -4498,6 +4651,10 @@ function openEditWorkspaceModal() {
   workspaceForm.resident_agent_master_mode = workspace.resident_agent_master_mode ?? false
   workspaceForm.resident_agent_interval_minutes = workspace.resident_agent_interval_minutes ?? 60
   workspaceForm.resident_agent_directive = workspace.resident_agent_directive || ''
+  // Clone so the modal editor mutates a draft, not the store's workspace object.
+  workspaceForm.resident_agent_periodic_tasks = (
+    workspace.resident_agent_periodic_tasks ?? []
+  ).map((task) => ({ ...task }))
   workspaceForm.resident_agent_type = workspace.resident_agent_type ?? 'claude'
   workspaceForm.resident_agent_solo_mode = workspace.resident_agent_solo_mode ?? true
   // Preset ids are localStorage-only; default the select to the agent-type
@@ -4613,7 +4770,30 @@ async function handleDeleteResident() {
   }
 }
 
-// Compact summary shown on the workspace form's "Configure…" row.
+// "Run now": force the resident to fire on the next monitor tick using the
+// SAVED directive + periodic tasks (no form save). Deliberate one-off — bypasses
+// pause but respects enabled, per the backend request_resident_run guard.
+async function handleRunResidentNow() {
+  const workspaceId = editingWorkspaceId.value ?? activeWorkspaceId.value
+  if (!workspaceId || !residentExists.value) return
+  await runPending('resident:run', () => workspaceStore.runResidentNow(workspaceId))
+}
+
+// "Save & run now": persist the current form (directive + periodic tasks + all
+// resident config) THEN request an immediate run, so the freshly-saved directive
+// takes effect this cycle instead of waiting for the next interval. Plain "Save"
+// only applies on the next natural wake-up — this button makes the timing
+// explicit for the user, which was the core complaint.
+async function handleSaveResidentAndRunNow() {
+  if (workspaceModalMode.value !== 'edit' || !editingWorkspaceId.value) return
+  if (!residentExists.value) return
+  const workspaceId = editingWorkspaceId.value
+  const workspace = await runPending('resident:save-run', () =>
+    workspaceStore.updateWorkspace(workspaceId, buildResidentPayload())
+  )
+  if (!workspace) return
+  await workspaceStore.runResidentNow(workspaceId)
+}
 const residentSummaryLabel = computed(() => {
   if (!workspaceForm.resident_agent_enabled) return 'Off'
   const every = `every ${workspaceForm.resident_agent_interval_minutes || 60}m`
@@ -5288,6 +5468,31 @@ const residentLastRunLabel = computed(() => {
   const lastRunMs = parseTimestampMs(activeWorkspace.value?.resident_agent_last_run_at)
   if (lastRunMs === null) return 'never'
   return `${formatElapsedDuration(elapsedClockMs.value - lastRunMs)} ago`
+})
+
+// True while a run-now request is stamped but not yet consumed by a wake-up.
+// Drives the card's "queued" hint and disables the Run-now button so a user
+// can't stack duplicate requests before the monitor tick fires.
+const residentRunPending = computed(
+  () => Boolean(activeWorkspace.value?.resident_agent_run_requested_at),
+)
+
+// Human "next run" hint for the resident card. Priority:
+//   - run-now requested      -> "next run queued"
+//   - paused                 -> "next run paused"
+//   - disabled / no schedule -> "" (caller hides the line)
+//   - future timestamp       -> "in {duration}" countdown
+//   - past-due timestamp     -> "due now" (overdue backstop will pick it up)
+const residentNextRunLabel = computed(() => {
+  const workspace = activeWorkspace.value
+  if (!workspace || !workspace.resident_agent_enabled) return ''
+  if (residentRunPending.value) return 'queued'
+  if (workspace.resident_agent_paused) return 'paused'
+  const nextRunMs = parseTimestampMs(workspace.resident_agent_next_run_at)
+  if (nextRunMs === null) return ''
+  const remaining = nextRunMs - elapsedClockMs.value
+  if (remaining <= 0) return 'due now'
+  return `in ${formatElapsedDuration(remaining)}`
 })
 
 // Newest report posted by the resident session, used to surface its latest
@@ -6017,6 +6222,27 @@ onUnmounted(() => {
 
 .agent-status-pause:hover {
   border-color: var(--ch-color-border-hover);
+}
+
+.agent-status-run-now {
+  height: 26px;
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 9px;
+}
+
+.agent-status-run-now:hover:not(:disabled) {
+  border-color: var(--ch-color-accent);
+  color: var(--ch-color-accent);
+}
+
+.agent-status-run-now:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .agent-status-paused-badge {
@@ -8151,6 +8377,72 @@ onUnmounted(() => {
   color: var(--ch-color-text-soft);
   font-size: 12px;
   line-height: 1.35;
+}
+
+.modal-label-badge {
+  margin-left: 8px;
+  border-radius: 999px;
+  padding: 1px 8px;
+  background: var(--ch-color-surface-sunken);
+  color: var(--ch-color-text-muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.periodic-task-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.periodic-task-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.periodic-task-enable {
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+
+.periodic-task-text {
+  width: 100%;
+}
+
+.periodic-task-text--disabled {
+  opacity: 0.55;
+  text-decoration: line-through;
+}
+
+.periodic-task-remove {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.periodic-task-remove:hover {
+  border-color: var(--ch-color-danger-border);
+  color: var(--ch-color-danger-text);
+}
+
+.periodic-task-empty {
+  font-style: italic;
+}
+
+.periodic-task-add {
+  margin-top: 8px;
 }
 
 .env-editor {
