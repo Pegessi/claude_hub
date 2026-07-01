@@ -5,6 +5,25 @@ import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time pa
 from ._constants import *  # noqa: F401,F403
 
 
+def _render_periodic_tasks_block(workspace: "Workspace") -> str:
+    """Render the resident's ENABLED periodic tasks as an explicit checklist.
+
+    Periodic tasks are the structured replacement for burying recurring work in
+    the free-text directive. Each enabled entry becomes a numbered line the
+    resident must complete every cycle. Returns "" when there are no enabled
+    entries so the prompt stays byte-for-byte identical to the pre-feature text
+    for workspaces that never configured any (backwards compatibility).
+    """
+    tasks = getattr(workspace, "resident_agent_periodic_tasks", None) or []
+    lines = [t.text.strip() for t in tasks if t.enabled and (t.text or "").strip()]
+    if not lines:
+        return ""
+    numbered = "\n".join(f"  {i}. {text}" for i, text in enumerate(lines, start=1))
+    return (
+        "Recurring tasks to perform EVERY cycle (run all of them this wake-up):\n" f"{numbered}\n\n"
+    )
+
+
 def build_resident_agent_prompt(workspace: "Workspace", base_url: str, session_id: str) -> str:
     """Build the self-drive prompt for a workspace's resident agent.
 
@@ -29,9 +48,12 @@ def build_resident_agent_prompt(workspace: "Workspace", base_url: str, session_i
         if directive
         else "User directive: (none provided — focus on lesson maintenance and task proposals)."
     )
+    periodic_block = _render_periodic_tasks_block(workspace)
     ws = workspace.id
     if workspace.resident_agent_master_mode:
-        return _build_resident_master_prompt(workspace, base_url, session_id, directive_block)
+        return _build_resident_master_prompt(
+            workspace, base_url, session_id, directive_block, periodic_block
+        )
     return (
         "You are this workspace's RESIDENT self-driven maintenance agent. You wake up "
         "periodically to keep the workspace healthy. You are NOT assigned a single task; "
@@ -39,9 +61,11 @@ def build_resident_agent_prompt(workspace: "Workspace", base_url: str, session_i
         f"Workspace id: {ws}\n"
         f"API base URL: {base_url}\n\n"
         f"{directive_block}\n\n"
+        f"{periodic_block}"
         "Each cycle, do the following, in order:\n"
-        "1. If the user directive specifies recurring or periodic tasks, perform them now "
-        "(read-only investigation, status checks, summaries, etc.).\n"
+        "1. If the user directive or the recurring-tasks checklist above specifies periodic "
+        "tasks, perform them now (read-only investigation, status checks, summaries, etc.). "
+        "Complete every enabled recurring task listed above.\n"
         "2. Review the most recent workspace task records and MAINTAIN LESSONS:\n"
         f"   - List current lessons: curl -sS {base_url}/api/workspaces/{ws}/lessons\n"
         "   - Create or merge a genuinely new, reusable lesson (only when justified):\n"
@@ -71,6 +95,7 @@ def _build_resident_master_prompt(
     base_url: str,
     session_id: str,
     directive_block: str,
+    periodic_block: str = "",
 ) -> str:
     """Master-mode resident prompt: an autonomous ORCHESTRATOR / product-owner.
 
@@ -94,13 +119,15 @@ def _build_resident_master_prompt(
         f"API base URL: {base_url}\n"
         f"This resident session id: {session_id}\n\n"
         f"{directive_block}\n\n"
+        f"{periodic_block}"
         "## Each cycle, in order\n\n"
         "1. Read the board to understand current state:\n"
         f"     curl -sS {base_url}/api/workspaces/{ws}/board\n"
         "   Inspect `tasks` (id, title, status, session_id, task_mode) and `sessions` (id, role, "
         "status, runtime_status). Review recent task outcomes and the user directive to decide "
         "what the workspace still needs next. Iterate on the requirements — refine the goal, do "
-        "not just repeat finished work.\n\n"
+        "not just repeat finished work. If a recurring-tasks checklist was provided above, treat "
+        "those items as standing objectives to advance every cycle.\n\n"
         "2. Find the EXISTING worker agents you may dispatch to. A usable worker is a session "
         'with `role == "orchestrator"` whose `status` is not stopped and whose `runtime_status` '
         "is idle or working (NOT offline and NOT attention).\n"
@@ -247,6 +274,7 @@ class _WorkspacesMixin:
         directive = (payload.resident_agent_directive or "").strip() or None
         resident_title = (payload.resident_agent_title or "").strip() or None
         resident_cwd = (payload.resident_agent_cwd or "").strip() or None
+        periodic_tasks = self._normalize_periodic_tasks(payload.resident_agent_periodic_tasks)
         workspace = Workspace(
             id=workspace_id,
             name=payload.name,
@@ -263,6 +291,7 @@ class _WorkspacesMixin:
             resident_agent_interval_minutes=interval_minutes,
             resident_agent_session_id=None,
             resident_agent_directive=directive,
+            resident_agent_periodic_tasks=periodic_tasks,
             resident_agent_last_run_at=None,
             resident_agent_type=payload.resident_agent_type,
             resident_agent_env=dict(payload.resident_agent_env or {}),
@@ -322,6 +351,10 @@ class _WorkspacesMixin:
         if payload.resident_agent_directive is not None:
             directive = payload.resident_agent_directive.strip()
             update_kwargs["resident_agent_directive"] = directive or None
+        if payload.resident_agent_periodic_tasks is not None:
+            update_kwargs["resident_agent_periodic_tasks"] = self._normalize_periodic_tasks(
+                payload.resident_agent_periodic_tasks
+            )
         if payload.resident_agent_type is not None:
             update_kwargs["resident_agent_type"] = payload.resident_agent_type
         if payload.resident_agent_env is not None:
@@ -392,6 +425,46 @@ class _WorkspacesMixin:
             return workspace
 
         updated = workspace.model_copy(update={**update_kwargs, "updated_at": _wm._now()})
+        # Recompute the UI next-run hint whenever anything that feeds it may have
+        # changed (interval, enable, pause, or last_run reset on disable). This is
+        # advisory only; the authoritative trigger is _resident_agent_due.
+        updated = updated.model_copy(
+            update={
+                "resident_agent_next_run_at": self._resident_next_run_at(
+                    updated, updated.resident_agent_last_run_at
+                )
+            }
+        )
+        self.workspaces[workspace_id] = updated
+        self._save_state()
+        return updated
+
+    def request_resident_run(self, workspace_id: str) -> Workspace:
+        """Flag the resident to run on the next monitor tick (manual "run now").
+
+        Stamps ``resident_agent_run_requested_at``; ``_resident_agent_due`` then
+        returns True on the next tick (within WORKSPACE_MONITOR_INTERVAL_SECONDS),
+        and ``_run_resident_agent`` consumes/clears the flag when the cycle fires.
+        The override respects Enable but bypasses Pause and the interval/activity
+        gates — an explicit user request is a deliberate one-off.
+
+        Raises ``KeyError`` if the workspace is missing, ``ValueError`` if the
+        resident is not enabled (nothing to run). If the resident session is
+        currently WORKING the flag still stays set and simply fires on the next
+        idle tick (the WORKING-skip in ``_run_resident_agent`` defers it without
+        clearing the request), so the manual run is not lost.
+        """
+        workspace = self.workspaces.get(workspace_id)
+        if workspace is None:
+            raise KeyError(workspace_id)
+        if not workspace.resident_agent_enabled:
+            raise ValueError("Resident agent is not enabled for this workspace")
+        updated = workspace.model_copy(
+            update={
+                "resident_agent_run_requested_at": _wm._now(),
+                "updated_at": _wm._now(),
+            }
+        )
         self.workspaces[workspace_id] = updated
         self._save_state()
         return updated
@@ -420,6 +493,47 @@ class _WorkspacesMixin:
             if field in update_kwargs and update_kwargs[field] != getattr(workspace, field):
                 return True
         return False
+
+    @staticmethod
+    def _normalize_periodic_tasks(
+        tasks: Optional[list["ResidentPeriodicTask"]],
+    ) -> list["ResidentPeriodicTask"]:
+        """Normalize a periodic-task list: trim text, drop empties, keep order.
+
+        Each entry keeps its client-supplied id (or the model default) so the UI
+        can stably identify rows across edits; entries whose text is blank after
+        trimming are dropped. ``None`` means "not provided" and yields an empty
+        list (safe default; callers only pass ``None`` on create where absence
+        means no periodic tasks).
+        """
+        result: list["ResidentPeriodicTask"] = []
+        for task in tasks or []:
+            text = (task.text or "").strip()
+            if not text:
+                continue
+            result.append(task.model_copy(update={"text": text}))
+        return result
+
+    def _resident_next_run_at(
+        self, workspace: "Workspace", last_run: Optional[datetime]
+    ) -> Optional[datetime]:
+        """Compute the resident's next overdue-backstop wake time for the UI.
+
+        This mirrors the backstop arm in ``_resident_agent_due``: ``last_run +
+        interval + stable jitter``. Returns ``None`` when the resident is
+        disabled or paused (no automatic scheduling) or when ``last_run`` is
+        ``None`` (bootstrap — it is due immediately, so there is no future time
+        to show). The activity fast-path can still wake the resident EARLIER
+        than this; the UI copy makes that clear. This value is advisory only —
+        the authoritative trigger remains ``_resident_agent_due``.
+        """
+        if not workspace.resident_agent_enabled or workspace.resident_agent_paused:
+            return None
+        if last_run is None:
+            return None
+        interval_seconds = max(1, workspace.resident_agent_interval_minutes) * 60
+        jitter = self._resident_jitter_seconds(workspace, interval_seconds)
+        return last_run + timedelta(seconds=interval_seconds + jitter)
 
     @staticmethod
     def _resident_jitter_seconds(workspace: "Workspace", interval_seconds: int) -> int:
@@ -503,6 +617,12 @@ class _WorkspacesMixin:
         wakeup; whether the resident actually fires is decided here:
 
         * **Disabled** -> never due.
+        * **Manual run-now** -> if ``resident_agent_run_requested_at`` is set (the
+          run-now endpoint stamped it), fire on the next tick regardless of the
+          interval or activity gate. It still respects Enable (a disabled
+          resident is never driven) but overrides Pause: an explicit user "run
+          now" is an intentional one-off even while auto-scheduling is paused.
+          The flag is cleared by ``_run_resident_agent`` once the cycle fires.
         * **Bootstrap** (``last_run_at is None``) -> due once. The first run
           establishes the activity/timer baseline; it does not fire instantly on
           every empty boot because once it runs the baseline is stamped.
@@ -517,12 +637,17 @@ class _WorkspacesMixin:
           periodic pass. This is the legacy fixed-interval path, demoted to a
           backstop.
 
-        Net: ``due = enabled AND (last_run is None
+        Net: ``due = enabled AND (run_requested OR last_run is None
                                   OR (activity_since AND elapsed >= debounce)
                                   OR elapsed >= interval + jitter)``.
         """
         if not workspace.resident_agent_enabled:
             return False
+        # Manual run-now override: an explicit user request fires on the next
+        # tick even while paused (it is a deliberate one-off), but never while
+        # disabled (guarded above). Checked BEFORE the paused early-return.
+        if workspace.resident_agent_run_requested_at is not None:
+            return True
         # Paused = keep the session alive for manual chat, but stop automatic
         # scheduling (no self-drive runs). disabled OR paused -> not due.
         if workspace.resident_agent_paused:
@@ -625,11 +750,20 @@ class _WorkspacesMixin:
         # failure in send_session_message does not leave resident_agent_session_id
         # unset (which would respawn a brand-new session/tab every monitor tick)
         # nor leave last_run_at stale (which would retry immediately every tick).
+        # We also clear resident_agent_run_requested_at (the manual run-now flag
+        # is a one-off — consume it now that the cycle is firing) and recompute
+        # resident_agent_next_run_at from the new last_run for the UI countdown.
         now = _wm._now()
-        self.workspaces[workspace.id] = workspace.model_copy(
+        stamped = workspace.model_copy(
             update={
                 "resident_agent_session_id": session.id,
                 "resident_agent_last_run_at": now,
+                "resident_agent_run_requested_at": None,
+            }
+        )
+        self.workspaces[workspace.id] = stamped.model_copy(
+            update={
+                "resident_agent_next_run_at": self._resident_next_run_at(stamped, now),
                 "updated_at": now,
             }
         )

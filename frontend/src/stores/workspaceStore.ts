@@ -355,6 +355,32 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
+  async function runResidentNow(workspaceId: string) {
+    isLoading.value = true
+    try {
+      const response = await fetch(`${API_BASE}/workspaces/${workspaceId}/resident/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      const workspace: Workspace = await response.json()
+      const index = workspaces.value.findIndex(item => item.id === workspaceId)
+      if (index >= 0) {
+        workspaces.value[index] = workspace
+      } else {
+        workspaces.value.push(workspace)
+      }
+      if (board.value && board.value.workspace.id === workspaceId) {
+        board.value = { ...board.value, workspace }
+      }
+      return workspace
+    } catch (e) {
+      notifyError(e instanceof Error ? e.message : 'Failed to run resident agent')
+    } finally {
+      isLoading.value = false
+    }
+  }
+
   async function deleteWorkspace(workspaceId: string) {
     isLoading.value = true
     try {
@@ -638,6 +664,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     summarizeFeedbackLessons,
     createWorkspace,
     updateWorkspace,
+    runResidentNow,
     deleteWorkspace,
     createTask,
     updateTask,

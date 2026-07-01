@@ -5,6 +5,40 @@
 
 ## Unreleased
 
+### feat: resident behavior — run-now, next-run visibility, managed periodic tasks
+
+- **What**: the per-workspace resident agent gains three interaction
+  improvements. (1) A **"Run now"** control (status card + agent-manager list,
+  backed by `POST /api/workspaces/{id}/resident/run`) forces the resident to
+  run on the next monitor tick. (2) A **next-run countdown** in the status card
+  ("next run in 4m" / "due now" / "queued" / "paused") makes the otherwise
+  opaque trigger visible. (3) **Structured recurring tasks** — an add / edit /
+  remove / enable list (`resident_agent_periodic_tasks`) that replaces burying
+  recurring work in the free-text directive; enabled entries render as an
+  explicit every-cycle checklist in both resident prompts. Directive edits now
+  spell out their timing: **Save** applies on the next scheduled cycle, **Save &
+  run now** applies immediately.
+- **Why**: the resident was meant to run periodic tasks *or* act on an updated
+  guiding directive, but editing the directive gave no signal about what changed
+  or when it would take effect, there was no way to see or force the next run,
+  and recurring tasks could not be managed.
+- **How**: new `ResidentPeriodicTask` model and workspace fields
+  (`resident_agent_periodic_tasks`, `resident_agent_run_requested_at`,
+  `resident_agent_next_run_at`). `request_resident_run` stamps a one-off flag
+  that `_resident_agent_due` honors *before* the paused early-return (respects
+  Enable, bypasses Pause); `_run_resident_agent` consumes it on fire but the
+  WORKING-skip defers a busy resident without dropping the request.
+  `_resident_next_run_at` mirrors the overdue-backstop arm for the advisory
+  countdown (never gates execution). Periodic tasks are trimmed / blank-dropped
+  / order-preserving and render `""` when none are enabled, keeping legacy
+  prompts byte-identical.
+- **Validation**: `black`/`isort`/`mypy` clean; frontend `eslint` + `vue-tsc` +
+  `vite build` clean; backend tests via the CI path
+  (`--ignore=tests/test_terminal_replay.py
+  --ignore=tests/test_terminal_input_latency_perf.py`) **536 passed**
+  (+19 new: 14 resident unit, 5 API). See
+  `docs/working-logs/2026-07-01-resident-behavior-optimization.md`.
+
 ### fix: restore green CI on main (misplaced browser perf test + non-blocking E2E)
 
 - **What**: the backend CI job now also ignores
