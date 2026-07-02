@@ -18,6 +18,7 @@ from claude_hub.models import (
     ExecutionTarget,
     ManagedSession,
     ManagedSessionStatus,
+    ResidentPeriodicTask,
     Workspace,
     WorkspaceCreate,
     WorkspaceSessionRole,
@@ -1566,3 +1567,340 @@ def test_update_workspace_master_mode_keeps_resident_session(
     # No respawn: pointer and live ManagedSession are preserved.
     assert updated.resident_agent_session_id == session.id
     assert session.id in manager.sessions
+
+
+# ---------------------------------------------------------------------------
+# Periodic tasks: persistence, normalization, prompt rendering
+# ---------------------------------------------------------------------------
+
+
+def test_create_workspace_periodic_tasks_normalized(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """Periodic tasks persist, trim text, drop blanks, keep ids/order, round-trip."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_enabled=True,
+            resident_agent_periodic_tasks=[
+                ResidentPeriodicTask(id="t1", text="  run the linter  ", enabled=True),
+                ResidentPeriodicTask(id="t2", text="   ", enabled=True),  # blank -> dropped
+                ResidentPeriodicTask(id="t3", text="check deps", enabled=False),
+            ],
+        )
+    )
+    tasks = workspace.resident_agent_periodic_tasks
+    assert [t.id for t in tasks] == ["t1", "t3"]  # blank dropped, order kept
+    assert tasks[0].text == "run the linter"  # trimmed
+    assert tasks[0].enabled is True
+    assert tasks[1].enabled is False  # disabled flag preserved
+
+    # Round-trip from disk.
+    reloaded = WorkspaceManager()
+    persisted = reloaded.workspaces[workspace.id].resident_agent_periodic_tasks
+    assert [t.id for t in persisted] == ["t1", "t3"]
+    assert persisted[0].text == "run the linter"
+
+
+def test_create_workspace_periodic_tasks_default_empty(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """Unspecified periodic tasks default to an empty list (backward compat)."""
+    workspace = _make_workspace(manager, tmp_path)
+    assert workspace.resident_agent_periodic_tasks == []
+
+
+def test_update_workspace_periodic_tasks(manager: WorkspaceManager, tmp_path: Path) -> None:
+    """update replaces the list wholesale; None leaves it unchanged; [] clears it."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_periodic_tasks=[ResidentPeriodicTask(id="a", text="first")],
+        )
+    )
+
+    updated = manager.update_workspace(
+        workspace.id,
+        WorkspaceUpdate(
+            resident_agent_periodic_tasks=[
+                ResidentPeriodicTask(id="b", text="  second  "),
+                ResidentPeriodicTask(id="c", text="third", enabled=False),
+            ]
+        ),
+    )
+    assert [t.id for t in updated.resident_agent_periodic_tasks] == ["b", "c"]
+    assert updated.resident_agent_periodic_tasks[0].text == "second"
+
+    # None leaves the list unchanged.
+    unchanged = manager.update_workspace(
+        workspace.id, WorkspaceUpdate(resident_agent_directive="noop")
+    )
+    assert [t.id for t in unchanged.resident_agent_periodic_tasks] == ["b", "c"]
+
+    # Empty list clears all tasks.
+    cleared = manager.update_workspace(
+        workspace.id, WorkspaceUpdate(resident_agent_periodic_tasks=[])
+    )
+    assert cleared.resident_agent_periodic_tasks == []
+
+
+def test_build_resident_prompt_renders_enabled_periodic_tasks(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """Enabled periodic tasks appear as a numbered checklist; disabled/blank omitted."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_enabled=True,
+            resident_agent_periodic_tasks=[
+                ResidentPeriodicTask(id="a", text="run the linter", enabled=True),
+                ResidentPeriodicTask(id="b", text="update the changelog", enabled=False),
+                ResidentPeriodicTask(id="c", text="triage open issues", enabled=True),
+            ],
+        )
+    )
+    prompt = _wm.build_resident_agent_prompt(workspace, "http://localhost:9999", "sid")
+    assert "Recurring tasks to perform EVERY cycle" in prompt
+    assert "1. run the linter" in prompt
+    # Disabled task is not rendered; enabled ones are renumbered contiguously.
+    assert "update the changelog" not in prompt
+    assert "2. triage open issues" in prompt
+
+
+def test_build_resident_prompt_no_periodic_block_when_empty(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """With no enabled periodic tasks the checklist block is absent (byte-compat)."""
+    workspace = _make_workspace(manager, tmp_path)
+    prompt = _wm.build_resident_agent_prompt(workspace, "http://localhost:9999", "sid")
+    assert "Recurring tasks to perform EVERY cycle" not in prompt
+
+    # A workspace whose only periodic tasks are disabled also renders no block.
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    disabled_only = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS2",
+            path=str(repo),
+            session_prefix="res2",
+            resident_agent_periodic_tasks=[
+                ResidentPeriodicTask(id="a", text="paused chore", enabled=False),
+            ],
+        )
+    )
+    prompt2 = _wm.build_resident_agent_prompt(disabled_only, "http://localhost:9999", "sid")
+    assert "Recurring tasks to perform EVERY cycle" not in prompt2
+
+
+def test_build_resident_prompt_master_renders_periodic_tasks(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """Master-mode prompt also embeds the recurring-tasks checklist."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_enabled=True,
+            resident_agent_master_mode=True,
+            resident_agent_periodic_tasks=[
+                ResidentPeriodicTask(id="a", text="review the backlog", enabled=True),
+            ],
+        )
+    )
+    prompt = _wm.build_resident_agent_prompt(workspace, "http://localhost:9999", "sid")
+    assert "RESIDENT MASTER agent" in prompt
+    assert "Recurring tasks to perform EVERY cycle" in prompt
+    assert "1. review the backlog" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Manual run-now: request flag, due override, consume-on-fire, next-run hint
+# ---------------------------------------------------------------------------
+
+
+def test_request_resident_run_stamps_flag(manager: WorkspaceManager, tmp_path: Path) -> None:
+    """request_resident_run stamps the flag and persists it to disk."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS", path=str(repo), session_prefix="res", resident_agent_enabled=True
+        )
+    )
+    assert workspace.resident_agent_run_requested_at is None
+
+    updated = manager.request_resident_run(workspace.id)
+    assert updated.resident_agent_run_requested_at is not None
+
+    reloaded = WorkspaceManager()
+    assert reloaded.workspaces[workspace.id].resident_agent_run_requested_at is not None
+
+
+def test_request_resident_run_missing_workspace_raises_keyerror(
+    manager: WorkspaceManager,
+) -> None:
+    with pytest.raises(KeyError):
+        manager.request_resident_run("does-not-exist")
+
+
+def test_request_resident_run_disabled_raises_valueerror(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """Requesting a run on a disabled resident is a ValueError (nothing to run)."""
+    workspace = _make_workspace(manager, tmp_path)
+    assert workspace.resident_agent_enabled is False
+    with pytest.raises(ValueError):
+        manager.request_resident_run(workspace.id)
+
+
+def test_resident_due_run_now_overrides_interval_and_pause(
+    manager: WorkspaceManager,
+) -> None:
+    """run-now makes a just-run resident due, and fires even while paused."""
+    now = datetime.now()
+    # Just ran (not otherwise due) but run requested => due.
+    ws = _due_workspace(now).model_copy(update={"resident_agent_run_requested_at": now})
+    assert manager._resident_agent_due(ws, now) is True
+
+    # Paused + run requested => still due (deliberate one-off overrides pause).
+    paused = ws.model_copy(update={"resident_agent_paused": True})
+    assert manager._resident_agent_due(paused, now) is True
+
+    # Disabled + run requested => NOT due (enable is the master switch).
+    disabled = ws.model_copy(
+        update={"resident_agent_enabled": False, "resident_agent_paused": False}
+    )
+    assert manager._resident_agent_due(disabled, now) is False
+
+
+def test_run_resident_agent_consumes_run_request_flag(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Firing a cycle clears the run-now flag and recomputes the next-run hint."""
+    workspace = _make_workspace(manager, tmp_path)
+    workspace = manager.update_workspace(workspace.id, WorkspaceUpdate(resident_agent_enabled=True))
+    session = _resident_session(workspace, runtime_status=AgentRuntimeStatus.IDLE)
+    manager.sessions[session.id] = session
+    workspace = workspace.model_copy(
+        update={
+            "resident_agent_session_id": session.id,
+            "resident_agent_run_requested_at": datetime.now(),
+        }
+    )
+    manager.workspaces[workspace.id] = workspace
+
+    async def fake_send(session_id: str, message: str) -> None:
+        return None
+
+    monkeypatch.setattr(manager, "send_session_message", fake_send)
+
+    asyncio.run(manager._run_resident_agent(workspace))
+
+    persisted = manager.workspaces[workspace.id]
+    assert persisted.resident_agent_run_requested_at is None  # consumed
+    assert persisted.resident_agent_last_run_at is not None
+    # Enabled + not paused + last_run stamped => a future next-run hint is set.
+    assert persisted.resident_agent_next_run_at is not None
+    assert persisted.resident_agent_next_run_at > persisted.resident_agent_last_run_at
+
+
+def test_run_resident_agent_busy_keeps_run_request_flag(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """A WORKING resident defers the run-now: the flag stays set (not lost)."""
+    workspace = _make_workspace(manager, tmp_path)
+    workspace = manager.update_workspace(workspace.id, WorkspaceUpdate(resident_agent_enabled=True))
+    session = _resident_session(workspace, runtime_status=AgentRuntimeStatus.WORKING)
+    manager.sessions[session.id] = session
+    requested_at = datetime.now()
+    workspace = workspace.model_copy(
+        update={
+            "resident_agent_session_id": session.id,
+            "resident_agent_run_requested_at": requested_at,
+        }
+    )
+    manager.workspaces[workspace.id] = workspace
+
+    async def fail_send(session_id: str, message: str) -> None:
+        raise AssertionError("busy resident must not be sent a prompt")
+
+    monkeypatch.setattr(manager, "send_session_message", fail_send)
+
+    asyncio.run(manager._run_resident_agent(workspace))
+
+    # Skipped without consuming the request, so a later idle tick still fires it.
+    persisted = manager.workspaces[workspace.id]
+    assert persisted.resident_agent_run_requested_at == requested_at
+
+
+# ---------------------------------------------------------------------------
+# Next-run hint: computed on update, cleared when paused/disabled
+# ---------------------------------------------------------------------------
+
+
+def test_resident_next_run_at_helper() -> None:
+    """_resident_next_run_at = last_run + interval + jitter; None when disabled/
+    paused/bootstrap."""
+    manager = WorkspaceManager()
+    now = datetime.now()
+    ws = _due_workspace(now, interval=60)
+    interval_seconds = 60 * 60
+    jitter = manager._resident_jitter_seconds(ws, interval_seconds)
+    expected = now + timedelta(seconds=interval_seconds + jitter)
+    assert manager._resident_next_run_at(ws, now) == expected
+
+    # Bootstrap (no last_run) => None.
+    assert manager._resident_next_run_at(ws, None) is None
+    # Paused => None.
+    paused = ws.model_copy(update={"resident_agent_paused": True})
+    assert manager._resident_next_run_at(paused, now) is None
+    # Disabled => None.
+    disabled = ws.model_copy(update={"resident_agent_enabled": False})
+    assert manager._resident_next_run_at(disabled, now) is None
+
+
+def test_update_workspace_recomputes_next_run_at(manager: WorkspaceManager, tmp_path: Path) -> None:
+    """Enabling with a prior last_run sets a next-run hint; pausing clears it."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS",
+            path=str(repo),
+            session_prefix="res",
+            resident_agent_enabled=True,
+        )
+    )
+    last_run = datetime.now() - timedelta(minutes=5)
+    workspace = workspace.model_copy(update={"resident_agent_last_run_at": last_run})
+    manager.workspaces[workspace.id] = workspace
+
+    # An update recomputes the hint from the existing last_run.
+    updated = manager.update_workspace(
+        workspace.id, WorkspaceUpdate(resident_agent_interval_minutes=30)
+    )
+    assert updated.resident_agent_next_run_at is not None
+    interval_seconds = 30 * 60
+    jitter = manager._resident_jitter_seconds(updated, interval_seconds)
+    assert updated.resident_agent_next_run_at == last_run + timedelta(
+        seconds=interval_seconds + jitter
+    )
+
+    # Pausing clears the hint (no automatic scheduling while paused).
+    paused = manager.update_workspace(workspace.id, WorkspaceUpdate(resident_agent_paused=True))
+    assert paused.resident_agent_next_run_at is None

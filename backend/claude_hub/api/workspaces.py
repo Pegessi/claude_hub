@@ -106,6 +106,26 @@ async def update_workspace(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+@router.post("/{workspace_id}/resident/run", response_model=Workspace)
+async def run_resident_now(
+    workspace_id: str,
+    current_user: User = Depends(get_current_user),
+) -> Workspace:
+    """Force the resident agent to run on the next monitor tick ("run now").
+
+    Applies the currently-saved directive and periodic tasks. Returns the
+    updated workspace (with ``resident_agent_run_requested_at`` stamped). The
+    cycle fires within one monitor interval and respects the existing
+    WORKING-skip guard (a busy resident defers rather than double-drives).
+    """
+    try:
+        return workspace_manager.request_resident_run(workspace_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Workspace not found") from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 @router.delete("/{workspace_id}", status_code=204)
 async def delete_workspace(
     workspace_id: str,

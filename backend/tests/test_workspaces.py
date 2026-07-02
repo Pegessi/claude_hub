@@ -286,6 +286,88 @@ def test_board_etag_returns_304_when_unchanged(tmp_path: Path) -> None:
     assert changed.headers.get("etag") != etag
 
 
+def test_workspace_periodic_tasks_roundtrip(tmp_path: Path) -> None:
+    """Periodic tasks POST on create, trim/drop-blank, and PATCH-replace via the API."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    client = TestClient(app)
+    created = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Periodic Repo",
+            "path": str(repo),
+            "session_prefix": "per",
+            "resident_agent_enabled": True,
+            "resident_agent_periodic_tasks": [
+                {"id": "a", "text": "  run the linter  ", "enabled": True},
+                {"id": "b", "text": "   ", "enabled": True},
+                {"id": "c", "text": "triage issues", "enabled": False},
+            ],
+        },
+    )
+    assert created.status_code == 201
+    tasks = created.json()["resident_agent_periodic_tasks"]
+    # Blank dropped, text trimmed, order + enabled flags preserved.
+    assert [t["id"] for t in tasks] == ["a", "c"]
+    assert tasks[0]["text"] == "run the linter"
+    assert tasks[1]["enabled"] is False
+
+    workspace_id = created.json()["id"]
+    patched = client.patch(
+        f"/api/workspaces/{workspace_id}",
+        json={"resident_agent_periodic_tasks": [{"id": "d", "text": "new chore"}]},
+    )
+    assert patched.status_code == 200
+    patched_tasks = patched.json()["resident_agent_periodic_tasks"]
+    assert [t["id"] for t in patched_tasks] == ["d"]
+    assert patched_tasks[0]["enabled"] is True  # model default
+
+
+def test_run_resident_now_endpoint(tmp_path: Path) -> None:
+    """POST /resident/run stamps the run flag on an enabled resident."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Run Now Repo",
+            "path": str(repo),
+            "session_prefix": "run",
+            "resident_agent_enabled": True,
+        },
+    ).json()
+    assert workspace["resident_agent_run_requested_at"] is None
+
+    response = client.post(f"/api/workspaces/{workspace['id']}/resident/run")
+    assert response.status_code == 200
+    assert response.json()["resident_agent_run_requested_at"] is not None
+
+
+def test_run_resident_now_missing_workspace_404(tmp_path: Path) -> None:
+    client = TestClient(app)
+    response = client.post("/api/workspaces/does-not-exist/resident/run")
+    assert response.status_code == 404
+
+
+def test_run_resident_now_disabled_resident_400(tmp_path: Path) -> None:
+    """Requesting a run on a workspace with no enabled resident is a 400."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "No Resident", "path": str(repo), "session_prefix": "nor"},
+    ).json()
+    assert workspace["resident_agent_enabled"] is False
+
+    response = client.post(f"/api/workspaces/{workspace['id']}/resident/run")
+    assert response.status_code == 400
+
+
 def test_task_goal_packet_create_update_and_legacy_normalization(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
