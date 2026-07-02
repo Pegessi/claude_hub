@@ -8408,6 +8408,18 @@ onUnmounted(() => {
 .periodic-task-enable {
   flex: 0 0 auto;
   cursor: pointer;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--ch-color-accent);
+  /* Reset default browser outline so the focus ring does not stretch to row
+     height; we draw a tidy ring on :focus-visible instead. */
+  outline: none;
+}
+
+.periodic-task-enable:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring-strong);
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 
 .periodic-task-text {
@@ -8416,7 +8428,22 @@ onUnmounted(() => {
 
 .periodic-task-text--disabled {
   opacity: 0.55;
+  /* Only strike through real text; empty rows showing placeholder should not
+     look "deleted" — the faded opacity is already enough to convey disabled.
+     We apply line-through via a wrapper-less trick by using ::placeholder
+     normalization: browsers do not let text-decoration reach the placeholder
+     unless the input has value, so we key the strike-through off an
+     :not(:placeholder-shown) selector. Since every row shares the same
+     placeholder, this reliably means "the user typed something". */
+}
+
+.periodic-task-text--disabled:not(:placeholder-shown) {
   text-decoration: line-through;
+}
+
+.periodic-task-text--disabled::placeholder {
+  text-decoration: none;
+  opacity: 0.6;
 }
 
 .periodic-task-remove {
