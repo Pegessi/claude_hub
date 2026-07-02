@@ -5,6 +5,37 @@
 
 ## Unreleased
 
+### fix(ui): task detail report rendering polish
+
+- **What**: verbose report sub-sections (Validation, Acceptance Check, Review
+  Profiles, Artifacts, Risks) inside the task detail **Progress** panel are
+  now collapsed by default inside nested `<details>` blocks, each with a
+  concise summary chip showing counts/status (e.g. `7 passed · 1 partial`,
+  `Code passed · UI failed`, `Artifacts (3)`) or a short text preview for
+  free-form markdown. The main report message, changed-files chips,
+  Confidence, and a new "awaiting acceptance" chip on final reports of
+  human-acceptance-pending tasks remain visible at the top level. The latest
+  report still auto-expands but with sub-sections folded, so a single scan
+  surfaces the verdict without rendering dozens of list items / long
+  markdown blocks up-front.
+- **Why**: tasks that accumulate many/large reports (especially autonomous
+  runs with multiple iterations) previously laid out every acceptance_check
+  `<li>`, every profile result, and full validation/risks markdown on
+  initial open, producing heavy DOM and making the latest verdict hard to
+  find at a glance.
+- **How**: refactor the `.report-card` body in `AgentWorkspaceView.vue` to
+  wrap the five verbose `.report-note` blocks in nested
+  `<details class="report-subsection">` with `:open` bound to nothing
+  (default-closed). Added small view-model helpers (`validationPreview`,
+  `risksPreview`, `artifactCount`, `profileResultSummary` reuse,
+  `reportIsAwaitingAcceptance`) that reuse existing acceptance/profile
+  summaries and only strip markdown for the preview chips. Added an
+  `.report-awaiting-acceptance` pill (uses the existing warning color token
+  alongside the existing `.report-summary-label` style, no new generic
+  `.chip` class). No new dependencies, no backend/store changes.
+- **Validation**: `pnpm eslint`, `pnpm vue-tsc`, and `pnpm build` all pass
+  in `frontend/`.
+
 ### feat: resident-created tasks target develop integration branch
 
 - **What**: tasks created by the resident agent (`origin=resident`) now

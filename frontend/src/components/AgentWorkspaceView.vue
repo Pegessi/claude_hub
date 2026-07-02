@@ -987,6 +987,12 @@
                     <summary>
                       <span class="report-state">{{ report.state }}</span>
                       <span
+                        v-if="reportIsAwaitingAcceptance(report)"
+                        class="report-summary-label report-awaiting-acceptance"
+                      >
+                        awaiting acceptance
+                      </span>
+                      <span
                         v-if="reportSummaryLabel(report)"
                         class="report-summary-label"
                       >
@@ -1026,24 +1032,45 @@
                         {{ file }}
                       </button>
                     </div>
-                    <div
+                    <details
                       v-if="report.validation"
-                      class="report-note"
+                      class="report-subsection report-note"
+                      :open="isReportSubsectionOpen(report, 'validation')"
+                      @toggle="event => toggleReportSubsection(report, 'validation', event)"
                     >
-                      <strong>Validation</strong>
+                      <summary>
+                        <strong>Validation</strong>
+                        <span
+                          v-if="validationPreview(report)"
+                          class="report-subsection-preview"
+                        >{{ validationPreview(report) }}</span>
+                      </summary>
                       <MarkdownContent
+                        v-if="isReportSubsectionOpen(report, 'validation')"
                         compact
                         link-markdown-paths
                         :text="report.validation"
                         @markdown-path-click="path => openMarkdownPreviewModal(path, report)"
                       />
-                    </div>
-                    <div
+                    </details>
+                    <details
                       v-if="acceptanceChecksFor(report).length > 0"
-                      class="report-note"
+                      class="report-subsection report-note"
+                      :open="isReportSubsectionOpen(report, 'acceptance')"
+                      @toggle="event => toggleReportSubsection(report, 'acceptance', event)"
                     >
-                      <strong>Acceptance Check</strong>
-                      <ol class="acceptance-check-list">
+                      <summary>
+                        <strong>Acceptance Check</strong>
+                        <span
+                          v-if="acceptanceSummary(report)"
+                          class="report-summary-label"
+                        >{{ acceptanceSummary(report) }}</span>
+                        <span class="report-subsection-count">({{ acceptanceChecksFor(report).length }} checks)</span>
+                      </summary>
+                      <ol
+                        v-if="isReportSubsectionOpen(report, 'acceptance')"
+                        class="acceptance-check-list"
+                      >
                         <li
                           v-for="check in acceptanceChecksFor(report)"
                           :key="`${check.criterion}-${check.status}`"
@@ -1052,13 +1079,25 @@
                           {{ check.criterion }} - {{ check.evidence }}
                         </li>
                       </ol>
-                    </div>
-                    <div
+                    </details>
+                    <details
                       v-if="profileResultsFor(report).length > 0"
-                      class="report-note"
+                      class="report-subsection report-note"
+                      :open="isReportSubsectionOpen(report, 'profiles')"
+                      @toggle="event => toggleReportSubsection(report, 'profiles', event)"
                     >
-                      <strong>Review Profiles</strong>
-                      <ol class="profile-result-list">
+                      <summary>
+                        <strong>Review Profiles</strong>
+                        <span
+                          v-if="profileResultSummary(profileResultsFor(report))"
+                          class="report-summary-label"
+                        >{{ profileResultSummary(profileResultsFor(report)) }}</span>
+                        <span class="report-subsection-count">({{ profileResultsFor(report).length }} profiles)</span>
+                      </summary>
+                      <ol
+                        v-if="isReportSubsectionOpen(report, 'profiles')"
+                        class="profile-result-list"
+                      >
                         <li
                           v-for="result in profileResultsFor(report)"
                           :key="`${result.profile}-${result.status}`"
@@ -1070,67 +1109,74 @@
                           </template>
                         </li>
                       </ol>
-                    </div>
-                    <div
-                      v-if="report.artifact_refs?.length"
-                      class="report-note"
+                    </details>
+                    <details
+                      v-if="artifactCount(report) > 0"
+                      class="report-subsection report-note"
+                      :open="isReportSubsectionOpen(report, 'artifacts')"
+                      @toggle="event => toggleReportSubsection(report, 'artifacts', event)"
                     >
-                      <strong>Artifacts</strong>
-                      <div class="report-artifacts">
-                        <div
-                          v-for="artifact in report.artifact_refs"
-                          :key="artifact"
-                          class="report-artifact"
-                        >
-                          <span>{{ artifact }}</span>
-                          <button
-                            v-if="isMarkdownArtifact(artifact)"
-                            type="button"
-                            class="artifact-preview-button"
-                            :disabled="isArtifactPreviewLoading(report, artifact)"
-                            @click="toggleArtifactPreview(report, artifact)"
+                      <summary>
+                        <strong>Artifacts</strong>
+                        <span class="report-subsection-count">({{ artifactCount(report) }})</span>
+                      </summary>
+                      <template v-if="isReportSubsectionOpen(report, 'artifacts')">
+                        <div class="report-artifacts">
+                          <div
+                            v-for="artifact in report.artifact_refs"
+                            :key="artifact"
+                            class="report-artifact"
                           >
-                            {{ artifactPreviewButtonLabel(report, artifact) }}
-                          </button>
+                            <span>{{ artifact }}</span>
+                            <button
+                              v-if="isMarkdownArtifact(artifact)"
+                              type="button"
+                              class="artifact-preview-button"
+                              :disabled="isArtifactPreviewLoading(report, artifact)"
+                              @click="toggleArtifactPreview(report, artifact)"
+                            >
+                              {{ artifactPreviewButtonLabel(report, artifact) }}
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                      <div
-                        v-for="artifact in markdownArtifactRefs(report)"
-                        :key="`${artifact}-preview`"
-                        class="artifact-preview"
-                      >
-                        <template v-if="expandedArtifactKey === artifactPreviewKey(report, artifact)">
-                          <div
-                            v-if="artifactPreviewErrors[artifactPreviewKey(report, artifact)]"
-                            class="artifact-preview-status artifact-preview-error"
-                          >
-                            {{ artifactPreviewErrors[artifactPreviewKey(report, artifact)] }}
-                          </div>
-                          <div
-                            v-else-if="!artifactPreviews[artifactPreviewKey(report, artifact)]"
-                            class="artifact-preview-status"
-                          >
-                            Loading Markdown preview...
-                          </div>
-                          <template v-else>
-                            <div class="artifact-preview-header">
-                              <span>{{ artifactPreviews[artifactPreviewKey(report, artifact)].filename }}</span>
-                              <span>{{ formatAttachmentSize(artifactPreviews[artifactPreviewKey(report, artifact)].size_bytes) }}</span>
-                            </div>
-                            <MarkdownContent
-                              class="artifact-preview-content"
-                              :text="artifactPreviews[artifactPreviewKey(report, artifact)].content"
-                            />
+                        <div
+                          v-for="artifact in markdownArtifactRefs(report)"
+                          :key="`${artifact}-preview`"
+                          class="artifact-preview"
+                        >
+                          <template v-if="expandedArtifactKey === artifactPreviewKey(report, artifact)">
                             <div
-                              v-if="artifactPreviews[artifactPreviewKey(report, artifact)].truncated"
+                              v-if="artifactPreviewErrors[artifactPreviewKey(report, artifact)]"
+                              class="artifact-preview-status artifact-preview-error"
+                            >
+                              {{ artifactPreviewErrors[artifactPreviewKey(report, artifact)] }}
+                            </div>
+                            <div
+                              v-else-if="!artifactPreviews[artifactPreviewKey(report, artifact)]"
                               class="artifact-preview-status"
                             >
-                              Preview truncated to the first 512 KB.
+                              Loading Markdown preview...
                             </div>
+                            <template v-else>
+                              <div class="artifact-preview-header">
+                                <span>{{ artifactPreviews[artifactPreviewKey(report, artifact)].filename }}</span>
+                                <span>{{ formatAttachmentSize(artifactPreviews[artifactPreviewKey(report, artifact)].size_bytes) }}</span>
+                              </div>
+                              <MarkdownContent
+                                class="artifact-preview-content"
+                                :text="artifactPreviews[artifactPreviewKey(report, artifact)].content"
+                              />
+                              <div
+                                v-if="artifactPreviews[artifactPreviewKey(report, artifact)].truncated"
+                                class="artifact-preview-status"
+                              >
+                                Preview truncated to the first 512 KB.
+                              </div>
+                            </template>
                           </template>
-                        </template>
-                      </div>
-                    </div>
+                        </div>
+                      </template>
+                    </details>
                     <div
                       v-if="report.confidence !== null && report.confidence !== undefined"
                       class="report-note report-note--inline"
@@ -1139,18 +1185,27 @@
                       <span>{{ formatAutonomousScore(report.confidence) }}</span>
                       <span v-if="report.requires_human_judgment">Human judgment required</span>
                     </div>
-                    <div
+                    <details
                       v-if="report.risks"
-                      class="report-note"
+                      class="report-subsection report-note"
+                      :open="isReportSubsectionOpen(report, 'risks')"
+                      @toggle="event => toggleReportSubsection(report, 'risks', event)"
                     >
-                      <strong>Risks</strong>
+                      <summary>
+                        <strong>Risks</strong>
+                        <span
+                          v-if="risksPreview(report)"
+                          class="report-subsection-preview"
+                        >{{ risksPreview(report) }}</span>
+                      </summary>
                       <MarkdownContent
+                        v-if="isReportSubsectionOpen(report, 'risks')"
                         compact
                         link-markdown-paths
                         :text="report.risks"
                         @markdown-path-click="path => openMarkdownPreviewModal(path, report)"
                       />
-                    </div>
+                    </details>
                   </details>
                 </li>
               </ol>
@@ -3064,6 +3119,7 @@ const expandedArtifactKey = ref<string | null>(null)
 const artifactPreviews = reactive<Record<string, WorkspaceArtifactPreview>>({})
 const artifactPreviewErrors = reactive<Record<string, string>>({})
 const artifactPreviewLoading = reactive<Record<string, boolean>>({})
+const openReportSubsections = reactive<Record<string, boolean>>({})
 const markdownPreviewModalPath = ref<string | null>(null)
 const markdownPreviewModalReportId = ref<string | null>(null)
 const markdownPreviewModalContent = ref<WorkspaceArtifactPreview | null>(null)
@@ -3525,6 +3581,41 @@ function profileResultSummary(results: ReviewProfileResult[]): string {
     .join(' · ')
 }
 
+function _markdownPreview(text: string | null | undefined, max = 80): string {
+  if (!text) return ''
+  const stripped = text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/^\s*[-*+]\s+/gm, '')
+    .replace(/^\s*\d+\.\s+/gm, '')
+    .replace(/[*_~>]/g, '')
+    .replace(/\[(.*?)\]\(.*?\)/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (stripped.length <= max) return stripped
+  return stripped.slice(0, Math.max(0, max - 1)) + '…'
+}
+
+function validationPreview(report: AgentReport, max = 80): string {
+  return _markdownPreview(report.validation, max)
+}
+
+function risksPreview(report: AgentReport, max = 80): string {
+  return _markdownPreview(report.risks, max)
+}
+
+function artifactCount(report: AgentReport): number {
+  return report.artifact_refs?.length ?? 0
+}
+
+function reportIsAwaitingAcceptance(report: AgentReport): boolean {
+  const task = selectedTask.value
+  if (!task) return false
+  if (!task.human_acceptance_requested_at || task.human_accepted_at) return false
+  return isFinalReport(report)
+}
+
 function isMarkdownArtifact(artifact: string): boolean {
   const value = artifact.trim().split(/[?#]/)[0] || ''
   return /\.(md|markdown|mdown|mkd)(?::\d+)?$/i.test(value)
@@ -3540,6 +3631,24 @@ function markdownArtifactRefs(report: AgentReport): string[] {
 
 function artifactPreviewKey(report: AgentReport, artifact: string): string {
   return `${report.id}:${artifact}`
+}
+
+function reportSubsectionKey(report: AgentReport, subsection: string): string {
+  return `${report.id}:${subsection}`
+}
+
+function isReportSubsectionOpen(report: AgentReport, subsection: string): boolean {
+  return openReportSubsections[reportSubsectionKey(report, subsection)] === true
+}
+
+function toggleReportSubsection(
+  report: AgentReport,
+  subsection: string,
+  event: Event,
+): void {
+  const el = event.currentTarget as HTMLDetailsElement | null
+  const key = reportSubsectionKey(report, subsection)
+  openReportSubsections[key] = el?.open === true
 }
 
 function markdownDocumentPreviewKey(document: WorkspaceMarkdownDocument): string {
@@ -7829,6 +7938,14 @@ onUnmounted(() => {
   background: var(--ch-color-chip-bg);
 }
 
+.report-awaiting-acceptance {
+  color: var(--ch-color-warning);
+  background: var(--ch-color-warning-bg);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
 .report-summary-message {
   flex: 1 1 auto;
   min-width: 0;
@@ -8123,6 +8240,63 @@ onUnmounted(() => {
 
 .report-note--inline > span {
   line-height: 1;
+}
+
+.report-subsection {
+  padding-top: 2px;
+  padding-bottom: 2px;
+}
+
+.report-subsection > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 8px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.report-subsection > summary::-webkit-details-marker {
+  display: none;
+}
+
+.report-subsection > summary::before {
+  content: '▸';
+  color: var(--ch-color-text-muted);
+  font-size: 10px;
+  line-height: 1;
+  flex: 0 0 auto;
+  transition: transform var(--ch-motion-fast);
+}
+
+.report-subsection[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.report-subsection[open] > summary {
+  margin-bottom: 5px;
+}
+
+.report-subsection > summary strong {
+  display: inline;
+  margin: 0;
+}
+
+.report-subsection-preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ch-color-text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-style: italic;
+}
+
+.report-subsection-count {
+  flex: 0 0 auto;
+  color: var(--ch-color-text-muted);
+  font-size: 11px;
 }
 
 .workspace-modal-overlay {
