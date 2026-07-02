@@ -14,6 +14,13 @@ class Settings(BaseSettings):
     ttyd_base_port: int = 10000
     default_command: str = "claude"
 
+    # Persistence backend for workspace state (spike / opt-in).
+    # "json" (default) preserves the current nested-JSON behavior exactly.
+    # "sqlite" selects the additive SQLite prototype. This flag is only consulted
+    # by claude_hub.services.storage.get_storage_backend(); the running workspace
+    # manager still uses the JSON path regardless, so the default is a no-op.
+    workspace_storage_backend: str = "json"
+
     # Feishu OAuth settings
     feishu_app_id: Optional[str] = None
     feishu_app_secret: Optional[str] = None

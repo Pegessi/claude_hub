@@ -132,6 +132,42 @@
   always reflect the true total.
 - **Validation**: `pnpm lint` clean; `pnpm build` (vue-tsc + vite) clean.
 
+### chore: SQLite persistence safety spike — additive storage backend (OFF by default)
+
+- **What**: an additive, opt-in `StorageBackend` abstraction under
+  `backend/claude_hub/services/storage/` — a `JsonStorageBackend` (faithful,
+  atomic-write-capable extraction of the current nested-JSON layout),
+  a stdlib-`sqlite3` `SqliteStorageBackend` prototype (one JSON-blob row per
+  entity, `schema_meta` versioning, WAL + transactional saves), a
+  non-destructive `migrate.py` (`import_json_to_sqlite` /
+  `export_sqlite_to_json`) — both stage to a temp target, round-trip-verify,
+  and only then promote (import discards a bad DB; export writes into a staging
+  dir, verifies, then atomically swaps it into place, keeping a `.bak` of the
+  prior JSON) — and an
+  `atomic_write_text` helper. Selection is behind a new
+  `workspace_storage_backend` setting that **defaults to `json`**.
+- **Why**: the user directive that storage should scale and may use SQLite,
+  without data loss. The current path (`workspace_manager/_persistence.py::
+  _save_state`) rewrites the *entire* per-workspace `state.json` on every
+  mutation via a **non-atomic** `write_text` (measured: 7.3 MB / 112 tasks /
+  2153 reports for one workspace, 157 workspaces on disk, 34 save call sites) —
+  a crash mid-write truncates the whole file.
+- **How**: the abstraction captures the existing `model_dump(mode="json")`
+  serialization boundary, so a backend swap is invisible to all 34 call sites.
+  **Not wired into the running manager** — `_save_state`/`_load_state` are
+  unchanged, so the default behavior is byte-identical. This is a design-first
+  spike; the ADR
+  (`docs/working-logs/2026-07-03-sqlite-persistence-safety-spike.md`) documents
+  schema versioning, atomic backup/restore, JSON→SQLite import, rollback, the
+  opt-in rollout ladder, and the recommended wiring follow-up.
+- **Validation**: `black`/`isort`/`mypy .` clean; backend tests via the CI path
+  (`--ignore=tests/test_terminal_replay.py
+  --ignore=tests/test_terminal_input_latency_perf.py`) **554 passed** (+15 new
+  storage tests: round-trip preservation for representative workspace/task/
+  session/report data, default-backend-is-JSON, non-destructive verified import
+  AND export, export-failure-leaves-live-tree-untouched, atomic-write crash
+  safety). No live `~/.claude_hub` state migrated or touched.
+
 ### feat: resident behavior — run-now, next-run visibility, managed periodic tasks
 
 - **What**: the per-workspace resident agent gains three interaction
