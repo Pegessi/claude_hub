@@ -110,6 +110,35 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     workspaceAgents.value[0] || null
   )
 
+  // Stable per-status task arrays. Derived once per board update instead of
+  // being re-filtered on every template expression (the board polls every 2.5s
+  // and each column used to call .filter() ~6 times per render).
+  const tasksByStatusMap = computed<Record<WorkspaceTaskStatus, WorkspaceTask[]>>(() => {
+    const map: Record<WorkspaceTaskStatus, WorkspaceTask[]> = {
+      todo: [],
+      queued: [],
+      working: [],
+      review: [],
+      done: [],
+    }
+    for (const task of tasks.value) {
+      const arr = map[task.status]
+      if (arr) arr.push(task)
+    }
+    return map
+  })
+
+  // Stable task-id -> latest report map, derived once per board update.
+  // Without this, latestReportForTask() filters the full reports array for
+  // every task card multiple times per render.
+  const latestReportByTaskId = computed<Record<string, AgentReport>>(() => {
+    const map: Record<string, AgentReport> = {}
+    for (const report of reports.value) {
+      if (report.task_id) map[report.task_id] = report
+    }
+    return map
+  })
+
   function sessionForTask(task: WorkspaceTask): ManagedSession | null {
     if (!task.session_id) return null
     return sessions.value.find(session => session.id === task.session_id) || null
@@ -120,8 +149,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   function latestReportForTask(task: WorkspaceTask): AgentReport | null {
-    const taskReports = reportsForTask(task)
-    return taskReports.length > 0 ? taskReports[taskReports.length - 1] : null
+    return latestReportByTaskId.value[task.id] ?? null
   }
 
   // ---- On-demand full report history (detail panel) ----
@@ -643,6 +671,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     dispatcherAgent,
     residentAgent,
     workspaceAgent,
+    tasksByStatusMap,
+    latestReportByTaskId,
     isLoading,
     error,
     notifications,
