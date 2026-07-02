@@ -31,6 +31,27 @@
   origin=human, and that the legacy non-master and master-mode resident
   prompts are unchanged; full CI-path pytest passes.
 
+### perf: board responsiveness with many historical tasks
+
+- **What**: two targeted fixes for the workspace board when task count grows
+  past ~100. (1) Task-by-status grouping is now a memoized Pinia computed
+  (`tasksByStatusMap`) instead of a per-call `.filter()` that ran ~30 times per
+  render across column counts, class bindings, and v-for iterations.
+  (2) The **Done** column collapses to the 5 most recent completed tasks by
+  default with a "Show all N" toggle, cutting DOM nodes for the dominant
+  historical column by ~95% on this workspace. Active / queued / working /
+  review columns are never collapsed.
+- **Why**: every 2.5s board poll replaced the full task list, which forced Vue
+  to diff 100+ done-task cards plus redundant filter passes; input latency and
+  scroll jank were noticeable once the workspace accumulated history.
+- **How**: `tasksByStatusMap` and `latestReportByTaskId` computeds in
+  `workspaceStore` derive stable arrays/maps once per board update; the
+  component's `tasksForColumn(status)` / `taskCountForStatus(status)` helpers
+  route the done column through a `visibleDoneTasks` computed that slices to
+  `DONE_TASK_COLLAPSE_LIMIT = 5` unless `showAllDoneTasks` is toggled. Counts
+  always reflect the true total.
+- **Validation**: `pnpm lint` clean; `pnpm build` (vue-tsc + vite) clean.
+
 ### feat: resident behavior — run-now, next-run visibility, managed periodic tasks
 
 - **What**: the per-workspace resident agent gains three interaction

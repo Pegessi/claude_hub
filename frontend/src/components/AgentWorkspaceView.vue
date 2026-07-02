@@ -178,7 +178,7 @@
         <span>{{ workspaceAgents.length }} agents</span>
         <span>{{ reviewerAgents.length + temporaryReviewers.length }} reviewers</span>
         <strong>{{ workspaceAgents.filter(agent => agent.runtime_status === 'working').length }} working</strong>
-        <span>{{ tasksByStatus('queued').length }} queued</span>
+        <span>{{ taskCountForStatus('queued') }} queued</span>
         <button
           type="button"
           class="summary-chip-button"
@@ -192,7 +192,7 @@
           v-for="column in columns"
           :key="column.status"
         >
-          {{ column.label }} {{ tasksByStatus(column.status).length }}
+          {{ column.label }} {{ taskCountForStatus(column.status) }}
         </span>
       </div>
     </div>
@@ -416,7 +416,7 @@
             :class="[
               'task-column',
               {
-                'task-column--empty': tasksByStatus(column.status).length === 0,
+                'task-column--empty': taskCountForStatus(column.status) === 0,
                 'task-column--collapsed': isMobileColumnCollapsed(column.status),
               },
             ]"
@@ -424,7 +424,16 @@
             <div class="column-header">
               <h2>{{ column.label }}</h2>
               <div class="column-meta">
-                <span>{{ tasksByStatus(column.status).length }}</span>
+                <span>{{ taskCountForStatus(column.status) }}</span>
+                <button
+                  v-if="column.status === 'done' && doneTasksTotal > DONE_TASK_COLLAPSE_LIMIT"
+                  type="button"
+                  class="column-collapse-button column-done-toggle"
+                  :aria-expanded="showAllDoneTasks"
+                  @click="showAllDoneTasks = !showAllDoneTasks"
+                >
+                  {{ showAllDoneTasks ? 'Show recent' : `Show all ${doneTasksTotal}` }}
+                </button>
                 <button
                   type="button"
                   class="column-collapse-button"
@@ -437,7 +446,7 @@
             </div>
             <div class="task-list">
               <article
-                v-for="task in tasksByStatus(column.status)"
+                v-for="task in tasksForColumn(column.status)"
                 :key="task.id"
                 :class="[
                   'task-card',
@@ -629,7 +638,7 @@
                 </div>
               </article>
               <div
-                v-if="tasksByStatus(column.status).length === 0"
+                v-if="taskCountForStatus(column.status) === 0"
                 class="column-empty"
               >
                 No tasks
@@ -2984,6 +2993,7 @@ const {
   activeWorkspaceId,
   board,
   tasks,
+  tasksByStatusMap,
   activeFeedbackLessons,
   workspaceAgents,
   reviewerAgents,
@@ -3080,6 +3090,32 @@ const columns: { status: WorkspaceTaskStatus; label: string }[] = [
   { status: 'done', label: 'Done' },
 ]
 
+// Done-task collapse: with 100+ completed tasks, rendering all done cards on
+// every 2.5s poll dominates DOM and re-render cost. Show the N most recent
+// done tasks by default with a toggle to reveal all.
+const DONE_TASK_COLLAPSE_LIMIT = 5
+const showAllDoneTasks = ref(false)
+const doneTasksTotal = computed(() => tasksByStatusMap.value.done.length)
+const visibleDoneTasks = computed(() => {
+  const all = tasksByStatusMap.value.done
+  if (showAllDoneTasks.value || all.length <= DONE_TASK_COLLAPSE_LIMIT) return all
+  // Tasks are in insertion order (oldest first); show the most recent N.
+  return all.slice(all.length - DONE_TASK_COLLAPSE_LIMIT)
+})
+
+// Stable per-column task lists. Non-done columns get the full list from the
+// store's memoized map; the done column gets the (possibly collapsed) list.
+function tasksForColumn(status: WorkspaceTaskStatus): WorkspaceTask[] {
+  if (status === 'done') return visibleDoneTasks.value
+  return tasksByStatusMap.value[status] || []
+}
+
+// Backwards-compat: total count for a status (always the true total, even
+// when done tasks are collapsed).
+function taskCountForStatus(status: WorkspaceTaskStatus): number {
+  return (tasksByStatusMap.value[status] || []).length
+}
+
 // Show a graceful skeleton over the board while a workspace switch is in
 // flight, or on the very first board load (board still null) for the active
 // workspace. Background polling refreshes do not trigger this — once a board
@@ -3171,7 +3207,7 @@ const mobileWorkspaceSummary = computed(() => {
   const agentCount = workspaceAgents.value.length
   const reviewerCount = reviewerAgents.value.length + temporaryReviewers.value.length
   const workingCount = workspaceAgents.value.filter(agent => agent.runtime_status === 'working').length
-  const queuedCount = tasksByStatus('queued').length
+  const queuedCount = taskCountForStatus('queued')
   return `${agentCount} agents · ${reviewerCount} reviewers · ${workingCount} working · ${queuedCount} queued`
 })
 
@@ -3751,10 +3787,6 @@ function startOptionsFor(task: WorkspaceTask): TaskStartOptions {
     }
   }
   return startOptions[task.id]
-}
-
-function tasksByStatus(status: WorkspaceTaskStatus) {
-  return tasks.value.filter(task => task.status === status)
 }
 
 function sessionForTask(task: WorkspaceTask) {
@@ -6744,6 +6776,24 @@ onUnmounted(() => {
 
 .column-collapse-button {
   display: none;
+}
+
+.column-done-toggle {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--ch-color-text-muted);
+  background: var(--ch-color-surface-elevated);
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--radius-sm, 4px);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.column-done-toggle:hover {
+  color: var(--ch-color-text);
+  border-color: var(--ch-color-border-strong);
 }
 
 .task-list {
