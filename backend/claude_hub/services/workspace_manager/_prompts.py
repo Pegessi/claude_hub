@@ -349,7 +349,47 @@ class _PromptsMixin:
             "Final reports should include task_id, state, message, message_en, message_zh, "
             "changed_files, validation, risks, acceptance_check, review_decision, review_reason, "
             "and risk_level. acceptance_check should map each Goal Packet acceptance criterion "
-            "to status passed, failed, partial, or not_checked with evidence."
+            "to status passed, failed, partial, or not_checked with evidence.\n\n"
+            f"{self._resident_integration_workflow_block(task)}"
+        )
+
+    def _resident_integration_workflow_block(self, task: "WorkspaceTask") -> str:
+        """Extra workflow instructions injected only for resident-created tasks.
+
+        Returns an empty string for human-created tasks so their assignment prompt
+        is byte-stable (modulo unrelated formatting) and continues to follow the
+        CLAUDE.md Mandatory Workflow default of branching from ``main``.
+
+        For resident-created tasks (``origin == RESIDENT``), workers must branch
+        from the local ``develop`` integration branch (if it exists) rather than
+        directly from ``main``, integrate only into ``develop`` within the scope
+        of the task, and keep all existing main-protection rules intact. The
+        runtime check for ``develop`` is done by the worker (``git rev-parse
+        --verify develop``) so the prompt stays deterministic regardless of
+        which repository the workspace is rooted in.
+        """
+        if task.origin != WorkspaceTaskOrigin.RESIDENT:
+            return ""
+        return (
+            "Resident integration workflow (this task was created by the resident agent):\n"
+            "- This workspace uses a `develop` integration branch for resident-created "
+            "work. Before creating your feature worktree, check whether a local "
+            "branch named `develop` exists (`git rev-parse --verify develop`). "
+            "If it does, create your isolated worktree/branch from `develop`: "
+            "`git worktree add ../claude_hub-<slug> -b feat/<slug> develop`. "
+            "If `develop` does not exist (e.g. on a fresh clone), fall back to "
+            "cutting from `main` as documented in CLAUDE.md.\n"
+            "- Treat `develop` as your integration target within the scope of this "
+            "task. Do NOT merge into `main`, do NOT push to any remote, and do NOT "
+            "use destructive git commands on shared branches (no `git reset --hard` "
+            "on `main`/`develop`, no `git push --force`, no `git clean -fdx`, no "
+            "deleting unmerged branches, no rebasing pushed branches).\n"
+            "- All existing safety rules still apply: Goal Packet approval gate, "
+            "explicit target_session_id (when dispatching subtasks under master "
+            "mode), no auto-creating worker agents, and main merge/push still "
+            "require explicit human approval in the task. Nothing in this block "
+            "weakens those constraints — it only changes which long-lived branch "
+            "you cut from and propose integration into.\n"
         )
 
     def _lesson_context_payload(self, workspace: Workspace, query: str) -> list[dict[str, Any]]:
