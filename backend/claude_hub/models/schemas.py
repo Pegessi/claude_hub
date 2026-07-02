@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Optional
@@ -454,6 +455,21 @@ class RemoteProfile(BaseModel):
     default_cwd: Optional[str] = None
 
 
+class ResidentPeriodicTask(BaseModel):
+    """A single recurring instruction the resident agent runs every cycle.
+
+    Periodic tasks are the structured replacement for burying recurring work as
+    prose inside the free-text ``resident_agent_directive``. Each enabled entry
+    is rendered as an explicit numbered checklist item in the resident prompt on
+    every wake-up. They all run together on each resident cycle at the workspace
+    interval — there is deliberately no per-entry independent schedule.
+    """
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    text: str
+    enabled: bool = True
+
+
 class WorkspaceCreate(BaseModel):
     """Payload for creating an agent workspace."""
 
@@ -469,6 +485,7 @@ class WorkspaceCreate(BaseModel):
     resident_agent_paused: bool = False
     resident_agent_interval_minutes: int = 60
     resident_agent_directive: Optional[str] = None
+    resident_agent_periodic_tasks: List[ResidentPeriodicTask] = Field(default_factory=list)
     resident_agent_type: AgentType = AgentType.CLAUDE
     resident_agent_env: Dict[str, str] = Field(default_factory=dict)
     resident_agent_solo_mode: bool = True
@@ -498,7 +515,15 @@ class Workspace(BaseModel):
     resident_agent_interval_minutes: int = 60
     resident_agent_session_id: Optional[str] = None
     resident_agent_directive: Optional[str] = None
+    resident_agent_periodic_tasks: List[ResidentPeriodicTask] = Field(default_factory=list)
     resident_agent_last_run_at: Optional[datetime] = None
+    # Server-managed scheduling hints. ``run_requested_at`` is set by the
+    # run-now endpoint to force a single manual cycle on the next monitor tick
+    # (cleared once the resident actually runs). ``next_run_at`` is the computed
+    # overdue-backstop time (last_run + interval + jitter) surfaced to the UI so
+    # users can see WHEN the resident will next wake on its own.
+    resident_agent_run_requested_at: Optional[datetime] = None
+    resident_agent_next_run_at: Optional[datetime] = None
     resident_agent_type: AgentType = AgentType.CLAUDE
     resident_agent_env: Dict[str, str] = Field(default_factory=dict)
     resident_agent_solo_mode: bool = True
@@ -524,6 +549,7 @@ class WorkspaceUpdate(BaseModel):
     resident_agent_paused: Optional[bool] = None
     resident_agent_interval_minutes: Optional[int] = None
     resident_agent_directive: Optional[str] = None
+    resident_agent_periodic_tasks: Optional[List[ResidentPeriodicTask]] = None
     resident_agent_type: Optional[AgentType] = None
     resident_agent_env: Optional[Dict[str, str]] = None
     resident_agent_solo_mode: Optional[bool] = None
