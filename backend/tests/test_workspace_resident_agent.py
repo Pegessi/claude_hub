@@ -23,7 +23,9 @@ from claude_hub.models import (
     WorkspaceCreate,
     WorkspaceSessionRole,
     WorkspaceTask,
+    WorkspaceTaskExecutionComplexity,
     WorkspaceTaskMode,
+    WorkspaceTaskOrigin,
     WorkspaceTaskStatus,
     WorkspaceUpdate,
 )
@@ -1904,3 +1906,131 @@ def test_update_workspace_recomputes_next_run_at(manager: WorkspaceManager, tmp_
     # Pausing clears the hint (no automatic scheduling while paused).
     paused = manager.update_workspace(workspace.id, WorkspaceUpdate(resident_agent_paused=True))
     assert paused.resident_agent_next_run_at is None
+
+
+# --- Resident integration workflow block in worker assignment prompt ---------
+#
+# When a task has origin=RESIDENT (created by the resident), the assignment
+# prompt carries an extra block instructing workers to cut their feature branch
+# from develop (when it exists) and to not merge/push main without approval.
+# Human-origin tasks get no such block and remain byte-stable vs. the prior
+# prompt. The resident master / legacy non-master prompts are unchanged.
+
+
+def _worker_session(workspace: Workspace) -> ManagedSession:
+    """Minimal orchestrator session for driving _build_task_assignment_prompt."""
+    now = datetime.now()
+    return ManagedSession(
+        id="worker-1",
+        workspace_id=workspace.id,
+        task_id=None,
+        tab_id="tab-worker-1",
+        role=WorkspaceSessionRole.ORCHESTRATOR,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.IDLE,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        current_task_id=None,
+        queued_count=0,
+        title="Worker",
+        workspace_path=workspace.path,
+        tmux_session="claude-hub-tab-worker-1",
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _make_assignment_task(workspace: Workspace, *, origin: WorkspaceTaskOrigin) -> WorkspaceTask:
+    now = datetime.now()
+    return WorkspaceTask(
+        id="task-asgn-1",
+        workspace_id=workspace.id,
+        title="Assignment task",
+        prompt="Do a thing",
+        agent_type=AgentType.CLAUDE,
+        task_mode=WorkspaceTaskMode.REVIEWED,
+        execution_complexity=WorkspaceTaskExecutionComplexity.AUTO,
+        origin=origin,
+        status=WorkspaceTaskStatus.WORKING,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def test_assignment_prompt_human_origin_has_no_develop_block(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """Human-created tasks get the pre-existing assignment prompt without any
+    resident-integration-workflow block — they continue to branch from main
+    per CLAUDE.md Mandatory Workflow."""
+    workspace = _make_workspace(manager, tmp_path)
+    session = _worker_session(workspace)
+    task = _make_assignment_task(workspace, origin=WorkspaceTaskOrigin.HUMAN)
+    prompt = manager._build_task_assignment_prompt(workspace, task, session)
+    assert "Resident integration workflow" not in prompt
+    assert "develop" not in prompt
+    assert "git rev-parse --verify develop" not in prompt
+    # Existing guardrails remain in place.
+    assert "Goal Packet" in prompt
+    assert "review_decision" in prompt
+
+
+def test_assignment_prompt_resident_origin_has_develop_block(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """Resident-created tasks carry an explicit develop-targeting block: cut
+    from develop when it exists, integrate only to develop, no destructive
+    ops, no main merge/push without approval."""
+    workspace = _make_workspace(manager, tmp_path)
+    session = _worker_session(workspace)
+    task = _make_assignment_task(workspace, origin=WorkspaceTaskOrigin.RESIDENT)
+    prompt = manager._build_task_assignment_prompt(workspace, task, session)
+    assert "Resident integration workflow" in prompt
+    assert "origin=resident" in prompt or "created by the resident" in prompt
+    assert "git rev-parse --verify develop" in prompt
+    assert "git worktree add ../claude_hub-<slug> -b feat/<slug> develop" in prompt
+    assert "fall back" in prompt and "main" in prompt
+    # Safety invariants must appear verbatim enough to be enforceable.
+    assert "Do NOT merge into `main`" in prompt
+    assert "do NOT push to any remote" in prompt
+    assert "git reset --hard" in prompt
+    assert "git push --force" in prompt
+    assert "git clean -fdx" in prompt
+    # Goal Packet / review_decision / target_session_id gates are preserved.
+    assert "Goal Packet" in prompt
+    assert "review_decision" in prompt
+    assert "target_session_id" in prompt
+    assert "explicit human approval" in prompt
+
+
+def test_resident_prompts_themselves_do_not_mention_develop(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """The master and legacy non-master resident prompts are NOT modified —
+    develop branching is a worker-side concern, so these stay unchanged."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    (repo / "legacy").mkdir()
+    (repo / "master").mkdir()
+
+    # Legacy non-master (read-only / propose-TODO) prompt.
+    ws_legacy = manager.create_workspace(
+        WorkspaceCreate(name="Legacy WS", path=str(repo / "legacy"), session_prefix="leg")
+    )
+    legacy_prompt = _wm.build_resident_agent_prompt(ws_legacy, "http://localhost:9999", "sid-leg")
+    assert "develop" not in legacy_prompt
+    assert "Resident integration workflow" not in legacy_prompt
+
+    # Master-mode orchestrator prompt.
+    ws_master = manager.create_workspace(
+        WorkspaceCreate(
+            name="Master WS",
+            path=str(repo / "master"),
+            session_prefix="mas",
+            resident_agent_master_mode=True,
+        )
+    )
+    master_prompt = _wm.build_resident_agent_prompt(ws_master, "http://localhost:9999", "sid-mas")
+    assert "develop" not in master_prompt
+    assert "Resident integration workflow" not in master_prompt
+    # Pre-existing guardrail stays.
+    assert "NEVER create or delete orchestrator worker sessions" in master_prompt

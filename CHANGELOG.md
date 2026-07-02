@@ -5,6 +5,32 @@
 
 ## Unreleased
 
+### feat: resident-created tasks target develop integration branch
+
+- **What**: tasks created by the resident agent (`origin=resident`) now
+  carry an explicit "Resident integration workflow" block in the worker
+  assignment prompt. Workers receiving such tasks must create their feature
+  worktree/branch from the local `develop` integration branch (when it
+  exists; falling back to `main` when it does not), integrate only into
+  `develop` within the scope of the task, and never merge to `main` or push
+  without explicit human approval. Human-created tasks are unchanged and
+  continue to branch from `main` per the existing Mandatory Workflow. The
+  master/legacy resident prompts themselves are unchanged (the injection is
+  worker-side only, single source of truth).
+- **Why**: resident-created feature work was previously proposed one
+  main-merge away from deployed state, with no buffered integration step;
+  this makes `develop` a stable landing zone the resident can target while
+  preserving every existing protection on `main`.
+- **How**: new helper `_resident_integration_workflow_block` on
+  `_PromptsMixin` returns the block when `task.origin == RESIDENT` and `""`
+  otherwise; injected at the tail of `_build_task_assignment_prompt`.
+  AGENTS.md / CLAUDE.md Mandatory Workflow gets a narrow carve-out bullet
+  documenting the exception (both files kept identical).
+- **Validation**: backend black/isort/mypy clean; new prompt gating tests
+  assert the block appears for origin=resident and is absent for
+  origin=human, and that the legacy non-master and master-mode resident
+  prompts are unchanged; full CI-path pytest passes.
+
 ### feat: resident behavior — run-now, next-run visibility, managed periodic tasks
 
 - **What**: the per-workspace resident agent gains three interaction

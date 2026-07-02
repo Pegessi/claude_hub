@@ -38,6 +38,15 @@ and managed workspace tasks — even small ones:
 1. Start from clean `main`: fetch/sync first.
 2. Create an isolated worktree and branch:
    `git worktree add ../claude_hub-<slug> -b feat/your-feature main`.
+   - **Exception — resident-created tasks**: when a task is created by the
+     resident agent (`origin=resident`) and a local `develop` integration
+     branch exists, cut the feature branch from `develop` instead of `main`
+     (`git worktree add ../claude_hub-<slug> -b feat/<slug> develop`) and
+     treat `develop` as your integration target within the task. `main`
+     remains protected and still requires explicit human approval to merge
+     into or push. The assignment prompt for such tasks spells this out
+     explicitly; when in doubt (e.g. on a fresh clone without `develop`),
+     use `main`.
 3. **Work only inside that task worktree.** Never edit files in the `main`
    worktree directly.
 4. For frontend changes, run a dedicated dev/review server from that worktree
