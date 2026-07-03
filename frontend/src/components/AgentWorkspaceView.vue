@@ -622,7 +622,7 @@
                   <LoadingButton
                     v-if="task.status === 'todo'"
                     type="button"
-                    class="primary-button"
+                    class="primary-button task-action--primary task-action--mobile-wide"
                     :loading="isPending(taskActionKey('start', task.id))"
                     loading-label="Starting task"
                     @click.stop="startTask(task)"
@@ -632,7 +632,7 @@
                   <button
                     v-if="canEditTask(task)"
                     type="button"
-                    class="tool-button"
+                    class="tool-button task-action--hide-mobile"
                     @click.stop="openEditTaskModal(task)"
                   >
                     <span class="btn-icon">✎</span> Edit
@@ -679,13 +679,53 @@
                   </LoadingButton>
                   <LoadingButton
                     type="button"
-                    class="danger-button"
+                    class="danger-button task-action--hide-mobile"
                     :loading="isPending(taskActionKey('delete', task.id))"
                     loading-label="Deleting task"
                     @click.stop="deleteTask(task)"
                   >
                     <span class="btn-icon">×</span> Delete
                   </LoadingButton>
+                  <details
+                    class="task-card-more-menu"
+                    name="task-card-more"
+                  >
+                    <summary
+                      class="task-card-more-trigger"
+                      title="More actions"
+                      aria-label="More actions"
+                    >
+                      ⋯
+                    </summary>
+                    <div
+                      class="task-card-more-panel"
+                      role="menu"
+                    >
+                      <button
+                        v-if="canEditTask(task)"
+                        type="button"
+                        class="task-card-more-item"
+                        @click.stop="openEditTaskModal(task)"
+                      >
+                        <span
+                          class="btn-icon"
+                          aria-hidden="true"
+                        >✎</span> Edit
+                      </button>
+                      <LoadingButton
+                        type="button"
+                        class="task-card-more-item task-card-more-item--danger"
+                        :loading="isPending(taskActionKey('delete', task.id))"
+                        loading-label="Deleting task"
+                        @click.stop="deleteTask(task)"
+                      >
+                        <span
+                          class="btn-icon"
+                          aria-hidden="true"
+                        >×</span> Delete
+                      </LoadingButton>
+                    </div>
+                  </details>
                 </div>
               </article>
               <div
@@ -7708,6 +7748,128 @@ onUnmounted(() => {
   height: 30px;
 }
 
+/* Task-card "more" overflow menu (⋯): desktop-hidden by default; shown on
+   narrow viewports to tuck Edit/Delete away so primary actions (Start, Abort,
+   Done, Request review, Open tab) sit in a compact 2-column grid without
+   spending vertical space on lower-frequency / destructive actions. The
+   pattern mirrors .workspace-mobile-menu for visual consistency. */
+.task-card-more-menu {
+  display: none;
+  position: relative;
+}
+
+.task-card-more-menu summary {
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
+}
+
+.task-card-more-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.task-card-more-trigger {
+  width: 100%;
+  height: 100%;
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-surface-control-active);
+  color: var(--ch-color-text-subtle);
+  font-size: 18px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  -webkit-tap-highlight-color: var(--ch-color-accent-ring);
+}
+
+.task-card-more-trigger:hover,
+.task-card-more-menu[open] .task-card-more-trigger {
+  border-color: var(--ch-color-border-hover);
+  color: var(--ch-color-text);
+  background: var(--ch-color-surface-control-hover);
+}
+
+.task-card-more-panel {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  z-index: 70;
+  min-width: 140px;
+  padding: 4px;
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-glass);
+  box-shadow: var(--ch-shadow-soft);
+  overscroll-behavior: contain;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.task-card-more-menu[open] .task-card-more-panel {
+  display: flex;
+}
+
+.task-card-more-item.task-card-more-item {
+  /* Double-class to win specificity over `.task-actions button` which sets
+     button-shaped defaults that conflict with the menu-item layout. */
+  width: 100%;
+  min-height: 32px;
+  height: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--ch-radius-sm);
+  background: transparent;
+  color: var(--ch-color-text);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  justify-content: flex-start;
+  cursor: pointer;
+  transition: background 0.1s ease, border-color 0.1s ease;
+  -webkit-tap-highlight-color: var(--ch-color-accent-ring);
+}
+
+.task-card-more-item.task-card-more-item:hover {
+  background: var(--ch-color-surface-control-hover);
+  border-color: var(--ch-color-border);
+}
+
+.task-card-more-item.task-card-more-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.task-card-more-item.task-card-more-item--danger {
+  background: var(--ch-color-danger-bg);
+  border-color: var(--ch-color-danger-border);
+  color: var(--ch-color-danger-text);
+}
+
+.task-card-more-item.task-card-more-item--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ch-color-danger-bg) 70%, var(--ch-color-danger-border));
+  border-color: var(--ch-color-danger-text);
+}
+
+/* Hide the mobile-overflow-only copies on desktop where the inline buttons
+   are used; shown in mobile media queries below. */
+.task-action--hide-mobile {
+  display: inline-flex;
+}
+
+.task-action--mobile-wide {
+  grid-column: auto;
+}
+
 .btn-icon {
   display: inline-flex;
   align-items: center;
@@ -10048,6 +10210,27 @@ onUnmounted(() => {
     height: 34px;
   }
 
+  /* On mobile, hide inline Edit/Delete and surface the ⋯ overflow menu as a
+     grid cell. Primary CTA (Start) spans both columns for emphasis. */
+  .task-card-more-menu {
+    display: block;
+    position: relative;
+    min-width: 0;
+    height: 34px;
+  }
+
+  .task-card-more-trigger {
+    height: 100%;
+  }
+
+  .task-action--hide-mobile {
+    display: none !important;
+  }
+
+  .task-action--mobile-wide {
+    grid-column: 1 / -1;
+  }
+
   .advanced-start select {
     width: 100%;
     font-size: 16px;
@@ -10189,7 +10372,17 @@ onUnmounted(() => {
   }
 
   .task-actions {
-    grid-template-columns: 1fr;
+    /* Keep 2-col grid at narrowest mobile; ⋯ overflow handles Edit/Delete so
+       we don't need a single-column stack. */
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  /* Narrow viewports: tighter tap targets but same 2-col grid + overflow. */
+  .task-actions button,
+  .task-card-more-trigger {
+    height: 34px;
+    font-size: 12px;
   }
 
   .agent-status-card-main {
