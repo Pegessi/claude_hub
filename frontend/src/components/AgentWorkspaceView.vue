@@ -290,11 +290,27 @@
               </span>
               <span
                 v-if="isResidentAgent(agent)"
-                class="agent-status-meta"
+                class="agent-status-meta agent-status-meta--resident"
               >
-                <span>last run {{ residentLastRunLabel }}</span>
-                <span v-if="residentNextRunLabel">next run {{ residentNextRunLabel }}</span>
-                <span v-if="latestResidentReport">{{ latestResidentReport.message }}</span>
+                <span class="agent-status-timing">
+                  <span class="agent-status-timing-chip">last run {{ residentLastRunLabel }}</span>
+                  <span
+                    v-if="residentNextRunLabel"
+                    class="agent-status-timing-chip"
+                    :data-run-state="
+                      residentNextRunLabel === 'queued' || residentNextRunLabel === 'due now'
+                        ? 'live'
+                        : residentNextRunLabel === 'paused'
+                          ? 'muted'
+                          : 'default'
+                    "
+                  >next run {{ residentNextRunLabel }}</span>
+                </span>
+                <span
+                  v-if="latestResidentReport"
+                  class="agent-status-resident-message"
+                  :title="latestResidentReport.message"
+                >{{ latestResidentReport.message }}</span>
               </span>
             </span>
             <span
@@ -425,13 +441,27 @@
               {
                 'task-column--empty': taskCountForStatus(column.status) === 0,
                 'task-column--collapsed': isMobileColumnCollapsed(column.status),
+                'task-column--live': (column.status === 'working' || column.status === 'review')
+                  && taskCountForStatus(column.status) > 0,
+                [`task-column--live-${column.status}`]: (column.status === 'working' || column.status === 'review')
+                  && taskCountForStatus(column.status) > 0,
               },
             ]"
           >
             <div class="column-header">
               <h2>{{ column.label }}</h2>
               <div class="column-meta">
-                <span>{{ taskCountForStatus(column.status) }}</span>
+                <span
+                  v-if="taskCountForStatus(column.status) > 0"
+                  class="column-count"
+                >
+                  {{ taskCountForStatus(column.status) }}
+                </span>
+                <span
+                  v-else
+                  class="column-count column-count--empty"
+                  aria-hidden="true"
+                >—</span>
                 <button
                   v-if="column.status === 'done' && doneTasksTotal > DONE_TASK_COLLAPSE_LIMIT"
                   type="button"
@@ -480,7 +510,7 @@
                       Auto {{ task.autonomous_run?.iteration || 1 }}/{{ task.autonomous_run?.max_iterations || task.autonomy_policy?.max_iterations || 3 }}
                     </span>
                     <span
-                      v-if="task.status === 'working' && activeReviewBadge(task)"
+                      v-if="activeReviewBadge(task)"
                       :class="[
                         'review-badge',
                         `review-badge--${activeReviewBadge(task)?.kind}`,
@@ -524,8 +554,9 @@
                 <div
                   v-if="latestReportForTask(task)"
                   class="latest-report"
+                  :data-report-tone="reportStateLabel(latestReportForTask(task)?.state).tone"
                 >
-                  <strong>{{ latestReportForTask(task)?.state }}</strong>
+                  <strong>{{ reportStateLabel(latestReportForTask(task)?.state).label }}</strong>
                   <span>{{ reportMessageForLang(latestReportForTask(task)!) }}</span>
                 </div>
                 <div class="session-meta">
@@ -4012,6 +4043,46 @@ function reviewStatusLabel(task: WorkspaceTask) {
   return ''
 }
 
+// Human-readable label + tone for a report state. Maps snake_case backend
+// states to title-case English and surfaces a tone hint used by the card's
+// .latest-report block for subtle status color coding. Unknown states fall
+// back to underscore-to-space replacement.
+function reportStateLabel(state: string | undefined | null): {
+  label: string
+  tone: 'neutral' | 'active' | 'success' | 'attention' | 'muted'
+} {
+  if (!state) return { label: '', tone: 'neutral' }
+  switch (state) {
+    case 'working':
+      return { label: 'In progress', tone: 'active' }
+    case 'review_started':
+      return { label: 'Reviewing', tone: 'active' }
+    case 'review_passed':
+      return { label: 'Review passed', tone: 'success' }
+    case 'review_failed':
+    case 'review_needs_input':
+      return { label: 'Changes requested', tone: 'attention' }
+    case 'goal_packet_proposed':
+    case 'goal_packet':
+      return { label: 'Goal packet', tone: 'muted' }
+    case 'completed':
+      return { label: 'Completed', tone: 'success' }
+    case 'idle':
+      return { label: 'Idle', tone: 'muted' }
+    case 'blocked':
+      return { label: 'Blocked', tone: 'attention' }
+    case 'needs_input':
+      return { label: 'Needs input', tone: 'attention' }
+    case 'ready_for_review':
+      return { label: 'Ready for review', tone: 'active' }
+    default:
+      return {
+        label: state.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+        tone: 'neutral',
+      }
+  }
+}
+
 function activeReviewBadge(
   task: WorkspaceTask,
 ): { kind: 'active' | 'pending' | 'attention'; label: string; title: string } | null {
@@ -6404,6 +6475,73 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
+/* Resident meta splits into a chip row for timing + a separate muted line
+   for the free-form latest-report message, so 'last run' / 'next run' stay
+   compact and visible instead of being pushed off by prose.
+
+   Specificity note: .agent-status-meta span (above) is 0-1-1 and applies a
+   default chip look to every span. Under .agent-status-meta--resident we
+   need to (a) reset the wrapper/container spans that are NOT chips, and
+   (b) give .agent-status-timing-chip / .agent-status-resident-message
+   selectors that BEAT 0-1-1 (two classes = 0-2-0) so their backgrounds/
+   padding/colors aren't overridden by the generic span rule. */
+.agent-status-meta--resident {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
+/* Reset the top-level spans inside resident meta so they don't render as
+   chips themselves (.agent-status-timing is a flex wrapper, not a pill). */
+.agent-status-meta--resident > span {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  max-width: 100%;
+}
+
+.agent-status-timing {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.agent-status-meta--resident .agent-status-timing-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  border-radius: 999px;
+  background: var(--ch-color-chip-bg);
+  color: var(--ch-color-text-muted);
+  font-size: 10px;
+  padding: 2px 7px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-status-meta--resident .agent-status-timing-chip[data-run-state='live'] {
+  background: color-mix(in srgb, var(--ch-color-accent) 22%, var(--ch-color-chip-bg));
+  color: var(--ch-color-accent);
+  font-weight: 700;
+}
+
+.agent-status-meta--resident .agent-status-timing-chip[data-run-state='muted'] {
+  background: var(--ch-color-chip-bg-muted);
+  color: var(--ch-color-text-muted);
+}
+
+.agent-status-meta--resident .agent-status-resident-message {
+  display: block;
+  width: 100%;
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--ch-color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .agent-status-pill {
   min-width: 74px;
   display: inline-flex;
@@ -7085,9 +7223,56 @@ onUnmounted(() => {
   gap: 8px;
 }
 
-.column-header span {
+.column-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: 999px;
+  background: var(--ch-color-chip-bg-muted);
+  color: var(--ch-color-text);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.column-count--empty {
+  min-width: 0;
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
   color: var(--ch-color-text-muted);
-  font-size: 12px;
+  font-weight: 400;
+  pointer-events: none;
+}
+
+/* Live Working / Review columns announce themselves with a top accent
+   stripe and subtle header tint so active work is findable at a glance. */
+.task-column--live {
+  border-top: 2px solid transparent;
+}
+
+.task-column--live-working .column-header {
+  background: color-mix(in srgb, var(--ch-color-warning-strong) 6%, var(--ch-color-surface));
+}
+
+.task-column--live-working {
+  border-top-color: var(--ch-color-warning-strong);
+}
+
+.task-column--live-review .column-header {
+  background: color-mix(in srgb, var(--ch-color-attention-strong) 6%, var(--ch-color-surface));
+}
+
+.task-column--live-review {
+  border-top-color: var(--ch-color-attention-strong);
+}
+
+.task-column--empty .column-header h2 {
+  color: var(--ch-color-text-muted);
 }
 
 .column-collapse-button {
@@ -7413,12 +7598,39 @@ onUnmounted(() => {
 }
 
 .latest-report strong {
-  color: var(--ch-color-text);
   font-weight: 700;
+  text-transform: capitalize;
 }
 
 .latest-report span {
   margin-left: 4px;
+}
+
+/* Subtle tone on the report label + left stripe to surface status
+   without competing with card-level left-bars. */
+.latest-report[data-report-tone='active'] {
+  border-left-color: var(--ch-color-info);
+}
+.latest-report[data-report-tone='active'] strong {
+  color: var(--ch-color-info);
+}
+
+.latest-report[data-report-tone='success'] {
+  border-left-color: var(--ch-color-success-strong);
+}
+.latest-report[data-report-tone='success'] strong {
+  color: var(--ch-color-success-strong);
+}
+
+.latest-report[data-report-tone='attention'] {
+  border-left-color: var(--ch-color-attention-strong);
+}
+.latest-report[data-report-tone='attention'] strong {
+  color: var(--ch-color-attention-strong);
+}
+
+.latest-report[data-report-tone='muted'] strong {
+  color: var(--ch-color-text-muted);
 }
 
 .session-meta {
