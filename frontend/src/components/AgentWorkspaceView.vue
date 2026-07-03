@@ -5907,10 +5907,12 @@ onUnmounted(() => {
 .workspace-view {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   background: var(--ch-color-app-bg);
   color: var(--ch-color-text);
+  overflow-x: hidden;
 }
 
 .workspace-header {
@@ -6204,6 +6206,8 @@ onUnmounted(() => {
   font-weight: 700;
 }
 
+/* Defensive: keep the agent-status panel from ever introducing horizontal
+   page overflow. The grid itself scrolls internally via overflow-x:auto. */
 .workspace-agent-status {
   flex-shrink: 0;
   display: grid;
@@ -6212,6 +6216,8 @@ onUnmounted(() => {
   border-bottom: 1px solid var(--ch-color-border-muted);
   background: var(--ch-color-canvas);
   padding: 12px 18px;
+  min-width: 0;
+  overflow-x: hidden;
 }
 
 .agent-status-header {
@@ -6339,9 +6345,7 @@ onUnmounted(() => {
   cursor: pointer;
   padding: 0;
   text-align: left;
-}
-
-.agent-status-card-main:focus-visible,
+}.agent-status-card-main:focus-visible,
 .agent-status-delete:focus-visible,
 .agent-status-refresh:focus-visible,
 .agent-status-view-switch button:focus-visible {
@@ -6365,6 +6369,7 @@ onUnmounted(() => {
   position: relative;
   display: inline-flex;
   flex: 0 0 auto;
+  min-width: 0;
 }
 
 .agent-status-avatar-wrap .agent-status-dot {
@@ -7874,14 +7879,99 @@ onUnmounted(() => {
 .detail-body {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 16px 18px;
 }
 
+/* Defensive wrap rules so long URLs, markdown-path links, inline code,
+   hashes, and file paths inside the task-detail modal do not force the
+   panel wider than the viewport on mobile (audit finding 2). pre blocks
+   and tables keep horizontal scroll; everything else wraps. */
+.detail-body :deep(*) {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.detail-body :deep(ol),
+.detail-body :deep(ul) {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.detail-body :deep(.progress-overview-timeline),
+.detail-body :deep(.timeline) {
+  /* Allow horizontal-scroll timelines to scroll inside the modal without
+     widening the body; shrink vertically stacked timelines too. */
+  min-width: 0;
+  max-width: 100%;
+}
+
+.detail-body :deep(a),
+.detail-body :deep(code),
+.detail-body :deep(.markdown-path-link),
+.detail-body :deep(span),
+.detail-body :deep(strong),
+.detail-body :deep(em),
+.detail-body :deep(p),
+.detail-body :deep(li) {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  hyphens: auto;
+  min-width: 0;
+}
+
+.detail-body :deep(pre),
+.detail-body :deep(table) {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.detail-body :deep(pre code) {
+  overflow-wrap: normal;
+  word-break: normal;
+  white-space: pre;
+}
+
+.detail-body :deep(img) {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Ensure the reports <details>/<summary> flex row respects the modal width.
+   The timestamp + delta meta block (.report-summary-meta) is flex:0 0 auto
+   with margin-left:auto; without an explicit width constraint on the
+   flex container it can push the summary (and thus detail-body) wider
+   than the viewport on mobile. Give details + summary a definite width
+   and allow the summary to wrap so chips + message + meta each stay
+   inside the panel on narrow screens (audit finding 2). */
+.detail-body :deep(.report-card) {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.detail-body :deep(.report-card summary) {
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  flex-wrap: wrap;
+  row-gap: 4px;
+  box-sizing: border-box;
+}
+
+.detail-body :deep(.report-summary-meta) {
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
 .detail-section {
+  min-width: 0;
   border: 1px solid var(--ch-color-border-muted);
   border-radius: var(--ch-radius-lg);
   background: var(--ch-color-surface);
@@ -8084,6 +8174,15 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
+/* Allow attachment path code to wrap in the detail modal on narrow screens
+   rather than forcing horizontal overflow; the white-space: nowrap above is
+   preserved for list/row contexts but overridden inside `.detail-body`. */
+.detail-body .attachment-meta code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
 .attachment-meta strong {
   color: var(--ch-color-text);
   font-size: 12px;
@@ -8253,8 +8352,12 @@ onUnmounted(() => {
 
 .progress-overview {
   margin-top: 10px;
+  min-width: 0;
+  max-width: 100%;
   overflow-x: auto;
+  overflow-y: hidden;
   padding: 4px 0 6px;
+  -webkit-overflow-scrolling: touch;
 }
 
 .progress-overview-timeline {
@@ -9784,7 +9887,11 @@ onUnmounted(() => {
   }
 
   .agent-status-card-main {
-    grid-template-columns: 9px minmax(0, 1fr);
+    /* Use 'auto' for the avatar column so the 28px md avatar (plus 7px gap)
+       fits and does not overlap the name; previously this was a hard 9px
+       which caused the avatar to cover the first character of the name
+       on mobile (audit finding 1 — " 'ontend bo..."). */
+    grid-template-columns: auto minmax(0, 1fr);
     gap: 7px;
     align-items: start;
   }
@@ -10086,7 +10193,10 @@ onUnmounted(() => {
   }
 
   .agent-status-card-main {
-    grid-template-columns: 10px minmax(0, 1fr);
+    /* Narrower viewports (<=480px) still need 'auto' for the avatar column
+       so the 28px md avatar does not clip the first character of the name. */
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 7px;
   }
 
   .agent-status-pill {
