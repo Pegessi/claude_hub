@@ -3,23 +3,32 @@
 Both directions:
 
 * Never mutate the source in place.
-* Stage the result to a **temporary** target, **verify** the round-trip there
-  (reconstructed snapshot must be set-equal to the source: same ids, same JSON
-  payloads), and only **then** promote it. If verification fails, the staged
-  target is discarded and a :class:`RoundTripError` is raised — a bad migration
-  can never overwrite a good source of truth in either direction.
-* ``import_json_to_sqlite`` writes a fresh DB and removes it on failure.
-  ``export_sqlite_to_json`` builds the JSON tree in a sibling staging dir,
-  verifies it, backs up any existing ``state_root`` to ``<state_root>.bak``, and
-  atomically swaps the verified tree into place.
+* Stage the result to a **temporary** target (``<target>.staging`` for
+  ``import_json_to_sqlite``; ``<state_root>.staging`` for
+  ``export_sqlite_to_json``), **verify** the round-trip there (reconstructed
+  snapshot must be set-equal to the source: same ids, same JSON payloads),
+  and only **then** promote it. If verification fails, the staged target is
+  discarded and a :class:`RoundTripError` is raised — a bad migration can
+  never overwrite a good source of truth or a pre-existing destination file
+  in either direction.
+* ``import_json_to_sqlite`` builds its DB in a ``<target>.staging`` sibling,
+  checkpoints WAL, backs up any existing ``<target>`` to ``<target>.bak``
+  (one-deep rolling backup), and atomically ``os.replace``s the verified DB
+  into place; on failure only the staging files are removed.
+* ``export_sqlite_to_json`` builds the JSON tree in a sibling staging dir,
+  verifies it, backs up any existing ``state_root`` to ``<state_root>.bak``,
+  and atomically swaps the verified tree into place.
 
-Because the live source is never written before verification, rollback is
-simply "keep using the source you have".
+Because the live source and the pre-existing destination are never written
+before verification, rollback on either failure mode is simply "keep using
+the source / destination you already have".
 """
 
 from __future__ import annotations
 
+import os
 import shutil
+import sqlite3
 from pathlib import Path
 
 from . import StorageSnapshot
@@ -63,26 +72,84 @@ def _assert_round_trip(source: StorageSnapshot, reloaded: StorageSnapshot) -> No
         raise RoundTripError("round-trip mismatch: " + "; ".join(diffs))
 
 
-def import_json_to_sqlite(state_root: Path, db_path: Path | None = None) -> Path:
-    """Import current JSON state into a new SQLite DB. JSON is never modified.
+def _delete_db_files(path: Path) -> None:
+    """Delete a SQLite DB and its WAL/SHM sidecars (if present). Missing files are ignored."""
+    for suffix in ("", "-wal", "-shm"):
+        p = Path(str(path) + suffix) if suffix else path
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
 
-    Returns the path of the written DB. Raises :class:`RoundTripError` (and
-    removes the DB) if the SQLite reload does not match the JSON source.
+
+def _checkpoint_db(path: Path) -> None:
+    """Force a WAL checkpoint (TRUNCATE) so the DB is a single self-contained file.
+
+    After this returns, the ``-wal`` / ``-shm`` sidecars are removed and all
+    committed data is in the main DB file — safe to ``os.replace`` alone.
+    """
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        conn.close()
+
+
+def import_json_to_sqlite(state_root: Path, db_path: Path | None = None) -> Path:
+    """Import current JSON state into a SQLite DB. The JSON source is never modified.
+
+    Safety properties:
+
+    * The DB is built in a **staging** sibling file (``<target>.staging``); the
+      final ``target`` path is not touched until the staged DB passes round-trip
+      verification. A pre-existing ``target`` (and its ``-wal`` / ``-shm``
+      sidecars) is therefore never overwritten, truncated, or deleted on a
+      failed import.
+    * If the staged DB fails the round-trip check, only the staging files are
+      deleted and :class:`RoundTripError` is raised — the original target (if
+      any) remains byte-identical.
+    * On success any existing ``target`` is moved aside to ``<target>.bak`` (a
+      one-deep rolling backup, consistent with :func:`atomic_write_text` and
+      :func:`export_sqlite_to_json`) before the verified staging DB is
+      atomically ``os.replace``d into place.
+    * Returns the path of the written DB.
     """
     state_root = Path(state_root)
     target = Path(db_path) if db_path else state_root / "state.sqlite3"
-    source = JsonStorageBackend(state_root).load()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = target.with_name(target.name + ".staging")
 
-    backend = SqliteStorageBackend(target)
-    backend.save(source)
+    # Never write directly to target; always start from a clean staging file.
+    _delete_db_files(staging)
+
+    source = JsonStorageBackend(state_root).load()
     try:
+        backend = SqliteStorageBackend(staging)
+        backend.save(source)
         _assert_round_trip(source, backend.load())
-    except RoundTripError:
-        for path in (target, Path(str(target) + "-wal"), Path(str(target) + "-shm")):
-            try:
-                path.unlink()
-            except OSError:
-                pass
+        # Ensure staging is a single self-contained file before promotion
+        # (merge + remove WAL/SHM sidecars).
+        _checkpoint_db(staging)
+
+        # Promote: back up any existing DB (one-deep rolling .bak) then atomically
+        # move the verified staging DB into place.
+        backup = target.with_name(target.name + ".bak")
+        if target.exists():
+            _delete_db_files(backup)
+            target.rename(backup)
+            # Also tuck the existing sidecars away to the .bak location so a
+            # future rollback by renaming .bak back has its WAL/SHM alongside.
+            for suffix in ("-wal", "-shm"):
+                sidecar = Path(str(target) + suffix)
+                if sidecar.exists():
+                    sidecar.rename(Path(str(backup) + suffix))
+        os.replace(staging, target)
+    except BaseException:
+        # On any failure (round-trip error, OS error, etc.) only delete staging.
+        # The final target — and any pre-existing DB at that path — is untouched.
+        _delete_db_files(staging)
         raise
     return target
 

@@ -308,8 +308,9 @@ def test_export_round_trip_failure_leaves_live_tree_untouched(
 def test_import_raises_on_round_trip_mismatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """If the SQLite reload disagrees with the source, import fails and discards
-    the DB — a bad migration can never silently become the source of truth."""
+    """If the SQLite reload disagrees with the source, import fails and only the
+    **staging** DB is removed — the final target path is never created, so no
+    prior DB at that location can be overwritten or truncated."""
     state_root = tmp_path / "workspaces"
     JsonStorageBackend(state_root).save(_representative_snapshot())
 
@@ -317,11 +318,111 @@ def test_import_raises_on_round_trip_mismatch(
     def _corrupt_load(self: SqliteStorageBackend) -> StorageSnapshot:
         return StorageSnapshot()
 
+    target = tmp_path / "state.sqlite3"
     monkeypatch.setattr(SqliteStorageBackend, "load", _corrupt_load)
     with pytest.raises(RoundTripError):
-        import_json_to_sqlite(state_root, tmp_path / "state.sqlite3")
-    # The half-baked DB was removed.
-    assert not (tmp_path / "state.sqlite3").exists()
+        import_json_to_sqlite(state_root, target)
+    monkeypatch.undo()
+
+    # Final target was never created (no promotion happened), and no staging
+    # debris was left behind.
+    assert not target.exists()
+    assert not (tmp_path / "state.sqlite3.staging").exists()
+    for suffix in ("-wal", "-shm"):
+        assert not Path(str(target) + suffix).exists()
+        assert not Path(str(target) + ".staging" + suffix).exists()
+
+
+def test_import_failure_preserves_pre_existing_target_db(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for the phase-1 review finding: if ``db_path`` already
+    holds a SQLite DB with unrelated content, a failed ``import_json_to_sqlite``
+    must NOT delete, truncate, or modify that pre-existing DB. The pre-existing
+    DB must remain byte-identical after the failed import.
+    """
+    state_root = tmp_path / "workspaces"
+    JsonStorageBackend(state_root).save(_representative_snapshot())
+
+    # Seed a pre-existing DB at the target path with DIFFERENT content, so we
+    # can detect any mutation / truncation / deletion.
+    target = tmp_path / "state.sqlite3"
+    other_snapshot = StorageSnapshot(
+        workspaces=[dict(_representative_snapshot().workspaces[0], id="pre-existing-ws")]
+    )
+    SqliteStorageBackend(target).save(other_snapshot)
+
+    # Snapshot the pre-existing DB bytes (and sidecars, if any).
+    def _bytes(p: Path) -> bytes:
+        return p.read_bytes() if p.exists() else b"<absent>"
+
+    before = {
+        "db": _bytes(target),
+        "wal": _bytes(Path(str(target) + "-wal")),
+        "shm": _bytes(Path(str(target) + "-shm")),
+    }
+
+    # Force a round-trip failure in the import.
+    def _corrupt_load(self: SqliteStorageBackend) -> StorageSnapshot:
+        return StorageSnapshot()
+
+    monkeypatch.setattr(SqliteStorageBackend, "load", _corrupt_load)
+    with pytest.raises(RoundTripError):
+        import_json_to_sqlite(state_root, target)
+    monkeypatch.undo()
+
+    # Pre-existing target must be byte-identical to before.
+    after = {
+        "db": _bytes(target),
+        "wal": _bytes(Path(str(target) + "-wal")),
+        "shm": _bytes(Path(str(target) + "-shm")),
+    }
+    assert after == before, "pre-existing target DB was mutated by a failed import"
+
+    # And the pre-existing DB must still reload to its original content (not
+    # silently zeroed or partially overwritten).
+    reloaded = SqliteStorageBackend(target).load()
+    assert [w["id"] for w in reloaded.workspaces] == ["pre-existing-ws"]
+
+    # Staging files must all be cleaned up.
+    assert not (tmp_path / "state.sqlite3.staging").exists()
+    for suffix in ("-wal", "-shm"):
+        assert not Path(str(target) + ".staging" + suffix).exists()
+
+
+def test_import_success_backs_up_pre_existing_target_db(tmp_path: Path) -> None:
+    """On a successful import, any pre-existing DB at ``db_path`` must be
+    preserved at ``<db_path>.bak`` (one-deep rolling backup) before the newly
+    imported DB is promoted, mirroring ``atomic_write_text`` and
+    ``export_sqlite_to_json`` backup semantics."""
+    state_root = tmp_path / "workspaces"
+    JsonStorageBackend(state_root).save(_representative_snapshot())
+
+    # Seed a pre-existing DB with DIFFERENT content.
+    target = tmp_path / "state.sqlite3"
+    other_snapshot = StorageSnapshot(
+        workspaces=[dict(_representative_snapshot().workspaces[0], id="old-ws")]
+    )
+    SqliteStorageBackend(target).save(other_snapshot)
+
+    # Successful import (no monkeypatching — round-trip verification should pass).
+    result = import_json_to_sqlite(state_root, target)
+    assert result == target
+
+    # Target now holds the freshly imported data.
+    reloaded = SqliteStorageBackend(target).load()
+    assert [w["id"] for w in reloaded.workspaces] == [WS_ID]
+
+    # Prior DB preserved at .bak.
+    backup = Path(str(target) + ".bak")
+    assert backup.exists()
+    backup_reloaded = SqliteStorageBackend(backup).load()
+    assert [w["id"] for w in backup_reloaded.workspaces] == ["old-ws"]
+
+    # No staging debris.
+    assert not (tmp_path / "state.sqlite3.staging").exists()
+    for suffix in ("-wal", "-shm"):
+        assert not Path(str(target) + ".staging" + suffix).exists()
 
 
 # --- Data-loss protection (atomic write) ---------------------------------------
