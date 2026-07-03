@@ -705,7 +705,7 @@
                         v-if="canEditTask(task)"
                         type="button"
                         class="task-card-more-item"
-                        @click.stop="openEditTaskModal(task)"
+                        @click.stop="openEditTaskModal(task); closeTaskCardMoreMenus()"
                       >
                         <span
                           class="btn-icon"
@@ -717,7 +717,7 @@
                         class="task-card-more-item task-card-more-item--danger"
                         :loading="isPending(taskActionKey('delete', task.id))"
                         loading-label="Deleting task"
-                        @click.stop="deleteTask(task)"
+                        @click.stop="deleteTask(task); closeTaskCardMoreMenus()"
                       >
                         <span
                           class="btn-icon"
@@ -3878,6 +3878,10 @@ function closeImageLightbox() {
 function handleLightboxKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape' && imageLightboxUrl.value) {
     closeImageLightbox()
+    return
+  }
+  if (event.key === 'Escape') {
+    closeTaskCardMoreMenus()
   }
 }
 
@@ -5138,6 +5142,25 @@ function closeWorkspaceMobileMenu() {
   }
 }
 
+function closeTaskCardMoreMenus() {
+  document
+    .querySelectorAll<HTMLDetailsElement>('.task-card-more-menu[open]')
+    .forEach((el) => {
+      el.open = false
+    })
+}
+
+function handleTaskCardMorePointerDown(event: PointerEvent) {
+  const target = event.target
+  if (!(target instanceof Node)) return
+  // Close any open .task-card-more-menu that does not contain the click target.
+  document
+    .querySelectorAll<HTMLDetailsElement>('.task-card-more-menu[open]')
+    .forEach((menu) => {
+      if (!menu.contains(target)) menu.open = false
+    })
+}
+
 function handleWorkspaceDocumentPointerDown(event: PointerEvent) {
   const target = event.target
   if (
@@ -5916,6 +5939,7 @@ watch(
 
 onMounted(async () => {
   document.addEventListener('pointerdown', handleWorkspaceDocumentPointerDown)
+  document.addEventListener('pointerdown', handleTaskCardMorePointerDown)
   document.addEventListener('keydown', handleLightboxKeydown)
   await fetchRemoteProfiles()
   await workspaceStore.fetchWorkspaces()
@@ -5928,6 +5952,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   document.removeEventListener('pointerdown', handleWorkspaceDocumentPointerDown)
+  document.removeEventListener('pointerdown', handleTaskCardMorePointerDown)
   document.removeEventListener('keydown', handleLightboxKeydown)
   if (boardPollTimer !== null) {
     window.clearInterval(boardPollTimer)
@@ -10062,10 +10087,12 @@ onUnmounted(() => {
     gap: 4px;
   }
 
+  /* Hide agent kind/detail/meta text on mobile to save vertical space.
+     Agent-status-actions are NOT hidden here — they are compacted below
+     into icon-only square buttons in a wrap row (reviewer AC). */
   .agent-status-kind,
   .agent-status-detail,
-  .agent-status-meta,
-  .agent-status-actions {
+  .agent-status-meta {
     display: none;
   }
 
@@ -10207,7 +10234,8 @@ onUnmounted(() => {
   .task-actions button,
   .agent-row button {
     width: 100%;
-    height: 34px;
+    height: 32px;
+    min-height: 32px;
   }
 
   /* On mobile, hide inline Edit/Delete and surface the ⋯ overflow menu as a
@@ -10216,7 +10244,7 @@ onUnmounted(() => {
     display: block;
     position: relative;
     min-width: 0;
-    height: 34px;
+    height: 32px;
   }
 
   .task-card-more-trigger {
@@ -10229,6 +10257,45 @@ onUnmounted(() => {
 
   .task-action--mobile-wide {
     grid-column: 1 / -1;
+  }
+
+  /* Compact agent-status-actions on mobile: icon-only square buttons in a
+     wrapping row under the card, instead of hidden (reviewer AC). */
+  .agent-status-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    justify-content: flex-end;
+    padding-left: 0;
+    margin-top: 2px;
+    align-items: center;
+  }
+
+  .agent-status-actions-sep {
+    display: none;
+  }
+
+  .agent-status-actions .agent-status-pause,
+  .agent-status-actions .agent-status-run-now,
+  .agent-status-actions .agent-status-switch-env,
+  .agent-status-actions .agent-status-delete {
+    width: 28px;
+    height: 28px;
+    min-width: 28px;
+    min-height: 28px;
+    padding: 0;
+    justify-content: center;
+    gap: 0;
+    font-size: 0; /* hide text label */
+    line-height: 1;
+  }
+
+  .agent-status-actions .agent-status-pause .btn-icon,
+  .agent-status-actions .agent-status-run-now .btn-icon,
+  .agent-status-actions .agent-status-switch-env .btn-icon,
+  .agent-status-actions .agent-status-delete .btn-icon {
+    font-size: 14px;
+    line-height: 1;
   }
 
   .advanced-start select {
@@ -10378,10 +10445,12 @@ onUnmounted(() => {
     gap: 6px;
   }
 
-  /* Narrow viewports: tighter tap targets but same 2-col grid + overflow. */
+  /* Narrow viewports: tighter tap targets but same 2-col grid + overflow.
+     Height matches 760px breakpoint so buttons stay ≤32px on all mobile. */
   .task-actions button,
   .task-card-more-trigger {
-    height: 34px;
+    height: 32px;
+    min-height: 32px;
     font-size: 12px;
   }
 
