@@ -1894,7 +1894,7 @@ async function handleCreateTab() {
   gap: 8px;
   background-color: var(--ch-color-surface-control);
   padding: 8px 12px;
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   margin-bottom: 12px;
   flex-shrink: 0;
 }
@@ -1905,11 +1905,25 @@ async function handleCreateTab() {
   font-size: 18px;
   cursor: pointer;
   padding: 4px;
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ch-color-text);
+  transition: background var(--ch-motion-fast), color var(--ch-motion-fast), transform var(--ch-motion-fast);
 }
 
-.path-nav-btn:hover {
+.path-nav-btn:hover:not(:disabled) {
   background-color: var(--ch-color-surface-control-hover);
+}
+
+.path-nav-btn:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.path-nav-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .current-path-input {
@@ -1917,7 +1931,7 @@ async function handleCreateTab() {
   flex: 1;
   background-color: var(--ch-color-app-bg);
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   color: var(--ch-color-text);
   font-size: 13px;
   font-family: monospace;
@@ -1943,7 +1957,7 @@ async function handleCreateTab() {
   flex: 1;
   overflow-y: auto;
   border: 1px solid var(--ch-color-border);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   background-color: var(--ch-color-app-bg);
   margin-bottom: 16px;
   min-height: 200px;
@@ -2021,7 +2035,7 @@ async function handleCreateTab() {
   padding: 10px 12px;
   background-color: var(--ch-color-surface-control);
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   color: var(--ch-color-text);
   font-size: 14px;
   box-sizing: border-box;
@@ -2051,18 +2065,19 @@ async function handleCreateTab() {
   gap: 4px;
   background-color: var(--ch-color-surface-sunken);
   border: 1px solid var(--ch-color-border);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   padding: 4px;
 }
 
 .segment-button {
   background-color: transparent;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   color: var(--ch-color-text-muted);
   cursor: pointer;
   font-size: 14px;
   padding: 8px 10px;
+  transition: background var(--ch-motion-fast), color var(--ch-motion-fast);
 }
 
 .segment-button.active {
@@ -2080,11 +2095,12 @@ async function handleCreateTab() {
   padding: 10px 12px;
   background-color: var(--ch-color-surface-control);
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   color: var(--ch-color-text);
   font-size: 14px;
   box-sizing: border-box;
   cursor: pointer;
+  transition: border-color var(--ch-motion-fast);
 }
 
 .select-input:hover {
@@ -2106,12 +2122,15 @@ async function handleCreateTab() {
   background-color: var(--ch-color-surface-control-hover);
   border: 1px solid var(--ch-color-border-strong);
   border-left: none;
-  border-top-right-radius: 4px;
-  border-bottom-right-radius: 4px;
+  border-top-right-radius: var(--ch-radius-sm);
+  border-bottom-right-radius: var(--ch-radius-sm);
   color: var(--ch-color-text);
   padding: 0 12px;
   cursor: pointer;
   font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  transition: background var(--ch-motion-fast);
 }
 
 .cwd-dropdown-btn:hover {
@@ -2218,10 +2237,23 @@ async function handleCreateTab() {
 .btn {
   padding: 10px 20px;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   font-size: 14px;
   cursor: pointer;
-  transition: background-color 0.2s;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-weight: 500;
+  transition: background-color 0.15s, transform 0.08s, opacity 0.15s;
+}
+
+.btn:hover:not(:disabled) {
+  transform: translateY(-0.5px);
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
 }
 
 .btn:disabled {

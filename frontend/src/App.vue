@@ -441,6 +441,9 @@ onUnmounted(() => {
   --ch-color-attention: #c084fc;
   --ch-color-attention-strong: #a855f7;
   --ch-color-attention-bg: rgba(192, 132, 252, 0.15);
+  --ch-color-review: #c084fc;
+  --ch-color-review-strong: #a855f7;
+  --ch-color-review-bg: rgba(192, 132, 252, 0.15);
   --ch-color-info: #38bdf8;
   --ch-color-danger: #f87171;
   --ch-color-danger-strong: #dc2626;
@@ -530,6 +533,9 @@ onUnmounted(() => {
   --ch-color-attention: #6d5b8b;
   --ch-color-attention-strong: #5f4f7d;
   --ch-color-attention-bg: #ece8f1;
+  --ch-color-review: #6d5b8b;
+  --ch-color-review-strong: #5f4f7d;
+  --ch-color-review-bg: #ece8f1;
   --ch-color-info: #4e7185;
   --ch-color-danger: #ad3f3f;
   --ch-color-danger-strong: #9f3636;

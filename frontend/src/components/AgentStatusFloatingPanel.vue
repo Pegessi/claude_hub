@@ -460,18 +460,28 @@ onUnmounted(() => {
   justify-content: center;
   gap: 6px;
   border: 1px solid var(--ch-color-border);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-md);
   background-color: var(--ch-color-surface-control);
   color: var(--ch-color-text);
   cursor: pointer;
   padding: 0 9px;
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast), height 180ms cubic-bezier(0.2, 0, 0, 1), min-width 180ms cubic-bezier(0.2, 0, 0, 1), padding 180ms cubic-bezier(0.2, 0, 0, 1), gap 180ms cubic-bezier(0.2, 0, 0, 1);
+  font-weight: 600;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), transform var(--ch-motion-fast), height 180ms cubic-bezier(0.2, 0, 0, 1), min-width 180ms cubic-bezier(0.2, 0, 0, 1), padding 180ms cubic-bezier(0.2, 0, 0, 1), gap 180ms cubic-bezier(0.2, 0, 0, 1);
 }
 
-.status-trigger:hover,
+.status-trigger:hover {
+  border-color: var(--ch-color-border-hover);
+  background-color: var(--ch-color-surface-control-hover);
+}
+
+.status-trigger:active {
+  transform: translateY(1px);
+}
+
 .agent-status[data-expanded='true'] .status-trigger {
   background-color: var(--ch-color-surface-control-hover);
   color: var(--ch-color-text);
+  box-shadow: 0 1px 3px var(--ch-shadow-color-soft);
 }
 
 .trigger-dot,
@@ -538,6 +548,12 @@ onUnmounted(() => {
   font-weight: 700;
   line-height: 18px;
   text-align: center;
+  transition: background var(--ch-motion-fast);
+}
+
+.status-trigger:hover .trigger-count,
+.agent-status[data-expanded='true'] .trigger-count {
+  background: var(--ch-color-surface-control-hover);
 }
 
 .status-panel {
@@ -550,12 +566,25 @@ onUnmounted(() => {
   max-height: min(60vh, 520px, calc(100vh - 72px));
   overflow: hidden;
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 8px;
+  border-radius: var(--ch-radius-lg);
   background: var(--ch-color-surface-glass);
   box-shadow: var(--ch-shadow-popover);
   backdrop-filter: blur(14px);
   display: flex;
   flex-direction: column;
+  animation: status-panel-in 140ms cubic-bezier(0.2, 0, 0, 1);
+  transform-origin: top right;
+}
+
+@keyframes status-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .panel-header {
@@ -587,22 +616,27 @@ onUnmounted(() => {
 }
 
 .panel-refresh {
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   background: transparent;
   color: var(--ch-color-text-muted);
   cursor: pointer;
   font-size: 14px;
+  transition: background var(--ch-motion-fast), color var(--ch-motion-fast), transform var(--ch-motion-fast);
 }
 
 .panel-refresh:hover {
   background: var(--ch-color-chip-bg);
   color: var(--ch-color-text);
+}
+
+.panel-refresh:active {
+  transform: rotate(25deg) scale(0.92);
 }
 
 .panel-mode-switch {
@@ -621,18 +655,29 @@ onUnmounted(() => {
   justify-content: space-between;
   gap: 6px;
   border: 1px solid var(--ch-color-border-muted);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text-muted);
   cursor: pointer;
   padding: 0 8px;
   text-align: left;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast), transform var(--ch-motion-fast);
+}
+
+.panel-mode-switch button:hover {
+  border-color: var(--ch-color-border-hover);
+  color: var(--ch-color-text);
+}
+
+.panel-mode-switch button:active {
+  transform: translateY(1px);
 }
 
 .panel-mode-switch button[data-active='true'] {
-  border-color: var(--ch-color-border-strong);
-  background: var(--ch-color-surface-control-hover);
-  color: var(--ch-color-text);
+  border-color: var(--ch-color-accent-ring-strong);
+  background: var(--ch-color-accent-soft);
+  color: var(--ch-color-accent-strong);
+  font-weight: 600;
 }
 
 .panel-mode-switch span {
@@ -715,15 +760,20 @@ onUnmounted(() => {
   cursor: pointer;
   padding: 10px 11px;
   text-align: left;
+  transition: background var(--ch-motion-fast);
 }
 
 .agent-row:last-child {
   border-bottom: 0;
 }
 
-.agent-row:hover,
-.agent-row.active {
+.agent-row:hover {
   background: var(--ch-color-row-hover);
+}
+
+.agent-row.active {
+  background: color-mix(in srgb, var(--ch-color-accent) 8%, var(--ch-color-row-hover));
+  box-shadow: inset 3px 0 0 var(--ch-color-accent);
 }
 
 .agent-main {
