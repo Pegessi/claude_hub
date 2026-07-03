@@ -5,6 +5,55 @@
 
 ## Unreleased
 
+### perf(ui): board large-history responsiveness polish
+
+- **What**: the workspace board now fills the remaining viewport height
+  instead of growing with column content; each task column scrolls
+  internally (rather than the whole page) and column headers stay visible
+  above the scroll region. The Done column shows 10 recent tasks by default
+  (up from 5) with a `Show N older` / `Show recent` toggle that frames the
+  remaining items explicitly as history, and each done card carries a small
+  relative-time chip (e.g. `2h`, `3d`, `1mo`) for scannability. Non-done
+  (Todo / Queued / Working / Review) card descriptions are tightened from
+  4 to 3 clamped lines so long prompts do not dominate a column. Active,
+  queued, working, and review cards remain fully visible (never hidden or
+  collapsed).
+- **Why**: with 100+ completed tasks and thousands of reports, the Done
+  column previously stretched the page to thousands of pixels, pushing
+  active work off-screen and making the board slow to scan / re-render on
+  polling. History cards had no age cue, so finding "what finished
+  recently" required opening each card.
+- **How**: CSS-only layout pass plus two small view-model additions in
+  `AgentWorkspaceView.vue`. `.workspace-layout` switched from a single-cell
+  grid to a `flex-direction: column` container; `.board` gained `flex: 1;
+  min-height: 0; overflow-x: auto; overflow-y: hidden`; `.task-column`
+  gained `height: 100%`; `.task-list` became `flex: 1 1 auto; min-height:
+  0; overflow-y: auto` so it forms the vertical scroll container while
+  `.column-header` (now `flex: 0 0 auto`) stays pinned above the list
+  without needing `position: sticky`. Mobile media query resets columns to
+  `height: auto` and the list back to `overflow: visible` so columns stack
+  naturally on narrow viewports. `DONE_TASK_COLLAPSE_LIMIT` raised from 5
+  to 10; toggle label now reads `Show N older` (using a new
+  `doneTasksCollapsedCount` computed) instead of `Show all N`. A
+  `formatRelativeTime` helper and `taskAgeLabel(task)` produce compact age
+  labels sourced from `task.completed_at ?? updated_at ?? created_at` and
+  rendered as a muted `.task-card-age` chip inside `.task-card-badges` on
+  done cards only. `.task-card-description` `-webkit-line-clamp` tightened
+  from 4 to 3 lines (both base and mobile media rules). No new
+  dependencies; no backend / store / data-model changes; existing
+  report-subsection collapsibles and awaiting-acceptance pill from the
+  prior report-polish commit are untouched.
+- **Validation**: `pnpm eslint src/components/AgentWorkspaceView.vue`,
+  `pnpm vue-tsc --noEmit`, and `pnpm vite build` all pass in `frontend/`.
+  Playwright smoke (system Chromium, headless, viewports 1440x900 and
+  430x900) against a local dev server confirms all five columns are equal
+  height (~516px inside a ~544px board), the Done list scrolls internally
+  (client 472 / scroll 765, scrollTop reaches 293 at bottom), collapsed
+  count is 10 cards expanding to 114, toggle label toggles between
+  `Show N older` and `Show recent`, age chips render on all visible done
+  cards (e.g. `2d`), zero JS page errors and zero failed non-aborted
+  network requests.
+
 ### fix(ui): task detail report rendering polish
 
 - **What**: verbose report sub-sections (Validation, Acceptance Check, Review

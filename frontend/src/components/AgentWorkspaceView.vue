@@ -439,7 +439,7 @@
                   :aria-expanded="showAllDoneTasks"
                   @click="showAllDoneTasks = !showAllDoneTasks"
                 >
-                  {{ showAllDoneTasks ? 'Show recent' : `Show all ${doneTasksTotal}` }}
+                  {{ showAllDoneTasks ? 'Show recent' : `Show ${doneTasksCollapsedCount} older` }}
                 </button>
                 <button
                   type="button"
@@ -496,6 +496,13 @@
                     >
                       <span :class="['status-dot', `status-dot--${task.status}`]" />
                       {{ task.status }}
+                    </span>
+                    <span
+                      v-if="task.status === 'done'"
+                      class="task-card-age"
+                      :title="formatTime(task.completed_at || task.updated_at || task.created_at)"
+                    >
+                      {{ taskAgeLabel(task) }}
                     </span>
                   </span>
                 </div>
@@ -3165,10 +3172,14 @@ const columns: { status: WorkspaceTaskStatus; label: string }[] = [
 
 // Done-task collapse: with 100+ completed tasks, rendering all done cards on
 // every 2.5s poll dominates DOM and re-render cost. Show the N most recent
-// done tasks by default with a toggle to reveal all.
-const DONE_TASK_COLLAPSE_LIMIT = 5
+// done tasks by default with a toggle to reveal all. The Done column scrolls
+// internally at desktop so the toggle is the "see older history" affordance.
+const DONE_TASK_COLLAPSE_LIMIT = 10
 const showAllDoneTasks = ref(false)
 const doneTasksTotal = computed(() => tasksByStatusMap.value.done.length)
+const doneTasksCollapsedCount = computed(
+  () => Math.max(0, doneTasksTotal.value - DONE_TASK_COLLAPSE_LIMIT),
+)
 const visibleDoneTasks = computed(() => {
   const all = tasksByStatusMap.value.done
   if (showAllDoneTasks.value || all.length <= DONE_TASK_COLLAPSE_LIMIT) return all
@@ -4458,6 +4469,41 @@ function formatTime(value: string) {
     hour: '2-digit',
     minute: '2-digit',
   }).format(new Date(value))
+}
+
+// Compact relative age label for done-card scannability (e.g. '2h', '3d', '1mo').
+function formatRelativeTime(value: string | null | undefined): string {
+  if (!value) return ''
+  const t = new Date(value).getTime()
+  if (!Number.isFinite(t)) return ''
+  const diffMs = Date.now() - t
+  const min = 60_000
+  const hour = 60 * min
+  const day = 24 * hour
+  const abs = Math.abs(diffMs)
+  if (abs < min) return diffMs < 0 ? 'soon' : 'just now'
+  if (abs < hour) {
+    const n = Math.floor(abs / min)
+    return `${n}m`
+  }
+  if (abs < day) {
+    const n = Math.floor(abs / hour)
+    return `${n}h`
+  }
+  if (abs < 30 * day) {
+    const n = Math.floor(abs / day)
+    return `${n}d`
+  }
+  if (abs < 365 * day) {
+    const n = Math.floor(abs / (30 * day))
+    return `${n}mo`
+  }
+  const n = Math.floor(abs / (365 * day))
+  return `${n}y`
+}
+
+function taskAgeLabel(task: WorkspaceTask): string {
+  return formatRelativeTime(task.completed_at || task.updated_at || task.created_at)
 }
 
 function parseTimestampMs(value?: string | null): number | null {
@@ -5966,6 +6012,7 @@ onUnmounted(() => {
 }
 
 .workspace-summary-strip {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -6087,6 +6134,7 @@ onUnmounted(() => {
 }
 
 .workspace-agent-status {
+  flex-shrink: 0;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   gap: 10px;
@@ -6727,8 +6775,9 @@ onUnmounted(() => {
 .workspace-layout {
   flex: 1;
   min-height: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
 
 .column-header h2,
@@ -6880,12 +6929,14 @@ onUnmounted(() => {
 
 .board {
   position: relative;
+  flex: 1;
   min-width: 0;
   min-height: 0;
   display: grid;
   grid-template-columns: repeat(5, minmax(220px, 1fr));
   gap: 12px;
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: hidden;
   padding: 14px;
 }
 
@@ -7006,6 +7057,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  height: 100%;
   border: 1px solid var(--ch-color-border-muted);
   border-radius: var(--ch-radius-lg);
   background: var(--ch-color-surface-raised);
@@ -7013,6 +7065,7 @@ onUnmounted(() => {
 }
 
 .column-header {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -7060,6 +7113,8 @@ onUnmounted(() => {
 }
 
 .task-list {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -7173,7 +7228,7 @@ onUnmounted(() => {
   white-space: normal;
   display: -webkit-box;
   overflow: hidden;
-  -webkit-line-clamp: 4;
+  -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow-wrap: anywhere;
   word-break: break-all;
@@ -7217,6 +7272,15 @@ onUnmounted(() => {
   gap: 6px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.task-card-age {
+  flex: 0 0 auto;
+  color: var(--ch-color-text-muted);
+  font-size: 10px;
+  line-height: 1.3;
+  padding: 2px 0;
+  white-space: nowrap;
 }
 
 .review-badge {
@@ -9571,6 +9635,7 @@ onUnmounted(() => {
 
   .task-column {
     min-width: 0;
+    height: auto;
     border-radius: var(--ch-radius-md);
   }
 
@@ -9620,6 +9685,7 @@ onUnmounted(() => {
   }
 
   .task-list {
+    flex: 0 0 auto;
     overflow: visible;
     padding: 8px;
   }
@@ -9640,7 +9706,7 @@ onUnmounted(() => {
   .task-card-description {
     display: -webkit-box;
     overflow: hidden;
-    -webkit-line-clamp: 4;
+    -webkit-line-clamp: 3;
     -webkit-box-orient: vertical;
   }
 
