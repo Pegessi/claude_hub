@@ -524,6 +524,119 @@ def test_import_roundtrip_failure_before_backup_does_not_touch_target(
     assert [w["id"] for w in reloaded.workspaces] == ["pre-existing-ws"]
 
 
+def test_import_sidecar_rename_failure_rolls_back_main_db(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for the attempt-4 finding: if moving a sidecar
+    (-wal or -shm) from target to .bak fails AFTER the main DB file has
+    already been renamed to .bak, _rename_db_with_sidecars must roll back
+    the main DB rename so the target is not left missing.
+
+    We patch Path.rename to fail specifically when the -wal sidecar is
+    being moved to .bak-wal during the backup step.
+    """
+    import pathlib
+
+    state_root = tmp_path / "workspaces"
+    JsonStorageBackend(state_root).save(_representative_snapshot())
+
+    # Seed a pre-existing DB at target.
+    target = tmp_path / "state.sqlite3"
+    other_snapshot = StorageSnapshot(
+        workspaces=[dict(_representative_snapshot().workspaces[0], id="pre-existing-ws")]
+    )
+    SqliteStorageBackend(target).save(other_snapshot)
+
+    # Create a fake -wal sidecar alongside the target so _rename_db_with_sidecars
+    # attempts to move it.
+    fake_wal = Path(str(target) + "-wal")
+    fake_wal.write_bytes(b"fake-wal-bytes")
+
+    before_target_bytes = target.read_bytes()
+    before_wal_bytes = fake_wal.read_bytes()
+
+    real_path_rename = pathlib.Path.rename
+    boom = OSError("simulated sidecar rename failure")
+
+    def _failing_rename(self: pathlib.Path, other):
+        # Fail when renaming target-wal -> target.bak-wal during backup step.
+        if self.name == fake_wal.name and str(other).endswith(".bak-wal"):
+            raise boom
+        return real_path_rename(self, other)
+
+    monkeypatch.setattr(pathlib.Path, "rename", _failing_rename)
+    with pytest.raises(OSError) as excinfo:
+        import_json_to_sqlite(state_root, target)
+    assert excinfo.value is boom
+    monkeypatch.undo()
+
+    # After the failure — check file-state FIRST before opening any SQLite
+    # connection to the target: opening the DB would cause SQLite to see and
+    # possibly clean up/roll back the -wal sidecar (invalid or partial WALs
+    # are auto-recovered at connection open), which would invalidate the
+    # byte-level checks that follow.
+    assert target.exists(), "main DB missing after sidecar rename failure"
+    wal_still_at_original = fake_wal.exists()
+    wal_bytes = fake_wal.read_bytes() if wal_still_at_original else None
+    assert not Path(str(target) + ".bak").exists()
+    assert not Path(str(target) + ".bak-wal").exists()
+    assert not Path(str(target) + ".bak-shm").exists()
+    assert not (tmp_path / "state.sqlite3.staging").exists()
+    assert target.read_bytes() == before_target_bytes
+    assert wal_still_at_original, "-wal sidecar missing after rollback"
+    assert wal_bytes == before_wal_bytes
+
+    # Now it is safe to open the target (the fake WAL file is still present;
+    # SQLite may choose to ignore/delete a corrupt WAL at open, which is fine
+    # for a real recovery but we have already verified file-state above).
+    reloaded = SqliteStorageBackend(target).load()
+    assert [w["id"] for w in reloaded.workspaces] == ["pre-existing-ws"]
+
+
+def test_rename_db_with_sidecars_is_all_or_nothing(tmp_path: Path) -> None:
+    """Direct unit test for _rename_db_with_sidecars: if any sidecar rename
+    fails, files already moved are restored to their original locations."""
+    import pathlib
+
+    main_src = tmp_path / "data.sqlite3"
+    main_dst = tmp_path / "data.moved"
+    wal_src = Path(str(main_src) + "-wal")
+    wal_dst = Path(str(main_dst) + "-wal")
+
+    main_src.write_bytes(b"main")
+    wal_src.write_bytes(b"wal")
+
+    import claude_hub.services.storage.migrate as migrate_mod
+
+    real_path_rename = pathlib.Path.rename
+    boom = OSError("simulated wal rename failure")
+
+    def _fail_wal(self: pathlib.Path, other):
+        if self == wal_src:
+            raise boom
+        return real_path_rename(self, other)
+
+    import unittest.mock
+
+    with unittest.mock.patch.object(pathlib.Path, "rename", _fail_wal):
+        with pytest.raises(OSError) as excinfo:
+            migrate_mod._rename_db_with_sidecars(main_src, main_dst)
+        assert excinfo.value is boom
+
+    # After failure: both files must be back at src; nothing at dst.
+    assert main_src.exists() and main_src.read_bytes() == b"main"
+    assert wal_src.exists() and wal_src.read_bytes() == b"wal"
+    assert not main_dst.exists()
+    assert not wal_dst.exists()
+
+    # A subsequent successful call (no failure) moves everything.
+    migrate_mod._rename_db_with_sidecars(main_src, main_dst)
+    assert not main_src.exists()
+    assert not wal_src.exists()
+    assert main_dst.exists() and main_dst.read_bytes() == b"main"
+    assert wal_dst.exists() and wal_dst.read_bytes() == b"wal"
+
+
 # --- Data-loss protection (atomic write) ---------------------------------------
 
 

@@ -100,15 +100,46 @@ def _checkpoint_db(path: Path) -> None:
 def _rename_db_with_sidecars(src: Path, dst: Path) -> None:
     """Rename a SQLite DB and its -wal/-shm sidecars from ``src`` to ``dst``.
 
-    Missing sidecars are silently skipped (a cleanly-closed DB has none).
-    Used to roll backup files aside before promotion and to restore them
-    if promotion fails.
+    All-or-nothing with best-effort rollback:
+
+    * Collect the set of files that actually exist (main DB plus any
+      ``-wal`` / ``-shm`` sidecars present).
+    * Rename them one at a time.
+    * If any rename raises :class:`OSError`, **every file that was already
+      moved is renamed back** to its original ``src`` location (in reverse
+      order) before the exception propagates. This ensures callers either
+      see the full DB set moved to ``dst`` or see the full DB set still at
+      ``src`` — never a split state where the main file landed at ``dst``
+      but a sidecar (or vice versa) was left stranded.
+    * If a rollback rename itself fails, the original exception is still
+      raised and the affected files are left where they landed (so an
+      operator can manually recover; we never delete data).
+    * Missing sidecars are silently skipped (a cleanly-checkpointed DB
+      has none).
     """
-    src.rename(dst)
+    pairs: list[tuple[Path, Path]] = [(src, dst)]
     for suffix in ("-wal", "-shm"):
         s = Path(str(src) + suffix)
         if s.exists():
-            s.rename(Path(str(dst) + suffix))
+            pairs.append((s, Path(str(dst) + suffix)))
+
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for s, d in pairs:
+            s.rename(d)
+            moved.append((s, d))
+    except OSError:
+        # Best-effort rollback: move files back to their src locations in
+        # reverse order so the main DB is the last to move back.
+        for s, d in reversed(moved):
+            try:
+                d.rename(s)
+            except OSError:
+                # Leave what exists; never delete to "fix" the state — an
+                # operator can manually recover from a partial layout but
+                # not from deleted data.
+                pass
+        raise
 
 
 def import_json_to_sqlite(state_root: Path, db_path: Path | None = None) -> Path:
