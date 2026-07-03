@@ -425,6 +425,105 @@ def test_import_success_backs_up_pre_existing_target_db(tmp_path: Path) -> None:
         assert not Path(str(target) + ".staging" + suffix).exists()
 
 
+def test_import_os_replace_failure_restores_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for the promotion-failure case: after a pre-existing
+    target DB has been moved to <target>.bak, if the final os.replace(staging,
+    target) raises (e.g. cross-device link, permission error, disk full), the
+    original DB must be restored from .bak back to target before the exception
+    propagates — callers must never observe a 'missing' DB after a failed
+    import.
+    """
+    import os
+
+    state_root = tmp_path / "workspaces"
+    JsonStorageBackend(state_root).save(_representative_snapshot())
+
+    # Seed a pre-existing DB with DIFFERENT content and capture its on-disk
+    # bytes before the failed import.
+    target = tmp_path / "state.sqlite3"
+    other_snapshot = StorageSnapshot(
+        workspaces=[dict(_representative_snapshot().workspaces[0], id="pre-existing-ws")]
+    )
+    SqliteStorageBackend(target).save(other_snapshot)
+
+    def _bytes(p: Path) -> bytes:
+        return p.read_bytes() if p.exists() else b"<absent>"
+
+    before = {"db": _bytes(target)}
+    for suffix in ("-wal", "-shm"):
+        before[suffix] = _bytes(Path(str(target) + suffix))
+
+    # Force os.replace to raise after backup rename has happened. We patch
+    # os.replace in the migrate module namespace.
+    import claude_hub.services.storage.migrate as migrate_mod
+
+    real_replace = os.replace
+    boom = OSError("simulated os.replace failure during promotion")
+
+    def _failing_replace(src: str, dst: str) -> None:
+        # Only fail the promotion replace (staging -> target), not other
+        # rename operations (target -> backup).
+        if Path(src).name.endswith(".staging"):
+            raise boom
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(migrate_mod.os, "replace", _failing_replace)
+    with pytest.raises(OSError) as excinfo:
+        import_json_to_sqlite(state_root, target)
+    assert excinfo.value is boom
+    monkeypatch.undo()
+
+    # Pre-existing target must exist at its original path and reload to the
+    # original content (i.e. the .bak was restored, not left stranded).
+    assert target.exists(), "target DB missing after failed promotion"
+    reloaded = SqliteStorageBackend(target).load()
+    assert [w["id"] for w in reloaded.workspaces] == ["pre-existing-ws"]
+
+    # Staging must be cleaned up.
+    assert not (tmp_path / "state.sqlite3.staging").exists()
+    for suffix in ("-wal", "-shm"):
+        assert not Path(str(target) + ".staging" + suffix).exists()
+
+    # The .bak should NOT exist after a successful restore (we moved it back).
+    assert not Path(str(target) + ".bak").exists()
+
+
+def test_import_roundtrip_failure_before_backup_does_not_touch_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If failure happens BEFORE the backup-rename step (e.g. round-trip
+    mismatch), no .bak is created, target is untouched, and staging is
+    cleaned up. This pins down the 'early failure' case of the new control
+    flow."""
+    state_root = tmp_path / "workspaces"
+    JsonStorageBackend(state_root).save(_representative_snapshot())
+
+    target = tmp_path / "state.sqlite3"
+    other_snapshot = StorageSnapshot(
+        workspaces=[dict(_representative_snapshot().workspaces[0], id="pre-existing-ws")]
+    )
+    SqliteStorageBackend(target).save(other_snapshot)
+
+    before_bytes = target.read_bytes()
+
+    def _corrupt_load(self: SqliteStorageBackend) -> StorageSnapshot:
+        return StorageSnapshot()
+
+    monkeypatch.setattr(SqliteStorageBackend, "load", _corrupt_load)
+    with pytest.raises(RoundTripError):
+        import_json_to_sqlite(state_root, target)
+    monkeypatch.undo()
+
+    # Target untouched byte-for-byte, no .bak created, staging cleaned up.
+    assert target.read_bytes() == before_bytes
+    assert not Path(str(target) + ".bak").exists()
+    assert not (tmp_path / "state.sqlite3.staging").exists()
+    reloaded = SqliteStorageBackend(target).load()
+    assert [w["id"] for w in reloaded.workspaces] == ["pre-existing-ws"]
+
+
 # --- Data-loss protection (atomic write) ---------------------------------------
 
 

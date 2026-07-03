@@ -97,6 +97,20 @@ def _checkpoint_db(path: Path) -> None:
         conn.close()
 
 
+def _rename_db_with_sidecars(src: Path, dst: Path) -> None:
+    """Rename a SQLite DB and its -wal/-shm sidecars from ``src`` to ``dst``.
+
+    Missing sidecars are silently skipped (a cleanly-closed DB has none).
+    Used to roll backup files aside before promotion and to restore them
+    if promotion fails.
+    """
+    src.rename(dst)
+    for suffix in ("-wal", "-shm"):
+        s = Path(str(src) + suffix)
+        if s.exists():
+            s.rename(Path(str(dst) + suffix))
+
+
 def import_json_to_sqlite(state_root: Path, db_path: Path | None = None) -> Path:
     """Import current JSON state into a SQLite DB. The JSON source is never modified.
 
@@ -105,15 +119,17 @@ def import_json_to_sqlite(state_root: Path, db_path: Path | None = None) -> Path
     * The DB is built in a **staging** sibling file (``<target>.staging``); the
       final ``target`` path is not touched until the staged DB passes round-trip
       verification. A pre-existing ``target`` (and its ``-wal`` / ``-shm``
-      sidecars) is therefore never overwritten, truncated, or deleted on a
-      failed import.
+      sidecars) is therefore never overwritten, truncated, or deleted during
+      build or on a round-trip failure.
     * If the staged DB fails the round-trip check, only the staging files are
       deleted and :class:`RoundTripError` is raised — the original target (if
       any) remains byte-identical.
     * On success any existing ``target`` is moved aside to ``<target>.bak`` (a
       one-deep rolling backup, consistent with :func:`atomic_write_text` and
       :func:`export_sqlite_to_json`) before the verified staging DB is
-      atomically ``os.replace``d into place.
+      atomically ``os.replace``d into place. If that final ``os.replace`` fails
+      for any reason, the ``.bak`` is restored back to ``target`` before the
+      exception propagates, so the pre-existing DB is never left missing.
     * Returns the path of the written DB.
     """
     state_root = Path(state_root)
@@ -125,6 +141,8 @@ def import_json_to_sqlite(state_root: Path, db_path: Path | None = None) -> Path
     _delete_db_files(staging)
 
     source = JsonStorageBackend(state_root).load()
+    backup = target.with_name(target.name + ".bak")
+    backed_up = False
     try:
         backend = SqliteStorageBackend(staging)
         backend.save(source)
@@ -135,21 +153,27 @@ def import_json_to_sqlite(state_root: Path, db_path: Path | None = None) -> Path
 
         # Promote: back up any existing DB (one-deep rolling .bak) then atomically
         # move the verified staging DB into place.
-        backup = target.with_name(target.name + ".bak")
         if target.exists():
             _delete_db_files(backup)
-            target.rename(backup)
-            # Also tuck the existing sidecars away to the .bak location so a
-            # future rollback by renaming .bak back has its WAL/SHM alongside.
-            for suffix in ("-wal", "-shm"):
-                sidecar = Path(str(target) + suffix)
-                if sidecar.exists():
-                    sidecar.rename(Path(str(backup) + suffix))
+            _rename_db_with_sidecars(target, backup)
+            backed_up = True
         os.replace(staging, target)
     except BaseException:
-        # On any failure (round-trip error, OS error, etc.) only delete staging.
-        # The final target — and any pre-existing DB at that path — is untouched.
+        # On any failure, clean up staging and — if we already moved the
+        # original target aside to .bak but the final os.replace did not
+        # succeed — restore the backup so the pre-existing DB is back at the
+        # expected path and not left missing.
         _delete_db_files(staging)
+        if backed_up and backup.exists() and not target.exists():
+            try:
+                _rename_db_with_sidecars(backup, target)
+            except OSError:
+                # If even the restore fails (e.g. permissions, cross-fs),
+                # leave the .bak in place rather than silently dropping it.
+                # The caller can manually rename it back; we do not delete it.
+                pass
+            else:
+                backed_up = False
         raise
     return target
 
