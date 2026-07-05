@@ -1,5 +1,5 @@
 import ipaddress
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic_settings import BaseSettings
 
@@ -19,7 +19,9 @@ class Settings(BaseSettings):
     # "sqlite" selects the additive SQLite prototype. This flag is only consulted
     # by claude_hub.services.storage.get_storage_backend(); the running workspace
     # manager still uses the JSON path regardless, so the default is a no-op.
-    workspace_storage_backend: str = "json"
+    # Tightened to Literal so pydantic raises ValidationError on any other value
+    # at settings-construction time (fail-fast instead of silent fallback later).
+    workspace_storage_backend: Literal["json", "sqlite"] = "json"
 
     # Feishu OAuth settings
     feishu_app_id: Optional[str] = None

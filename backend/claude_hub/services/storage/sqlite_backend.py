@@ -8,9 +8,15 @@ backend stores. A ``schema_meta`` table records the on-disk ``schema_version``.
 Durability / crash-safety:
 
 * WAL journal mode + ``synchronous=FULL``.
+* ``busy_timeout=5000`` so multi-process / multi-tab lock contention waits
+  instead of raising ``OperationalError: database is locked`` immediately.
 * Each :meth:`save` runs in a single transaction — a crash rolls back to the last
   commit, so a partial write can never corrupt committed state (contrast the
   current JSON path, whose non-atomic full-file rewrite can truncate on crash).
+* Orphan parity: rows without ``workspace_id`` are skipped on save for
+  tasks/sessions/reports, matching ``JsonStorageBackend`` semantics where such
+  items cannot be placed in any per-workspace ``state.json`` and are therefore
+  not round-trippable.
 
 This backend is **opt-in** (``WORKSPACE_STORAGE_BACKEND=sqlite``) and is not wired
 into the running manager. It exists to prove a safe round-trip.
@@ -26,6 +32,33 @@ from . import SCHEMA_VERSION, StorageSnapshot
 
 _ENTITY_TABLES = ("workspaces", "tasks", "sessions", "reports")
 
+# Milliseconds SQLite will wait on a locked database before raising
+# OperationalError. 5s gives concurrent readers/writers (e.g., a migration CLI
+# running alongside the server) a chance to serialize without failing fast.
+_BUSY_TIMEOUT_MS = 5000
+
+
+def _run_integrity_check(db_path: Path) -> None:
+    """Run ``PRAGMA integrity_check`` against ``db_path`` and raise on any defect.
+
+    The pragma returns one row with value ``'ok'`` when the database is
+    consistent; any other rows describe individual defects. We treat any
+    non-ok result as fatal — callers should refuse to migrate or export a
+    corrupt database rather than propagate corruption.
+    """
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+        rows = conn.execute("PRAGMA integrity_check").fetchall()
+    finally:
+        conn.close()
+    messages = [r[0] for r in rows if r and r[0] != "ok"]
+    if messages:
+        raise sqlite3.DatabaseError(
+            f"SQLite integrity check failed for {db_path}: {'; '.join(messages[:5])}"
+            + (" ..." if len(messages) > 5 else "")
+        )
+
 
 class SqliteStorageBackend:
     """JSON-blob-per-row SQLite backend."""
@@ -39,6 +72,7 @@ class SqliteStorageBackend:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=FULL")
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
         self._ensure_schema(conn)
         return conn
 
@@ -112,9 +146,17 @@ class SqliteStorageBackend:
                     ("reports", snapshot.reports),
                 ):
                     for item in items:
+                        workspace_id = item.get("workspace_id")
+                        # Orphan parity with JsonStorageBackend: items without a
+                        # workspace_id cannot be placed in any per-workspace
+                        # state.json on the JSON side, so skip them here too to
+                        # prevent a JSON -> SQLite -> JSON round-trip from
+                        # gaining orphan rows that JSON cannot represent.
+                        if not workspace_id:
+                            continue
                         conn.execute(
                             f"INSERT INTO {table}(id, workspace_id, json) " "VALUES (?, ?, ?)",
-                            (item["id"], item.get("workspace_id"), json.dumps(item)),
+                            (item["id"], workspace_id, json.dumps(item)),
                         )
         finally:
             conn.close()

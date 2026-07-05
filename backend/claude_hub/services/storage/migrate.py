@@ -92,6 +92,11 @@ def _checkpoint_db(path: Path) -> None:
     """
     conn = sqlite3.connect(str(path))
     try:
+        # Match the busy_timeout used by the backend so checkpoint waits out
+        # any concurrent writer instead of failing immediately.
+        from .sqlite_backend import _BUSY_TIMEOUT_MS  # local import avoids cycle at module load
+
+        conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     finally:
         conn.close()
@@ -149,12 +154,13 @@ def import_json_to_sqlite(state_root: Path, db_path: Path | None = None) -> Path
 
     * The DB is built in a **staging** sibling file (``<target>.staging``); the
       final ``target`` path is not touched until the staged DB passes round-trip
-      verification. A pre-existing ``target`` (and its ``-wal`` / ``-shm``
-      sidecars) is therefore never overwritten, truncated, or deleted during
-      build or on a round-trip failure.
-    * If the staged DB fails the round-trip check, only the staging files are
-      deleted and :class:`RoundTripError` is raised — the original target (if
-      any) remains byte-identical.
+      verification AND ``PRAGMA integrity_check``. A pre-existing ``target``
+      (and its ``-wal`` / ``-shm`` sidecars) is therefore never overwritten,
+      truncated, or deleted during build or on a round-trip failure.
+    * If the staged DB fails the round-trip or integrity check, only the
+      staging files are deleted and :class:`RoundTripError` (or a
+      ``sqlite3.DatabaseError``) is raised — the original target (if any)
+      remains byte-identical.
     * On success any existing ``target`` is moved aside to ``<target>.bak`` (a
       one-deep rolling backup, consistent with :func:`atomic_write_text` and
       :func:`export_sqlite_to_json`) before the verified staging DB is
@@ -163,6 +169,8 @@ def import_json_to_sqlite(state_root: Path, db_path: Path | None = None) -> Path
       exception propagates, so the pre-existing DB is never left missing.
     * Returns the path of the written DB.
     """
+    from .sqlite_backend import _run_integrity_check  # local import: keep module-light
+
     state_root = Path(state_root)
     target = Path(db_path) if db_path else state_root / "state.sqlite3"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -178,9 +186,10 @@ def import_json_to_sqlite(state_root: Path, db_path: Path | None = None) -> Path
         backend = SqliteStorageBackend(staging)
         backend.save(source)
         _assert_round_trip(source, backend.load())
-        # Ensure staging is a single self-contained file before promotion
-        # (merge + remove WAL/SHM sidecars).
+        # Collapse WAL so staging is single-file AND then verify integrity
+        # before we touch the live target.
         _checkpoint_db(staging)
+        _run_integrity_check(staging)
 
         # Promote: back up any existing DB (one-deep rolling .bak) then atomically
         # move the verified staging DB into place.
@@ -213,14 +222,24 @@ def export_sqlite_to_json(db_path: Path, state_root: Path) -> Path:
     """Export SQLite state back to the JSON layout (rollback direction).
 
     Non-destructive: the JSON is built in a sibling staging directory and the
-    round-trip is verified **before** the live ``state_root`` is touched. Only
-    after verification passes is any existing ``state_root`` moved aside to
-    ``<state_root>.bak`` and the verified tree swapped into place. On mismatch a
-    :class:`RoundTripError` is raised and the live ``state_root`` is left exactly
-    as it was. Returns the JSON root.
+    round-trip is verified **before** the live ``state_root`` is touched. The
+    source DB is integrity-checked before staging is promoted. Only after
+    verification passes is any existing ``state_root`` moved aside to
+    ``<state_root>.bak`` and the verified tree swapped into place. If the final
+    rename fails, the prior ``state_root`` is restored from ``.bak`` (symmetric
+    with :func:`import_json_to_sqlite`). On mismatch or integrity failure a
+    :class:`RoundTripError` / ``sqlite3.DatabaseError`` is raised and the live
+    ``state_root`` is left exactly as it was. Returns the JSON root.
     """
+    from .sqlite_backend import _run_integrity_check  # local import: keep module-light
+
     db_path = Path(db_path)
     state_root = Path(state_root)
+
+    # Refuse to migrate a corrupt DB. This runs BEFORE we touch state_root.
+    if db_path.exists():
+        _run_integrity_check(db_path)
+
     source = SqliteStorageBackend(db_path).load()
 
     # Stage into a sibling directory (same parent => same filesystem => atomic
@@ -229,6 +248,9 @@ def export_sqlite_to_json(db_path: Path, state_root: Path) -> Path:
     staging = state_root.with_name(state_root.name + ".staging")
     if staging.exists():
         shutil.rmtree(staging)
+
+    backup = state_root.with_name(state_root.name + ".bak")
+    backed_up = False
     try:
         backend = JsonStorageBackend(staging)
         backend.save(source)
@@ -236,13 +258,25 @@ def export_sqlite_to_json(db_path: Path, state_root: Path) -> Path:
         _assert_round_trip(source, backend.load())
 
         # Promote: back up any existing live tree, then swap staging in.
-        backup = state_root.with_name(state_root.name + ".bak")
         if state_root.exists():
             if backup.exists():
                 shutil.rmtree(backup)
             state_root.rename(backup)
+            backed_up = True
         staging.rename(state_root)
-    finally:
+    except BaseException:
+        # Clean up staging on any failure.
         if staging.exists():
             shutil.rmtree(staging)
+        # If we moved the live tree aside to .bak but the final rename did
+        # not succeed, restore the backup so state_root is not missing.
+        if backed_up and backup.exists() and not state_root.exists():
+            try:
+                backup.rename(state_root)
+            except OSError:
+                # Leave .bak in place for manual recovery; never delete.
+                pass
+            else:
+                backed_up = False
+        raise
     return state_root
