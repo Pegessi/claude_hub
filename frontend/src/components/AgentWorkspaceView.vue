@@ -536,6 +536,20 @@
                     </span>
                   </span>
                 </div>
+                <div
+                  v-if="task.task_mode === 'autonomous' && autonomyProgress(task)"
+                  class="task-card-autonomy-progress"
+                  :title="`Autonomous iteration ${autonomyProgress(task)!.current} of ${autonomyProgress(task)!.max}`"
+                  role="progressbar"
+                  :aria-valuenow="autonomyProgress(task)!.current"
+                  :aria-valuemin="0"
+                  :aria-valuemax="autonomyProgress(task)!.max"
+                >
+                  <span
+                    class="task-card-autonomy-progress-fill"
+                    :style="{ width: autonomyProgress(task)!.percent + '%' }"
+                  />
+                </div>
                 <p class="task-card-description">
                   {{ task.prompt }}
                 </p>
@@ -4621,6 +4635,21 @@ function taskAgeLabel(task: WorkspaceTask): string {
   return formatRelativeTime(task.completed_at || task.updated_at || task.created_at)
 }
 
+// Visualize an autonomous task's iteration budget as a fraction so the board
+// shows how far a long-running auto task has progressed, not just "Auto 1/3".
+function autonomyProgress(
+  task: WorkspaceTask,
+): { current: number; max: number; percent: number } | null {
+  if (task.task_mode !== 'autonomous') return null
+  const current = task.autonomous_run?.iteration || 1
+  const max =
+    task.autonomous_run?.max_iterations || task.autonomy_policy?.max_iterations || 3
+  if (!Number.isFinite(max) || max <= 0) return null
+  const clampedCurrent = Math.max(1, Math.min(current, max))
+  const percent = Math.round((clampedCurrent / max) * 100)
+  return { current: clampedCurrent, max, percent }
+}
+
 function parseTimestampMs(value?: string | null): number | null {
   if (!value) return null
   const timestamp = new Date(value).getTime()
@@ -7250,6 +7279,15 @@ onUnmounted(() => {
   .board-skeleton-line {
     animation: none;
   }
+
+  .task-card--working::before,
+  .task-card--review::before {
+    animation: none;
+  }
+
+  .task-card-autonomy-progress-fill {
+    transition: none;
+  }
 }
 
 .empty-board {
@@ -7421,10 +7459,28 @@ onUnmounted(() => {
 
 .task-card--working::before {
   background: var(--ch-color-warning-strong);
+  width: 4px;
+  animation: task-card-live-pulse 1.8s ease-in-out infinite;
+}
+
+.task-card--working {
+  border-color: color-mix(in srgb, var(--ch-color-warning-strong) 32%, var(--ch-color-border-muted));
 }
 
 .task-card--review::before {
   background: var(--ch-color-attention-strong);
+  width: 4px;
+  animation: task-card-live-pulse 1.8s ease-in-out infinite;
+}
+
+.task-card--review {
+  border-color: color-mix(in srgb, var(--ch-color-attention-strong) 32%, var(--ch-color-border-muted));
+}
+
+/* Live tasks breathe so an actively-running task is obvious at a glance. */
+@keyframes task-card-live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.42; }
 }
 
 .task-card--done::before {
@@ -7563,6 +7619,25 @@ onUnmounted(() => {
   line-height: 1;
   padding: 5px 7px;
   white-space: nowrap;
+}
+
+/* Thin iteration-budget bar for autonomous cards; teal matches .autonomy-badge. */
+.task-card-autonomy-progress {
+  position: relative;
+  height: 3px;
+  margin: 8px 0 0;
+  border-radius: 999px;
+  background: rgba(20, 184, 166, 0.16);
+  overflow: hidden;
+}
+
+.task-card-autonomy-progress-fill {
+  display: block;
+  height: 100%;
+  min-width: 6px;
+  border-radius: inherit;
+  background: rgba(20, 184, 166, 0.85);
+  transition: width var(--ch-motion-standard);
 }
 
 .origin-badge {
@@ -7934,10 +8009,16 @@ onUnmounted(() => {
 }
 
 .column-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 8px 2px;
+  padding: 16px 0;
   color: var(--ch-color-text-subtle);
   font-size: 12px;
   text-align: center;
-  padding: 18px 0;
+  border: 1px dashed var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
 }
 
 .task-detail-overlay {
