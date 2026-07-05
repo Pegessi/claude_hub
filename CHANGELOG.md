@@ -5,6 +5,27 @@
 
 ## Unreleased
 
+### fix(ui): larger mobile agent-status tap targets + clearer show-older toggle
+
+- **What**: on the Agent Workspace board, mobile-width agent-status action
+  buttons (Refresh / Env / Pause·Resume / Run now / Delete) are bumped from
+  28×28 icon-only targets to 36×36 with `aria-label` (and a missing
+  Pause/Resume `title`) so the controls remain comfortably tappable and
+  stay identifiable to assistive technology. The Done-column "Show N
+  older" toggle is enlarged to min-height 26px with roomier padding,
+  medium weight, a hover fill, and a corrected `--ch-radius-sm` design
+  token reference (was `--radius-sm`, which never resolved).
+- **Why**: 28×28 icon-only buttons at ~360px viewport width fell below the
+  common 32–44px mobile tap-target guideline, and the missing `title` on
+  Pause/Resume plus the `font-size:0` label hiding made the controls
+  ambiguous. The Done toggle was ~19px tall at 11px for an action that
+  expands 100+ history items, and the stale `--radius-sm` token meant the
+  intended rounded corners did not render.
+- **How**: CSS-only size/token/hover changes in `AgentWorkspaceView.vue`
+  plus additive `aria-label` / dynamic `:title` bindings on the existing
+  buttons; no JavaScript behavior change.
+- **Validation**: `pnpm lint` and `pnpm build` (vue-tsc + vite) exit 0.
+
 ### fix(workspace): recover reviews whose reviewer terminal disappeared
 
 - **What**: workspace review reaping now treats a bound reviewer whose tmux
