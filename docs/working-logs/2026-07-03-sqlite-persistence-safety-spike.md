@@ -226,3 +226,126 @@ the current code path. Wiring is the next task, behind the same flag.
 Scanned the workspace lessons catalog; none of the 5 lessons
 (review-decision policy, mobile keyboard, dispatch race, new-agent-type parsing,
 multi-tab refresh) apply to persistence/storage. No lessons force-fit.
+
+---
+
+## 7. Phase 3 — Read-only `storage verify` CLI (2026-07-05)
+
+Phase 2 hardened the opt-in backend with busy-timeout, integrity_check gates,
+orphan parity, Literal config typing, and restore-on-failure. The default is
+still `json` and the running server does not touch SQLite. Phase 3 adds a
+**read-only pre-flight command** so an operator (or CI) can exercise the
+SQLite round-trip against their real JSON state *before* any live rollout.
+
+### What ships
+
+- `backend/claude_hub/services/storage/verify.py` — pure-Python helper:
+  - `VerificationError` / `EntityDiff` / `VerificationReport` dataclasses.
+  - `verify_state_dir(state_root)` loads the JSON snapshot, writes it into a
+    **tempdir-scoped** SQLite file, runs `PRAGMA integrity_check`, reloads,
+    exports via the production `export_sqlite_to_json`, reloads that export,
+    and compares fingerprints. Returns `VerificationReport(ok=True)` on
+    success; raises `VerificationError` with a partial `report` attribute on
+    any failure.
+  - Orphan items (no `workspace_id`) are counted and surfaced as **warnings**,
+    not failures — both backends silently drop them on `save()`, so we
+    compare fingerprints after stripping orphans.
+  - `state_root` is opened read-only; no files are created inside it. All
+    SQLite/export artifacts live under a `TemporaryDirectory` and are cleaned
+    up on return.
+- `backend/claude_hub/cli/commands/storage.py` — new `storage` Click group
+  with one command:
+  - `claude-hub storage verify [--state-root PATH] [--copy/--no-copy] [--json]`
+  - Default `--state-root` is `~/.claude_hub/workspaces`.
+  - Default `--copy` shutil.copytrees the source into a temp dir (ignoring
+    `*.sqlite3*`, `*.bak`, `*.staging`) before verifying, so concurrent
+    server saves cannot cause a torn JSON read. Pass `--no-copy` only when
+    the server is stopped or you are pointing at a fixture.
+  - Exit codes: `0` on pass, `1` on verification failure, `2` (Click default)
+    on usage / IO errors.
+  - Human output prints source counts, integrity / SQLite round-trip /
+    JSON-export round-trip flags, warnings, and `PASS` / `FAIL`. `--json`
+    emits the full `VerificationReport.to_dict()` (with an `error` field on
+    failure).
+- `backend/claude_hub/cli/main.py` — `_register()` imports and attaches
+  `storage` between `session` and `lessons`.
+- `backend/tests/test_storage_verify.py` — 10 tests covering:
+  - Clean snapshot passes; verifier does not mutate `state_root`.
+  - Missing `index.json` and corrupt JSON both raise `VerificationError`.
+  - Integrity-check failure is raised as `VerificationError` (monkeypatched).
+  - Orphan items surface as warnings; export round-trip still passes and
+    orphans are correctly dropped.
+  - CLI subcommand is registered, returns exit 0 with `PASS` in human output
+    and a parseable JSON payload with `--json`, returns exit 1 for a missing
+    root, and leaves `state_root` byte-identical under default `--copy`.
+  - Meta-check: `workspace_storage_backend` still defaults to `"json"` and
+    `get_storage_backend()` still returns `JsonStorageBackend` by default.
+
+### Operator usage (develop only — not yet on main)
+
+```bash
+# Pre-flight your live state root (server may be running — default --copy is safe):
+claude-hub storage verify
+
+# Point at a fixture / test snapshot:
+claude-hub storage verify --state-root /tmp/my-fixture --no-copy
+
+# Machine-readable output:
+claude-hub --json storage verify | jq .
+```
+
+Sample human output on a healthy fixture:
+
+```
+storage verify: /path/to/state
+  source           : 1 workspaces, 4 tasks, 7 sessions, 12 reports
+  integrity_check  : ok
+  sqlite roundtrip : ok
+  json export r/t  : ok
+  result: PASS
+```
+
+On failure, the `FAIL` line lists the first error, and per-kind diffs
+(`missing=`, `extra=`, `changed=`) are emitted to stderr so an operator can
+see exactly which entity ids drifted.
+
+### Do-not-flip guardrails (still) in force
+
+- `settings.workspace_storage_backend` still defaults to `"json"`; the
+  `Literal["json", "sqlite"]` typing still rejects any other value at
+  Settings-construction time, and `get_storage_backend()` still falls back to
+  JSON for any unknown runtime value.
+- `workspace_manager` is still **not** wired to `get_storage_backend()`. The
+  running server continues to read/write `index.json` + `<ws>/state.json`
+  exactly as before. Phase 3 only adds the CLI verifier.
+- All verify artifacts live in temp dirs; the command never opens the live
+  state root for writing, never creates `*.sqlite3` next to live data, and
+  never touches `*.bak` / `*.staging` files.
+
+### Phase 4 preview (not in this task)
+
+1. Wire `workspace_manager._save_state` / `_load_state` to
+   `get_storage_backend()` behind the existing flag. Make JSON writes use
+   `atomic_write_text` unconditionally (this is a data-loss fix independent
+   of SQLite).
+2. Add a shadow-write wrapper that saves to both backends, reloads SQLite,
+   compares fingerprints against the JSON snapshot on every save, and logs
+   (but does not block on) drift. Run this shadow mode for N days in
+   `develop` while the default remains `json`.
+3. Once drift logs are empty across real deployments, add an offline
+   migration subcommand (built on `import_json_to_sqlite` + the verify
+   helper), then flip the default to `sqlite` behind a major-version note.
+
+## 8. Validation evidence (phase 3)
+
+- `black --check` / `isort --check-only` / `mypy` all green on
+  `storage/verify.py`, `cli/commands/storage.py`, `cli/main.py`,
+  `tests/test_storage_verify.py`.
+- `uv run pytest tests/test_storage_backend.py tests/test_storage_verify.py`
+  → 42 passed (32 phase-2 + 10 phase-3).
+- Manual smoke: seeded a fixture root with one workspace, ran
+  `claude-hub storage verify --state-root <fixture> --no-copy`, confirmed
+  exit 0 with `result: PASS` and no files added to the fixture root.
+- Main worktree at `/Users/bytedance/claude_hub` remains at `59fa368` with
+  the three protected untracked files untouched. No frontend files were
+  touched.

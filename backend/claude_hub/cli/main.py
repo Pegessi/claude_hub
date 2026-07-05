@@ -93,6 +93,7 @@ def _register() -> None:
         terminal,
     )
     from claude_hub.cli.commands.sessions import session
+    from claude_hub.cli.commands.storage import storage
     from claude_hub.cli.commands.tasks import task
     from claude_hub.cli.commands.workspaces import agent, workspace
 
@@ -109,6 +110,7 @@ def _register() -> None:
     cli.add_command(agent)
     cli.add_command(task)
     cli.add_command(session)
+    cli.add_command(storage)
     cli.add_command(lessons)
     cli.add_command(feishu)
 
