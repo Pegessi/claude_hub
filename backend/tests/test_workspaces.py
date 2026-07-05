@@ -6868,6 +6868,66 @@ def test_fallback_reaper_redispatches_when_prompt_still_pending(
     )
 
 
+def test_fallback_reaper_redispatches_when_reviewer_tmux_pane_missing(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A bound reviewer with a missing tmux pane can never POST its verdict.
+
+    The reaper should treat that concrete terminal failure as a stale dispatch,
+    clear the dead reviewer binding, and assign a fresh reviewer instead of
+    leaving the task stuck in review forever.
+    """
+    sent_messages: list[tuple[str, str]] = []
+    client, workspace_id, task_id, review_session_id = _setup_review_in_flight_task(
+        monkeypatch,
+        tmp_path,
+        tab_id="tab-reaper-missing-pane",
+        port=12384,
+        name="Missing reviewer pane",
+        prefix="reapmp",
+        sent_messages=sent_messages,
+    )
+
+    initial_attempts = workspace_manager.tasks[task_id].review_attempts
+    stale = datetime.now() - timedelta(
+        seconds=workspace_module.REVIEW_REAPER_DISPATCH_GRACE_SECONDS + 30
+    )
+    reviewer = workspace_manager.sessions[review_session_id]
+    workspace_manager.sessions[review_session_id] = reviewer.model_copy(
+        update={
+            "status": ManagedSessionStatus.WORKING,
+            "runtime_status": AgentRuntimeStatus.WORKING,
+            "task_id": task_id,
+            "current_task_id": task_id,
+            "last_activity_at": stale,
+            "updated_at": stale,
+        }
+    )
+
+    async def fake_capture_output(tmux_session: str) -> str:
+        if tmux_session == reviewer.tmux_session:
+            raise RuntimeError(f"can't find pane: {tmux_session}")
+        return "⏺ Reviewing the change...\n  ? for shortcuts\n"
+
+    monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture_output)
+    sent_messages.clear()
+
+    asyncio.run(workspace_manager.dispatch_workspace(workspace_id, refresh_sessions=False))
+
+    after = workspace_manager.tasks[task_id]
+    assert after.review_attempts == initial_attempts + 1, (
+        "fallback reaper must re-dispatch when the assigned reviewer tmux pane is gone; "
+        f"attempts {initial_attempts} -> {after.review_attempts}"
+    )
+    assert after.review_session_id is not None
+    assert after.review_session_id != review_session_id
+    stale_reviewer = workspace_manager.sessions[review_session_id]
+    assert stale_reviewer.current_task_id is None
+    assert stale_reviewer.task_id is None
+    assert any("fallback reaper" in msg.lower() for _, msg in sent_messages)
+
+
 def test_interrupted_idle_working_agent_auto_continue_stops_after_limit(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,

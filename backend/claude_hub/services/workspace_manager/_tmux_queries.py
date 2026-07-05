@@ -315,6 +315,11 @@ class _TmuxQueriesMixin:
         """
         if not task.review_session_id:
             return False
+        if self._review_dispatch_in_reaper_grace(task, now=_wm._now()):
+            # Reviewer was just dispatched: don't treat an empty early capture
+            # as "prompt still in input box", or we re-dispatch before the
+            # reviewer has had a chance to submit the prompt.
+            return False
         reviewer = self.sessions.get(task.review_session_id)
         if not reviewer or not reviewer.tmux_session:
             return False
@@ -333,13 +338,57 @@ class _TmuxQueriesMixin:
             self._expected_pending_prompt_prefix(reviewer, task),
         )
 
+    async def _reviewer_terminal_missing(self, task: WorkspaceTask) -> bool:
+        """Return True when the assigned reviewer points at a dead tmux pane.
+
+        A reviewer can remain bound to a task with runtime_status=WORKING after
+        its backing tmux pane has disappeared. In that state the final reviewer
+        report can never reach Claude Hub, while the normal active-reviewer
+        checks keep treating the assignment as live. Detect only the concrete
+        missing-pane failure so silent but healthy reviewers are still protected
+        from duplicate prompts.
+        """
+        if not task.review_session_id:
+            return False
+        if self._review_dispatch_in_reaper_grace(task, now=_wm._now()):
+            return False
+        reviewer = self.sessions.get(task.review_session_id)
+        if not reviewer or not reviewer.tmux_session:
+            return False
+        if reviewer.task_id != task.id and reviewer.current_task_id != task.id:
+            return False
+        try:
+            await self._capture_tmux_output(reviewer.tmux_session)
+        except RuntimeError as exc:
+            message = str(exc).lower()
+            if "can't find pane" in message or "can't find window" in message:
+                logger.warning(
+                    "Reviewer terminal missing for task_id=%s session_id=%s tmux_session=%s: %s",
+                    task.id,
+                    reviewer.id,
+                    reviewer.tmux_session,
+                    exc,
+                )
+                self.sessions[reviewer.id] = reviewer.model_copy(
+                    update={
+                        "status": ManagedSessionStatus.STOPPED,
+                        "runtime_status": AgentRuntimeStatus.IDLE,
+                        "updated_at": _wm._now(),
+                    }
+                )
+                return True
+        return False
+
     async def _review_dispatch_failed(self, task: WorkspaceTask) -> bool:
         """Reaper gate: True when this task's review dispatch should be re-sent.
 
         Combines the strict reviewer-availability predicate with the input-box
-        backstop so the fallback reaper only re-dispatches on positive evidence
-        of a failed dispatch, never on transient reviewer IDLE."""
+        backstop and the missing-terminal detector so the fallback reaper only
+        re-dispatches on positive evidence of a failed dispatch, never on
+        transient reviewer IDLE."""
         if self._reviewer_dispatch_stuck(task):
+            return True
+        if await self._reviewer_terminal_missing(task):
             return True
         return await self._reviewer_prompt_still_pending(task)
 
@@ -367,10 +416,19 @@ class _TmuxQueriesMixin:
             include_stale_assignments=True,
         )
         # Clear the task's own stale reference so future dispatch succeeds.
+        # Unconditionally clear review_session_id when we reach this point:
+        # callers only invoke ``_release_stale_reviewer_for_task`` after they've
+        # independently determined the reviewer is not live (missing terminal,
+        # prompt still in input box, or reaper-detected stuck dispatch). The
+        # prior ``and not _reviewer_is_active(current)`` guard prevented
+        # clearing when a bound-but-dead reviewer still carried WORKING in
+        # memory (e.g. tmux pane gone but session record not yet marked
+        # STOPPED), which is exactly the missing-pane scenario this recovery
+        # addresses.
         current = self.tasks.get(task.id)
         if not current:
             return
-        if current.review_session_id and not self._reviewer_is_active(current):
+        if current.review_session_id:
             self.tasks[current.id] = current.model_copy(
                 update={
                     "review_session_id": None,

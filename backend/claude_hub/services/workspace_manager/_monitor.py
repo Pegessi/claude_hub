@@ -611,11 +611,21 @@ class _MonitorMixin:
                 or (session.task_id != task.id and session.current_task_id != task.id)
             ):
                 continue
+            # Preserve an already-STOPPED session's status: a dead/missing
+            # reviewer (e.g. tmux pane gone) is marked STOPPED by the missing-
+            # terminal detector before release, and overwriting that with the
+            # caller's IDLE would mask the failure and let a STOPPED session
+            # look schedulable.
+            next_status = (
+                ManagedSessionStatus.STOPPED
+                if session.status == ManagedSessionStatus.STOPPED
+                else status
+            )
             self.sessions[session.id] = session.model_copy(
                 update={
                     "task_id": None,
                     "current_task_id": None,
-                    "status": status,
+                    "status": next_status,
                     "runtime_status": runtime_status,
                     "updated_at": updated_at,
                     "last_activity_at": updated_at,

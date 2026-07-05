@@ -5,6 +5,41 @@
 
 ## Unreleased
 
+### fix(workspace): recover reviews whose reviewer terminal disappeared
+
+- **What**: workspace review reaping now treats a bound reviewer whose tmux
+  pane or window is gone as a stale review dispatch: it marks the reviewer
+  `STOPPED` / `IDLE`, clears the task's `review_session_id` binding, and
+  allows the fallback reaper to send the review to another available
+  reviewer. `_release_reviewer_session` now preserves an already-`STOPPED`
+  session's status instead of overwriting it with `IDLE`, and the
+  prompt-still-in-input-box backstop now honors the reaper grace window so
+  a freshly-dispatched reviewer is not falsely reaped before it can submit
+  its prompt.
+- **Why**: several reviewed tasks sat permanently stuck in "Awaiting AI
+  review" after the reviewer tmux pane disappeared (e.g. tab deleted, tmux
+  server restart) — the final reviewer report could never reach Claude
+  Hub, while the task still looked assigned to an active reviewer and the
+  existing `_reviewer_is_active` / `_reviewer_dispatch_stuck` gates (which
+  look at in-memory session state, not tmux pane liveness) kept the
+  binding live.
+- **How**: adds `_reviewer_terminal_missing(task)` to
+  `_TmuxQueriesMixin`, which calls `_capture_tmux_output` and treats
+  `"can't find pane"` / `"can't find window"` `RuntimeError`s as positive
+  evidence of a dead terminal; wires it into `_review_dispatch_failed`;
+  removes the `and not _reviewer_is_active(current)` gate in
+  `_release_stale_reviewer_for_task` so a task with a bound-but-dead
+  reviewer is actually unbound; preserves `STOPPED` status in
+  `_release_reviewer_session` via a `next_status` local; adds a
+  reaper-grace early-return in `_reviewer_prompt_still_pending`; adds
+  regression test
+  `test_fallback_reaper_redispatches_when_reviewer_tmux_pane_missing`.
+- **Validation**: `uv run black --check`, `uv run mypy
+  claude_hub/services/workspace_manager/`, and `uv run pytest
+  tests/test_workspaces.py -k 'reaper or review_dispatch or
+  reviewer_tmux_pane_missing'` (9 tests, including the new regression,
+  all pass); `git diff --check` clean.
+
 ### perf(ui): board large-history responsiveness polish
 
 - **What**: the workspace board now fills the remaining viewport height
