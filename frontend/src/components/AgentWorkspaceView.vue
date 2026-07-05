@@ -230,6 +230,7 @@
             type="button"
             class="agent-status-refresh"
             title="Refresh statuses"
+            aria-label="Refresh statuses"
             :loading="isPending('workspace:refresh-statuses')"
             hide-content-while-loading
             loading-label="Refreshing statuses"
@@ -334,6 +335,7 @@
               type="button"
               class="agent-status-switch-env"
               title="Switch Env / Model"
+              aria-label="Switch Env / Model"
               :loading="isPending(sessionActionKey('switch-env', agent.id))"
               loading-label="Switching env"
               @click.stop="openSwitchEnvModal(agent)"
@@ -344,6 +346,8 @@
               v-if="isResidentAgent(agent)"
               type="button"
               class="agent-status-pause"
+              :title="isResidentPaused ? 'Resume resident agent' : 'Pause resident agent'"
+              :aria-label="isResidentPaused ? 'Resume resident agent' : 'Pause resident agent'"
               :loading="isPending('workspace:resident-pause')"
               :loading-label="isResidentPaused ? 'Resuming agent' : 'Pausing agent'"
               @click="toggleResidentPaused"
@@ -359,6 +363,7 @@
               :title="residentRunPending
                 ? 'A run is already queued for the next monitor tick'
                 : 'Run the resident now using its saved directive and periodic tasks'"
+              :aria-label="residentRunPending ? 'Run queued' : 'Run now'"
               :loading="isPending('resident:run')"
               loading-label="Queuing run"
               @click="handleRunResidentNow"
@@ -375,6 +380,7 @@
               class="agent-status-delete"
               :disabled="!canDeleteAgent(agent)"
               :title="agentDeleteTitle(agent)"
+              aria-label="Delete agent"
               :loading="isPending(agentActionKey('delete', agent.id))"
               loading-label="Deleting agent"
               @click="deleteAgent(agent)"
@@ -7390,19 +7396,24 @@ onUnmounted(() => {
 .column-done-toggle {
   display: inline-flex;
   align-items: center;
-  padding: 2px 8px;
-  font-size: 11px;
+  min-height: 26px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--ch-color-text-muted);
   background: var(--ch-color-surface-elevated);
   border: 1px solid var(--ch-color-border-muted);
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--ch-radius-sm, 4px);
   cursor: pointer;
   white-space: nowrap;
+  transition: color var(--ch-motion-fast), border-color var(--ch-motion-fast),
+    background var(--ch-motion-fast);
 }
 
 .column-done-toggle:hover {
   color: var(--ch-color-text);
   border-color: var(--ch-color-border-strong);
+  background: var(--ch-color-surface-control);
 }
 
 .task-list {
@@ -10360,14 +10371,14 @@ onUnmounted(() => {
   .agent-status-actions .agent-status-run-now,
   .agent-status-actions .agent-status-switch-env,
   .agent-status-actions .agent-status-delete {
-    width: 28px;
-    height: 28px;
-    min-width: 28px;
-    min-height: 28px;
+    width: 36px;
+    height: 36px;
+    min-width: 36px;
+    min-height: 36px;
     padding: 0;
     justify-content: center;
     gap: 0;
-    font-size: 0; /* hide text label */
+    font-size: 0; /* hide text label; icon-only with aria-label for a11y */
     line-height: 1;
   }
 
@@ -10375,7 +10386,7 @@ onUnmounted(() => {
   .agent-status-actions .agent-status-run-now .btn-icon,
   .agent-status-actions .agent-status-switch-env .btn-icon,
   .agent-status-actions .agent-status-delete .btn-icon {
-    font-size: 14px;
+    font-size: 16px;
     line-height: 1;
   }
 
