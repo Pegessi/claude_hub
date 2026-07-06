@@ -36,6 +36,37 @@
   Desktop and narrow-viewport visual pass confirms no flashing, consistent
   modal/popover chrome, usable mobile layout.
 
+### feat(ui): consistent action-button iconography; summary/column chips; calm icon font stack
+
+- **What**: every action button across the workspace surface (Start/Edit/
+  Done/Request review/Abort/Open/Delete, New/Edit/Lessons/Agents/Add Task,
+  agent-row Open/Env/Pause/Run/Delete, file-browser Browse/Close/Refresh/
+  Select, modal Save/Create/Send/Clear/Restart, lessons AI summarize/Force
+  run/Refresh/Delete/Clear/Add, workspace/resident modal Configure/Delete/
+  Save/Create/Pause/Done) now carries a semantic glyph prefix. Summary strip
+  stats (agents/reviewers/working/queued/lessons) render as muted pill chips
+  with a bold count; column headers are small rounded count chips with the
+  count bolded. All lowercase `x` close glyphs are normalized to `×`
+  (U+00D7). `.btn-icon` gets a dedicated symbol-font stack (Apple Symbols,
+  Segoe UI Symbol, Noto Sans Symbols, Symbola) at 11px so the glyphs render
+  consistently across platforms. Action buttons use `display: inline-flex`
+  with a 4px gap, and all buttons gain an `:active translateY(1px)` press
+  response. Hardcoded `border-radius: 4px` tokens are migrated to
+  `--ch-radius-sm`.
+- **Why**: prior to this pass the workspace mixed unlabeled arrows (→ on
+  Open), lowercase `x` closes, inconsistent icon sizing, and a handful of
+  completely text-only buttons. This made affordances harder to scan and
+  gave the surface a less-finished feel. Chip treatment for summary stats
+  makes the live counts visually distinct from freeform text.
+- **How**: template + CSS changes in `AgentWorkspaceView.vue`. The feature
+  branch was cut from an older develop that still contained the now-removed
+  pulsing animations; integration reconciled conflicts to preserve the
+  restrained-UI state (no `task-card-live-pulse`/`review-badge-pulse`
+  keyframes, surface ring on tab indicators, 18% card border tint) while
+  adding the iconography and chip polish. Abort glyph moved from `■` to
+  `⬤` per the accepted feature.
+- **Validation**: `pnpm lint` and `pnpm build` (vue-tsc + vite) exit 0.
+
 ### fix(ui): larger mobile agent-status tap targets + clearer show-older toggle
 
 - **What**: on the Agent Workspace board, mobile-width agent-status action

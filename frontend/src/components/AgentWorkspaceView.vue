@@ -139,7 +139,7 @@
               loading-label="Refreshing"
               @click="refreshAgentStatusesFromMenu"
             >
-              Refresh
+              <span class="btn-icon">↻</span> Refresh
             </LoadingButton>
             <NetworkAccessMenu variant="menu" />
             <button
@@ -685,7 +685,7 @@
                     loading-label="Aborting task"
                     @click.stop="abortTask(task)"
                   >
-                    <span class="btn-icon">■</span> Abort
+                    <span class="btn-icon">⬤</span> Abort
                   </LoadingButton>
                   <LoadingButton
                     v-if="sessionForTask(task)"
@@ -1458,7 +1458,7 @@
                   loading-label="Aborting task"
                   @click="abortTask(selectedTask)"
                 >
-                  <span class="btn-icon">■</span> Abort
+                  <span class="btn-icon">⬤</span> Abort
                 </LoadingButton>
                 <LoadingButton
                   v-if="selectedSession"
@@ -1530,7 +1530,7 @@
                   :loading="isPending(selectedTaskSendKey)"
                   loading-label="Sending message"
                 >
-                  Send
+                  <span class="btn-icon">▶</span> Send
                 </LoadingButton>
               </form>
             </div>
@@ -1738,7 +1738,7 @@
                 class="tool-button"
                 @click="openResidentAgentModal"
               >
-                Configure…
+                <span class="btn-icon">⚙</span> Configure…
               </button>
             </div>
             <p class="modal-hint">
@@ -1754,7 +1754,7 @@
               :disabled="isLoading || isPending('workspace:delete')"
               @click="handleDeleteWorkspace"
             >
-              Delete Workspace
+              <span class="btn-icon">×</span> Delete Workspace
             </button>
             <button
               type="button"
@@ -1770,6 +1770,7 @@
               :loading="isPending(workspaceModalMode === 'edit' ? 'workspace:update' : 'workspace:create')"
               :loading-label="workspaceModalMode === 'edit' ? 'Saving workspace' : 'Creating workspace'"
             >
+              <span class="btn-icon">{{ workspaceModalMode === 'edit' ? '✓' : '+' }}</span>
               {{ workspaceModalMode === 'edit' ? 'Save workspace' : 'Create workspace' }}
             </LoadingButton>
           </div>
@@ -1902,7 +1903,7 @@
                   title="Remove this recurring task"
                   @click="removePeriodicTask(task.id)"
                 >
-                  ✕
+                  ×
                 </button>
               </li>
             </ul>
@@ -1917,7 +1918,7 @@
               class="tool-button periodic-task-add"
               @click="addPeriodicTask"
             >
-              + Add recurring task
+              <span class="btn-icon">+</span> Add recurring task
             </button>
           </div>
           <div class="modal-field">
@@ -2019,7 +2020,7 @@
             class="tool-button"
             @click="closeResidentAgentModal"
           >
-            Done
+            <span class="btn-icon">✓</span> Done
           </button>
           <LoadingButton
             type="button"
@@ -2029,7 +2030,7 @@
             loading-label="Deleting"
             @click="handleDeleteResident"
           >
-            Delete
+            <span class="btn-icon">×</span> Delete
           </LoadingButton>
           <LoadingButton
             type="button"
@@ -2039,6 +2040,7 @@
             :loading-label="(activeWorkspace?.resident_agent_paused ?? false) ? 'Resuming resident' : 'Pausing resident'"
             @click="handleToggleResidentPause"
           >
+            <span class="btn-icon">{{ (activeWorkspace?.resident_agent_paused ?? false) ? '▶' : '⏸' }}</span>
             {{ (activeWorkspace?.resident_agent_paused ?? false) ? 'Resume' : 'Pause' }}
           </LoadingButton>
           <LoadingButton
@@ -2049,7 +2051,7 @@
             loading-label="Creating"
             @click="handleCreateResident"
           >
-            Create
+            <span class="btn-icon">+</span> Create
           </LoadingButton>
           <LoadingButton
             type="button"
@@ -2062,7 +2064,7 @@
             loading-label="Saving & running"
             @click="handleSaveResidentAndRunNow"
           >
-            Save &amp; run now
+            <span class="btn-icon">▶</span> Save &amp; run now
           </LoadingButton>
         </div>
       </div>
@@ -2290,7 +2292,7 @@
               :loading="isPending('task:create')"
               loading-label="Adding task"
             >
-              Add task
+              <span class="btn-icon">+</span> Add task
             </LoadingButton>
           </div>
         </form>
@@ -2373,7 +2375,7 @@
               :loading="isPending(taskActionKey('edit', editingTaskId))"
               loading-label="Saving task"
             >
-              Save task
+              <span class="btn-icon">✓</span> Save task
             </LoadingButton>
           </div>
         </form>
@@ -2410,7 +2412,7 @@
             loading-label="Checking"
             @click="handleSummarizeLessons(false)"
           >
-            AI summarize
+            <span class="btn-icon">💡</span> AI summarize
           </LoadingButton>
           <LoadingButton
             type="button"
@@ -2420,7 +2422,7 @@
             loading-label="Queueing"
             @click="handleSummarizeLessons(true)"
           >
-            Force AI run
+            <span class="btn-icon">↻</span> Force AI run
           </LoadingButton>
           <LoadingButton
             type="button"
@@ -2429,7 +2431,7 @@
             loading-label="Refreshing"
             @click="refreshFeedbackLessons"
           >
-            Refresh
+            <span class="btn-icon">↻</span> Refresh
           </LoadingButton>
         </div>
 
@@ -2483,7 +2485,7 @@
                   loading-label="Deleting"
                   @click="deleteLesson(lesson)"
                 >
-                  Delete
+                  <span class="btn-icon">×</span> Delete
                 </LoadingButton>
               </div>
             </article>
@@ -2532,7 +2534,7 @@
               class="tool-button"
               @click="resetLessonForm"
             >
-              Clear
+              <span class="btn-icon">×</span> Clear
             </button>
             <LoadingButton
               type="submit"
@@ -2541,7 +2543,7 @@
               :loading="isPending('feedback:create')"
               loading-label="Adding lesson"
             >
-              Add lesson
+              <span class="btn-icon">+</span> Add lesson
             </LoadingButton>
           </div>
         </form>
@@ -2610,34 +2612,39 @@
               <div class="agent-row-actions">
                 <LoadingButton
                   type="button"
+                  class="tool-button"
                   :loading="isPending(sessionActionKey('open', agent.id))"
                   loading-label="Opening agent"
                   @click="openSession(agent)"
                 >
-                  Open
+                  <span class="btn-icon">⧉</span> Open
                 </LoadingButton>
                 <LoadingButton
                   v-if="canSwitchAgentEnv(agent)"
                   type="button"
+                  class="tool-button"
                   title="Switch Env / Model"
                   :loading="isPending(sessionActionKey('switch-env', agent.id))"
                   loading-label="Switching env"
                   @click="openSwitchEnvModal(agent)"
                 >
-                  ⚙ Env
+                  <span class="btn-icon">⚙</span> Env
                 </LoadingButton>
                 <LoadingButton
                   v-if="isResidentAgent(agent)"
                   type="button"
+                  class="tool-button"
                   :loading="isPending('workspace:resident-pause')"
                   :loading-label="isResidentPaused ? 'Resuming agent' : 'Pausing agent'"
                   @click="toggleResidentPaused"
                 >
+                  <span class="btn-icon">{{ isResidentPaused ? '▶' : '⏸' }}</span>
                   {{ isResidentPaused ? 'Resume' : 'Pause' }}
                 </LoadingButton>
                 <LoadingButton
                   v-if="isResidentAgent(agent)"
                   type="button"
+                  class="tool-button"
                   :disabled="residentRunPending"
                   :title="residentRunPending
                     ? 'A run is already queued for the next monitor tick'
@@ -2646,6 +2653,7 @@
                   loading-label="Queuing run"
                   @click="handleRunResidentNow"
                 >
+                  <span class="btn-icon">▶</span>
                   {{ residentRunPending ? 'Run queued' : 'Run now' }}
                 </LoadingButton>
                 <LoadingButton
@@ -2658,7 +2666,7 @@
                   loading-label="Deleting agent"
                   @click="deleteAgent(agent)"
                 >
-                  Delete
+                  <span class="btn-icon">×</span> Delete
                 </LoadingButton>
               </div>
             </article>
@@ -2771,7 +2779,7 @@
                 loading-label="Opening browser"
                 @click="openAgentDirectoryBrowser"
               >
-                Browse
+                <span class="btn-icon">⋯</span> Browse
               </LoadingButton>
             </div>
           </div>
@@ -2804,7 +2812,7 @@
               :loading="isPending('agent:create')"
               loading-label="Creating agent"
             >
-              Create agent
+              <span class="btn-icon">+</span> Create agent
             </LoadingButton>
           </div>
         </form>
@@ -2824,7 +2832,7 @@
             class="tool-button"
             @click="showAgentFileBrowser = false"
           >
-            Close
+            <span class="btn-icon">×</span> Close
           </button>
         </div>
         <div class="file-browser-path">
@@ -2858,7 +2866,7 @@
             loading-label="Refreshing directory"
             @click="refreshAgentDirectory"
           >
-            Refresh
+            <span class="btn-icon">↻</span> Refresh
           </LoadingButton>
         </div>
         <div class="file-browser-list">
@@ -2905,7 +2913,7 @@
             class="primary-button"
             @click="selectAgentCurrentDirectory"
           >
-            Select directory
+            <span class="btn-icon">✓</span> Select directory
           </button>
         </div>
       </div>
@@ -3019,7 +3027,7 @@
             :loading="switchEnvAgent ? isPending(sessionActionKey('switch-env', switchEnvAgent.id)) : false"
             loading-label="Restarting…"
           >
-            Restart Agent
+            <span class="btn-icon">↻</span> Restart Agent
           </LoadingButton>
         </div>
       </form>
@@ -6190,34 +6198,12 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 9px 18px;
-  border-bottom: 1px solid var(--ch-color-border-muted);
-  background: var(--ch-color-canvas);
-}
-
-.workspace-summary-primary,
-.workspace-column-tabs {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.workspace-summary-primary {
-  color: var(--ch-color-text-muted);
-  font-size: 12px;
-}
-
-.workspace-summary-strip {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
   padding: 8px 18px;
   border-bottom: 1px solid var(--ch-color-border-muted);
   background: var(--ch-color-canvas);
 }
 
+.workspace-summary-primary,
 .workspace-column-tabs {
   display: flex;
   align-items: center;
@@ -6227,10 +6213,7 @@ onUnmounted(() => {
 }
 
 .workspace-summary-primary {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
+  color: var(--ch-color-text-muted);
   font-size: 12px;
 }
 
@@ -6242,9 +6225,10 @@ onUnmounted(() => {
   padding: 0 8px;
   border-radius: 999px;
   background: var(--ch-color-chip-bg-muted);
-  color: var(--ch-color-text-muted);
+  border: 1px solid transparent;
   font-size: 11px;
   white-space: nowrap;
+  color: var(--ch-color-text-muted);
 }
 
 .summary-chip strong {
@@ -6254,6 +6238,7 @@ onUnmounted(() => {
 
 .summary-chip--accent {
   background: color-mix(in srgb, var(--ch-color-accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--ch-color-accent) 25%, transparent);
   color: var(--ch-color-accent);
 }
 
@@ -7961,10 +7946,12 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1;
   opacity: 0.8;
   flex-shrink: 0;
+  font-family: "Apple Symbols", "Segoe UI Symbol", "Noto Sans Symbols",
+    "Symbola", -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
 .task-actions button:active,
