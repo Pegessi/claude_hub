@@ -2,6 +2,7 @@
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
+from ..storage import atomic_write_text
 from ._constants import *  # noqa: F401,F403
 
 
@@ -11,7 +12,9 @@ class _PersistenceMixin:
         index_payload = {
             "workspaces": [item.model_dump(mode="json") for item in self.workspaces.values()]
         }
-        INDEX_FILE.write_text(json.dumps(index_payload, indent=2), encoding="utf-8")
+        # Atomic write for index.json: tempfile + fsync + os.replace prevents
+        # truncation on crash. A one-deep .bak of the prior contents is kept.
+        atomic_write_text(INDEX_FILE, json.dumps(index_payload, indent=2))
 
         for workspace in self.workspaces.values():
             workspace_dir = self._workspace_dir(workspace.id)
@@ -33,9 +36,10 @@ class _PersistenceMixin:
                     if item.workspace_id == workspace.id
                 ],
             }
-            self._workspace_state_file(workspace.id).write_text(
+            # Atomic write for <ws>/state.json — same safety rationale as index.
+            atomic_write_text(
+                self._workspace_state_file(workspace.id),
                 json.dumps(payload, indent=2),
-                encoding="utf-8",
             )
             self._write_snapshot(workspace.id)
 

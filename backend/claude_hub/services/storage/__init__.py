@@ -33,6 +33,11 @@ __all__ = [
     "atomic_write_text",
     "get_storage_backend",
     "SCHEMA_VERSION",
+    "ShadowStorageBackend",
+    "ShadowDrift",
+    "ShadowDriftWarning",
+    "ShadowError",
+    "assert_path_outside_root",
 ]
 
 # Bump when the on-disk layout (not the pydantic models) changes in a way that
@@ -134,3 +139,27 @@ def get_storage_backend(
     from .json_backend import JsonStorageBackend
 
     return JsonStorageBackend(root)
+
+
+# Lazy imports for shadow-write helpers: avoid loading shadow (which pulls in
+# verify + sqlite_backend) at package import time unless a caller actually
+# asks for it. The default server path does not touch these names.
+def __getattr__(name: str):  # type: ignore[no-untyped-def]  # pragma: no cover - trivial lazy shim
+    if name in {
+        "ShadowStorageBackend",
+        "ShadowDrift",
+        "ShadowDriftWarning",
+        "ShadowError",
+        "assert_path_outside_root",
+    }:
+        from .shadow import (  # noqa: WPS433  (intentional lazy import)
+            ShadowDrift,
+            ShadowDriftWarning,
+            ShadowError,
+            ShadowStorageBackend,
+            assert_path_outside_root,
+        )
+
+        globals()[name] = locals()[name]
+        return locals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

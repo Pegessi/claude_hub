@@ -336,16 +336,139 @@ see exactly which entity ids drifted.
    migration subcommand (built on `import_json_to_sqlite` + the verify
    helper), then flip the default to `sqlite` behind a major-version note.
 
-## 8. Validation evidence (phase 3)
+## 9. Phase 4 — atomic hot-path + opt-in shadow (2026-07-07)
 
-- `black --check` / `isort --check-only` / `mypy` all green on
-  `storage/verify.py`, `cli/commands/storage.py`, `cli/main.py`,
-  `tests/test_storage_verify.py`.
-- `uv run pytest tests/test_storage_backend.py tests/test_storage_verify.py`
-  → 42 passed (32 phase-2 + 10 phase-3).
-- Manual smoke: seeded a fixture root with one workspace, ran
-  `claude-hub storage verify --state-root <fixture> --no-copy`, confirmed
-  exit 0 with `result: PASS` and no files added to the fixture root.
+Phase 4 lands the narrowest safety gate that:
+
+1. **Hardens the production JSON hot-path against truncation-on-crash**
+   (flag-free, no behavior change beyond durability).
+2. **Adds an opt-in shadow writer + one-shot CLI dry-run** for pre-flighting
+   SQLite against any state root before any cutover.
+
+### 9.1 What ships
+
+* **AC1-2 — atomic hot-path writes.** `workspace_manager/_persistence._save_state`
+  now routes both `index.json` and per-workspace `<ws>/state.json` through the
+  existing `atomic_write_text()` helper (tempfile + `fsync` + `os.replace` +
+  one-deep `.bak`). The previous implementation called `Path.write_text(...)`
+  directly on the live file, which could truncate authoritative state on
+  mid-write crash / disk-full. `snapshot.md` (human-readable, regenerable)
+  continues to use plain `write_text` by design.
+* **AC3-5 — `ShadowStorageBackend`.** New `services/storage/shadow.py` wraps a
+  primary (authoritative, JSON) and a secondary (best-effort, SQLite) backend:
+  * `load()` always delegates to primary (secondary is write-only).
+  * `save()` writes primary first and re-raises primary failures; on primary
+    success it calls secondary inside a try/except, routing any exception to
+    an `on_error` callback (default: `logger.warning`) and swallowing it so
+    primary durability is never compromised.
+  * After a successful secondary save, the wrapper reloads both backends and
+    diffs fingerprints via the existing `verify._fingerprint/_diff` helpers.
+    Drift is surfaced as a `ShadowDriftWarning` routed through `on_error` but
+    never raises.
+* **AC6 — live-root guard.** `assert_path_outside_root(candidate, *roots)`
+  refuses any shadow DB path (or its parent) that resolves under a forbidden
+  state root, with graceful symlink/`..` resolution fallback. Called by the CLI
+  and intended for any future server-side opt-in wiring.
+* **AC7 — `claude-hub storage shadow` CLI.** One-shot dry-run: copies the
+  state root to a tempdir (default `--copy`), dual-writes through
+  `ShadowStorageBackend`, prints a `PASS` / `FAIL` summary with drift details,
+  and exits 0 on match, 1 on drift/error. `--db-path` is optional (a temp DB
+  is used by default and cleaned up). Human + `--json` output both supported.
+* **AC8-11 — tests, formatting, docs.** 17 new focused tests in
+  `tests/test_storage_shadow.py` covering atomic routing, primary/secondary
+  failure semantics, drift detection, live-root guard, CLI exit codes,
+  JSON-default meta-check, and Protocol structural compatibility.
+
+### 9.2 What is *not* wired
+
+* `workspace_manager` continues to load from JSON directly; `_load_state` is
+  intentionally untouched this phase.
+* `get_storage_backend()` is still not called by the running server;
+  `workspace_storage_backend` still defaults to `"json"`.
+* `ShadowStorageBackend` is NOT constructed by default anywhere. It is only
+  instantiated when an operator explicitly runs `claude-hub storage shadow`,
+  and lazy-imported in `storage/__init__.py` so that merely importing the
+  storage package does not pull in `sqlite_backend` / `verify` (keeping the
+  production import graph unchanged).
+* No long-running dual-write daemon. The CLI is a one-shot dry-run; a
+  resident/dev canary shadow (phase-5) will require explicit opt-in wiring
+  and a separate rollout plan.
+
+### 9.3 Operator usage (develop only)
+
+```bash
+# Pre-flight a fixture / copy of live state against SQLite (default: temp DB,
+# copies state root first so a running server cannot cause torn reads):
+claude-hub storage shadow
+
+# Persist the shadow DB for inspection and point at a specific root:
+claude-hub storage shadow --state-root ~/.claude_hub/workspaces --db-path /tmp/shadow.db
+
+# Machine-readable output (exit 0 = match, exit 1 = drift/error):
+claude-hub --json storage shadow --state-root <fixture> --no-copy | jq .
+```
+
+Sample human output on a clean snapshot:
+
+```
+storage shadow: /path/to/state
+  db            : /tmp/shadow.db
+  primary→secondary : ok
+  result: PASS
+```
+
+On drift (simulated by corrupting the secondary):
+
+```
+storage shadow: /path/to/state
+  db            : /tmp/shadow.db
+  primary→secondary : DRIFT
+  drift detail  : shadow drift: tasks missing from secondary: 1 (t1)
+  result: FAIL
+```
+
+### 9.4 Do-not-flip guardrails (still) in force
+
+* `settings.workspace_storage_backend` still defaults to `"json"`.
+* No code path writes `*.sqlite3` files under `~/.claude_hub/workspaces` by
+  default. The CLI refuses any `--db-path` under the source state root.
+* All tests use `tmp_path`; no test or CLI invocation touches the live state
+  root when `--state-root` is not supplied against a running server
+  (default `--copy` snapshots into a TemporaryDirectory first).
+* Frontend is untouched.
+
+## 10. Validation evidence (phase 4)
+
+- `black --check` / `isort --check-only` green on touched files
+  (`storage/shadow.py`, `storage/__init__.py`, `storage/json_backend.py`
+  unchanged API, `cli/commands/storage.py`,
+  `workspace_manager/_persistence.py`, `tests/test_storage_shadow.py`).
+- `mypy` green on the 4 production files + the new test file
+  (`Success: no issues found in 5 source files`).
+- `uv run pytest tests/test_storage_backend.py tests/test_storage_verify.py
+  tests/test_storage_shadow.py` → **59 passed** (42 prior + 17 new).
+- Manual CLI smoke (see §9.3) confirmed exit 0 on a clean fixture, exit 2
+  (Click usage) on a `--db-path` inside the state root, and exit 1 with drift
+  detail when the secondary was forced to drop a task row.
+- Meta-check: a grep for `Shadow` in `workspace_manager` sources finds no
+  references (shadow is never constructed on the hot path); a grep for
+  `INDEX_FILE.write_text` / `_workspace_state_file(..).write_text` in
+  `_persistence.py` returns zero matches (hot path is atomic).
 - Main worktree at `/Users/bytedance/claude_hub` remains at `59fa368` with
-  the three protected untracked files untouched. No frontend files were
-  touched.
+  the three protected untracked files untouched; develop base for this
+  phase is `98650ba`. No frontend files touched.
+
+## 11. Phase 5 preview
+
+1. Add a long-running opt-in shadow backend wired behind an explicit env/flag
+   (`WORKSPACE_STORAGE_SHADOW_DB=/out/of/tree/shadow.db`) for resident/dev
+   canaries. Keep secondary failures non-fatal and log drift to a structured
+   sink (lessons store or log file) rather than stderr.
+2. Let shadow age in canary until drift logs are clean across real
+   workloads (target: ≥7 days on develop, ≥3 days on a dev deployment).
+3. Wire `_load_state` behind `get_storage_backend()` with the same opt-in
+   flag, default still `"json"`, with a `migrate` subcommand that performs
+   the export/import/verify round-trip offline before any cutover.
+4. Final cutover PR: flip default to `sqlite` behind a CHANGELOG note, keep
+   JSON read fallback for one release, then remove raw JSON writes after
+   verification.
