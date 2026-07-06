@@ -6108,10 +6108,10 @@ onUnmounted(() => {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 6px;
-  border: 1px solid var(--ch-color-border-strong);
+  border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface-glass);
-  box-shadow: var(--ch-shadow-soft);
+  background: var(--ch-color-surface-raised);
+  box-shadow: var(--ch-shadow-popover);
   scrollbar-width: thin;
   touch-action: pan-y;
   -webkit-overflow-scrolling: touch;
@@ -7286,11 +7286,6 @@ onUnmounted(() => {
     animation: none;
   }
 
-  .task-card--working::before,
-  .task-card--review::before {
-    animation: none;
-  }
-
   .task-card-autonomy-progress-fill {
     transition: none;
   }
@@ -7470,28 +7465,18 @@ onUnmounted(() => {
 
 .task-card--working::before {
   background: var(--ch-color-warning-strong);
-  width: 4px;
-  animation: task-card-live-pulse 1.8s ease-in-out infinite;
 }
 
 .task-card--working {
-  border-color: color-mix(in srgb, var(--ch-color-warning-strong) 32%, var(--ch-color-border-muted));
+  border-color: color-mix(in srgb, var(--ch-color-warning-strong) 18%, var(--ch-color-border-muted));
 }
 
 .task-card--review::before {
   background: var(--ch-color-attention-strong);
-  width: 4px;
-  animation: task-card-live-pulse 1.8s ease-in-out infinite;
 }
 
 .task-card--review {
-  border-color: color-mix(in srgb, var(--ch-color-attention-strong) 32%, var(--ch-color-border-muted));
-}
-
-/* Live tasks breathe so an actively-running task is obvious at a glance. */
-@keyframes task-card-live-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.42; }
+  border-color: color-mix(in srgb, var(--ch-color-attention-strong) 18%, var(--ch-color-border-muted));
 }
 
 .task-card--done::before {
@@ -7688,10 +7673,6 @@ onUnmounted(() => {
   color: var(--ch-color-info);
 }
 
-.review-badge--active .review-badge-dot {
-  animation: review-badge-pulse 1.4s ease-in-out infinite;
-}
-
 .review-badge--pending {
   background: color-mix(in srgb, var(--ch-color-text-subtle) 18%, transparent);
   border-color: color-mix(in srgb, var(--ch-color-text-subtle) 45%, transparent);
@@ -7702,11 +7683,6 @@ onUnmounted(() => {
   background: color-mix(in srgb, var(--ch-color-attention-strong) 18%, transparent);
   border-color: color-mix(in srgb, var(--ch-color-attention-strong) 45%, transparent);
   color: var(--ch-color-attention-strong);
-}
-
-@keyframes review-badge-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.45; transform: scale(0.7); }
 }
 
 .status-dot {
@@ -9158,6 +9134,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   overflow-y: auto;
+  overscroll-behavior: contain;
   background: var(--ch-color-overlay);
   padding: 16px;
 }

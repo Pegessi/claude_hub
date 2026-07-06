@@ -271,25 +271,24 @@ watch(
 <style scoped>
 .modal-overlay {
   position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background-color: var(--ch-color-overlay-soft);
+  inset: 0;
+  background: var(--ch-color-overlay);
   display: flex;
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
   padding: 16px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
   z-index: 1100;
 }
 
 .modal {
-  background-color: var(--ch-color-surface);
+  background: var(--ch-color-surface);
   border: 1px solid var(--ch-color-border);
-  border-radius: 8px;
+  border-radius: var(--ch-radius-lg);
+  box-shadow: var(--ch-shadow-dialog);
   padding: 20px;
   min-width: 640px;
   width: min(800px, 100%);

@@ -1569,7 +1569,10 @@ async function handleCreateTab() {
   height: 7px;
   border-radius: 50%;
   background-color: var(--ch-color-success);
-  transition: background-color 120ms ease, box-shadow 120ms ease;
+  /* Subtle surface ring to separate the dot from the tab background,
+     matching the treatment on agent avatar status dots. No colored glow. */
+  box-shadow: 0 0 0 1.5px var(--ch-color-surface);
+  transition: background-color 120ms ease;
 }
 
 .tab-indicator[data-status='idle'] {
@@ -1578,12 +1581,10 @@ async function handleCreateTab() {
 
 .tab-indicator[data-status='working'] {
   background-color: var(--ch-color-warning);
-  box-shadow: 0 0 6px var(--ch-color-warning-bg);
 }
 
 .tab-indicator[data-status='attention'] {
   background-color: var(--ch-color-attention);
-  box-shadow: 0 0 6px var(--ch-color-attention-bg);
 }
 
 .tab-indicator[data-status='offline'] {

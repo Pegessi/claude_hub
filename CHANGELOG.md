@@ -5,6 +5,37 @@
 
 ## Unreleased
 
+### fix(ui): restrained, calm status presentation; modal/popover consistency pass
+
+- **What**: removed the breathing/pulsing opacity animation on working/review
+  task-card left borders (`@keyframes task-card-live-pulse`, 1.8s infinite
+  1→0.42 opacity) and the pulsing review-badge dot (`@keyframes
+  review-badge-pulse`, 1.4s infinite opacity+scale). Working/review cards
+  now use a calm static 3px colored left-border with a subtle 18%
+  color-mixed border tint (down from a flashier 32%). Tab-bar status dots
+  replace their soft colored glow (6px warning/attention box-shadow) with
+  a clean surface ring matching the avatar-status-dot pattern. The Env
+  Preset Manager modal now uses the shared overlay color, dialog shadow,
+  and `--ch-radius-lg` token so it reads consistently with other dialogs.
+  The mobile workspace popover menu now uses `--ch-color-surface-raised`,
+  `--ch-color-border`, and `--ch-shadow-popover` to match the tab-bar
+  context menu. Added `overscroll-behavior: contain` to modal overlays for
+  cleaner scroll chaining.
+- **Why**: the resident directive calls for a clean, elegant, substantial
+  UI — not flashy. Continuous breathing/pulsing on task cards and the
+  colored glow on tab dots read as distracting decoration rather than
+  status information. Modal/popover surfaces had drifted across three
+  slightly different background/border/shadow combinations, so the
+  hierarchy felt unplanned.
+- **How**: CSS-only changes in `AgentWorkspaceView.vue`, `TabBar.vue`, and
+  `EnvPresetManager.vue`. The autonomy iteration-budget progress bar,
+  empty-column dashed placeholder, functional spinners, skeleton shimmer
+  (which already honors `prefers-reduced-motion`), and one-shot entry
+  animations (toast, popover, mobile panel) are preserved as utilitarian.
+- **Validation**: `pnpm lint` and `pnpm build` (vue-tsc + vite) exit 0.
+  Desktop and narrow-viewport visual pass confirms no flashing, consistent
+  modal/popover chrome, usable mobile layout.
+
 ### fix(ui): larger mobile agent-status tap targets + clearer show-older toggle
 
 - **What**: on the Agent Workspace board, mobile-width agent-status action
