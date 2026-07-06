@@ -637,7 +637,7 @@
                     loading-label="Opening tab"
                     @click.stop="openSession(sessionForTask(task)!)"
                   >
-                    <span class="btn-icon">→</span> Open tab
+                    <span class="btn-icon">⧉</span> Open tab
                   </LoadingButton>
                   <LoadingButton
                     type="button"
@@ -1370,7 +1370,7 @@
                   loading-label="Opening terminal"
                   @click="openSession(selectedSession)"
                 >
-                  <span class="btn-icon">→</span> Open terminal
+                  <span class="btn-icon">⧉</span> Open terminal
                 </LoadingButton>
                 <span
                   class="detail-actions-sep"
@@ -2519,7 +2519,7 @@
                   loading-label="Opening agent"
                   @click="openSession(agent)"
                 >
-                  <span class="btn-icon">→</span> Open
+                  <span class="btn-icon">⧉</span> Open
                 </LoadingButton>
                 <LoadingButton
                   v-if="canSwitchAgentEnv(agent)"
@@ -7405,10 +7405,12 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1;
   opacity: 0.8;
   flex-shrink: 0;
+  font-family: "Apple Symbols", "Segoe UI Symbol", "Noto Sans Symbols",
+    "Symbola", -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
 .task-actions button:active,
