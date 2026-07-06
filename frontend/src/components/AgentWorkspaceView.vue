@@ -139,7 +139,7 @@
               loading-label="Refreshing"
               @click="refreshAgentStatusesFromMenu"
             >
-              Refresh
+              <span class="btn-icon">↻</span> Refresh
             </LoadingButton>
             <NetworkAccessMenu variant="menu" />
             <button
@@ -2768,7 +2768,7 @@
             loading-label="Refreshing directory"
             @click="refreshAgentDirectory"
           >
-            Refresh
+            <span class="btn-icon">↻</span> Refresh
           </LoadingButton>
         </div>
         <div class="file-browser-list">
