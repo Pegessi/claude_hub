@@ -40,7 +40,7 @@
           class="tool-button workspace-desktop-action"
           @click="openWorkspaceModal"
         >
-          New Workspace
+          <span class="btn-icon">+</span> New
         </button>
         <button
           type="button"
@@ -48,7 +48,7 @@
           :disabled="!activeWorkspaceId"
           @click="openEditWorkspaceModal"
         >
-          Edit Workspace
+          <span class="btn-icon">✎</span> Edit
         </button>
         <button
           type="button"
@@ -56,7 +56,7 @@
           :disabled="!activeWorkspaceId"
           @click="openLessonsModal"
         >
-          Lessons
+          <span class="btn-icon">💡</span> Lessons
         </button>
         <button
           type="button"
@@ -64,7 +64,7 @@
           :disabled="!activeWorkspaceId"
           @click="openAgentOptionsModal"
         >
-          Manage Agents
+          <span class="btn-icon">⚙</span> Agents
         </button>
         <button
           type="button"
@@ -72,7 +72,7 @@
           :disabled="!activeWorkspaceId"
           @click="openTaskModal"
         >
-          Add Task
+          <span class="btn-icon">+</span> Add Task
         </button>
         <details
           ref="workspaceMobileMenuRef"
@@ -175,24 +175,25 @@
       class="workspace-summary-strip"
     >
       <div class="workspace-summary-primary">
-        <span>{{ workspaceAgents.length }} agents</span>
-        <span>{{ reviewerAgents.length + temporaryReviewers.length }} reviewers</span>
-        <strong>{{ workspaceAgents.filter(agent => agent.runtime_status === 'working').length }} working</strong>
-        <span>{{ taskCountForStatus('queued') }} queued</span>
+        <span class="summary-chip"><strong>{{ workspaceAgents.length }}</strong> agents</span>
+        <span class="summary-chip"><strong>{{ reviewerAgents.length + temporaryReviewers.length }}</strong> reviewers</span>
+        <span class="summary-chip summary-chip--accent"><strong>{{ workspaceAgents.filter(agent => agent.runtime_status === 'working').length }}</strong> working</span>
+        <span class="summary-chip"><strong>{{ taskCountForStatus('queued') }}</strong> queued</span>
         <button
           type="button"
-          class="summary-chip-button"
+          class="summary-chip summary-chip-button"
           @click="openLessonsModal"
         >
-          {{ activeFeedbackLessons.length }} lessons
+          <strong>{{ activeFeedbackLessons.length }}</strong> lessons
         </button>
       </div>
       <div class="workspace-column-tabs">
         <span
           v-for="column in columns"
           :key="column.status"
+          class="column-tab-chip"
         >
-          {{ column.label }} {{ taskCountForStatus(column.status) }}
+          {{ column.label }} <strong>{{ taskCountForStatus(column.status) }}</strong>
         </span>
       </div>
     </div>
@@ -321,7 +322,7 @@
               loading-label="Switching env"
               @click.stop="openSwitchEnvModal(agent)"
             >
-              ⚙ Env
+              <span class="btn-icon">⚙</span> Env
             </LoadingButton>
             <LoadingButton
               v-if="isResidentAgent(agent)"
@@ -331,6 +332,7 @@
               :loading-label="isResidentPaused ? 'Resuming agent' : 'Pausing agent'"
               @click="toggleResidentPaused"
             >
+              <span class="btn-icon">{{ isResidentPaused ? '▶' : '⏸' }}</span>
               {{ isResidentPaused ? 'Resume' : 'Pause' }}
             </LoadingButton>
             <LoadingButton
@@ -345,8 +347,13 @@
               loading-label="Queuing run"
               @click="handleRunResidentNow"
             >
+              <span class="btn-icon">▶</span>
               {{ residentRunPending ? 'Run queued' : 'Run now' }}
             </LoadingButton>
+            <span
+              class="agent-status-actions-sep"
+              aria-hidden="true"
+            />
             <LoadingButton
               type="button"
               class="agent-status-delete"
@@ -356,7 +363,7 @@
               loading-label="Deleting agent"
               @click="deleteAgent(agent)"
             >
-              Delete
+              <span class="btn-icon">×</span> Delete
             </LoadingButton>
           </div>
         </article>
@@ -515,20 +522,22 @@
                   <span>{{ reportMessageForLang(latestReportForTask(task)!) }}</span>
                 </div>
                 <div class="session-meta">
-                  <span>task {{ task.status }}</span>
-                  <span>agent {{ agentTitle(task.session_id) }}</span>
-                  <span v-if="task.review_session_id">
-                    reviewer {{ reviewerTitle(task.review_session_id) }}
+                  <span class="meta-agent">{{ agentTitle(task.session_id) }}</span>
+                  <span
+                    v-if="task.review_session_id"
+                    class="meta-reviewer"
+                  >
+                    {{ reviewerTitle(task.review_session_id) }}
                   </span>
-                  <span v-if="reviewStatusLabel(task)">{{ reviewStatusLabel(task) }}</span>
+                  <span
+                    v-if="reviewStatusLabel(task)"
+                    class="meta-review-state"
+                  >{{ reviewStatusLabel(task) }}</span>
                   <span
                     v-if="injectedFeedbackLessonIds(task).length > 0"
                     class="feedback-meta-chip"
                   >
                     feedback {{ injectedFeedbackLessonIds(task).length }}
-                  </span>
-                  <span v-if="sessionForTask(task)">
-                    runtime {{ sessionForTask(task)?.runtime_status }}
                   </span>
                 </div>
                 <details
@@ -575,11 +584,12 @@
                   <LoadingButton
                     v-if="task.status === 'todo'"
                     type="button"
+                    class="primary-button"
                     :loading="isPending(taskActionKey('start', task.id))"
                     loading-label="Starting task"
                     @click.stop="startTask(task)"
                   >
-                    Start
+                    <span class="btn-icon">▶</span> Start
                   </LoadingButton>
                   <button
                     v-if="canEditTask(task)"
@@ -587,25 +597,27 @@
                     class="tool-button"
                     @click.stop="openEditTaskModal(task)"
                   >
-                    Edit
+                    <span class="btn-icon">✎</span> Edit
                   </button>
                   <LoadingButton
                     v-if="canMarkDoneTask(task)"
                     type="button"
+                    class="tool-button"
                     :loading="isPending(taskActionKey('mark-done', task.id))"
                     loading-label="Marking done"
                     @click.stop="markTask(task.id, 'done')"
                   >
-                    Done
+                    <span class="btn-icon">✓</span> Done
                   </LoadingButton>
                   <LoadingButton
                     v-if="canRequestReviewTask(task)"
                     type="button"
+                    class="tool-button"
                     :loading="isPending(taskActionKey('request-review', task.id))"
                     loading-label="Requesting review"
                     @click.stop="requestReview(task)"
                   >
-                    Request review
+                    <span class="btn-icon">◎</span> Request review
                   </LoadingButton>
                   <LoadingButton
                     v-if="canAbortTask(task)"
@@ -615,16 +627,17 @@
                     loading-label="Aborting task"
                     @click.stop="abortTask(task)"
                   >
-                    Abort
+                    <span class="btn-icon">⬤</span> Abort
                   </LoadingButton>
                   <LoadingButton
                     v-if="sessionForTask(task)"
                     type="button"
+                    class="tool-button"
                     :loading="isPending(sessionActionKey('open', task.session_id))"
                     loading-label="Opening tab"
                     @click.stop="openSession(sessionForTask(task)!)"
                   >
-                    Open tab
+                    <span class="btn-icon">⧉</span> Open tab
                   </LoadingButton>
                   <LoadingButton
                     type="button"
@@ -633,7 +646,7 @@
                     loading-label="Deleting task"
                     @click.stop="deleteTask(task)"
                   >
-                    Delete
+                    <span class="btn-icon">×</span> Delete
                   </LoadingButton>
                 </div>
               </article>
@@ -672,7 +685,7 @@
               aria-label="Close task detail"
               @click="closeTaskDetail"
             >
-              x
+              ×
             </button>
           </div>
 
@@ -1309,7 +1322,7 @@
                   loading-label="Starting task"
                   @click="startTask(selectedTask)"
                 >
-                  Start
+                  <span class="btn-icon">▶</span> Start
                 </LoadingButton>
                 <button
                   v-if="canEditTask(selectedTask)"
@@ -1317,7 +1330,7 @@
                   class="tool-button"
                   @click="openEditTaskModal(selectedTask)"
                 >
-                  Edit
+                  <span class="btn-icon">✎</span> Edit
                 </button>
                 <LoadingButton
                   v-if="canMarkDoneTask(selectedTask)"
@@ -1327,7 +1340,7 @@
                   loading-label="Marking done"
                   @click="markTask(selectedTask.id, 'done')"
                 >
-                  Done
+                  <span class="btn-icon">✓</span> Done
                 </LoadingButton>
                 <LoadingButton
                   v-if="canRequestReviewTask(selectedTask)"
@@ -1337,7 +1350,7 @@
                   loading-label="Requesting review"
                   @click="requestReview(selectedTask)"
                 >
-                  Request review
+                  <span class="btn-icon">◎</span> Request review
                 </LoadingButton>
                 <LoadingButton
                   v-if="canAbortTask(selectedTask)"
@@ -1347,7 +1360,7 @@
                   loading-label="Aborting task"
                   @click="abortTask(selectedTask)"
                 >
-                  Abort
+                  <span class="btn-icon">⬤</span> Abort
                 </LoadingButton>
                 <LoadingButton
                   v-if="selectedSession"
@@ -1357,8 +1370,12 @@
                   loading-label="Opening terminal"
                   @click="openSession(selectedSession)"
                 >
-                  Open terminal
+                  <span class="btn-icon">⧉</span> Open terminal
                 </LoadingButton>
+                <span
+                  class="detail-actions-sep"
+                  aria-hidden="true"
+                />
                 <LoadingButton
                   type="button"
                   class="danger-button"
@@ -1366,7 +1383,7 @@
                   loading-label="Deleting task"
                   @click="deleteTask(selectedTask)"
                 >
-                  Delete
+                  <span class="btn-icon">×</span> Delete
                 </LoadingButton>
               </div>
               <form
@@ -1404,7 +1421,7 @@
                       aria-label="Remove attachment"
                       @click="removeDraftAttachment(detailAttachments, attachment)"
                     >
-                      x
+                      ×
                     </button>
                   </div>
                 </div>
@@ -1447,7 +1464,7 @@
               aria-label="Close Markdown preview"
               @click="closeMarkdownPreviewModal"
             >
-              x
+              ×
             </button>
           </div>
           <div
@@ -1494,7 +1511,7 @@
           aria-label="Close image preview"
           @click="closeImageLightbox"
         >
-          x
+          ×
         </button>
         <img
           class="image-lightbox-img"
@@ -2005,7 +2022,7 @@
                   aria-label="Remove attachment"
                   @click="removeDraftAttachment(taskForm.attachments, attachment)"
                 >
-                  x
+                  ×
                 </button>
               </div>
             </div>
@@ -2282,7 +2299,7 @@
             aria-label="Close lessons"
             @click="closeLessonsModal"
           >
-            x
+            ×
           </button>
         </div>
 
@@ -5953,7 +5970,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 9px 18px;
+  padding: 8px 18px;
   border-bottom: 1px solid var(--ch-color-border-muted);
   background: var(--ch-color-canvas);
 }
@@ -5962,8 +5979,9 @@ onUnmounted(() => {
 .workspace-column-tabs {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
+  flex-wrap: wrap;
 }
 
 .workspace-summary-primary {
@@ -5971,21 +5989,55 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
-.workspace-summary-primary strong {
+.summary-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--ch-color-chip-bg-muted);
+  border: 1px solid transparent;
+  font-size: 11px;
+  white-space: nowrap;
+  color: var(--ch-color-text-muted);
+}
+
+.summary-chip strong {
   color: var(--ch-color-text);
+  font-weight: 700;
+}
+
+.summary-chip--accent {
+  background: color-mix(in srgb, var(--ch-color-accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--ch-color-accent) 25%, transparent);
+  color: var(--ch-color-accent);
+}
+
+.summary-chip--accent strong {
+  color: var(--ch-color-accent-strong);
 }
 
 .summary-chip-button {
-  height: 24px;
+  height: 22px;
   border: 1px solid var(--ch-color-border-muted);
   border-radius: 999px;
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
   cursor: pointer;
-  font-size: 12px;
-  font-weight: 700;
-  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 400;
+  padding: 0 8px;
   white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: border-color var(--ch-motion-fast), background var(--ch-motion-fast);
+}
+
+.summary-chip-button strong {
+  font-weight: 700;
+  color: var(--ch-color-text);
 }
 
 .summary-chip-button:hover {
@@ -5997,14 +6049,22 @@ onUnmounted(() => {
   overflow-x: auto;
 }
 
-.workspace-column-tabs span {
+.column-tab-chip {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   border: 1px solid var(--ch-color-border-muted);
   border-radius: 999px;
   background: var(--ch-color-chip-bg-muted);
-  color: var(--ch-color-text);
+  color: var(--ch-color-text-muted);
   font-size: 11px;
-  padding: 4px 9px;
+  padding: 3px 8px;
+}
+
+.column-tab-chip strong {
+  color: var(--ch-color-text);
+  font-weight: 700;
 }
 
 .workspace-agent-status {
@@ -6348,6 +6408,25 @@ onUnmounted(() => {
   gap: 6px;
   justify-content: flex-end;
   padding-left: 22px;
+  align-items: center;
+}
+
+.agent-status-actions-sep,
+.detail-actions-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--ch-color-border);
+  margin: 0 2px;
+  flex-shrink: 0;
+}
+
+.agent-status-pause,
+.agent-status-run-now,
+.agent-status-switch-env,
+.agent-status-delete {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
 }
 
 .agent-status-pause {
@@ -6359,10 +6438,15 @@ onUnmounted(() => {
   cursor: pointer;
   font-size: 12px;
   padding: 0 9px;
+  transition: border-color 0.12s, background 0.12s, transform 0.08s;
 }
 
 .agent-status-pause:hover {
   border-color: var(--ch-color-border-hover);
+}
+
+.agent-status-pause:active {
+  transform: translateY(1px);
 }
 
 .agent-status-run-now {
@@ -6374,11 +6458,16 @@ onUnmounted(() => {
   cursor: pointer;
   font-size: 12px;
   padding: 0 9px;
+  transition: border-color 0.12s, color 0.12s, background 0.12s, transform 0.08s;
 }
 
 .agent-status-run-now:hover:not(:disabled) {
   border-color: var(--ch-color-accent);
   color: var(--ch-color-accent);
+}
+
+.agent-status-run-now:active {
+  transform: translateY(1px);
 }
 
 .agent-status-run-now:disabled {
@@ -6474,6 +6563,10 @@ onUnmounted(() => {
   height: 30px;
   padding: 0 10px;
   transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast), transform var(--ch-motion-fast);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
 }
 
 .tool-button:hover,
@@ -6568,6 +6661,33 @@ onUnmounted(() => {
   background: var(--ch-color-danger-border);
   color: var(--ch-color-danger-text);
   font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.workspace-error__close {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 18px;
+  line-height: 1;
+  border-radius: var(--ch-radius-sm);
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+.workspace-error__close:hover {
+  opacity: 1;
+  background: color-mix(in srgb, currentColor 15%, transparent);
 }
 
 .workspace-layout {
@@ -7029,10 +7149,26 @@ onUnmounted(() => {
 .session-meta span {
   border-radius: 999px;
   background: var(--ch-color-chip-bg);
-  color: var(--ch-color-text);
+  color: var(--ch-color-text-muted);
   font-size: 10px;
-  padding: 3px 7px;
+  padding: 2px 6px;
   white-space: nowrap;
+}
+
+.session-meta .meta-agent {
+  color: var(--ch-color-text);
+  font-weight: 600;
+}
+
+.session-meta .meta-reviewer {
+  background: color-mix(in srgb, var(--ch-color-review) 12%, var(--ch-color-chip-bg));
+  color: var(--ch-color-review);
+}
+
+.session-meta .meta-review-state {
+  background: color-mix(in srgb, var(--ch-color-accent) 12%, var(--ch-color-chip-bg));
+  color: var(--ch-color-accent);
+  font-weight: 600;
 }
 
 .agent-badge {
@@ -7231,6 +7367,7 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 4px;
   overflow: hidden;
   text-align: center;
   text-overflow: ellipsis;
@@ -7244,7 +7381,7 @@ onUnmounted(() => {
 .agent-row button {
   height: 26px;
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-control-active);
   color: var(--ch-color-text);
   padding: 0 8px;
@@ -7254,6 +7391,16 @@ onUnmounted(() => {
 
 .task-actions button {
   height: 30px;
+}
+
+.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0.8;
+  flex-shrink: 0;
 }
 
 .task-actions button:active,
@@ -7396,12 +7543,22 @@ onUnmounted(() => {
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0;
   transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), transform var(--ch-motion-fast);
 }
 
 .icon-button:hover {
   border-color: var(--ch-color-border-hover);
   background: var(--ch-color-surface-control-hover);
+}
+
+.icon-button:active {
+  transform: translateY(1px);
 }
 
 .detail-body {
@@ -7489,6 +7646,7 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  align-items: center;
 }
 
 .detail-actions button {
@@ -7496,6 +7654,7 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 4px;
   overflow: hidden;
   text-align: center;
   text-overflow: ellipsis;
@@ -7569,7 +7728,7 @@ onUnmounted(() => {
   height: 42px;
   overflow: hidden;
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-sunken);
 }
 
@@ -8996,7 +9155,7 @@ onUnmounted(() => {
 }
 
 .file-browser-path {
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-soft);
   padding: 8px;
 }
@@ -9013,7 +9172,7 @@ onUnmounted(() => {
 .path-nav-button {
   height: 30px;
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
   cursor: pointer;
@@ -9025,7 +9184,7 @@ onUnmounted(() => {
   min-height: 160px;
   overflow-y: auto;
   border: 1px solid var(--ch-color-border);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   background: var(--ch-color-app-bg);
   margin-top: 12px;
 }
@@ -9412,7 +9571,7 @@ onUnmounted(() => {
     height: 28px;
     min-width: 54px;
     border: 1px solid var(--ch-color-border-strong);
-    border-radius: 4px;
+    border-radius: var(--ch-radius-sm);
     background: var(--ch-color-surface-control-active);
     color: var(--ch-color-text);
     font-size: 12px;
