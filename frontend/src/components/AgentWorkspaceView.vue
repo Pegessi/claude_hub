@@ -2014,6 +2014,13 @@
           The resident is configured here and created together with the
           workspace when you press "Create workspace".
         </p>
+        <p
+          v-else-if="residentRunPending"
+          class="modal-hint resident-queued-hint"
+        >
+          <span class="resident-queued-badge">Run queued</span>
+          A run is queued for the next monitor tick and will fire shortly.
+        </p>
         <div class="modal-actions">
           <button
             type="button"
@@ -5135,26 +5142,51 @@ async function handleDeleteResident() {
 // "Run now": force the resident to fire on the next monitor tick using the
 // SAVED directive + periodic tasks (no form save). Deliberate one-off — bypasses
 // pause but respects enabled, per the backend request_resident_run guard.
+// Fires a clear success toast so the user knows the click registered; when the
+// resident is already WORKING we vary the copy to make the deferral explicit
+// (the backend preserves the flag and fires on the next idle tick).
 async function handleRunResidentNow() {
   const workspaceId = editingWorkspaceId.value ?? activeWorkspaceId.value
   if (!workspaceId || !residentExists.value) return
-  await runPending('resident:run', () => workspaceStore.runResidentNow(workspaceId))
+  const isBusy = residentAgent.value?.runtime_status === 'working'
+  const ok = await runPending('resident:run', () => workspaceStore.runResidentNow(workspaceId))
+  if (!ok) return
+  workspaceStore.pushNotification({
+    type: isBusy ? 'info' : 'success',
+    message: isBusy
+      ? 'Resident is busy — run queued; will fire as soon as the current cycle finishes.'
+      : 'Resident run requested — firing within the next monitor tick.',
+    autoDismissMs: isBusy ? 6000 : 4000,
+  })
 }
 
 // "Save & run now": persist the current form (directive + periodic tasks + all
 // resident config) THEN request an immediate run, so the freshly-saved directive
-// takes effect this cycle instead of waiting for the next interval. Plain "Save"
-// only applies on the next natural wake-up — this button makes the timing
-// explicit for the user, which was the core complaint.
+// takes effect this cycle instead of waiting for the next interval. The entire
+// save+run sequence runs under one pending key so the spinner spans both calls;
+// on success we close the resident modal (revealing the agent-status "queued"
+// chip) and push a toast whose copy varies by whether the resident was already
+// working. If save succeeds but run fails, the modal stays open so the user can
+// retry without re-entering form state.
 async function handleSaveResidentAndRunNow() {
   if (workspaceModalMode.value !== 'edit' || !editingWorkspaceId.value) return
   if (!residentExists.value) return
   const workspaceId = editingWorkspaceId.value
-  const workspace = await runPending('resident:save-run', () =>
-    workspaceStore.updateWorkspace(workspaceId, buildResidentPayload())
-  )
-  if (!workspace) return
-  await workspaceStore.runResidentNow(workspaceId)
+  const isBusy = residentAgent.value?.runtime_status === 'working'
+  const result = await runPending('resident:save-run', async () => {
+    const workspace = await workspaceStore.updateWorkspace(workspaceId, buildResidentPayload())
+    if (!workspace) return null
+    return workspaceStore.runResidentNow(workspaceId)
+  })
+  if (!result) return
+  closeResidentAgentModal()
+  workspaceStore.pushNotification({
+    type: isBusy ? 'info' : 'success',
+    message: isBusy
+      ? 'Resident is busy — run queued; will fire as soon as the current cycle finishes.'
+      : 'Resident run requested — firing within the next monitor tick.',
+    autoDismissMs: isBusy ? 6000 : 4000,
+  })
 }
 const residentSummaryLabel = computed(() => {
   if (!workspaceForm.resident_agent_enabled) return 'Off'
@@ -9688,6 +9720,30 @@ onUnmounted(() => {
    EnvPresetManager (1100) that AgentConfigFields opens from inside it. */
 .resident-agent-modal-overlay {
   z-index: 1050;
+}
+
+/* In-modal queued-run hint shown just above the action buttons when a run-now
+   request is pending a monitor tick. Uses a dedicated .resident-queued-badge
+   (not agent-status-timing-chip, which lives under the agent-status card and
+   carries scope-dependent resets) so styling is self-contained. */
+.resident-queued-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.resident-queued-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: color-mix(in srgb, var(--ch-color-accent-bg) 18%, transparent);
+  color: var(--ch-color-accent-fg);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
 }
 
 /* Fixed-height flex column so the popup keeps a stable size regardless of

@@ -1770,6 +1770,48 @@ def test_request_resident_run_disabled_raises_valueerror(
         manager.request_resident_run(workspace.id)
 
 
+def test_request_resident_run_succeeds_when_paused(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """Pause is NOT a gate for request_resident_run — deliberate one-off overrides it."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS", path=str(repo), session_prefix="res", resident_agent_enabled=True
+        )
+    )
+    workspace = manager.update_workspace(workspace.id, WorkspaceUpdate(resident_agent_paused=True))
+    assert workspace.resident_agent_paused is True
+    assert workspace.resident_agent_run_requested_at is None
+
+    updated = manager.request_resident_run(workspace.id)
+    assert updated.resident_agent_paused is True  # pause state untouched
+    assert updated.resident_agent_run_requested_at is not None
+    # And due-check honors the run-request even while paused.
+    assert manager._resident_agent_due(updated, updated.resident_agent_run_requested_at) is True
+
+
+def test_request_resident_run_re_stamps_when_already_queued(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """A second run-now while one is already queued is idempotent, not an error."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    workspace = manager.create_workspace(
+        WorkspaceCreate(
+            name="WS", path=str(repo), session_prefix="res", resident_agent_enabled=True
+        )
+    )
+    first = manager.request_resident_run(workspace.id)
+    first_ts = first.resident_agent_run_requested_at
+    assert first_ts is not None
+
+    # Second call does not raise and returns a workspace with the flag still set.
+    second = manager.request_resident_run(workspace.id)
+    assert second.resident_agent_run_requested_at is not None
+
+
 def test_resident_due_run_now_overrides_interval_and_pause(
     manager: WorkspaceManager,
 ) -> None:

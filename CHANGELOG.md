@@ -5,6 +5,38 @@
 
 ## Unreleased
 
+### fix(ui): resident "Save & run now" gives unmistakable feedback; queued/busy state visible
+
+- **What**: clicking "Save & run now" or the standalone "Run now" button on a
+  resident agent now shows an immediate success/info toast ("Resident run
+  requested — firing within the next monitor tick", or the "Resident is busy —
+  run queued" variant when the resident is already in a WORKING cycle). The
+  "Save & run now" spinner now spans BOTH the PATCH save and the POST run
+  request (it previously cleared halfway through, making the second call look
+  idle). On a successful save-and-run the resident sub-modal closes so the
+  agent-status "next run queued" chip is visible. An in-modal "Run queued"
+  badge is now shown while the sub-modal is open and a run is pending a
+  monitor tick, so the user doesn't have to close the modal to confirm the
+  request landed. Added backend tests covering pause-bypass through the
+  public `request_resident_run` method and idempotent re-stamping when a run
+  is already queued.
+- **Why**: user-reported high-priority bug — both "Save & run now" and the
+  plain "Run now" action appeared to do nothing. Investigation showed the
+  backend was scheduling the run correctly (`run_requested_at` stamp, pause
+  bypass, WORKING-skip preserving the flag) but the frontend never surfaced a
+  success toast, the save-and-run spinner cleared between the two network
+  calls, and the open modal hid the external "queued" chip, so the user had no
+  signal the click had registered until the monitor tick fired 5 seconds
+  later.
+- **How**: frontend changes in `AgentWorkspaceView.vue`
+  (`handleRunResidentNow`, `handleSaveResidentAndRunNow`, modal template
+  footer, new `.resident-queued-hint` / `.resident-queued-badge` styles); two
+  new backend tests in `tests/test_workspace_resident_agent.py`. No backend
+  behavioral changes — the scheduling logic was already correct.
+- **Validation**: `uv run black .`, `uv run isort .`, `uv run mypy .` all
+  clean; `uv run pytest` passes on Python 3.11 (matching the pinned
+  target-version); `pnpm lint` and `pnpm build` (vue-tsc + vite) exit 0.
+
 ### fix(ui): restrained, calm status presentation; modal/popover consistency pass
 
 - **What**: removed the breathing/pulsing opacity animation on working/review
