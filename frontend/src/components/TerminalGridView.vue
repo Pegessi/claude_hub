@@ -31,8 +31,8 @@ function setActivePane(paneId: string) {
 .terminal-grid {
   flex: 1;
   display: grid;
-  gap: 4px;
-  padding: 4px;
+  gap: var(--ch-space-1);
+  padding: var(--ch-space-1);
   overflow: hidden;
   min-height: 0;
   transition: padding 180ms cubic-bezier(0.2, 0, 0, 1), gap 180ms cubic-bezier(0.2, 0, 0, 1);
