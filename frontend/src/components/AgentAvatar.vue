@@ -104,10 +104,10 @@ const title = computed(() => `${kind.value} agent`)
  *     (themed green; --ch-terminal-green is ANSI-tinted and low-contrast
  *     against the sunken surface in both themes).
  *
- * Brand marks preserved as flat hex literals (Finding 2 brand-tokenization
- * is a separate follow-up):
- *   • Claude: background #f1eee5 (cream), color #d97757 (orange)
- *   • Codex:  background #000 (black), color #fff (white)
+ * Brand marks use the --ch-agent-* brand tokens defined in App.vue :root
+ * (Finding 2 brand-tokenization, consumer half):
+ *   • Claude: var(--ch-agent-claude-bg) cream / var(--ch-agent-claude-fg) orange
+ *   • Codex:  var(--ch-agent-codex-bg) black / var(--ch-agent-codex-fg) white
  *
  * Functional constants preserved: 28/22px geometry, 64/72/70% glyph sizing,
  * inset 1px box-shadow stroke, overflow:hidden, flex layout.
@@ -148,13 +148,13 @@ const title = computed(() => `${kind.value} agent`)
 }
 
 .agent-avatar--claude {
-  background: #f1eee5;
-  color: #d97757;
+  background: var(--ch-agent-claude-bg);
+  color: var(--ch-agent-claude-fg);
 }
 
 .agent-avatar--codex {
-  background: #000;
-  color: #fff;
+  background: var(--ch-agent-codex-bg);
+  color: var(--ch-agent-codex-fg);
 }
 
 .agent-avatar--cursor {
