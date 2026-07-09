@@ -5,6 +5,8 @@
 
 ## Unreleased
 
+- fix(ui): apply exact-match design tokens to `LoginView.vue` spacing/radius (page padding 24px → `--ch-space-5`, h1 margin-bottom 8px → `--ch-space-2`, button gap 12px → `--ch-space-3`, button padding 16px/24px → `--ch-space-4`/`--ch-space-5`, button radius 10px → `--ch-radius-lg`, footer margin-top 32px → `--ch-space-6`, footer padding-top 24px → `--ch-space-5`); left off-scale values (container radius 8px, container padding 48px, subtitle margin 40px, rem font sizes, 200ms transition, hover shadow/lift, 1px borders, layout constants) literal with inline comments per the conservative mapping rule. Purely CSS; no template or script changes. Validation: `pnpm lint` + `pnpm build` clean.
+
 - fix(ui): apply design tokens to `LayoutSelector.vue` spacing/type/weight (on-scale gap/padding → `--ch-space-*`, font-size → `--ch-font-*`, font-weight → `--ch-weight-*`; off-scale px and geometry retained as literal); styling-only, no DOM/script changes.
 
 ### fix(ui): apply exact-match design tokens to MarkdownContent typography/spacing
