@@ -5,6 +5,43 @@
 
 ## Unreleased
 
+### fix(ui): apply design tokens to AgentStatusFloatingPanel (icon align, weights, density)
+
+- **What**: retrofitted `frontend/src/components/AgentStatusFloatingPanel.vue`
+  onto the spacing/type/weight token scale (--ch-space-*, --ch-font-*,
+  --ch-leading-*, --ch-weight-*). Hardcoded 2/6/7/9/10/11/14px gaps/paddings
+  snapped to the nearest scale step; all seven `font-weight: 700` usages and
+  two non-standard `font-weight: 650` usages demoted to --ch-weight-semibold
+  (600) for labels/headings and --ch-weight-medium (500) for chips/meta;
+  inline status dots use a fixed 8px inline-flex box so they sit on the text
+  baseline; the refresh ↻ icon sits in a consistent 28×28 hit target with a
+  14×14 internal glyph box (matching the project .btn-icon convention); the
+  mode-switch count pill and trigger-count pill share an 18px-high pill
+  rhythm; agent-row padding/gap unified at space-3 (12px) with space-2
+  internal gaps; agent-name → font-md/semibold, agent-cli chip → xs/medium,
+  agent-detail → xs/regular/leading-normal for calmer hierarchy. Mobile
+  breakpoints switched from magic 7/8px offsets to space-2. No behavior,
+  DOM, color, or radius changes; no new animations (only the existing 140ms
+  one-shot entrance keyframe remains — dots/pills are static).
+- **Why**: the floating panel was the next high-visibility surface after the
+  board shell carrying token debt (~89 hardcoded px values), with misaligned
+  glyphs (7px trigger dot vs 9px avatar dot, 26px refresh button vs 28px
+  trigger), inconsistent weights (700/650/600/non-standard), and uneven
+  row density that made the secondary panel feel ad-hoc next to the
+  tokenized shell.
+- **How**: styling-only change within a single SFC; added a
+  `.panel-refresh-icon` wrapper to give the ↻ glyph a 14×14 box; removed
+  the `background-color` (redundant with `background`) and collapsed
+  multi-property transition onto separate lines for readability; added a
+  short doc comment at the top of `<style scoped>` documenting the
+  hardcoded-px policy (allowed for control heights, pill diameters, 1px
+  borders). No other files modified.
+- **Validation**: `pnpm lint` clean (eslint --fix); `pnpm build` clean
+  (vue-tsc + vite, 397.7 KB JS / 171.0 KB CSS). Dev-server visual smoke
+  confirms baseline-aligned dots, even row density, static status
+  indicators, working refresh/mode-switch/resize/tab-selection, and mobile
+  trigger-label collapse.
+
 ### feat(design): spacing + type scale tokens; applied to board shell
 
 - **What**: added a minimal, 4px-base design-token foundation for spacing
