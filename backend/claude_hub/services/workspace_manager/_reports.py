@@ -999,18 +999,30 @@ class _ReportsMixin:
             }
         )
         self._save_state()
-        # Clear only when this reviewer last reviewed a *different* task. Same-task
-        # re-review cycles (review_failed -> fix -> completed, or goal-packet then
-        # implementation review) keep their context; a brand-new reviewer with no
-        # prior review (previous_review_task_id is None) pays no /clear round-trip.
-        should_clear_context = (
+        # Two independent reasons to clear the reviewer's context:
+        #   1. The user's "Clear context" choice (task.clear_context) — the same
+        #      per-task flag the worker honors in _dispatch_task_to_session. It was
+        #      previously only wired to the worker, so ticking the box cleared the
+        #      worker but never the reviewer (the reviewer ran with stale context).
+        #   2. The reviewer last reviewed a *different* task. Same-task re-review
+        #      cycles (review_failed -> fix -> completed, or goal-packet then
+        #      implementation review) keep their context; a brand-new reviewer with
+        #      no prior review (previous_review_task_id is None) pays no /clear
+        #      round-trip.
+        # OR them so the user override adds to, rather than replaces, the heuristic.
+        user_requested_clear = bool(task.clear_context)
+        unrelated_prior_review = (
             previous_review_task_id is not None and previous_review_task_id != task.id
         )
+        should_clear_context = user_requested_clear or unrelated_prior_review
         if should_clear_context:
             logger.info(
-                "Clearing reviewer context before unrelated review task_id=%s reviewer_id=%s",
+                "Clearing reviewer context task_id=%s reviewer_id=%s "
+                "user_requested=%s unrelated_prior_review=%s",
                 task.id,
                 reviewer.id,
+                user_requested_clear,
+                unrelated_prior_review,
             )
             await self.send_session_message(reviewer.id, "/clear")
             await asyncio.sleep(0.5)
