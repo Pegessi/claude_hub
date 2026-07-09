@@ -331,7 +331,7 @@ watch(
   display: flex;
   flex-direction: column;
   border: 1px solid var(--ch-color-border);
-  border-radius: 6px;
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-soft);
   overflow: hidden;
 }
@@ -404,7 +404,7 @@ watch(
   color: var(--ch-color-text-soft);
   background: var(--ch-color-surface-control);
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   flex-shrink: 0;
   text-transform: lowercase;
 }
@@ -434,7 +434,7 @@ watch(
   padding: var(--ch-space-2) var(--ch-space-3);
   background-color: var(--ch-color-surface-control);
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   color: var(--ch-color-text);
   font-size: var(--ch-font-md);
   box-sizing: border-box;
@@ -451,7 +451,7 @@ watch(
 }
 
 .form-hint-inline {
-  font-weight: normal;
+  font-weight: var(--ch-weight-regular);
   font-size: var(--ch-font-sm);
   color: var(--ch-color-text-soft);
   margin-left: 6px;
@@ -480,7 +480,7 @@ watch(
   padding: var(--ch-space-2) var(--ch-space-3);
   background-color: var(--ch-color-surface-control);
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   color: var(--ch-color-text);
   font-family: monospace !important;
   font-size: var(--ch-font-md);
@@ -513,7 +513,7 @@ watch(
   color: var(--ch-color-text-soft);
   font-size: var(--ch-font-md);
   border: 1px dashed var(--ch-color-border);
-  border-radius: 6px;
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-soft);
 }
 
@@ -535,7 +535,7 @@ watch(
 .btn {
   padding: var(--ch-space-2) var(--ch-space-4);
   border: none;
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   font-size: var(--ch-font-md);
   cursor: pointer;
   transition: background-color 0.2s;

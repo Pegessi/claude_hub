@@ -5,6 +5,8 @@
 
 ## Unreleased
 
+- style(ui): tokenize `EnvPresetManager.vue` form weight + radii — replace `font-weight: normal` with `var(--ch-weight-regular)` (finding #9, exact-value swap, no visual change); snap the four form-input/btn/badge `border-radius: 4px` to `var(--ch-radius-sm)`=5px and the two container-surface `border-radius: 6px` (sidebar, empty-state) to `var(--ch-radius-md)`=7px (finding #19, audit-prescribed 1px snap). 7 one-line CSS substitutions; template+script byte-identical; CSS-only.
+
 - style(ui): tokenize `TerminalPane.vue` pane-tab font-weight — the literal `font-weight: 500` on `.pane-tab-name` now uses `var(--ch-weight-medium)` (=500); zero visual change. CSS-only; no template/script/prop changes.
 
 - style(ui): flatten `AgentAvatar.vue` fallback palette onto design tokens — snap radii to the 5/7/10 scale (base 8px → `--ch-radius-md`, small 6px → `--ch-radius-sm`); map default fallback color `#fff` → `--ch-color-text-inverse`, background `#4b4b4b` → `--ch-color-surface-control`; replace cursor and terminal `linear-gradient` gloss with flat surfaces (cursor → `--ch-color-surface-raised` with `--ch-color-text` glyph for themed contrast; terminal → `--ch-color-surface-sunken` with `--ch-color-success` glyph). Claude (`#f1eee5`/`#d97757`) and Codex (`#000`/`#fff`) brand colors retained as flat hex literals (brand-tokenization deferred to a follow-up). CSS-only; no template/script/prop changes.
