@@ -5,6 +5,20 @@
 
 ## Unreleased
 
+### fix(ui): apply exact-match design tokens to MarkdownContent typography/spacing
+
+- Applied the existing `--ch-font-{sm,md,xl}`, `--ch-space-{1,2}`, and
+  `--ch-leading-tight` tokens to MarkdownContent.vue where values match
+  exactly (body 13px → md, compact 12px → sm, h1 18px → xl, block margins
+  8px → space-2, inline-code horizontal padding and li+li gap 4px → space-1,
+  heading line-height 1.25 → leading-tight). Left off-scale values literal
+  with inline comments per the conservative mapping rule (h2 16px, h3/h4
+  14px, heading margins 14px/6px, pre/blockquote padding 10px, list indent
+  20px, cell padding 6px/8px, radii 4px/6px, body/compact line-height
+  1.55/1.45, 0.92em code size, 1/2/3px strokes). Purely CSS; no template,
+  script, or markdown-pipeline changes. Validation: `pnpm lint` +
+  `pnpm build` clean.
+
 ### perf(workspace): slim the board poll payload ~56% via detail-only field projection
 
 - **What**: the steady-state `GET /api/workspaces/{id}/board` payload — polled

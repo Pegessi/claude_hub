@@ -106,17 +106,41 @@ function handleClick(event: MouseEvent) {
 </script>
 
 <style scoped>
+/*
+ * Markdown content — DOMPurify + marked renderer for reports/messages.
+ *
+ * Styling consumes the global design-token scale (--ch-font-*, --ch-space-*,
+ * --ch-leading-*) where values match exactly. Per the conservative mapping
+ * rule for this pass, off-scale hardcoded px are LEFT LITERAL with a short
+ * comment when the nearest token would introduce a visible change:
+ *   • h2 16px / h3-h4 14px (no matching font token; lg=15 / md=13 would
+ *     visibly shrink headings)
+ *   • Heading margin 14px 0 6px (neither 12/16 nor 4/8 is a clean match
+ *     for the established heading rhythm)
+ *   • pre padding 10px / blockquote padding-left 10px (nearest tokens 8/12
+ *     would shift code-block/quote density)
+ *   • ul/ol padding-left 20px (list indent distance; no token)
+ *   • th/td padding 6px 8px (cell density; 6px has no clean token)
+ *   • Inline-code border-radius 4px (--ch-radius-sm=5px differs)
+ *   • pre border-radius 6px (--ch-radius-md=7px differs)
+ *   • Body line-height 1.55 (slightly above --ch-leading-normal=1.5) and
+ *     compact line-height 1.45 (slightly below) — prose-reading tweaks
+ *   • 1/2/3px borders, underline offset, and accent bar (stroke/affordance
+ *     constants, not spacing)
+ *   • em-based code font-size 0.92em (relative sizing; per task instruction)
+ */
+
 .markdown-content {
   color: var(--ch-color-text);
-  font-size: 13px;
-  line-height: 1.55;
+  font-size: var(--ch-font-md);
+  line-height: 1.55; /* prose reading; slightly above --ch-leading-normal */
   overflow-wrap: anywhere;
   word-break: break-word;
 }
 
 .markdown-content.compact {
-  font-size: 12px;
-  line-height: 1.45;
+  font-size: var(--ch-font-sm);
+  line-height: 1.45; /* compact prose; slightly below --ch-leading-normal */
 }
 
 .markdown-content :deep(*) {
@@ -129,7 +153,7 @@ function handleClick(event: MouseEvent) {
 .markdown-content :deep(blockquote),
 .markdown-content :deep(pre),
 .markdown-content :deep(table) {
-  margin: 8px 0 0;
+  margin: var(--ch-space-2) 0 0;
 }
 
 .markdown-content :deep(:first-child) {
@@ -140,22 +164,22 @@ function handleClick(event: MouseEvent) {
 .markdown-content :deep(h2),
 .markdown-content :deep(h3),
 .markdown-content :deep(h4) {
-  margin: 14px 0 6px;
+  margin: 14px 0 6px; /* off-scale; nearest tokens 12/16 and 4/8 shift heading rhythm */
   color: var(--ch-color-text);
-  line-height: 1.25;
+  line-height: var(--ch-leading-tight);
 }
 
 .markdown-content :deep(h1) {
-  font-size: 18px;
+  font-size: var(--ch-font-xl);
 }
 
 .markdown-content :deep(h2) {
-  font-size: 16px;
+  font-size: 16px; /* no token; lg=15px would visibly shrink h2 */
 }
 
 .markdown-content :deep(h3),
 .markdown-content :deep(h4) {
-  font-size: 14px;
+  font-size: 14px; /* no token; md=13px would visibly shrink sub-headings */
 }
 
 .markdown-content :deep(a) {
@@ -166,20 +190,20 @@ function handleClick(event: MouseEvent) {
 
 .markdown-content :deep(code) {
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  border-radius: 4px; /* --ch-radius-sm=5px differs; keep literal */
   background: var(--ch-color-canvas);
   color: var(--ch-color-text-code);
-  padding: 1px 4px;
+  padding: 1px var(--ch-space-1);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 0.92em;
+  font-size: 0.92em; /* em-based; keep per task instruction */
 }
 
 .markdown-content :deep(pre) {
   overflow-x: auto;
   border: 1px solid var(--ch-color-surface-control-active);
-  border-radius: 6px;
+  border-radius: 6px; /* --ch-radius-md=7px differs; keep literal */
   background: var(--ch-color-canvas);
-  padding: 10px;
+  padding: 10px; /* off-scale; nearest 8/12 shifts code-block density */
 }
 
 .markdown-content :deep(pre code) {
@@ -192,16 +216,16 @@ function handleClick(event: MouseEvent) {
 .markdown-content :deep(blockquote) {
   border-left: 3px solid var(--ch-color-border-hover);
   color: var(--ch-color-text-muted);
-  padding-left: 10px;
+  padding-left: 10px; /* off-scale; nearest 8/12 shifts quote indent */
 }
 
 .markdown-content :deep(ul),
 .markdown-content :deep(ol) {
-  padding-left: 20px;
+  padding-left: 20px; /* list indent distance; no token */
 }
 
 .markdown-content :deep(li + li) {
-  margin-top: 4px;
+  margin-top: var(--ch-space-1);
 }
 
 .markdown-content :deep(table) {
@@ -213,6 +237,6 @@ function handleClick(event: MouseEvent) {
 .markdown-content :deep(th),
 .markdown-content :deep(td) {
   border: 1px solid var(--ch-color-border-strong);
-  padding: 6px 8px;
+  padding: 6px 8px; /* 6px off-scale; keep to preserve cell density */
 }
 </style>
