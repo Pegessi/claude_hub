@@ -5,7 +5,7 @@
 
 ## Unreleased
 
-- docs(ui): refresh `docs/working-logs/2026-07-10-minimalist-ui-audit.md` — fix stale App.vue line references (:root 457–580; font-weight 745/806/843; hairline shadows 819/860; mode-bar transition 783); split the multi-owner motion finding #14 into a dispatchable MobileControls finding (14) and a deferred App+AWV finding (14b); mark LoginView CTA (Task A) and LoadingButton focus (Task C) as already shipped (commits ce5b139, 0f02b39); 4 suggested follow-ups (AgentAvatar, MobileControls, deferred App+AWV motion, deferred brand-token pass). Read-only doc fix; no source edits.
+- docs(ui): refresh `docs/working-logs/2026-07-10-minimalist-ui-audit.md` (single-owner pass) — split remaining multi-owner rows (#2→avatar/#2b-AWV; #14b→App/#14c-AWV; #22 avatar-only; #24 merged into #14b) so every finding names exactly one owning file; restore the exactly-3 bounded follow-ups section (Task 1: AgentAvatar palette/radii/gradients; Task 2: MobileControls motion snap; Task 3: EnvPresetManager weight+radii) with deferred bundles and small standalone tweaks listed separately for traceability; mark LoginView (ce5b139) and LoadingButton (0f02b39) as SHIPPED. Read-only doc; no source edits.
 
 - a11y(ui): add intrinsic `:focus-visible` outline ring to the shared `LoadingButton` primitive (`outline:2px solid var(--ch-color-accent-ring-strong); outline-offset:2px; border-radius:inherit;`) so every consumer (login, logout, env-save, workspace CTAs) gets a visible keyboard-focus indicator automatically, even when a parent forgets to supply one. CSS-only; no template/script/prop/behavior change; zero visual impact outside keyboard navigation.
 
