@@ -6298,7 +6298,7 @@ onUnmounted(() => {
   border-radius: 999px;
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   line-height: 1;
   padding: 4px 7px;
   text-transform: uppercase;
@@ -6320,7 +6320,7 @@ onUnmounted(() => {
   border-radius: 999px;
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   line-height: 1;
   padding: 4px 7px;
   text-transform: uppercase;
@@ -6341,7 +6341,7 @@ onUnmounted(() => {
 .workspace-column-tabs {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--ch-space-1);
   min-width: 0;
   flex-wrap: wrap;
 }
@@ -6453,7 +6453,7 @@ onUnmounted(() => {
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--ch-space-2);
 }
 
 .agent-status-view-switch button {
@@ -6549,8 +6549,6 @@ onUnmounted(() => {
 .agent-status-card:hover {
   border-color: var(--ch-color-border-hover);
   background: var(--ch-color-surface-raised);
-  box-shadow: 0 8px 24px var(--ch-shadow-color-soft);
-  transform: translateY(-1px);
 }
 
 .agent-status-card-main {
@@ -6618,7 +6616,7 @@ onUnmounted(() => {
 .agent-status-meta {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--ch-space-2);
   min-width: 0;
 }
 
@@ -6635,7 +6633,7 @@ onUnmounted(() => {
 .agent-status-kind {
   flex: 0 0 auto;
   color: var(--ch-color-text-muted);
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   text-transform: uppercase;
 }
 
@@ -6645,7 +6643,7 @@ onUnmounted(() => {
   align-items: center;
   border-radius: 999px;
   padding: 2px 7px;
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -6693,7 +6691,7 @@ onUnmounted(() => {
   border-radius: 999px;
   background: var(--ch-color-chip-bg);
   color: var(--ch-color-text);
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   padding: 3px 7px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -6727,7 +6725,7 @@ onUnmounted(() => {
 
 .agent-status-timing {
   display: flex;
-  gap: 6px;
+  gap: var(--ch-space-2);
   flex-wrap: wrap;
 }
 
@@ -6738,7 +6736,7 @@ onUnmounted(() => {
   border-radius: 999px;
   background: var(--ch-color-chip-bg);
   color: var(--ch-color-text-muted);
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   padding: 2px 7px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -6759,7 +6757,7 @@ onUnmounted(() => {
 .agent-status-meta--resident .agent-status-resident-message {
   display: block;
   width: 100%;
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   line-height: 1.3;
   color: var(--ch-color-text-muted);
   overflow: hidden;
@@ -6835,7 +6833,7 @@ onUnmounted(() => {
 
 .agent-status-actions {
   display: flex;
-  gap: 6px;
+  gap: var(--ch-space-2);
   justify-content: flex-end;
   padding-left: 22px;
   align-items: center;
@@ -6868,7 +6866,7 @@ onUnmounted(() => {
   cursor: pointer;
   font-size: 12px;
   padding: 0 9px;
-  transition: border-color 0.12s, background 0.12s, transform 0.08s;
+  transition: border-color var(--ch-motion-fast), background var(--ch-motion-fast), transform var(--ch-motion-fast);
 }
 
 .agent-status-pause:hover {
@@ -6888,7 +6886,7 @@ onUnmounted(() => {
   cursor: pointer;
   font-size: 12px;
   padding: 0 9px;
-  transition: border-color 0.12s, color 0.12s, background 0.12s, transform 0.08s;
+  transition: border-color var(--ch-motion-fast), color var(--ch-motion-fast), background var(--ch-motion-fast), transform var(--ch-motion-fast);
 }
 
 .agent-status-run-now:hover:not(:disabled) {
@@ -6934,7 +6932,7 @@ onUnmounted(() => {
   cursor: pointer;
   font-size: 12px;
   padding: 0 9px;
-  transition: border-color 0.12s, background 0.12s, color 0.12s, transform 0.08s;
+  transition: border-color var(--ch-motion-fast), background var(--ch-motion-fast), color var(--ch-motion-fast), transform var(--ch-motion-fast);
 }
 
 .agent-status-delete:hover:not(:disabled) {
@@ -6959,7 +6957,7 @@ onUnmounted(() => {
     color var(--ch-motion-fast),
     border-color var(--ch-motion-fast),
     background var(--ch-motion-fast),
-    transform 0.08s;
+    transform var(--ch-motion-fast);
 }
 
 .agent-status-switch-env:hover {
@@ -7127,7 +7125,7 @@ onUnmounted(() => {
   border-radius: var(--ch-radius-sm);
   cursor: pointer;
   opacity: 0.7;
-  transition: opacity 0.15s, background 0.15s;
+  transition: opacity var(--ch-motion-fast), background var(--ch-motion-fast);
 }
 
 .workspace-error__close:hover {
@@ -7186,7 +7184,7 @@ onUnmounted(() => {
 
 .agent-manager-view-switch {
   display: flex;
-  gap: 6px;
+  gap: var(--ch-space-2);
 }
 
 .agent-manager-view-switch button {
@@ -7228,7 +7226,7 @@ onUnmounted(() => {
 
 .agent-row {
   border: 1px solid var(--ch-color-surface-control-active);
-  border-radius: 6px;
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-soft);
   padding: 9px;
   display: flex;
@@ -7393,7 +7391,7 @@ onUnmounted(() => {
 
 .board-skeleton-fade-enter-active,
 .board-skeleton-fade-leave-active {
-  transition: opacity 240ms ease;
+  transition: opacity var(--ch-motion-standard);
 }
 
 .board-skeleton-fade-enter-from,
@@ -7539,7 +7537,7 @@ onUnmounted(() => {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--ch-space-2);
   overflow-y: auto;
   overflow-x: hidden;
   padding: 10px;
@@ -7642,7 +7640,7 @@ onUnmounted(() => {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 6px;
+  gap: var(--ch-space-2);
   min-width: 0;
 }
 
@@ -7678,7 +7676,7 @@ onUnmounted(() => {
   border-radius: 999px;
   background: var(--ch-color-chip-bg);
   color: var(--ch-color-text-muted);
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   padding: 2px 7px;
   white-space: nowrap;
   max-width: 100%;
@@ -7722,7 +7720,7 @@ onUnmounted(() => {
 .task-card-age {
   flex: 0 0 auto;
   color: var(--ch-color-text-muted);
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   line-height: 1.3;
   padding: 2px 0;
   white-space: nowrap;
@@ -7734,7 +7732,7 @@ onUnmounted(() => {
   gap: 4px;
   border-radius: 999px;
   padding: 2px 7px;
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   font-weight: 600;
   letter-spacing: 0.02em;
   white-space: nowrap;
@@ -7752,7 +7750,7 @@ onUnmounted(() => {
   border-radius: var(--ch-radius-sm);
   background: rgba(20, 184, 166, 0.12);
   color: #5eead4;
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   font-weight: 600;
   line-height: 1;
   padding: 2px 7px;
@@ -7787,7 +7785,7 @@ onUnmounted(() => {
   border-radius: var(--ch-radius-sm);
   background: rgba(139, 92, 246, 0.14);
   color: #c4b5fd;
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   font-weight: 600;
   letter-spacing: 0.03em;
   line-height: 1;
@@ -7915,7 +7913,7 @@ onUnmounted(() => {
   flex-wrap: wrap;
   margin-bottom: 6px;
   min-width: 0;
-  gap: 6px;
+  gap: var(--ch-space-2);
 }
 
 .advanced-start {
@@ -7948,7 +7946,7 @@ onUnmounted(() => {
 .task-actions {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
-  gap: 6px;
+  gap: var(--ch-space-2);
 }
 
 .task-actions button {
@@ -7975,7 +7973,7 @@ onUnmounted(() => {
   background: var(--ch-color-surface-control-active);
   color: var(--ch-color-text);
   padding: 0 8px;
-  transition: background 0.12s ease, border-color 0.12s ease, transform 0.08s ease;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), transform var(--ch-motion-fast);
   -webkit-tap-highlight-color: var(--ch-color-accent-ring);
 }
 
@@ -8019,7 +8017,7 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast);
   -webkit-tap-highlight-color: var(--ch-color-accent-ring);
 }
 
@@ -8059,7 +8057,7 @@ onUnmounted(() => {
   height: auto;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--ch-space-1);
   padding: 6px 10px;
   border: 1px solid transparent;
   border-radius: var(--ch-radius-sm);
@@ -8070,7 +8068,7 @@ onUnmounted(() => {
   text-align: left;
   justify-content: flex-start;
   cursor: pointer;
-  transition: background 0.1s ease, border-color 0.1s ease;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast);
   -webkit-tap-highlight-color: var(--ch-color-accent-ring);
 }
 
@@ -8220,7 +8218,7 @@ onUnmounted(() => {
   border-radius: 999px;
   background: var(--ch-color-surface-control-active);
   color: var(--ch-color-text);
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   padding: 2px 7px;
 }
 
@@ -8445,7 +8443,7 @@ onUnmounted(() => {
   border-radius: 999px;
   background: var(--ch-color-accent-soft);
   color: var(--ch-color-accent);
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   font-weight: 600;
   padding: 2px 7px;
   white-space: nowrap;
@@ -8524,7 +8522,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 10px;
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 6px;
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-soft);
   padding: 8px;
 }
@@ -8630,7 +8628,7 @@ onUnmounted(() => {
 .goal-packet-section {
   min-width: 0;
   border: 1px solid var(--ch-color-border-muted);
-  border-radius: 6px;
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-soft);
   padding: 10px;
 }
@@ -8648,14 +8646,14 @@ onUnmounted(() => {
 .goal-packet-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--ch-space-1);
 }
 
 .goal-packet-meta span {
   border-radius: 999px;
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text-muted);
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   padding: 3px 7px;
 }
 
@@ -8708,7 +8706,7 @@ onUnmounted(() => {
 
 .autonomous-evaluations ol {
   display: grid;
-  gap: 6px;
+  gap: var(--ch-space-2);
   list-style: none;
   margin: 0;
   padding: 0;
@@ -8835,7 +8833,7 @@ onUnmounted(() => {
 
 .progress-overview-time,
 .progress-overview-delta {
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   line-height: 1.2;
   white-space: nowrap;
 }
@@ -8906,7 +8904,7 @@ onUnmounted(() => {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--ch-space-2);
   min-width: 0;
   margin-left: auto;
 }
@@ -8942,7 +8940,7 @@ onUnmounted(() => {
   border-radius: 999px;
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text-muted);
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   line-height: 1;
   padding: 3px 6px;
   white-space: nowrap;
@@ -8964,7 +8962,7 @@ onUnmounted(() => {
   border-radius: 999px;
   background: var(--ch-color-surface-control-active);
   color: var(--ch-color-text);
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   padding: 3px 7px;
 }
 
@@ -9039,14 +9037,14 @@ onUnmounted(() => {
 
 .report-artifacts {
   display: grid;
-  gap: 6px;
+  gap: var(--ch-space-1);
 }
 
 .report-artifact {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: var(--ch-space-1);
   min-width: 0;
 }
 
@@ -9063,7 +9061,7 @@ onUnmounted(() => {
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
   cursor: pointer;
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   padding: 3px 8px;
 }
 
@@ -9082,7 +9080,7 @@ onUnmounted(() => {
   gap: 8px;
   border: 1px solid var(--ch-color-border-muted);
   border-bottom: 0;
-  border-radius: 8px 8px 0 0;
+  border-radius: var(--ch-radius-md) var(--ch-radius-md) 0 0;
   background: var(--ch-color-surface);
   color: var(--ch-color-text-muted);
   font-size: 11px;
@@ -9093,14 +9091,14 @@ onUnmounted(() => {
   max-height: 420px;
   overflow: auto;
   border: 1px solid var(--ch-color-border-muted);
-  border-radius: 0 0 8px 8px;
+  border-radius: 0 0 var(--ch-radius-md) var(--ch-radius-md);
   background: var(--ch-color-surface);
   padding: 10px;
 }
 
 .artifact-preview-status {
   border: 1px solid var(--ch-color-border-muted);
-  border-radius: 8px;
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface);
   color: var(--ch-color-text-subtle);
   font-size: 12px;
@@ -9159,7 +9157,7 @@ onUnmounted(() => {
   height: auto;
   object-fit: contain;
   border-radius: var(--ch-radius-sm);
-  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--ch-shadow-dialog);
 }
 
 .image-lightbox-close {
@@ -9233,7 +9231,7 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 6px 8px;
+  gap: var(--ch-space-1) var(--ch-space-2);
   cursor: pointer;
   list-style: none;
 }
@@ -9245,7 +9243,7 @@ onUnmounted(() => {
 .report-subsection > summary::before {
   content: '▸';
   color: var(--ch-color-text-muted);
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   line-height: 1;
   flex: 0 0 auto;
   transition: transform var(--ch-motion-fast);
@@ -9433,14 +9431,14 @@ onUnmounted(() => {
 .summary-run-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--ch-space-1);
 }
 
 .summary-run-meta span {
   border-radius: 999px;
   background: var(--ch-color-chip-bg-muted);
   color: var(--ch-color-text-muted);
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   font-weight: 700;
   padding: 3px 7px;
 }
@@ -9499,7 +9497,7 @@ onUnmounted(() => {
   border-radius: 999px;
   background: var(--ch-color-chip-bg-muted);
   color: var(--ch-color-text-muted);
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   font-weight: 700;
   padding: 3px 7px;
 }
@@ -9602,7 +9600,7 @@ onUnmounted(() => {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--ch-space-2);
 }
 
 .periodic-task-row {
@@ -10175,7 +10173,7 @@ onUnmounted(() => {
 
   .workspace-mobile-identity span {
     color: var(--ch-color-text-muted);
-    font-size: 10px;
+    font-size: var(--ch-font-xs);
     font-weight: 700;
     line-height: 1;
     text-transform: uppercase;
@@ -10211,7 +10209,7 @@ onUnmounted(() => {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto auto;
     align-items: center;
-    gap: 6px;
+    gap: var(--ch-space-2);
   }
 
   .workspace-select-shell {
@@ -10263,7 +10261,7 @@ onUnmounted(() => {
   .workspace-agent-status {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: var(--ch-space-2);
     padding: 7px 10px;
     background: var(--ch-color-canvas);
   }
@@ -10276,7 +10274,7 @@ onUnmounted(() => {
 
   .agent-status-view-switch {
     flex-direction: row;
-    gap: 6px;
+    gap: var(--ch-space-2);
   }
 
   .agent-status-view-switch button {
@@ -10290,7 +10288,7 @@ onUnmounted(() => {
 
   .agent-status-view-switch strong {
     min-width: 18px;
-    font-size: 10px;
+    font-size: var(--ch-font-xs);
     line-height: 17px;
   }
 
@@ -10300,7 +10298,7 @@ onUnmounted(() => {
 
   .agent-status-grid {
     display: flex;
-    gap: 6px;
+    gap: var(--ch-space-2);
     overflow-x: auto;
     padding-bottom: 2px;
     scroll-snap-type: x proximity;
@@ -10354,7 +10352,7 @@ onUnmounted(() => {
     min-width: 0;
     margin-top: 3px;
     padding: 3px 6px;
-    font-size: 10px;
+    font-size: var(--ch-font-xs);
   }
 
   .workspace-layout {
@@ -10416,7 +10414,7 @@ onUnmounted(() => {
   }
 
   .column-meta {
-    gap: 6px;
+    gap: var(--ch-space-2);
   }
 
   .column-collapse-button {
@@ -10476,7 +10474,7 @@ onUnmounted(() => {
   .task-actions {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 6px;
+    gap: var(--ch-space-2);
   }
 
   .task-actions button,
@@ -10625,7 +10623,7 @@ onUnmounted(() => {
     justify-content: center;
     gap: 8px;
     border: 1px solid var(--ch-color-border-strong);
-    border-radius: 6px;
+    border-radius: var(--ch-radius-md);
     background: var(--ch-color-surface-control);
     color: var(--ch-color-text);
     font-size: 14px;
@@ -10690,7 +10688,7 @@ onUnmounted(() => {
     /* Keep 2-col grid at narrowest mobile; ⋯ overflow handles Edit/Delete so
        we don't need a single-column stack. */
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 6px;
+    gap: var(--ch-space-2);
   }
 
   /* Narrow viewports: tighter tap targets but same 2-col grid + overflow.
@@ -10797,7 +10795,7 @@ onUnmounted(() => {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
 }
@@ -10889,7 +10887,7 @@ onUnmounted(() => {
   margin-top: -1px;
   cursor: pointer;
   transition: color var(--ch-motion-fast);
-  border-radius: 3px;
+  border-radius: var(--ch-radius-sm);
 }
 
 .toast__close:hover {
