@@ -25,7 +25,10 @@
               title="Create new preset"
               @click="handleNew"
             >
-              + New
+              <span
+                class="btn-icon"
+                aria-hidden="true"
+              >+</span> New
             </button>
           </div>
           <div class="env-preset-list">
@@ -277,7 +280,7 @@ watch(
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
-  padding: 16px;
+  padding: var(--ch-space-4);
   overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
@@ -289,11 +292,11 @@ watch(
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-lg);
   box-shadow: var(--ch-shadow-dialog);
-  padding: 20px;
+  padding: var(--ch-space-5);
   min-width: 640px;
   width: min(800px, 100%);
   max-width: 100%;
-  max-height: calc(100dvh - 32px);
+  max-height: calc(100dvh - var(--ch-space-4) * 2);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -303,19 +306,20 @@ watch(
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 16px;
+  margin-bottom: var(--ch-space-4);
   flex-shrink: 0;
 }
 
 .env-manage-header h3 {
   margin: 0;
   color: var(--ch-color-text);
-  font-size: 18px;
+  font-size: var(--ch-font-xl);
+  line-height: var(--ch-leading-tight);
 }
 
 .env-manage-body {
   display: flex;
-  gap: 16px;
+  gap: var(--ch-space-4);
   flex: 1;
   min-height: 0;
   overflow: hidden;
@@ -336,9 +340,9 @@ watch(
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 10px 12px;
-  font-size: 12px;
-  font-weight: 600;
+  padding: var(--ch-space-2) var(--ch-space-3);
+  font-size: var(--ch-font-sm);
+  font-weight: var(--ch-weight-semibold);
   color: var(--ch-color-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -347,10 +351,13 @@ watch(
 }
 
 .env-new-btn {
-  font-size: 11px;
-  padding: 4px 8px;
+  font-size: var(--ch-font-xs);
+  padding: var(--ch-space-1) var(--ch-space-2);
+  gap: var(--ch-space-1);
   text-transform: none;
   letter-spacing: normal;
+  display: inline-flex;
+  align-items: center;
 }
 
 .env-preset-list {
@@ -362,11 +369,11 @@ watch(
 .env-preset-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
+  gap: var(--ch-space-2);
+  padding: var(--ch-space-2) var(--ch-space-3);
   cursor: pointer;
   color: var(--ch-color-text);
-  font-size: 13px;
+  font-size: var(--ch-font-md);
   border-bottom: 1px solid var(--ch-color-border-muted);
   transition: background var(--ch-motion-fast);
 }
@@ -393,7 +400,7 @@ watch(
 }
 
 .env-preset-item-badge {
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
   color: var(--ch-color-text-soft);
   background: var(--ch-color-surface-control);
   padding: 2px 6px;
@@ -411,25 +418,25 @@ watch(
 }
 
 .form-group {
-  margin-bottom: 16px;
+  margin-bottom: var(--ch-space-4);
 }
 
 .form-group label {
   display: block;
   color: var(--ch-color-text);
   margin-bottom: 6px;
-  font-size: 14px;
-  font-weight: 500;
+  font-size: var(--ch-font-md);
+  font-weight: var(--ch-weight-medium);
 }
 
 .form-group input {
   width: 100%;
-  padding: 8px 12px;
+  padding: var(--ch-space-2) var(--ch-space-3);
   background-color: var(--ch-color-surface-control);
   border: 1px solid var(--ch-color-border-strong);
   border-radius: 4px;
   color: var(--ch-color-text);
-  font-size: 14px;
+  font-size: var(--ch-font-md);
   box-sizing: border-box;
 }
 
@@ -445,15 +452,16 @@ watch(
 
 .form-hint-inline {
   font-weight: normal;
-  font-size: 12px;
+  font-size: var(--ch-font-sm);
   color: var(--ch-color-text-soft);
   margin-left: 6px;
 }
 
 .form-hint {
   color: var(--ch-color-text-soft);
-  font-size: 12px;
+  font-size: var(--ch-font-sm);
   margin: 6px 0 0 0;
+  line-height: var(--ch-leading-normal);
 }
 
 .env-textarea-group {
@@ -469,14 +477,14 @@ watch(
 .env-textarea {
   width: 100%;
   box-sizing: border-box;
-  padding: 10px 12px;
+  padding: var(--ch-space-2) var(--ch-space-3);
   background-color: var(--ch-color-surface-control);
   border: 1px solid var(--ch-color-border-strong);
   border-radius: 4px;
   color: var(--ch-color-text);
   font-family: monospace !important;
-  font-size: 13px;
-  line-height: 1.45;
+  font-size: var(--ch-font-md);
+  line-height: var(--ch-leading-normal);
   resize: vertical;
   spellcheck: false;
 }
@@ -503,7 +511,7 @@ watch(
   justify-content: center;
   height: 100%;
   color: var(--ch-color-text-soft);
-  font-size: 14px;
+  font-size: var(--ch-font-md);
   border: 1px dashed var(--ch-color-border);
   border-radius: 6px;
   background: var(--ch-color-surface-soft);
@@ -513,22 +521,22 @@ watch(
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-top: 16px;
-  padding-top: 16px;
+  margin-top: var(--ch-space-4);
+  padding-top: var(--ch-space-4);
   border-top: 1px solid var(--ch-color-border);
   flex-shrink: 0;
 }
 
 .env-manage-footer-right {
   display: flex;
-  gap: 10px;
+  gap: var(--ch-space-2);
 }
 
 .btn {
-  padding: 8px 16px;
+  padding: var(--ch-space-2) var(--ch-space-4);
   border: none;
   border-radius: 4px;
-  font-size: 13px;
+  font-size: var(--ch-font-md);
   cursor: pointer;
   transition: background-color 0.2s;
 }
@@ -539,8 +547,19 @@ watch(
 }
 
 .btn-small {
-  padding: 5px 10px;
-  font-size: 12px;
+  padding: var(--ch-space-1) var(--ch-space-2);
+  font-size: var(--ch-font-sm);
+}
+
+.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  font-size: var(--ch-font-sm);
+  line-height: 1;
+  flex-shrink: 0;
 }
 
 .btn-secondary {
@@ -575,7 +594,7 @@ watch(
     min-width: 0;
     width: 100%;
     max-height: calc(100dvh - 20px);
-    padding: 16px;
+    padding: var(--ch-space-4);
   }
 
   .env-manage-body {

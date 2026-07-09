@@ -227,7 +227,7 @@ function onAgentTypeChange(value: string) {
   longer depend on parent rules.
 */
 .agent-config-fields .acf-field {
-  margin-bottom: 14px;
+  margin-bottom: var(--ch-space-3);
 }
 
 /* Grayed-out state when the parent disables the whole block (e.g. the resident
@@ -243,37 +243,37 @@ function onAgentTypeChange(value: string) {
 }
 
 .agent-config-fields--form .acf-field {
-  margin-bottom: 16px;
+  margin-bottom: var(--ch-space-4);
 }
 
 .agent-config-fields .acf-label {
   display: block;
   margin-bottom: 6px;
   color: var(--ch-color-text-muted);
-  font-size: 13px;
+  font-size: var(--ch-font-md);
 }
 
 .agent-config-fields--form .acf-label {
   color: var(--ch-color-text);
-  font-size: 14px;
+  font-size: var(--ch-font-md);
 }
 
 .agent-config-fields .acf-select {
   width: 100%;
   height: 34px;
-  padding: 0 10px;
+  padding: 0 var(--ch-space-3);
   border: 1px solid var(--ch-color-border-strong);
   border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
-  font-size: 14px;
+  font-size: var(--ch-font-md);
   box-sizing: border-box;
   cursor: pointer;
 }
 
 .agent-config-fields--form .acf-select {
   height: auto;
-  padding: 10px 12px;
+  padding: var(--ch-space-2) var(--ch-space-3);
   border-radius: 4px;
 }
 
@@ -291,15 +291,15 @@ function onAgentTypeChange(value: string) {
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 8px;
+  gap: var(--ch-space-2);
   margin-bottom: 0;
   color: var(--ch-color-text);
   cursor: pointer;
 }
 
 .agent-config-fields .acf-checkbox {
-  width: 16px;
-  height: 16px;
+  width: var(--ch-space-4);
+  height: var(--ch-space-4);
   margin: 0;
   cursor: pointer;
   flex-shrink: 0;
@@ -308,19 +308,19 @@ function onAgentTypeChange(value: string) {
 .agent-config-fields .acf-hint {
   margin: 6px 0 0;
   color: var(--ch-color-text-soft);
-  font-size: 12px;
-  line-height: 1.35;
+  font-size: var(--ch-font-sm);
+  line-height: var(--ch-leading-normal);
 }
 
 .env-editor {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--ch-space-2);
 }
 
 .env-preset-row {
   display: flex;
-  gap: 8px;
+  gap: var(--ch-space-2);
   align-items: center;
 }
 

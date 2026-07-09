@@ -5,6 +5,32 @@
 
 ## Unreleased
 
+### feat(design): apply spacing/type tokens to EnvPresetManager + AgentConfigFields
+
+- **What**: rolled the spacing (`--ch-space-*`), font-size (`--ch-font-*`),
+  leading (`--ch-leading-*`), and weight (`--ch-weight-*`) tokens from the prior
+  board-shell pass into the two secondary config panels: the EnvPresetManager
+  modal (preset sidebar, list items, form inputs/textarea, footer action row,
+  `+ New` button) and the AgentConfigFields reusable form (agent-type select,
+  YOLO checkbox, env-preset row). The bare `+` in `+ New` is wrapped in a
+  scoped `.btn-icon` span (14×14 inline-flex glyph box) to match the global
+  btn-icon geometry used on the board without leaking across components.
+- **Why**: these panels still used hardcoded px for paddings/gaps (4/5/6/8/10/
+  12/14/16/20px) and font-sizes (10/11/12/13/14/18px), so controls felt denser
+  and less aligned than the freshly tokenized board shell.
+- **How**: simple/complex split — structural gutters ≥8px, control-surface
+  padding, all font-sizes/line-heights, and explicit numeric font-weights
+  (500/600) snap to the nearest token; micro-gaps ≤6px, border-radius,
+  transition durations, fixed layout geometry (34px select height, 220px
+  sidebar, 280px/160px min-heights, 640px modal), and selectors without a
+  declared weight stay as local px/inherited. No new colors, no new radii, no
+  new transitions, no new tokens in App.vue, no behavioral changes. File-scope
+  locked to the two SFCs; AgentWorkspaceView.vue / App.vue / stores / backend
+  untouched.
+- **Validation**: `pnpm lint` clean; `pnpm build` clean; dev-server smoke on
+  the Add-Agent modal and EnvPresetManager modal confirms even rhythm and
+  unchanged control behavior.
+
 ### fix(ui): apply design tokens to AgentStatusFloatingPanel (icon align, weights, density)
 
 - **What**: retrofitted `frontend/src/components/AgentStatusFloatingPanel.vue`
