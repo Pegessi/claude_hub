@@ -1519,15 +1519,17 @@ def _make_claude_process(
 
 
 @pytest.mark.asyncio
-async def test_switch_env_rejects_non_claude_tabs(monkeypatch: MonkeyPatch) -> None:
-    process = TTYDProcess(
-        tab_id="tab-codex",
-        port=12391,
-        name="Codex",
-        agent_type=AgentType.CODEX,
-    )
-    with pytest.raises(ValueError, match="Claude tabs"):
-        await process.switch_env({"ANTHROPIC_MODEL": "x"})
+async def test_switch_env_rejects_unsupported_agent_types(monkeypatch: MonkeyPatch) -> None:
+    # Codex is now supported; cursor and terminal are not.
+    for agent_type in (AgentType.CURSOR, AgentType.TERMINAL):
+        process = TTYDProcess(
+            tab_id=f"tab-{agent_type.value}",
+            port=12391,
+            name=agent_type.value,
+            agent_type=agent_type,
+        )
+        with pytest.raises(ValueError, match="Claude and Codex tabs"):
+            await process.switch_env({"FOO": "bar"})
 
 
 @pytest.mark.asyncio
@@ -1750,6 +1752,140 @@ async def test_switch_env_manager_persists_state(monkeypatch: MonkeyPatch, tmp_p
     assert saved[0]["id"] == process.tab_id
     assert saved[0]["solo_mode"] is True
     assert saved[0]["env"]["ANTHROPIC_MODEL"] == "new-model"
+
+
+def _make_codex_process(
+    monkeypatch: MonkeyPatch, solo_mode: bool = False, tmp_path=None, env: dict | None = None
+) -> TTYDProcess:
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    if tmp_path is not None:
+        monkeypatch.setattr(ttyd_manager_module, "LAUNCH_ENV_DIR", tmp_path)
+    process = TTYDProcess(
+        tab_id="tab-codex-switch",
+        port=12490,
+        name="Codex Switch Env Test",
+        solo_mode=solo_mode,
+        agent_type=AgentType.CODEX,
+        env=env or {},
+    )
+    return process
+
+
+@pytest.mark.asyncio
+async def test_switch_env_codex_non_solo_respawn_command(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    process = _make_codex_process(monkeypatch, solo_mode=False, tmp_path=tmp_path)
+    new_env = {"OPENAI_API_KEY": "test-key"}
+    captured: dict = {}
+
+    async def _fake_exists(_session: str) -> bool:
+        return True
+
+    async def _fake_spawn(*args, **kwargs):
+        captured["args"] = args
+        return _FakeProcess(0)
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", _fake_exists)
+    monkeypatch.setattr(
+        ttyd_manager_module.asyncio, "create_subprocess_exec", _fake_spawn, raising=False
+    )
+
+    await process.switch_env(new_env)
+
+    args = captured["args"]
+    assert args[0] == "tmux"
+    assert "respawn-pane" in args
+    lc_index = args.index("-lc")
+    respawn_cmd = args[lc_index + 1]
+
+    assert "--ask-for-approval" not in respawn_cmd
+    assert "--sandbox" not in respawn_cmd
+    assert "codex resume --last" in respawn_cmd
+    assert "|| codex" in respawn_cmd
+    assert respawn_cmd.rstrip().endswith("; exec /bin/zsh")
+    assert process.solo_mode is False
+    assert process.env["OPENAI_API_KEY"] == "test-key"
+
+
+@pytest.mark.asyncio
+async def test_switch_env_codex_solo_respawn_command(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    process = _make_codex_process(monkeypatch, solo_mode=True, tmp_path=tmp_path)
+    new_env = {"OPENAI_API_KEY": "test-key"}
+    captured: dict = {}
+
+    async def _fake_exists(_session: str) -> bool:
+        return True
+
+    async def _fake_spawn(*args, **kwargs):
+        captured["args"] = args
+        return _FakeProcess(0)
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", _fake_exists)
+    monkeypatch.setattr(
+        ttyd_manager_module.asyncio, "create_subprocess_exec", _fake_spawn, raising=False
+    )
+
+    await process.switch_env(new_env)
+
+    args = captured["args"]
+    lc_index = args.index("-lc")
+    respawn_cmd = args[lc_index + 1]
+
+    assert "codex --ask-for-approval never --sandbox danger-full-access" in respawn_cmd
+    assert "codex resume --last" in respawn_cmd
+    assert "|| codex --ask-for-approval never --sandbox danger-full-access" in respawn_cmd
+    assert respawn_cmd.rstrip().endswith("; exec /bin/zsh")
+    assert process.solo_mode is True
+
+
+@pytest.mark.asyncio
+async def test_switch_env_codex_toggles_solo_mode(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    process = _make_codex_process(monkeypatch, solo_mode=False, tmp_path=tmp_path)
+    captured: dict = {}
+
+    async def _fake_exists(_session: str) -> bool:
+        return True
+
+    async def _fake_spawn(*args, **kwargs):
+        captured["args"] = args
+        return _FakeProcess(0)
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", _fake_exists)
+    monkeypatch.setattr(
+        ttyd_manager_module.asyncio, "create_subprocess_exec", _fake_spawn, raising=False
+    )
+
+    await process.switch_env({"FOO": "bar"}, solo_mode=True)
+
+    args = captured["args"]
+    lc_index = args.index("-lc")
+    respawn_cmd = args[lc_index + 1]
+
+    assert "--ask-for-approval never" in respawn_cmd
+    assert "--sandbox danger-full-access" in respawn_cmd
+    assert process.solo_mode is True
+
+
+@pytest.mark.asyncio
+async def test_switch_env_codex_rolls_back_on_failure(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    process = _make_codex_process(monkeypatch, solo_mode=False, tmp_path=tmp_path)
+
+    async def _fake_exists(_session: str) -> bool:
+        return True
+
+    async def _fake_spawn(*args, **kwargs):
+        return _FakeProcess(1, stderr=b"tmux: failed")
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", _fake_exists)
+    monkeypatch.setattr(
+        ttyd_manager_module.asyncio, "create_subprocess_exec", _fake_spawn, raising=False
+    )
+
+    with pytest.raises(RuntimeError, match="tmux: failed"):
+        await process.switch_env({"NEW_VAR": "new-value"}, solo_mode=True)
+
+    # Rollback must restore state
+    assert process.solo_mode is False
+    assert "NEW_VAR" not in process.env
 
 
 @pytest.mark.asyncio

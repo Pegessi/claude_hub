@@ -989,20 +989,24 @@ asyncio.run(_main())
         return self._claude_command(self._claude_session_arg())
 
     async def switch_env(self, new_env: Dict[str, str], solo_mode: Optional[bool] = None) -> None:
-        """Hot-swap the launch env and/or solo mode of a live local Claude tab.
+        """Hot-swap the launch env and/or solo mode of a live local Claude or Codex tab.
 
-        Rewrites the on-disk launch wrapper + settings.json, then uses
-        ``tmux respawn-pane -k`` to relaunch Claude with ``--resume`` targeting
-        this tab's stable ``agent_session_id`` (falling back to ``--session-id``
-        if resume fails so the conversation id is re-pinned). Pane scrollback is
-        preserved; the running Claude process is killed and replaced.
+        Rewrites the on-disk launch wrapper (and settings.json for Claude), then
+        uses ``tmux respawn-pane -k`` to relaunch the agent with resume flags so
+        conversation history is preserved. Pane scrollback is preserved; the
+        running agent process is killed and replaced.
+
+        For Claude: resumes via ``--resume <agent_session_id>`` (falling back to
+        ``--session-id`` so the conversation id is re-pinned).
+        For Codex: resumes via ``codex resume --last`` (best-effort; codex does
+        not support pinning a specific session id).
 
         Raises:
-            ValueError: if the tab is not a local Claude tab.
+            ValueError: if the tab is not a local Claude/Codex tab.
             RuntimeError: if the tmux session is not alive or respawn fails.
         """
-        if self.agent_type != AgentType.CLAUDE:
-            raise ValueError("switch_env is only supported for Claude tabs")
+        if self.agent_type not in {AgentType.CLAUDE, AgentType.CODEX}:
+            raise ValueError("switch_env is only supported for Claude and Codex tabs")
         if self.target != ExecutionTarget.LOCAL:
             raise ValueError("switch_env is only supported for local tabs")
         if not await _tmux_session_exists_async(self.tmux_session):
@@ -1011,7 +1015,7 @@ asyncio.run(_main())
         # Snapshot current state and on-disk launch files so we can roll back if
         # respawn-pane fails. Without rollback, a tmux-level failure (bad session,
         # tmux crashed, etc.) would leave self.env/self.solo_mode and the
-        # <tabid>.sh/.settings.json out of sync with the still-running claude.
+        # <tabid>.sh/.settings.json out of sync with the still-running agent.
         old_env = dict(self.env)
         old_solo_mode = self.solo_mode
         LAUNCH_ENV_DIR.mkdir(parents=True, exist_ok=True)
@@ -1043,30 +1047,41 @@ asyncio.run(_main())
         # If those writes raise (e.g. invalid env), state was already mutated
         # above but no tmux operation has happened yet, so the on-disk files are
         # consistent with self.env and next restart/switch will pick them up.
-        settings_arg = self._claude_settings_arg()
-        model_arg = self._claude_model_arg()
-        session_arg = self._claude_session_arg()
-
         user_shell = os.environ.get("SHELL", "/bin/bash")
 
-        if self.solo_mode:
-            base = "IS_SANDBOX=1 claude --dangerously-skip-permissions"
+        if self.agent_type == AgentType.CODEX:
+            if self.solo_mode:
+                fresh_cmd = "codex --ask-for-approval never --sandbox danger-full-access"
+            else:
+                fresh_cmd = "codex"
+            # Codex does not support pinning a session id; best-effort resume
+            # via resume --last, falling back to a fresh start.
+            inner_cmd = f"codex resume --last || {fresh_cmd}"
         else:
-            base = get_default_command()
+            # Claude path
+            settings_arg = self._claude_settings_arg()
+            model_arg = self._claude_model_arg()
+            session_arg = self._claude_session_arg()
 
-        if self.agent_session_id:
-            quoted_sid = shlex.quote(self.agent_session_id)
-            resume_inner = f"{base}{settings_arg}{model_arg} --resume {quoted_sid}"
-            inner_cmd = f"{resume_inner} || {base}{settings_arg}{model_arg}{session_arg}"
-        else:
-            # Defensive: legacy tab without a pinned session id; start fresh.
-            inner_cmd = f"{base}{settings_arg}{model_arg}{session_arg}"
+            if self.solo_mode:
+                base = "IS_SANDBOX=1 claude --dangerously-skip-permissions"
+            else:
+                base = get_default_command()
+
+            if self.agent_session_id:
+                quoted_sid = shlex.quote(self.agent_session_id)
+                resume_inner = f"{base}{settings_arg}{model_arg} --resume {quoted_sid}"
+                inner_cmd = f"{resume_inner} || {base}{settings_arg}{model_arg}{session_arg}"
+            else:
+                # Defensive: legacy tab without a pinned session id; start fresh.
+                inner_cmd = f"{base}{settings_arg}{model_arg}{session_arg}"
+
         wrapped = self._with_env(inner_cmd)
 
-        # Append `; exec $SHELL` so the pane stays alive at a shell when Claude
-        # exits. This matches how solo and cursor tabs launch initially and
-        # gives the user a visible shell prompt if resume fails and the fresh
-        # fallback also errors out (otherwise the pane would die silently).
+        # Append `; exec $SHELL` so the pane stays alive at a shell when the
+        # agent exits. This matches how solo/cursor/codex tabs launch initially
+        # and gives the user a visible shell prompt if resume fails and the
+        # fresh fallback also errors out (otherwise the pane would die silently).
         respawn_cmd = f"{wrapped}; exec {shlex.quote(user_shell)}"
 
         try:
@@ -2225,10 +2240,11 @@ class TTYDManager:
         env: Dict[str, str],
         solo_mode: Optional[bool] = None,
     ) -> TerminalTab:
-        """Hot-swap env/solo_mode on a live local Claude tab via tmux respawn-pane.
+        """Hot-swap env/solo_mode on a live local Claude/Codex tab via tmux respawn-pane.
 
         Unlike ``update_tab`` this does NOT restart ttyd; it rewrites the launch
         files and respawns the foreground process in-place so the WebSocket
+        connection, pane scrollback, and conversation (via resume flags) survive.
         connection, pane scrollback, and conversation (via --resume) survive.
         """
         process = self.processes.get(tab_id)

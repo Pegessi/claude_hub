@@ -385,7 +385,7 @@ class TerminalTabCreate(TerminalTabBase):
 
 
 class SwitchEnvRequest(BaseModel):
-    """Payload for switching the environment / model of a live Claude tab."""
+    """Payload for switching the environment / model of a live Claude or Codex tab."""
 
     env: Dict[str, str] = Field(
         ...,
