@@ -186,6 +186,27 @@ async def get_task_reports(
         raise HTTPException(status_code=404, detail="Workspace not found") from e
 
 
+@router.get(
+    "/{workspace_id}/tasks/{task_id}",
+    response_model=WorkspaceTask,
+)
+async def get_task(
+    workspace_id: str,
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+) -> WorkspaceTask:
+    """Full, untrimmed task for the detail panel / edit modal (on-demand).
+
+    The board list payload strips detail-only heavy fields from tasks (goal
+    packet prose arrays, autonomous evaluation reports); this endpoint returns
+    the complete task so the detail panel can render them when opened.
+    """
+    try:
+        return workspace_manager.task_for_id(workspace_id, task_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Task not found") from e
+
+
 @router.post("/{workspace_id}/tasks", response_model=WorkspaceTask, status_code=201)
 async def create_task(
     workspace_id: str,

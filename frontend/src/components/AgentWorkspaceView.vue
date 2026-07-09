@@ -3410,9 +3410,38 @@ const mobileWorkspaceSummary = computed(() => {
   return `${agentCount} agents · ${reviewerCount} reviewers · ${workingCount} working · ${queuedCount} queued`
 })
 
-const selectedTask = computed(() =>
-  tasks.value.find(task => task.id === selectedTaskId.value) || null
-)
+const selectedTask = computed(() => {
+  const boardTask = tasks.value.find(task => task.id === selectedTaskId.value) || null
+  if (!boardTask) return null
+  // The board list payload trims detail-only heavy fields off tasks (goal-packet
+  // prose arrays + objective, autonomous_run evaluation_reports + rubric). Overlay
+  // the on-demand full task onto the live board task so those sections render in
+  // the detail panel while status/state/scalars stay live from the board poll.
+  const detail = selectedTaskId.value
+    ? workspaceStore.taskDetailForId(selectedTaskId.value)
+    : null
+  if (!detail) return boardTask
+  const merged: WorkspaceTask = { ...boardTask }
+  if (detail.goal_packet) {
+    merged.goal_packet = boardTask.goal_packet
+      ? {
+          ...detail.goal_packet,
+          status: boardTask.goal_packet.status,
+          source: boardTask.goal_packet.source,
+        }
+      : detail.goal_packet
+  }
+  if (detail.autonomous_run) {
+    merged.autonomous_run = boardTask.autonomous_run
+      ? {
+          ...boardTask.autonomous_run,
+          evaluation_reports: detail.autonomous_run.evaluation_reports,
+          rubric: detail.autonomous_run.rubric,
+        }
+      : detail.autonomous_run
+  }
+  return merged
+})
 
 function feedbackTokens(value: string): Set<string> {
   const text = value.toLowerCase()
@@ -6007,15 +6036,20 @@ watch(tasks, value => {
   }
 })
 
-// Hydrate the detail panel's full report history on demand. The board payload
-// only carries the latest report per task, so opening a task fetches its
-// complete history; switching away drops the prior task's cache.
+// Hydrate the detail panel's full report history + full task on demand. The
+// board payload only carries the latest report per task and trims detail-only
+// heavy task fields, so opening a task fetches its complete history and full
+// task; switching away drops the prior task's caches.
 watch(selectedTaskId, (taskId, prevTaskId) => {
   if (prevTaskId && prevTaskId !== taskId) {
     workspaceStore.clearTaskReports(prevTaskId)
+    workspaceStore.clearTaskDetail(prevTaskId)
   }
   if (taskId && activeWorkspaceId.value) {
     workspaceStore.fetchTaskReports(activeWorkspaceId.value, taskId).catch(() => {
+      // Error state is owned by the workspace store.
+    })
+    workspaceStore.fetchTaskDetail(activeWorkspaceId.value, taskId).catch(() => {
       // Error state is owned by the workspace store.
     })
   }
@@ -6025,6 +6059,7 @@ watch(activeWorkspaceId, value => {
   selectedWorkspaceId.value = value || ''
   workspaceSessionView.value = 'agents'
   workspaceStore.clearTaskReports()
+  workspaceStore.clearTaskDetail()
   closeTaskDetail()
 })
 

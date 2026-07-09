@@ -14,14 +14,21 @@ from pytest import MonkeyPatch
 from claude_hub.auth.dependencies import get_current_user
 from claude_hub.main import app
 from claude_hub.models import (
+    AcceptanceCheck,
+    AcceptanceCheckStatus,
     AgentReport,
     AgentReportState,
     AgentRuntimeStatus,
     AgentType,
+    AutonomousRun,
+    EvaluationDecision,
+    EvaluationReport,
     ExecutionTarget,
+    GoalPacket,
     ManagedSession,
     ManagedSessionStatus,
     RemoteProfile,
+    ReviewProfile,
     TerminalAgentStatus,
     TerminalTab,
     User,
@@ -9418,3 +9425,215 @@ def test_get_task_reports_endpoint_unknown_workspace_returns_404() -> None:
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Workspace not found"
+
+
+def _heavy_report(report_id: str = "rep-heavy") -> AgentReport:
+    """An AgentReport populated with every detail-only heavy field."""
+    return AgentReport(
+        id=report_id,
+        workspace_id="ws-board",
+        task_id="task-1",
+        session_id="sess-1",
+        state=AgentReportState.READY_FOR_REVIEW,
+        message="human readable summary",
+        message_en="english summary",
+        message_zh="中文摘要",
+        changed_files=["a.py", "b.py"],
+        validation="all green",
+        risks="none",
+        acceptance_check=[
+            AcceptanceCheck(
+                criterion="c1",
+                status=AcceptanceCheckStatus.PASSED,
+                evidence="did it",
+            )
+        ],
+        evaluation_report=EvaluationReport(id="eval-1", decision=EvaluationDecision.PASS),
+        review_profiles=[ReviewProfile.CODE],
+        profile_results=[],
+        artifact_refs=["report.md"],
+        confidence=0.9,
+        review_reason="looks good",
+        risk_level="low",
+        review_cycle=2,
+        created_at=datetime.now(),
+    )
+
+
+def _heavy_task(task_id: str = "task-1") -> WorkspaceTask:
+    """A WorkspaceTask carrying a full goal_packet and autonomous_run."""
+    now = datetime.now()
+    return WorkspaceTask(
+        id=task_id,
+        workspace_id="ws-board",
+        title="Slim the board",
+        prompt="do the thing",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        goal_packet=GoalPacket(
+            objective="ship the projection",
+            acceptance_criteria=["c1", "c2"],
+            validation_plan=["run pytest"],
+            assumptions=["a1"],
+            out_of_scope=["o1"],
+            handoff_requirements=["h1"],
+            source="agent_generated",
+        ),
+        autonomous_run=AutonomousRun(
+            id="run-1",
+            task_id=task_id,
+            iteration=2,
+            max_iterations=5,
+            next_action="keep going",
+            rubric=[],
+            evaluation_reports=[EvaluationReport(id="er-1", decision=EvaluationDecision.REVISE)],
+        ),
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def test_board_report_projection_strips_heavy_keeps_card_fields() -> None:
+    projected = workspace_manager._board_report_projection(_heavy_report())
+
+    # Card / gate fields survive untouched.
+    assert projected.id == "rep-heavy"
+    assert projected.state == AgentReportState.READY_FOR_REVIEW
+    assert projected.message == "human readable summary"
+    assert projected.message_en == "english summary"
+    assert projected.message_zh == "中文摘要"
+    assert projected.review_reason == "looks good"
+    assert projected.risk_level == "low"
+    assert projected.review_cycle == 2
+
+    # Detail-only heavy fields are emptied.
+    assert projected.changed_files == []
+    assert projected.validation is None
+    assert projected.risks is None
+    assert projected.acceptance_check == []
+    assert projected.evaluation_report is None
+    assert projected.review_profiles == []
+    assert projected.profile_results == []
+    assert projected.artifact_refs == []
+
+
+def test_board_report_projection_does_not_mutate_source() -> None:
+    source = _heavy_report()
+    workspace_manager._board_report_projection(source)
+
+    # The stored report keeps its heavy fields; only the projection is trimmed.
+    assert source.changed_files == ["a.py", "b.py"]
+    assert source.evaluation_report is not None
+    assert source.acceptance_check and source.acceptance_check[0].criterion == "c1"
+
+
+def test_board_task_projection_strips_goal_packet_prose_keeps_status() -> None:
+    projected = workspace_manager._board_task_projection(_heavy_task())
+
+    assert projected.goal_packet is not None
+    # Status / source stay so cards can badge the packet state.
+    assert projected.goal_packet.status == GoalPacket(objective="x").status
+    assert projected.goal_packet.source == "agent_generated"
+    # Prose arrays and objective are emptied (detail-only).
+    assert projected.goal_packet.objective == ""
+    assert projected.goal_packet.acceptance_criteria == []
+    assert projected.goal_packet.validation_plan == []
+    assert projected.goal_packet.assumptions == []
+    assert projected.goal_packet.out_of_scope == []
+    assert projected.goal_packet.handoff_requirements == []
+
+
+def test_board_task_projection_strips_autonomous_reports_keeps_scalars() -> None:
+    projected = workspace_manager._board_task_projection(_heavy_task())
+
+    assert projected.autonomous_run is not None
+    # Progress scalars survive for the card.
+    assert projected.autonomous_run.iteration == 2
+    assert projected.autonomous_run.max_iterations == 5
+    assert projected.autonomous_run.next_action == "keep going"
+    # Heavy evaluation payloads are emptied.
+    assert projected.autonomous_run.evaluation_reports == []
+    assert projected.autonomous_run.rubric == []
+
+
+def test_board_task_projection_does_not_mutate_source() -> None:
+    source = _heavy_task()
+    workspace_manager._board_task_projection(source)
+
+    assert source.goal_packet is not None
+    assert source.goal_packet.objective == "ship the projection"
+    assert source.goal_packet.acceptance_criteria == ["c1", "c2"]
+    assert source.autonomous_run is not None
+    assert len(source.autonomous_run.evaluation_reports) == 1
+
+
+def test_board_task_projection_noop_when_no_heavy_fields() -> None:
+    now = datetime.now()
+    plain = WorkspaceTask(
+        id="task-plain",
+        workspace_id="ws-board",
+        title="plain",
+        prompt="p",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.TODO,
+        created_at=now,
+        updated_at=now,
+    )
+
+    projected = workspace_manager._board_task_projection(plain)
+
+    # No goal_packet / autonomous_run to trim: same object returned.
+    assert projected is plain
+
+
+def _seed_board_task(task: WorkspaceTask) -> str:
+    """Register a workspace + a single task directly in the manager."""
+    now = datetime.now()
+    workspace_id = task.workspace_id
+    workspace_manager.workspaces[workspace_id] = Workspace(
+        id=workspace_id,
+        name="Board WS",
+        path="/tmp/board-ws",
+        default_branch="main",
+        session_prefix="brd",
+        created_at=now,
+        updated_at=now,
+    )
+    workspace_manager.tasks[task.id] = task
+    return workspace_id
+
+
+def test_get_task_endpoint_returns_full_untrimmed_task() -> None:
+    task = _heavy_task()
+    workspace_id = _seed_board_task(task)
+    client = TestClient(app)
+
+    response = client.get(f"/api/workspaces/{workspace_id}/tasks/{task.id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    # The detail endpoint returns the full task, not the board projection.
+    assert body["goal_packet"]["objective"] == "ship the projection"
+    assert body["goal_packet"]["acceptance_criteria"] == ["c1", "c2"]
+    assert len(body["autonomous_run"]["evaluation_reports"]) == 1
+    assert body["autonomous_run"]["rubric"] == []
+
+
+def test_get_task_endpoint_unknown_workspace_returns_404() -> None:
+    client = TestClient(app)
+
+    response = client.get("/api/workspaces/missing-ws/tasks/task-1")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Task not found"
+
+
+def test_get_task_endpoint_unknown_task_returns_404() -> None:
+    task = _heavy_task()
+    workspace_id = _seed_board_task(task)
+    client = TestClient(app)
+
+    response = client.get(f"/api/workspaces/{workspace_id}/tasks/does-not-exist")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Task not found"

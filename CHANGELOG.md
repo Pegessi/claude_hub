@@ -5,6 +5,55 @@
 
 ## Unreleased
 
+### perf(workspace): slim the board poll payload ~56% via detail-only field projection
+
+- **What**: the steady-state `GET /api/workspaces/{id}/board` payload — polled
+  every 2.5s by the board view — is now trimmed of detail-only heavy fields
+  without data loss. On the real "Claude Hub" workspace the board shrank from
+  **2,257,079 → 984,557 bytes (−56.4%, 1.27MB saved)**: tasks 1,122,002 →
+  407,566 (−714KB) and reports 876,434 → 318,348 (−558KB). Two projection
+  passes run server-side in `get_board`: (1) each board task's `goal_packet`
+  keeps `status`/`source` but empties `objective` + the five prose arrays
+  (`acceptance_criteria`, `validation_plan`, `assumptions`, `out_of_scope`,
+  `handoff_requirements`), and its `autonomous_run` keeps progress scalars
+  (phase/iteration/max_iterations/next_action/iterations) but empties
+  `evaluation_reports` + `rubric`; (2) each latest-per-task board report keeps
+  card + gate-routing fields (`id`, `state`, `message`/`_en`/`_zh`,
+  `review_*`, `risk_level`) but empties `changed_files`, `validation`, `risks`,
+  `acceptance_check`, `evaluation_report`, `review_profiles`, `profile_results`,
+  `artifact_refs`. Task `prompt` and `attachments` are kept full (only ~138KB
+  total, and the edit modal reads them straight off the board task). A new
+  `GET /api/workspaces/{id}/tasks/{task_id}` endpoint returns the full untrimmed
+  task on demand; the existing `.../tasks/{task_id}/reports` endpoint already
+  served full report history. The detail panel lazy-loads both when a task is
+  opened and drops the caches when it switches away.
+- **Why**: the board card and columns only render a small slice of each task
+  and its latest report; the heavy goal-packet prose, autonomous evaluation
+  reports, and per-report timeline fields (changed files, validation, risks,
+  acceptance evidence, artifacts) are only ever shown in the detail panel. Re-
+  sending all of that on every 2.5s poll dominated the payload and slowed the
+  UI. Projecting to the same Pydantic types with heavy fields emptied preserves
+  the response schema (no frontend type churn, ETag/304 fast-path intact) while
+  halving the wire size.
+- **How**: added `_board_task_projection` / `_board_report_projection` static
+  helpers + `task_for_id` in `services/workspace_manager/_tmux_queries.py`
+  (using `model_copy(update=...)` so stored models are never mutated), wired
+  them into `get_board`, and added the single-task endpoint in
+  `api/workspaces.py` (declared after `.../reports` so no route shadowing). On
+  the frontend, `workspaceStore.ts` gained `taskDetails` state +
+  `fetchTaskDetail`/`taskDetailForId`/`clearTaskDetail`, and
+  `AgentWorkspaceView.vue`'s `selectedTask` computed overlays the on-demand full
+  task onto the live board task (status/scalars stay live from the poll, prose/
+  evaluation come from the detail fetch). `App.vue` and the `AgentWorkspaceView`
+  `<style>` block were intentionally left untouched (disjoint from a concurrent
+  UI task).
+- **Validation**: backend `black`/`isort`/`mypy` clean; `pytest tests/test_workspaces.py`
+  128 passed (9 new: projection field-stripping + non-mutation + no-op, and the
+  single-task endpoint 200/404 paths). Full backend suite unchanged at 52
+  pre-existing `asyncio.run()` event-loop failures (identical on `develop`).
+  Frontend `pnpm lint` clean; `pnpm build` (vue-tsc + vite) exits 0. Before/
+  after byte split measured against the live 2.1MB board.
+
 ### feat(design): spacing + type scale tokens; applied to board shell
 
 - **What**: added a minimal, 4px-base design-token foundation for spacing
