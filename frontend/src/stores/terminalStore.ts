@@ -90,6 +90,7 @@ export const useTerminalStore = defineStore('terminal', () => {
   )
   let statusPollTimer: number | null = null
   let statusPollConsumers = 0
+  let lastAgentStatusETag: string | null = null
 
   // Layout and panes
   const layoutType = ref<LayoutType>(
@@ -230,12 +231,19 @@ export const useTerminalStore = defineStore('terminal', () => {
     if (isStatusLoading.value) return
     isStatusLoading.value = true
     try {
-      const response = await fetch(`${API_BASE}/tabs/status`)
+      const response = await fetch(`${API_BASE}/tabs/status`, {
+        headers: lastAgentStatusETag ? { 'If-None-Match': lastAgentStatusETag } : {},
+      })
+      if (response.status === 304) return
       if (!response.ok) throw new Error('Failed to fetch agent statuses')
+      const etag = response.headers.get('etag')
+      lastAgentStatusETag = etag
       const statuses: TerminalAgentStatus[] = await response.json()
       // Only update when the data actually changed — this avoids a full Vue
       // re-render cascade (TabBar, both AgentStatusFloatingPanels, all
       // TerminalPanes) every 5 seconds when the poll returns identical data.
+      // statusesEqual is complementary to the 304 fast-path: it still catches
+      // identical payloads if an intermediate proxy strips conditional headers.
       if (!statusesEqual(agentStatuses.value, statuses)) {
         agentStatuses.value = statuses
       }

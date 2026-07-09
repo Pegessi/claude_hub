@@ -1,7 +1,9 @@
+import hashlib
+import json
 import logging
-from typing import List
+from typing import Any, List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from ..auth.dependencies import get_current_user
@@ -20,6 +22,33 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/tabs", tags=["tabs"])
 
 
+# sampled_at is regenerated on every call (the in-process cache is 0.75s TTL,
+# shorter than the 5s poll interval) and churns even when every user-visible
+# field is stable. Stripping it from the ETag payload lets an idle poll resolve
+# to 304 instead of re-shipping the status list every 5s. last_changed_at is
+# content-meaningful (it flips when the status actually transitions) and is
+# kept so real state changes rotate the hash.
+_VOLATILE_STATUS_FIELDS = ("sampled_at",)
+
+
+def _tab_status_etag(statuses: List[TerminalAgentStatus]) -> str:
+    """Compute a stable, order-independent ETag over tab-status content.
+
+    Mirrors the shape of ``workspaces._board_etag``: dump through pydantic,
+    drop volatile per-tick fields, sort the list by tab_id to neutralize
+    iteration-order jitter, canonicalize with ``sort_keys``/tight separators,
+    sha256, truncate to 32 hex chars, wrap in double quotes per RFC 7232.
+    """
+    payload = [s.model_dump(mode="json") for s in statuses]
+    for item in payload:
+        for field in _VOLATILE_STATUS_FIELDS:
+            item.pop(field, None)
+    payload.sort(key=lambda item: item.get("tab_id") or "")
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+    return f'"{digest}"'
+
+
 class TabOrderUpdate(BaseModel):
     tab_ids: List[str]
 
@@ -32,10 +61,26 @@ async def list_tabs(current_user: User = Depends(get_current_user)) -> List[Term
 
 @router.get("/status", response_model=List[TerminalAgentStatus])
 async def list_tab_statuses(
+    request: Request,
+    response: Response,
     current_user: User = Depends(get_current_user),
-) -> List[TerminalAgentStatus]:
-    """List best-effort runtime statuses for terminal agents."""
-    return await ttyd_manager.list_tab_agent_statuses()
+) -> Any:
+    """List best-effort runtime statuses for terminal agents.
+
+    Emits a content-based ETag; a 5s poll whose ``If-None-Match`` still matches
+    gets a bodyless 304 instead of re-serializing the status array over loopback.
+    """
+    statuses = await ttyd_manager.list_tab_agent_statuses()
+
+    etag = _tab_status_etag(statuses)
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = "no-cache"
+
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match and etag in {tag.strip() for tag in if_none_match.split(",")}:
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
+
+    return statuses
 
 
 @router.post("", response_model=TerminalTab, status_code=201)
