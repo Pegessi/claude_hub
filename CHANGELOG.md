@@ -5,6 +5,37 @@
 
 ## Unreleased
 
+### fix(ui): apply design tokens to NetworkAccessMenu (icon align, weights, density, shadow fix)
+
+- **What**: retrofitted `frontend/src/components/NetworkAccessMenu.vue`
+  (toolbar signal-icon trigger + embedded menu-item variant) onto the
+  spacing/type/weight token scale. Replaced ~63 hardcoded px spacing/font
+  values with `--ch-space-{1..4}`, `--ch-font-{xs,sm,md}`,
+  `--ch-leading-tight`, and `--ch-weight-{regular,medium,semibold}`.
+  Removed all `font-weight: 700/800` (eight occurrences) in favor of
+  semibold (600) for headings and medium (500) for chips/meta. Normalized
+  the signal-bars icon wrapper to 16×16 (space-4) with a 4px (space-1)
+  inter-bar gap, the chevron to 8×8 (space-2), and the Refresh button to
+  28px high to match other control hit-targets; unified port-chip, link
+  rows, and status lines on the space-2/space-3 grid; swapped an undefined
+  `var(--ch-shadow-lg)` reference on the toolbar popover to
+  `--ch-shadow-popover` to match other floating panels. No behavior, DOM,
+  or color-palette changes.
+- **Why**: the menu carried token debt from before the scale existed
+  (mixed 2/3/4/6/7/8/10px paddings/gaps and shouting 700/800 weights) and
+  referenced a shadow token that was never defined in App.vue, so the
+  popover had no drop shadow separation from the toolbar.
+- **How**: styling-only change within a single SFC; added a short doc
+  comment at the top of `<style scoped>` documenting the hardcoded-px
+  policy (allowed for the 32px toolbar trigger, 1px borders, 3px signal-
+  bar stroke, and the 6/11/16px proportional bar heights that define the
+  glyph shape). No other files modified.
+- **Validation**: `pnpm lint` clean (eslint --fix); `pnpm build` clean
+  (vue-tsc + vite, 397.7 KB JS / 173.2 KB CSS). Dev-server (port 5181,
+  proxying backend :8173) confirms the trigger opens, links populate,
+  Refresh and Copy work, hover/active states render, chevron rotates, and
+  click-outside dismiss still functions.
+
 ### feat(design): apply spacing/type tokens to EnvPresetManager + AgentConfigFields
 
 - **What**: rolled the spacing (`--ch-space-*`), font-size (`--ch-font-*`),
