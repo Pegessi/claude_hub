@@ -5,6 +5,8 @@
 
 ## Unreleased
 
+- perf(ui): idle-prefetch the lazy `AgentWorkspaceView` chunk after first paint so the first switch to workspace mode is instant (warm ES-module cache). Scheduled from `App.vue` `onMounted` via `requestIdleCallback` (with a `setTimeout(1500ms)` Safari fallback), one-shot, error-swallowed, guarded by `mode !== 'workspace'`, with `onUnmounted` cancellation. The initial-bundle reduction from the prior lazy-split is preserved — entry chunk size is essentially unchanged (~194 kB / gzip ~67 kB), and the 207 kB workspace chunk stays in its own async file.
+
 - perf(ui): lazy-load `AgentWorkspaceView.vue` via `defineAsyncComponent` + dynamic `import()` to shrink the initial terminal-mode JS/CSS bundle. The workspace board is ~10,951 lines but only renders behind `v-if="mode === 'workspace'"` and the app defaults to terminal mode; Vite now code-splits it into a separate lazy chunk (`AgentWorkspaceView-*.js` ~207 kB gzip ~58 kB + `AgentWorkspaceView-*.css` ~93 kB gzip ~13 kB). Main chunk shrinks from 399.01 kB (gzip 123.88 kB) → 193.97 kB (gzip 67.25 kB) on JS (~51% raw / ~46% gzip saving on initial JS) and CSS from 178.00 kB (gzip 24.98 kB) → 84.64 kB (gzip 12.53 kB). No Suspense/loading placeholder (v-if gate is sufficient); zero UX change; all other first-paint components stay static.
 
 - style(ui): apply exact-match design tokens to `TerminalGridView.vue` grid gap/padding (`.terminal-grid` gap/padding 4px → `--ch-space-1`); grid-template ratios and 180ms cubic-bezier transition untouched. Purely CSS; no template or script changes. Validation: `pnpm lint` + `pnpm build` clean.

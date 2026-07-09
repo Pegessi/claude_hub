@@ -190,6 +190,11 @@ let lastAppliedViewportOffsetTop = ''
 let lastAppliedControlsViewportShift = ''
 let fixedViewportProbe: HTMLDivElement | null = null
 
+// Handle for the idle-time workspace-chunk prefetch (see
+// scheduleWorkspaceChunkPrefetch below). Cancelled in onUnmounted if it
+// hasn't fired yet.
+let workspacePrefetchCancel: (() => void) | null = null
+
 const KEYBOARD_OPEN_THRESHOLD_PX = 36
 const KEYBOARD_CLOSE_THRESHOLD_PX = 12
 const KEYBOARD_CLOSE_DELAY_MS = 160
@@ -380,6 +385,47 @@ function cleanupMobileViewportSync() {
   fixedViewportProbe = null
 }
 
+// After first paint, prefetch the lazy AgentWorkspaceView chunk during
+// browser idle so the first switch to workspace mode is instant (no network
+// wait). Vite/Rollup dedupes this dynamic import with defineAsyncComponent's
+// identical factory above — both resolve to the same AgentWorkspaceView-*.js
+// chunk, and ES-module promise caching means defineAsyncComponent will see
+// an already-resolved module when v-if mounts it later. The prefetch is
+// guarded: only in the browser, skipped when we're already in workspace
+// mode (v-if is already pulling the chunk via defineAsyncComponent), fired
+// at most once, errors are swallowed (defineAsyncComponent will retry on
+// mount), and the idle/timeout handle is cancelled in onUnmounted.
+function scheduleWorkspaceChunkPrefetch() {
+  if (typeof window === 'undefined') return
+  if (workspacePrefetchCancel !== null) return
+  if (mode.value === 'workspace') return
+
+  const doPrefetch = () => {
+    workspacePrefetchCancel = null
+    import('@/components/AgentWorkspaceView.vue').catch(() => {})
+  }
+
+  const w = window as Window & {
+    requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number
+    cancelIdleCallback?: (id: number) => void
+  }
+
+  if (typeof w.requestIdleCallback === 'function' && typeof w.cancelIdleCallback === 'function') {
+    const id = w.requestIdleCallback(doPrefetch, { timeout: 4000 })
+    workspacePrefetchCancel = () => {
+      w.cancelIdleCallback!(id)
+      workspacePrefetchCancel = null
+    }
+  } else {
+    // Safari fallback: fire ~1.5s after mount, long after critical paint.
+    const id = window.setTimeout(doPrefetch, 1500)
+    workspacePrefetchCancel = () => {
+      window.clearTimeout(id)
+      workspacePrefetchCancel = null
+    }
+  }
+}
+
 onMounted(async () => {
   // Always check auth first - it will handle the case when auth is not enabled
   await authStore.checkAuth()
@@ -388,10 +434,16 @@ onMounted(async () => {
   }
   // Set up mobile viewport sync
   setupMobileViewportSync()
+  // Warm the lazy workspace chunk in idle so mode switch is instant.
+  scheduleWorkspaceChunkPrefetch()
 })
 
 onUnmounted(() => {
   cleanupMobileViewportSync()
+  if (workspacePrefetchCancel !== null) {
+    workspacePrefetchCancel()
+    workspacePrefetchCancel = null
+  }
 })
 </script>
 
