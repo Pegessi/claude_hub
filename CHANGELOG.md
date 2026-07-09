@@ -5,6 +5,8 @@
 
 ## Unreleased
 
+- style(ui): flatten Feishu login CTA — remove the `translateY(-2px)` hover lift and `0 8px 20px` accent glow so the button matches the flat-minimalist aesthetic used elsewhere (background-color change is the sole hover affordance); tighten `transition: all 0.2s ease` to `transition: background-color var(--ch-motion-standard)`; add `.feishu-login-btn:focus-visible { outline: 2px solid var(--ch-color-accent-ring-strong); outline-offset: 2px }` for keyboard focus accessibility. CSS-only; zero markup/behavior change.
+
 - docs(ui): add `docs/working-logs/2026-07-10-minimalist-ui-audit.md` — prioritized minimalist-design findings across spacing/type/radius/shadow/color/motion/focus/noise categories, with deferred-file note (App.vue + AgentWorkspaceView.vue in-flight) and 3 suggested bounded follow-up tasks (LoginView CTA, AgentAvatar palette/gradients, LoadingButton focus ring). Read-only audit; no source edits.
 
 - perf(ui): idle-prefetch the lazy `AgentWorkspaceView` chunk after first paint so the first switch to workspace mode is instant (warm ES-module cache). Scheduled from `App.vue` `onMounted` via `requestIdleCallback` (with a `setTimeout(1500ms)` Safari fallback), one-shot, error-swallowed, guarded by `mode !== 'workspace'`, with `onUnmounted` cancellation. The initial-bundle reduction from the prior lazy-split is preserved — entry chunk size is essentially unchanged (~194 kB / gzip ~67 kB), and the 207 kB workspace chunk stays in its own async file.

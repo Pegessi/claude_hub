@@ -53,17 +53,17 @@ function handleLogin() {
  *   • .login-container border-radius:8px (--ch-radius-md=7px, lg=10px;
  *     neither equals 8; per exact-match rule)
  *   • .login-header p margin-bottom:40px (no 40px token)
- *   • .feishu-login-btn transition:all 0.2s ease (--ch-motion-standard
- *     is 180ms; 200ms is not an exact match)
- *   • Hover box-shadow 0 8px 20px (shadow-spread parameter, not a
- *     spacing token; no matching --ch-shadow-* for accent-color glow)
- *   • translateY(-2px) hover lift (affordance constant)
  *   • 1px borders (stroke constant, not spacing)
  *   • Layout constants: min-height:100vh, max-width:400px, width:90%
  *   • All font-sizes are rem-based (2rem/0.95rem/1.1rem/1.3rem/0.85rem);
  *     --ch-font-* is px-based so these stay rem (per task instruction)
  *   • No font-weight declarations exist in this file; weight tokens
  *     are a no-op.
+ *   • .feishu-login-btn hover is flat (background-color only; no lift
+ *     or glow — matches rest of product's minimalist buttons).
+ *   • Transition uses --ch-motion-standard (background-color only).
+ *   • :focus-visible uses --ch-color-accent-ring-strong for keyboard
+ *     accessibility (consistent with App.vue :root focus style).
  */
 
 .login-page {
@@ -112,17 +112,16 @@ function handleLogin() {
   border-radius: var(--ch-radius-lg);
   font-size: 1.1rem;
   cursor: pointer;
-  transition: all 0.2s ease; /* --ch-motion-standard=180ms ≠ 200ms; keep literal */
+  transition: background-color var(--ch-motion-standard);
 }
 
 .feishu-login-btn:hover {
   background: var(--ch-color-accent-hover);
-  transform: translateY(-2px);
-  box-shadow: 0 8px 20px var(--ch-color-accent-ring);
 }
 
-.feishu-login-btn:active {
-  transform: translateY(0);
+.feishu-login-btn:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring-strong);
+  outline-offset: 2px;
 }
 
 .feishu-icon {
