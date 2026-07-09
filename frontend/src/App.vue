@@ -116,18 +116,28 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, watch } from 'vue'
+import { defineAsyncComponent, onMounted, onUnmounted, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import TabBar from '@/components/TabBar.vue'
 import LayoutSelector from '@/components/LayoutSelector.vue'
 import TerminalGridView from '@/components/TerminalGridView.vue'
 import MobileControls from '@/components/MobileControls.vue'
-import AgentWorkspaceView from '@/components/AgentWorkspaceView.vue'
 import NetworkAccessMenu from '@/components/NetworkAccessMenu.vue'
 import LoginView from '@/views/LoginView.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useAuthStore } from '@/stores/authStore'
+
+// AgentWorkspaceView is lazy-loaded: the app boots to terminal mode by default
+// and the 10,951-line workspace board is only ever rendered behind
+// v-if="mode === 'workspace'". defineAsyncComponent + dynamic import() lets
+// Vite split it into a separate chunk so the initial terminal bundle skips it.
+// No Suspense / loadingComponent: v-if gates mounting until the first workspace
+// switch, and Vue's default async-component behavior leaves the anchor empty
+// until the promise resolves (zero UX change vs. static import).
+const AgentWorkspaceView = defineAsyncComponent(
+  () => import('@/components/AgentWorkspaceView.vue'),
+)
 
 const appStore = useAppStore()
 const store = useTerminalStore()
