@@ -318,8 +318,8 @@ onUnmounted(() => {
   flex-direction: column;
   justify-content: flex-end;
   align-items: flex-end;
-  padding: 12px;
-  padding-bottom: calc(12px + env(safe-area-inset-bottom, 0));
+  padding: var(--ch-space-3);
+  padding-bottom: calc(var(--ch-space-3) + env(safe-area-inset-bottom, 0));
   transition: transform 180ms cubic-bezier(0.2, 0, 0, 1);
   will-change: transform;
 }
@@ -328,14 +328,14 @@ onUnmounted(() => {
   pointer-events: auto;
   background-color: var(--ch-color-surface-glass);
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 12px;
-  padding: 10px 12px;
+  border-radius: var(--ch-radius-lg);
+  padding: var(--ch-space-2) var(--ch-space-3);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--ch-space-2);
   width: 100%;
   max-width: 420px;
-  margin-bottom: 12px;
+  margin-bottom: var(--ch-space-3);
   box-shadow: var(--ch-shadow-soft);
 }
 
@@ -354,37 +354,42 @@ onUnmounted(() => {
 
 .controls-row {
   display: flex;
-  gap: 5px;
+  gap: var(--ch-space-1);
   justify-content: center;
 }
 
 .controls-row-modifiers {
-  gap: 8px;
+  gap: var(--ch-space-2);
 }
 
 .controls-row-shortcuts {
-  gap: 4px;
+  gap: var(--ch-space-1);
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
   justify-content: flex-start;
-  padding-bottom: 2px;
+  padding-bottom: var(--ch-space-1);
 }
 
 .control-btn {
   background-color: var(--ch-color-surface-control-hover);
   color: var(--ch-color-text);
   border: 1px solid var(--ch-color-border-hover);
-  border-radius: 8px;
-  padding: 10px 8px;
-  font-size: 13px;
-  font-weight: 500;
+  border-radius: var(--ch-radius-md);
+  padding: var(--ch-space-2) var(--ch-space-2);
+  font-size: var(--ch-font-md);
+  font-weight: var(--ch-weight-medium);
   cursor: pointer;
   user-select: none;
   min-width: 42px;
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   text-align: center;
   transition: background-color 0.08s, transform 0.08s, box-shadow 0.08s, border-color 0.08s;
   touch-action: manipulation;
   flex-shrink: 0;
+  box-sizing: border-box;
 }
 
 .control-btn:active,
@@ -409,9 +414,9 @@ onUnmounted(() => {
 }
 
 .control-btn-arrow {
-  font-size: 18px;
+  font-size: var(--ch-font-xl);
   min-width: 38px;
-  padding: 10px 6px;
+  padding: var(--ch-space-2) var(--ch-space-1);
 }
 
 .control-btn-enter {
@@ -430,15 +435,15 @@ onUnmounted(() => {
 .control-btn-wide {
   flex: 1;
   max-width: 120px;
-  font-size: 12px;
+  font-size: var(--ch-font-sm);
 }
 
 .control-btn-shortcut {
   background-color: var(--ch-color-accent-soft);
   border-color: var(--ch-color-border-hover);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   min-width: 50px;
-  padding: 8px 6px;
+  padding: var(--ch-space-2) var(--ch-space-1);
   white-space: nowrap;
 }
 
@@ -456,7 +461,7 @@ onUnmounted(() => {
   border-radius: 50%;
   width: 56px;
   height: 56px;
-  font-size: 24px;
+  font-size: var(--ch-font-xl);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -494,33 +499,34 @@ onUnmounted(() => {
 :global(html[data-keyboard-open='true'] .mobile-controls-overlay) {
   bottom: 0;
   transform: translate3d(0, var(--mobile-controls-viewport-shift, 0px), 0);
-  padding: 6px;
-  padding-bottom: max(6px, env(safe-area-inset-bottom, 0));
+  padding: var(--ch-space-1);
+  padding-bottom: max(var(--ch-space-1), env(safe-area-inset-bottom, 0));
 }
 
 :global(html[data-keyboard-open='true'] .controls-panel) {
-  gap: 4px;
+  gap: var(--ch-space-1);
   max-width: none;
-  margin-bottom: 6px;
-  padding: 6px;
-  border-radius: 8px;
+  margin-bottom: var(--ch-space-1);
+  padding: var(--ch-space-1);
+  border-radius: var(--ch-radius-md);
 }
 
 :global(html[data-keyboard-open='true'] .controls-row) {
-  gap: 4px;
+  gap: var(--ch-space-1);
 }
 
 :global(html[data-keyboard-open='true'] .control-btn) {
   min-width: 34px;
-  padding: 7px 6px;
-  border-radius: 6px;
-  font-size: 12px;
+  min-height: 40px;
+  padding: var(--ch-space-2) var(--ch-space-1);
+  border-radius: var(--ch-radius-sm);
+  font-size: var(--ch-font-sm);
 }
 
 :global(html[data-keyboard-open='true'] .control-btn-arrow) {
   min-width: 32px;
-  padding: 6px 5px;
-  font-size: 16px;
+  padding: var(--ch-space-1) var(--ch-space-1);
+  font-size: var(--ch-font-lg);
 }
 
 :global(html[data-keyboard-open='true'] .control-btn-enter) {
@@ -529,13 +535,13 @@ onUnmounted(() => {
 
 :global(html[data-keyboard-open='true'] .control-btn-shortcut) {
   min-width: 44px;
-  padding: 6px 5px;
-  font-size: 10px;
+  padding: var(--ch-space-1) var(--ch-space-1);
+  font-size: var(--ch-font-xs);
 }
 
 :global(html[data-keyboard-open='true'] .toggle-btn) {
   width: 42px;
   height: 42px;
-  font-size: 20px;
+  font-size: var(--ch-font-xl);
 }
 </style>

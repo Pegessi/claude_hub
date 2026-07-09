@@ -323,6 +323,20 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+/*
+ * Network access menu — toolbar signal/wifi trigger and menu-item submenu.
+ *
+ * Styling consumes the global design-token scale defined in App.vue :root
+ * (--ch-space-*, --ch-font-*, --ch-leading-*, --ch-weight-*) plus the
+ * established color/radius/shadow/motion tokens. Hardcoded px values
+ * remain only for functional constants: the 32px toolbar trigger size
+ * (toolbar-icon convention), 1px borders, signal-bar stroke width,
+ * signal-bar proportional heights (6/11/16px — decorative glyph whose
+ * shape must stay intact), and 360px panel max-width. Per reviewer
+ * note, --ch-shadow-lg is not defined; the popover shadow uses
+ * --ch-shadow-popover to match other floating panels.
+ */
+
 .network-access {
   color: var(--ch-color-text);
 }
@@ -330,6 +344,8 @@ onUnmounted(() => {
 .network-access--toolbar {
   position: relative;
 }
+
+/* --- Toolbar trigger (signal/wifi glyph) -------------------------------- */
 
 .network-access-trigger {
   width: 32px;
@@ -361,13 +377,16 @@ onUnmounted(() => {
   color: var(--ch-color-text);
 }
 
+/* Signal-bars glyph: 16x16 flex-end box (--ch-space-4) with three bars of
+ * proportional height (6/11/16px) so the tallest bar fills the box. Bar
+ * width stays 3px (glyph stroke), inter-bar gap uses space-1. */
 .network-access-icon {
-  width: 17px;
-  height: 17px;
+  width: var(--ch-space-4);
+  height: var(--ch-space-4);
   display: inline-flex;
   align-items: flex-end;
   justify-content: center;
-  gap: 2px;
+  gap: var(--ch-space-1);
 }
 
 .network-access-icon span {
@@ -388,17 +407,19 @@ onUnmounted(() => {
   height: 16px;
 }
 
+/* --- Toolbar popover panel --------------------------------------------- */
+
 .network-access-panel {
   position: absolute;
-  top: calc(100% + 7px);
+  top: calc(100% + var(--ch-space-2));
   right: 0;
   z-index: 60;
   width: min(360px, calc(100vw - 24px));
-  padding: 10px;
+  padding: var(--ch-space-3);
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-glass);
-  box-shadow: var(--ch-shadow-lg);
+  box-shadow: var(--ch-shadow-popover);
 }
 
 .network-access-panel-header,
@@ -406,40 +427,43 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--ch-space-3);
 }
 
 .network-access-panel-header > div,
 .network-access-menu-heading > div {
   min-width: 0;
   display: grid;
-  gap: 2px;
+  gap: var(--ch-space-1);
 }
 
 .network-access-panel-header strong,
 .network-access-menu-heading span {
-  font-size: 13px;
-  font-weight: 800;
+  font-size: var(--ch-font-md);
+  font-weight: var(--ch-weight-semibold);
+  line-height: var(--ch-leading-tight);
   color: var(--ch-color-text);
 }
 
 .network-access-panel-header span,
 .network-access-menu-heading strong {
-  font-size: 11px;
-  font-weight: 700;
+  font-size: var(--ch-font-xs);
+  font-weight: var(--ch-weight-medium);
+  line-height: var(--ch-leading-tight);
   color: var(--ch-color-text-muted);
 }
 
 .network-access-refresh {
-  height: 26px;
+  height: 28px;
   flex: 0 0 auto;
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
-  padding: 0 8px;
-  font-size: 11px;
-  font-weight: 800;
+  padding: 0 var(--ch-space-2);
+  font-size: var(--ch-font-xs);
+  font-weight: var(--ch-weight-medium);
+  line-height: var(--ch-leading-tight);
   cursor: pointer;
 }
 
@@ -450,19 +474,20 @@ onUnmounted(() => {
 
 .network-access-port {
   width: fit-content;
-  margin-top: 8px;
-  padding: 3px 7px;
+  margin-top: var(--ch-space-2);
+  padding: 2px var(--ch-space-2);
   border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-soft);
   color: var(--ch-color-text-muted);
-  font-size: 11px;
-  font-weight: 800;
+  font-size: var(--ch-font-xs);
+  font-weight: var(--ch-weight-medium);
+  line-height: var(--ch-leading-tight);
 }
 
 .network-access-list {
   display: grid;
-  gap: 6px;
-  margin-top: 8px;
+  gap: var(--ch-space-2);
+  margin-top: var(--ch-space-2);
 }
 
 .network-access-link {
@@ -470,14 +495,15 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: minmax(68px, max-content) minmax(0, 1fr) max-content;
   align-items: center;
-  gap: 8px;
+  gap: var(--ch-space-2);
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface);
   color: var(--ch-color-text);
-  padding: 7px 8px;
+  padding: var(--ch-space-2);
   cursor: pointer;
   text-align: left;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast);
 }
 
 .network-access-link:hover {
@@ -487,37 +513,43 @@ onUnmounted(() => {
 
 .network-access-link span {
   color: var(--ch-color-text-muted);
-  font-size: 11px;
-  font-weight: 800;
+  font-size: var(--ch-font-xs);
+  font-weight: var(--ch-weight-medium);
+  line-height: var(--ch-leading-tight);
 }
 
 .network-access-link code {
   overflow: hidden;
   color: var(--ch-color-text);
-  font-size: 12px;
+  font-size: var(--ch-font-sm);
+  line-height: var(--ch-leading-tight);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .network-access-link strong {
   color: var(--ch-color-accent);
-  font-size: 11px;
-  font-weight: 800;
+  font-size: var(--ch-font-xs);
+  font-weight: var(--ch-weight-medium);
+  line-height: var(--ch-leading-tight);
 }
 
 .network-access-status {
-  margin: 8px 0 0;
+  margin: var(--ch-space-2) 0 0;
   color: var(--ch-color-text-muted);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
+  line-height: var(--ch-leading-normal);
 }
 
 .network-access-status--error {
   color: var(--ch-color-danger);
 }
 
+/* --- Menu-item variant (embedded in a parent <menu>) ------------------- */
+
 .network-access--menu {
-  margin-top: 4px;
-  padding-top: 4px;
+  margin-top: var(--ch-space-1);
+  padding-top: var(--ch-space-1);
   border-top: 1px solid var(--ch-color-border);
 }
 
@@ -535,13 +567,14 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--ch-space-2);
   border: 1px solid transparent;
   border-radius: var(--ch-radius-sm);
   background: transparent;
   color: var(--ch-color-text);
-  padding: 5px 8px;
+  padding: var(--ch-space-1) var(--ch-space-2);
   cursor: pointer;
+  transition: background var(--ch-motion-fast);
 }
 
 .network-access-menu-summary:hover,
@@ -557,28 +590,30 @@ onUnmounted(() => {
 .network-access-menu-summary > div {
   min-width: 0;
   display: grid;
-  gap: 1px;
+  gap: 0;
 }
 
 .network-access-menu-summary span {
   overflow: hidden;
   color: var(--ch-color-text);
-  font-size: 12px;
-  font-weight: 700;
+  font-size: var(--ch-font-sm);
+  font-weight: var(--ch-weight-semibold);
+  line-height: var(--ch-leading-tight);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .network-access-menu-summary strong {
   color: var(--ch-color-text-muted);
-  font-size: 10px;
-  font-weight: 800;
+  font-size: var(--ch-font-xs);
+  font-weight: var(--ch-weight-medium);
+  line-height: var(--ch-leading-tight);
   text-transform: uppercase;
 }
 
 .network-access-menu-chevron {
-  width: 7px;
-  height: 7px;
+  width: var(--ch-space-2);
+  height: var(--ch-space-2);
   flex: 0 0 auto;
   border-right: 2px solid currentColor;
   border-bottom: 2px solid currentColor;
@@ -592,11 +627,11 @@ onUnmounted(() => {
 }
 
 .network-access-submenu-panel {
-  padding: 4px 0 2px;
+  padding: var(--ch-space-1) 0 0;
 }
 
 .network-access--menu .network-access-menu-heading {
-  padding: 0 2px;
+  padding: 0;
 }
 
 .network-access--menu .network-access-link {

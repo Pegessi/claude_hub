@@ -54,6 +54,100 @@
   Frontend `pnpm lint` clean; `pnpm build` (vue-tsc + vite) exits 0. Before/
   after byte split measured against the live 2.1MB board.
 
+### fix(ui): apply design tokens to NetworkAccessMenu (icon align, weights, density, shadow fix)
+
+- **What**: retrofitted `frontend/src/components/NetworkAccessMenu.vue`
+  (toolbar signal-icon trigger + embedded menu-item variant) onto the
+  spacing/type/weight token scale. Replaced ~63 hardcoded px spacing/font
+  values with `--ch-space-{1..4}`, `--ch-font-{xs,sm,md}`,
+  `--ch-leading-tight`, and `--ch-weight-{regular,medium,semibold}`.
+  Removed all `font-weight: 700/800` (eight occurrences) in favor of
+  semibold (600) for headings and medium (500) for chips/meta. Normalized
+  the signal-bars icon wrapper to 16×16 (space-4) with a 4px (space-1)
+  inter-bar gap, the chevron to 8×8 (space-2), and the Refresh button to
+  28px high to match other control hit-targets; unified port-chip, link
+  rows, and status lines on the space-2/space-3 grid; swapped an undefined
+  `var(--ch-shadow-lg)` reference on the toolbar popover to
+  `--ch-shadow-popover` to match other floating panels. No behavior, DOM,
+  or color-palette changes.
+- **Why**: the menu carried token debt from before the scale existed
+  (mixed 2/3/4/6/7/8/10px paddings/gaps and shouting 700/800 weights) and
+  referenced a shadow token that was never defined in App.vue, so the
+  popover had no drop shadow separation from the toolbar.
+- **How**: styling-only change within a single SFC; added a short doc
+  comment at the top of `<style scoped>` documenting the hardcoded-px
+  policy (allowed for the 32px toolbar trigger, 1px borders, 3px signal-
+  bar stroke, and the 6/11/16px proportional bar heights that define the
+  glyph shape). No other files modified.
+- **Validation**: `pnpm lint` clean (eslint --fix); `pnpm build` clean
+  (vue-tsc + vite, 397.7 KB JS / 173.2 KB CSS). Dev-server (port 5181,
+  proxying backend :8173) confirms the trigger opens, links populate,
+  Refresh and Copy work, hover/active states render, chevron rotates, and
+  click-outside dismiss still functions.
+
+### feat(design): apply spacing/type tokens to EnvPresetManager + AgentConfigFields
+
+- **What**: rolled the spacing (`--ch-space-*`), font-size (`--ch-font-*`),
+  leading (`--ch-leading-*`), and weight (`--ch-weight-*`) tokens from the prior
+  board-shell pass into the two secondary config panels: the EnvPresetManager
+  modal (preset sidebar, list items, form inputs/textarea, footer action row,
+  `+ New` button) and the AgentConfigFields reusable form (agent-type select,
+  YOLO checkbox, env-preset row). The bare `+` in `+ New` is wrapped in a
+  scoped `.btn-icon` span (14×14 inline-flex glyph box) to match the global
+  btn-icon geometry used on the board without leaking across components.
+- **Why**: these panels still used hardcoded px for paddings/gaps (4/5/6/8/10/
+  12/14/16/20px) and font-sizes (10/11/12/13/14/18px), so controls felt denser
+  and less aligned than the freshly tokenized board shell.
+- **How**: simple/complex split — structural gutters ≥8px, control-surface
+  padding, all font-sizes/line-heights, and explicit numeric font-weights
+  (500/600) snap to the nearest token; micro-gaps ≤6px, border-radius,
+  transition durations, fixed layout geometry (34px select height, 220px
+  sidebar, 280px/160px min-heights, 640px modal), and selectors without a
+  declared weight stay as local px/inherited. No new colors, no new radii, no
+  new transitions, no new tokens in App.vue, no behavioral changes. File-scope
+  locked to the two SFCs; AgentWorkspaceView.vue / App.vue / stores / backend
+  untouched.
+- **Validation**: `pnpm lint` clean; `pnpm build` clean; dev-server smoke on
+  the Add-Agent modal and EnvPresetManager modal confirms even rhythm and
+  unchanged control behavior.
+
+### fix(ui): apply design tokens to AgentStatusFloatingPanel (icon align, weights, density)
+
+- **What**: retrofitted `frontend/src/components/AgentStatusFloatingPanel.vue`
+  onto the spacing/type/weight token scale (--ch-space-*, --ch-font-*,
+  --ch-leading-*, --ch-weight-*). Hardcoded 2/6/7/9/10/11/14px gaps/paddings
+  snapped to the nearest scale step; all seven `font-weight: 700` usages and
+  two non-standard `font-weight: 650` usages demoted to --ch-weight-semibold
+  (600) for labels/headings and --ch-weight-medium (500) for chips/meta;
+  inline status dots use a fixed 8px inline-flex box so they sit on the text
+  baseline; the refresh ↻ icon sits in a consistent 28×28 hit target with a
+  14×14 internal glyph box (matching the project .btn-icon convention); the
+  mode-switch count pill and trigger-count pill share an 18px-high pill
+  rhythm; agent-row padding/gap unified at space-3 (12px) with space-2
+  internal gaps; agent-name → font-md/semibold, agent-cli chip → xs/medium,
+  agent-detail → xs/regular/leading-normal for calmer hierarchy. Mobile
+  breakpoints switched from magic 7/8px offsets to space-2. No behavior,
+  DOM, color, or radius changes; no new animations (only the existing 140ms
+  one-shot entrance keyframe remains — dots/pills are static).
+- **Why**: the floating panel was the next high-visibility surface after the
+  board shell carrying token debt (~89 hardcoded px values), with misaligned
+  glyphs (7px trigger dot vs 9px avatar dot, 26px refresh button vs 28px
+  trigger), inconsistent weights (700/650/600/non-standard), and uneven
+  row density that made the secondary panel feel ad-hoc next to the
+  tokenized shell.
+- **How**: styling-only change within a single SFC; added a
+  `.panel-refresh-icon` wrapper to give the ↻ glyph a 14×14 box; removed
+  the `background-color` (redundant with `background`) and collapsed
+  multi-property transition onto separate lines for readability; added a
+  short doc comment at the top of `<style scoped>` documenting the
+  hardcoded-px policy (allowed for control heights, pill diameters, 1px
+  borders). No other files modified.
+- **Validation**: `pnpm lint` clean (eslint --fix); `pnpm build` clean
+  (vue-tsc + vite, 397.7 KB JS / 171.0 KB CSS). Dev-server visual smoke
+  confirms baseline-aligned dots, even row density, static status
+  indicators, working refresh/mode-switch/resize/tab-selection, and mobile
+  trigger-label collapse.
+
 ### feat(design): spacing + type scale tokens; applied to board shell
 
 - **What**: added a minimal, 4px-base design-token foundation for spacing

@@ -42,7 +42,10 @@
           loading-label="Refreshing statuses"
           @click="refreshPanelData()"
         >
-          ↻
+          <span
+            class="panel-refresh-icon"
+            aria-hidden="true"
+          >↻</span>
         </LoadingButton>
       </div>
 
@@ -445,11 +448,24 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+/*
+ * Agent status floating panel — trigger chip + popover list.
+ *
+ * Styling uses the global design-token scale (--ch-space-*, --ch-font-*,
+ * --ch-leading-*, --ch-weight-*) defined in frontend/src/App.vue :root,
+ * plus the established color/radius/shadow/motion tokens. Hardcoded px
+ * values remain only for functional component dimensions (control height,
+ * panel min/max sizes, pill diameters, avatar ring widths) and 1px borders —
+ * those are layout constants, not visual rhythm.
+ */
+
 .agent-status {
   position: relative;
   align-self: flex-end;
   flex: 0 0 auto;
 }
+
+/* --- Trigger chip (collapsed state) ------------------------------------ */
 
 .status-trigger {
   height: 28px;
@@ -458,15 +474,26 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: var(--ch-space-2);
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-md);
   background-color: var(--ch-color-surface-control);
   color: var(--ch-color-text);
   cursor: pointer;
-  padding: 0 9px;
-  font-weight: 600;
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), transform var(--ch-motion-fast), height 180ms cubic-bezier(0.2, 0, 0, 1), min-width 180ms cubic-bezier(0.2, 0, 0, 1), padding 180ms cubic-bezier(0.2, 0, 0, 1), gap 180ms cubic-bezier(0.2, 0, 0, 1);
+  padding: 0 var(--ch-space-3);
+  font-size: var(--ch-font-sm);
+  font-weight: var(--ch-weight-medium);
+  line-height: var(--ch-leading-tight);
+  transition:
+    background var(--ch-motion-fast),
+    border-color var(--ch-motion-fast),
+    color var(--ch-motion-fast),
+    box-shadow var(--ch-motion-fast),
+    transform var(--ch-motion-fast),
+    height 180ms cubic-bezier(0.2, 0, 0, 1),
+    min-width 180ms cubic-bezier(0.2, 0, 0, 1),
+    padding 180ms cubic-bezier(0.2, 0, 0, 1),
+    gap 180ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 .status-trigger:hover {
@@ -484,11 +511,14 @@ onUnmounted(() => {
   box-shadow: 0 1px 3px var(--ch-shadow-color-soft);
 }
 
+/* Status dots (trigger + avatar-overlay) use a fixed 8px inline-flex box so
+ * they sit on the text baseline regardless of surrounding glyph metrics. */
 .trigger-dot,
 .status-dot {
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
   flex: 0 0 auto;
+  display: inline-block;
   border-radius: 50%;
   background: currentColor;
 }
@@ -497,14 +527,15 @@ onUnmounted(() => {
   position: relative;
   display: inline-flex;
   flex: 0 0 auto;
+  align-items: center;
 }
 
 .agent-avatar-wrap .status-dot {
   position: absolute;
   right: -2px;
   bottom: -2px;
-  width: 9px;
-  height: 9px;
+  width: 8px;
+  height: 8px;
   box-shadow: 0 0 0 2px var(--ch-color-surface);
 }
 
@@ -534,18 +565,21 @@ onUnmounted(() => {
 
 .trigger-label {
   color: inherit;
-  font-size: 12px;
-  font-weight: 700;
+  font-size: var(--ch-font-sm);
+  font-weight: var(--ch-weight-semibold);
+  line-height: var(--ch-leading-tight);
 }
 
 .trigger-count {
   min-width: 18px;
   height: 18px;
+  padding: 0 var(--ch-space-1);
+  box-sizing: border-box;
   border-radius: 999px;
   background: var(--ch-color-chip-bg);
   color: var(--ch-color-text);
-  font-size: 11px;
-  font-weight: 700;
+  font-size: var(--ch-font-xs);
+  font-weight: var(--ch-weight-medium);
   line-height: 18px;
   text-align: center;
   transition: background var(--ch-motion-fast);
@@ -556,9 +590,11 @@ onUnmounted(() => {
   background: var(--ch-color-surface-control-hover);
 }
 
+/* --- Popover panel ----------------------------------------------------- */
+
 .status-panel {
   position: absolute;
-  top: calc(100% + 7px);
+  top: calc(100% + var(--ch-space-2));
   right: 0;
   z-index: 120;
   width: min(360px, calc(100vw - 16px));
@@ -572,6 +608,7 @@ onUnmounted(() => {
   backdrop-filter: blur(14px);
   display: flex;
   flex-direction: column;
+  /* One-shot entrance only — no looping/pulsing/blinking. */
   animation: status-panel-in 140ms cubic-bezier(0.2, 0, 0, 1);
   transform-origin: top right;
 }
@@ -591,7 +628,8 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 9px 10px;
+  gap: var(--ch-space-2);
+  padding: var(--ch-space-2) var(--ch-space-3);
   border-bottom: 1px solid var(--ch-color-border-muted);
 }
 
@@ -599,25 +637,32 @@ onUnmounted(() => {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--ch-space-1);
 }
 
 .panel-title {
   color: var(--ch-color-text);
-  font-size: 12px;
-  font-weight: 700;
+  font-size: var(--ch-font-sm);
+  font-weight: var(--ch-weight-semibold);
+  line-height: var(--ch-leading-tight);
 }
 
 .panel-subtitle {
   color: var(--ch-color-text-muted);
-  font-size: 10px;
-  font-weight: 650;
+  font-size: var(--ch-font-xs);
+  font-weight: var(--ch-weight-medium);
+  line-height: var(--ch-leading-tight);
+  letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 
+/* Refresh icon button: same 28px height as other controls for a consistent
+ * hit-target, with an internal 14x14 glyph box aligned to the .btn-icon
+ * convention used elsewhere in the app. */
 .panel-refresh {
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -626,8 +671,18 @@ onUnmounted(() => {
   background: transparent;
   color: var(--ch-color-text-muted);
   cursor: pointer;
-  font-size: 14px;
   transition: background var(--ch-motion-fast), color var(--ch-motion-fast), transform var(--ch-motion-fast);
+}
+
+.panel-refresh-icon {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
 }
 
 .panel-refresh:hover {
@@ -639,11 +694,13 @@ onUnmounted(() => {
   transform: rotate(25deg) scale(0.92);
 }
 
+/* --- Mode switch (Agents / Reviewers) ---------------------------------- */
+
 .panel-mode-switch {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
-  padding: 8px 10px;
+  gap: var(--ch-space-2);
+  padding: var(--ch-space-2) var(--ch-space-3);
   border-bottom: 1px solid var(--ch-color-border-muted);
 }
 
@@ -653,13 +710,15 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
+  gap: var(--ch-space-2);
   border: 1px solid var(--ch-color-border-muted);
   border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text-muted);
   cursor: pointer;
-  padding: 0 8px;
+  padding: 0 var(--ch-space-2);
+  font-size: var(--ch-font-sm);
+  line-height: var(--ch-leading-tight);
   text-align: left;
   transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast), transform var(--ch-motion-fast);
 }
@@ -677,7 +736,7 @@ onUnmounted(() => {
   border-color: var(--ch-color-accent-ring-strong);
   background: var(--ch-color-accent-soft);
   color: var(--ch-color-accent-strong);
-  font-weight: 600;
+  font-weight: var(--ch-weight-semibold);
 }
 
 .panel-mode-switch span {
@@ -685,17 +744,22 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
-  font-weight: 700;
+  font-size: var(--ch-font-xs);
+  font-weight: var(--ch-weight-medium);
+  line-height: var(--ch-leading-tight);
 }
 
 .panel-mode-switch strong {
   min-width: 18px;
+  height: 18px;
+  padding: 0 var(--ch-space-1);
+  box-sizing: border-box;
   border-radius: 999px;
   background: var(--ch-color-chip-bg);
   color: currentColor;
-  font-size: 10px;
-  line-height: 17px;
+  font-size: var(--ch-font-xs);
+  font-weight: var(--ch-weight-medium);
+  line-height: 18px;
   text-align: center;
 }
 
@@ -704,10 +768,13 @@ onUnmounted(() => {
   outline-offset: 2px;
 }
 
+/* --- List body --------------------------------------------------------- */
+
 .empty-status {
-  padding: 14px 12px;
+  padding: var(--ch-space-3);
   color: var(--ch-color-text-muted);
-  font-size: 12px;
+  font-size: var(--ch-font-sm);
+  line-height: var(--ch-leading-normal);
 }
 
 .agent-list {
@@ -725,12 +792,14 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--ch-space-2);
   background: var(--ch-color-surface-raised);
   color: var(--ch-color-text-muted);
-  padding: 7px 11px 6px;
-  font-size: 10px;
-  font-weight: 700;
+  padding: var(--ch-space-2) var(--ch-space-3);
+  font-size: var(--ch-font-xs);
+  font-weight: var(--ch-weight-semibold);
+  line-height: var(--ch-leading-tight);
+  letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 
@@ -744,7 +813,9 @@ onUnmounted(() => {
 .agent-group-header strong {
   flex: 0 0 auto;
   color: var(--ch-color-text);
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
+  font-weight: var(--ch-weight-medium);
+  line-height: var(--ch-leading-tight);
 }
 
 .agent-row {
@@ -752,13 +823,13 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
+  gap: var(--ch-space-3);
   border: 0;
   border-bottom: 1px solid var(--ch-color-border-muted);
   background: transparent;
   color: inherit;
   cursor: pointer;
-  padding: 10px 11px;
+  padding: var(--ch-space-3);
   text-align: left;
   transition: background var(--ch-motion-fast);
 }
@@ -783,15 +854,16 @@ onUnmounted(() => {
 .agent-line {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--ch-space-2);
   min-width: 0;
 }
 
 .agent-name {
   min-width: 0;
   color: var(--ch-color-text);
-  font-size: 13px;
-  font-weight: 650;
+  font-size: var(--ch-font-md);
+  font-weight: var(--ch-weight-semibold);
+  line-height: var(--ch-leading-tight);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -800,18 +872,21 @@ onUnmounted(() => {
 .agent-type {
   flex: 0 0 auto;
   color: var(--ch-color-text-muted);
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
+  line-height: var(--ch-leading-tight);
   text-transform: uppercase;
 }
 
+/* Kind chip (claude / codex / cursor / terminal) */
 .agent-cli {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   border-radius: 999px;
-  padding: 2px 7px;
-  font-size: 10px;
-  font-weight: 700;
+  padding: 2px var(--ch-space-2);
+  font-size: var(--ch-font-xs);
+  font-weight: var(--ch-weight-medium);
+  line-height: var(--ch-leading-tight);
   letter-spacing: 0.04em;
   text-transform: uppercase;
   background: var(--ch-color-chip-bg);
@@ -840,24 +915,30 @@ onUnmounted(() => {
 
 .agent-detail {
   display: block;
-  margin-top: 3px;
+  margin-top: var(--ch-space-1);
   color: var(--ch-color-text-muted);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
+  font-weight: var(--ch-weight-regular);
+  line-height: var(--ch-leading-normal);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* Status pill on the right of each row */
 .status-pill {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   min-width: 76px;
+  height: 22px;
+  padding: 0 var(--ch-space-2);
+  box-sizing: border-box;
   border-radius: 999px;
   background: var(--ch-color-chip-bg);
-  padding: 5px 8px;
-  font-size: 11px;
-  font-weight: 700;
+  font-size: var(--ch-font-xs);
+  font-weight: var(--ch-weight-medium);
+  line-height: var(--ch-leading-tight);
 }
 
 .status-pill[data-status='idle'] {
@@ -876,6 +957,8 @@ onUnmounted(() => {
   background: var(--ch-color-chip-bg);
 }
 
+/* --- Resize handle ----------------------------------------------------- */
+
 .resize-handle {
   position: absolute;
   left: 0;
@@ -890,18 +973,20 @@ onUnmounted(() => {
 .resize-handle::before {
   content: '';
   position: absolute;
-  left: 5px;
-  bottom: 5px;
-  width: 8px;
-  height: 8px;
+  left: var(--ch-space-1);
+  bottom: var(--ch-space-1);
+  width: var(--ch-space-2);
+  height: var(--ch-space-2);
   border-left: 1px solid var(--ch-color-border-hover);
   border-bottom: 1px solid var(--ch-color-border-hover);
 }
 
+/* --- Mobile / coarse-pointer fallback ---------------------------------- */
+
 @media (max-width: 768px), (pointer: coarse) {
   .status-trigger {
     min-width: 60px;
-    padding: 0 7px;
+    padding: 0 var(--ch-space-2);
   }
 
   .trigger-label {
@@ -911,8 +996,8 @@ onUnmounted(() => {
   .status-panel {
     position: fixed;
     top: 96px;
-    right: 8px;
-    left: 8px;
+    right: var(--ch-space-2);
+    left: var(--ch-space-2);
     width: auto !important;
     max-width: none;
     max-height: min(60vh, calc(100vh - 112px));
