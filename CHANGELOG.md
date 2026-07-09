@@ -5,6 +5,8 @@
 
 ## Unreleased
 
+- a11y(ui): add intrinsic `:focus-visible` outline ring to the shared `LoadingButton` primitive (`outline:2px solid var(--ch-color-accent-ring-strong); outline-offset:2px; border-radius:inherit;`) so every consumer (login, logout, env-save, workspace CTAs) gets a visible keyboard-focus indicator automatically, even when a parent forgets to supply one. CSS-only; no template/script/prop/behavior change; zero visual impact outside keyboard navigation.
+
 - style(ui): flatten Feishu login CTA — remove the `translateY(-2px)` hover lift and `0 8px 20px` accent glow so the button matches the flat-minimalist aesthetic used elsewhere (background-color change is the sole hover affordance); tighten `transition: all 0.2s ease` to `transition: background-color var(--ch-motion-standard)`; add `.feishu-login-btn:focus-visible { outline: 2px solid var(--ch-color-accent-ring-strong); outline-offset: 2px }` for keyboard focus accessibility. CSS-only; zero markup/behavior change.
 
 - docs(ui): add `docs/working-logs/2026-07-10-minimalist-ui-audit.md` — prioritized minimalist-design findings across spacing/type/radius/shadow/color/motion/focus/noise categories, with deferred-file note (App.vue + AgentWorkspaceView.vue in-flight) and 3 suggested bounded follow-up tasks (LoginView CTA, AgentAvatar palette/gradients, LoadingButton focus ring). Read-only audit; no source edits.

@@ -52,6 +52,12 @@ withDefaults(defineProps<{
   position: relative;
 }
 
+.loading-button:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring-strong);
+  outline-offset: 2px;
+  border-radius: inherit;
+}
+
 .loading-button__spinner {
   width: 1em;
   height: 1em;
