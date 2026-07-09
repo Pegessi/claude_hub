@@ -198,9 +198,8 @@ onUnmounted(() => {
  *     lg=15px would visibly enlarge the ↻ glyph)
  *   • .empty-icon font-size:32px (large emoji glyph; no 32px font token,
  *     xl=18px is UI body scale)
- *   • font-weight:500 on .pane-tab-name maps exactly to --ch-weight-medium=500
- *     but is intentionally NOT tokenized in this pass — the task enumerates
- *     exactly 7 px substitutions and says "nothing speculative".
+ *   • .pane-tab-name font-weight now uses var(--ch-weight-medium) (=500);
+ *     tokenized per minimalist-audit Finding #18 (zero visual change).
  *
  * Functional constants left without inline comment (stroke/affordance/motion,
  * not spacing or type): 1px/2px borders & outlines, outline-offset:1px,
@@ -254,7 +253,7 @@ onUnmounted(() => {
   min-width: 0;
   color: var(--ch-color-text);
   font-size: var(--ch-font-sm);
-  font-weight: 500; /* matches --ch-weight-medium=500 exactly; left literal per 'nothing speculative' rule */
+  font-weight: var(--ch-weight-medium);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
