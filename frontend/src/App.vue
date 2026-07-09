@@ -527,6 +527,7 @@ onUnmounted(() => {
   --ch-radius-lg: 10px;
   --ch-motion-fast: 120ms ease;
   --ch-motion-standard: 180ms ease;
+  --ch-motion-drawer: 180ms cubic-bezier(0.2, 0, 0, 1);
 
   /* ------------------------------------------------------------------
      Spacing scale (4px base). Use for layout rhythm — gutters, padding,
@@ -577,6 +578,17 @@ onUnmounted(() => {
   --ch-terminal-bright-magenta: #d8b4fe;
   --ch-terminal-bright-cyan: #67e8f9;
   --ch-terminal-bright-white: #ffffff;
+
+  --ch-agent-claude-bg: #f1eee5;
+  --ch-agent-claude-fg: #d97757;
+  --ch-agent-codex-bg: #000;
+  --ch-agent-codex-fg: #fff;
+  --ch-agent-origin-bg: #c4b5fd;
+  --ch-agent-origin-fg: #8b5cf6;
+  --ch-agent-autonomy-bg: #5eead4;
+  --ch-agent-autonomy-fg: #14b8a6;
+
+  --ch-shadow-hairline: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 
 :root[data-theme='light'] {
@@ -669,6 +681,8 @@ onUnmounted(() => {
   --ch-terminal-bright-magenta: #5f4f7d;
   --ch-terminal-bright-cyan: #4e7185;
   --ch-terminal-bright-white: #fdfdfc;
+
+  --ch-shadow-hairline: 0 1px 3px rgba(15, 23, 42, 0.16);
 }
 
 html, body, #app {
@@ -780,7 +794,7 @@ textarea {
   border-bottom: 1px solid var(--ch-color-border);
   background: var(--ch-color-surface);
   overflow: visible;
-  transition: max-height 200ms cubic-bezier(0.2, 0, 0, 1), padding 200ms cubic-bezier(0.2, 0, 0, 1), border-color 200ms cubic-bezier(0.2, 0, 0, 1), opacity 160ms ease, transform 200ms cubic-bezier(0.2, 0, 0, 1);
+  transition: max-height var(--ch-motion-drawer), padding var(--ch-motion-drawer), border-color var(--ch-motion-drawer), opacity var(--ch-motion-drawer), transform var(--ch-motion-drawer);
 }
 
 .mode-switch {
@@ -816,7 +830,6 @@ textarea {
 .mode-button.active {
   background: var(--ch-color-surface-selected);
   border-color: var(--ch-color-accent-ring-strong);
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
 }
 
 .app-mode-tools {
@@ -857,7 +870,7 @@ textarea {
   height: calc(100% - 6px);
   border-radius: 999px;
   background: var(--ch-color-surface-control-hover);
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.16);
+  box-shadow: var(--ch-shadow-hairline);
   transition: transform var(--ch-motion-standard), background var(--ch-motion-fast);
 }
 
