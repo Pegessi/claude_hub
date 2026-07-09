@@ -2207,6 +2207,73 @@ def test_reviewer_clears_context_between_unrelated_tasks(
     assert clear_index < prompt_index
 
 
+def test_reviewer_honors_task_clear_context_flag(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A fresh reviewer must receive /clear when the task opts into clear_context.
+
+    Regression for "clear对reviewer不生效": the reviewer /clear decision used to
+    key solely off the reviewer's prior-review history, so a first-ever review by
+    a fresh reviewer (previous_review_task_id is None) never cleared context even
+    when the user ticked "Clear context". The worker honored task.clear_context
+    but the reviewer silently ignored it.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="rev-clear-flag-tab",
+        port=12816,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Reviewer Clear Flag", "path": str(repo), "session_prefix": "rcf"},
+    ).json()
+    worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    persistent_reviewer = client.post(
+        f"/api/workspaces/{workspace['id']}/agent",
+        json={"role": "reviewer", "reuse_existing": False},
+    ).json()
+
+    # Fresh reviewer, first-ever review, but the task opts into clear_context.
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Clear me", "prompt": "Implement clearable", "clear_context": True},
+    ).json()
+    client.post(
+        f"/api/workspaces/tasks/{task['id']}/start",
+        json={"target_session_id": worker["id"]},
+    )
+    sent_messages.clear()
+    client.post(
+        f"/api/workspaces/sessions/{worker['id']}/reports",
+        json={"task_id": task["id"], "state": "completed", "message": "Done"},
+    )
+
+    reviewer_id = workspace_manager.tasks[task["id"]].review_session_id
+    assert reviewer_id == persistent_reviewer["id"]
+    review_messages = [m for _sess, m in sent_messages]
+    clear_index = next(
+        (i for i, m in enumerate(review_messages) if m == "/clear"),
+        None,
+    )
+    prompt_index = next(
+        (i for i, m in enumerate(review_messages) if "Review workspace task" in m),
+        None,
+    )
+    assert (
+        clear_index is not None
+    ), "Reviewer must receive /clear when task.clear_context is set, even with no prior review"
+    assert prompt_index is not None
+    assert clear_index < prompt_index
+
+
 def test_reviewer_bound_to_working_task_is_not_reused_for_other_review(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
