@@ -35,6 +35,77 @@ class _TmuxQueriesMixin:
             if report.task_id == task_id
         ]
 
+    def task_for_id(self, workspace_id: str, task_id: str) -> WorkspaceTask:
+        """Return the full, untrimmed task for the detail panel / edit modal.
+
+        The board list payload strips detail-only heavy fields from tasks (see
+        ``_board_task_projection``); the detail panel lazy-loads the complete task
+        from here so goal-packet arrays and autonomous evaluation reports render.
+        """
+        if workspace_id not in self.workspaces:
+            raise KeyError(workspace_id)
+        task = self.tasks.get(task_id)
+        if task is None or task.workspace_id != workspace_id:
+            raise KeyError(task_id)
+        return task
+
+    @staticmethod
+    def _board_report_projection(report: AgentReport) -> AgentReport:
+        """Strip detail-only heavy fields from a board (latest-per-task) report.
+
+        The board card only reads a report's ``id``, ``state``, ``message`` /
+        ``message_en`` / ``message_zh`` (card + resident header) and the review
+        routing scalars used by gate logic. The heavy timeline fields
+        (changed_files, validation, risks, acceptance_check, evaluation_report,
+        review_profiles, profile_results, artifact_refs) are only rendered in the
+        detail panel, which hydrates the full untrimmed history on demand via
+        ``reports_for_task``. Emptying them here roughly halves the board body.
+        """
+        return report.model_copy(
+            update={
+                "changed_files": [],
+                "validation": None,
+                "risks": None,
+                "acceptance_check": [],
+                "evaluation_report": None,
+                "review_profiles": [],
+                "profile_results": [],
+                "artifact_refs": [],
+            }
+        )
+
+    @staticmethod
+    def _board_task_projection(task: WorkspaceTask) -> WorkspaceTask:
+        """Strip detail-only heavy fields from a board (list-view) task.
+
+        Cards read only ``goal_packet.status``/``source`` and the autonomous_run
+        scalars (phase/iteration/max_iterations/next_action) + ``iterations`` for
+        progress; the goal-packet prose arrays and ``autonomous_run`` evaluation
+        reports/rubric are detail-only. The detail panel lazy-loads the full task
+        via ``task_for_id``. ``prompt`` and ``attachments`` are kept full (small,
+        and the edit modal reads them straight off the board task)."""
+        update: dict[str, Any] = {}
+        if task.goal_packet is not None:
+            update["goal_packet"] = task.goal_packet.model_copy(
+                update={
+                    "objective": "",
+                    "acceptance_criteria": [],
+                    "validation_plan": [],
+                    "assumptions": [],
+                    "out_of_scope": [],
+                    "handoff_requirements": [],
+                }
+            )
+        if task.autonomous_run is not None and (
+            task.autonomous_run.evaluation_reports or task.autonomous_run.rubric
+        ):
+            update["autonomous_run"] = task.autonomous_run.model_copy(
+                update={"evaluation_reports": [], "rubric": []}
+            )
+        if not update:
+            return task
+        return task.model_copy(update=update)
+
     async def _send_tmux_message(self, tmux_session: str, message: str) -> None:
         logger.info(
             "Sending workspace message to tmux_session=%s message_length=%s",
@@ -755,12 +826,15 @@ class _TmuxQueriesMixin:
         await self._prune_orphan_workspace_tabs(workspace_id)
         self._sync_workspace_tab_metadata(workspace_id)
         tasks = [
-            task
+            self._board_task_projection(task)
             for task in self.tasks.values()
             if task.workspace_id == workspace_id and not task.system_internal
         ]
         sessions = self.sessions_for_workspace(workspace_id)
-        reports = self.latest_reports_per_task_for_workspace(workspace_id)
+        reports = [
+            self._board_report_projection(report)
+            for report in self.latest_reports_per_task_for_workspace(workspace_id)
+        ]
         return WorkspaceBoard(
             workspace=self.workspaces[workspace_id],
             tasks=tasks,

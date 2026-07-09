@@ -81,6 +81,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   // detail panel hydrates from here instead of the (trimmed) board payload.
   const taskReports = ref<Record<string, AgentReport[]>>({})
   const taskReportFetches = new Map<string, Promise<void>>()
+  // Full per-task detail, fetched on demand when a task detail panel is opened.
+  // The board list payload strips detail-only heavy task fields (goal-packet
+  // prose arrays, autonomous evaluation reports); the detail panel hydrates the
+  // complete task from here so those sections render.
+  const taskDetails = ref<Record<string, WorkspaceTask>>({})
+  const taskDetailFetches = new Map<string, Promise<void>>()
 
   const activeWorkspace = computed(() =>
     workspaces.value.find(workspace => workspace.id === activeWorkspaceId.value) || null
@@ -155,6 +161,23 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   // ---- On-demand full report history (detail panel) ----
   function reportsForTaskId(taskId: string): AgentReport[] {
     return taskReports.value[taskId] || []
+  }
+
+  // ---- On-demand full task detail (detail panel / edit modal) ----
+  function taskDetailForId(taskId: string): WorkspaceTask | null {
+    return taskDetails.value[taskId] || null
+  }
+
+  function clearTaskDetail(taskId?: string) {
+    if (!taskId) {
+      taskDetails.value = {}
+      return
+    }
+    if (taskId in taskDetails.value) {
+      const next = { ...taskDetails.value }
+      delete next[taskId]
+      taskDetails.value = next
+    }
   }
 
   function clearTaskReports(taskId?: string) {
@@ -262,6 +285,36 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       throw e
     } finally {
       taskReportFetches.delete(key)
+    }
+  }
+
+  async function fetchTaskDetail(
+    workspaceId = activeWorkspaceId.value,
+    taskId?: string,
+  ) {
+    if (!workspaceId || !taskId) return
+    const key = `${workspaceId}:${taskId}`
+    const existing = taskDetailFetches.get(key)
+    if (existing) return existing
+
+    const request = (async () => {
+      const response = await fetch(
+        `${API_BASE}/workspaces/${workspaceId}/tasks/${taskId}`,
+      )
+      if (!response.ok) throw new Error(await readError(response))
+      // Reassign (spread) so the keyed object is a new reference and Pinia
+      // reactivity reliably re-derives the detail-panel computed.
+      taskDetails.value = { ...taskDetails.value, [taskId]: await response.json() }
+    })()
+
+    taskDetailFetches.set(key, request)
+    try {
+      await request
+    } catch (e) {
+      notifyError(e instanceof Error ? e.message : 'Failed to fetch task detail')
+      throw e
+    } finally {
+      taskDetailFetches.delete(key)
     }
   }
 
@@ -685,6 +738,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     reportsForTaskId,
     clearTaskReports,
     fetchTaskReports,
+    taskDetails,
+    taskDetailForId,
+    clearTaskDetail,
+    fetchTaskDetail,
     fetchWorkspaces,
     setActiveWorkspace,
     fetchBoard,
