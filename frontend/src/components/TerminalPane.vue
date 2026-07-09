@@ -169,6 +169,48 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+/*
+ * Terminal pane — chrome (header bar, refresh button, empty-state) surrounding
+ * the ttyd/xterm canvas. The canvas itself (.pane-terminal and everything it
+ * hosts) is out of scope for this pass.
+ *
+ * Styling consumes the global design-token scale (--ch-space-*, --ch-font-*)
+ * where values match exactly. This pass applies exactly 7 enumerated
+ * substitutions and nothing speculative:
+ *   • .pane-header         gap:8px              → --ch-space-2
+ *   • .pane-empty          padding:16px         → --ch-space-4
+ *   • .empty-icon          margin-bottom:12px   → --ch-space-3
+ *   • .pane-empty p        margin:4px 0         → var(--ch-space-1) 0
+ *   • .pane-tab-name       font-size:12px       → --ch-font-sm
+ *   • .pane-empty p        font-size:13px       → --ch-font-md
+ *   • .empty-hint          font-size:11px       → --ch-font-xs
+ *
+ * The following hardcoded px are LEFT LITERAL with a brief inline comment,
+ * per the task's explicit preserve list (off-scale / functional geometry
+ * constants, not spacing/type on the token scale):
+ *   • .pane-header max-height:28px (header strip height; nearest token 24/32
+ *     would visibly change chrome density)
+ *   • .pane-header padding:5px 9px (tight chrome padding; asymmetric, no
+ *     matching token pair)
+ *   • .pane-action-button width/height:22px (icon button geometry; nearest
+ *     token 24 would shift the button grid)
+ *   • .pane-action-icon font-size:14px (glyph size inside the 22px button;
+ *     lg=15px would visibly enlarge the ↻ glyph)
+ *   • .empty-icon font-size:32px (large emoji glyph; no 32px font token,
+ *     xl=18px is UI body scale)
+ *   • font-weight:500 on .pane-tab-name maps exactly to --ch-weight-medium=500
+ *     but is intentionally NOT tokenized in this pass — the task enumerates
+ *     exactly 7 px substitutions and says "nothing speculative".
+ *
+ * Functional constants left without inline comment (stroke/affordance/motion,
+ * not spacing or type): 1px/2px borders & outlines, outline-offset:1px,
+ * box-shadow offsets, transition durations and cubic-bezier curves (some
+ * already on --ch-motion-fast; the 180ms/140ms/700ms/360deg values are
+ * bespoke motion curves). Colors, radii, and shadows already on
+ * the --ch-color, --ch-radius, --ch-shadow, and --ch-motion-fast tokens
+ * are unchanged.
+ */
+
 .terminal-pane {
   position: relative;
   display: flex;
@@ -197,9 +239,9 @@ onUnmounted(() => {
 .pane-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  max-height: 28px;
-  padding: 5px 9px;
+  gap: var(--ch-space-2);
+  max-height: 28px; /* off-scale chrome height; nearest 24/32 shifts density */
+  padding: 5px 9px; /* tight asymmetric chrome padding; no matching token pair */
   background-color: var(--ch-color-surface);
   border-bottom: 1px solid var(--ch-color-border-muted);
   flex-shrink: 0;
@@ -211,16 +253,16 @@ onUnmounted(() => {
   flex: 1;
   min-width: 0;
   color: var(--ch-color-text);
-  font-size: 12px;
-  font-weight: 500;
+  font-size: var(--ch-font-sm);
+  font-weight: 500; /* matches --ch-weight-medium=500 exactly; left literal per 'nothing speculative' rule */
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .pane-action-button {
-  width: 22px;
-  height: 22px;
+  width: 22px; /* off-scale icon-button geometry; nearest 24 shifts grid */
+  height: 22px; /* off-scale icon-button geometry; nearest 24 shifts grid */
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -251,7 +293,7 @@ onUnmounted(() => {
 
 .pane-action-icon {
   display: inline-block;
-  font-size: 14px;
+  font-size: 14px; /* ↻ glyph size inside 22px button; lg=15px would enlarge glyph */
   line-height: 1;
 }
 
@@ -277,22 +319,22 @@ onUnmounted(() => {
   justify-content: center;
   color: var(--ch-color-text-subtle);
   text-align: center;
-  padding: 16px;
+  padding: var(--ch-space-4);
 }
 
 .empty-icon {
-  font-size: 32px;
-  margin-bottom: 12px;
+  font-size: 32px; /* large empty-state emoji; xl=18px is UI body scale */
+  margin-bottom: var(--ch-space-3);
   opacity: 0.5;
 }
 
 .pane-empty p {
-  margin: 4px 0;
-  font-size: 13px;
+  margin: var(--ch-space-1) 0;
+  font-size: var(--ch-font-md);
 }
 
 .empty-hint {
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   opacity: 0.7;
 }
 
