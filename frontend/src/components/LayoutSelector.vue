@@ -183,8 +183,8 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 7px 10px;
+  gap: var(--ch-space-2);
+  padding: 7px 10px; /* off-scale: between space-1 (4px) and space-2 (8px), rounding shifts layout */
   background-color: var(--ch-color-canvas);
   border-bottom: 1px solid var(--ch-color-border-muted);
 }
@@ -196,7 +196,7 @@ onUnmounted(() => {
 .layout-buttons {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 5px; /* off-scale: between space-1 (4px) and space-2 (8px), tight density between tiles */
 }
 
 .layout-btn {
@@ -205,7 +205,7 @@ onUnmounted(() => {
   background: var(--ch-color-surface-control);
   border: 1px solid var(--ch-color-border-muted);
   border-radius: var(--ch-radius-md);
-  padding: 4px;
+  padding: var(--ch-space-1);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -225,7 +225,7 @@ onUnmounted(() => {
 .layout-btn.active {
   border-color: var(--ch-color-accent-strong);
   background-color: var(--ch-color-accent-soft);
-  box-shadow: 0 1px 3px var(--ch-shadow-color-soft);
+  box-shadow: 0 1px 3px var(--ch-shadow-color-soft); /* off-scale: tight 1px highlight, not replaceable by --ch-shadow-soft (popover) */
 }
 
 .layout-btn:focus-visible,
@@ -296,13 +296,13 @@ onUnmounted(() => {
 
 .layout-menu-panel {
   position: absolute;
-  top: calc(100% + 7px);
+  top: calc(100% + 7px); /* off-scale: tiny gap to trigger, keep as literal */
   right: 0;
   z-index: 1200;
   width: 182px;
   max-height: min(340px, calc(var(--visual-viewport-height, 100dvh) - 96px));
   overflow-y: auto;
-  padding: 6px;
+  padding: 6px; /* off-scale: between space-1 (4px) and space-2 (8px), density-tuned */
   border: 1px solid var(--ch-color-border-strong);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-glass);
@@ -327,8 +327,8 @@ onUnmounted(() => {
   min-height: 34px;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 7px;
+  gap: var(--ch-space-2);
+  padding: 5px 7px; /* off-scale: dense menu item, between space-1 and space-2 */
   border: 1px solid transparent;
   border-radius: var(--ch-radius-sm);
   background: transparent;
@@ -350,7 +350,7 @@ onUnmounted(() => {
   border-color: var(--ch-color-accent-ring-strong);
   background: var(--ch-color-accent-soft);
   color: var(--ch-color-accent-strong);
-  font-weight: 600;
+  font-weight: var(--ch-weight-semibold);
 }
 
 .layout-menu-item.active .layout-cell {
@@ -358,20 +358,20 @@ onUnmounted(() => {
 }
 
 .layout-menu-item-label {
-  font-size: 12px;
-  font-weight: 600;
+  font-size: var(--ch-font-sm);
+  font-weight: var(--ch-weight-semibold);
 }
 
 .user-section {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--ch-space-3);
 }
 
 .user-info {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--ch-space-2);
 }
 
 .user-avatar {
@@ -390,27 +390,27 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-weight: bold;
-  font-size: 12px;
+  font-weight: var(--ch-weight-semibold);
+  font-size: var(--ch-font-sm);
 }
 
 .user-name {
   color: var(--ch-color-text);
-  font-size: 13px;
+  font-size: var(--ch-font-md);
 }
 
 .logout-btn {
   background: none;
   border: 1px solid var(--ch-color-text-subtle);
   color: var(--ch-color-text);
-  padding: 4px 11px;
+  padding: var(--ch-space-1) 11px; /* horizontal 11px off-scale, keep literal */
   border-radius: var(--ch-radius-sm);
   cursor: pointer;
-  font-size: 11px;
-  font-weight: 500;
+  font-size: var(--ch-font-xs);
+  font-weight: var(--ch-weight-medium);
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--ch-space-1);
   transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast), transform var(--ch-motion-fast);
 }
 

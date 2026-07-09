@@ -5,6 +5,8 @@
 
 ## Unreleased
 
+- fix(ui): apply design tokens to `LayoutSelector.vue` spacing/type/weight (on-scale gap/padding → `--ch-space-*`, font-size → `--ch-font-*`, font-weight → `--ch-weight-*`; off-scale px and geometry retained as literal); styling-only, no DOM/script changes.
+
 ### fix(ui): apply exact-match design tokens to MarkdownContent typography/spacing
 
 - Applied the existing `--ch-font-{sm,md,xl}`, `--ch-space-{1,2}`, and
