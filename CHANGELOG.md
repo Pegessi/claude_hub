@@ -5,6 +5,8 @@
 
 ## Unreleased
 
+- fix(ui): apply design tokens to `LayoutSelector.vue` spacing/type/weight (on-scale gap/padding → `--ch-space-*`, font-size → `--ch-font-*`, font-weight → `--ch-weight-*`; off-scale px and geometry retained as literal); styling-only, no DOM/script changes.
+
 ### fix(ui): apply design tokens to TabBar (tab strip, menus, modals, toasts)
 
 - **What**: retrofitted `frontend/src/components/TabBar.vue` (terminal tab
