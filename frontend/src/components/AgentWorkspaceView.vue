@@ -6492,14 +6492,14 @@ onUnmounted(() => {
   border-radius: 999px;
   background: var(--ch-color-chip-bg);
   color: currentColor;
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   line-height: 18px;
   text-align: center;
 }
 
 .agent-status-eyebrow {
   color: var(--ch-color-text-muted);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   font-weight: var(--ch-weight-semibold);
   text-transform: uppercase;
 }
@@ -6675,7 +6675,7 @@ onUnmounted(() => {
   display: block;
   margin-top: 3px;
   color: var(--ch-color-text-muted);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6774,7 +6774,7 @@ onUnmounted(() => {
   border-radius: 999px;
   background: var(--ch-color-chip-bg);
   color: currentColor;
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   font-weight: var(--ch-weight-semibold);
   padding: 5px 8px;
 }
@@ -7219,7 +7219,7 @@ onUnmounted(() => {
   border-radius: 999px;
   background: var(--ch-color-chip-bg);
   color: currentColor;
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   line-height: 18px;
   text-align: center;
 }
@@ -7243,7 +7243,7 @@ onUnmounted(() => {
 .agent-row span {
   display: block;
   color: var(--ch-color-text-muted);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
 }
 
 .dispatcher-row {
@@ -7660,7 +7660,7 @@ onUnmounted(() => {
   max-width: 100%;
   margin: 4px 0 6px;
   color: var(--ch-color-text-muted);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   line-height: 1.35;
   white-space: normal;
   display: -webkit-box;
@@ -7862,7 +7862,7 @@ onUnmounted(() => {
   background: var(--ch-color-chip-bg-muted);
   padding: 6px 8px;
   color: var(--ch-color-text-muted);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   line-height: 1.35;
   min-width: 0;
   display: -webkit-box;
@@ -7925,7 +7925,7 @@ onUnmounted(() => {
 .advanced-start summary {
   margin-bottom: 8px;
   color: var(--ch-color-accent);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   cursor: pointer;
 }
 
@@ -7960,7 +7960,7 @@ onUnmounted(() => {
   text-align: center;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   font-weight: var(--ch-weight-semibold);
   line-height: 1;
 }
@@ -8201,7 +8201,7 @@ onUnmounted(() => {
 .detail-section-title {
   display: block;
   color: var(--ch-color-accent);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   font-weight: var(--ch-weight-semibold);
   text-transform: uppercase;
 }
@@ -8235,7 +8235,7 @@ onUnmounted(() => {
   border: 0;
   background: transparent;
   color: var(--ch-color-text-subtle);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   font-weight: 600;
   cursor: pointer;
   letter-spacing: 0.02em;
@@ -8428,7 +8428,7 @@ onUnmounted(() => {
 .fact-grid span {
   display: block;
   color: var(--ch-color-text-muted);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
 }
 
 .fact-grid strong {
@@ -8467,7 +8467,7 @@ onUnmounted(() => {
   text-align: center;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   font-weight: var(--ch-weight-semibold);
   line-height: 1;
 }
@@ -8599,7 +8599,7 @@ onUnmounted(() => {
 .attachment-meta span,
 .attachment-meta code {
   color: var(--ch-color-text-muted);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
 }
 
 .detail-footer {
@@ -8638,7 +8638,7 @@ onUnmounted(() => {
   display: block;
   margin-bottom: 6px;
   color: var(--ch-color-text);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   font-weight: var(--ch-weight-semibold);
   text-transform: uppercase;
 }
@@ -8689,7 +8689,7 @@ onUnmounted(() => {
 .autonomous-evaluations > strong {
   display: block;
   color: var(--ch-color-text-muted);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   font-weight: var(--ch-weight-semibold);
   margin-bottom: 5px;
   text-transform: uppercase;
@@ -8823,7 +8823,7 @@ onUnmounted(() => {
   min-width: 0;
   overflow: hidden;
   color: var(--ch-color-text);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   font-weight: var(--ch-weight-semibold);
   line-height: 1.2;
   text-overflow: ellipsis;
@@ -8911,7 +8911,7 @@ onUnmounted(() => {
 
 .report-summary-label {
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   color: var(--ch-color-text-muted);
   padding: 2px 8px;
   border-radius: 999px;
@@ -8929,7 +8929,7 @@ onUnmounted(() => {
 .report-summary-message {
   flex: 1 1 auto;
   min-width: 0;
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   color: var(--ch-color-text-muted);
   white-space: nowrap;
   overflow: hidden;
@@ -9014,12 +9014,12 @@ onUnmounted(() => {
 
 .markdown-output-row span {
   color: var(--ch-color-text-muted);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
 }
 
 .markdown-output-row code {
   color: var(--ch-color-text-subtle);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   white-space: normal;
   overflow-wrap: anywhere;
 }
@@ -9052,7 +9052,7 @@ onUnmounted(() => {
   overflow-wrap: anywhere;
   color: var(--ch-color-text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
 }
 
 .artifact-preview-button {
@@ -9083,7 +9083,7 @@ onUnmounted(() => {
   border-radius: var(--ch-radius-md) var(--ch-radius-md) 0 0;
   background: var(--ch-color-surface);
   color: var(--ch-color-text-muted);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   padding: 7px 9px;
 }
 
@@ -9129,7 +9129,7 @@ onUnmounted(() => {
 
 .markdown-preview-modal-header span {
   color: var(--ch-color-text-muted);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   text-transform: uppercase;
 }
 
@@ -9182,7 +9182,7 @@ onUnmounted(() => {
   display: block;
   margin-bottom: 5px;
   color: var(--ch-color-text);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   text-transform: uppercase;
 }
 
@@ -9266,7 +9266,7 @@ onUnmounted(() => {
   flex: 1 1 auto;
   min-width: 0;
   color: var(--ch-color-text-muted);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -9276,7 +9276,7 @@ onUnmounted(() => {
 .report-subsection-count {
   flex: 0 0 auto;
   color: var(--ch-color-text-muted);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
 }
 
 .workspace-modal-overlay {
@@ -9590,7 +9590,7 @@ onUnmounted(() => {
   padding: 1px 8px;
   background: var(--ch-color-surface-sunken);
   color: var(--ch-color-text-muted);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   font-weight: var(--ch-weight-semibold);
 }
 
@@ -9874,7 +9874,7 @@ onUnmounted(() => {
   padding: 2px 8px;
   background: color-mix(in srgb, var(--ch-color-accent-bg) 18%, transparent);
   color: var(--ch-color-accent-fg);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   font-weight: 600;
   line-height: 1.4;
   letter-spacing: 0.02em;
@@ -10056,7 +10056,7 @@ onUnmounted(() => {
 .file-item span {
   width: 28px;
   color: var(--ch-color-text-subtle);
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
 }
 
 .file-item strong {
@@ -10191,7 +10191,7 @@ onUnmounted(() => {
 
   .workspace-mobile-identity small {
     color: var(--ch-color-text-muted);
-    font-size: 11px;
+    font-size: var(--ch-font-xs);
     line-height: 1.2;
   }
 
@@ -10283,7 +10283,7 @@ onUnmounted(() => {
   }
 
   .agent-status-view-switch span {
-    font-size: 11px;
+    font-size: var(--ch-font-xs);
   }
 
   .agent-status-view-switch strong {
