@@ -1597,7 +1597,7 @@ async function handleCreateTab() {
   border: none;
   color: var(--ch-color-text);
   font-size: var(--ch-font-md);
-  outline: 1px solid var(--ch-color-accent);
+  outline: 2px solid var(--ch-color-accent-ring-strong);
   padding: var(--ch-space-1);
   border-radius: var(--ch-radius-sm);
   width: 120px;
@@ -1997,9 +1997,10 @@ async function handleCreateTab() {
   line-height: var(--ch-leading-tight);
 }
 
-.current-path-input:focus {
+.current-path-input:focus-visible {
   outline: none;
-  border-color: var(--ch-color-accent);
+  border-color: var(--ch-color-accent-ring-strong);
+  box-shadow: 0 0 0 2px var(--ch-color-accent-ring);
 }
 
 .current-path {
@@ -2111,10 +2112,11 @@ async function handleCreateTab() {
   box-sizing: border-box;
 }
 
-.form-group input:focus,
-.form-group select:focus {
+.form-group input:focus-visible,
+.form-group select:focus-visible {
   outline: none;
-  border-color: var(--ch-color-accent);
+  border-color: var(--ch-color-accent-ring-strong);
+  box-shadow: 0 0 0 2px var(--ch-color-accent-ring);
 }
 
 .form-error {

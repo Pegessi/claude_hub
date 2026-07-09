@@ -440,9 +440,10 @@ watch(
   box-sizing: border-box;
 }
 
-.form-group input:focus {
+.form-group input:focus-visible {
   outline: none;
-  border-color: var(--ch-color-accent);
+  border-color: var(--ch-color-accent-ring-strong);
+  box-shadow: 0 0 0 2px var(--ch-color-accent-ring);
 }
 
 .form-group input:disabled {
@@ -489,9 +490,10 @@ watch(
   spellcheck: false;
 }
 
-.env-textarea:focus {
+.env-textarea:focus-visible {
   outline: none;
-  border-color: var(--ch-color-accent);
+  border-color: var(--ch-color-accent-ring-strong);
+  box-shadow: 0 0 0 2px var(--ch-color-accent-ring);
 }
 
 .env-textarea:disabled {
