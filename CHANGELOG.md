@@ -5,6 +5,43 @@
 
 ## Unreleased
 
+### fix(ui): board task-card polish — overflow containment, dedup duplicate chips, normalize btn-icon, tighten density
+
+- **What**: four concrete UI fixes on the board task card (and propagated to
+  sibling surfaces where the same bugs applied): (1) long unbroken strings
+  (URLs, branch names, badge text, session titles) no longer bleed past the
+  card's right edge — titles wrap inside the card, chips cap width with
+  ellipsis, and flex children carry `min-width:0`; (2) the redundant
+  duplicate-title chips are gone — after dispatch the backend renames
+  worker/reviewer session tabs to `task.title`, which made both `.meta-agent`
+  (plain) and `.meta-reviewer` (purple) chips echo the title already shown in
+  `<h3>` (the "two mr优化 chips back-to-back" the user reported). Those chips
+  now show a short role label (`cb-agent-1`, `Reviewer`, etc.) instead of
+  repeating the title, and `.meta-review-state` is suppressed when the header
+  already shows an `activeReviewBadge` with the same semantic; (3) the
+  `.btn-icon` glyphs (✓ ◎ ⧉ × ▶ ✎ …) now share a fixed 14×14 box with
+  consistent font-size and optical baseline alignment, so they render at
+  matching size/weight across task actions, detail-panel actions, more-menu
+  items, agent-row buttons, and the refresh trigger; (4) density tightened —
+  `.autonomy-badge` shrunk to match the other chips (10px / 2px 7px / 600
+  weight), card padding/gaps tightened to match modern product-UI scale,
+  `.feedback-meta-chip` and `.origin-badge` normalized to the same chip scale.
+- **Why**: user-reported polish — cards on the board felt cluttered (duplicate
+  title chips, oversized autonomy badge, chips that bled off the card on long
+  text) and action glyphs looked uneven because they had no fixed footprint.
+- **How**: frontend-only pass in `frontend/src/components/AgentWorkspaceView.vue`.
+  Added three template helpers (`agentChipLabel`, `reviewerChipLabel`,
+  `shouldShowMetaReviewState`) that compute non-duplicative chip text and
+  suppress redundant review-state; rewrote `.task-card`, `.task-card-header`,
+  `.task-card h3`, `.latest-report`, `.session-meta` to carry `min-width:0`
+  and wrapping behavior; shrank `.autonomy-badge` / `.feedback-meta-chip` /
+  `.origin-badge` / `.review-badge` to a common chip scale; replaced the
+  free-form `.btn-icon` rule with a fixed 14×14 footprint; tightened card
+  padding and `.task-list` gap. No backend changes.
+- **Validation**: `cd frontend && pnpm lint` (clean, eslint --fix) and
+  `cd frontend && pnpm build` (vue-tsc + vite, 397 KB index JS, 168 KB CSS)
+  both exit 0.
+
 ### fix(ui): resident "Save & run now" gives unmistakable feedback; queued/busy state visible
 
 - **What**: clicking "Save & run now" or the standalone "Run now" button on a

@@ -236,7 +236,10 @@
             loading-label="Refreshing statuses"
             @click="refreshAgentStatuses"
           >
-            ↻
+            <span
+              class="btn-icon"
+              aria-hidden="true"
+            >↻</span>
           </LoadingButton>
         </div>
       </div>
@@ -580,15 +583,15 @@
                   <span>{{ reportMessageForLang(latestReportForTask(task)!) }}</span>
                 </div>
                 <div class="session-meta">
-                  <span class="meta-agent">{{ agentTitle(task.session_id) }}</span>
+                  <span class="meta-agent">{{ agentChipLabel(task) }}</span>
                   <span
                     v-if="task.review_session_id"
                     class="meta-reviewer"
                   >
-                    {{ reviewerTitle(task.review_session_id) }}
+                    {{ reviewerChipLabel(task) }}
                   </span>
                   <span
-                    v-if="reviewStatusLabel(task)"
+                    v-if="shouldShowMetaReviewState(task)"
                     class="meta-review-state"
                   >{{ reviewStatusLabel(task) }}</span>
                   <span
@@ -715,7 +718,10 @@
                       title="More actions"
                       aria-label="More actions"
                     >
-                      ⋯
+                      <span
+                        class="btn-icon"
+                        aria-hidden="true"
+                      >⋯</span>
                     </summary>
                     <div
                       class="task-card-more-panel"
@@ -4297,6 +4303,63 @@ function reviewerTitle(sessionId?: string | null) {
   return managedWorkspaceSessions.value.find(agent => agent.id === sessionId)?.title || sessionId
 }
 
+// Short role label for the task-card meta row. After dispatch the backend
+// renames worker/reviewer session tabs to task.title (_monitor.py:684), which
+// makes agentTitle()/reviewerTitle() always echo the title already shown in
+// <h3> (producing the duplicate "mr优化 / mr优化" chips the user reported).
+// When the resolved title equals (or is prefixed by) the task title, fall back
+// to a short role label so the meta chips carry identifying information
+// without repeating the heading.
+function agentChipLabel(task: WorkspaceTask): string {
+  const raw = agentTitle(task.session_id)
+  if (!task.session_id) return 'auto'
+  if (raw === task.title) return shortRoleLabel(task.session_id, 'Agent')
+  if (task.title && raw.startsWith(task.title) && raw.length > task.title.length + 4) {
+    return shortRoleLabel(task.session_id, 'Agent')
+  }
+  return raw
+}
+
+function reviewerChipLabel(task: WorkspaceTask): string {
+  if (!task.review_session_id) return ''
+  const raw = reviewerTitle(task.review_session_id)
+  if (raw === task.title) return shortRoleLabel(task.review_session_id, 'Reviewer')
+  if (task.title && raw.startsWith(task.title) && raw.length > task.title.length + 4) {
+    return shortRoleLabel(task.review_session_id, 'Reviewer')
+  }
+  // Avoid echoing the agent label verbatim (same role / same session)
+  const agentLabel = agentChipLabel(task)
+  if (raw === agentLabel) return shortRoleLabel(task.review_session_id, 'Reviewer')
+  return raw
+}
+
+function shortRoleLabel(sessionId: string, fallback: string): string {
+  // For cb-agent-1 / cb-reviewer-2 style ids surface the id (short, unique).
+  // For anything else fall back to the generic role name.
+  if (/^[a-z]+-[a-z]+-\d+(-[a-z0-9]+)?$/.test(sessionId)) return sessionId
+  return fallback
+}
+
+// Whether the meta-review-state chip should be hidden because the header
+// already shows an activeReviewBadge carrying the same semantic.
+function shouldShowMetaReviewState(task: WorkspaceTask): boolean {
+  const label = reviewStatusLabel(task)
+  if (!label) return false
+  const badge = activeReviewBadge(task)
+  if (!badge) return true
+  // Suppress when the header badge label already says the same thing.
+  const overlapping = new Set([
+    'Changes requested',
+    'Review needs input',
+    'Pending review',
+    'Awaiting human acceptance',
+    'Reviewing',
+    'Awaiting AI review',
+  ])
+  if (overlapping.has(label)) return false
+  return true
+}
+
 function agentRoleLabel(agent: ManagedSession) {
   if (agent.role === 'dispatcher') return 'Dispatcher'
   if (agent.role === 'resident') return 'Resident'
@@ -7431,10 +7494,12 @@ onUnmounted(() => {
 .task-list {
   flex: 1 1 auto;
   min-height: 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 10px;
 }
 
@@ -7445,8 +7510,9 @@ onUnmounted(() => {
   border: 1px solid var(--ch-color-border-muted);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface);
-  padding: 10px 10px 10px 12px;
+  padding: 9px 10px 9px 12px;
   cursor: pointer;
+  min-width: 0;
   -webkit-tap-highlight-color: transparent;
   transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), transform var(--ch-motion-fast);
 }
@@ -7534,18 +7600,25 @@ onUnmounted(() => {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
+  min-width: 0;
 }
 
 .task-card h3 {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
   color: var(--ch-color-text-strong);
   font-size: 13px;
+  font-weight: 600;
   line-height: 1.35;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .task-card-description {
   max-width: 100%;
-  margin: 6px 0 8px;
+  margin: 4px 0 6px;
   color: var(--ch-color-text-muted);
   font-size: 11px;
   line-height: 1.35;
@@ -7564,8 +7637,12 @@ onUnmounted(() => {
   background: var(--ch-color-chip-bg);
   color: var(--ch-color-text-muted);
   font-size: 10px;
-  padding: 2px 6px;
+  padding: 2px 7px;
   white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 0 auto;
 }
 
 .session-meta .meta-agent {
@@ -7593,9 +7670,11 @@ onUnmounted(() => {
 .task-card-badges {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .task-card-age {
@@ -7610,14 +7689,18 @@ onUnmounted(() => {
 .review-badge {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   border-radius: 999px;
-  padding: 3px 8px;
+  padding: 2px 7px;
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.02em;
   white-space: nowrap;
   border: 1px solid transparent;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 0 auto;
 }
 
 .autonomy-badge {
@@ -7627,11 +7710,12 @@ onUnmounted(() => {
   border-radius: var(--ch-radius-sm);
   background: rgba(20, 184, 166, 0.12);
   color: #5eead4;
-  font-size: 11px;
-  font-weight: 700;
+  font-size: 10px;
+  font-weight: 600;
   line-height: 1;
-  padding: 5px 7px;
+  padding: 2px 7px;
   white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 /* Thin iteration-budget bar for autonomous cards; teal matches .autonomy-badge. */
@@ -7662,11 +7746,12 @@ onUnmounted(() => {
   background: rgba(139, 92, 246, 0.14);
   color: #c4b5fd;
   font-size: 10px;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 0.03em;
   line-height: 1;
-  padding: 4px 7px;
+  padding: 2px 7px;
   white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 .origin-badge::before {
@@ -7682,6 +7767,7 @@ onUnmounted(() => {
   height: 6px;
   border-radius: 999px;
   background: currentColor;
+  flex: 0 0 auto;
 }
 
 .review-badge--active {
@@ -7730,7 +7816,7 @@ onUnmounted(() => {
 }
 
 .latest-report {
-  margin: 0 0 8px;
+  margin: 0 0 6px;
   border-left: 2px solid var(--ch-color-border-hover);
   border-radius: 0 var(--ch-radius-sm) var(--ch-radius-sm) 0;
   background: var(--ch-color-chip-bg-muted);
@@ -7738,6 +7824,7 @@ onUnmounted(() => {
   color: var(--ch-color-text-muted);
   font-size: 11px;
   line-height: 1.35;
+  min-width: 0;
   display: -webkit-box;
   overflow: hidden;
   -webkit-line-clamp: 2;
@@ -7784,7 +7871,9 @@ onUnmounted(() => {
 
 .session-meta {
   flex-wrap: wrap;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
+  min-width: 0;
+  gap: 6px;
 }
 
 .advanced-start {
@@ -7883,7 +7972,7 @@ onUnmounted(() => {
   border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-control-active);
   color: var(--ch-color-text-subtle);
-  font-size: 18px;
+  font-size: 14px;
   line-height: 1;
   display: inline-flex;
   align-items: center;
@@ -7978,12 +8067,15 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 11px;
+  width: 14px;
+  height: 14px;
+  font-size: 12px;
   line-height: 1;
-  opacity: 0.8;
+  opacity: 0.85;
   flex-shrink: 0;
   font-family: "Apple Symbols", "Segoe UI Symbol", "Noto Sans Symbols",
     "Symbola", -apple-system, BlinkMacSystemFont, sans-serif;
+  vertical-align: -1px;
 }
 
 .task-actions button:active,
@@ -8311,9 +8403,11 @@ onUnmounted(() => {
   border-radius: 999px;
   background: var(--ch-color-accent-soft);
   color: var(--ch-color-accent);
-  font-size: 11px;
-  font-weight: 700;
-  padding: 4px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 .detail-actions {
