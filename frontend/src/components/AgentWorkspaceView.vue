@@ -6484,7 +6484,7 @@ onUnmounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
 }
 
 .agent-status-view-switch strong {
@@ -6500,7 +6500,7 @@ onUnmounted(() => {
 .agent-status-eyebrow {
   color: var(--ch-color-text-muted);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
   text-transform: uppercase;
 }
 
@@ -6624,7 +6624,7 @@ onUnmounted(() => {
   min-width: 0;
   color: var(--ch-color-text);
   font-size: 13px;
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6644,7 +6644,7 @@ onUnmounted(() => {
   border-radius: 999px;
   padding: 2px 7px;
   font-size: var(--ch-font-xs);
-  font-weight: 700;
+  font-weight: var(--ch-weight-medium);
   letter-spacing: 0.04em;
   text-transform: uppercase;
   background: var(--ch-color-chip-bg);
@@ -6746,7 +6746,7 @@ onUnmounted(() => {
 .agent-status-meta--resident .agent-status-timing-chip[data-run-state='live'] {
   background: color-mix(in srgb, var(--ch-color-accent) 22%, var(--ch-color-chip-bg));
   color: var(--ch-color-accent);
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
 }
 
 .agent-status-meta--resident .agent-status-timing-chip[data-run-state='muted'] {
@@ -6775,7 +6775,7 @@ onUnmounted(() => {
   background: var(--ch-color-chip-bg);
   color: currentColor;
   font-size: 11px;
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
   padding: 5px 8px;
 }
 
@@ -6909,7 +6909,7 @@ onUnmounted(() => {
   padding: 1px 7px;
   background: var(--ch-color-surface-sunken);
   color: var(--ch-color-text-muted);
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
 }
 
 .agent-status-master-badge {
@@ -6919,7 +6919,7 @@ onUnmounted(() => {
   border: 1px solid rgba(167, 139, 250, 0.45);
   background: rgba(139, 92, 246, 0.16);
   color: #c4b5fd;
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
   letter-spacing: 0.02em;
 }
 
@@ -7073,7 +7073,7 @@ onUnmounted(() => {
   background: var(--ch-color-accent-strong);
   border-color: var(--ch-color-accent-strong);
   color: var(--ch-color-text-inverse);
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
 }
 
 .primary-button:hover {
@@ -7211,7 +7211,7 @@ onUnmounted(() => {
 
 .agent-manager-view-switch span {
   font-size: 12px;
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
 }
 
 .agent-manager-view-switch strong {
@@ -7874,7 +7874,7 @@ onUnmounted(() => {
 }
 
 .latest-report strong {
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
   text-transform: capitalize;
 }
 
@@ -7961,7 +7961,7 @@ onUnmounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 11px;
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
   line-height: 1;
 }
 
@@ -8202,7 +8202,7 @@ onUnmounted(() => {
   display: block;
   color: var(--ch-color-accent);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
   text-transform: uppercase;
 }
 
@@ -8468,7 +8468,7 @@ onUnmounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 11px;
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
   line-height: 1;
 }
 
@@ -8639,7 +8639,7 @@ onUnmounted(() => {
   margin-bottom: 6px;
   color: var(--ch-color-text);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
   text-transform: uppercase;
 }
 
@@ -8690,7 +8690,7 @@ onUnmounted(() => {
   display: block;
   color: var(--ch-color-text-muted);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
   margin-bottom: 5px;
   text-transform: uppercase;
 }
@@ -8824,7 +8824,7 @@ onUnmounted(() => {
   overflow: hidden;
   color: var(--ch-color-text);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
   line-height: 1.2;
   text-overflow: ellipsis;
   text-transform: capitalize;
@@ -8891,7 +8891,7 @@ onUnmounted(() => {
 }
 
 .report-state {
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
   color: var(--ch-color-text);
 }
 
@@ -9203,7 +9203,7 @@ onUnmounted(() => {
 .profile-result-list span {
   margin-right: 5px;
   color: var(--ch-color-text);
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
 }
 
 .report-note--inline {
@@ -9439,7 +9439,7 @@ onUnmounted(() => {
   background: var(--ch-color-chip-bg-muted);
   color: var(--ch-color-text-muted);
   font-size: var(--ch-font-xs);
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
   padding: 3px 7px;
 }
 
@@ -9498,7 +9498,7 @@ onUnmounted(() => {
   background: var(--ch-color-chip-bg-muted);
   color: var(--ch-color-text-muted);
   font-size: var(--ch-font-xs);
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
   padding: 3px 7px;
 }
 
@@ -9591,7 +9591,7 @@ onUnmounted(() => {
   background: var(--ch-color-surface-sunken);
   color: var(--ch-color-text-muted);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
 }
 
 .periodic-task-list {
@@ -10174,7 +10174,7 @@ onUnmounted(() => {
   .workspace-mobile-identity span {
     color: var(--ch-color-text-muted);
     font-size: var(--ch-font-xs);
-    font-weight: 700;
+    font-weight: var(--ch-weight-semibold);
     line-height: 1;
     text-transform: uppercase;
   }
@@ -10627,7 +10627,7 @@ onUnmounted(() => {
     background: var(--ch-color-surface-control);
     color: var(--ch-color-text);
     font-size: 14px;
-    font-weight: 700;
+    font-weight: var(--ch-weight-semibold);
   }
 
   .detail-footer-chevron {
@@ -10865,7 +10865,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   font-size: 13px;
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
   line-height: 1;
 }
 
