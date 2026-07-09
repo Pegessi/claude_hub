@@ -84,16 +84,44 @@ const title = computed(() => `${kind.value} agent`)
 </script>
 
 <style scoped>
+/*
+ * Agent avatar — small 28/22px badge shown in tabs, board cards, and status
+ * panels. There are four kinds (claude / codex / cursor / terminal); unknown
+ * kinds fall back to terminal via the kind() computed.
+ *
+ * Token mapping (per minimalist-UI audit Findings 6/7/8, Task B):
+ *   • Radii snapped to the 5/7/10 scale: base 8px -> --ch-radius-md, sm 6px
+ *     -> --ch-radius-sm.
+ *   • Default fallback palette mapped to surface/text tokens: color #fff ->
+ *     --ch-color-text-inverse; background #4b4b4b -> --ch-color-surface-control
+ *     (themes across light/dark).
+ *   • Cursor variant flattened from linear-gradient gloss to flat
+ *     --ch-color-surface-raised; foreground adapted to --ch-color-text to
+ *     preserve contrast against the now-themed raised surface (the previous
+ *     literal #111 would fail contrast on #202020 in dark theme).
+ *   • Terminal variant flattened from linear-gradient gloss to flat
+ *     --ch-color-surface-sunken; foreground mapped to --ch-color-success
+ *     (themed green; --ch-terminal-green is ANSI-tinted and low-contrast
+ *     against the sunken surface in both themes).
+ *
+ * Brand marks preserved as flat hex literals (Finding 2 brand-tokenization
+ * is a separate follow-up):
+ *   • Claude: background #f1eee5 (cream), color #d97757 (orange)
+ *   • Codex:  background #000 (black), color #fff (white)
+ *
+ * Functional constants preserved: 28/22px geometry, 64/72/70% glyph sizing,
+ * inset 1px box-shadow stroke, overflow:hidden, flex layout.
+ */
 .agent-avatar {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  border-radius: 8px;
+  border-radius: var(--ch-radius-md);
   width: 28px;
   height: 28px;
-  color: #fff;
-  background: #4b4b4b;
+  color: var(--ch-color-text-inverse);
+  background: var(--ch-color-surface-control);
   box-shadow: inset 0 0 0 1px var(--ch-color-border-muted, rgba(255, 255, 255, 0.1));
   overflow: hidden;
 }
@@ -101,7 +129,7 @@ const title = computed(() => `${kind.value} agent`)
 .agent-avatar[data-size='sm'] {
   width: 22px;
   height: 22px;
-  border-radius: 6px;
+  border-radius: var(--ch-radius-sm);
 }
 
 .agent-avatar__glyph {
@@ -130,12 +158,12 @@ const title = computed(() => `${kind.value} agent`)
 }
 
 .agent-avatar--cursor {
-  background: linear-gradient(135deg, #f5f5f5 0%, #d4d4d4 100%);
-  color: #111;
+  background: var(--ch-color-surface-raised);
+  color: var(--ch-color-text);
 }
 
 .agent-avatar--terminal {
-  background: linear-gradient(135deg, #2a2a2a 0%, #1a1a1a 100%);
-  color: #7ee787;
+  background: var(--ch-color-surface-sunken);
+  color: var(--ch-color-success);
 }
 </style>
