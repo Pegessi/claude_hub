@@ -765,6 +765,11 @@ textarea {
   background: var(--ch-color-warning-strong);
 }
 
+.auth-error-banner__retry:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring-strong);
+  outline-offset: 2px;
+}
+
 .auth-error-banner__close {
   background: none;
   border: none;
@@ -779,6 +784,11 @@ textarea {
 
 .auth-error-banner__close:hover {
   opacity: 1;
+}
+
+.auth-error-banner__close:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring-strong);
+  outline-offset: 2px;
 }
 
 .app-mode-bar {
@@ -832,6 +842,11 @@ textarea {
   border-color: var(--ch-color-accent-ring-strong);
 }
 
+.mode-button:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring-strong);
+  outline-offset: 2px;
+}
+
 .app-mode-tools {
   display: inline-flex;
   align-items: center;
@@ -881,6 +896,11 @@ textarea {
 .theme-switch[aria-checked='false'] .theme-switch-label:first-child,
 .theme-switch[aria-checked='true'] .theme-switch-label:nth-child(2) {
   color: var(--ch-color-text);
+}
+
+.theme-switch:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring-strong);
+  outline-offset: 2px;
 }
 
 .error-close {
