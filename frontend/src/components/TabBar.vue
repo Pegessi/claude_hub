@@ -1320,20 +1320,57 @@ async function handleCreateTab() {
 </script>
 
 <style scoped>
+/*
+ * Tab bar — terminal tab strip + add-tab + teleported tab menu + mobile app
+ * menu + create/duplicate/switch-env/file-browser modals + toast stack.
+ *
+ * Styling consumes the global design-token scale defined in App.vue :root
+ * (--ch-space-*, --ch-font-*, --ch-leading-*, --ch-weight-*, --ch-radius-*,
+ * --ch-motion-*, --ch-shadow-*, --ch-color-*). Hardcoded px values remain
+ * only for functional constants:
+ *   • 30px tab / add-tab / mobile-app-menu-trigger sizes (toolbar-icon
+ *     convention; changing shifts the 48px tab-bar layout height).
+ *   • 32px path-nav-btn (file-browser toolbar navigation buttons — toolbar-
+ *     icon convention for modal controls).
+ *   • 36px switch-env-icon (display glyph between 32 and 40).
+ *   • 18px toast__icon box (sized to fit i/△/!/✓ emoji glyphs optically).
+ *   • 24px tab-menu-trigger / tab-close / toast__close hit boxes (sized to
+ *     sit within the 30px tab without bloating it).
+ *   • 7×7px tab-indicator status dot (proportional ring; 1.5px ring stroke).
+ *   • 999px pill border-radius on .pane-indicator / mode chip.
+ *   • 1px/2px/3px borders, outline offsets, rings, drag indicators, toast
+ *     accent bar, toast timer progress, drag-over negative margins (stroke /
+ *     affordance constants, not spacing). Tight 2px chip/code padding is
+ *     retained on mode chips and inline code for optical density.
+ *   • Modal / panel functional widths (184/400/420/480/500/600px), viewport
+ *     math (100vw - Npx, 100dvh - Npx), 200px min-height list, 120/124px
+ *     button / input min-widths, 70vh height, textarea min-heights, 180px
+ *     tab-name max-width, 72px toast-stack top offset.
+ *   • 14px tab-fade mask width (scroll affordance gradient).
+ *   • Keyframe px (translateY -4/-6px — entrance animations).
+ *   • 1–2px glyph offsets (margin-top/padding-top on toast icon/message,
+ *     subtitle margin).
+ *   • @media collapse breakpoints (640/768px).
+ * Transitions: 120ms ease and 180-200ms ease are mapped to --ch-motion-fast
+ * and --ch-motion-standard; 180ms cubic-bezier(0.2,0,0,1) collapse/entrance
+ * curves are kept as-written (specific expand/collapse physics differ from
+ * the standard ease).
+ */
+
 .tab-bar {
   display: flex;
   align-items: flex-end;
   background-color: var(--ch-color-surface);
   border-bottom: 1px solid var(--ch-color-border-muted);
-  padding: 7px 10px 6px;
-  gap: 6px;
+  padding: var(--ch-space-2) var(--ch-space-3) var(--ch-space-2);
+  gap: var(--ch-space-2);
   max-height: 48px;
   overflow: visible;
   transition: max-height 180ms cubic-bezier(0.2, 0, 0, 1), padding 180ms cubic-bezier(0.2, 0, 0, 1), gap 180ms cubic-bezier(0.2, 0, 0, 1), border-color 180ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 .tab-bar > :not(.modal-overlay) {
-  transition: opacity 120ms ease;
+  transition: opacity var(--ch-motion-fast);
 }
 
 .mobile-app-menu {
@@ -1363,7 +1400,7 @@ async function handleCreateTab() {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  font-size: 20px;
+  font-size: var(--ch-font-xl);
   line-height: 1;
   transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast);
 }
@@ -1376,14 +1413,14 @@ async function handleCreateTab() {
 
 .mobile-app-menu-panel {
   position: absolute;
-  top: calc(100% + 7px);
+  top: calc(100% + var(--ch-space-2));
   right: 0;
   z-index: 1200;
   width: 184px;
   max-height: min(560px, calc(100dvh - 96px));
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 6px;
+  padding: var(--ch-space-2);
   border: 1px solid var(--ch-color-border-strong);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-glass);
@@ -1398,13 +1435,14 @@ async function handleCreateTab() {
   min-height: 34px;
   display: flex;
   align-items: center;
-  padding: 5px 8px;
+  padding: var(--ch-space-1) var(--ch-space-2);
   border: 1px solid transparent;
   border-radius: var(--ch-radius-sm);
   background: transparent;
   color: var(--ch-color-text);
-  font-size: 12px;
-  font-weight: 600;
+  font-size: var(--ch-font-sm);
+  font-weight: var(--ch-weight-semibold);
+  line-height: var(--ch-leading-tight);
   text-align: left;
   cursor: pointer;
 }
@@ -1420,16 +1458,17 @@ async function handleCreateTab() {
 }
 
 .mobile-app-menu-item--mode + .mobile-app-menu-item:not(.mobile-app-menu-item--mode) {
-  margin-top: 4px;
+  margin-top: var(--ch-space-1);
 }
 
 .mobile-app-menu-item--mode strong {
   border-radius: 999px;
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
-  font-size: 10px;
+  font-size: var(--ch-font-xs);
+  font-weight: var(--ch-weight-medium);
   line-height: 1;
-  padding: 4px 7px;
+  padding: 2px var(--ch-space-2);
   text-transform: uppercase;
 }
 
@@ -1453,7 +1492,7 @@ async function handleCreateTab() {
   width: 14px;
   pointer-events: none;
   opacity: 0;
-  transition: opacity 0.2s;
+  transition: opacity var(--ch-motion-standard);
   z-index: 2;
 }
 
@@ -1478,7 +1517,7 @@ async function handleCreateTab() {
 .tabs {
   display: flex;
   align-items: flex-end;
-  gap: 6px;
+  gap: var(--ch-space-2);
   overflow-x: auto;
   overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
@@ -1495,13 +1534,13 @@ async function handleCreateTab() {
 .tab {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--ch-space-2);
   height: 30px;
   box-sizing: border-box;
   background-color: var(--ch-color-surface-control);
   border: 1px solid var(--ch-color-border-muted);
   border-radius: var(--ch-radius-md);
-  padding: 0 10px;
+  padding: 0 var(--ch-space-3);
   cursor: pointer;
   user-select: none;
   flex: 0 0 auto;
@@ -1545,7 +1584,7 @@ async function handleCreateTab() {
 
 .tab-name {
   color: var(--ch-color-text);
-  font-size: 14px;
+  font-size: var(--ch-font-md);
   max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1557,10 +1596,10 @@ async function handleCreateTab() {
   background: transparent;
   border: none;
   color: var(--ch-color-text);
-  font-size: 14px;
+  font-size: var(--ch-font-md);
   outline: 1px solid var(--ch-color-accent);
-  padding: 2px 4px;
-  border-radius: 2px;
+  padding: var(--ch-space-1);
+  border-radius: var(--ch-radius-sm);
   width: 120px;
 }
 
@@ -1572,7 +1611,7 @@ async function handleCreateTab() {
   /* Subtle surface ring to separate the dot from the tab background,
      matching the treatment on agent avatar status dots. No colored glow. */
   box-shadow: 0 0 0 1.5px var(--ch-color-surface);
-  transition: background-color 120ms ease;
+  transition: background-color var(--ch-motion-fast);
 }
 
 .tab-indicator[data-status='idle'] {
@@ -1594,22 +1633,25 @@ async function handleCreateTab() {
 .pane-indicator {
   background-color: var(--ch-color-accent);
   color: var(--ch-color-text-inverse);
-  font-size: 10px;
-  font-weight: bold;
-  padding: 1px 5px;
-  border-radius: 8px;
+  font-size: var(--ch-font-xs);
+  font-weight: var(--ch-weight-medium);
+  padding: 1px var(--ch-space-1);
+  border-radius: 999px;
   line-height: 1;
-  min-width: 14px;
+  min-width: var(--ch-space-4);
   text-align: center;
+  box-sizing: border-box;
 }
 
 .tab-menu-trigger {
+  width: 24px;
+  height: 24px;
   background: none;
   border: none;
   color: var(--ch-color-text-soft);
-  font-size: 16px;
+  font-size: var(--ch-font-lg);
   line-height: 1;
-  padding: 2px 6px;
+  padding: 0;
   border-radius: var(--ch-radius-sm);
   cursor: pointer;
   opacity: 0;
@@ -1623,12 +1665,14 @@ async function handleCreateTab() {
 }
 
 .tab-close {
+  width: 24px;
+  height: 24px;
   background: none;
   border: none;
   color: var(--ch-color-text-soft);
-  font-size: 17px;
+  font-size: var(--ch-font-lg);
   cursor: pointer;
-  padding: 0 4px;
+  padding: 0;
   line-height: 1;
   border-radius: var(--ch-radius-sm);
   opacity: 0;
@@ -1636,6 +1680,9 @@ async function handleCreateTab() {
     color var(--ch-motion-fast),
     background var(--ch-motion-fast),
     opacity var(--ch-motion-standard);
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .tab:hover .tab-menu-trigger,
@@ -1659,7 +1706,7 @@ async function handleCreateTab() {
 
 .tab-menu-panel {
   z-index: 1200;
-  padding: 6px;
+  padding: var(--ch-space-2);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-raised);
   border: 1px solid var(--ch-color-border);
@@ -1667,7 +1714,7 @@ async function handleCreateTab() {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  animation: tab-menu-in 120ms cubic-bezier(0.2, 0, 0, 1);
+  animation: tab-menu-in var(--ch-motion-fast);
   transform-origin: top right;
 }
 
@@ -1685,15 +1732,15 @@ async function handleCreateTab() {
 .tab-menu-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--ch-space-3);
   width: 100%;
   text-align: left;
   background: transparent;
   border: none;
   color: var(--ch-color-text);
-  font-size: 13px;
-  line-height: 1.2;
-  padding: 7px 10px;
+  font-size: var(--ch-font-md);
+  line-height: var(--ch-leading-tight);
+  padding: var(--ch-space-2) var(--ch-space-3);
   border-radius: var(--ch-radius-sm);
   cursor: pointer;
   transition: background var(--ch-motion-fast), color var(--ch-motion-fast);
@@ -1710,21 +1757,22 @@ async function handleCreateTab() {
 
 .tab-menu-item-icon {
   flex: 0 0 auto;
-  width: 16px;
+  width: var(--ch-space-4);
   text-align: center;
   color: var(--ch-color-text-muted);
-  font-size: 13px;
+  font-size: var(--ch-font-md);
+  line-height: 1;
 }
 
 .switch-env-modal {
-  width: min(480px, calc(100vw - 32px));
+  width: min(480px, calc(100vw - var(--ch-space-6)));
 }
 
 .switch-env-header {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: var(--ch-space-3);
+  margin-bottom: var(--ch-space-4);
 }
 
 .switch-env-icon {
@@ -1737,7 +1785,8 @@ async function handleCreateTab() {
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-accent-soft);
   color: var(--ch-color-accent);
-  font-size: 18px;
+  font-size: var(--ch-font-xl);
+  line-height: 1;
 }
 
 .switch-env-title-block {
@@ -1746,12 +1795,16 @@ async function handleCreateTab() {
 
 .switch-env-title-block h3 {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--ch-font-lg);
+  font-weight: var(--ch-weight-semibold);
+  line-height: var(--ch-leading-tight);
 }
 
 .switch-env-subtitle {
   margin: 2px 0 0;
-  font-size: 12px;
+  font-size: var(--ch-font-sm);
+  font-weight: var(--ch-weight-regular);
+  line-height: var(--ch-leading-tight);
   color: var(--ch-color-text-muted);
   white-space: nowrap;
   overflow: hidden;
@@ -1760,29 +1813,29 @@ async function handleCreateTab() {
 
 .switch-env-callout {
   display: flex;
-  gap: 10px;
+  gap: var(--ch-space-3);
   align-items: flex-start;
-  margin: 0 0 18px;
-  padding: 10px 12px;
+  margin: 0 0 var(--ch-space-5);
+  padding: var(--ch-space-3);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-soft, rgba(255, 255, 255, 0.04));
   border: 1px solid var(--ch-color-border-muted);
   border-left: 3px solid var(--ch-color-accent);
-  font-size: 12.5px;
-  line-height: 1.5;
+  font-size: var(--ch-font-sm);
+  line-height: var(--ch-leading-normal);
   color: var(--ch-color-text-muted);
 }
 
 .switch-env-callout-icon {
   flex: 0 0 auto;
   color: var(--ch-color-accent);
-  font-weight: 600;
-  line-height: 1.5;
+  font-weight: var(--ch-weight-semibold);
+  line-height: var(--ch-leading-normal);
 }
 
 .field-hint-inline {
   color: var(--ch-color-text-soft);
-  font-weight: 400;
+  font-weight: var(--ch-weight-regular);
 }
 
 .switch-env-submit {
@@ -1793,9 +1846,9 @@ async function handleCreateTab() {
 .switch-env-modal .checkbox-desc code,
 .switch-env-modal .form-hint code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  padding: 1px 5px;
-  border-radius: 3px;
+  font-size: var(--ch-font-sm);
+  padding: 1px var(--ch-space-1);
+  border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
 }
@@ -1806,7 +1859,7 @@ async function handleCreateTab() {
   border: 1px solid var(--ch-color-border-muted);
   box-sizing: border-box;
   color: var(--ch-color-text);
-  font-size: 18px;
+  font-size: var(--ch-font-xl);
   width: 30px;
   height: 30px;
   border-radius: var(--ch-radius-md);
@@ -1815,6 +1868,7 @@ async function handleCreateTab() {
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
+  line-height: 1;
   transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast), width 180ms cubic-bezier(0.2, 0, 0, 1), height 180ms cubic-bezier(0.2, 0, 0, 1), border-radius 180ms cubic-bezier(0.2, 0, 0, 1);
 }
 
@@ -1841,7 +1895,7 @@ async function handleCreateTab() {
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
-  padding: 16px;
+  padding: var(--ch-space-4);
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   z-index: 1000;
@@ -1854,12 +1908,12 @@ async function handleCreateTab() {
 .modal {
   background-color: var(--ch-color-surface);
   border: 1px solid var(--ch-color-border);
-  border-radius: 8px;
-  padding: 24px;
+  border-radius: var(--ch-radius-md);
+  padding: var(--ch-space-6);
   min-width: 400px;
   width: min(520px, 100%);
   max-width: 100%;
-  max-height: calc(100dvh - 32px);
+  max-height: calc(100dvh - var(--ch-space-6));
   overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
@@ -1873,7 +1927,7 @@ async function handleCreateTab() {
   max-width: 600px;
   height: 70vh;
   max-height: 600px;
-  padding: 16px;
+  padding: var(--ch-space-4);
   overflow: hidden;
 }
 
@@ -1881,7 +1935,7 @@ async function handleCreateTab() {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 16px;
+  margin-bottom: var(--ch-space-4);
   flex-shrink: 0;
 }
 
@@ -1892,25 +1946,28 @@ async function handleCreateTab() {
 .file-browser-path {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--ch-space-2);
   background-color: var(--ch-color-surface-control);
-  padding: 8px 12px;
+  padding: var(--ch-space-2) var(--ch-space-3);
   border-radius: var(--ch-radius-sm);
-  margin-bottom: 12px;
+  margin-bottom: var(--ch-space-3);
   flex-shrink: 0;
 }
 
 .path-nav-btn {
+  width: var(--ch-space-6);
+  height: var(--ch-space-6);
   background: none;
   border: none;
-  font-size: 18px;
+  font-size: var(--ch-font-xl);
   cursor: pointer;
-  padding: 4px;
+  padding: 0;
   border-radius: var(--ch-radius-sm);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   color: var(--ch-color-text);
+  line-height: 1;
   transition: background var(--ch-motion-fast), color var(--ch-motion-fast), transform var(--ch-motion-fast);
 }
 
@@ -1934,9 +1991,10 @@ async function handleCreateTab() {
   border: 1px solid var(--ch-color-border-strong);
   border-radius: var(--ch-radius-sm);
   color: var(--ch-color-text);
-  font-size: 13px;
+  font-size: var(--ch-font-md);
   font-family: monospace;
-  padding: 6px 8px;
+  padding: var(--ch-space-2) var(--ch-space-2);
+  line-height: var(--ch-leading-tight);
 }
 
 .current-path-input:focus {
@@ -1946,12 +2004,13 @@ async function handleCreateTab() {
 
 .current-path {
   color: var(--ch-color-text);
-  font-size: 13px;
+  font-size: var(--ch-font-md);
   font-family: monospace;
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  line-height: var(--ch-leading-tight);
 }
 
 .file-browser-list {
@@ -1960,15 +2019,15 @@ async function handleCreateTab() {
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-sm);
   background-color: var(--ch-color-app-bg);
-  margin-bottom: 16px;
+  margin-bottom: var(--ch-space-4);
   min-height: 200px;
 }
 
 .file-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
+  gap: var(--ch-space-2);
+  padding: var(--ch-space-2) var(--ch-space-3);
   cursor: pointer;
   color: var(--ch-color-text);
 }
@@ -1982,16 +2041,20 @@ async function handleCreateTab() {
 }
 
 .file-icon {
-  font-size: 16px;
+  width: var(--ch-space-4);
+  text-align: center;
+  font-size: var(--ch-font-md);
+  line-height: 1;
 }
 
 .file-name {
-  font-size: 14px;
+  font-size: var(--ch-font-md);
+  line-height: var(--ch-leading-tight);
 }
 
 .file-loading,
 .file-error {
-  padding: 16px;
+  padding: var(--ch-space-4);
   text-align: center;
   color: var(--ch-color-text-soft);
 }
@@ -2003,42 +2066,48 @@ async function handleCreateTab() {
 .file-browser-footer {
   display: flex;
   justify-content: flex-end;
-  gap: 12px;
+  gap: var(--ch-space-3);
   flex-shrink: 0;
 }
 
 .modal h3 {
-  margin: 0 0 20px 0;
+  margin: 0 0 var(--ch-space-5) 0;
   color: var(--ch-color-text);
-  font-size: 18px;
+  font-size: var(--ch-font-xl);
+  font-weight: var(--ch-weight-semibold);
+  line-height: var(--ch-leading-tight);
 }
 
 .confirm-message {
   color: var(--ch-color-text);
-  font-size: 14px;
-  margin: 0 0 24px 0;
+  font-size: var(--ch-font-md);
+  line-height: var(--ch-leading-normal);
+  margin: 0 0 var(--ch-space-6) 0;
 }
 
 .form-group {
-  margin-bottom: 16px;
+  margin-bottom: var(--ch-space-4);
   position: relative;
 }
 
 .form-group label {
   display: block;
   color: var(--ch-color-text);
-  margin-bottom: 6px;
-  font-size: 14px;
+  margin-bottom: var(--ch-space-2);
+  font-size: var(--ch-font-md);
+  font-weight: var(--ch-weight-medium);
+  line-height: var(--ch-leading-tight);
 }
 
 .form-group input {
   width: 100%;
-  padding: 10px 12px;
+  padding: var(--ch-space-3) var(--ch-space-3);
   background-color: var(--ch-color-surface-control);
   border: 1px solid var(--ch-color-border-strong);
   border-radius: var(--ch-radius-sm);
   color: var(--ch-color-text);
-  font-size: 14px;
+  font-size: var(--ch-font-md);
+  line-height: var(--ch-leading-tight);
   box-sizing: border-box;
 }
 
@@ -2050,24 +2119,26 @@ async function handleCreateTab() {
 
 .form-error {
   color: var(--ch-color-danger);
-  font-size: 12px;
-  margin: 6px 0 0 0;
+  font-size: var(--ch-font-sm);
+  line-height: var(--ch-leading-tight);
+  margin: var(--ch-space-2) 0 0 0;
 }
 
 .form-hint {
   color: var(--ch-color-text-soft);
-  font-size: 12px;
-  margin: 6px 0 0 0;
+  font-size: var(--ch-font-sm);
+  line-height: var(--ch-leading-tight);
+  margin: var(--ch-space-2) 0 0 0;
 }
 
 .segmented-control {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px;
+  gap: var(--ch-space-1);
   background-color: var(--ch-color-surface-sunken);
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-sm);
-  padding: 4px;
+  padding: var(--ch-space-1);
 }
 
 .segment-button {
@@ -2076,8 +2147,10 @@ async function handleCreateTab() {
   border-radius: var(--ch-radius-sm);
   color: var(--ch-color-text-muted);
   cursor: pointer;
-  font-size: 14px;
-  padding: 8px 10px;
+  font-size: var(--ch-font-md);
+  font-weight: var(--ch-weight-medium);
+  line-height: var(--ch-leading-tight);
+  padding: var(--ch-space-2) var(--ch-space-3);
   transition: background var(--ch-motion-fast), color var(--ch-motion-fast);
 }
 
@@ -2093,12 +2166,13 @@ async function handleCreateTab() {
 
 .select-input {
   width: 100%;
-  padding: 10px 12px;
+  padding: var(--ch-space-3) var(--ch-space-3);
   background-color: var(--ch-color-surface-control);
   border: 1px solid var(--ch-color-border-strong);
   border-radius: var(--ch-radius-sm);
   color: var(--ch-color-text);
-  font-size: 14px;
+  font-size: var(--ch-font-md);
+  line-height: var(--ch-leading-tight);
   box-sizing: border-box;
   cursor: pointer;
   transition: border-color var(--ch-motion-fast);
@@ -2126,9 +2200,11 @@ async function handleCreateTab() {
   border-top-right-radius: var(--ch-radius-sm);
   border-bottom-right-radius: var(--ch-radius-sm);
   color: var(--ch-color-text);
-  padding: 0 12px;
+  padding: 0 var(--ch-space-3);
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--ch-font-md);
+  font-weight: var(--ch-weight-medium);
+  line-height: var(--ch-leading-tight);
   display: inline-flex;
   align-items: center;
   transition: background var(--ch-motion-fast);
@@ -2147,7 +2223,7 @@ async function handleCreateTab() {
 .checkbox-label {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--ch-space-1);
   cursor: pointer;
 }
 
@@ -2157,32 +2233,34 @@ async function handleCreateTab() {
 }
 
 .checkbox-input {
-  margin-right: 8px;
-  width: 16px;
-  height: 16px;
+  margin-right: var(--ch-space-2);
+  width: var(--ch-space-4);
+  height: var(--ch-space-4);
   cursor: pointer;
 }
 
 .checkbox-text {
   color: var(--ch-color-text);
-  font-size: 14px;
-  font-weight: 500;
+  font-size: var(--ch-font-md);
+  font-weight: var(--ch-weight-medium);
+  line-height: var(--ch-leading-tight);
 }
 
 .checkbox-desc {
   color: var(--ch-color-text-soft);
-  font-size: 12px;
-  margin-left: 24px;
+  font-size: var(--ch-font-sm);
+  line-height: var(--ch-leading-normal);
+  margin-left: var(--ch-space-6);
 }
 
 .env-editor {
-  gap: 8px;
+  gap: var(--ch-space-2);
 }
 
 .env-preset-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
+  gap: var(--ch-space-2);
 }
 
 .env-manage-button {
@@ -2192,11 +2270,11 @@ async function handleCreateTab() {
 .env-template-panel {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--ch-space-2);
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-muted);
-  padding: 10px;
+  padding: var(--ch-space-3);
 }
 
 .env-preset-name {
@@ -2208,11 +2286,12 @@ async function handleCreateTab() {
   min-height: 92px;
   resize: vertical;
   font-family: monospace !important;
-  line-height: 1.45;
+  font-size: var(--ch-font-sm);
+  line-height: var(--ch-leading-normal);
 }
 
 .env-textarea-preview {
-  margin-top: 8px;
+  margin-top: var(--ch-space-2);
   width: 100%;
   resize: none;
   min-height: 60px;
@@ -2220,33 +2299,36 @@ async function handleCreateTab() {
   cursor: default;
   white-space: pre-wrap;
   font-family: monospace !important;
+  font-size: var(--ch-font-sm);
+  line-height: var(--ch-leading-normal);
 }
 
 .env-editor-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
+  gap: var(--ch-space-2);
 }
 
 .modal-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 12px;
-  margin-top: 24px;
+  gap: var(--ch-space-3);
+  margin-top: var(--ch-space-6);
 }
 
 .btn {
-  padding: 10px 20px;
+  padding: var(--ch-space-3) var(--ch-space-5);
   border: none;
   border-radius: var(--ch-radius-sm);
-  font-size: 14px;
+  font-size: var(--ch-font-md);
+  font-weight: var(--ch-weight-medium);
+  line-height: var(--ch-leading-tight);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  font-weight: 500;
-  transition: background-color 0.15s, transform 0.08s, opacity 0.15s;
+  gap: var(--ch-space-2);
+  transition: background-color var(--ch-motion-standard), transform 80ms ease, opacity var(--ch-motion-standard);
 }
 
 .btn:hover:not(:disabled) {
@@ -2263,8 +2345,8 @@ async function handleCreateTab() {
 }
 
 .btn-small {
-  padding: 6px 12px;
-  font-size: 12px;
+  padding: var(--ch-space-2) var(--ch-space-3);
+  font-size: var(--ch-font-sm);
 }
 
 .btn-secondary {
@@ -2299,26 +2381,26 @@ async function handleCreateTab() {
   .modal-overlay {
     align-items: flex-start;
     justify-content: flex-start;
-    padding: 10px;
+    padding: var(--ch-space-3);
   }
 
   .modal {
     min-width: 0;
     width: 100%;
-    max-height: calc(100dvh - 20px);
-    padding: 16px;
-    border-radius: 6px;
+    max-height: calc(100dvh - var(--ch-space-5));
+    padding: var(--ch-space-4);
+    border-radius: var(--ch-radius-sm);
   }
 
   .file-browser-modal {
     min-width: 0;
     width: 100%;
-    height: calc(100dvh - 20px);
-    max-height: calc(100dvh - 20px);
+    height: calc(100dvh - var(--ch-space-5));
+    max-height: calc(100dvh - var(--ch-space-5));
   }
 
   .file-browser-path {
-    padding: 8px;
+    padding: var(--ch-space-2);
   }
 
   .modal-actions,
@@ -2326,7 +2408,7 @@ async function handleCreateTab() {
     position: sticky;
     bottom: -1px;
     background-color: var(--ch-color-surface);
-    padding-top: 12px;
+    padding-top: var(--ch-space-3);
   }
 
   .modal-actions .btn,
@@ -2349,12 +2431,12 @@ async function handleCreateTab() {
 .toast-stack {
   position: fixed;
   top: 72px;
-  right: 16px;
+  right: var(--ch-space-4);
   z-index: 1000;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  max-width: min(420px, calc(100vw - 32px));
+  gap: var(--ch-space-2);
+  max-width: min(420px, calc(100vw - var(--ch-space-6)));
   pointer-events: none;
 }
 
@@ -2362,18 +2444,18 @@ async function handleCreateTab() {
   position: relative;
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  padding: 10px 12px 10px 14px;
+  gap: var(--ch-space-3);
+  padding: var(--ch-space-3) var(--ch-space-3) var(--ch-space-3) calc(var(--ch-space-3) + var(--ch-space-1));
   border-radius: var(--ch-radius-md);
   border: 1px solid var(--ch-color-border);
   background: var(--ch-color-surface-raised);
   color: var(--ch-color-text);
   box-shadow: var(--ch-shadow-popover);
-  font-size: 13px;
-  line-height: 1.45;
+  font-size: var(--ch-font-md);
+  line-height: var(--ch-leading-normal);
   overflow: hidden;
   pointer-events: auto;
-  animation: toast-in 180ms cubic-bezier(0.2, 0, 0, 1);
+  animation: toast-in var(--ch-motion-standard);
 }
 
 @keyframes toast-in {
@@ -2405,8 +2487,8 @@ async function handleCreateTab() {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 13px;
-  font-weight: 700;
+  font-size: var(--ch-font-md);
+  font-weight: var(--ch-weight-semibold);
   line-height: 1;
 }
 
@@ -2419,16 +2501,21 @@ async function handleCreateTab() {
 
 .toast__close {
   flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
   background: transparent;
   border: none;
   color: var(--ch-color-text-subtle);
-  font-size: 16px;
+  font-size: var(--ch-font-lg);
   line-height: 1;
-  padding: 2px;
+  padding: 0;
   margin-top: -1px;
   cursor: pointer;
-  transition: color var(--ch-motion-fast);
-  border-radius: 3px;
+  transition: color var(--ch-motion-fast), background var(--ch-motion-fast);
+  border-radius: var(--ch-radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .toast__close:hover {
@@ -2479,9 +2566,9 @@ async function handleCreateTab() {
 
 @media (max-width: 768px) {
   .toast-stack {
-    top: 12px;
-    right: 8px;
-    left: 8px;
+    top: var(--ch-space-3);
+    right: var(--ch-space-2);
+    left: var(--ch-space-2);
     max-width: none;
   }
 }

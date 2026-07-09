@@ -5,6 +5,57 @@
 
 ## Unreleased
 
+### fix(ui): apply design tokens to TabBar (tab strip, menus, modals, toasts)
+
+- **What**: retrofitted `frontend/src/components/TabBar.vue` (terminal tab
+  strip, add-tab trigger, mobile app menu, teleported tab-menu,
+  create/duplicate/switch-env/file-browser modals, and toast stack — ~201
+  hardcoded px values in `<style scoped>`) onto the design-token scale.
+  Replaced padding/margin/gap/spacing with `--ch-space-{1..6}`, font-size
+  with `--ch-font-{xs,sm,md,lg,xl}`, line-height with `--ch-leading-tight`
+  (single-line controls/tabs/menus/buttons) and `--ch-leading-normal`
+  (body/callouts/toasts/form hints), `font-weight: bold` (`.pane-indicator`)
+  and `font-weight: 700` (`.toast__icon`) with `--ch-weight-medium` /
+  `--ch-weight-semibold`, border-radius `8/6/3/2px` values with
+  `--ch-radius-md/sm`, and transition timings with `--ch-motion-fast`/
+  `--ch-motion-standard` where appropriate. Normalized icon hit-targets:
+  `.tab-menu-trigger`, `.tab-close`, `.toast__close` fixed at 24×24 with
+  inline-flex center alignment and glyphs at `--ch-font-lg`; `.add-tab` /
+  `.mobile-app-menu-trigger` kept at the existing 30px toolbar-icon
+  convention with explicit `line-height: 1` and `--ch-font-xl`;
+  `.path-nav-btn` normalized to 32×32 (space-6); `.tab-menu-item-icon`,
+  `.file-icon` at 16px (space-4). Added a short doc comment at the top of
+  `<style scoped>` documenting which hardcoded px remain as functional
+  constants (30px tab controls, 36px switch-env glyph, 18px toast icon, 24px
+  close/menu triggers, 7×7 status dot, 999px pills, 1/2/3px borders/rings/
+  indicators, modal/panel functional widths, viewport math, 14px tab-fade
+  mask width, 180ms cubic-bezier collapse/expand curves, keyframe px, 1px
+  glyph offsets, media breakpoints).
+- **Why**: TabBar carried pre-token-scale debt across all its sub-surfaces
+  — mixed 2/4/6/7/8/10/12/14/16/18/20/24px paddings, 10/12/12.5/13/14/16/
+  17/18/20px font sizes, `bold`/700 shouting weights, mismatched 8/6/3/2px
+  radii, and misaligned icon boxes (16px ⋯ vs 17px × vs 18px +).
+  Harmonizing with the scale matches the treatment already applied to
+  EnvPresetManager, AgentConfigFields, AgentStatusFloatingPanel,
+  MobileControls, and NetworkAccessMenu.
+- **How**: styling-only change within a single SFC. No DOM, script, prop,
+  event, ref, teleport-target, z-index, or template changes. `--ch-shadow-
+  popover` was already correctly referenced (no undefined token);
+  `.tab-menu-panel` uses `--ch-shadow-popover`, `.toast` uses
+  `--ch-shadow-popover`, `.mobile-app-menu-panel` uses `--ch-shadow-soft`
+  (all pre-existing and correctly referenced). Retained the functional
+  toast-timer shrink animation (progress indicator, not decorative pulse)
+  and the one-shot tab-menu-in/toast-in entrances; added no new animations,
+  shadows, colors, or radii.
+- **Validation**: `pnpm lint` clean (eslint --fix, zero warnings/errors);
+  `pnpm build` clean (vue-tsc + vite, 397.7 KB JS / 177.4 KB CSS). grep
+  confirms zero hardcoded `font-weight: 700/800/bold` or `font-size: Npx`
+  in TabBar.vue source; built CSS audit confirms all six spacing, all five
+  type, both leading, and all three weight tokens are referenced.
+  Dev-server smoke on port 5182 (proxying backend :8173) confirms index
+  loads, proxy reaches `/api/system/network-access`, and the CSS bundles
+  without undefined-token failures.
+
 ### fix(ui): apply design tokens to NetworkAccessMenu (icon align, weights, density, shadow fix)
 
 - **What**: retrofitted `frontend/src/components/NetworkAccessMenu.vue`
