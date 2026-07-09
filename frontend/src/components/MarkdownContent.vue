@@ -121,8 +121,6 @@ function handleClick(event: MouseEvent) {
  *     would shift code-block/quote density)
  *   • ul/ol padding-left 20px (list indent distance; no token)
  *   • th/td padding 6px 8px (cell density; 6px has no clean token)
- *   • Inline-code border-radius 4px (--ch-radius-sm=5px differs)
- *   • pre border-radius 6px (--ch-radius-md=7px differs)
  *   • Body line-height 1.55 (slightly above --ch-leading-normal=1.5) and
  *     compact line-height 1.45 (slightly below) — prose-reading tweaks
  *   • 1/2/3px borders, underline offset, and accent bar (stroke/affordance
@@ -190,7 +188,7 @@ function handleClick(event: MouseEvent) {
 
 .markdown-content :deep(code) {
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px; /* --ch-radius-sm=5px differs; keep literal */
+  border-radius: var(--ch-radius-sm);
   background: var(--ch-color-canvas);
   color: var(--ch-color-text-code);
   padding: 1px var(--ch-space-1);
@@ -201,7 +199,7 @@ function handleClick(event: MouseEvent) {
 .markdown-content :deep(pre) {
   overflow-x: auto;
   border: 1px solid var(--ch-color-surface-control-active);
-  border-radius: 6px; /* --ch-radius-md=7px differs; keep literal */
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-canvas);
   padding: 10px; /* off-scale; nearest 8/12 shifts code-block density */
 }
