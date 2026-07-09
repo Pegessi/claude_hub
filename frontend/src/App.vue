@@ -500,6 +500,7 @@ onUnmounted(() => {
   --ch-color-warning: #facc15;
   --ch-color-warning-strong: #f59e0b;
   --ch-color-warning-bg: rgba(250, 204, 21, 0.14);
+  --ch-color-on-warning: #1a1a1a;
   --ch-color-attention: #c084fc;
   --ch-color-attention-strong: #a855f7;
   --ch-color-attention-bg: rgba(192, 132, 252, 0.15);
@@ -631,6 +632,7 @@ onUnmounted(() => {
   --ch-color-warning: #906018;
   --ch-color-warning-strong: #81530f;
   --ch-color-warning-bg: #f1e8d6;
+  --ch-color-on-warning: #fdfdfc;
   --ch-color-attention: #6d5b8b;
   --ch-color-attention-strong: #5f4f7d;
   --ch-color-attention-bg: #ece8f1;
@@ -751,7 +753,7 @@ textarea {
 
 .auth-error-banner__retry {
   background: var(--ch-color-warning);
-  color: #1a1a1a;
+  color: var(--ch-color-on-warning);
   border: 1px solid var(--ch-color-warning-strong);
   border-radius: var(--ch-radius-sm);
   padding: 4px 10px;
