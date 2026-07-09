@@ -5,6 +5,29 @@
 
 ## Unreleased
 
+### fix: "Clear context" now applies to the reviewer, not just the worker
+
+- **What**: when a task has the **"Clear context"** checkbox ticked
+  (`task.clear_context`), the independent reviewer session now receives `/clear`
+  before its review prompt — matching the worker/orchestrator behavior. Before
+  this fix the flag was honored only on the worker dispatch path, so the reviewer
+  ran with stale context.
+- **Why**: the reviewer's `/clear` decision keyed solely off its own prior-review
+  history (`previous_review_task_id`), never reading the user's per-task
+  `clear_context` choice. A fresh reviewer (no prior review) or a same-task
+  re-review therefore skipped `/clear` even when the user explicitly asked to
+  clear context.
+- **How**: in `_request_task_review` (`workspace_manager/_reports.py`) the clear
+  decision now ORs the user flag with the existing unrelated-prior-review
+  heuristic: `should_clear_context = bool(task.clear_context) or (previous_review_task_id is not None and previous_review_task_id != task.id)`.
+  Default behavior is preserved when the flag is unset (fresh reviewer pays no
+  round-trip; same-task re-review keeps context; unrelated prior review still
+  clears).
+- **Validation**: `black`/`isort`/`mypy` clean on touched files; full
+  `tests/test_workspaces.py` **119 passed** including a new regression test
+  (`test_reviewer_honors_task_clear_context_flag`) asserting a fresh reviewer
+  receives `/clear` before the review prompt when `clear_context` is set.
+
 ### feat: resident behavior — run-now, next-run visibility, managed periodic tasks
 
 - **What**: the per-workspace resident agent gains three interaction
