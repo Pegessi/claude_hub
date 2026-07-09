@@ -5,6 +5,8 @@
 
 ## Unreleased
 
+- style(ui): snap MobileControls off-token motion durations to the design scale (`--ch-motion-fast` 120ms / `--ch-motion-standard` 180ms): bottom-sheet enter/leave 140ms → `--ch-motion-standard`; control-key press feedback 80ms → `--ch-motion-fast`; toggle-FAB press 100ms → `--ch-motion-fast`. Transition property lists preserved (all four/three properties genuinely animate bg-color+scale+shadow in :active/.pressed states); the overlay `transition: transform 180ms cubic-bezier(...)` is untouched. Pure CSS duration tokenization; template/script/behavior unchanged; press feedback stays within the fast UI-response band (≤120ms).
+
 - docs(ui): refresh `docs/working-logs/2026-07-10-minimalist-ui-audit.md` (single-owner pass) — split remaining multi-owner rows (#2→avatar/#2b-AWV; #14b→App/#14c-AWV; #22 avatar-only; #24 merged into #14b) so every finding names exactly one owning file; restore the exactly-3 bounded follow-ups section (Task 1: AgentAvatar palette/radii/gradients; Task 2: MobileControls motion snap; Task 3: EnvPresetManager weight+radii) with deferred bundles and small standalone tweaks listed separately for traceability; mark LoginView (ce5b139) and LoadingButton (0f02b39) as SHIPPED. Read-only doc; no source edits.
 
 - a11y(ui): add intrinsic `:focus-visible` outline ring to the shared `LoadingButton` primitive (`outline:2px solid var(--ch-color-accent-ring-strong); outline-offset:2px; border-radius:inherit;`) so every consumer (login, logout, env-save, workspace CTAs) gets a visible keyboard-focus indicator automatically, even when a parent forgets to supply one. CSS-only; no template/script/prop/behavior change; zero visual impact outside keyboard navigation.

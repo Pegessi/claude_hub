@@ -341,7 +341,7 @@ onUnmounted(() => {
 
 .mobile-controls-panel-enter-active,
 .mobile-controls-panel-leave-active {
-  transition: opacity 140ms ease, transform 140ms ease;
+  transition: opacity var(--ch-motion-standard), transform var(--ch-motion-standard);
   transform-origin: right bottom;
   will-change: opacity, transform;
 }
@@ -386,7 +386,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   text-align: center;
-  transition: background-color 0.08s, transform 0.08s, box-shadow 0.08s, border-color 0.08s;
+  transition: background-color var(--ch-motion-fast), transform var(--ch-motion-fast), box-shadow var(--ch-motion-fast), border-color var(--ch-motion-fast);
   touch-action: manipulation;
   flex-shrink: 0;
   box-sizing: border-box;
@@ -467,7 +467,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   box-shadow: 0 4px 12px var(--ch-shadow-color-soft);
-  transition: background-color 0.1s, transform 0.1s, box-shadow 0.1s;
+  transition: background-color var(--ch-motion-fast), transform var(--ch-motion-fast), box-shadow var(--ch-motion-fast);
 }
 
 .toggle-btn:hover {
