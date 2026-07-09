@@ -91,11 +91,13 @@ async def switch_tab_env(
     req: SwitchEnvRequest,
     current_user: User = Depends(get_current_user),
 ) -> TerminalTab:
-    """Hot-swap environment variables and/or solo mode for a live local Claude tab.
+    """Hot-swap environment variables and/or solo mode for a live local Claude/Codex tab.
 
-    Rewrites the launch wrapper/settings and uses ``tmux respawn-pane -k`` to
-    relaunch Claude with ``--resume`` so conversation history is preserved.
-    Returns 400 for non-Claude, remote, or stopped tabs.
+    Rewrites the launch wrapper (and settings.json for Claude) and uses
+    ``tmux respawn-pane -k`` to relaunch the agent with resume flags so
+    conversation history is preserved (``--resume`` for Claude,
+    ``codex resume --last`` for Codex).
+    Returns 400 for non-Claude/Codex, remote, or stopped tabs.
     """
     logger.info(
         "switch_env for tab %s: %d env vars, solo_mode=%s, user=%s",

@@ -2821,7 +2821,17 @@
             >
             <span>Solo Mode</span>
           </label>
-          <p class="modal-hint">
+          <p
+            v-if="switchEnvAgent?.agent_type === 'codex'"
+            class="modal-hint"
+          >
+            Relaunch with <code>--ask-for-approval never</code> and
+            <code>--sandbox danger-full-access</code>.
+          </p>
+          <p
+            v-else
+            class="modal-hint"
+          >
             Relaunch with <code>IS_SANDBOX=1</code> and
             <code>--dangerously-skip-permissions</code>.
           </p>
@@ -4243,10 +4253,10 @@ function canDeleteAgent(agent: ManagedSession) {
 }
 
 function canSwitchAgentEnv(agent: ManagedSession) {
-  // Switch-env is Claude-only, requires a live local tmux session (not
-  // offline/stopped), and is only available on local targets (remote sessions
-  // aren't supported by the backend respawn flow).
-  return agent.agent_type === 'claude'
+  // Switch-env supports Claude and Codex, requires a live local tmux session
+  // (not offline/stopped), and is only available on local targets (remote
+  // sessions aren't supported by the backend respawn flow).
+  return (agent.agent_type === 'claude' || agent.agent_type === 'codex')
     && agent.target === 'local'
     && agent.runtime_status !== 'offline'
 }

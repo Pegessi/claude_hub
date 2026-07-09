@@ -115,7 +115,7 @@
           <span>Duplicate</span>
         </LoadingButton>
         <LoadingButton
-          v-if="openTabMenuTab && openTabMenuTab.agent_type === 'claude'"
+          v-if="openTabMenuTab && (openTabMenuTab.agent_type === 'claude' || openTabMenuTab.agent_type === 'codex')"
           type="button"
           class="tab-menu-item"
           role="menuitem"
@@ -564,7 +564,17 @@
                 >
                 <span class="checkbox-text">Solo Mode</span>
               </div>
-              <span class="checkbox-desc">
+              <span
+                v-if="switchEnvTab?.agent_type === 'codex'"
+                class="checkbox-desc"
+              >
+                Relaunch with <code>--ask-for-approval never</code> and
+                <code>--sandbox danger-full-access</code>.
+              </span>
+              <span
+                v-else
+                class="checkbox-desc"
+              >
                 Relaunch with <code>IS_SANDBOX=1</code> and
                 <code>--dangerously-skip-permissions</code>.
               </span>

@@ -28,6 +28,30 @@
   (`test_reviewer_honors_task_clear_context_flag`) asserting a fresh reviewer
   receives `/clear` before the review prompt when `clear_context` is set.
 
+### fix: env restart (switch-env) solo mode now works for Claude; add Codex env restart with solo mode
+
+- **What**: the **Switch Env** ⚙ hot-swap action previously had two issues.
+  (1) It was Claude-only — Codex tabs had no way to change env / toggle solo
+  mode without deleting and recreating the tab. (2) The relaunch command for
+  Claude already correctly propagated solo mode (`IS_SANDBOX=1 claude
+  --dangerously-skip-permissions`), verified by existing tests.
+- **Backend**: `TTYDProcess.switch_env()` now supports both `AgentType.CLAUDE`
+  and `AgentType.CODEX`. For Codex it respawns with `codex resume --last ||
+  <fresh>` (solo: `codex --ask-for-approval never --sandbox danger-full-access`),
+  matching the existing `_solo_command()` / `_agent_start_command()` launch
+  semantics. Unsupported agent types (cursor, terminal) and remote tabs still
+  raise 400 as before. Docstrings updated on `switch_env`, the manager-level
+  method, the API endpoint, and `SwitchEnvRequest`.
+- **Frontend**: the gear / Switch Env button now appears for both Claude and
+  Codex tabs in TabBar and AgentWorkspaceView (`canSwitchAgentEnv` updated).
+  The solo-mode help text in the modal is agent-type-aware: Codex shows
+  `--ask-for-approval never --sandbox danger-full-access`; Claude shows
+  `IS_SANDBOX=1` / `--dangerously-skip-permissions`.
+- **Tests**: added `_make_codex_process` helper and four new test cases
+  covering non-solo respawn, solo respawn, solo toggle, and rollback on tmux
+  failure for Codex. Updated the unsupported-agent-type test to assert on
+  cursor/terminal instead of codex. All 70 ttyd_manager tests pass.
+
 ### feat: resident behavior — run-now, next-run visibility, managed periodic tasks
 
 - **What**: the per-workspace resident agent gains three interaction
