@@ -5,6 +5,8 @@
 
 ## Unreleased
 
+- style(ui): cap App.vue heaviest weight at semibold (600) — replace the three `font-weight: 700` declarations (`.auth-error-banner__retry`, `.mode-button`, `.theme-switch`) with `var(--ch-weight-semibold)` per minimalist-audit Finding #1 (calm-hierarchy principle; the token's own comment states 600 is "preferred over 700"). Intentional small visual softening on three chrome controls; :root token values, deferred box-shadow literals, and mode-bar transitions untouched. CSS-only; template/script byte-identical.
+
 - style(ui): tokenize `EnvPresetManager.vue` form weight + radii — replace `font-weight: normal` with `var(--ch-weight-regular)` (finding #9, exact-value swap, no visual change); snap the four form-input/btn/badge `border-radius: 4px` to `var(--ch-radius-sm)`=5px and the two container-surface `border-radius: 6px` (sidebar, empty-state) to `var(--ch-radius-md)`=7px (finding #19, audit-prescribed 1px snap). 7 one-line CSS substitutions; template+script byte-identical; CSS-only.
 
 - style(ui): tokenize `TerminalPane.vue` pane-tab font-weight — the literal `font-weight: 500` on `.pane-tab-name` now uses `var(--ch-weight-medium)` (=500); zero visual change. CSS-only; no template/script/prop changes.

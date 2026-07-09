@@ -742,7 +742,7 @@ textarea {
   border-radius: var(--ch-radius-sm);
   padding: 4px 10px;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
   cursor: pointer;
   transition: background var(--ch-motion-fast);
 }
@@ -803,7 +803,7 @@ textarea {
   cursor: pointer;
   padding: 0 12px;
   font-size: 13px;
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
   transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast);
 }
 
@@ -840,7 +840,7 @@ textarea {
   cursor: pointer;
   padding: 3px;
   font-size: 11px;
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
 }
 
 .theme-switch-label {
