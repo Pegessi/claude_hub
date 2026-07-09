@@ -465,6 +465,33 @@ onUnmounted(() => {
   --ch-radius-lg: 10px;
   --ch-motion-fast: 120ms ease;
   --ch-motion-standard: 180ms ease;
+
+  /* ------------------------------------------------------------------
+     Spacing scale (4px base). Use for layout rhythm — gutters, padding,
+     gaps between major blocks. Tighter intra-component spacing (chip
+     inner padding, icon-to-text gaps, dot-to-label gaps) may stay as
+     local 4-6px values where snapping to a whole step would look loose. */
+  --ch-space-1: 4px;   /* micro: icon-to-text gap, focus-ring offset */
+  --ch-space-2: 8px;   /* tight: gap between related chips/buttons */
+  --ch-space-3: 12px;  /* base: column-header padding, inter-button gap, default gutter */
+  --ch-space-4: 16px;  /* roomy: section padding, board outer padding, header padding */
+  --ch-space-5: 24px;  /* generous: major section separation */
+  --ch-space-6: 32px;  /* large: hero / empty-state padding */
+
+  /* ------------------------------------------------------------------
+     Type scale. Calm, minimalist — 5 sizes, no display/hero scale.
+     Pair with --ch-leading-* and --ch-weight-* below. */
+  --ch-font-xs: 11px;          /* chips, count pills, meta/supporting labels */
+  --ch-font-sm: 12px;          /* body text, buttons, form labels, summary strip */
+  --ch-font-md: 13px;          /* column headers, secondary headings, card titles */
+  --ch-font-lg: 15px;          /* section/sub heads */
+  --ch-font-xl: 18px;          /* page-level heading (workspace h1) */
+  --ch-leading-tight: 1.25;    /* headings: dense, multi-line safe */
+  --ch-leading-normal: 1.5;    /* body/paragraph: comfortable reading rhythm */
+  --ch-weight-regular: 400;    /* body, placeholder, meta */
+  --ch-weight-medium: 500;     /* subtle emphasis, buttons */
+  --ch-weight-semibold: 600;   /* headings, numeric counts — preferred over 700 for calm hierarchy */
+
   --ch-tab-fade-start: #1e1e1e;
   --ch-tab-fade-end: rgba(30, 30, 30, 0);
   --ch-terminal-bg: #1f1f1f;

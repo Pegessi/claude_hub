@@ -5,6 +5,33 @@
 
 ## Unreleased
 
+### feat(design): spacing + type scale tokens; applied to board shell
+
+- **What**: added a minimal, 4px-base design-token foundation for spacing
+  (`--ch-space-1..6` = 4/8/12/16/24/32px) and typography
+  (`--ch-font-xs/sm/md/lg/xl`, `--ch-leading-tight/normal`,
+  `--ch-weight-regular/medium/semibold`) in `frontend/src/App.vue :root`,
+  alongside the existing color/radius/shadow/motion tokens, and applied them
+  to the board shell: `.workspace-header` (page title block + action row),
+  `.workspace-summary-strip` (working/queued/lessons chips and column-tab
+  chips), `.workspace-agent-status` outer panel, `.board` grid, `.task-column`
+  chrome headers, `.column-header` (title + count pill), and `.board-skeleton`
+  loading state. Shell headings demoted from 700 to 600 (semibold) for a
+  calmer hierarchy.
+- **Why**: paddings/margins/font-sizes were hardcoded ad-hoc across shell CSS
+  (4/5/6/7/8/9/10/11/12/14/16/18px), which made the UI feel unrefined and
+  blocked future migration of cards/modals onto the same system. Establishes
+  the scale first, converts the highest-visibility shell, and leaves task
+  cards (shipped in b040437) and agent-status-cards untouched so later passes
+  can migrate incrementally.
+- **How**: added ~16 tokens with one-line comments describing intended use;
+  replaced `px` values in shell selectors with `var(--ch-*)` references,
+  snapping odd values (11→12, 14→16, 7px gaps→8) to the nearest scale step.
+  No new colors, no new radii, no decorative flourishes, no backend changes.
+- **Validation**: `pnpm lint` (eslint --fix, clean); `pnpm build` (vue-tsc +
+  vite, 397.6 KB JS / 169.1 KB CSS) exits 0. Dev-server visual smoke on the
+  live backend confirms even rhythm and no shell/card regressions.
+
 ### fix(ui): board task-card polish — overflow containment, dedup duplicate chips, normalize btn-icon, tighten density
 
 - **What**: four concrete UI fixes on the board task card (and propagated to

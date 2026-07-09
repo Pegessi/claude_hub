@@ -83,7 +83,10 @@
             title="Workspace menu"
             aria-label="Workspace menu"
           >
-            ⋯
+            <span
+              class="btn-icon"
+              aria-hidden="true"
+            >⋯</span>
           </summary>
           <div class="workspace-mobile-menu-panel">
             <button
@@ -6122,23 +6125,25 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 16px 18px;
+  gap: var(--ch-space-4);
+  padding: var(--ch-space-4) calc(var(--ch-space-4) + 2px);
   border-bottom: 1px solid var(--ch-color-border-muted);
   background: var(--ch-color-surface-raised);
 }
 
 .workspace-header h1 {
-  font-size: 18px;
-  line-height: 1.2;
-  margin: 0 0 4px;
+  font-size: var(--ch-font-xl);
+  font-weight: var(--ch-weight-semibold);
+  line-height: var(--ch-leading-tight);
+  margin: 0 0 var(--ch-space-1);
   color: var(--ch-color-text-strong);
 }
 
 .workspace-header p {
   margin: 0;
   color: var(--ch-color-text-muted);
-  font-size: 12px;
+  font-size: var(--ch-font-sm);
+  line-height: var(--ch-leading-normal);
 }
 
 .workspace-title-block {
@@ -6159,7 +6164,7 @@ onUnmounted(() => {
 .agent-row-meta {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--ch-space-2);
 }
 
 .workspace-actions {
@@ -6186,11 +6191,10 @@ onUnmounted(() => {
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  font-size: 20px;
   line-height: 1;
   transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast);
 }
@@ -6203,14 +6207,14 @@ onUnmounted(() => {
 
 .workspace-mobile-menu-panel {
   position: absolute;
-  top: calc(100% + 7px);
+  top: calc(100% + var(--ch-space-2));
   right: 0;
   z-index: 80;
   width: 188px;
   max-height: min(560px, calc(100dvh - 96px));
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 6px;
+  padding: var(--ch-space-1) var(--ch-space-2);
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-raised);
@@ -6225,13 +6229,13 @@ onUnmounted(() => {
   min-height: 34px;
   display: flex;
   align-items: center;
-  padding: 5px 8px;
+  padding: var(--ch-space-1) var(--ch-space-2);
   border: 1px solid transparent;
   border-radius: var(--ch-radius-sm);
   background: transparent;
   color: var(--ch-color-text);
-  font-size: 12px;
-  font-weight: 600;
+  font-size: var(--ch-font-sm);
+  font-weight: var(--ch-weight-semibold);
   text-align: left;
   cursor: pointer;
 }
@@ -6292,8 +6296,8 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 8px 18px;
+  gap: var(--ch-space-3);
+  padding: var(--ch-space-2) calc(var(--ch-space-4) + 2px);
   border-bottom: 1px solid var(--ch-color-border-muted);
   background: var(--ch-color-canvas);
 }
@@ -6309,26 +6313,27 @@ onUnmounted(() => {
 
 .workspace-summary-primary {
   color: var(--ch-color-text-muted);
-  font-size: 12px;
+  font-size: var(--ch-font-sm);
+  line-height: var(--ch-leading-normal);
 }
 
 .summary-chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--ch-space-1);
   height: 22px;
-  padding: 0 8px;
+  padding: 0 var(--ch-space-2);
   border-radius: 999px;
   background: var(--ch-color-chip-bg-muted);
   border: 1px solid transparent;
-  font-size: 11px;
+  font-size: var(--ch-font-xs);
   white-space: nowrap;
   color: var(--ch-color-text-muted);
 }
 
 .summary-chip strong {
   color: var(--ch-color-text);
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
 }
 
 .summary-chip--accent {
@@ -6348,18 +6353,18 @@ onUnmounted(() => {
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
   cursor: pointer;
-  font-size: 11px;
-  font-weight: 400;
-  padding: 0 8px;
+  font-size: var(--ch-font-xs);
+  font-weight: var(--ch-weight-regular);
+  padding: 0 var(--ch-space-2);
   white-space: nowrap;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--ch-space-1);
   transition: border-color var(--ch-motion-fast), background var(--ch-motion-fast);
 }
 
 .summary-chip-button strong {
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
   color: var(--ch-color-text);
 }
 
@@ -6372,18 +6377,18 @@ onUnmounted(() => {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--ch-space-1);
   border: 1px solid var(--ch-color-border-muted);
   border-radius: 999px;
   background: var(--ch-color-chip-bg-muted);
   color: var(--ch-color-text-muted);
-  font-size: 11px;
-  padding: 3px 8px;
+  font-size: var(--ch-font-xs);
+  padding: 3px var(--ch-space-2);
 }
 
 .column-tab-chip strong {
   color: var(--ch-color-text);
-  font-weight: 700;
+  font-weight: var(--ch-weight-semibold);
 }
 
 /* Defensive: keep the agent-status panel from ever introducing horizontal
@@ -6392,10 +6397,10 @@ onUnmounted(() => {
   flex-shrink: 0;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 10px;
+  gap: var(--ch-space-3);
   border-bottom: 1px solid var(--ch-color-border-muted);
   background: var(--ch-color-canvas);
-  padding: 12px 18px;
+  padding: var(--ch-space-3) calc(var(--ch-space-4) + 2px);
   min-width: 0;
   overflow-x: hidden;
 }
@@ -6405,7 +6410,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--ch-space-3);
 }
 
 .agent-status-view-switch {
@@ -7257,10 +7262,10 @@ onUnmounted(() => {
   min-height: 0;
   display: grid;
   grid-template-columns: repeat(5, minmax(220px, 1fr));
-  gap: 12px;
+  gap: var(--ch-space-3);
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 14px;
+  padding: var(--ch-space-4);
 }
 
 /* Graceful loading skeleton shown over the board during a workspace switch
@@ -7272,8 +7277,8 @@ onUnmounted(() => {
   z-index: 5;
   display: grid;
   grid-template-columns: repeat(5, minmax(220px, 1fr));
-  gap: 12px;
-  padding: 14px;
+  gap: var(--ch-space-3);
+  padding: var(--ch-space-4);
   background: var(--ch-color-surface);
   overflow: hidden;
 }
@@ -7289,7 +7294,7 @@ onUnmounted(() => {
 }
 
 .board-skeleton-header {
-  padding: 11px 12px;
+  padding: var(--ch-space-3);
   border-bottom: 1px solid var(--ch-color-border-muted);
   background: var(--ch-color-surface);
 }
@@ -7396,20 +7401,22 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 11px 12px;
+  padding: var(--ch-space-3);
   border-bottom: 1px solid var(--ch-color-border-muted);
   background: var(--ch-color-surface);
 }
 
 .column-header h2 {
   color: var(--ch-color-text-strong);
-  font-size: 13px;
+  font-size: var(--ch-font-md);
+  font-weight: var(--ch-weight-semibold);
+  line-height: var(--ch-leading-tight);
 }
 
 .column-meta {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--ch-space-2);
 }
 
 .column-count {
@@ -7418,13 +7425,13 @@ onUnmounted(() => {
   justify-content: center;
   min-width: 22px;
   height: 20px;
-  padding: 0 7px;
+  padding: 0 var(--ch-space-2);
   border: 1px solid var(--ch-color-border-muted);
   border-radius: 999px;
   background: var(--ch-color-chip-bg-muted);
   color: var(--ch-color-text);
-  font-size: 11px;
-  font-weight: 700;
+  font-size: var(--ch-font-xs);
+  font-weight: var(--ch-weight-semibold);
   font-variant-numeric: tabular-nums;
 }
 
