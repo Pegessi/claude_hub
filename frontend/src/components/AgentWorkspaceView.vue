@@ -6653,7 +6653,7 @@ onUnmounted(() => {
 
 .agent-status-cli[data-kind='claude'] {
   background: rgba(217, 119, 87, 0.18);
-  color: #d97757;
+  color: var(--ch-agent-claude-fg);
 }
 
 .agent-status-cli[data-kind='codex'] {
@@ -6668,7 +6668,7 @@ onUnmounted(() => {
 
 .agent-status-cli[data-kind='terminal'] {
   background: rgba(126, 231, 135, 0.16);
-  color: #7ee787;
+  color: var(--ch-color-success);
 }
 
 .agent-status-detail {
@@ -6918,7 +6918,7 @@ onUnmounted(() => {
   padding: 1px 8px;
   border: 1px solid rgba(167, 139, 250, 0.45);
   background: rgba(139, 92, 246, 0.16);
-  color: #c4b5fd;
+  color: var(--ch-agent-origin-bg);
   font-weight: var(--ch-weight-semibold);
   letter-spacing: 0.02em;
 }
@@ -7749,7 +7749,7 @@ onUnmounted(() => {
   border: 1px solid rgba(20, 184, 166, 0.34);
   border-radius: var(--ch-radius-sm);
   background: rgba(20, 184, 166, 0.12);
-  color: #5eead4;
+  color: var(--ch-agent-autonomy-bg);
   font-size: var(--ch-font-xs);
   font-weight: 600;
   line-height: 1;
@@ -7784,7 +7784,7 @@ onUnmounted(() => {
   border: 1px solid rgba(167, 139, 250, 0.38);
   border-radius: var(--ch-radius-sm);
   background: rgba(139, 92, 246, 0.14);
-  color: #c4b5fd;
+  color: var(--ch-agent-origin-bg);
   font-size: var(--ch-font-xs);
   font-weight: 600;
   letter-spacing: 0.03em;

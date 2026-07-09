@@ -895,7 +895,7 @@ onUnmounted(() => {
 
 .agent-cli[data-kind='claude'] {
   background: rgba(217, 119, 87, 0.18);
-  color: #d97757;
+  color: var(--ch-agent-claude-fg);
 }
 
 .agent-cli[data-kind='codex'] {
@@ -910,7 +910,7 @@ onUnmounted(() => {
 
 .agent-cli[data-kind='terminal'] {
   background: rgba(126, 231, 135, 0.16);
-  color: #7ee787;
+  color: var(--ch-color-success);
 }
 
 .agent-detail {
