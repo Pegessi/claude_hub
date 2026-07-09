@@ -944,7 +944,7 @@ ${buildIframeSabScript(tabId)}
         ensureTerminalThemeStyle().textContent =
           'html, body { width: 100% !important; height: 100% !important; margin: 0 !important; padding: 0 !important; overflow: hidden !important; background: ' + renderedBackground + ' !important; color: ' + page.foreground + ' !important; }' +
           '#terminal, .terminal { width: 100% !important; height: 100% !important; box-sizing: border-box !important; margin: 0 !important; padding: 0 !important; background: ' + renderedBackground + ' !important; color: ' + page.foreground + ' !important; }' +
-          '.xterm { width: 100% !important; height: 100% !important; box-sizing: border-box !important; margin: 0 !important; padding: 6px !important; background: ' + renderedBackground + ' !important; color: ' + page.foreground + ' !important; }' +
+          '.xterm { width: 100% !important; height: 100% !important; box-sizing: border-box !important; margin: 0 !important; padding: 8px !important; background: ' + renderedBackground + ' !important; color: ' + page.foreground + ' !important; }' +
           '.xterm-viewport { inset: 0 !important; width: 100% !important; height: 100% !important; background-color: ' + renderedBackground + ' !important; }' +
           '.xterm-screen { width: 100% !important; height: 100% !important; }' +
           '.xterm-screen canvas { width: 100% !important; height: 100% !important; filter: ' + page.canvasFilter + ' !important; }' +
