@@ -249,7 +249,12 @@ watch(
   }
 )
 
-// When the modal opens, load the current selection into draft
+// When the modal opens, load the current selection into draft.
+// PR-11 follow-up: { immediate: true } is required now that AWV gates
+// <EnvPresetManager> with v-if="showSwitchEnvManager" — EPM is mounted with
+// visible=true on first open (no false→true transition for the watch to fire
+// on). The `if (newVisible)` guard keeps this safe for TabBar (which mounts
+// EPM at shell startup with visible=false; the immediate fire just no-ops).
 watch(
   () => props.visible,
   (newVisible) => {
@@ -267,7 +272,8 @@ watch(
         }
       }
     }
-  }
+  },
+  { immediate: true }
 )
 </script>
 

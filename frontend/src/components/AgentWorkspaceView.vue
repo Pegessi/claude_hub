@@ -2937,7 +2937,11 @@
   </section>
 
   <!-- Switch Env Preset Manager (for the Switch Env modal) -->
+  <!-- PR-11: v-if="showSwitchEnvManager" gates instantiation so the async
+       component is not loaded until the user clicks "Manage presets";
+       EPM's own root v-if="visible" still gates the rendered DOM. -->
   <EnvPresetManager
+    v-if="showSwitchEnvManager"
     v-model:model-value="switchEnvForm.env_preset"
     :visible="showSwitchEnvManager"
     @close="closeSwitchEnvPresetManager"
@@ -3086,14 +3090,41 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import AgentAvatar from '@/components/AgentAvatar.vue'
-import AgentConfigFields from '@/components/AgentConfigFields.vue'
-import EnvPresetManager from '@/components/EnvPresetManager.vue'
 import LoadingButton from '@/components/LoadingButton.vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import NetworkAccessMenu from '@/components/NetworkAccessMenu.vue'
+// PR-11: modal-gated heavy components lazy-loaded on first open via
+// defineAsyncComponent, matching the idiom used for AgentStatusFloatingPanel
+// in TabBar.vue:663-665 and for AWV itself in App.vue:146-148.
+//
+// - EnvPresetManager (615 lines): rendered at L2940 for the Switch-Env preset
+//   manager, gated at the call site by v-if="showSwitchEnvManager" so the chunk
+//   is fetched only when the user opens the manager (EPM's own root div is
+//   ALSO v-if="visible", but a v-if on the caller is required to prevent Vue
+//   from instantiating the async component — and triggering its loader — at
+//   AWV mount).
+// - AgentConfigFields (336 lines): rendered inside v-if="showResidentAgentModal"
+//   (L1940, resident agent setup) and v-if="showAgentOptionsModal" (L2727,
+//   add-agent form). Both parents are v-if-gated, so the async loader fires
+//   only on the first modal open.
+//
+// Note (GP-transparent, see CHANGELOG): because TabBar statically imports both
+// components for its Create-Tab / Switch-Env flows (TabBar.vue:649-650), the
+// PR-05 vite.config.ts manualChunks rule forces EPM+ACF into a synchronous
+// shared `agent-config-*.js` chunk that the index shell imports on first paint.
+// That means these async imports resolve to an already-loaded module in the
+// steady state; the conversion is therefore a semantic 'load on first open'
+// annotation that positions AWV for a future TabBar-side async follow-up where
+// the shared chunk can move off the critical path.
+const EnvPresetManager = defineAsyncComponent(
+  () => import('@/components/EnvPresetManager.vue')
+)
+const AgentConfigFields = defineAsyncComponent(
+  () => import('@/components/AgentConfigFields.vue')
+)
 import {
   defaultLaunchEnvPresetForAgent,
   parseLaunchEnv,
