@@ -1369,9 +1369,9 @@ async function handleCreateTab() {
  *     subtitle margin).
  *   • @media collapse breakpoints (640/768px).
  * Transitions: 120ms ease and 180-200ms ease are mapped to --ch-motion-fast
- * and --ch-motion-standard; 180ms cubic-bezier(0.2,0,0,1) collapse/entrance
- * curves are kept as-written (specific expand/collapse physics differ from
- * the standard ease).
+ * and --ch-motion-standard; collapse/entrance curves use var(--ch-motion-drawer)
+ * (180ms var(--ch-motion-ease), i.e. cubic-bezier(0.2,0,0,1)) whose expand/
+ * collapse physics intentionally differ from the standard ease.
  */
 
 .tab-bar {
@@ -1383,7 +1383,7 @@ async function handleCreateTab() {
   gap: var(--ch-space-2);
   max-height: 48px;
   overflow: visible;
-  transition: max-height 180ms cubic-bezier(0.2, 0, 0, 1), padding 180ms cubic-bezier(0.2, 0, 0, 1), gap 180ms cubic-bezier(0.2, 0, 0, 1), border-color 180ms cubic-bezier(0.2, 0, 0, 1);
+  transition: max-height var(--ch-motion-drawer), padding var(--ch-motion-drawer), gap var(--ch-motion-drawer), border-color var(--ch-motion-drawer);
 }
 
 .tab-bar > :not(.modal-overlay) {
@@ -1562,7 +1562,7 @@ async function handleCreateTab() {
   user-select: none;
   flex: 0 0 auto;
   white-space: nowrap;
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), transform var(--ch-motion-fast), height 180ms cubic-bezier(0.2, 0, 0, 1), padding 180ms cubic-bezier(0.2, 0, 0, 1), gap 180ms cubic-bezier(0.2, 0, 0, 1), border-radius 180ms cubic-bezier(0.2, 0, 0, 1);
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), transform var(--ch-motion-fast), height var(--ch-motion-drawer), padding var(--ch-motion-drawer), gap var(--ch-motion-drawer), border-radius var(--ch-motion-drawer);
 }
 
 .tab:hover {
@@ -1606,7 +1606,7 @@ async function handleCreateTab() {
   overflow: hidden;
   text-overflow: ellipsis;
   line-height: 1;
-  transition: font-size 180ms cubic-bezier(0.2, 0, 0, 1), max-width 180ms cubic-bezier(0.2, 0, 0, 1);
+  transition: font-size var(--ch-motion-drawer), max-width var(--ch-motion-drawer);
 }
 
 .tab-name-input {
@@ -1886,7 +1886,7 @@ async function handleCreateTab() {
   justify-content: center;
   flex: 0 0 auto;
   line-height: 1;
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast), width 180ms cubic-bezier(0.2, 0, 0, 1), height 180ms cubic-bezier(0.2, 0, 0, 1), border-radius 180ms cubic-bezier(0.2, 0, 0, 1);
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast), width var(--ch-motion-drawer), height var(--ch-motion-drawer), border-radius var(--ch-motion-drawer);
 }
 
 .add-tab:hover:not(:disabled) {

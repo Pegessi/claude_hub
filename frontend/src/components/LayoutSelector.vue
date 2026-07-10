@@ -275,7 +275,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), transform var(--ch-motion-fast), width 180ms cubic-bezier(0.2, 0, 0, 1), height 180ms cubic-bezier(0.2, 0, 0, 1), border-radius 180ms cubic-bezier(0.2, 0, 0, 1);
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), transform var(--ch-motion-fast), width var(--ch-motion-standard) var(--ch-motion-ease), height var(--ch-motion-standard) var(--ch-motion-ease), border-radius var(--ch-motion-standard) var(--ch-motion-ease);
 }
 
 .layout-menu-trigger:hover,
@@ -307,7 +307,7 @@ onUnmounted(() => {
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-glass);
   box-shadow: var(--ch-shadow-soft);
-  animation: layout-menu-in 120ms cubic-bezier(0.2, 0, 0, 1);
+  animation: layout-menu-in var(--ch-motion-fast) var(--ch-motion-ease);
   transform-origin: top right;
 }
 

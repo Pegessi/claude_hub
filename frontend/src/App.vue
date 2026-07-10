@@ -538,7 +538,9 @@ onUnmounted(() => {
   --ch-radius-lg: 10px;
   --ch-motion-fast: 120ms ease;
   --ch-motion-standard: 180ms ease;
-  --ch-motion-drawer: 180ms cubic-bezier(0.2, 0, 0, 1);
+  --ch-motion-panel: 140ms;
+  --ch-motion-ease: cubic-bezier(0.2, 0, 0, 1);
+  --ch-motion-drawer: 180ms var(--ch-motion-ease);
 
   /* ------------------------------------------------------------------
      Spacing scale (4px base). Use for layout rhythm — gutters, padding,
@@ -669,8 +671,6 @@ onUnmounted(() => {
   --ch-radius-sm: 5px;
   --ch-radius-md: 7px;
   --ch-radius-lg: 10px;
-  --ch-motion-fast: 120ms ease;
-  --ch-motion-standard: 180ms ease;
   --ch-tab-fade-start: #fcfcfb;
   --ch-tab-fade-end: rgba(252, 252, 251, 0);
   --ch-terminal-bg: #f6f6f4;
@@ -954,7 +954,7 @@ textarea {
 
 /* RM-01 global reduced-motion guard: users who set the OS "reduce motion"
  * preference get a near-motionless UI across the entire app — spinners, fades,
- * slides, toasts, panel/menu entrances, and all ~77 var(--ch-motion-*)
+ * slides, toasts, panel/menu entrances, and all var(--ch-motion-*)
  * transitions are effectively neutralized by this universal-selector net (a
  * single rule cascades into every child component without per-component edits).
  * 0.001ms durations collapse animations/transitions to effectively-instant

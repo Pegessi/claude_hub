@@ -490,10 +490,10 @@ onUnmounted(() => {
     color var(--ch-motion-fast),
     box-shadow var(--ch-motion-fast),
     transform var(--ch-motion-fast),
-    height 180ms cubic-bezier(0.2, 0, 0, 1),
-    min-width 180ms cubic-bezier(0.2, 0, 0, 1),
-    padding 180ms cubic-bezier(0.2, 0, 0, 1),
-    gap 180ms cubic-bezier(0.2, 0, 0, 1);
+    height var(--ch-motion-standard) var(--ch-motion-ease),
+    min-width var(--ch-motion-standard) var(--ch-motion-ease),
+    padding var(--ch-motion-standard) var(--ch-motion-ease),
+    gap var(--ch-motion-standard) var(--ch-motion-ease);
 }
 
 .status-trigger:hover {
@@ -609,7 +609,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   /* One-shot entrance only — no looping/pulsing/blinking. */
-  animation: status-panel-in 140ms cubic-bezier(0.2, 0, 0, 1);
+  animation: status-panel-in var(--ch-motion-panel) var(--ch-motion-ease);
   transform-origin: top right;
 }
 
