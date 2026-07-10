@@ -26,6 +26,7 @@ import type {
   WorkspaceUpdate,
   StoreNotification,
   NotificationType,
+  RemoteProfile,
 } from '@/types'
 
 const API_BASE = '/api'
@@ -100,6 +101,14 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const lastLessonsFetchAt = new Map<string, number>()
   const LESSONS_REFETCH_INTERVAL_MS = 30_000
   let loadedLessonsWorkspaceId: string | null = null
+  // Remote execution profiles (PR-09): cached list + in-flight promise dedup so
+  // concurrent modal opens / target-toggle watchers do not fire duplicate GETs
+  // against /api/remote/profiles. The resource is global (no workspace id in the
+  // URL), so a singleton in-flight reference (rather than a keyed Map) suffices.
+  // Pass { force: true } to bypass the cache and refetch.
+  const remoteProfiles = ref<RemoteProfile[]>([])
+  const remoteProfilesLoading = ref(false)
+  let remoteProfilesFetch: Promise<void> | null = null
 
   const activeWorkspace = computed(() =>
     workspaces.value.find(workspace => workspace.id === activeWorkspaceId.value) || null
@@ -391,6 +400,42 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       throw e
     } finally {
       taskDetailFetches.delete(key)
+    }
+  }
+
+  async function fetchRemoteProfiles(opts: { force?: boolean } = {}) {
+    // In-flight coalesce: concurrent callers (modal opens, target-toggle
+    // watchers, etc.) share one in-flight GET against /api/remote/profiles.
+    // Mirrors the boardFetches / taskDetailFetches Map pattern but uses a
+    // singleton Promise ref because remote profiles are workspace-global (no
+    // key dimension). Cached early-return when profiles are already loaded
+    // unless the caller explicitly passes { force: true }.
+    if (!opts.force && remoteProfiles.value.length > 0) return
+    if (remoteProfilesFetch) return remoteProfilesFetch
+
+    const request = (async () => {
+      remoteProfilesLoading.value = true
+      try {
+        const response = await fetch(`${API_BASE}/remote/profiles`)
+        if (!response.ok) throw new Error(await readError(response))
+        remoteProfiles.value = await response.json()
+      } finally {
+        remoteProfilesLoading.value = false
+      }
+    })()
+
+    remoteProfilesFetch = request
+    try {
+      await request
+    } catch (e) {
+      // Note: mirroring the pre-PR-09 AWV behavior we notify but do NOT
+      // re-throw: every caller today is fire-and-forget (modal open,
+      // target-toggle watcher) and would surface an unhandled-promise
+      // rejection otherwise. Callers that need to observe failure can
+      // await the returned promise and check remoteProfiles.value.length.
+      notifyError(e instanceof Error ? e.message : 'Failed to load remote profiles')
+    } finally {
+      remoteProfilesFetch = null
     }
   }
 
@@ -866,6 +911,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     notifications,
     pushNotification,
     dismissNotification,
+    remoteProfiles,
+    remoteProfilesLoading,
+    fetchRemoteProfiles,
     sessionForTask,
     reportsForTask,
     latestReportForTask,

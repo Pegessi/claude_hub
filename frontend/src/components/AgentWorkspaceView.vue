@@ -3125,7 +3125,6 @@ import type {
   FeedbackSummaryRun,
   GoalPacket,
   ManagedSession,
-  RemoteProfile,
   ResidentPeriodicTask,
   ReviewProfile,
   ReviewProfileResult,
@@ -3197,6 +3196,8 @@ const {
   isLoading,
   error,
   notifications: wsNotifications,
+  remoteProfiles,
+  remoteProfilesLoading,
 } = storeToRefs(workspaceStore)
 
 // Combine workspace and terminal store notifications so toasts fire regardless
@@ -3246,8 +3247,10 @@ const editingTaskId = ref<string | null>(null)
 const workspaceSessionView = ref<WorkspaceSessionView>('agents')
 const workspaceMobileMenuRef = ref<HTMLDetailsElement | null>(null)
 const elapsedClockMs = ref(Date.now())
-const remoteProfiles = ref<RemoteProfile[]>([])
-const remoteProfilesLoading = ref(false)
+// remoteProfiles / remoteProfilesLoading are sourced from workspaceStore via
+// storeToRefs (see destructure above); PR-09 hoists fetchRemoteProfiles into the
+// store for in-flight dedup + cached early-return. A thin AWV wrapper below
+// preserves the workspaceForm default-select side-effect after await.
 const agentBrowserCurrentPath = ref('')
 const agentBrowserPathInput = ref('')
 const agentBrowserParentPath = ref<string | null>(null)
@@ -4977,23 +4980,16 @@ const hasBilingualReport = computed(() =>
 )
 
 async function fetchRemoteProfiles() {
-  remoteProfilesLoading.value = true
-  try {
-    const response = await fetch('/api/remote/profiles')
-    if (!response.ok) throw new Error('Failed to load remote profiles')
-    remoteProfiles.value = await response.json()
-    if (!workspaceForm.remote_profile_id && remoteProfiles.value.length > 0) {
-      workspaceForm.remote_profile_id = remoteProfiles.value[0].id
-    }
-  } catch (e) {
-    // (F5) error is now a computed; push to the notification queue instead.
-    workspaceStore.pushNotification({
-      type: 'error',
-      message: e instanceof Error ? e.message : 'Failed to load remote profiles',
-      autoDismissMs: 8000,
-    })
-  } finally {
-    remoteProfilesLoading.value = false
+  // PR-09: the network fetch, loading flag, error notification, and in-flight
+  // dedup live in workspaceStore.fetchRemoteProfiles (see workspaceStore.ts).
+  // We keep this thin AWV wrapper so the form-specific default-select side
+  // effect (auto-picking the first profile for the workspace create/edit form
+  // when nothing is selected yet) runs AFTER the store resolves; the store
+  // itself stays form-agnostic. Error notification is handled inside the store,
+  // so we do not re-throw here.
+  await workspaceStore.fetchRemoteProfiles()
+  if (!workspaceForm.remote_profile_id && remoteProfiles.value.length > 0) {
+    workspaceForm.remote_profile_id = remoteProfiles.value[0].id
   }
 }
 
