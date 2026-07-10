@@ -6190,7 +6190,18 @@ onMounted(async () => {
   document.addEventListener('keydown', handleLightboxKeydown)
   await fetchRemoteProfiles()
   await workspaceStore.fetchWorkspaces()
-  terminalStore.startAgentStatusPolling()
+  // PR-08: AWV intentionally does NOT acquire the terminalStore
+  // agent-status poll here. TabBar is mounted across mode switches (it lives
+  // inside v-show="mode==='terminal'" in App.vue, not v-if) and always owns the
+  // poll via its own onMounted, so `agentStatuses` stays populated for the
+  // optional status_text/detail overlay in workspace mode. The board poll
+  // (`refreshBoard`, 2.5s) is AWV's authoritative status source and already
+  // returns board.sessions[*].runtime_status/current_task_id/workspace_path,
+  // which the three resolvers (agentRuntimeStatus/agentRuntimeText/
+  // agentRuntimeDetail) fall back to via `|| agent.<field>` if the terminal
+  // overlay is ever empty. Taking an extra ref-count bump here would just
+  // couple AWV to a poll it doesn't own and introduce a dual-source desync
+  // hazard between the 2.5s board poll and the 5s terminal-status poll.
   boardPollTimer = window.setInterval(refreshBoard, 2500)
   elapsedClockTimer = window.setInterval(() => {
     elapsedClockMs.value = Date.now()
@@ -6211,7 +6222,9 @@ onUnmounted(() => {
   }
   resetDraftAttachments(taskForm.attachments)
   resetDraftAttachments(detailAttachments.value)
-  terminalStore.stopAgentStatusPolling()
+  // PR-08: paired with the removal of startAgentStatusPolling() above — AWV
+  // never acquired the poll, so there is nothing to release on unmount.
+  // TabBar (and ASFP when open) continue to drive statusPollConsumers.
 })
 </script>
 
