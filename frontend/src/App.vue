@@ -952,8 +952,31 @@ textarea {
   opacity: 0;
 }
 
-/* Reduced-motion guard: users with the OS preference get an instant swap. */
+/* RM-01 global reduced-motion guard: users who set the OS "reduce motion"
+ * preference get a near-motionless UI across the entire app — spinners, fades,
+ * slides, toasts, panel/menu entrances, and all ~77 var(--ch-motion-*)
+ * transitions are effectively neutralized by this universal-selector net (a
+ * single rule cascades into every child component without per-component edits).
+ * 0.001ms durations collapse animations/transitions to effectively-instant
+ * (avoids display:none flicker edge cases while preserving a single render);
+ * animation-iteration-count:1 stops infinite loops; scroll-behavior:auto
+ * disables smooth scroll for vestibular safety.
+ */
 @media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* Reduced-motion guard: users with the OS preference get an instant swap on
+     the mode-content-fade transition (kept explicit even though the universal
+     net above already neutralizes transition-duration; this keeps RM-04's
+     behavior obvious to future readers and wins specificity-wise on the class
+     selector). */
   .mode-content-fade-enter-active {
     transition: none !important;
   }
