@@ -960,18 +960,26 @@ asyncio.run(_main())
             and self.agent_type in {AgentType.CLAUDE, AgentType.CODEX, AgentType.CURSOR}
         )
 
+    def _codex_launch_command(self, recover: bool) -> str:
+        """Build the codex launch command, preserving solo flags on both branches.
+
+        Codex cannot pin a session id at launch, so recovery best-effort resumes
+        the most recent recorded session and falls back to a fresh start if there
+        is nothing to resume. The solo flags (``--ask-for-approval never
+        --sandbox danger-full-access``) MUST be applied to BOTH the ``resume
+        --last`` branch and the fresh fallback: ``codex resume`` accepts them, and
+        omitting them on resume silently drops solo mode whenever the resume
+        succeeds (the common case).
+        """
+        flags = " --ask-for-approval never --sandbox danger-full-access" if self.solo_mode else ""
+        fresh = f"codex{flags}"
+        if recover:
+            return f"codex resume --last{flags} || {fresh}"
+        return fresh
+
     def _agent_start_command(self, recover: bool = False) -> str:
         if self.agent_type == AgentType.CODEX:
-            if self.solo_mode:
-                fresh = "codex --ask-for-approval never --sandbox danger-full-access"
-            else:
-                fresh = "codex"
-            if recover:
-                # Best-effort: codex does not let us pin a session id at launch,
-                # so resume the most recent recorded session and fall back to a
-                # fresh start if there is nothing to resume.
-                return f"codex resume --last || {fresh}"
-            return fresh
+            return self._codex_launch_command(recover=recover)
         if self.agent_type == AgentType.CURSOR:
             if recover:
                 # Best-effort: cursor resumes the previous session for this cwd.
@@ -1050,13 +1058,10 @@ asyncio.run(_main())
         user_shell = os.environ.get("SHELL", "/bin/bash")
 
         if self.agent_type == AgentType.CODEX:
-            if self.solo_mode:
-                fresh_cmd = "codex --ask-for-approval never --sandbox danger-full-access"
-            else:
-                fresh_cmd = "codex"
             # Codex does not support pinning a session id; best-effort resume
-            # via resume --last, falling back to a fresh start.
-            inner_cmd = f"codex resume --last || {fresh_cmd}"
+            # via resume --last, falling back to a fresh start. Solo flags apply
+            # to BOTH branches so a successful resume keeps solo mode.
+            inner_cmd = self._codex_launch_command(recover=True)
         else:
             # Claude path
             settings_arg = self._claude_settings_arg()
