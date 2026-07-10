@@ -9394,6 +9394,82 @@ def test_latest_reports_per_task_keeps_newest_per_task() -> None:
     assert all(report.workspace_id == workspace_id for report in latest)
 
 
+def test_get_board_resident_report_populated_for_resident_session() -> None:
+    """``resident_report`` is the newest report for the resident session id."""
+    now = datetime.now()
+    workspace_id = "ws-resident-board"
+    resident_sid = "resident-sess-1"
+    try:
+        workspace_manager.workspaces[workspace_id] = Workspace(
+            id=workspace_id,
+            name="Resident WS",
+            path="/tmp/resident-ws",
+            default_branch="main",
+            session_prefix="res",
+            resident_agent_session_id=resident_sid,
+            created_at=now,
+            updated_at=now,
+        )
+        # Resident session + a task report + cross-session noise.
+        for rid, sid, ts, msg, task_id in [
+            ("r-old", resident_sid, 0, "first heartbeat", None),
+            ("r-new", resident_sid, 10, "latest heartbeat " + "x" * 200, None),
+            ("t1", "worker-sess", 5, "task done", "task-1"),
+            ("other-sess", "worker-sess-2", 1, "irrelevant", None),
+        ]:
+            workspace_manager.reports[rid] = AgentReport(
+                id=rid,
+                workspace_id=workspace_id,
+                task_id=task_id,
+                session_id=sid,
+                state=AgentReportState.WORKING,
+                message=msg,
+                created_at=now + timedelta(seconds=ts),
+            )
+        board = asyncio.run(workspace_manager.get_board(workspace_id))
+
+        assert board.resident_report is not None
+        assert board.resident_report.id == "r-new"
+        assert board.resident_report.session_id == resident_sid
+        # Resident report message goes through the same preview-truncation as
+        # card reports (was 200+ chars; ends with ellipsis).
+        assert board.resident_report.message is not None
+        assert board.resident_report.message.endswith("…")
+        assert len(board.resident_report.message) < 200
+        # Heavy fields stripped on resident report too.
+        assert board.resident_report.changed_files == []
+        assert board.resident_report.validation is None
+        # Board reports list includes the latest per task_id; resident
+        # (task_id=None) also has an entry in there (latest-per-bucket).
+        report_ids = {r.id for r in board.reports}
+        assert "t1" in report_ids
+    finally:
+        # Clean up so other tests don't see this workspace.
+        workspace_manager.workspaces.pop(workspace_id, None)
+        for rid in ("r-old", "r-new", "t1", "other-sess"):
+            workspace_manager.reports.pop(rid, None)
+
+
+def test_get_board_resident_report_none_when_no_resident() -> None:
+    """``resident_report`` is None when the workspace has no resident session."""
+    now = datetime.now()
+    workspace_id = "ws-no-resident"
+    try:
+        workspace_manager.workspaces[workspace_id] = Workspace(
+            id=workspace_id,
+            name="No Resident WS",
+            path="/tmp/no-resident-ws",
+            default_branch="main",
+            session_prefix="nr",
+            created_at=now,
+            updated_at=now,
+        )
+        board = asyncio.run(workspace_manager.get_board(workspace_id))
+        assert board.resident_report is None
+    finally:
+        workspace_manager.workspaces.pop(workspace_id, None)
+
+
 def test_reports_for_task_returns_full_history() -> None:
     workspace_id = _seed_workspace_with_reports()
 
@@ -9496,15 +9572,18 @@ def _heavy_task(task_id: str = "task-1") -> WorkspaceTask:
 def test_board_report_projection_strips_heavy_keeps_card_fields() -> None:
     projected = workspace_manager._board_report_projection(_heavy_report())
 
-    # Card / gate fields survive untouched.
+    # Card / gate scalars survive untouched.
     assert projected.id == "rep-heavy"
     assert projected.state == AgentReportState.READY_FOR_REVIEW
-    assert projected.message == "human readable summary"
-    assert projected.message_en == "english summary"
-    assert projected.message_zh == "中文摘要"
     assert projected.review_reason == "looks good"
     assert projected.risk_level == "low"
     assert projected.review_cycle == 2
+
+    # Short messages pass through verbatim (no ellipsis added when already
+    # under the 160-char preview cap).
+    assert projected.message == "human readable summary"
+    assert projected.message_en == "english summary"
+    assert projected.message_zh == "中文摘要"
 
     # Detail-only heavy fields are emptied.
     assert projected.changed_files == []
@@ -9517,6 +9596,67 @@ def test_board_report_projection_strips_heavy_keeps_card_fields() -> None:
     assert projected.artifact_refs == []
 
 
+def test_board_report_projection_truncates_long_messages() -> None:
+    long_ascii = (
+        "The quick brown fox jumps over the lazy dog and then some more text to "
+        "exceed one hundred and sixty characters in total so the preview logic "
+        "walks back to a word boundary before appending the ellipsis marker here."
+    )
+    long_cjk = "中文摘要" * 80  # 4 chars * 80 = 320, well over cap
+    assert len(long_ascii) > 160
+    assert len(long_cjk) > 160
+    report = _heavy_report("rep-long")
+    report = report.model_copy(
+        update={"message": long_ascii, "message_en": long_ascii, "message_zh": long_cjk}
+    )
+
+    projected = workspace_manager._board_report_projection(report)
+
+    # Each message body is truncated to ~160 chars + ellipsis.
+    assert projected.message is not None
+    assert projected.message_en is not None
+    assert projected.message_zh is not None
+    assert len(projected.message) <= 160 + len("…") + 24  # walk-back slack
+    assert projected.message.endswith("…")
+    assert projected.message != long_ascii
+    assert len(projected.message_en) <= 160 + len("…") + 24
+    assert projected.message_en.endswith("…")
+    # ASCII path walks back so we don't bisect a word: after rstrip, the
+    # body length maps to a position in the source that is a boundary
+    # char (space/punct) or end-of-string, never an ASCII alnum that
+    # would continue a word.
+    body_ascii = projected.message[: -len("…")]
+    assert not long_ascii[len(body_ascii)].isascii() or not long_ascii[len(body_ascii)].isalnum()
+    # CJK path clips without walking back (no ASCII word boundary to find),
+    # and never bisects a rune.
+    assert len(projected.message_zh) == 160 + len("…")
+    assert projected.message_zh.endswith("…")
+    assert projected.message_zh[:-1] == long_cjk[:160]
+    # ASCII path walks back so we don't bisect a word: construct a string
+    # where the cap lands mid-word and assert the preview does not end
+    # mid-word (last non-ellipsis char must be a word boundary or earlier
+    # word-final char).
+    mid_word = "w" * 200  # all word chars, no spaces
+    mw = workspace_manager._board_report_projection(
+        _heavy_report("rep-mw").model_copy(update={"message": mid_word})
+    )
+    assert mw.message is not None and mw.message.endswith("…")
+    body = mw.message[: -len("…")]
+    # Since there are no boundary chars anywhere, the walk-back loop finds
+    # nothing within 24 chars and we get the hard cap; acceptable outcome
+    # is "≤160 word chars + ellipsis" (worst case, no space to land on).
+    assert len(body) <= 160
+    # None / empty stay untouched.
+    null_report = _heavy_report("rep-null")
+    null_report = null_report.model_copy(
+        update={"message": None, "message_en": "", "message_zh": None}
+    )
+    projected_null = workspace_manager._board_report_projection(null_report)
+    assert projected_null.message is None
+    assert projected_null.message_en == ""
+    assert projected_null.message_zh is None
+
+
 def test_board_report_projection_does_not_mutate_source() -> None:
     source = _heavy_report()
     workspace_manager._board_report_projection(source)
@@ -9525,6 +9665,19 @@ def test_board_report_projection_does_not_mutate_source() -> None:
     assert source.changed_files == ["a.py", "b.py"]
     assert source.evaluation_report is not None
     assert source.acceptance_check and source.acceptance_check[0].criterion == "c1"
+
+
+def test_preview_board_message_helper() -> None:
+    from claude_hub.services.workspace_manager._tmux_queries import _preview_board_message
+
+    assert _preview_board_message(None) is None
+    assert _preview_board_message("") == ""
+    assert _preview_board_message("short") == "short"
+    assert _preview_board_message("a" * 160) == "a" * 160  # exact cap: no ellipsis
+    preview = _preview_board_message("a" * 200)
+    assert preview is not None
+    assert preview.endswith("…")
+    assert len(preview) == 160 + len("…")
 
 
 def test_board_task_projection_strips_goal_packet_prose_keeps_status() -> None:

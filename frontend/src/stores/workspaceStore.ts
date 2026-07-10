@@ -94,6 +94,15 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const tasks = computed(() => board.value?.tasks || [])
   const sessions = computed(() => board.value?.sessions || [])
   const reports = computed(() => board.value?.reports || [])
+  /**
+   * Latest report for the workspace's resident agent session
+   * (board.resident_report), populated server-side. The board poll truncates
+   * message bodies; this is the authoritative source for the resident status
+   * chip so the UI never has to scan reports[] for task_id=null entries.
+   */
+  const residentReport = computed<AgentReport | null>(
+    () => board.value?.resident_report ?? null,
+  )
   const activeFeedbackLessons = computed(() =>
     feedbackLessons.value.filter(lesson => lesson.status === 'active')
   )
@@ -777,6 +786,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     temporaryReviewers,
     dispatcherAgent,
     residentAgent,
+    residentReport,
     workspaceAgent,
     tasksByStatusMap,
     latestReportByTaskId,

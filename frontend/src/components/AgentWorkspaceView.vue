@@ -6001,18 +6001,14 @@ const residentNextRunLabel = computed(() => {
 })
 
 // Newest report posted by the resident session, used to surface its latest
-// heartbeat on the resident card. Returns null when none exist.
-const latestResidentReport = computed<AgentReport | null>(() => {
-  const sessionId = activeWorkspace.value?.resident_agent_session_id
-  if (!sessionId) return null
-  const residentReports = workspaceStore.reports.filter(
-    report => report.session_id === sessionId
-  )
-  if (residentReports.length === 0) return null
-  return [...residentReports].sort(
-    (a, b) => (parseTimestampMs(b.created_at) ?? 0) - (parseTimestampMs(a.created_at) ?? 0)
-  )[0]
-})
+// heartbeat on the resident card. Sourced from the server-populated
+// `board.resident_report` scalar (projected with preview-truncated messages)
+// so we do not have to scan the board reports[] list for task_id=null
+// entries per poll. Null when there is no resident session or it has not
+// emitted a report yet.
+const latestResidentReport = computed<AgentReport | null>(
+  () => workspaceStore.residentReport,
+)
 
 function isResidentAgent(agent: ManagedSession) {
   return agent.role === 'resident'

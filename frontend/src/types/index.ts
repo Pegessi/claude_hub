@@ -563,6 +563,14 @@ export interface WorkspaceBoard {
   reports: AgentReport[]
   markdown_documents?: WorkspaceMarkdownDocument[]
   snapshot_path?: string | null
+  /**
+   * Latest (most-recent-by-created_at) report for the workspace's resident
+   * agent session, projected with the same truncated preview bodies as
+   * `reports`. `null` when there is no resident session or it has not emitted
+   * a report yet. Populated by the backend so the UI can avoid scanning
+   * `reports` for task_id=null entries.
+   */
+  resident_report?: AgentReport | null
 }
 
 export type FeedbackLessonScope = 'workspace' | 'family' | 'global'

@@ -974,6 +974,7 @@ class WorkspaceBoard(BaseModel):
     reports: List[AgentReport]
     markdown_documents: List[WorkspaceMarkdownDocument] = Field(default_factory=list)
     snapshot_path: Optional[str] = None
+    resident_report: Optional[AgentReport] = None
 
 
 class SpawnWorkerRequest(BaseModel):

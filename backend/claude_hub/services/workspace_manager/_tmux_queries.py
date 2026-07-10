@@ -4,6 +4,44 @@ import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time pa
 
 from ._constants import *  # noqa: F401,F403
 
+# Preview length for board report messages. The Kanban card clamps its
+# latest-report line to ~2 lines via -webkit-line-clamp:2 at 11px/1.35lh
+# (~60-80 visible chars); the resident-agent chip shows a short inline status
+# string. Truncating here keeps the 2.5s board poll from shipping full markdown
+# bodies that the UI never renders end-to-end.
+_BOARD_MESSAGE_PREVIEW_CHARS = 160
+_BOARD_MESSAGE_ELLIPSIS = "…"
+
+
+def _preview_board_message(text: Optional[str]) -> Optional[str]:
+    """Truncate ``text`` for board-poll previews.
+
+    * Returns ``None``/``""`` unchanged so null/empty bodies stay empty.
+    * Strings shorter than the preview cap pass through untouched (no trailing
+      ellipsis inserted for already-short messages).
+    * Longer strings are clipped to the cap and an ellipsis is appended. When
+      the cut point lands inside a run of ASCII word characters, the cut is
+      walked back to the last space/punct boundary so we do not slice mid-word;
+      CJK / no-space text clips at exactly the cap in Unicode code points (not
+      bytes), so multi-byte glyphs are never bisected.
+    """
+    if text is None:
+        return None
+    limit = _BOARD_MESSAGE_PREVIEW_CHARS
+    if len(text) <= limit:
+        return text
+    cut = limit
+    # Walk back to a word boundary when the cut point is mid-word in ASCII
+    # text, but never shrink below limit - 24 chars (keeps CJK and no-space
+    # strings from being pulled shorter than needed).
+    if cut > 24 and text[cut - 1].isascii() and text[cut - 1].isalnum():
+        for back in range(cut, cut - 24, -1):
+            ch = text[back - 1]
+            if ch.isspace() or ch in "-_/,:;)!.>]}\"'":
+                cut = back
+                break
+    return text[:cut].rstrip() + _BOARD_MESSAGE_ELLIPSIS
+
 
 class _TmuxQueriesMixin:
     def reports_for_workspace(self, workspace_id: str) -> list[AgentReport]:
@@ -51,15 +89,16 @@ class _TmuxQueriesMixin:
 
     @staticmethod
     def _board_report_projection(report: AgentReport) -> AgentReport:
-        """Strip detail-only heavy fields from a board (latest-per-task) report.
+        """Strip detail-only heavy fields and truncate message bodies for the board.
 
         The board card only reads a report's ``id``, ``state``, ``message`` /
         ``message_en`` / ``message_zh`` (card + resident header) and the review
-        routing scalars used by gate logic. The heavy timeline fields
+        routing scalars used by gate logic. Heavy timeline fields
         (changed_files, validation, risks, acceptance_check, evaluation_report,
-        review_profiles, profile_results, artifact_refs) are only rendered in the
-        detail panel, which hydrates the full untrimmed history on demand via
-        ``reports_for_task``. Emptying them here roughly halves the board body.
+        review_profiles, profile_results, artifact_refs) and full markdown
+        bodies are only rendered in the detail panel, which hydrates the full
+        untrimmed history on demand via ``reports_for_task``. Trimming here
+        keeps the board payload an order of magnitude smaller.
         """
         return report.model_copy(
             update={
@@ -71,6 +110,9 @@ class _TmuxQueriesMixin:
                 "review_profiles": [],
                 "profile_results": [],
                 "artifact_refs": [],
+                "message": _preview_board_message(report.message),
+                "message_en": _preview_board_message(report.message_en),
+                "message_zh": _preview_board_message(report.message_zh),
             }
         )
 
@@ -831,17 +873,36 @@ class _TmuxQueriesMixin:
             if task.workspace_id == workspace_id and not task.system_internal
         ]
         sessions = self.sessions_for_workspace(workspace_id)
-        reports = [
+        projected_reports = [
             self._board_report_projection(report)
             for report in self.latest_reports_per_task_for_workspace(workspace_id)
         ]
+        # Resident agent's latest heartbeat — surfaced on its own scalar so the
+        # frontend does not have to scan reports[] for task_id=None. Resolved
+        # from full reports (pre-projection) then projected so messages are
+        # preview-truncated the same way as card reports.
+        resident_report: Optional[AgentReport] = None
+        resident_sid = workspace.resident_agent_session_id
+        if resident_sid:
+            resident_full = max(
+                (
+                    r
+                    for r in self.reports_for_workspace(workspace_id)
+                    if r.session_id == resident_sid
+                ),
+                key=lambda r: r.created_at,
+                default=None,
+            )
+            if resident_full is not None:
+                resident_report = self._board_report_projection(resident_full)
         return WorkspaceBoard(
             workspace=self.workspaces[workspace_id],
             tasks=tasks,
             sessions=sessions,
-            reports=reports,
+            reports=projected_reports,
             markdown_documents=self.markdown_documents_for_workspace(workspace_id),
             snapshot_path=str(self.snapshot_path(workspace_id)),
+            resident_report=resident_report,
         )
 
     def _sync_workspace_tab_metadata(self, workspace_id: str) -> None:
