@@ -60,7 +60,7 @@ withDefaults(defineProps<{
 .loading-button__spinner {
   position: absolute;
   left: 0;
-  top: 50%;
+  top: calc(50% - 0.5em);
   width: 1em;
   height: 1em;
   opacity: 0;
@@ -68,7 +68,6 @@ withDefaults(defineProps<{
   border: 2px solid currentColor;
   border-right-color: transparent;
   border-radius: 999px;
-  transform: translateY(-50%);
 }
 
 .loading-button--loading .loading-button__spinner {
@@ -87,7 +86,6 @@ withDefaults(defineProps<{
   display: inline-block;
   margin-right: 0;
   opacity: 1;
-  transform: none;
   animation: loading-button-spin 700ms linear infinite;
 }
 
