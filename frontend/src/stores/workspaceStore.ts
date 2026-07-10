@@ -145,17 +145,71 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     return map
   })
 
+  // Stable task-id -> session map, derived once per board update.
+  // Mirrors latestReportByTaskId so sessionForTask() becomes an O(1) lookup
+  // instead of an O(S) sessions.value.find(...) per call inside the card
+  // v-for (PR-02).
+  const sessionByTaskId = computed<Record<string, ManagedSession | null>>(() => {
+    const sessionById: Record<string, ManagedSession> = {}
+    for (const session of sessions.value) {
+      sessionById[session.id] = session
+    }
+    const map: Record<string, ManagedSession | null> = {}
+    for (const task of tasks.value) {
+      if (!task.session_id) {
+        map[task.id] = null
+        continue
+      }
+      map[task.id] = sessionById[task.session_id] || null
+    }
+    return map
+  })
+
+  // Stable task-id -> reports[] map + latest-review-report map, both derived
+  // in a single O(R) pass after each board replacement. Without this,
+  // reportsForTask() does an O(R) Array.filter per call, and AWV's
+  // latestReviewReportForTask() stacked a second .filter(review_*) on
+  // top — O(N·R) per render for N cards (PR-02).
+  const reportsByTaskId = computed<Record<string, AgentReport[]>>(() => {
+    const map: Record<string, AgentReport[]> = {}
+    for (const report of reports.value) {
+      if (!report.task_id) continue
+      const arr = map[report.task_id]
+      if (arr) {
+        arr.push(report)
+      } else {
+        map[report.task_id] = [report]
+      }
+    }
+    return map
+  })
+
+  const latestReviewReportByTaskId = computed<Record<string, AgentReport>>(() => {
+    const map: Record<string, AgentReport> = {}
+    for (const report of reports.value) {
+      if (!report.task_id) continue
+      if (report.state.startsWith('review_')) {
+        map[report.task_id] = report
+      }
+    }
+    return map
+  })
+
   function sessionForTask(task: WorkspaceTask): ManagedSession | null {
     if (!task.session_id) return null
-    return sessions.value.find(session => session.id === task.session_id) || null
+    return sessionByTaskId.value[task.id] ?? null
   }
 
   function reportsForTask(task: WorkspaceTask): AgentReport[] {
-    return reports.value.filter(report => report.task_id === task.id)
+    return reportsByTaskId.value[task.id] || []
   }
 
   function latestReportForTask(task: WorkspaceTask): AgentReport | null {
     return latestReportByTaskId.value[task.id] ?? null
+  }
+
+  function latestReviewReportForTask(task: WorkspaceTask): AgentReport | null {
+    return latestReviewReportByTaskId.value[task.id] ?? null
   }
 
   // ---- On-demand full report history (detail panel) ----
@@ -726,6 +780,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     workspaceAgent,
     tasksByStatusMap,
     latestReportByTaskId,
+    sessionByTaskId,
+    reportsByTaskId,
+    latestReviewReportByTaskId,
     isLoading,
     error,
     notifications,
@@ -734,6 +791,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     sessionForTask,
     reportsForTask,
     latestReportForTask,
+    latestReviewReportForTask,
     taskReports,
     reportsForTaskId,
     clearTaskReports,

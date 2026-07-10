@@ -4083,10 +4083,7 @@ function latestReportForTask(task: WorkspaceTask) {
 }
 
 function latestReviewReportForTask(task: WorkspaceTask) {
-  const reviewReports = workspaceStore
-    .reportsForTask(task)
-    .filter(report => report.state.startsWith('review_'))
-  return reviewReports[reviewReports.length - 1] || null
+  return workspaceStore.latestReviewReportForTask(task)
 }
 
 function taskModeLabel(mode: WorkspaceTaskMode) {
