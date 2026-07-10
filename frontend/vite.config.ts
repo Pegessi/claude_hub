@@ -58,4 +58,23 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          // PR-05: EnvPresetManager + AgentConfigFields are statically imported
+          // by BOTH TabBar (shell/index chunk) and AgentWorkspaceView (async
+          // workspace chunk). Without a manualChunks hint Rollup ships a copy
+          // in each bundle (~950 lines duplicated). Force them into a single
+          // shared synchronous chunk that both importers reference.
+          if (
+            id.includes('/components/EnvPresetManager.vue') ||
+            id.includes('/components/AgentConfigFields.vue')
+          ) {
+            return 'agent-config'
+          }
+        },
+      },
+    },
+  },
 })
