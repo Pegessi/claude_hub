@@ -3487,7 +3487,7 @@ const feedbackLessonTokenIndex = computed<FeedbackLessonTokens[]>(() =>
 // key, so a memo entry is reused only when its matched result is guaranteed
 // identical. A cheap string compare replaces the query re-tokenization.
 function feedbackTaskContentKey(task: WorkspaceTask): string {
-  return `${task.title} ${task.prompt}`
+  return `${task.title}\u0000${task.prompt}`
 }
 
 // Bounded per-task memo for the matching result, declared at setup scope so it
