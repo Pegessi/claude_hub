@@ -592,7 +592,11 @@
     </div>
 
     <!-- Env Preset Manager Modal -->
+    <!-- PR-14: v-if gates instantiation so the async agent-config chunk is not
+         fetched until the user opens Manage-presets; EPM's own root v-if="visible"
+         still gates the rendered DOM. -->
     <EnvPresetManager
+      v-if="showSwitchEnvManager"
       v-model:model-value="switchEnvForm.env_preset"
       :visible="showSwitchEnvManager"
       @close="closeSwitchEnvPresetManager"
@@ -646,8 +650,6 @@ import {
   parseLaunchEnv,
   useLaunchEnvPresets,
 } from '@/composables/useLaunchEnvPresets'
-import AgentConfigFields from '@/components/AgentConfigFields.vue'
-import EnvPresetManager from '@/components/EnvPresetManager.vue'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
@@ -662,6 +664,22 @@ import type { AgentRuntimeStatus, AgentType, SwitchEnvRequest } from '@/types'
 // dots), so it never depends on this chunk being fetched.
 const AgentStatusFloatingPanel = defineAsyncComponent(
   () => import('@/components/AgentStatusFloatingPanel.vue')
+)
+
+// PR-14: both EnvPresetManager (615 lines, Switch-Env preset manager) and
+// AgentConfigFields (336 lines, new-tab form) are lazy-loaded so their shared
+// 'agent-config' chunk (~95 KB raw / 35 KB gz) defers off the initial shell.
+// Gating: ACF at L292 sits inside v-if="showModal" (L197 create-tab modal), so
+// Vue does not fire the async loader until the user opens New Tab. EPM at L593
+// has v-if="showSwitchEnvManager" added at the call site (mirroring PR-11's AWV
+// fix) so the chunk is fetched only on Manage-presets open. EPM's {immediate:true}
+// watch (EnvPresetManager.vue L253-276, from PR-11) ensures draftName/draftText
+// populate on first mount with visible=true.
+const AgentConfigFields = defineAsyncComponent(
+  () => import('@/components/AgentConfigFields.vue')
+)
+const EnvPresetManager = defineAsyncComponent(
+  () => import('@/components/EnvPresetManager.vue')
 )
 
 interface FileInfo {

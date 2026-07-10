@@ -59,14 +59,26 @@ export default defineConfig({
     },
   },
   build: {
+    modulePreload: {
+      // PR-14: agent-config chunk (EnvPresetManager + AgentConfigFields) is
+      // only needed when the user opens a modal — exclude it from modulepreload
+      // so it is truly deferred off the initial shell. Both importers (TabBar
+      // and AWV) use defineAsyncComponent + dynamic import(), so the chunk is
+      // fetched on-demand when a modal opens.
+      resolveDependencies(filename, deps) {
+        return deps.filter((dep) => !dep.includes('agent-config'))
+      },
+    },
     rollupOptions: {
       output: {
         manualChunks(id) {
-          // PR-05: EnvPresetManager + AgentConfigFields are statically imported
-          // by BOTH TabBar (shell/index chunk) and AgentWorkspaceView (async
-          // workspace chunk). Without a manualChunks hint Rollup ships a copy
-          // in each bundle (~950 lines duplicated). Force them into a single
-          // shared synchronous chunk that both importers reference.
+          // PR-05/PR-14: EnvPresetManager + AgentConfigFields are imported by
+          // BOTH TabBar and AgentWorkspaceView via defineAsyncComponent (PR-11
+          // converted AWV, PR-14 converted TabBar). Without a manualChunks hint
+          // Rollup would ship a copy in each async importer's chunk (~950 lines
+          // duplicated). Force them into a single shared on-demand chunk that
+          // both async importers reference. Combined with modulePreload
+          // exclusion above, this chunk is fetched only when a modal opens.
           if (
             id.includes('/components/EnvPresetManager.vue') ||
             id.includes('/components/AgentConfigFields.vue')
