@@ -584,6 +584,7 @@ onUnmounted(() => {
   --ch-agent-claude-fg: #d97757;
   --ch-agent-codex-bg: #000;
   --ch-agent-codex-fg: #fff;
+  --ch-agent-codex-fg-cli: #10a37f;
   --ch-agent-origin-bg: #c4b5fd;
   --ch-agent-origin-fg: #8b5cf6;
   --ch-agent-autonomy-bg: #5eead4;
@@ -683,6 +684,8 @@ onUnmounted(() => {
   --ch-terminal-bright-magenta: #5f4f7d;
   --ch-terminal-bright-cyan: #4e7185;
   --ch-terminal-bright-white: #fdfdfc;
+
+  --ch-agent-codex-fg-cli: #10a37f;
 
   --ch-shadow-hairline: 0 1px 3px rgba(15, 23, 42, 0.16);
 }

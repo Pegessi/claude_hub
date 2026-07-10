@@ -906,7 +906,7 @@ onUnmounted(() => {
 
 .agent-cli[data-kind='codex'] {
   background: rgba(16, 163, 127, 0.18);
-  color: #10a37f;
+  color: var(--ch-agent-codex-fg-cli);
 }
 
 .agent-cli[data-kind='cursor'] {
