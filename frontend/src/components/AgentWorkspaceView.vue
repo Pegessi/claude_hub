@@ -6286,7 +6286,7 @@ onUnmounted(() => {
 }
 
 .workspace-mobile-menu-item--mode + .workspace-mobile-menu-item:not(.workspace-mobile-menu-item--mode) {
-  margin-top: 4px;
+  margin-top: var(--ch-space-1);
 }
 
 .workspace-mobile-menu-item--mode.active {
@@ -6311,7 +6311,7 @@ onUnmounted(() => {
 
 .workspace-mobile-menu-item--theme {
   justify-content: space-between;
-  margin-top: 4px;
+  margin-top: var(--ch-space-1);
   border-color: var(--ch-color-accent-ring-strong);
   background: var(--ch-color-accent-soft);
 }
@@ -6673,7 +6673,7 @@ onUnmounted(() => {
 
 .agent-status-detail {
   display: block;
-  margin-top: 3px;
+  margin-top: var(--ch-space-1);
   color: var(--ch-color-text-muted);
   font-size: var(--ch-font-xs);
   overflow: hidden;
@@ -6682,7 +6682,7 @@ onUnmounted(() => {
 }
 
 .agent-status-meta {
-  margin-top: 6px;
+  margin-top: var(--ch-space-2);
   flex-wrap: wrap;
 }
 
@@ -8433,7 +8433,7 @@ onUnmounted(() => {
 
 .fact-grid strong {
   display: block;
-  margin-top: 4px;
+  margin-top: var(--ch-space-1);
   color: var(--ch-color-text);
   font-size: 12px;
   overflow-wrap: anywhere;
@@ -10350,7 +10350,7 @@ onUnmounted(() => {
     grid-column: 2;
     width: fit-content;
     min-width: 0;
-    margin-top: 3px;
+    margin-top: var(--ch-space-1);
     padding: 3px 6px;
     font-size: var(--ch-font-xs);
   }
