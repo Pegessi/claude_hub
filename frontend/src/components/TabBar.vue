@@ -635,10 +635,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import type { CSSProperties } from 'vue'
 import { storeToRefs } from 'pinia'
-import AgentStatusFloatingPanel from '@/components/AgentStatusFloatingPanel.vue'
 import LayoutSelector from '@/components/LayoutSelector.vue'
 import LoadingButton from '@/components/LoadingButton.vue'
 import NetworkAccessMenu from '@/components/NetworkAccessMenu.vue'
@@ -654,6 +653,16 @@ import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import type { AppMode, RemoteProfile, TerminalTab } from '@/types'
 import type { AgentRuntimeStatus, AgentType, SwitchEnvRequest } from '@/types'
+
+// Lazy-loaded so the 1012-line panel lands in its own on-demand chunk instead of
+// the initial shell bundle (PR-04). The whole SFC (collapsed status chip + panel
+// body) is deferred; the small chunk is fetched right after the main bundle, so
+// the chips pop in without displacing terminal content. Agent-status polling is
+// owned by TabBar's onMounted below (which drives the always-visible tab-indicator
+// dots), so it never depends on this chunk being fetched.
+const AgentStatusFloatingPanel = defineAsyncComponent(
+  () => import('@/components/AgentStatusFloatingPanel.vue')
+)
 
 interface FileInfo {
   name: string
@@ -1252,12 +1261,20 @@ onMounted(() => {
   window.addEventListener('resize', updateScrollFadeState)
   document.addEventListener('pointerdown', handleDocumentPointerDown)
   document.addEventListener('keydown', handleDocumentKeyDown)
+  // Own the agent-status poll here rather than relying on the (now lazy)
+  // AgentStatusFloatingPanel to start it. TabBar's tab-indicator dots read
+  // agentStatuses, so the poll must run even if the user never opens a status
+  // chip (i.e. even if the ASFP chunk is never fetched). The store call is
+  // ref-counted with a single shared timer, so ASFP acquiring its own consumer
+  // on open is harmless (no second interval, no leak).
+  store.startAgentStatusPolling()
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', updateScrollFadeState)
   document.removeEventListener('pointerdown', handleDocumentPointerDown)
   document.removeEventListener('keydown', handleDocumentKeyDown)
+  store.stopAgentStatusPolling()
 })
 
 function handleDocumentKeyDown(e: KeyboardEvent) {
