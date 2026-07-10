@@ -11,7 +11,6 @@
     :aria-busy="loading ? 'true' : undefined"
   >
     <span
-      v-if="loading"
       class="loading-button__spinner"
       aria-hidden="true"
     />
@@ -59,15 +58,21 @@ withDefaults(defineProps<{
 }
 
 .loading-button__spinner {
+  position: absolute;
+  left: 0;
+  top: 50%;
   width: 1em;
   height: 1em;
-  display: inline-block;
-  flex: 0 0 auto;
-  margin-right: 0.45em;
-  vertical-align: -0.125em;
+  opacity: 0;
+  pointer-events: none;
   border: 2px solid currentColor;
   border-right-color: transparent;
   border-radius: 999px;
+  transform: translateY(-50%);
+}
+
+.loading-button--loading .loading-button__spinner {
+  opacity: 1;
   animation: loading-button-spin 700ms linear infinite;
 }
 
@@ -76,7 +81,14 @@ withDefaults(defineProps<{
 }
 
 .loading-button--hide-content .loading-button__spinner {
+  /* Icon-only refresh buttons: put the spinner back in flow so it centers in
+     the square button (content is display:none via this modifier). */
+  position: static;
+  display: inline-block;
   margin-right: 0;
+  opacity: 1;
+  transform: none;
+  animation: loading-button-spin 700ms linear infinite;
 }
 
 .loading-button--hide-content .loading-button__content {
