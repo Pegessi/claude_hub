@@ -544,4 +544,10 @@ onUnmounted(() => {
   height: 42px;
   font-size: var(--ch-font-xl);
 }
+
+.control-btn:focus-visible,
+.toggle-btn:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring-strong);
+  outline-offset: 2px;
+}
 </style>

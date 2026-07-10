@@ -768,6 +768,12 @@ onUnmounted(() => {
   outline-offset: 2px;
 }
 
+.status-trigger:focus-visible,
+.agent-row:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring-strong);
+  outline-offset: 2px;
+}
+
 /* --- List body --------------------------------------------------------- */
 
 .empty-status {

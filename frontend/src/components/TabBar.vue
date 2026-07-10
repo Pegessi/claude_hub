@@ -2575,4 +2575,19 @@ async function handleCreateTab() {
   }
 }
 
+.tab-menu-trigger:focus-visible,
+.tab-close:focus-visible,
+.add-tab:focus-visible,
+.mobile-app-menu-trigger:focus-visible,
+.mobile-app-menu-item:focus-visible,
+.tab-menu-item:focus-visible,
+.path-nav-btn:focus-visible,
+.segment-button:focus-visible,
+.cwd-dropdown-btn:focus-visible,
+.btn:focus-visible,
+.toast__close:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring-strong);
+  outline-offset: 2px;
+}
+
 </style>
