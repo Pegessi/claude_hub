@@ -110,13 +110,15 @@
         <TerminalGridView v-else />
         <MobileControls />
       </div>
-      <AgentWorkspaceView v-if="mode === 'workspace'" />
+      <Transition name="mode-content-fade">
+        <AgentWorkspaceView v-if="mode === 'workspace'" />
+      </Transition>
     </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import { defineAsyncComponent, onMounted, onUnmounted, watch } from 'vue'
+import { defineAsyncComponent, h, onMounted, onUnmounted, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import TabBar from '@/components/TabBar.vue'
 import LayoutSelector from '@/components/LayoutSelector.vue'
@@ -132,12 +134,20 @@ import { useAuthStore } from '@/stores/authStore'
 // and the 10,951-line workspace board is only ever rendered behind
 // v-if="mode === 'workspace'". defineAsyncComponent + dynamic import() lets
 // Vite split it into a separate chunk so the initial terminal bundle skips it.
-// No Suspense / loadingComponent: v-if gates mounting until the first workspace
-// switch, and Vue's default async-component behavior leaves the anchor empty
-// until the promise resolves (zero UX change vs. static import).
-const AgentWorkspaceView = defineAsyncComponent(
-  () => import('@/components/AgentWorkspaceView.vue'),
-)
+// Inline loadingComponent gives a small centered spinner during the first chunk
+// fetch so the switch reads as a deliberate reveal instead of blank→pop (RM-04).
+// No Suspense: v-if gates mounting until the first workspace switch, and the
+// placeholder is swapped for the real component as soon as the chunk resolves.
+// delay:0 = show the placeholder immediately (Vue has no "min display time" for
+// defineAsyncComponent; the placeholder is replaced the moment the loader resolves).
+const ModeSwitchPlaceholder = () => h('div', { class: 'mode-fade-placeholder' }, [
+  h('div', { class: 'mode-fade-spinner' }),
+])
+const AgentWorkspaceView = defineAsyncComponent({
+  loader: () => import('@/components/AgentWorkspaceView.vue'),
+  loadingComponent: ModeSwitchPlaceholder,
+  delay: 0,
+})
 
 const appStore = useAppStore()
 const store = useTerminalStore()
@@ -923,6 +933,53 @@ textarea {
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+/*
+ * Mode-switch fade (RM-04): enter-only opacity fade when AgentWorkspaceView
+ * mounts on terminal->workspace switch. No leave rule: AWV unmounts instantly
+ * on workspace->terminal so we never have two flex:1 children (.terminal-mode-shell
+ * and .workspace-view) coexisting in the column flow (which would stack 50/50).
+ * v-show on .terminal-mode-shell and v-if on AWV flush in the same render tick,
+ * so the terminal shell is display:none before AWV is inserted — AWV is the sole
+ * flex:1 child during its enter-from/enter-active phases.
+ */
+.mode-content-fade-enter-active {
+  transition: opacity var(--ch-motion-standard);
+}
+
+.mode-content-fade-enter-from {
+  opacity: 0;
+}
+
+/* Reduced-motion guard: users with the OS preference get an instant swap. */
+@media (prefers-reduced-motion: reduce) {
+  .mode-content-fade-enter-active {
+    transition: none !important;
+  }
+}
+
+/*
+ * Inline placeholder shown while the AWV async chunk is loading. Sized as a
+ * proper flex:1 child so it fills the content area during the fetch; uses a
+ * 24px spinner (smaller than the boot 40px spinner) reusing @keyframes spin.
+ */
+.mode-fade-placeholder {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  background: var(--ch-color-app-bg);
+}
+
+.mode-fade-spinner {
+  width: 24px;
+  height: 24px;
+  border: 3px solid var(--ch-color-border);
+  border-top-color: var(--ch-color-accent);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
 }
 
 .empty-state {
