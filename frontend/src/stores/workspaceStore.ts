@@ -87,6 +87,19 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   // complete task from here so those sections render.
   const taskDetails = ref<Record<string, WorkspaceTask>>({})
   const taskDetailFetches = new Map<string, Promise<void>>()
+  // Feedback-lesson fetch deduplication + cadence throttle (PR-03).
+  //
+  // `feedbackLessons` is a single shared ref, not per-workspace, so a throttle
+  // that only looked at wall-clock time per workspace could render the wrong
+  // workspace's lessons after a rapid A→B→A switch. We mirror the boardETag
+  // identity guard at fetchBoard:297 (`board.value?.workspace.id ===
+  // workspaceId`) with a scalar `loadedLessonsWorkspaceId` that records which
+  // workspace the current feedbackLessons.value belongs to; the throttle only
+  // short-circuits when the requested id matches AND the last fetch is fresh.
+  const lessonFetches = new Map<string, Promise<void>>()
+  const lastLessonsFetchAt = new Map<string, number>()
+  const LESSONS_REFETCH_INTERVAL_MS = 30_000
+  let loadedLessonsWorkspaceId: string | null = null
 
   const activeWorkspace = computed(() =>
     workspaces.value.find(workspace => workspace.id === activeWorkspaceId.value) || null
@@ -384,11 +397,57 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   async function fetchFeedbackLessons(workspaceId = activeWorkspaceId.value) {
     if (!workspaceId) {
       feedbackLessons.value = []
+      loadedLessonsWorkspaceId = null
       return
     }
-    const response = await fetch(`${API_BASE}/workspaces/${workspaceId}/lessons?limit=50`)
-    if (!response.ok) throw new Error(await readError(response))
-    feedbackLessons.value = await response.json()
+    // In-flight coalesce: concurrent calls for the same workspace share one
+    // in-flight GET, mirroring boardFetches / taskReportFetches / taskDetailFetches.
+    const existing = lessonFetches.get(workspaceId)
+    if (existing) return existing
+
+    // Cadence throttle with identity guard (mirrors fetchBoard:297's
+    // `board.value?.workspace.id === workspaceId` ETag guard): only skip the
+    // fetch when (a) we hold lessons for THIS workspace and (b) the last
+    // fetch completed within the throttle window. Switching workspaces forces
+    // a fresh fetch regardless of age, so we never render ws-B's lessons
+    // against ws-A's UI.
+    const lastAt = lastLessonsFetchAt.get(workspaceId)
+    if (
+      loadedLessonsWorkspaceId === workspaceId
+      && lastAt !== undefined
+      && Date.now() - lastAt < LESSONS_REFETCH_INTERVAL_MS
+    ) {
+      return
+    }
+
+    const request = (async () => {
+      // Capture requested id at the top of the IIFE so we can detect a
+      // workspace switch mid-flight and drop the late response (torn-write
+      // guard) instead of overwriting the new workspace's lessons.
+      const requestedId = workspaceId
+      const response = await fetch(`${API_BASE}/workspaces/${requestedId}/lessons?limit=50`)
+      if (!response.ok) throw new Error(await readError(response))
+      const data = await response.json() as FeedbackLesson[]
+      if (requestedId !== activeWorkspaceId.value) {
+        // User switched workspaces while this was in flight — discard. The
+        // new workspace's own fetch (already queued or about to fire) will
+        // populate feedbackLessons with the correct data.
+        return
+      }
+      feedbackLessons.value = data
+      loadedLessonsWorkspaceId = requestedId
+      lastLessonsFetchAt.set(requestedId, Date.now())
+    })()
+
+    lessonFetches.set(workspaceId, request)
+    try {
+      await request
+    } catch (e) {
+      notifyError(e instanceof Error ? e.message : 'Failed to fetch feedback lessons')
+      throw e
+    } finally {
+      lessonFetches.delete(workspaceId)
+    }
   }
 
   async function createFeedbackLesson(payload: FeedbackLessonCreate) {
@@ -401,6 +460,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         body: JSON.stringify(payload),
       })
       if (!response.ok) throw new Error(await readError(response))
+      // Force refresh after mutation: bypass both the in-flight map (defensive
+      // — we just awaited the POST, nothing else should be in flight for this
+      // id) and the cadence throttle.
+      lastLessonsFetchAt.delete(activeWorkspaceId.value)
+      lessonFetches.delete(activeWorkspaceId.value)
       await fetchFeedbackLessons()
     } catch (e) {
       notifyError(e instanceof Error ? e.message : 'Failed to create lesson')
@@ -418,6 +482,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         method: 'DELETE',
       })
       if (!response.ok) throw new Error(await readError(response))
+      lastLessonsFetchAt.delete(activeWorkspaceId.value)
+      lessonFetches.delete(activeWorkspaceId.value)
       await fetchFeedbackLessons()
     } catch (e) {
       notifyError(e instanceof Error ? e.message : 'Failed to delete lesson')
@@ -440,6 +506,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       })
       if (!response.ok) throw new Error(await readError(response))
       const run = await response.json() as FeedbackSummaryRun
+      lastLessonsFetchAt.delete(activeWorkspaceId.value)
+      lessonFetches.delete(activeWorkspaceId.value)
       await fetchBoard()
       await fetchFeedbackLessons()
       return run
