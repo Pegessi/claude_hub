@@ -475,13 +475,13 @@
                   aria-hidden="true"
                 >—</span>
                 <button
-                  v-if="column.status === 'done' && doneTasksTotal > DONE_TASK_COLLAPSE_LIMIT"
+                  v-if="isCollapsibleColumn(column.status) && taskCountForStatus(column.status) > COLUMN_COLLAPSE_LIMIT"
                   type="button"
-                  class="column-collapse-button column-done-toggle"
-                  :aria-expanded="showAllDoneTasks"
-                  @click="showAllDoneTasks = !showAllDoneTasks"
+                  class="column-collapse-button column-collapse-toggle"
+                  :aria-expanded="showAllColumns[column.status]"
+                  @click="toggleColumnShowAll(column.status)"
                 >
-                  {{ showAllDoneTasks ? 'Show recent' : `Show ${doneTasksCollapsedCount} older` }}
+                  {{ showAllColumns[column.status] ? 'Show recent' : `Show ${columnCollapsedCount(column.status)} older` }}
                 </button>
                 <button
                   type="button"
@@ -3285,28 +3285,50 @@ const columns: { status: WorkspaceTaskStatus; label: string }[] = [
   { status: 'done', label: 'Done' },
 ]
 
-// Done-task collapse: with 100+ completed tasks, rendering all done cards on
-// every 2.5s poll dominates DOM and re-render cost. Show the N most recent
-// done tasks by default with a toggle to reveal all. The Done column scrolls
-// internally at desktop so the toggle is the "see older history" affordance.
-const DONE_TASK_COLLAPSE_LIMIT = 10
-const showAllDoneTasks = ref(false)
-const doneTasksTotal = computed(() => tasksByStatusMap.value.done.length)
-const doneTasksCollapsedCount = computed(
-  () => Math.max(0, doneTasksTotal.value - DONE_TASK_COLLAPSE_LIMIT),
-)
-const visibleDoneTasks = computed(() => {
-  const all = tasksByStatusMap.value.done
-  if (showAllDoneTasks.value || all.length <= DONE_TASK_COLLAPSE_LIMIT) return all
-  // Tasks are in insertion order (oldest first); show the most recent N.
-  return all.slice(all.length - DONE_TASK_COLLAPSE_LIMIT)
+// Per-column count-cap collapse (PR-10): with large backlogs, rendering every
+// todo/queued/done card on every 2.5s poll dominates DOM and re-render cost
+// (buttons, selects, avatars, dependency selects, PR-02 linear scans). For the
+// three unbounded columns (todo, queued, done), show the N most recent tasks
+// by default with a toggle to reveal all. Working/review stay uncapped because
+// agent parallelism keeps them small by construction. Columns scroll internally
+// at desktop, so the toggle is the "see older" affordance.
+//
+// Pattern mirrors the existing mobileCollapsedColumns reactive record (a
+// per-status boolean map initialized all-false). taskCountForStatus() below
+// continues to return the TRUE total (header counts, summary chips, empty-state
+// detection, and the toggle threshold all use the full count), so collapsing
+// cards never hides counts.
+const COLUMN_COLLAPSE_LIMIT = 10
+const COLLAPSIBLE_COLUMNS: ReadonlySet<WorkspaceTaskStatus> = new Set([
+  'todo',
+  'queued',
+  'done',
+])
+const showAllColumns = reactive<Record<WorkspaceTaskStatus, boolean>>({
+  todo: false,
+  queued: false,
+  working: false,
+  review: false,
+  done: false,
 })
-
-// Stable per-column task lists. Non-done columns get the full list from the
-// store's memoized map; the done column gets the (possibly collapsed) list.
+function isCollapsibleColumn(status: WorkspaceTaskStatus): boolean {
+  return COLLAPSIBLE_COLUMNS.has(status)
+}
+function toggleColumnShowAll(status: WorkspaceTaskStatus): void {
+  if (!isCollapsibleColumn(status)) return
+  showAllColumns[status] = !showAllColumns[status]
+}
+function columnCollapsedCount(status: WorkspaceTaskStatus): number {
+  if (!isCollapsibleColumn(status)) return 0
+  const total = taskCountForStatus(status)
+  return Math.max(0, total - COLUMN_COLLAPSE_LIMIT)
+}
 function tasksForColumn(status: WorkspaceTaskStatus): WorkspaceTask[] {
-  if (status === 'done') return visibleDoneTasks.value
-  return tasksByStatusMap.value[status] || []
+  const all = tasksByStatusMap.value[status] || []
+  if (!isCollapsibleColumn(status)) return all
+  if (showAllColumns[status] || all.length <= COLUMN_COLLAPSE_LIMIT) return all
+  // Tasks are in insertion order (oldest first); show the most recent N.
+  return all.slice(all.length - COLUMN_COLLAPSE_LIMIT)
 }
 
 // Backwards-compat: total count for a status (always the true total, even
@@ -7561,7 +7583,7 @@ onUnmounted(() => {
   display: none;
 }
 
-.column-done-toggle {
+.column-collapse-toggle {
   display: inline-flex;
   align-items: center;
   min-height: 26px;
@@ -7578,7 +7600,7 @@ onUnmounted(() => {
     background var(--ch-motion-fast);
 }
 
-.column-done-toggle:hover {
+.column-collapse-toggle:hover {
   color: var(--ch-color-text);
   border-color: var(--ch-color-border-strong);
   background: var(--ch-color-surface-control);
