@@ -8,6 +8,15 @@
   />
 </template>
 
+<script lang="ts">
+// True module-scope declarations. Evaluated ONCE at module load, not per
+// component instance, so htmlCache is shared across every MarkdownContent
+// instance on the page. FIFO eviction at HTML_CACHE_CAP.
+const HTML_CACHE_CAP = 200
+const MARKED_OPTS = { async: false as const, breaks: true, gfm: true }
+const htmlCache = new Map<string, string>()
+</script>
+
 <script setup lang="ts">
 import { computed } from 'vue'
 import DOMPurify from 'dompurify'
@@ -30,17 +39,23 @@ const emit = defineEmits<{
 const markdownPathPattern = /((?:~|\.{1,2}|\/|[\w.-]+\/)?[\w./~@:+-]+\.(?:md|markdown|mdown|mkd)(?::\d+)?(?:[?#][^\s`"'<>)]*)?)/gi
 
 const safeHtml = computed(() => {
-  const source = props.text?.trim() || ''
+  const raw = props.text ?? ''
+  const source = raw.trim()
   if (!source) return ''
 
-  const html = marked.parse(source, {
-    async: false,
-    breaks: true,
-    gfm: true,
-  })
+  const key = raw + '\0' + (props.linkMarkdownPaths ? '1' : '0')
+  const cached = htmlCache.get(key)
+  if (cached !== undefined) return cached
 
+  const html = marked.parse(source, MARKED_OPTS)
   const sanitized = DOMPurify.sanitize(html)
-  return props.linkMarkdownPaths ? linkPathMentions(sanitized) : sanitized
+  const result = props.linkMarkdownPaths ? linkPathMentions(sanitized) : sanitized
+
+  htmlCache.set(key, result)
+  if (htmlCache.size > HTML_CACHE_CAP) {
+    htmlCache.delete(htmlCache.keys().next().value as string)
+  }
+  return result
 })
 
 function linkPathMentions(html: string): string {
