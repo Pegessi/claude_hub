@@ -3469,21 +3469,56 @@ function feedbackLessonText(lesson: FeedbackLesson): string {
   ].join(' ')
 }
 
-function feedbackLessonScore(lesson: FeedbackLesson, task: WorkspaceTask): number {
-  const queryTokens = feedbackTokens(`${task.title} ${task.prompt}`)
-  if (queryTokens.size === 0) return 0
-  const lessonTokens = feedbackTokens(feedbackLessonText(lesson))
-  let score = 0
-  queryTokens.forEach((token) => {
-    if (lessonTokens.has(token)) score += 1
-  })
-  return score
+// Pre-tokenize each active lesson exactly once. This computed recomputes only
+// when the set of active lessons changes (a lesson fetch/create/update), NOT on
+// every board poll — so lessons are no longer re-tokenized for every task on
+// every poll. feedbackTokens / feedbackLessonText above are unchanged; this only
+// adds a caching layer.
+type FeedbackLessonTokens = { lesson: FeedbackLesson; tokens: Set<string> }
+
+const feedbackLessonTokenIndex = computed<FeedbackLessonTokens[]>(() =>
+  activeFeedbackLessons.value.map(lesson => ({
+    lesson,
+    tokens: feedbackTokens(feedbackLessonText(lesson)),
+  })),
+)
+
+// Exact title+prompt content key for a task. Any title/prompt edit changes the
+// key, so a memo entry is reused only when its matched result is guaranteed
+// identical. A cheap string compare replaces the query re-tokenization.
+function feedbackTaskContentKey(task: WorkspaceTask): string {
+  return `${task.title} ${task.prompt}`
 }
 
-function matchingFeedbackLessons(task: WorkspaceTask | null): FeedbackLesson[] {
-  if (!task) return []
-  return activeFeedbackLessons.value
-    .map(lesson => ({ lesson, score: feedbackLessonScore(lesson, task) }))
+// Bounded per-task memo for the matching result, declared at setup scope so it
+// survives computed re-runs / board polls (a Map created inside the computed
+// would be discarded every run and never hit — per reviewer note). It is
+// intentionally NON-reactive: it is written from inside a computed as a cache,
+// so making it reactive would retrigger that computed. The memo is cleared when
+// the pre-tokenized lesson index changes and evicted of task ids no longer
+// present, so it stays bounded to the live task set.
+const feedbackMatchMemo = new Map<string, { contentKey: string; lessons: FeedbackLesson[] }>()
+let feedbackMatchMemoIndex: FeedbackLessonTokens[] | null = null
+
+// Pure matching against the pre-tokenized lesson index. Preserves the original
+// rule exactly: score = count of query tokens present in the lesson tokens; keep
+// score > 0; sort by score desc (Array.sort is stable, so ties keep lesson
+// order); cap at 6. Equivalent to the previous feedbackLessonScore +
+// matchingFeedbackLessons, minus the per-pair lesson re-tokenization.
+function matchingFeedbackLessonsFor(
+  task: WorkspaceTask,
+  index: FeedbackLessonTokens[],
+): FeedbackLesson[] {
+  const queryTokens = feedbackTokens(`${task.title} ${task.prompt}`)
+  if (queryTokens.size === 0) return []
+  return index
+    .map(entry => {
+      let score = 0
+      queryTokens.forEach((token) => {
+        if (entry.tokens.has(token)) score += 1
+      })
+      return { lesson: entry.lesson, score }
+    })
     .filter(item => item.score > 0)
     .sort((a, b) => b.score - a.score)
     .map(item => item.lesson)
@@ -3537,7 +3572,32 @@ function feedbackSummaryDescription(run: FeedbackSummaryRun): string {
 }
 
 const feedbackLessonMatchSummary = computed(() => {
-  const matchedTaskCount = tasks.value.filter(task => matchingFeedbackLessons(task).length > 0).length
+  const index = feedbackLessonTokenIndex.value
+  // Invalidate the whole memo when the pre-tokenized lesson set changes, so a
+  // lessons edit re-evaluates every task against the new lessons.
+  if (feedbackMatchMemoIndex !== index) {
+    feedbackMatchMemo.clear()
+    feedbackMatchMemoIndex = index
+  }
+  const currentTaskIds = new Set<string>()
+  let matchedTaskCount = 0
+  tasks.value.forEach((task) => {
+    currentTaskIds.add(task.id)
+    const contentKey = feedbackTaskContentKey(task)
+    let entry = feedbackMatchMemo.get(task.id)
+    if (!entry || entry.contentKey !== contentKey) {
+      entry = { contentKey, lessons: matchingFeedbackLessonsFor(task, index) }
+      feedbackMatchMemo.set(task.id, entry)
+    }
+    if (entry.lessons.length > 0) matchedTaskCount += 1
+  })
+  // Evict entries for task ids no longer on the board so the memo stays bounded
+  // to the current task set.
+  if (feedbackMatchMemo.size > currentTaskIds.size) {
+    for (const id of feedbackMatchMemo.keys()) {
+      if (!currentTaskIds.has(id)) feedbackMatchMemo.delete(id)
+    }
+  }
   if (activeFeedbackLessons.value.length === 0) return 'No active lessons indexed'
   if (matchedTaskCount === 0) return 'No current task matches'
   return `${matchedTaskCount} current tasks match active lessons`
