@@ -6652,13 +6652,12 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 8px;
   border: 1px solid var(--ch-color-border-muted);
-  border-radius: var(--ch-radius-lg);
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface);
   color: inherit;
   padding: 10px 11px;
   scroll-snap-align: start;
-  box-shadow: 0 1px 0 var(--ch-shadow-color-soft);
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), transform var(--ch-motion-fast), box-shadow var(--ch-motion-fast);
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast);
 }
 
 .agent-status-card:hover {
@@ -6737,8 +6736,8 @@ onUnmounted(() => {
 
 .agent-status-name {
   min-width: 0;
-  color: var(--ch-color-text);
-  font-size: 13px;
+  color: var(--ch-color-text-strong);
+  font-size: var(--ch-font-md);
   font-weight: var(--ch-weight-semibold);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -7669,7 +7668,7 @@ onUnmounted(() => {
   cursor: pointer;
   min-width: 0;
   -webkit-tap-highlight-color: transparent;
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), transform var(--ch-motion-fast);
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast);
 }
 
 .task-card::before {
@@ -7683,14 +7682,12 @@ onUnmounted(() => {
 .task-card:hover {
   border-color: var(--ch-color-border-hover);
   background: var(--ch-color-surface-raised);
-  box-shadow: 0 8px 20px var(--ch-shadow-color-soft);
-  transform: translateY(-1px);
 }
 
 .task-card.selected {
   border-color: var(--ch-color-accent);
   background: var(--ch-color-surface-selected);
-  box-shadow: 0 0 0 1px var(--ch-color-accent-ring), 0 8px 20px var(--ch-shadow-color-soft);
+  box-shadow: 0 0 0 1px var(--ch-color-accent-ring);
 }
 
 .task-card--todo::before {
@@ -8085,7 +8082,7 @@ onUnmounted(() => {
   height: 26px;
   border: 1px solid var(--ch-color-border-strong);
   border-radius: var(--ch-radius-sm);
-  background: var(--ch-color-surface-control-active);
+  background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
   padding: 0 8px;
   transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), transform var(--ch-motion-fast);
@@ -8125,7 +8122,7 @@ onUnmounted(() => {
   height: 100%;
   border: 1px solid var(--ch-color-border-strong);
   border-radius: var(--ch-radius-sm);
-  background: var(--ch-color-surface-control-active);
+  background: var(--ch-color-surface-control);
   color: var(--ch-color-text-subtle);
   font-size: 14px;
   line-height: 1;

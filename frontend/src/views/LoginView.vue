@@ -57,8 +57,11 @@ function handleLogin() {
  *   • Layout constants: min-height:100vh, max-width:400px, width:90%
  *   • All font-sizes are rem-based (2rem/0.95rem/1.1rem/1.3rem/0.85rem);
  *     --ch-font-* is px-based so these stay rem (per task instruction)
- *   • No font-weight declarations exist in this file; weight tokens
- *     are a no-op.
+ *   • Only one weight declaration in this file: h1 uses --ch-weight-semibold
+ *     (600) to match the rest of the product; no other element overrides
+ *     weight, so UA defaults apply to non-heading text. Prior versions of
+ *     this comment incorrectly claimed "no weight declarations" — corrected
+ *     for round-8 D8-06.
  *   • .feishu-login-btn hover is flat (background-color only; no lift
  *     or glow — matches rest of product's minimalist buttons).
  *   • Transition uses --ch-motion-standard (background-color only).
@@ -90,6 +93,7 @@ function handleLogin() {
 .login-header h1 {
   margin: 0 0 var(--ch-space-2) 0;
   font-size: 2rem;
+  font-weight: var(--ch-weight-semibold);
   color: var(--ch-color-text-strong);
 }
 
