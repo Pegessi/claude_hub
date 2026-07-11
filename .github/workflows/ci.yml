@@ -99,6 +99,14 @@ jobs:
         run: pnpm run test:unit
       - name: Run Type check and build
         run: pnpm run build
+      # Audit A11 (PR-14): guard the ~33 KB gz agent-config lazy-chunk split.
+      # The script inspects dist/ to confirm EnvPresetManager.vue +
+      # AgentConfigFields.vue stay in the on-demand agent-config chunk and
+      # never leak into the initial index entry. Fails the build on
+      # regression so a stray static import or deleted manualChunks rule
+      # can't silently undo the first-paint win.
+      - name: Verify agent-config chunk split (perf audit A11)
+        run: pnpm run verify-chunk-split
 
   ttyd:
     name: Verify ttyd & tmux
