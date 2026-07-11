@@ -7149,6 +7149,22 @@ onUnmounted(() => {
   border-color: var(--ch-color-border-hover);
 }
 
+/* VIS-03: keyboard focus ring for workspace-header toolbar buttons reuses the
+   app's 2px accent-ring-strong pattern (matching shell buttons, agent-status
+   actions at 6715-6721, and the login CTA). Without this rule focus falls back
+   to the UA's thin 1px auto outline, which looks off-system against the rest
+   of the app's 2px token ring. :hover/:active states are unchanged.
+   .workspace-desktop-action is always co-classed with .tool-button in markup
+   but included here for selector robustness. */
+.tool-button:focus-visible,
+.primary-button:focus-visible,
+.workspace-desktop-action:focus-visible,
+.abort-button:focus-visible,
+.danger-button:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring-strong);
+  outline-offset: 2px;
+}
+
 .workspace-select {
   width: 100%;
   min-width: 220px;
@@ -7865,12 +7881,15 @@ onUnmounted(() => {
   font-size: var(--ch-font-xs);
   font-weight: var(--ch-weight-semibold);
   letter-spacing: 0.02em;
-  white-space: nowrap;
+  /* VIS-01: allow the badge to shrink and wrap so long task titles no longer
+     clip "AI reviewing" / "Awaiting AI review" mid-word. The parent
+     .task-card-badges has flex-wrap: wrap, so a constrained badge drops to a
+     new line instead of overflowing the card. text-overflow:ellipsis is inert
+     on inline-flex anyway; removed along with overflow:hidden so text can wrap. */
+  white-space: normal;
   border: 1px solid transparent;
   max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
 }
 
 .autonomy-badge {

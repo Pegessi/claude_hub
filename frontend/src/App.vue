@@ -498,9 +498,14 @@ onUnmounted(() => {
   --ch-color-text-inverse: #ffffff;
   --ch-color-text-code: #e5e7eb;
   --ch-color-accent: #60a5fa;
-  --ch-color-accent-strong: #3b82f6;
-  --ch-color-accent-hover: #2563eb;
-  --ch-color-accent-soft: rgba(59, 130, 246, 0.2);
+  /* VIS-02: darken accent-strong/hover by one Tailwind step so white-on-accent
+     text meets WCAG AA (≥4.5:1). #2563eb on white = 5.17:1 (was 3.68:1 on #3b82f6);
+     #1d4ed8 = 6.70:1, preserving a visible hover delta. Light-theme block unchanged.
+     Text-on-light consumers (ASFP mode-switch active, AWV summary-chip--accent strong)
+     only see their ratio improve; non-text fills/borders unaffected. */
+  --ch-color-accent-strong: #2563eb;
+  --ch-color-accent-hover: #1d4ed8;
+  --ch-color-accent-soft: rgba(37, 99, 235, 0.2);
   --ch-color-accent-ring: rgba(96, 165, 250, 0.2);
   --ch-color-accent-ring-strong: rgba(96, 165, 250, 0.7);
   --ch-color-success: #4ade80;
