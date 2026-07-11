@@ -14,6 +14,7 @@
       allowfullscreen
       scrolling="yes"
       @load="onIframeLoad($event, cachedTabId)"
+      @error="onIframeError(cachedTabId)"
     />
     <Transition name="terminal-connecting-fade">
       <div
@@ -27,6 +28,24 @@
           aria-hidden="true"
         />
         <span class="terminal-connecting-text">Connecting…</span>
+      </div>
+    </Transition>
+    <Transition name="terminal-connecting-fade">
+      <div
+        v-if="activeTabFailed"
+        class="terminal-connection-error-overlay"
+        role="alert"
+        aria-live="assertive"
+      >
+        <span class="terminal-connection-error-title">Connection lost</span>
+        <span class="terminal-connection-error-text">Unable to reach the terminal. Check that the backend is running and try again.</span>
+        <button
+          type="button"
+          class="terminal-connection-error-retry"
+          @click.stop="retryConnection"
+        >
+          Retry
+        </button>
       </div>
     </Transition>
   </div>
@@ -350,6 +369,11 @@ const iframeRefs: Record<string, HTMLIFrameElement | null> = {}
 const cachedTabIds = ref<string[]>([])
 const terminalContainer = ref<HTMLElement | null>(null)
 const activeTabReady = ref(false)
+// A10: mirror connection-failure flag from terminalStore for the active tab.
+// True only when the active tab's iframe has errored or timed out without
+// reaching 'terminal-ready'; false the moment we retry, switch tabs, or hear
+// a successful terminal-ready postMessage.
+const activeTabFailed = ref(false)
 const appStore = useAppStore()
 const terminalStore = useTerminalStore()
 const { colorScheme } = storeToRefs(appStore)
@@ -370,6 +394,13 @@ let lastThemeKey: string | null = null
 const MOBILE_TERMINAL_BREAKPOINT_PX = 768
 const MOBILE_KEYBOARD_RESIZE_SETTLE_MS = 260
 const MAX_SINGLE_PANE_CACHED_TERMINALS = 4
+// A10: how long to wait for a 'terminal-ready' postMessage from a freshly-
+// inserted (or retried) iframe before concluding the ttyd connection failed.
+// 10s is generous relative to the normal SAB fast-path (~200–800 ms) but short
+// enough that a user isn't staring at the F1 spinner forever when the backend
+// is down.
+const CONNECT_TIMEOUT_MS = 10000
+const connectTimeoutIds: Record<string, number> = {}
 
 function getTerminalState(): TerminalKeyState {
   if (!window.__claudeHub.terminalState) {
@@ -394,6 +425,76 @@ function syncActiveTabReady() {
   activeTabReady.value = !!(state.ready && state.ready[props.tabId])
 }
 
+/** A10: sync the failure flag for the active tab from terminalStore. */
+function syncActiveTabFailed() {
+  activeTabFailed.value = terminalStore.isConnectionFailed(props.tabId)
+}
+
+/** A10: clear any pending connect-timeout for a tab (idempotent). */
+function clearConnectTimeout(tabId: string) {
+  const t = connectTimeoutIds[tabId]
+  if (t) {
+    window.clearTimeout(t)
+    delete connectTimeoutIds[tabId]
+  }
+}
+
+/** A10: arm the connect-timeout for a tab. Called whenever a fresh iframe is
+ *  inserted (cacheTabId / Retry). If it fires before clearConnectTimeout, we
+ *  mark the tab as failed — ttyd didn't deliver terminal-ready in time. */
+function startConnectTimeout(tabId: string) {
+  if (!tabId) return
+  clearConnectTimeout(tabId)
+  connectTimeoutIds[tabId] = window.setTimeout(() => {
+    delete connectTimeoutIds[tabId]
+    // Only mark failed if the tab is still in the DOM and still not ready.
+    const state = getTerminalState()
+    if (state.ready && state.ready[tabId]) return
+    terminalStore.markConnectionFailed(tabId)
+    syncActiveTabFailed()
+  }, CONNECT_TIMEOUT_MS)
+}
+
+/** A10: iframe native error handler. Fires for network/load errors (backend
+ *  down, 502, DNS) — exactly the cases where no terminal-ready will ever
+ *  arrive. */
+function onIframeError(tabId: string) {
+  if (!tabId) return
+  clearConnectTimeout(tabId)
+  terminalStore.markConnectionFailed(tabId)
+  syncActiveTabFailed()
+}
+
+/** A10: Retry handler. Drop the errored tab out of cachedTabIds to force Vue
+ *  to destroy the dead iframe, then re-insert it so onIframeLoad + the SAB
+ *  fast-path re-run cleanly. Clears the error flag and re-arms the timeout
+ *  via cacheTabId's side effect. */
+function retryConnection() {
+  const tabId = props.tabId
+  if (!tabId) return
+  clearConnectTimeout(tabId)
+  terminalStore.clearConnectionError(tabId)
+  syncActiveTabFailed()
+  activeTabReady.value = false
+  // Tear down any ready-state / SAB ring from the dead iframe so the next
+  // load behaves like a fresh mount.
+  const state = getTerminalState()
+  delete state.ready[tabId]
+  if (state.inputRing[tabId]) {
+    state.inputRing[tabId] = null
+    delete state.inputRing[tabId]
+  }
+  // Force iframe recreation: remove tabId entirely from the cache so Vue
+  // unmounts the old iframe element, then re-push so a new iframe mounts.
+  cachedTabIds.value = cachedTabIds.value.filter(id => id !== tabId)
+  // Defer the re-insertion one microtask so the v-for unmount runs first.
+  window.setTimeout(() => {
+    if (!cachedTabIds.value.includes(tabId)) {
+      cacheTabId(tabId)
+    }
+  }, 0)
+}
+
 function getOrCreateInputRing(tabId: string): SabInputRing | null {
   if (!sabInputSupported()) return null
   const state = getTerminalState()
@@ -408,16 +509,35 @@ function cacheTabId(tabId: string) {
   // Split layouts must not keep hidden iframe clients attached to tmux.
   if (layoutType.value !== '1x1') {
     cachedTabIds.value = [tabId]
-    return
+  } else {
+    const cachedWithoutCurrent = cachedTabIds.value.filter(id => id !== tabId)
+    cachedTabIds.value = [...cachedWithoutCurrent, tabId].slice(-MAX_SINGLE_PANE_CACHED_TERMINALS)
   }
-  const cachedWithoutCurrent = cachedTabIds.value.filter(id => id !== tabId)
-  cachedTabIds.value = [...cachedWithoutCurrent, tabId].slice(-MAX_SINGLE_PANE_CACHED_TERMINALS)
+  // A10: a tab entering the cache means a fresh iframe will be (re)mounted for
+  // it; arm the connect timeout so a permanently-dead backend surfaces an
+  // error overlay instead of an eternal F1 spinner. Skip re-arming if the tab
+  // is already flagged as failed (that path is resolved via retryConnection,
+  // which clears the flag before re-inserting).
+  if (!terminalStore.isConnectionFailed(tabId)) {
+    startConnectTimeout(tabId)
+  }
 }
 
 watch(
   () => props.tabId,
   (newTabId, oldTabId) => {
+    // A10: on tab switch, drop any pending connect timeout from the old tab
+    // (its iframe may be cached or may be evicted; either way we don't want
+    // its timer to fire for a tab the user isn't looking at), and clear a
+    // stale error flag if the old tab is being evicted by a split layout.
+    if (oldTabId && oldTabId !== newTabId) {
+      if (layoutType.value !== '1x1') {
+        clearConnectTimeout(oldTabId)
+        terminalStore.clearConnectionError(oldTabId)
+      }
+    }
     syncActiveTabReady()
+    syncActiveTabFailed()
     cacheTabId(newTabId)
     requestAnimationFrame(() => {
       scheduleTerminalResize(newTabId)
@@ -1269,8 +1389,13 @@ function handleMessage(event: MessageEvent) {
       getOrCreateInputRing(tabId)
       flushKeyQueue(tabId)
       scheduleTerminalResize(tabId)
+      // A10: successful handshake — cancel any pending failure timeout and
+      // drop the error flag so the overlay disappears immediately.
+      clearConnectTimeout(tabId)
+      terminalStore.clearConnectionError(tabId)
       if (tabId === props.tabId) {
         activeTabReady.value = true
+        activeTabFailed.value = false
       }
       window.dispatchEvent(new CustomEvent('terminal-ready-change', {
         detail: { tabId, ready: true },
@@ -1374,6 +1499,9 @@ onUnmounted(() => {
   pendingKeyboardResizeAll = false
   pendingKeyboardResizeTabIds.clear()
   lastThemeKey = null
+  // A10: cancel any in-flight connect timeouts so they can't fire into a
+  // torn-down component.
+  Object.keys(connectTimeoutIds).forEach(clearConnectTimeout)
 })
 </script>
 
@@ -1462,6 +1590,72 @@ onUnmounted(() => {
 
   .terminal-connecting-fade-enter-active,
   .terminal-connecting-fade-leave-active {
+    transition: none;
+  }
+}
+
+/* A10: connection-failure overlay. Rendered as a sibling AFTER the F1
+ * Connecting overlay so it naturally sits on top; uses the same
+ * absolute-fill / backdrop treatment but adds pointer-events for the Retry
+ * button and a quiet icon + primary CTA. */
+.terminal-connection-error-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ch-space-2);
+  background: var(--ch-color-app-bg);
+  z-index: 6;
+  pointer-events: auto;
+  padding: var(--ch-space-6);
+  text-align: center;
+}
+
+.terminal-connection-error-title {
+  font-size: var(--ch-font-base);
+  font-weight: var(--ch-weight-semibold);
+  color: var(--ch-color-text);
+  letter-spacing: -0.01em;
+}
+
+.terminal-connection-error-text {
+  font-size: var(--ch-font-sm);
+  color: var(--ch-color-text-muted);
+  max-width: 34ch;
+  line-height: 1.5;
+}
+
+.terminal-connection-error-retry {
+  margin-top: var(--ch-space-3);
+  padding: var(--ch-space-2) var(--ch-space-4);
+  font-size: var(--ch-font-sm);
+  font-weight: var(--ch-weight-medium);
+  color: var(--ch-color-text-inverse);
+  background: var(--ch-color-accent);
+  border: none;
+  border-radius: var(--ch-radius-md);
+  cursor: pointer;
+  transition: background var(--ch-motion-fast), transform var(--ch-motion-fast), box-shadow var(--ch-motion-fast);
+  font-family: inherit;
+}
+
+.terminal-connection-error-retry:hover {
+  background: var(--ch-color-accent-hover);
+}
+
+.terminal-connection-error-retry:active {
+  transform: translateY(1px);
+}
+
+.terminal-connection-error-retry:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring-strong);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-connection-error-retry {
     transition: none;
   }
 }
