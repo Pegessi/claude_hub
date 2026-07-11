@@ -7673,8 +7673,9 @@ onUnmounted(() => {
 .task-card::before {
   content: '';
   position: absolute;
-  inset: 0 auto 0 0;
-  width: 3px;
+  inset: 0 0 auto 0;
+  width: auto;
+  height: 2px;
   background: var(--ch-color-text-subtle);
 }
 
