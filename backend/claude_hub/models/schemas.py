@@ -425,6 +425,10 @@ class TerminalTab(TerminalTabBase):
         None,
         description="Managed workspace role for this tab",
     )
+    agent_session_id: Optional[str] = Field(
+        None,
+        description="Stable agent CLI conversation id (Claude --session-id); used for /resume and diagnostics.",
+    )
 
     class Config:
         from_attributes = True
@@ -696,6 +700,11 @@ class ManagedSession(BaseModel):
     auto_continue_task_id: Optional[str] = None
     auto_continue_attempts: int = 0
     last_auto_continue_at: Optional[datetime] = None
+    # Hard recovery: interrupt + /clear + re-inject prompt after repeated API errors.
+    # Tracked per task_id so counter resets on new task dispatch.
+    hard_recovery_task_id: Optional[str] = None
+    hard_recovery_attempts: int = 0
+    last_hard_recovery_at: Optional[datetime] = None
     prompt_retry_task_id: Optional[str] = None
     prompt_retry_attempted_at: Optional[datetime] = None
     # For reviewer sessions: the id of the task this session was last dispatched

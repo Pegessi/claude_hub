@@ -1570,6 +1570,7 @@ asyncio.run(_main())
             workspace_id=self.workspace_id,
             workspace_name=self.workspace_name,
             workspace_role=self.workspace_role,
+            agent_session_id=self.agent_session_id,
         )
 
 

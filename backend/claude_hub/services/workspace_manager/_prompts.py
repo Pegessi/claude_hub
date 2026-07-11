@@ -1100,3 +1100,108 @@ class _PromptsMixin:
             "P-JUDGE for re-review) rather than folding the work into your own context. Append "
             "the new ledger entries to your existing subagent ledger; do not restart it.\n\n"
         )
+
+    def _build_hard_recovery_worker_prompt(
+        self,
+        workspace: Workspace,
+        task: WorkspaceTask,
+        session: ManagedSession,
+        interruption_reason: str,
+    ) -> str:
+        """Prompt sent after hard recovery (interrupt + /clear) for a worker agent.
+
+        The agent's context has been wiped by /clear but the CLI conversation id is preserved,
+        so the agent can resume work without losing the session entirely.
+        """
+        agent_session_id = self._agent_session_id_for_session(session)
+        session_line = f"Conversation ID: {agent_session_id}\n" if agent_session_id else ""
+        goal_packet_line = (
+            f"Previously approved Goal Packet:\n{task.goal_packet.model_dump_json()}\n\n"
+            if task.goal_packet
+            else ""
+        )
+        return (
+            f"{HARD_RECOVERY_WORKER_MESSAGE}\n\n"
+            f"Error detected: {interruption_reason}\n\n"
+            f"Workspace: {workspace.name}\n"
+            f"Task ID: {task.id}\n"
+            f"Task title: {task.title}\n"
+            f"Task mode: {task.task_mode.value}\n"
+            f"{session_line}"
+            f"State snapshot: {self.snapshot_path(workspace.id)}\n\n"
+            f"Task description:\n{task.prompt}\n\n"
+            f"{goal_packet_line}"
+            f"{self._autonomous_continue_orchestrator_reminder(task)}"
+            "Resume work now. Start by reading the state snapshot and checking the current state "
+            "of any files you were editing. If the task was already complete (e.g., you already "
+            "posted a ready_for_review report before the error), post a completed report immediately.\n\n"
+            f"{self._report_endpoint_curl(session, task.id)}"
+        )
+
+    def _build_hard_recovery_reviewer_prompt(
+        self,
+        workspace: Workspace,
+        task: WorkspaceTask,
+        session: ManagedSession,
+        trigger_report: AgentReport,
+        interruption_reason: str,
+    ) -> str:
+        """Prompt sent after hard recovery (interrupt + /clear) for a reviewer agent."""
+        task_reports = [
+            report
+            for report in self.reports_for_workspace(task.workspace_id)
+            if report.task_id == task.id
+        ][-12:]
+        report_payload = [
+            {
+                "state": report.state.value,
+                "session_id": report.session_id,
+                "message": report.message,
+                "changed_files": report.changed_files,
+                "validation": report.validation,
+                "risks": report.risks,
+                "acceptance_check": [
+                    item.model_dump(mode="json") for item in report.acceptance_check
+                ],
+                "artifact_refs": report.artifact_refs,
+                "confidence": report.confidence,
+                "review_decision": report.review_decision.value,
+                "review_reason": report.review_reason,
+                "risk_level": report.risk_level,
+                "created_at": report.created_at.isoformat(),
+            }
+            for report in task_reports
+        ]
+        agent_session_id = self._agent_session_id_for_session(session)
+        session_line = f"Conversation ID: {agent_session_id}\n" if agent_session_id else ""
+        return (
+            f"{HARD_RECOVERY_REVIEWER_MESSAGE}\n\n"
+            f"Error detected: {interruption_reason}\n\n"
+            f"Workspace: {workspace.name}\n"
+            f"Task ID: {task.id}\n"
+            f"Task title: {task.title}\n"
+            f"Task mode: {task.task_mode.value}\n"
+            f"Implementation agent session: {task.session_id or 'unknown'}\n"
+            f"Reviewer session: {session.id}\n"
+            f"{session_line}"
+            f"State snapshot: {self.snapshot_path(workspace.id)}\n\n"
+            "Task description:\n"
+            f"{task.prompt}\n\n"
+            "Stored Goal Packet JSON:\n"
+            f"{task.goal_packet.model_dump_json() if task.goal_packet else 'null'}\n\n"
+            "Trigger report JSON:\n"
+            f"{trigger_report.model_dump_json()}\n\n"
+            "Recent task reports JSON:\n"
+            f"{json.dumps(report_payload, indent=2)}\n\n"
+            "Resume the review now. Read the worker's latest report, check changed files for "
+            "evidence, and issue a review_passed, review_failed, or review_needs_input verdict.\n\n"
+            f"{self._report_endpoint_curl(session, task.id)}"
+        )
+
+    def _agent_session_id_for_session(self, session: ManagedSession) -> str | None:
+        """Look up the CLI conversation id (agent_session_id) from ttyd_manager for a session."""
+        try:
+            tab = ttyd_manager.get_tab(session.tab_id)
+            return tab.agent_session_id if tab else None
+        except Exception:
+            return None

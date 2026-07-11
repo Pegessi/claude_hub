@@ -80,6 +80,15 @@ TMUX_SUBMIT_SETTLE_SECONDS = 0.7
 AUTO_CONTINUE_MAX_ATTEMPTS = 10
 AUTO_CONTINUE_MIN_INTERVAL_SECONDS = 15
 AUTO_CONTINUE_IDLE_GRACE_SECONDS = 20
+# After this many soft auto-continue prompts fail to revive an agent stuck on
+# an API error, escalate to hard recovery: interrupt, /clear, re-inject prompt.
+AUTO_CONTINUE_SOFT_ATTEMPTS_BEFORE_HARD_RECOVERY = 3
+# Maximum hard recoveries per task before giving up and marking NEEDS_INPUT.
+AUTO_CONTINUE_MAX_HARD_RECOVERIES = 2
+# Wait this long after sending /clear for the CLI to settle before re-pasting.
+CLEAR_CONTEXT_SETTLE_SECONDS = 1.5
+# Wait this long after interrupt (Escape + C-c) before sending /clear.
+INTERRUPT_SETTLE_SECONDS = 1.0
 REVIEW_RUNTIME_REOPEN_GRACE_SECONDS = 20
 MAX_AUTOMATED_REVIEW_FAILURES = 3
 PROMPT_DISPATCH_STALL_GRACE_SECONDS = 20
@@ -112,11 +121,35 @@ AUTO_CONTINUE_MESSAGE = (
     "the workspace report, immediately POST a ready_for_review or completed report instead of "
     "doing more work."
 )
+AUTO_CONTINUE_REVIEWER_MESSAGE = (
+    "Please inspect the review state. If the review was interrupted by an API error, continue "
+    "from the last step: read the worker's report and changed files, judge against the Goal "
+    "Packet, and issue a review_passed, review_failed, or review_needs_input verdict. "
+    "If you already posted your verdict and the message did not reach the server, re-POST it now."
+)
 AUTO_REPORT_MISSING_MESSAGE = (
     "The task appears complete but no workspace report was recorded. Please immediately POST "
     "the final ready_for_review or completed report with changed_files, validation, risks, "
     "the stored Goal Packet if it has not been reported yet, and acceptance_check evidence; "
     "only continue work if you find it is actually unfinished."
+)
+HARD_RECOVERY_WORKER_MESSAGE = (
+    "⚠️  Your previous context was automatically cleared because the agent encountered a persistent "
+    "API error and could not continue. A fresh context has been started for you within the SAME "
+    "conversation (session_id preserved).\n\n"
+    "Please continue the assigned workspace task from where it left off. Re-read the state snapshot "
+    "at the path given in the original assignment, review any files you changed, and pick up from "
+    "the last actionable step. The task details and report endpoint are repeated below.\n\n"
+    "If the task was already complete before the error, immediately post a ready_for_review or "
+    "completed report instead of redoing work."
+)
+HARD_RECOVERY_REVIEWER_MESSAGE = (
+    "⚠️  Your previous context was automatically cleared because the reviewer encountered a "
+    "persistent API error and could not continue. A fresh context has been started for you within "
+    "the SAME conversation (session_id preserved).\n\n"
+    "Please continue the review for the assigned workspace task. Re-read the worker's latest "
+    "report and judge the task against the Goal Packet acceptance criteria. The review prompt "
+    "and report endpoint are repeated below."
 )
 ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024
 ARTIFACT_PREVIEW_MAX_BYTES = 512 * 1024
@@ -191,8 +224,11 @@ __all__ = [
     "ATTACHMENT_MAX_BYTES",
     "AUTO_CONTINUE_IDLE_GRACE_SECONDS",
     "AUTO_CONTINUE_MAX_ATTEMPTS",
+    "AUTO_CONTINUE_MAX_HARD_RECOVERIES",
     "AUTO_CONTINUE_MESSAGE",
     "AUTO_CONTINUE_MIN_INTERVAL_SECONDS",
+    "AUTO_CONTINUE_REVIEWER_MESSAGE",
+    "AUTO_CONTINUE_SOFT_ATTEMPTS_BEFORE_HARD_RECOVERY",
     "AUTO_REPORT_MISSING_MESSAGE",
     "AgentReport",
     "AgentReportCreate",
@@ -204,6 +240,7 @@ __all__ = [
     "AutonomousRun",
     "AutonomousRunPhase",
     "AutonomyPolicy",
+    "CLEAR_CONTEXT_SETTLE_SECONDS",
     "ContinueTaskRequest",
     "DispatchDecisionRequest",
     "EnsureWorkspaceAgentRequest",
@@ -218,8 +255,11 @@ __all__ = [
     "FeedbackSummaryRequest",
     "FeedbackSummaryRun",
     "GoalPacketStatus",
+    "HARD_RECOVERY_REVIEWER_MESSAGE",
+    "HARD_RECOVERY_WORKER_MESSAGE",
     "IMAGE_ATTACHMENT_TYPES",
     "INDEX_FILE",
+    "INTERRUPT_SETTLE_SECONDS",
     "LEGACY_STATE_FILE",
     "MARKDOWN_ARTIFACT_SUFFIXES",
     "MARKDOWN_DISCOVERY_EXCLUDED_DIRS",
