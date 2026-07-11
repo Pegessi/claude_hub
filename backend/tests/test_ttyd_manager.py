@@ -1279,6 +1279,10 @@ def test_codex_recovery_resumes_last_with_fallback() -> None:
     launch = cmd[-1]
     assert "codex resume --last" in launch
     assert "||" in launch
+    # Solo flags must ride on the resume branch, not only the fresh fallback,
+    # or a successful `resume --last` silently drops solo mode.
+    assert "codex resume --last --ask-for-approval never --sandbox danger-full-access" in launch
+    assert "|| codex --ask-for-approval never --sandbox danger-full-access" in launch
 
 
 def test_non_solo_codex_recovery_resumes_last() -> None:
@@ -1296,6 +1300,9 @@ def test_non_solo_codex_recovery_resumes_last() -> None:
     recover_cmd = process._build_ttyd_command(session_exists=False)
     assert "codex resume --last" in recover_cmd[-1]
     assert "||" in recover_cmd[-1]
+    # Non-solo must NOT carry solo flags on either branch.
+    assert "--ask-for-approval" not in recover_cmd[-1]
+    assert "--sandbox" not in recover_cmd[-1]
 
     # A live session (backend-only restart) must NOT resume — bare reattach.
     live_cmd = process._build_ttyd_command(session_exists=True)
@@ -1772,7 +1779,9 @@ def _make_codex_process(
 
 
 @pytest.mark.asyncio
-async def test_switch_env_codex_non_solo_respawn_command(monkeypatch: MonkeyPatch, tmp_path) -> None:
+async def test_switch_env_codex_non_solo_respawn_command(
+    monkeypatch: MonkeyPatch, tmp_path
+) -> None:
     process = _make_codex_process(monkeypatch, solo_mode=False, tmp_path=tmp_path)
     new_env = {"OPENAI_API_KEY": "test-key"}
     captured: dict = {}
@@ -1832,6 +1841,12 @@ async def test_switch_env_codex_solo_respawn_command(monkeypatch: MonkeyPatch, t
 
     assert "codex --ask-for-approval never --sandbox danger-full-access" in respawn_cmd
     assert "codex resume --last" in respawn_cmd
+    # Regression guard: solo flags must ride on the resume branch itself, not
+    # only the fresh fallback — a successful `resume --last` would otherwise
+    # relaunch codex without solo mode.
+    assert (
+        "codex resume --last --ask-for-approval never --sandbox danger-full-access" in respawn_cmd
+    )
     assert "|| codex --ask-for-approval never --sandbox danger-full-access" in respawn_cmd
     assert respawn_cmd.rstrip().endswith("; exec /bin/zsh")
     assert process.solo_mode is True
@@ -1862,6 +1877,10 @@ async def test_switch_env_codex_toggles_solo_mode(monkeypatch: MonkeyPatch, tmp_
 
     assert "--ask-for-approval never" in respawn_cmd
     assert "--sandbox danger-full-access" in respawn_cmd
+    # Toggling into solo must also flag the resume branch.
+    assert (
+        "codex resume --last --ask-for-approval never --sandbox danger-full-access" in respawn_cmd
+    )
     assert process.solo_mode is True
 
 
