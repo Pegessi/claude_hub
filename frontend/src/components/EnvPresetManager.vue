@@ -98,7 +98,7 @@
             v-else
             class="env-empty-state"
           >
-            <p>Select a preset or create a new one.</p>
+            <EmptyState title="Select a preset or create a new one." />
           </div>
         </div>
       </div>
@@ -135,6 +135,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import EmptyState from '@/components/EmptyState.vue'
 import { BUILT_IN_PRESET_IDS, useLaunchEnvPresets } from '@/composables/useLaunchEnvPresets'
 import type { LaunchEnvPreset } from '@/composables/useLaunchEnvPresets'
 
