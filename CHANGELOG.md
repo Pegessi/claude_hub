@@ -5,6 +5,30 @@
 
 ## Unreleased
 
+### fix: Codex restart now keeps solo mode when resuming a prior session
+
+- **What**: when a Codex agent that was launched in **solo mode** restarted —
+  either via the **Switch Env** ⚙ hot-swap or via reboot recovery — the relaunch
+  command was `codex resume --last || codex --ask-for-approval never --sandbox
+  danger-full-access`. The solo flags rode on the *fresh fallback* only. Because
+  `codex resume --last` normally **succeeds**, the resumed session relaunched as
+  plain `codex`, silently dropping solo mode (`--ask-for-approval never --sandbox
+  danger-full-access`).
+- **Why**: `codex resume` accepts `-a/--ask-for-approval` and `-s/--sandbox`
+  (verified against codex-cli 0.144.1), but the resume branch never passed them.
+  The `||` fallback masked the defect in tests that only asserted the flags
+  appeared *somewhere* in the command string.
+- **How**: extracted a single `TTYDProcess._codex_launch_command(recover)` helper
+  used by both `_agent_start_command()` (reboot recovery) and `switch_env()`
+  (hot-swap). It appends the solo flags to **both** the `codex resume --last`
+  branch and the fresh fallback when `solo_mode` is set, and to neither when it
+  is not. Non-solo behavior is unchanged.
+- **Validation**: `black`/`isort`/`mypy` clean on touched files;
+  `tests/test_ttyd_manager.py` **70 passed**. Strengthened the codex recovery and
+  switch-env solo tests to assert the solo flags appear on the *resume branch*
+  specifically (`codex resume --last --ask-for-approval never --sandbox
+  danger-full-access`), and that non-solo resume carries no solo flags.
+
 ### fix: "Clear context" now applies to the reviewer, not just the worker
 
 - **What**: when a task has the **"Clear context"** checkbox ticked
