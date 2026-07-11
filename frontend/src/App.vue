@@ -556,13 +556,15 @@ onUnmounted(() => {
   --ch-space-6: 32px;  /* large: hero / empty-state padding */
 
   /* ------------------------------------------------------------------
-     Type scale. Calm, minimalist — 5 sizes, no display/hero scale.
+     Type scale. Calm, minimalist — 6 sizes; 2xl is the single hero step
+     reserved for standalone landing headings (e.g. LoginView h1).
      Pair with --ch-leading-* and --ch-weight-* below. */
   --ch-font-xs: 11px;          /* chips, count pills, meta/supporting labels */
   --ch-font-sm: 12px;          /* body text, buttons, form labels, summary strip */
   --ch-font-md: 13px;          /* column headers, secondary headings, card titles */
   --ch-font-lg: 15px;          /* section/sub heads */
   --ch-font-xl: 18px;          /* page-level heading (workspace h1) */
+  --ch-font-2xl: 24px;         /* hero heading — login/landing card title only */
   --ch-leading-tight: 1.25;    /* headings: dense, multi-line safe */
   --ch-leading-normal: 1.5;    /* body/paragraph: comfortable reading rhythm */
   --ch-weight-regular: 400;    /* body, placeholder, meta */
