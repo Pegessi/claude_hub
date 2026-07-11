@@ -35,7 +35,7 @@ function setActivePane(paneId: string) {
   padding: var(--ch-space-1);
   overflow: hidden;
   min-height: 0;
-  transition: padding 180ms cubic-bezier(0.2, 0, 0, 1), gap 180ms cubic-bezier(0.2, 0, 0, 1);
+  transition: padding var(--ch-motion-drawer), gap var(--ch-motion-drawer);
 }
 
 .layout-1x1 {

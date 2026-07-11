@@ -1748,7 +1748,7 @@ async function handleCreateTab() {
   box-shadow: var(--ch-shadow-popover);
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 0;
   animation: tab-menu-in var(--ch-motion-fast);
   transform-origin: top right;
 }
@@ -1957,8 +1957,8 @@ async function handleCreateTab() {
 }
 
 .file-browser-modal {
-  min-width: 500px;
-  width: 80%;
+  min-width: 480px;
+  width: min(600px, 100%);
   max-width: 600px;
   height: 70vh;
   max-height: 600px;
@@ -2003,15 +2003,11 @@ async function handleCreateTab() {
   justify-content: center;
   color: var(--ch-color-text);
   line-height: 1;
-  transition: background var(--ch-motion-fast), color var(--ch-motion-fast), transform var(--ch-motion-fast);
+  transition: background var(--ch-motion-fast), color var(--ch-motion-fast);
 }
 
 .path-nav-btn:hover:not(:disabled) {
   background-color: var(--ch-color-surface-control-hover);
-}
-
-.path-nav-btn:active:not(:disabled) {
-  transform: scale(0.94);
 }
 
 .path-nav-btn:disabled {
@@ -2365,15 +2361,7 @@ async function handleCreateTab() {
   align-items: center;
   justify-content: center;
   gap: var(--ch-space-2);
-  transition: background-color var(--ch-motion-standard), transform 80ms ease, opacity var(--ch-motion-standard);
-}
-
-.btn:hover:not(:disabled) {
-  transform: translateY(-0.5px);
-}
-
-.btn:active:not(:disabled) {
-  transform: translateY(1px);
+  transition: background-color var(--ch-motion-standard), opacity var(--ch-motion-standard);
 }
 
 .btn:disabled {

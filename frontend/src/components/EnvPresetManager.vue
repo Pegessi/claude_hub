@@ -359,7 +359,6 @@ watch(
   color: var(--ch-color-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  border-bottom: 1px solid var(--ch-color-border);
   background: var(--ch-color-surface-sunken);
 }
 
@@ -387,12 +386,7 @@ watch(
   cursor: pointer;
   color: var(--ch-color-text);
   font-size: var(--ch-font-md);
-  border-bottom: 1px solid var(--ch-color-border-muted);
   transition: background var(--ch-motion-fast);
-}
-
-.env-preset-item:last-child {
-  border-bottom: none;
 }
 
 .env-preset-item:hover {
@@ -416,7 +410,7 @@ watch(
   font-size: var(--ch-font-xs);
   color: var(--ch-color-text-soft);
   background: var(--ch-color-surface-control);
-  padding: 2px 6px;
+  padding: 2px var(--ch-space-2); /* vertical 2px kept raw: smallest token --ch-space-1 (4px) would double chip height */
   border-radius: var(--ch-radius-sm);
   flex-shrink: 0;
   text-transform: lowercase;
@@ -437,7 +431,7 @@ watch(
 .form-group label {
   display: block;
   color: var(--ch-color-text);
-  margin-bottom: 6px;
+  margin-bottom: var(--ch-space-2);
   font-size: var(--ch-font-md);
   font-weight: var(--ch-weight-medium);
 }
@@ -468,13 +462,13 @@ watch(
   font-weight: var(--ch-weight-regular);
   font-size: var(--ch-font-sm);
   color: var(--ch-color-text-soft);
-  margin-left: 6px;
+  margin-left: var(--ch-space-2);
 }
 
 .form-hint {
   color: var(--ch-color-text-soft);
   font-size: var(--ch-font-sm);
-  margin: 6px 0 0 0;
+  margin: var(--ch-space-2) 0 0 0;
   line-height: var(--ch-leading-normal);
 }
 

@@ -210,16 +210,12 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), transform var(--ch-motion-fast);
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast);
 }
 
 .layout-btn:hover {
   background-color: var(--ch-color-surface-control-hover);
   border-color: var(--ch-color-border-hover);
-}
-
-.layout-btn:active {
-  transform: translateY(1px);
 }
 
 .layout-btn.active {
@@ -275,17 +271,13 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), transform var(--ch-motion-fast), width var(--ch-motion-standard) var(--ch-motion-ease), height var(--ch-motion-standard) var(--ch-motion-ease), border-radius var(--ch-motion-standard) var(--ch-motion-ease);
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), width var(--ch-motion-standard) var(--ch-motion-ease), height var(--ch-motion-standard) var(--ch-motion-ease), border-radius var(--ch-motion-standard) var(--ch-motion-ease);
 }
 
 .layout-menu-trigger:hover,
 .layout-menu[open] .layout-menu-trigger {
   border-color: var(--ch-color-border-hover);
   background: var(--ch-color-surface-control-hover);
-}
-
-.layout-menu-trigger:active {
-  transform: translateY(1px);
 }
 
 .layout-menu-icon,
@@ -340,10 +332,6 @@ onUnmounted(() => {
 
 .layout-menu-item:hover {
   background: var(--ch-color-surface-control-hover);
-}
-
-.layout-menu-item:active {
-  transform: translateY(1px);
 }
 
 .layout-menu-item.active {
@@ -411,17 +399,13 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   gap: var(--ch-space-1);
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast), transform var(--ch-motion-fast);
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast);
 }
 
 .logout-btn:hover:not(:disabled) {
   background-color: var(--ch-color-danger-bg);
   border-color: var(--ch-color-danger);
   color: var(--ch-color-danger-strong);
-}
-
-.logout-btn:active:not(:disabled) {
-  transform: translateY(1px);
 }
 
 .logout-btn:disabled {
