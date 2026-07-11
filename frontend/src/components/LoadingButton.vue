@@ -67,7 +67,7 @@ withDefaults(defineProps<{
   pointer-events: none;
   border: 2px solid currentColor;
   border-right-color: transparent;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
 }
 
 .loading-button--loading .loading-button__spinner {

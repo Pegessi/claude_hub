@@ -391,7 +391,7 @@ onUnmounted(() => {
 
 .network-access-icon span {
   width: 3px;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: currentColor;
 }
 
