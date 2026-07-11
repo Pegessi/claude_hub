@@ -274,7 +274,7 @@ function onAgentTypeChange(value: string) {
 .agent-config-fields--form .acf-select {
   height: auto;
   padding: var(--ch-space-2) var(--ch-space-3);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
 }
 
 .agent-config-fields .acf-select:hover {

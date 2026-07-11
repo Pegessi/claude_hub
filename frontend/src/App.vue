@@ -536,6 +536,7 @@ onUnmounted(() => {
   --ch-radius-sm: 5px;
   --ch-radius-md: 7px;
   --ch-radius-lg: 10px;
+  --ch-radius-pill: 9999px;
   --ch-motion-fast: 120ms ease;
   --ch-motion-standard: 180ms ease;
   --ch-motion-panel: 140ms;
@@ -671,6 +672,7 @@ onUnmounted(() => {
   --ch-radius-sm: 5px;
   --ch-radius-md: 7px;
   --ch-radius-lg: 10px;
+  --ch-radius-pill: 9999px;
   --ch-tab-fade-start: #fcfcfb;
   --ch-tab-fade-end: rgba(252, 252, 251, 0);
   --ch-terminal-bg: #f6f6f4;
@@ -877,7 +879,7 @@ textarea {
   width: 112px;
   height: 32px;
   border: 1px solid var(--ch-color-border);
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-surface-sunken);
   color: var(--ch-color-text-muted);
   cursor: pointer;
@@ -898,7 +900,7 @@ textarea {
   left: 3px;
   width: calc(50% - 3px);
   height: calc(100% - 6px);
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-surface-control-hover);
   box-shadow: var(--ch-shadow-hairline);
   transition: transform var(--ch-motion-standard), background var(--ch-motion-fast);
