@@ -193,403 +193,411 @@
     />
 
     <!-- Create Tab Modal -->
-    <div
-      v-if="showModal"
-      class="modal-overlay"
-      @click.self="closeCreateModal"
-    >
-      <div class="modal">
-        <h3>Create New Terminal</h3>
-        <form @submit.prevent="handleCreateTab">
-          <div class="form-group">
-            <label for="tabName">Tab Name</label>
-            <input
-              id="tabName"
-              v-model="form.name"
-              type="text"
-              placeholder="Enter tab name"
-              autofocus
-            >
-          </div>
-          <div class="form-group">
-            <label>Run On</label>
-            <div class="segmented-control">
-              <button
-                type="button"
-                :class="['segment-button', { active: form.target === 'local' }]"
-                @click="form.target = 'local'"
-              >
-                Local
-              </button>
-              <button
-                type="button"
-                :class="['segment-button', { active: form.target === 'remote' }]"
-                @click="form.target = 'remote'"
-              >
-                Remote
-              </button>
-            </div>
-          </div>
-          <div
-            v-if="form.target === 'remote'"
-            class="form-group"
-          >
-            <label for="remoteProfile">Remote Server</label>
-            <select
-              id="remoteProfile"
-              v-model="form.remote_profile_id"
-              class="select-input"
-              :disabled="remoteProfilesLoading"
-            >
-              <option
-                v-if="remoteProfiles.length === 0"
-                value=""
-              >
-                No remote servers configured
-              </option>
-              <option
-                v-for="profile in remoteProfiles"
-                :key="profile.id"
-                :value="profile.id"
-              >
-                {{ profile.name }}
-              </option>
-            </select>
-            <p
-              v-if="remoteProfilesError"
-              class="form-error"
-            >
-              {{ remoteProfilesError }}
-            </p>
-            <p
-              v-else-if="remoteProfiles.length === 0"
-              class="form-hint"
-            >
-              Add profiles in ~/.claude_hub/remote_profiles.json or ~/.ssh/config
-            </p>
-          </div>
-          <div class="form-group">
-            <label for="tabCwd">Working Directory (optional)</label>
-            <div class="cwd-input-wrapper">
+    <Transition name="modal-fade">
+      <div
+        v-if="showModal"
+        class="modal-overlay"
+        @click.self="closeCreateModal"
+      >
+        <div class="modal">
+          <h3>Create New Terminal</h3>
+          <form @submit.prevent="handleCreateTab">
+            <div class="form-group">
+              <label for="tabName">Tab Name</label>
               <input
-                id="tabCwd"
-                v-model="form.cwd"
+                id="tabName"
+                v-model="form.name"
                 type="text"
-                :placeholder="form.target === 'remote' ? '~/workspace/project' : 'e.g., ~/Project/my-app'"
+                placeholder="Enter tab name"
+                autofocus
               >
-              <LoadingButton
-                type="button"
-                class="cwd-dropdown-btn"
-                :disabled="form.target === 'remote' && !form.remote_profile_id"
-                :loading="isPending('tab-browser:open')"
-                loading-label="Opening browser"
-                @click="toggleFileBrowser"
-              >
-                Browse
-              </LoadingButton>
             </div>
-          </div>
-          <AgentConfigFields
-            v-model:agent-type="form.agent_type"
-            v-model:solo-mode="form.solo_mode"
-            v-model:env-preset="form.env_preset"
-            v-model:env-text="form.env_text"
-            variant="form"
-            solo-label="Solo Mode"
-          />
-          <div
-            v-if="form.target === 'remote'"
-            class="form-group"
-          >
-            <label class="checkbox-label">
-              <div class="checkbox-row">
-                <input
-                  v-model="form.remote_reconnect"
-                  type="checkbox"
-                  class="checkbox-input"
+            <div class="form-group">
+              <label>Run On</label>
+              <div class="segmented-control">
+                <button
+                  type="button"
+                  :class="['segment-button', { active: form.target === 'local' }]"
+                  @click="form.target = 'local'"
                 >
-                <span class="checkbox-text">Auto Reconnect</span>
+                  Local
+                </button>
+                <button
+                  type="button"
+                  :class="['segment-button', { active: form.target === 'remote' }]"
+                  @click="form.target = 'remote'"
+                >
+                  Remote
+                </button>
               </div>
-              <span class="checkbox-desc">Reconnect SSH automatically if the network drops</span>
-            </label>
-          </div>
-          <div class="modal-actions">
-            <button
-              type="button"
-              class="btn btn-secondary"
-              @click="closeCreateModal"
+            </div>
+            <div
+              v-if="form.target === 'remote'"
+              class="form-group"
             >
-              Cancel
-            </button>
-            <LoadingButton
-              type="submit"
-              class="btn btn-primary"
-              :disabled="isCreateDisabled"
-              :loading="isPending('tab:create')"
-              loading-label="Creating tab"
-            >
-              {{ isLoading ? 'Creating...' : 'Create' }}
-            </LoadingButton>
-          </div>
-        </form>
-      </div>
-    </div>
-
-    <!-- File Browser Modal -->
-    <div
-      v-if="showFileBrowser"
-      class="modal-overlay file-browser-overlay"
-      @click.self="showFileBrowser = false"
-    >
-      <div class="modal file-browser-modal">
-        <div class="file-browser-header">
-          <h3>{{ form.target === 'remote' ? 'Select Remote Directory' : 'Select Working Directory' }}</h3>
-          <button
-            type="button"
-            class="btn btn-secondary btn-small"
-            @click="showFileBrowser = false"
-          >
-            Close
-          </button>
-        </div>
-        <div class="file-browser-path">
-          <LoadingButton
-            type="button"
-            class="path-nav-btn"
-            title="Home"
-            :loading="isPending('tab-browser:home')"
-            hide-content-while-loading
-            loading-label="Loading home"
-            @click="navigateToHome"
-          >
-            🏠
-          </LoadingButton>
-          <LoadingButton
-            v-if="browserParentPath"
-            type="button"
-            class="path-nav-btn"
-            title="Parent"
-            :loading="isPending('tab-browser:up')"
-            hide-content-while-loading
-            loading-label="Loading parent"
-            @click="navigateToParent"
-          >
-            ↑
-          </LoadingButton>
-          <input
-            v-model="browserPathInput"
-            type="text"
-            class="current-path-input"
-            @keyup.enter="navigateToPath(browserPathInput)"
-          >
-          <LoadingButton
-            type="button"
-            class="path-nav-btn"
-            title="Refresh"
-            :loading="isPending('tab-browser:refresh')"
-            hide-content-while-loading
-            loading-label="Refreshing directory"
-            @click="refreshDirectory"
-          >
-            ↻
-          </LoadingButton>
-        </div>
-        <div class="file-browser-list">
-          <div
-            v-if="browserParentPath"
-            class="file-item"
-            @click="navigateToPath(browserParentPath)"
-          >
-            <span class="file-icon">⬆️</span>
-            <span class="file-name">..</span>
-          </div>
-          <div
-            v-for="item in browserItems"
-            :key="item.path"
-            :class="['file-item', { 'is-dir': item.is_dir }]"
-            @click="handleFileItemClick(item)"
-          >
-            <span class="file-icon">{{ item.is_dir ? '📁' : '📄' }}</span>
-            <span class="file-name">{{ item.name }}</span>
-          </div>
-          <div
-            v-if="browserLoading"
-            class="file-loading"
-          >
-            Loading...
-          </div>
-          <div
-            v-if="browserError"
-            class="file-error"
-          >
-            {{ browserError }}
-          </div>
-        </div>
-        <div class="file-browser-footer">
-          <button
-            type="button"
-            class="btn btn-secondary"
-            @click="showFileBrowser = false"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            class="btn btn-primary"
-            @click="selectCurrentDirectory"
-          >
-            Select This Directory
-          </button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Close Tab Confirmation Modal -->
-    <div
-      v-if="showCloseConfirm"
-      class="modal-overlay"
-      @click.self="showCloseConfirm = false"
-    >
-      <div class="modal">
-        <h3>Close Terminal</h3>
-        <p class="confirm-message">
-          Are you sure you want to close "{{ tabToClose?.name }}"?
-        </p>
-        <div class="modal-actions">
-          <button
-            type="button"
-            class="btn btn-secondary"
-            @click="showCloseConfirm = false"
-          >
-            Cancel
-          </button>
-          <LoadingButton
-            type="button"
-            class="btn btn-danger"
-            :disabled="isLoading"
-            :loading="tabToClose ? isPending(tabActionKey('close', tabToClose.id)) : false"
-            loading-label="Closing tab"
-            @click="confirmCloseTab"
-          >
-            {{ isLoading ? 'Closing...' : 'Close' }}
-          </LoadingButton>
-        </div>
-      </div>
-    </div>
-
-    <!-- Switch Env Modal -->
-    <div
-      v-if="showSwitchEnv"
-      class="modal-overlay"
-      @click.self="closeSwitchEnvModal"
-    >
-      <div class="modal switch-env-modal">
-        <div class="switch-env-header">
-          <div
-            class="switch-env-icon"
-            aria-hidden="true"
-          >
-            ⚙
-          </div>
-          <div class="switch-env-title-block">
-            <h3>Switch Environment</h3>
-            <p class="switch-env-subtitle">
-              {{ switchEnvTab?.name }}
-            </p>
-          </div>
-        </div>
-        <p class="switch-env-callout">
-          <span
-            class="switch-env-callout-icon"
-            aria-hidden="true"
-          >↻</span>
-          <span>
-            The agent will restart and automatically resume its conversation.
-            In-flight generation will be interrupted.
-          </span>
-        </p>
-        <form @submit.prevent="handleSwitchEnv">
-          <div class="form-group env-editor">
-            <label>Environment Preset</label>
-            <div class="env-preset-row">
+              <label for="remoteProfile">Remote Server</label>
               <select
-                v-model="switchEnvForm.env_preset"
+                id="remoteProfile"
+                v-model="form.remote_profile_id"
                 class="select-input"
-                @change="applySwitchEnvPreset(switchEnvForm.env_preset)"
+                :disabled="remoteProfilesLoading"
               >
                 <option
-                  v-for="preset in envPresets"
-                  :key="preset.id"
-                  :value="preset.id"
+                  v-if="remoteProfiles.length === 0"
+                  value=""
                 >
-                  {{ preset.name }}
+                  No remote servers configured
                 </option>
-                <option value="custom">
-                  Custom (current values)
+                <option
+                  v-for="profile in remoteProfiles"
+                  :key="profile.id"
+                  :value="profile.id"
+                >
+                  {{ profile.name }}
                 </option>
               </select>
+              <p
+                v-if="remoteProfilesError"
+                class="form-error"
+              >
+                {{ remoteProfilesError }}
+              </p>
+              <p
+                v-else-if="remoteProfiles.length === 0"
+                class="form-hint"
+              >
+                Add profiles in ~/.claude_hub/remote_profiles.json or ~/.ssh/config
+              </p>
+            </div>
+            <div class="form-group">
+              <label for="tabCwd">Working Directory (optional)</label>
+              <div class="cwd-input-wrapper">
+                <input
+                  id="tabCwd"
+                  v-model="form.cwd"
+                  type="text"
+                  :placeholder="form.target === 'remote' ? '~/workspace/project' : 'e.g., ~/Project/my-app'"
+                >
+                <LoadingButton
+                  type="button"
+                  class="cwd-dropdown-btn"
+                  :disabled="form.target === 'remote' && !form.remote_profile_id"
+                  :loading="isPending('tab-browser:open')"
+                  loading-label="Opening browser"
+                  @click="toggleFileBrowser"
+                >
+                  Browse
+                </LoadingButton>
+              </div>
+            </div>
+            <AgentConfigFields
+              v-model:agent-type="form.agent_type"
+              v-model:solo-mode="form.solo_mode"
+              v-model:env-preset="form.env_preset"
+              v-model:env-text="form.env_text"
+              variant="form"
+              solo-label="Solo Mode"
+            />
+            <div
+              v-if="form.target === 'remote'"
+              class="form-group"
+            >
+              <label class="checkbox-label">
+                <div class="checkbox-row">
+                  <input
+                    v-model="form.remote_reconnect"
+                    type="checkbox"
+                    class="checkbox-input"
+                  >
+                  <span class="checkbox-text">Auto Reconnect</span>
+                </div>
+                <span class="checkbox-desc">Reconnect SSH automatically if the network drops</span>
+              </label>
+            </div>
+            <div class="modal-actions">
               <button
                 type="button"
-                class="btn btn-secondary env-manage-button"
-                @click="openSwitchEnvPresetManager"
+                class="btn btn-secondary"
+                @click="closeCreateModal"
               >
-                Manage
+                Cancel
               </button>
+              <LoadingButton
+                type="submit"
+                class="btn btn-primary"
+                :disabled="isCreateDisabled"
+                :loading="isPending('tab:create')"
+                loading-label="Creating tab"
+              >
+                {{ isLoading ? 'Creating...' : 'Create' }}
+              </LoadingButton>
+            </div>
+          </form>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- File Browser Modal -->
+    <Transition name="modal-fade">
+      <div
+        v-if="showFileBrowser"
+        class="modal-overlay file-browser-overlay"
+        @click.self="showFileBrowser = false"
+      >
+        <div class="modal file-browser-modal">
+          <div class="file-browser-header">
+            <h3>{{ form.target === 'remote' ? 'Select Remote Directory' : 'Select Working Directory' }}</h3>
+            <button
+              type="button"
+              class="btn btn-secondary btn-small"
+              @click="showFileBrowser = false"
+            >
+              Close
+            </button>
+          </div>
+          <div class="file-browser-path">
+            <LoadingButton
+              type="button"
+              class="path-nav-btn"
+              title="Home"
+              :loading="isPending('tab-browser:home')"
+              hide-content-while-loading
+              loading-label="Loading home"
+              @click="navigateToHome"
+            >
+              🏠
+            </LoadingButton>
+            <LoadingButton
+              v-if="browserParentPath"
+              type="button"
+              class="path-nav-btn"
+              title="Parent"
+              :loading="isPending('tab-browser:up')"
+              hide-content-while-loading
+              loading-label="Loading parent"
+              @click="navigateToParent"
+            >
+              ↑
+            </LoadingButton>
+            <input
+              v-model="browserPathInput"
+              type="text"
+              class="current-path-input"
+              @keyup.enter="navigateToPath(browserPathInput)"
+            >
+            <LoadingButton
+              type="button"
+              class="path-nav-btn"
+              title="Refresh"
+              :loading="isPending('tab-browser:refresh')"
+              hide-content-while-loading
+              loading-label="Refreshing directory"
+              @click="refreshDirectory"
+            >
+              ↻
+            </LoadingButton>
+          </div>
+          <div class="file-browser-list">
+            <div
+              v-if="browserParentPath"
+              class="file-item"
+              @click="navigateToPath(browserParentPath)"
+            >
+              <span class="file-icon">⬆️</span>
+              <span class="file-name">..</span>
+            </div>
+            <div
+              v-for="item in browserItems"
+              :key="item.path"
+              :class="['file-item', { 'is-dir': item.is_dir }]"
+              @click="handleFileItemClick(item)"
+            >
+              <span class="file-icon">{{ item.is_dir ? '📁' : '📄' }}</span>
+              <span class="file-name">{{ item.name }}</span>
+            </div>
+            <div
+              v-if="browserLoading"
+              class="file-loading"
+            >
+              Loading...
+            </div>
+            <div
+              v-if="browserError"
+              class="file-error"
+            >
+              {{ browserError }}
             </div>
           </div>
-          <div class="form-group">
-            <label for="switchEnvText">
-              Environment Variables
-              <span class="field-hint-inline">(KEY=VALUE, one per line)</span>
-            </label>
-            <textarea
-              id="switchEnvText"
-              v-model="switchEnvForm.env_text"
-              class="select-input env-textarea"
-              rows="6"
-              placeholder="ANTHROPIC_MODEL=claude-sonnet-4-5&#10;ANTHROPIC_BASE_URL=https://..."
-            />
-            <p class="form-hint">
-              These fully replace the tab's current environment. Include
-              <code>ANTHROPIC_MODEL</code> to switch models.
-            </p>
+          <div class="file-browser-footer">
+            <button
+              type="button"
+              class="btn btn-secondary"
+              @click="showFileBrowser = false"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              class="btn btn-primary"
+              @click="selectCurrentDirectory"
+            >
+              Select This Directory
+            </button>
           </div>
-          <div class="form-group">
-            <label class="checkbox-label">
-              <div class="checkbox-row">
-                <input
-                  v-model="switchEnvForm.solo_mode"
-                  type="checkbox"
-                  class="checkbox-input"
-                >
-                <span class="checkbox-text">Solo Mode</span>
-              </div>
-              <span class="checkbox-desc">
-                Relaunch with <code>IS_SANDBOX=1</code> and
-                <code>--dangerously-skip-permissions</code>.
-              </span>
-            </label>
-          </div>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- Close Tab Confirmation Modal -->
+    <Transition name="modal-fade">
+      <div
+        v-if="showCloseConfirm"
+        class="modal-overlay"
+        @click.self="showCloseConfirm = false"
+      >
+        <div class="modal">
+          <h3>Close Terminal</h3>
+          <p class="confirm-message">
+            Are you sure you want to close "{{ tabToClose?.name }}"?
+          </p>
           <div class="modal-actions">
             <button
               type="button"
               class="btn btn-secondary"
-              @click="closeSwitchEnvModal"
+              @click="showCloseConfirm = false"
             >
               Cancel
             </button>
             <LoadingButton
-              type="submit"
-              class="btn btn-primary switch-env-submit"
-              :loading="switchEnvTab ? isPending(tabActionKey('switch-env', switchEnvTab.id)) : false"
-              loading-label="Restarting…"
+              type="button"
+              class="btn btn-danger"
+              :disabled="isLoading"
+              :loading="tabToClose ? isPending(tabActionKey('close', tabToClose.id)) : false"
+              loading-label="Closing tab"
+              @click="confirmCloseTab"
             >
-              Restart Agent
+              {{ isLoading ? 'Closing...' : 'Close' }}
             </LoadingButton>
           </div>
-        </form>
+        </div>
       </div>
-    </div>
+    </Transition>
+
+    <!-- Switch Env Modal -->
+    <Transition name="modal-fade">
+      <div
+        v-if="showSwitchEnv"
+        class="modal-overlay"
+        @click.self="closeSwitchEnvModal"
+      >
+        <div class="modal switch-env-modal">
+          <div class="switch-env-header">
+            <div
+              class="switch-env-icon"
+              aria-hidden="true"
+            >
+              ⚙
+            </div>
+            <div class="switch-env-title-block">
+              <h3>Switch Environment</h3>
+              <p class="switch-env-subtitle">
+                {{ switchEnvTab?.name }}
+              </p>
+            </div>
+          </div>
+          <p class="switch-env-callout">
+            <span
+              class="switch-env-callout-icon"
+              aria-hidden="true"
+            >↻</span>
+            <span>
+              The agent will restart and automatically resume its conversation.
+              In-flight generation will be interrupted.
+            </span>
+          </p>
+          <form @submit.prevent="handleSwitchEnv">
+            <div class="form-group env-editor">
+              <label>Environment Preset</label>
+              <div class="env-preset-row">
+                <select
+                  v-model="switchEnvForm.env_preset"
+                  class="select-input"
+                  @change="applySwitchEnvPreset(switchEnvForm.env_preset)"
+                >
+                  <option
+                    v-for="preset in envPresets"
+                    :key="preset.id"
+                    :value="preset.id"
+                  >
+                    {{ preset.name }}
+                  </option>
+                  <option value="custom">
+                    Custom (current values)
+                  </option>
+                </select>
+                <button
+                  type="button"
+                  class="btn btn-secondary env-manage-button"
+                  @click="openSwitchEnvPresetManager"
+                >
+                  Manage
+                </button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="switchEnvText">
+                Environment Variables
+                <span class="field-hint-inline">(KEY=VALUE, one per line)</span>
+              </label>
+              <textarea
+                id="switchEnvText"
+                v-model="switchEnvForm.env_text"
+                class="select-input env-textarea"
+                rows="6"
+                placeholder="ANTHROPIC_MODEL=claude-sonnet-4-5&#10;ANTHROPIC_BASE_URL=https://..."
+              />
+              <p class="form-hint">
+                These fully replace the tab's current environment. Include
+                <code>ANTHROPIC_MODEL</code> to switch models.
+              </p>
+            </div>
+            <div class="form-group">
+              <label class="checkbox-label">
+                <div class="checkbox-row">
+                  <input
+                    v-model="switchEnvForm.solo_mode"
+                    type="checkbox"
+                    class="checkbox-input"
+                  >
+                  <span class="checkbox-text">Solo Mode</span>
+                </div>
+                <span class="checkbox-desc">
+                  Relaunch with <code>IS_SANDBOX=1</code> and
+                  <code>--dangerously-skip-permissions</code>.
+                </span>
+              </label>
+            </div>
+            <div class="modal-actions">
+              <button
+                type="button"
+                class="btn btn-secondary"
+                @click="closeSwitchEnvModal"
+              >
+                Cancel
+              </button>
+              <LoadingButton
+                type="submit"
+                class="btn btn-primary switch-env-submit"
+                :loading="switchEnvTab ? isPending(tabActionKey('switch-env', switchEnvTab.id)) : false"
+                loading-label="Restarting…"
+              >
+                Restart Agent
+              </LoadingButton>
+            </div>
+          </form>
+        </div>
+      </div>
+    </Transition>
 
     <!-- Env Preset Manager Modal -->
     <!-- PR-14: v-if gates instantiation so the async agent-config chunk is not
@@ -2623,6 +2631,37 @@ async function handleCreateTab() {
 .toast__close:focus-visible {
   outline: 2px solid var(--ch-color-accent-ring-strong);
   outline-offset: 2px;
+}
+
+/* Modal enter/leave transitions — driven by existing motion tokens.
+   enter: --ch-motion-drawer (180ms cubic-bezier(0.2,0,0,1));
+   leave: --ch-motion-fast (120ms ease).
+   Transition classes attach to the .modal-overlay root itself (overlay fades);
+   the inner .modal dialog additionally gets a subtle scale+translate rise.
+   Reduced-motion users are covered by the RM-01 universal net in App.vue. */
+.modal-fade-enter-active {
+  transition: opacity var(--ch-motion-drawer);
+}
+.modal-fade-enter-active .modal {
+  transition: opacity var(--ch-motion-drawer), transform var(--ch-motion-drawer);
+}
+.modal-fade-leave-active {
+  transition: opacity var(--ch-motion-fast);
+}
+.modal-fade-leave-active .modal {
+  transition: opacity var(--ch-motion-fast), transform var(--ch-motion-fast);
+}
+.modal-fade-enter-from,
+.modal-fade-leave-to {
+  opacity: 0;
+}
+.modal-fade-enter-from .modal {
+  opacity: 0;
+  transform: translateY(4px) scale(0.98);
+}
+.modal-fade-leave-to .modal {
+  opacity: 0;
+  transform: translateY(2px) scale(0.98);
 }
 
 </style>
