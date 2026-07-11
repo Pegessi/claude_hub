@@ -15,6 +15,20 @@
       scrolling="yes"
       @load="onIframeLoad($event, cachedTabId)"
     />
+    <Transition name="terminal-connecting-fade">
+      <div
+        v-if="!activeTabReady"
+        class="terminal-connecting-overlay"
+        aria-live="polite"
+        aria-label="Terminal connecting"
+      >
+        <span
+          class="terminal-connecting-spinner"
+          aria-hidden="true"
+        />
+        <span class="terminal-connecting-text">Connecting…</span>
+      </div>
+    </Transition>
   </div>
 </template>
 
@@ -335,6 +349,7 @@ type IframeWithSabCache = HTMLIFrameElement & { __sabDrainScript?: HTMLScriptEle
 const iframeRefs: Record<string, HTMLIFrameElement | null> = {}
 const cachedTabIds = ref<string[]>([])
 const terminalContainer = ref<HTMLElement | null>(null)
+const activeTabReady = ref(false)
 const appStore = useAppStore()
 const terminalStore = useTerminalStore()
 const { colorScheme } = storeToRefs(appStore)
@@ -373,6 +388,12 @@ function getTerminalState(): TerminalKeyState {
   return window.__claudeHub.terminalState as unknown as TerminalKeyState
 }
 
+/** Sync reactive activeTabReady from the global shared ready map. */
+function syncActiveTabReady() {
+  const state = getTerminalState()
+  activeTabReady.value = !!(state.ready && state.ready[props.tabId])
+}
+
 function getOrCreateInputRing(tabId: string): SabInputRing | null {
   if (!sabInputSupported()) return null
   const state = getTerminalState()
@@ -396,6 +417,7 @@ function cacheTabId(tabId: string) {
 watch(
   () => props.tabId,
   (newTabId, oldTabId) => {
+    syncActiveTabReady()
     cacheTabId(newTabId)
     requestAnimationFrame(() => {
       scheduleTerminalResize(newTabId)
@@ -1247,6 +1269,12 @@ function handleMessage(event: MessageEvent) {
       getOrCreateInputRing(tabId)
       flushKeyQueue(tabId)
       scheduleTerminalResize(tabId)
+      if (tabId === props.tabId) {
+        activeTabReady.value = true
+      }
+      window.dispatchEvent(new CustomEvent('terminal-ready-change', {
+        detail: { tabId, ready: true },
+      }))
     }
   }
 
@@ -1254,6 +1282,12 @@ function handleMessage(event: MessageEvent) {
     const tabId = event.data.tabId
     if (tabId) {
       getTerminalState().ready[tabId] = false
+      if (tabId === props.tabId) {
+        activeTabReady.value = false
+      }
+      window.dispatchEvent(new CustomEvent('terminal-ready-change', {
+        detail: { tabId, ready: false },
+      }))
     }
   }
 
@@ -1369,5 +1403,66 @@ onUnmounted(() => {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
+}
+
+/* Connecting overlay — shown while ttyd WebSocket is handshaking.
+ * Absolutely positioned over the iframe area so it never causes layout shift.
+ * pointer-events:none lets clicks pass through to the iframe below. */
+.terminal-connecting-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ch-space-3);
+  background-color: var(--ch-color-app-bg);
+  pointer-events: none;
+}
+
+.terminal-connecting-spinner {
+  width: 20px; /* off-scale: spinner diameter; no matching size token */
+  height: 20px; /* off-scale: spinner diameter; no matching size token */
+  border: 2px solid var(--ch-color-border-muted);
+  border-top-color: var(--ch-color-accent);
+  border-radius: 50%;
+  animation: terminal-connecting-spin 700ms linear infinite;
+}
+
+@keyframes terminal-connecting-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.terminal-connecting-text {
+  font-size: var(--ch-font-sm);
+  color: var(--ch-color-text-muted);
+  font-weight: var(--ch-weight-medium);
+}
+
+.terminal-connecting-fade-enter-active,
+.terminal-connecting-fade-leave-active {
+  transition: opacity var(--ch-motion-standard) var(--ch-motion-ease);
+}
+
+.terminal-connecting-fade-enter-from,
+.terminal-connecting-fade-leave-to {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-connecting-spinner {
+    animation: none;
+  }
+
+  .terminal-connecting-fade-enter-active,
+  .terminal-connecting-fade-leave-active {
+    transition: none;
+  }
 }
 </style>
