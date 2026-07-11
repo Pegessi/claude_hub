@@ -281,7 +281,7 @@ watch(
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: var(--ch-color-overlay);
+  background: var(--ch-color-overlay-soft);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -290,21 +290,28 @@ watch(
   overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
-  z-index: 1100;
+  z-index: 1000;
 }
 
 .modal {
   background: var(--ch-color-surface);
   border: 1px solid var(--ch-color-border);
-  border-radius: var(--ch-radius-lg);
+  border-radius: var(--ch-radius-md);
   box-shadow: var(--ch-shadow-dialog);
-  padding: var(--ch-space-5);
+  padding: var(--ch-space-6);
   min-width: 640px;
   width: min(800px, 100%);
   max-width: 100%;
   max-height: calc(100dvh - var(--ch-space-4) * 2);
   display: flex;
   flex-direction: column;
+  /* R9-01: converged onto TabBar's radius-md + space-6 chrome. overflow is
+     intentionally kept `hidden` (not reconciled to TabBar's overflow-y:auto):
+     this modal is a fixed-height two-pane editor whose inner regions scroll
+     independently (.env-manage-body{overflow:hidden} clips, .env-preset-list
+     and the editor's textarea scroll themselves). A modal-level overflow-y
+     would add a redundant outer scrollbar and risk double scrollbars on short
+     viewports, so the TabBar single-column scroll model does not apply here. */
   overflow: hidden;
 }
 
@@ -541,12 +548,18 @@ watch(
 }
 
 .btn {
-  padding: var(--ch-space-2) var(--ch-space-4);
+  padding: var(--ch-space-3) var(--ch-space-5);
   border: none;
   border-radius: var(--ch-radius-sm);
   font-size: var(--ch-font-md);
+  font-weight: var(--ch-weight-medium);
+  line-height: var(--ch-leading-tight);
   cursor: pointer;
-  transition: background-color 0.2s;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ch-space-2);
+  transition: background-color var(--ch-motion-standard);
 }
 
 .btn:disabled {
@@ -555,7 +568,7 @@ watch(
 }
 
 .btn-small {
-  padding: var(--ch-space-1) var(--ch-space-2);
+  padding: var(--ch-space-2) var(--ch-space-3);
   font-size: var(--ch-font-sm);
 }
 
