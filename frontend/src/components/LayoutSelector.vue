@@ -242,7 +242,7 @@ onUnmounted(() => {
 
 .layout-cell {
   background-color: var(--ch-color-text-subtle);
-  border-radius: 2px;
+  border-radius: 2px; /* functional geometry for tiny layout-preset cells; --ch-radius-sm (5px) reads too rounded here */
   min-height: 4px;
   min-width: 4px;
   transition: background-color var(--ch-motion-fast);
