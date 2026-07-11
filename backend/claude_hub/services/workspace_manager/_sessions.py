@@ -23,7 +23,19 @@ class _SessionsMixin:
         for session_id, session in list(self.sessions.items()):
             if session.task_id == task_id or session.current_task_id == task_id:
                 self.sessions[session_id] = session.model_copy(
-                    update={"task_id": None, "current_task_id": None, "updated_at": _wm._now()}
+                    update={
+                        "task_id": None,
+                        "current_task_id": None,
+                        "auto_continue_task_id": None,
+                        "auto_continue_attempts": 0,
+                        "last_auto_continue_at": None,
+                        "hard_recovery_task_id": None,
+                        "hard_recovery_attempts": 0,
+                        "last_hard_recovery_at": None,
+                        "prompt_retry_task_id": None,
+                        "prompt_retry_attempted_at": None,
+                        "updated_at": _wm._now(),
+                    }
                 )
         self._save_state()
 

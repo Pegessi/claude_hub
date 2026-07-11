@@ -66,7 +66,7 @@ class _MonitorMixin:
                     run_auto_continue
                     and runtime_status == AgentRuntimeStatus.IDLE
                     and task
-                    and task.status == WorkspaceTaskStatus.WORKING
+                    and task.status in {WorkspaceTaskStatus.WORKING, WorkspaceTaskStatus.REVIEW}
                 ):
                     auto_continue_update = await self._auto_continue_stopped_task(
                         session,
@@ -308,19 +308,30 @@ class _MonitorMixin:
         task: WorkspaceTask,
         sampled_at: datetime,
     ) -> dict[str, Any] | None:
-        # Only the worker that owns a WORKING task may be auto-continued. After a
-        # ``review_failed`` reopen the reviewer session intentionally stays bound
-        # to the task (``current_task_id``) so the same reviewer handles the next
-        # cycle — but it is NOT the task's worker. Without this guard the monitor
-        # treats the idle reviewer as a worker owing a report and endlessly
-        # auto-prompts it (action=report_missing); the reviewer re-posts its
-        # verdict, which is correctly dropped as a stale duplicate, stranding the
-        # task until the fallback reaper fires (~5 min later). The worker is
-        # ``task.session_id``; the reviewer is ``task.review_session_id``.
-        if task.session_id and task.session_id != session.id:
+        # Only the agent that owns the current work phase may be auto-continued:
+        # - During WORKING: the worker (task.session_id). After a ``review_failed``
+        #   reopen the reviewer session stays bound via ``current_task_id`` but is
+        #   NOT the worker; without this guard the monitor would treat the idle
+        #   reviewer as a worker owing a report and endlessly auto-prompt it.
+        # - During REVIEW: the reviewer (task.review_session_id). The worker may
+        #   also be idle but should not be auto-continued while review is in flight.
+        is_worker = task.session_id and task.session_id == session.id
+        is_reviewer = task.review_session_id and task.review_session_id == session.id
+        if task.status == WorkspaceTaskStatus.WORKING:
+            if not is_worker:
+                return None
+        elif task.status == WorkspaceTaskStatus.REVIEW:
+            if not is_reviewer:
+                return None
+        else:
             return None
         if state_policy.review_in_flight(task.review_requested_at, task.review_completed_at):
-            return None
+            # For workers during WORKING, review_in_flight means a reviewer is active
+            # and the worker should not be prodded. For reviewers during REVIEW,
+            # review_in_flight is True while they are reviewing, which is exactly
+            # when we want to auto-continue them if they get stuck on errors.
+            if task.status == WorkspaceTaskStatus.WORKING:
+                return None
         latest_state = self._latest_report_state(task.id)
         if latest_state in {
             AgentReportState.READY_FOR_REVIEW,
@@ -359,14 +370,40 @@ class _MonitorMixin:
         ):
             return None
 
+        is_reviewer_session = (
+            task.review_session_id is not None and task.review_session_id == session.id
+        )
         interruption_reason = self._auto_continue_interruption_reason(output)
         completion_reason = None
-        if not interruption_reason:
+        # Completion patterns (e.g. "ready_for_review", "changed_files") only apply
+        # to workers posting final reports. Reviewers post review_passed/review_failed
+        # and don't need completion-nudge prompts.
+        if not interruption_reason and not is_reviewer_session:
             completion_reason = self._auto_continue_completion_reason(output)
         if not interruption_reason and not completion_reason:
             return None
 
         attempts = session.auto_continue_attempts if session.auto_continue_task_id == task.id else 0
+        hard_attempts = (
+            session.hard_recovery_attempts if session.hard_recovery_task_id == task.id else 0
+        )
+        # Hard recovery cooldown: after a hard recovery, do not immediately fire
+        # another one or another soft prompt; wait for the agent to produce output.
+        if (
+            session.hard_recovery_task_id == task.id
+            and session.last_hard_recovery_at
+            and (sampled_at - session.last_hard_recovery_at).total_seconds()
+            < AUTO_CONTINUE_MIN_INTERVAL_SECONDS * 2
+        ):
+            return {
+                "status": ManagedSessionStatus.WORKING,
+                "runtime_status": AgentRuntimeStatus.WORKING,
+                "auto_continue_task_id": task.id,
+                "auto_continue_attempts": attempts,
+                "hard_recovery_task_id": task.id,
+                "hard_recovery_attempts": hard_attempts,
+                "updated_at": sampled_at,
+            }
         if (
             session.auto_continue_task_id == task.id
             and session.last_auto_continue_at
@@ -380,7 +417,49 @@ class _MonitorMixin:
                 "auto_continue_attempts": attempts,
                 "updated_at": sampled_at,
             }
-        if attempts >= AUTO_CONTINUE_MAX_ATTEMPTS:
+
+        # --- Hard recovery escalation for persistent API errors ---
+        # When soft auto-continue prompts fail to revive a Claude agent stuck on an
+        # API error (4xx/5xx/overloaded/etc.), escalate: interrupt the agent, clear
+        # its context with /clear, wait for settle, then re-inject the task prompt
+        # so it can resume within the same conversation. Only Claude supports /clear;
+        # Codex/Cursor fall through to the existing soft-prompt path.
+        if (
+            interruption_reason
+            and session.agent_type == AgentType.CLAUDE
+            and attempts >= AUTO_CONTINUE_SOFT_ATTEMPTS_BEFORE_HARD_RECOVERY
+            and hard_attempts < AUTO_CONTINUE_MAX_HARD_RECOVERIES
+        ):
+            return await self._perform_hard_recovery(
+                session, task, sampled_at, interruption_reason, attempts, hard_attempts
+            )
+
+        # If we have exhausted all hard recoveries and are still seeing errors,
+        # give up: for workers mark NEEDS_INPUT for manual intervention; for
+        # reviewers release the stuck binding so the reaper can re-dispatch.
+        if interruption_reason and hard_attempts >= AUTO_CONTINUE_MAX_HARD_RECOVERIES:
+            if is_reviewer_session:
+                self._release_stale_reviewer_for_task(task, updated_at=sampled_at)
+                logger.warning(
+                    "Workspace reviewer hard recovery exhausted; releasing for re-dispatch "
+                    "session_id=%s task_id=%s soft_attempts=%s hard_attempts=%s reason=%s",
+                    session.id,
+                    task.id,
+                    attempts,
+                    hard_attempts,
+                    interruption_reason,
+                )
+                return {
+                    "status": ManagedSessionStatus.IDLE,
+                    "runtime_status": AgentRuntimeStatus.IDLE,
+                    "auto_continue_task_id": None,
+                    "auto_continue_attempts": 0,
+                    "hard_recovery_task_id": None,
+                    "hard_recovery_attempts": 0,
+                    "task_id": None,
+                    "current_task_id": None,
+                    "updated_at": sampled_at,
+                }
             self.tasks[task.id] = task.model_copy(
                 update={
                     "status": WorkspaceTaskStatus.REVIEW,
@@ -389,20 +468,78 @@ class _MonitorMixin:
                 }
             )
             logger.warning(
-                "Workspace agent auto-continue limit reached session_id=%s task_id=%s attempts=%s",
+                "Workspace agent hard recovery exhausted session_id=%s task_id=%s "
+                "soft_attempts=%s hard_attempts=%s reason=%s",
                 session.id,
                 task.id,
                 attempts,
+                hard_attempts,
+                interruption_reason,
             )
             return {
                 "status": ManagedSessionStatus.NEEDS_INPUT,
                 "runtime_status": AgentRuntimeStatus.ATTENTION,
                 "auto_continue_task_id": task.id,
                 "auto_continue_attempts": attempts,
+                "hard_recovery_task_id": task.id,
+                "hard_recovery_attempts": hard_attempts,
                 "updated_at": sampled_at,
             }
 
-        message = AUTO_CONTINUE_MESSAGE if interruption_reason else AUTO_REPORT_MISSING_MESSAGE
+        # If max soft attempts reached (completion patterns or non-Claude agents),
+        # fall through to NEEDS_INPUT / REVIEW. For reviewers, release for re-dispatch.
+        if attempts >= AUTO_CONTINUE_MAX_ATTEMPTS:
+            if is_reviewer_session:
+                self._release_stale_reviewer_for_task(task, updated_at=sampled_at)
+                logger.warning(
+                    "Workspace reviewer auto-continue limit reached; releasing for re-dispatch "
+                    "session_id=%s task_id=%s attempts=%s hard_attempts=%s",
+                    session.id,
+                    task.id,
+                    attempts,
+                    hard_attempts,
+                )
+                return {
+                    "status": ManagedSessionStatus.IDLE,
+                    "runtime_status": AgentRuntimeStatus.IDLE,
+                    "auto_continue_task_id": None,
+                    "auto_continue_attempts": 0,
+                    "hard_recovery_task_id": None,
+                    "hard_recovery_attempts": 0,
+                    "task_id": None,
+                    "current_task_id": None,
+                    "updated_at": sampled_at,
+                }
+            self.tasks[task.id] = task.model_copy(
+                update={
+                    "status": WorkspaceTaskStatus.REVIEW,
+                    "reviewed_at": sampled_at,
+                    "updated_at": sampled_at,
+                }
+            )
+            logger.warning(
+                "Workspace agent auto-continue limit reached session_id=%s task_id=%s attempts=%s hard_attempts=%s",
+                session.id,
+                task.id,
+                attempts,
+                hard_attempts,
+            )
+            return {
+                "status": ManagedSessionStatus.NEEDS_INPUT,
+                "runtime_status": AgentRuntimeStatus.ATTENTION,
+                "auto_continue_task_id": task.id,
+                "auto_continue_attempts": attempts,
+                "hard_recovery_task_id": task.id,
+                "hard_recovery_attempts": hard_attempts,
+                "updated_at": sampled_at,
+            }
+
+        if interruption_reason:
+            message = (
+                AUTO_CONTINUE_REVIEWER_MESSAGE if is_reviewer_session else AUTO_CONTINUE_MESSAGE
+            )
+        else:
+            message = AUTO_REPORT_MISSING_MESSAGE
         # The agent's context may have been cleared since it learned the report
         # endpoint from its bootstrap/assignment prompt. Restate the endpoint so
         # a cleared agent always has a curl target to POST its report to.
@@ -428,6 +565,118 @@ class _MonitorMixin:
             "last_activity_at": sampled_at,
             "updated_at": sampled_at,
         }
+
+    async def _perform_hard_recovery(
+        self,
+        session: ManagedSession,
+        task: WorkspaceTask,
+        sampled_at: datetime,
+        interruption_reason: str,
+        soft_attempts: int,
+        hard_attempts: int,
+    ) -> dict[str, Any]:
+        """Hard-recover a stuck agent: interrupt, /clear, re-inject task prompt.
+
+        This is the escalation path when soft auto-continue prompts fail to
+        revive a Claude agent that hit a persistent API error. The conversation
+        ID is preserved (same tmux pane, same --session-id), but the in-context
+        window is wiped via /clear so the agent can continue without a corrupt
+        error state in its context.
+        """
+        workspace = self.workspaces.get(task.workspace_id)
+        if not workspace:
+            logger.warning(
+                "Hard recovery could not find workspace for task_id=%s session_id=%s",
+                task.id,
+                session.id,
+            )
+            return {
+                "status": ManagedSessionStatus.NEEDS_INPUT,
+                "runtime_status": AgentRuntimeStatus.ATTENTION,
+                "auto_continue_task_id": task.id,
+                "auto_continue_attempts": soft_attempts,
+                "updated_at": sampled_at,
+            }
+
+        new_hard_attempts = hard_attempts + 1
+        agent_session_id = None
+        try:
+            tab = ttyd_manager.get_tab(session.tab_id)
+            if tab:
+                agent_session_id = tab.agent_session_id
+        except Exception:
+            pass
+
+        logger.warning(
+            "Performing hard recovery for stuck agent session_id=%s task_id=%s "
+            "reason=%s soft_attempts=%s hard_attempt=%s/%s agent_session_id=%s",
+            session.id,
+            task.id,
+            interruption_reason,
+            soft_attempts,
+            new_hard_attempts,
+            AUTO_CONTINUE_MAX_HARD_RECOVERIES,
+            agent_session_id,
+        )
+
+        # Step 1: Interrupt the agent (Escape + single Ctrl-C) to dismiss any
+        # error dialog and return to the Claude prompt.
+        await self._interrupt_session(session)
+        await asyncio.sleep(INTERRUPT_SETTLE_SECONDS)
+
+        # Step 2: Send /clear to wipe the context window.
+        await self.send_session_message(session.id, "/clear")
+        await asyncio.sleep(CLEAR_CONTEXT_SETTLE_SECONDS)
+
+        # Step 3: Re-inject the appropriate recovery prompt.
+        if session.role == WorkspaceSessionRole.REVIEWER:
+            trigger_report = self._latest_report_for_task(task.id)
+            if trigger_report:
+                prompt = self._build_hard_recovery_reviewer_prompt(
+                    workspace, task, session, trigger_report, interruption_reason
+                )
+            else:
+                # Should not happen (reviewer only exists when there is a trigger report),
+                # but fall back to a simpler message.
+                prompt = (
+                    f"{HARD_RECOVERY_REVIEWER_MESSAGE}\n\n"
+                    f"Error detected: {interruption_reason}\n\n"
+                    f"Task ID: {task.id}\nTask title: {task.title}\n\n"
+                    f"{self._report_endpoint_curl(session, task.id)}"
+                )
+        else:
+            prompt = self._build_hard_recovery_worker_prompt(
+                workspace, task, session, interruption_reason
+            )
+
+        await self.send_session_message(session.id, prompt)
+
+        logger.info(
+            "Hard recovery complete for session_id=%s task_id=%s hard_attempt=%s",
+            session.id,
+            task.id,
+            new_hard_attempts,
+        )
+        return {
+            "status": ManagedSessionStatus.WORKING,
+            "runtime_status": AgentRuntimeStatus.WORKING,
+            "auto_continue_task_id": task.id,
+            "auto_continue_attempts": 0,  # Reset soft attempts after hard recovery
+            "last_auto_continue_at": None,
+            "hard_recovery_task_id": task.id,
+            "hard_recovery_attempts": new_hard_attempts,
+            "last_hard_recovery_at": sampled_at,
+            "last_activity_at": sampled_at,
+            "updated_at": sampled_at,
+        }
+
+    def _latest_report_for_task(self, task_id: str) -> AgentReport | None:
+        """Return the most recent report for a task (any state)."""
+        reports = sorted(
+            [report for report in self.reports.values() if report.task_id == task_id],
+            key=lambda report: report.created_at,
+        )
+        return reports[-1] if reports else None
 
     def _auto_continue_completion_reason(self, output: str) -> str | None:
         return state_policy.auto_continue_completion_reason(output)
@@ -579,6 +828,9 @@ class _MonitorMixin:
                     "auto_continue_task_id": None,
                     "auto_continue_attempts": 0,
                     "last_auto_continue_at": None,
+                    "hard_recovery_task_id": None,
+                    "hard_recovery_attempts": 0,
+                    "last_hard_recovery_at": None,
                     "updated_at": _wm._now(),
                 }
             )
@@ -617,6 +869,12 @@ class _MonitorMixin:
                     "current_task_id": None,
                     "status": status,
                     "runtime_status": runtime_status,
+                    "auto_continue_task_id": None,
+                    "auto_continue_attempts": 0,
+                    "last_auto_continue_at": None,
+                    "hard_recovery_task_id": None,
+                    "hard_recovery_attempts": 0,
+                    "last_hard_recovery_at": None,
                     "updated_at": updated_at,
                     "last_activity_at": updated_at,
                 }
@@ -661,6 +919,12 @@ class _MonitorMixin:
                     "current_task_id": None,
                     "status": ManagedSessionStatus.IDLE,
                     "runtime_status": AgentRuntimeStatus.IDLE,
+                    "auto_continue_task_id": None,
+                    "auto_continue_attempts": 0,
+                    "last_auto_continue_at": None,
+                    "hard_recovery_task_id": None,
+                    "hard_recovery_attempts": 0,
+                    "last_hard_recovery_at": None,
                     "updated_at": updated_at,
                     "last_activity_at": updated_at,
                 }
@@ -689,6 +953,9 @@ class _MonitorMixin:
                 "auto_continue_task_id": task_id,
                 "auto_continue_attempts": 0,
                 "last_auto_continue_at": None,
+                "hard_recovery_task_id": None,
+                "hard_recovery_attempts": 0,
+                "last_hard_recovery_at": None,
                 "updated_at": _wm._now(),
             }
         )

@@ -5,6 +5,60 @@
 
 ## Unreleased
 
+### feat: Hard context recovery for agents stuck on persistent API errors
+
+- **What**: when a Claude agent (worker or reviewer) gets stuck on a
+  repeated API error (4xx/5xx, overloaded, etc.) and soft "please continue"
+  prompts fail to revive it after 3 attempts, the monitor now escalates to
+  **hard recovery**: interrupt the agent (Escape+Ctrl-C), send `/clear` to
+  wipe the corrupted context window, wait for settle, then re-inject the
+  task/review prompt within the **same conversation** (session_id preserved).
+  This avoids losing the entire conversation when transient API errors leave
+  the agent wedged on an error screen.
+- **Why**: previously, the monitor would only send soft text prompts (up to 10
+  attempts) and then mark the task NEEDS_INPUT for manual intervention. When
+  the error was a transient API issue that left the Claude CLI stuck showing
+  an error dialog, no amount of "please continue" prompts could get the agent
+  back to a usable state because the dialog blocked input; only `/clear`
+  resets the conversation to a working prompt.
+- **How**:
+  - Added `agent_session_id: Optional[str]` to `TerminalTab` schema; surfaced
+    from `TTYDProcess.to_schema()` so the CLI's `--session-id` UUID is logged
+    during recovery for diagnostics.
+  - Added `hard_recovery_task_id`, `hard_recovery_attempts`,
+    `last_hard_recovery_at` fields to `ManagedSession`; counter resets on new
+    task dispatch, `continue_task`, and review request.
+  - New constants: `AUTO_CONTINUE_SOFT_ATTEMPTS_BEFORE_HARD_RECOVERY=3`,
+    `AUTO_CONTINUE_MAX_HARD_RECOVERIES=2`, `INTERRUPT_SETTLE_SECONDS=1.0`,
+    `CLEAR_CONTEXT_SETTLE_SECONDS=1.5`.
+  - Extended `_auto_continue_stopped_task` to also fire for REVIEW-phase
+    reviewers (previously WORKING-only) with per-phase ownership guards and a
+    reviewer-specific continue message.
+  - Added `_perform_hard_recovery()`: logs warning with `agent_session_id`,
+    calls `_interrupt_session`, waits 1s, sends `/clear`, waits 1.5s, sends
+    role-specific recovery prompt (worker gets task description + goal packet
+    + curl endpoint; reviewer gets task reports JSON + trigger report + goal
+    packet).
+  - Hard recovery is **Claude-only** (`/clear` is a Claude CLI slash command);
+    Codex/Cursor continue on the existing soft-prompt path.
+  - After 2 hard recoveries exhaust without progress: workers → REVIEW +
+    NEEDS_INPUT (manual intervention); reviewers → `_release_stale_reviewer_for_task()`
+    so the existing reviewer reaper re-dispatches with a fresh session.
+  - Added `AUTO_CONTINUE_REVIEWER_MESSAGE`, `HARD_RECOVERY_WORKER_MESSAGE`,
+    `HARD_RECOVERY_REVIEWER_MESSAGE` constants; added `_build_hard_recovery_worker_prompt()`,
+    `_build_hard_recovery_reviewer_prompt()`, `_agent_session_id_for_session()`,
+    and `_latest_report_for_task()` helper methods in `_prompts.py` and
+    `_monitor.py`.
+  - Reset hard recovery fields in `_release_task_session`,
+    `_release_reviewer_session`, `_cleanup_reviewer_for_terminal_task`,
+    `_assign_current_task`, `_dispatch_task_to_session`, `continue_task`, and
+    `_request_task_review` to prevent stale counters across task lifecycles.
+- **Validation**: `black`/`isort`/`mypy` clean on all touched production
+  files; 145 unit tests pass (including 13 new tests in
+  `tests/test_hard_recovery.py` covering schema fields, constants,
+  normalization defaults, escalation thresholds, agent-type gating, role
+  detection, and `_latest_report_for_task`).
+
 ### fix: Codex restart now keeps solo mode when resuming a prior session
 
 - **What**: when a Codex agent that was launched in **solo mode** restarted —
