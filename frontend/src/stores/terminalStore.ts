@@ -99,6 +99,32 @@ export const useTerminalStore = defineStore('terminal', () => {
   const panes = ref<Pane[]>([])
   const activePaneId = ref<string | null>(null)
 
+  // Per-tab connection-failure flag (A10). Set by TerminalView when an iframe
+  // load errors or a tab never reaches 'terminal-ready' within the connect
+  // timeout; cleared on successful terminal-ready, on Retry, and when a tab is
+  // deleted. Components should treat true as "show a Connection lost overlay
+  // with Retry"; never auto-retry.
+  const connectionErrors = ref<Record<string, boolean>>({})
+
+  function markConnectionFailed(tabId: string) {
+    if (!tabId) return
+    if (connectionErrors.value[tabId]) return
+    connectionErrors.value = { ...connectionErrors.value, [tabId]: true }
+  }
+
+  function clearConnectionError(tabId: string) {
+    if (!tabId) return
+    if (!connectionErrors.value[tabId]) return
+    const next = { ...connectionErrors.value }
+    delete next[tabId]
+    connectionErrors.value = next
+  }
+
+  function isConnectionFailed(tabId: string | null | undefined): boolean {
+    if (!tabId) return false
+    return !!connectionErrors.value[tabId]
+  }
+
   const activeTab = computed(() => tabs.value.find(tab => tab.id === activeTabId.value) || null)
   const manualTabs = computed(() => tabs.value.filter(tab => !tab.workspace_id))
   const managedTabs = computed(() => tabs.value.filter(tab => Boolean(tab.workspace_id)))
@@ -359,6 +385,8 @@ export const useTerminalStore = defineStore('terminal', () => {
       if (activeTabId.value === tabId) {
         activeTabId.value = manualTabs.value.length ? manualTabs.value[0].id : null
       }
+      // A10: drop any lingering connection-error state for the deleted tab.
+      clearConnectionError(tabId)
     } catch (e) {
       notifyError(e instanceof Error ? e.message : 'Unknown error')
     } finally {
@@ -461,6 +489,10 @@ export const useTerminalStore = defineStore('terminal', () => {
     panes,
     activePaneId,
     activePane,
+    connectionErrors,
+    markConnectionFailed,
+    clearConnectionError,
+    isConnectionFailed,
     fetchTabs,
     fetchAgentStatuses,
     startAgentStatusPolling,
