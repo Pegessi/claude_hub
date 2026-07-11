@@ -433,7 +433,6 @@ export const useTerminalStore = defineStore('terminal', () => {
   async function saveTabOrder() {
     try {
       const tabIds = tabs.value.map(t => t.id)
-      console.log('Saving tab order:', tabIds)
       const response = await fetch(`${API_BASE}/tabs/order`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -444,8 +443,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         console.error('Failed to save tab order:', response.status, errText)
         throw new Error(`Failed to save tab order: ${response.status}`)
       }
-      const result = await response.json()
-      console.log('Tab order saved:', result)
+      await response.json()
     } catch (e) {
       console.error('Error saving tab order:', e)
       // (F5) Re-enabled — use pushNotification so transient tab-order save

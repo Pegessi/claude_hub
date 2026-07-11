@@ -7638,7 +7638,7 @@ onUnmounted(() => {
   min-height: 26px;
   padding: 4px 12px;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: var(--ch-weight-medium);
   color: var(--ch-color-text-muted);
   background: var(--ch-color-surface-elevated);
   border: 1px solid var(--ch-color-border-muted);
@@ -7774,7 +7774,7 @@ onUnmounted(() => {
   margin: 0;
   color: var(--ch-color-text-strong);
   font-size: 13px;
-  font-weight: 600;
+  font-weight: var(--ch-weight-semibold);
   line-height: 1.35;
   overflow-wrap: anywhere;
   word-break: break-word;
@@ -7811,7 +7811,7 @@ onUnmounted(() => {
 
 .session-meta .meta-agent {
   color: var(--ch-color-text);
-  font-weight: 600;
+  font-weight: var(--ch-weight-semibold);
 }
 
 .session-meta .meta-reviewer {
@@ -7822,7 +7822,7 @@ onUnmounted(() => {
 .session-meta .meta-review-state {
   background: color-mix(in srgb, var(--ch-color-accent) 12%, var(--ch-color-chip-bg));
   color: var(--ch-color-accent);
-  font-weight: 600;
+  font-weight: var(--ch-weight-semibold);
 }
 
 .agent-badge {
@@ -7857,7 +7857,7 @@ onUnmounted(() => {
   border-radius: 999px;
   padding: 2px 7px;
   font-size: var(--ch-font-xs);
-  font-weight: 600;
+  font-weight: var(--ch-weight-semibold);
   letter-spacing: 0.02em;
   white-space: nowrap;
   border: 1px solid transparent;
@@ -7875,7 +7875,7 @@ onUnmounted(() => {
   background: rgba(20, 184, 166, 0.12);
   color: var(--ch-agent-autonomy-bg);
   font-size: var(--ch-font-xs);
-  font-weight: 600;
+  font-weight: var(--ch-weight-semibold);
   line-height: 1;
   padding: 2px 7px;
   white-space: nowrap;
@@ -7910,7 +7910,7 @@ onUnmounted(() => {
   background: rgba(139, 92, 246, 0.14);
   color: var(--ch-agent-origin-bg);
   font-size: var(--ch-font-xs);
-  font-weight: 600;
+  font-weight: var(--ch-weight-semibold);
   letter-spacing: 0.03em;
   line-height: 1;
   padding: 2px 7px;
@@ -8188,7 +8188,7 @@ onUnmounted(() => {
   background: transparent;
   color: var(--ch-color-text);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: var(--ch-weight-semibold);
   text-align: left;
   justify-content: flex-start;
   cursor: pointer;
@@ -8371,7 +8371,7 @@ onUnmounted(() => {
   background: transparent;
   color: var(--ch-color-text-subtle);
   font-size: var(--ch-font-xs);
-  font-weight: 600;
+  font-weight: var(--ch-weight-semibold);
   cursor: pointer;
   letter-spacing: 0.02em;
 }
@@ -8579,7 +8579,7 @@ onUnmounted(() => {
   background: var(--ch-color-accent-soft);
   color: var(--ch-color-accent);
   font-size: var(--ch-font-xs);
-  font-weight: 600;
+  font-weight: var(--ch-weight-semibold);
   padding: 2px 7px;
   white-space: nowrap;
   flex: 0 0 auto;
@@ -9056,7 +9056,7 @@ onUnmounted(() => {
 .report-awaiting-acceptance {
   color: var(--ch-color-warning);
   background: var(--ch-color-warning-bg);
-  font-weight: 600;
+  font-weight: var(--ch-weight-semibold);
   text-transform: uppercase;
   letter-spacing: 0.02em;
 }
@@ -9689,10 +9689,10 @@ onUnmounted(() => {
   padding: 10px;
 }
 
-.modal-field input:focus,
-.modal-field textarea:focus,
-.modal-field select:focus,
-.file-browser-path input:focus {
+.modal-field input:focus-visible,
+.modal-field textarea:focus-visible,
+.modal-field select:focus-visible,
+.file-browser-path input:focus-visible {
   outline: none;
   border-color: var(--ch-color-accent);
   box-shadow: 0 0 0 2px var(--ch-color-accent-ring);
@@ -9965,7 +9965,7 @@ onUnmounted(() => {
 .resident-summary-title {
   color: var(--ch-color-text);
   font-size: 14px;
-  font-weight: 500;
+  font-weight: var(--ch-weight-medium);
 }
 
 .resident-summary-status {
@@ -10010,7 +10010,7 @@ onUnmounted(() => {
   background: color-mix(in srgb, var(--ch-color-accent-bg) 18%, transparent);
   color: var(--ch-color-accent-fg);
   font-size: var(--ch-font-xs);
-  font-weight: 600;
+  font-weight: var(--ch-weight-semibold);
   line-height: 1.4;
   letter-spacing: 0.02em;
 }
@@ -10200,7 +10200,7 @@ onUnmounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
-  font-weight: 500;
+  font-weight: var(--ch-weight-medium);
 }
 
 .file-status {
@@ -10912,7 +10912,7 @@ onUnmounted(() => {
 .switch-env-callout-icon {
   flex: 0 0 auto;
   color: var(--ch-color-accent);
-  font-weight: 600;
+  font-weight: var(--ch-weight-semibold);
   line-height: 1.5;
 }
 

@@ -758,7 +758,7 @@ textarea {
   align-items: center;
   gap: 12px;
   font-size: 13px;
-  font-weight: 500;
+  font-weight: var(--ch-weight-medium);
 }
 
 .auth-error-banner__actions {

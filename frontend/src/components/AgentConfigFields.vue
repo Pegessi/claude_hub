@@ -281,7 +281,7 @@ function onAgentTypeChange(value: string) {
   border-color: var(--ch-color-border-hover);
 }
 
-.agent-config-fields .acf-select:focus {
+.agent-config-fields .acf-select:focus-visible {
   outline: none;
   border-color: var(--ch-color-accent);
   box-shadow: 0 0 0 2px var(--ch-color-accent-ring);
