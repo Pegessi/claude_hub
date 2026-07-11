@@ -146,6 +146,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const workspaceAgent = computed(() =>
     workspaceAgents.value[0] || null
   )
+  // RS-05: precomputed working-agent count — replaces inline
+  // `workspaceAgents.filter(a => a.runtime_status === 'working').length` at the
+  // desktop summary strip and in mobileWorkspaceSummary (PR-02 precomputed-derived idiom).
+  const workingAgentCount = computed(() =>
+    workspaceAgents.value.filter(agent => agent.runtime_status === 'working').length
+  )
 
   // Stable per-status task arrays. Derived once per board update instead of
   // being re-filtered on every template expression (the board polls every 2.5s
@@ -901,6 +907,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     residentAgent,
     residentReport,
     workspaceAgent,
+    workingAgentCount,
     tasksByStatusMap,
     latestReportByTaskId,
     sessionByTaskId,

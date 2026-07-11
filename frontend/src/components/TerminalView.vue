@@ -296,7 +296,10 @@ function buildIframeSabScript(tabId: string): string {
   }
 
   // Polling fallback for browsers that expose SAB but not Atomics.waitAsync
-  // (most browsers on the main thread). Runs a light rAF + microtask loop.
+  // (e.g. Firefox). Runs a light rAF + microtask loop. When waitAsync is
+  // available the promise chain below already drives drain on every generation
+  // change, so we do NOT start this loop in that case (would add 60 rAF
+  // wakeups/sec per iframe for no benefit — RS-03).
   var lastGeneration = -1;
   function pollLoop() {
     var gen = Atomics.load(meta, RING_WORD_GENERATION);
@@ -316,11 +319,12 @@ function buildIframeSabScript(tabId: string): string {
   window.__claudeHubDrainSabRing = scheduleDrain;
 
   scheduleDrain();
-  requestAnimationFrame(pollLoop);
+  if (typeof Atomics.waitAsync !== 'function') {
+    requestAnimationFrame(pollLoop);
+  }
 
   // Also drain whenever we receive any parent postMessage — catches races
   // between SAB writes and the legacy message path.
-  var originalPostMessageListener = window.addEventListener;
   window.addEventListener('message', function (ev) {
     if (ev && ev.data && ev.data.tabId === TAB_ID) {
       scheduleDrain();
@@ -390,6 +394,10 @@ const pendingResizeTabIds = new Set<string>()
 let pendingResizeAll = false
 // Last-sent theme payload cache to avoid duplicate theme messages
 let lastThemeKey: string | null = null
+// RS-08: scroll-bottom and retry-reinsert timers are one-shot but not tied
+// to a specific tab's lifecycle in a way that connectTimeoutIds is. Track them
+// so onUnmounted can clear them and prevent postMessage into a torn-down iframe.
+const pendingOneShotTimers = new Set<number>()
 
 const MOBILE_TERMINAL_BREAKPOINT_PX = 768
 const MOBILE_KEYBOARD_RESIZE_SETTLE_MS = 260
@@ -437,6 +445,23 @@ function clearConnectTimeout(tabId: string) {
     window.clearTimeout(t)
     delete connectTimeoutIds[tabId]
   }
+}
+
+/** RS-08: schedule a one-shot setTimeout and auto-remove it from the tracking
+ *  set when it fires, so onUnmounted can clean up any stragglers. */
+function setTrackedTimeout(handler: () => void, delayMs: number): number {
+  const id = window.setTimeout(() => {
+    pendingOneShotTimers.delete(id)
+    handler()
+  }, delayMs)
+  pendingOneShotTimers.add(id)
+  return id
+}
+
+/** Cancel every tracked one-shot timer — used on unmount. */
+function clearAllTrackedTimeouts() {
+  pendingOneShotTimers.forEach(id => window.clearTimeout(id))
+  pendingOneShotTimers.clear()
 }
 
 /** A10: arm the connect-timeout for a tab. Called whenever a fresh iframe is
@@ -488,7 +513,7 @@ function retryConnection() {
   // unmounts the old iframe element, then re-push so a new iframe mounts.
   cachedTabIds.value = cachedTabIds.value.filter(id => id !== tabId)
   // Defer the re-insertion one microtask so the v-for unmount runs first.
-  window.setTimeout(() => {
+  setTrackedTimeout(() => {
     if (!cachedTabIds.value.includes(tabId)) {
       cacheTabId(tabId)
     }
@@ -548,8 +573,8 @@ watch(
       // a visible history replay before the bottom prompt is usable.
       if (oldTabId && oldTabId !== newTabId && !isMobileTerminalViewport()) {
         postTerminalScrollBottom(newTabId)
-        window.setTimeout(() => postTerminalScrollBottom(newTabId), 120)
-        window.setTimeout(() => postTerminalScrollBottom(newTabId), 360)
+        setTrackedTimeout(() => postTerminalScrollBottom(newTabId), 120)
+        setTrackedTimeout(() => postTerminalScrollBottom(newTabId), 360)
       }
     })
   },
@@ -583,6 +608,9 @@ function registerIframe(el: Element | ComponentPublicInstance | null, tabId: str
       state.inputRing[tabId] = null
       delete state.inputRing[tabId]
     }
+    // RS-07: drop the pre-ready key queue for closed tabs so empty arrays
+    // don't accumulate for every tab ever opened.
+    delete state.queues[tabId]
   }
 }
 
@@ -632,11 +660,15 @@ function flushKeyQueue(tabId: string) {
   const queue = state.queues[tabId]
   if (!queue || queue.length === 0) return
 
-  while (queue.length > 0) {
-    const item = queue[0]
-    if (!postTerminalKey(tabId, item)) return
-    queue.shift()
+  // RS-06: index-pointer drain — avoids O(n^2) re-indexing from queue.shift()
+  // in a loop. Splice the successfully-sent prefix once at the end (or on
+  // early-exit when postTerminalKey returns false because the iframe isn't
+  // ready; unsent keys stay at the front for the next flush attempt).
+  let sent = 0
+  for (; sent < queue.length; sent++) {
+    if (!postTerminalKey(tabId, queue[sent])) break
   }
+  if (sent > 0) queue.splice(0, sent)
 }
 
 function cssVar(name: string) {
@@ -804,8 +836,8 @@ function scheduleMobileTerminalActivation(tabId?: string) {
     refreshHistory: false,
     scrollToBottom: true,
   })
-  window.setTimeout(() => postTerminalScrollBottom(tabId), 120)
-  window.setTimeout(() => postTerminalScrollBottom(tabId), 360)
+  setTrackedTimeout(() => postTerminalScrollBottom(tabId), 120)
+  setTrackedTimeout(() => postTerminalScrollBottom(tabId), 360)
 }
 
 function refreshTerminalHistory(tabId?: string) {
@@ -816,7 +848,7 @@ function refreshTerminalHistory(tabId?: string) {
     reason: 'manual',
     scrollToBottom: true,
   })
-  window.setTimeout(() => postTerminalScrollBottom(targetTabId), 400)
+  setTrackedTimeout(() => postTerminalScrollBottom(targetTabId), 400)
 }
 
 function isMobileKeyboardResizeActive() {
@@ -1502,6 +1534,9 @@ onUnmounted(() => {
   // A10: cancel any in-flight connect timeouts so they can't fire into a
   // torn-down component.
   Object.keys(connectTimeoutIds).forEach(clearConnectTimeout)
+  // RS-08: cancel any one-shot scroll/retry timers so they don't postMessage
+  // into a detached iframe.
+  clearAllTrackedTimeouts()
 })
 </script>
 

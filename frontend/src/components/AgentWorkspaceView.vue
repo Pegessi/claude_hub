@@ -180,7 +180,7 @@
       <div class="workspace-summary-primary">
         <span class="summary-chip"><strong>{{ workspaceAgents.length }}</strong> agents</span>
         <span class="summary-chip"><strong>{{ reviewerAgents.length + temporaryReviewers.length }}</strong> reviewers</span>
-        <span class="summary-chip summary-chip--accent"><strong>{{ workspaceAgents.filter(agent => agent.runtime_status === 'working').length }}</strong> working</span>
+        <span class="summary-chip summary-chip--accent"><strong>{{ workingAgentCount }}</strong> working</span>
         <span class="summary-chip"><strong>{{ taskCountForStatus('queued') }}</strong> queued</span>
         <button
           type="button"
@@ -3246,6 +3246,7 @@ const {
   temporaryReviewers,
   dispatcherAgent,
   residentAgent,
+  workingAgentCount,
   isLoading,
   error,
   notifications: wsNotifications,
@@ -3483,7 +3484,7 @@ const mobileWorkspaceSummary = computed(() => {
 
   const agentCount = workspaceAgents.value.length
   const reviewerCount = reviewerAgents.value.length + temporaryReviewers.value.length
-  const workingCount = workspaceAgents.value.filter(agent => agent.runtime_status === 'working').length
+  const workingCount = workingAgentCount.value
   const queuedCount = taskCountForStatus('queued')
   return `${agentCount} agents · ${reviewerCount} reviewers · ${workingCount} working · ${queuedCount} queued`
 })
@@ -3650,6 +3651,11 @@ function feedbackSummaryDescription(run: FeedbackSummaryRun): string {
 }
 
 const feedbackLessonMatchSummary = computed(() => {
+  // RS-04: this summary only renders inside the Lessons modal (v-if="showLessonsModal"
+  // on the enclosing div at L2417). Skip the O(N) task scan + per-task string allocs
+  // entirely when the modal is closed — this computed used to fire on every 2.5s board
+  // poll even though its output was invisible.
+  if (!showLessonsModal.value) return ''
   const index = feedbackLessonTokenIndex.value
   // Invalidate the whole memo when the pre-tokenized lesson set changes, so a
   // lessons edit re-evaluates every task against the new lessons.

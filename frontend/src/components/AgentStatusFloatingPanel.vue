@@ -407,16 +407,15 @@ function stopResize() {
   window.removeEventListener('pointermove', handleResize)
   window.removeEventListener('pointerup', stopResize)
   window.removeEventListener('pointercancel', stopResize)
+  // RS-02: persist size ONCE at drag-commit time instead of on every pointermove
+  // (previous watch(panelSize,…) wrote localStorage.setItem synchronously at 60-120 Hz).
+  if (panelSize.value) {
+    localStorage.setItem(storageKeySize, JSON.stringify(panelSize.value))
+  }
 }
 
 watch(expanded, value => {
   localStorage.setItem(storageKeyExpanded, String(value))
-})
-
-watch(panelSize, value => {
-  if (value) {
-    localStorage.setItem(storageKeySize, JSON.stringify(value))
-  }
 })
 
 function setStatusPolling(active: boolean) {
