@@ -72,6 +72,32 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id) {
+          // RS-01 (round-4 perf audit): route the Vue ecosystem runtime, the
+          // plugin-vue export-helper, and the useLaunchEnvPresets composable
+          // into a dedicated `vendor` chunk. These modules are statically
+          // imported by BOTH entry-side SFCs (TabBar / AgentWorkspaceView) and
+          // the agent-config SFCs. With no vendor chunk, Rollup co-located them
+          // INTO agent-config and forced the entry to statically re-import them
+          // via a cross-chunk facade (`import{…}from"./agent-config-*.js"`),
+          // pinning agent-config (and its CSS <link>) to the initial static
+          // payload edge even though the two modals are only reached via dynamic
+          // import(). Parking the shared modules in `vendor` (legitimately on
+          // the critical path) severs that facade: agent-config then carries
+          // ONLY modal-gated SFC code and stays purely dynamic. A naive
+          // all-node_modules→vendor rule was rejected — it pulls modal-only deps
+          // (e.g. `marked`) onto the critical path — so the set is scoped to the
+          // Vue ecosystem plus the two shared app modules.
+          if (
+            id.includes('/node_modules/@vue/') ||
+            id.includes('/node_modules/vue/') ||
+            id.includes('/node_modules/vue-router/') ||
+            id.includes('/node_modules/pinia/') ||
+            id.includes('/node_modules/@vueuse/') ||
+            id.includes('plugin-vue:export-helper') ||
+            id.includes('/composables/useLaunchEnvPresets')
+          ) {
+            return 'vendor'
+          }
           // PR-05/PR-14: EnvPresetManager + AgentConfigFields are imported by
           // BOTH TabBar and AgentWorkspaceView via defineAsyncComponent (PR-11
           // converted AWV, PR-14 converted TabBar). Without a manualChunks hint

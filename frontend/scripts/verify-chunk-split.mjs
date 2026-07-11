@@ -11,7 +11,7 @@
  * chunk becomes an eagerly-fetched static dependency of the entry rather
  * than being loaded via defineAsyncComponent when the user opens a modal.
  *
- * Detection strategy (four always-on layers + one bonus manifest layer)
+ * Detection strategy (five always-on layers + one bonus manifest layer)
  * ---------------------------------------------
  * Layer 1 (chunk identity, always runs):
  *   Parse dist/index.html for the <script type=module> entry. Assert exactly
@@ -64,6 +64,23 @@
  *   wrapped-SFC var is NOT directly present in the export list (it may only
  *   be referenced transitively via the Module-namespace wrapper).
  *
+ * Layer 6 (no static facade edge, always runs — catches the RS-01 shared-runtime
+ *   facade blind spot):
+ *   Layers 3/4 only guard the two SFC DEFAULTS. They stay green when the entry
+ *   statically re-imports shared runtime/helper symbols FROM agent-config via a
+ *   cross-chunk facade (`import{…51 symbols…}from"./agent-config-*.js"`). That
+ *   facade appears when Vue runtime + the plugin-vue export-helper + a shared
+ *   composable (useLaunchEnvPresets) are statically imported by BOTH the entry
+ *   SFCs and the agent-config SFCs and no dedicated vendor chunk exists, so
+ *   Rollup parks them in agent-config and pins the chunk (and its CSS <link>)
+ *   to the initial static payload. We assert the entry chunk contains NO static
+ *   `…from"./agent-config-*.js"` re-export/import and NO bare side-effect
+ *   `import"./agent-config-*.js"`; the healthy dynamic trigger
+ *   `import("./agent-config-*.js").then(` has no `from` clause and is not
+ *   matched. The RS-01 fix routes those shared modules into a `vendor` chunk,
+ *   which removes the facade — so post-fix the healthy split legitimately has
+ *   no static agent-config edge and this layer stays green.
+ *
  * Layer 5 (manifest cross-check, bonus when --manifest was used):
  *   When dist/.vite/manifest.json exists (vite build --manifest), we add:
  *     (a) the agent-config chunk is flagged `isDynamicEntry: true`,
@@ -75,13 +92,18 @@
  *
  * Why not simpler checks
  * ----------------------
- *   * "No `import ... from './agent-config-*.js'` at top of index.js" is a
- *     non-starter: Rollup emits cross-chunk re-export facades for shared
- *     Vue/runtime helpers that look like static imports at the top level
- *     but carry no component code (the helpers live in agent-config
- *     because manualChunks forced Vue+EPM+ACF together). These facades are
- *     present and correct in the healthy split; flagging them false-positives.
- *   * "Bare 'AgentConfigFields' string not in index.js" also false-positives
+ *   * "No `import ... from './agent-config-*.js'` at top of index.js" USED to be
+ *     a non-starter: pre-RS-01, Rollup emitted a cross-chunk re-export facade
+ *     for shared Vue/runtime helpers that looked like a static import at the top
+ *     level but carried no component code (the helpers lived in agent-config
+ *     because manualChunks forced Vue+EPM+ACF together). RS-01 removed that
+ *     facade by routing the shared runtime/helper/composable modules into a
+ *     dedicated `vendor` chunk; the entry now re-imports those symbols from
+ *     `vendor` (legitimately critical-path) and agent-config has NO static edge.
+ *     Layer 6 therefore now DOES flag any static `…from"./agent-config-*.js"`
+ *     facade as the RS-01 regression — while still ignoring the dynamic
+ *     `import("./agent-config-*.js").then(` trigger, which has no `from` clause.
+ *   * "Bare 'AgentConfigFields' string not in index.js" still false-positives
  *     on the legitimate dynamic import() glue and CSS asset paths.
  *   * "agent-config-*.js file exists" alone is insufficient — the file
  *     exists even when the lazy trigger is removed (Vue re-export facade
@@ -234,6 +256,27 @@ function checkManifest(distDir, acHash) {
         `  with static imports. The chunk would be fetched as a static dependency even though the components\n` +
         `  only render behind modal v-if gates. Re-route the imports through defineAsyncComponent to restore\n` +
         `  on-demand loading. (Entry.dynamicImports was: ${JSON.stringify(dyn)})`,
+    )
+    return 'failed'
+  }
+
+  // RS-01 (manifest-level equivalent of Layer 6 / nofacade): the entry must NOT
+  // list agent-config in its STATIC `imports` array. Rollup records a chunk in
+  // `imports` when the entry statically re-imports symbols from it (the shared
+  // Vue-runtime/helper facade). agent-config belongs in `dynamicImports` ONLY;
+  // any presence in `imports` means the chunk is on the initial static payload
+  // edge. This catches the RS-01 edge even in a source form where the raw JS
+  // facade regex might miss it (e.g. a future Rollup output shape change).
+  const staticImports = Array.isArray(entry.imports) ? entry.imports : []
+  if (staticImports.includes(acKey)) {
+    fail(
+      `Manifest: entry (index.html) lists ${acKey} in STATIC imports (RS-01 static-payload edge).\n` +
+        `  imports = ${JSON.stringify(staticImports)}\n` +
+        `  agent-config must appear in entry.dynamicImports ONLY — a static \`imports\` entry means the entry\n` +
+        `  chunk statically re-imports shared runtime/helper symbols from agent-config via a cross-chunk facade,\n` +
+        `  pinning the chunk (and its CSS) to the initial critical path. Route the shared Vue runtime +\n` +
+        `  plugin-vue export-helper + any composable shared between the entry and agent-config SFCs into a\n` +
+        `  dedicated \`vendor\` chunk via manualChunks so agent-config stays purely dynamic.`,
     )
     return 'failed'
   }
@@ -509,6 +552,77 @@ function checkNoEagerSfcImport(lazyName, lazySrc) {
 }
 
 // ---------------------------------------------------------------------------
+// Layer 6 — no static facade edge to agent-config (always runs)
+// ---------------------------------------------------------------------------
+//
+// RS-01 (round-4 perf audit). Layers 3/4 prove the two SFC *defaults* are not
+// pulled into the entry via a dynamic-import revert (Layer 3) or a direct
+// static SFC import (Layer 4). Neither catches the *shared-runtime facade*
+// edge: when Vue runtime + the plugin-vue export-helper + shared app modules
+// (e.g. the useLaunchEnvPresets composable) are statically imported by BOTH
+// entry-side SFCs AND the agent-config SFCs, and no dedicated vendor chunk
+// exists, Rollup co-locates those shared modules INTO agent-config and makes
+// the entry statically re-import them with a cross-chunk facade:
+//     import{r as C,m as Xt,…51 symbols…}from"./agent-config-<hash>.js"
+// That single static edge drags agent-config (and its CSS <link>) onto the
+// initial payload even though EnvPresetManager/AgentConfigFields themselves
+// are only reached via dynamic import().then(). Layers 3+4 stay green (the two
+// dynamic sites are intact and no SFC default is directly exported), so the
+// edge sailed past the guard — the RS-01 blind spot.
+//
+// Detection: a STATIC `…from"./agent-config-<hash>.js"` import/re-export, or a
+// bare side-effect `import"./agent-config-<hash>.js"`, in the entry chunk. The
+// healthy dynamic trigger is `import("./agent-config-<hash>.js").then(` — a
+// *call expression* with NO `from` clause and a `(` immediately after `import`,
+// so it is never matched here. Any `from"./agent-config-…"` is necessarily a
+// static binding and therefore the RS-01 edge.
+//
+// NOTE (policy reversal): earlier revisions of this guard deliberately did NOT
+// flag this facade, treating it as "present and correct in the healthy split".
+// RS-01's fix routes the shared runtime/composable modules into a dedicated
+// `vendor` chunk, which removes the agent-config facade entirely (the entry
+// then re-imports those symbols from `vendor`, which is legitimately on the
+// critical path). So post-RS-01 the healthy split has NO static agent-config
+// edge, and this assertion is consistent with it — a static agent-config
+// facade now signals a regression, not the expected shape.
+function checkNoStaticFacade(entryRel, entrySrc, lazyName) {
+  const hashMatch = lazyName.match(/^agent-config-(.+)\.js$/)
+  if (!hashMatch) {
+    fail(`Could not extract hash from lazy chunk filename ${lazyName} for facade check.`)
+    return 'failed'
+  }
+  const esc = escapeRegExp(hashMatch[1])
+  // Static re-export / import facade: `…from"./agent-config-<hash>.js"`.
+  // A `from` clause never appears in the dynamic `import("./…").then(` trigger
+  // nor in __vite__mapDeps string arrays, so this uniquely identifies a static
+  // binding to the chunk.
+  const facadeRe = new RegExp(`from\\s*["']\\./agent-config-${esc}\\.js["']`, 'g')
+  // Bare side-effect import: `import"./agent-config-<hash>.js"` (no `from`).
+  // The immediately-following quote (not `(`) distinguishes it from `import(`.
+  const bareRe = new RegExp(`import\\s*["']\\./agent-config-${esc}\\.js["']`, 'g')
+  const facadeMatches = entrySrc.match(facadeRe) || []
+  const bareMatches = entrySrc.match(bareRe) || []
+  const total = facadeMatches.length + bareMatches.length
+  if (total > 0) {
+    fail(
+      `Entry chunk (${entryRel}) contains ${total} STATIC import/re-export facade edge(s) to ` +
+        `agent-config (${facadeMatches.length} \`…from"./agent-config-*.js"\`, ${bareMatches.length} bare \`import"./agent-config-*.js"\`).\n` +
+        `  This is the RS-01 static-payload edge: the entry statically re-imports shared runtime/helper\n` +
+        `  symbols from agent-config via a cross-chunk facade, forcing the chunk (and its CSS <link>) onto the\n` +
+        `  initial critical path even though EnvPresetManager/AgentConfigFields are only reached via dynamic\n` +
+        `  import().then(). The healthy dynamic trigger — import("./agent-config-*.js").then( — has no \`from\`\n` +
+        `  clause and is NOT counted here. Route the shared Vue runtime + plugin-vue export-helper + any\n` +
+        `  composable statically shared between the entry and the agent-config SFCs (e.g. useLaunchEnvPresets)\n` +
+        `  into a dedicated \`vendor\` chunk via vite manualChunks, so agent-config carries ONLY modal-gated SFC\n` +
+        `  code and the entry re-imports those shared symbols from vendor (which is legitimately critical-path).`,
+    )
+    return 'failed'
+  }
+  ok(`nofacade : entry chunk has no static import/re-export facade edge to agent-config (RS-01 clean)`)
+  return 'passed'
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 function main() {
@@ -537,6 +651,7 @@ function main() {
 
   const trigger = checkDynamicImportTrigger(chunks.entryRel, chunks.entrySrc, chunks.lazyName)
   const nostatic = checkNoEagerSfcImport(chunks.lazyName, chunks.lazySrc)
+  const nofacade = checkNoStaticFacade(chunks.entryRel, chunks.entrySrc, chunks.lazyName)
   const manifest = checkManifest(distDir, chunks.lazyName)
 
   if (failures.length) {
@@ -552,6 +667,7 @@ function main() {
     `markers: passed`,
     `trigger: ${trigger}`,
     `nostatic: ${nostatic}`,
+    `nofacade: ${nofacade}`,
   ].filter(Boolean).join(', ')
   console.log(`\n\x1b[32m✓ agent-config chunk split intact (${layers}).\x1b[0m\n`)
 }
