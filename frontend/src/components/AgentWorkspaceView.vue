@@ -6448,7 +6448,6 @@ onUnmounted(() => {
   justify-content: space-between;
   gap: var(--ch-space-3);
   padding: var(--ch-space-2) calc(var(--ch-space-4) + 2px);
-  border-bottom: 1px solid var(--ch-color-border-muted);
   background: var(--ch-color-canvas);
 }
 
@@ -6637,7 +6636,7 @@ onUnmounted(() => {
   min-width: 0;
   display: flex;
   flex-wrap: nowrap;
-  gap: 8px;
+  gap: var(--ch-space-2);
   overflow-x: auto;
   overflow-y: hidden;
   padding-bottom: 2px;
@@ -6655,7 +6654,7 @@ onUnmounted(() => {
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface);
   color: inherit;
-  padding: 10px 11px;
+  padding: var(--ch-space-2) var(--ch-space-3);
   scroll-snap-align: start;
   transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast);
 }
@@ -7342,10 +7341,10 @@ onUnmounted(() => {
   border: 1px solid var(--ch-color-surface-control-active);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-soft);
-  padding: 9px;
+  padding: var(--ch-space-2);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--ch-space-2);
 }
 
 .agent-row strong {
@@ -7449,15 +7448,15 @@ onUnmounted(() => {
 .board-skeleton-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px;
+  gap: var(--ch-space-2);
+  padding: var(--ch-space-3);
 }
 
 .board-skeleton-card {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 12px;
+  padding: var(--ch-space-3);
   border: 1px solid var(--ch-color-border-muted);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface);
@@ -7654,7 +7653,7 @@ onUnmounted(() => {
   gap: var(--ch-space-2);
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 10px;
+  padding: var(--ch-space-3);
 }
 
 .task-card {
@@ -7664,7 +7663,7 @@ onUnmounted(() => {
   border: 1px solid var(--ch-color-border-muted);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface);
-  padding: 9px 10px 9px 12px;
+  padding: var(--ch-space-2) var(--ch-space-3);
   cursor: pointer;
   min-width: 0;
   -webkit-tap-highlight-color: transparent;
@@ -7770,7 +7769,7 @@ onUnmounted(() => {
 
 .task-card-description {
   max-width: 100%;
-  margin: 4px 0 6px;
+  margin: var(--ch-space-1) 0 var(--ch-space-1);
   color: var(--ch-color-text-muted);
   font-size: var(--ch-font-xs);
   line-height: 1.35;
@@ -7816,7 +7815,7 @@ onUnmounted(() => {
 .agent-badge {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--ch-space-1);
 }
 
 .task-card-badges {
@@ -7968,11 +7967,11 @@ onUnmounted(() => {
 }
 
 .latest-report {
-  margin: 0 0 6px;
+  margin: 0 0 var(--ch-space-1);
   border-left: 2px solid var(--ch-color-border-hover);
   border-radius: 0 var(--ch-radius-sm) var(--ch-radius-sm) 0;
   background: var(--ch-color-chip-bg-muted);
-  padding: 6px 8px;
+  padding: var(--ch-space-1) var(--ch-space-2);
   color: var(--ch-color-text-muted);
   font-size: var(--ch-font-xs);
   line-height: 1.35;
