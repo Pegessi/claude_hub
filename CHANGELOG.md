@@ -54,10 +54,12 @@
     `_assign_current_task`, `_dispatch_task_to_session`, `continue_task`, and
     `_request_task_review` to prevent stale counters across task lifecycles.
 - **Validation**: `black`/`isort`/`mypy` clean on all touched production
-  files; 145 unit tests pass (including 13 new tests in
+  files; 151 unit tests pass (including 13 new tests in
   `tests/test_hard_recovery.py` covering schema fields, constants,
   normalization defaults, escalation thresholds, agent-type gating, role
   detection, and `_latest_report_for_task`).
+- **Doc**: `docs/working-logs/2026-07-11-agent-error-hard-recovery.md`
+  covers module design, key issues/pitfalls, and test inventory.
 
 ### fix: Codex restart now keeps solo mode when resuming a prior session
 
