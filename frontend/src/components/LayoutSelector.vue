@@ -71,7 +71,7 @@
       </button>
     </div>
 
-    <!-- 用户信息和退出按钮 -->
+    <!-- User info and sign-out button -->
     <div
       v-if="authStore.isAuthenticated"
       class="user-section"
@@ -95,7 +95,7 @@
         loading-label="Logging out"
         @click="handleLogout"
       >
-        退出
+        Sign out
       </LoadingButton>
     </div>
   </div>

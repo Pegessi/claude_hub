@@ -55,8 +55,10 @@ function handleLogin() {
  *   • .login-header p margin-bottom:40px (no 40px token)
  *   • 1px borders (stroke constant, not spacing)
  *   • Layout constants: min-height:100vh, max-width:400px, width:90%
- *   • All font-sizes are rem-based (2rem/0.95rem/1.1rem/1.3rem/0.85rem);
- *     --ch-font-* is px-based so these stay rem (per task instruction)
+ *   • Font-sizes consume the --ch-font-* px scale: h1 → --ch-font-2xl
+ *     (24px hero step added for this landing title), subtitle →
+ *     --ch-font-lg (15px), button → --ch-font-xl (18px), icon →
+ *     --ch-font-xl (18px), footer → --ch-font-md (13px)
  *   • No font-weight declarations exist in this file; weight tokens
  *     are a no-op.
  *   • .feishu-login-btn hover is flat (background-color only; no lift
@@ -89,14 +91,14 @@ function handleLogin() {
 
 .login-header h1 {
   margin: 0 0 var(--ch-space-2) 0;
-  font-size: 2rem;
+  font-size: var(--ch-font-2xl);
   color: var(--ch-color-text-strong);
 }
 
 .login-header p {
   margin: 0 0 40px 0; /* no 40px token; keep literal */
   color: var(--ch-color-text-muted);
-  font-size: 0.95rem;
+  font-size: var(--ch-font-lg);
 }
 
 .feishu-login-btn {
@@ -110,7 +112,7 @@ function handleLogin() {
   color: var(--ch-color-text-inverse);
   border: none;
   border-radius: var(--ch-radius-lg);
-  font-size: 1.1rem;
+  font-size: var(--ch-font-xl);
   cursor: pointer;
   transition: background-color var(--ch-motion-standard);
 }
@@ -125,7 +127,7 @@ function handleLogin() {
 }
 
 .feishu-icon {
-  font-size: 1.3rem;
+  font-size: var(--ch-font-xl);
 }
 
 .login-footer {
@@ -137,6 +139,6 @@ function handleLogin() {
 .login-footer p {
   margin: 0;
   color: var(--ch-color-text-soft);
-  font-size: 0.85rem;
+  font-size: var(--ch-font-md);
 }
 </style>
