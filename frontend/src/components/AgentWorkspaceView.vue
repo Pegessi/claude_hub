@@ -770,918 +770,1219 @@
     </div>
 
     <Teleport to="body">
-      <div
-        v-if="selectedTask"
-        class="task-detail-overlay"
-        @click.self="closeTaskDetail"
-      >
-        <aside
-          :class="['task-detail-panel', { 'mobile-actions-expanded': isDetailActionsExpanded }]"
-          role="dialog"
-          aria-modal="true"
-          :aria-label="selectedTask.title"
+      <Transition name="modal-fade">
+        <div
+          v-if="selectedTask"
+          class="task-detail-overlay"
+          @click.self="closeTaskDetail"
         >
-          <div class="detail-header">
-            <div>
-              <span class="detail-eyebrow">{{ selectedTask.status }}</span>
-              <h2>{{ selectedTask.title }}</h2>
+          <aside
+            :class="['task-detail-panel', { 'mobile-actions-expanded': isDetailActionsExpanded }]"
+            role="dialog"
+            aria-modal="true"
+            :aria-label="selectedTask.title"
+          >
+            <div class="detail-header">
+              <div>
+                <span class="detail-eyebrow">{{ selectedTask.status }}</span>
+                <h2>{{ selectedTask.title }}</h2>
+              </div>
+              <button
+                type="button"
+                class="icon-button"
+                aria-label="Close task detail"
+                @click="closeTaskDetail"
+              >
+                ×
+              </button>
             </div>
-            <button
-              type="button"
-              class="icon-button"
-              aria-label="Close task detail"
-              @click="closeTaskDetail"
-            >
-              ×
-            </button>
-          </div>
 
-          <div class="detail-body">
-            <section class="detail-section">
-              <div class="detail-section-title">
-                Task description
-              </div>
-              <MarkdownContent
-                class="detail-copy"
-                link-markdown-paths
-                :text="selectedTask.prompt"
-                @markdown-path-click="path => openMarkdownPreviewModal(path)"
-              />
-              <div
-                v-if="selectedTask.attachments.length > 0"
-                class="attachment-list attachment-list--readonly"
-              >
-                <div
-                  v-for="attachment in selectedTask.attachments"
-                  :key="attachment.id"
-                  class="attachment-row"
-                >
-                  <button
-                    type="button"
-                    class="attachment-thumb attachment-thumb--clickable"
-                    :aria-label="`Preview ${attachment.filename}`"
-                    @click="openImageLightbox(`/api/workspaces/attachments/${attachment.id}`, attachment.filename)"
-                  >
-                    <img
-                      :src="`/api/workspaces/attachments/${attachment.id}`"
-                      :alt="attachment.filename"
-                    >
-                  </button>
-                  <div class="attachment-meta">
-                    <strong>{{ attachment.filename }}</strong>
-                    <span>{{ persistedAttachmentMeta(attachment) }}</span>
-                    <code>{{ attachment.path }}</code>
-                  </div>
+            <div class="detail-body">
+              <section class="detail-section">
+                <div class="detail-section-title">
+                  Task description
                 </div>
-              </div>
-            </section>
-
-            <details class="detail-section detail-section--collapsible">
-              <summary class="detail-section-title">
-                Goal Packet
-              </summary>
-              <div
-                v-if="!selectedTask.goal_packet"
-                class="empty-timeline"
-              >
-                No goal packet recorded yet.
-              </div>
-              <div
-                v-else
-                class="goal-packet"
-              >
-                <div class="goal-packet-objective">
-                  <span>Objective</span>
-                  <MarkdownContent
-                    compact
-                    :text="selectedTask.goal_packet.objective"
-                  />
-                </div>
-                <div class="goal-packet-meta">
-                  <span>{{ goalPacketStatusLabel(selectedTask.goal_packet.status) }}</span>
-                  <span>{{ selectedTask.goal_packet.source || 'agent_generated' }}</span>
-                </div>
-                <div
-                  v-for="section in goalPacketSections(selectedTask.goal_packet)"
-                  :key="section.key"
-                  class="goal-packet-section"
-                >
-                  <strong>{{ section.label }}</strong>
-                  <ol v-if="section.items.length > 0">
-                    <li
-                      v-for="item in section.items"
-                      :key="item"
-                    >
-                      {{ item }}
-                    </li>
-                  </ol>
-                  <span
-                    v-else
-                    class="goal-packet-empty"
-                  >
-                    none
-                  </span>
-                </div>
-              </div>
-            </details>
-
-            <details class="detail-section detail-section--collapsible">
-              <summary class="detail-section-title">
-                Assignment
-              </summary>
-              <div class="fact-grid">
-                <div>
-                  <span>Mode</span>
-                  <strong>{{ taskModeLabel(selectedTask.task_mode) }}</strong>
-                </div>
-                <div>
-                  <span>Execution</span>
-                  <strong>{{ executionComplexityLabel(selectedTask.execution_complexity) }}</strong>
-                </div>
-                <div>
-                  <span>Task stage</span>
-                  <strong>{{ selectedTask.status }}</strong>
-                </div>
-                <div>
-                  <span>Agent runtime</span>
-                  <strong>{{ selectedSession?.runtime_status || 'none' }}</strong>
-                </div>
-                <div>
-                  <span>Agent</span>
-                  <strong>{{ selectedSession?.title || 'auto' }}</strong>
-                </div>
-                <div>
-                  <span>Reviewer</span>
-                  <strong>{{ selectedTask.review_session_id ? reviewerTitle(selectedTask.review_session_id) : 'none' }}</strong>
-                </div>
-                <div>
-                  <span>Review state</span>
-                  <strong>{{ reviewStatusLabel(selectedTask) || 'not requested' }}</strong>
-                </div>
-                <div>
-                  <span>Goal Packet gate</span>
-                  <strong>{{ goalPacketGateLabel(selectedTask) }}</strong>
-                </div>
-                <div>
-                  <span>Review profiles</span>
-                  <strong>{{ taskReviewProfiles(selectedTask) }}</strong>
-                </div>
-                <div v-if="selectedTask.human_acceptance_requested_at">
-                  <span>Human acceptance</span>
-                  <strong>{{ selectedTask.human_accepted_at ? 'accepted' : 'awaiting' }}</strong>
-                </div>
-                <div v-if="selectedTask.review_skip_reason">
-                  <span>Review reason</span>
-                  <strong>{{ selectedTask.review_skip_reason }}</strong>
-                </div>
-                <div>
-                  <span>Queued behind</span>
-                  <strong>{{ selectedSession?.queued_count || 0 }}</strong>
-                </div>
-                <div>
-                  <span>Clear context</span>
-                  <strong>{{ selectedTask.clear_context ? 'yes' : 'no' }}</strong>
-                </div>
-                <div>
-                  <span>Snapshot</span>
-                  <strong>{{ board?.snapshot_path || 'none' }}</strong>
-                </div>
-              </div>
-            </details>
-
-            <details
-              v-if="selectedTask.task_mode === 'autonomous'"
-              class="detail-section detail-section--collapsible autonomous-run-panel"
-            >
-              <summary class="detail-section-title">
-                Autonomous Run
-              </summary>
-              <div
-                v-if="!selectedTask.autonomous_run"
-                class="empty-timeline"
-              >
-                No autonomous run recorded yet.
-              </div>
-              <template v-else>
-                <div class="fact-grid">
-                  <div>
-                    <span>Phase</span>
-                    <strong>{{ autonomousRunPhaseLabel(selectedTask.autonomous_run.phase) }}</strong>
-                  </div>
-                  <div>
-                    <span>Iteration</span>
-                    <strong>{{ selectedTask.autonomous_run.iteration }} / {{ selectedTask.autonomous_run.max_iterations }}</strong>
-                  </div>
-                  <div>
-                    <span>Score</span>
-                    <strong>{{ formatAutonomousScore(selectedTask.autonomous_run.current_score) }}</strong>
-                  </div>
-                  <div>
-                    <span>Threshold</span>
-                    <strong>{{ formatAutonomousScore(selectedTask.autonomous_run.pass_threshold) }}</strong>
-                  </div>
-                  <div>
-                    <span>Strictness</span>
-                    <strong>{{ selectedTask.autonomy_policy?.evaluation_strictness || 'balanced' }}</strong>
-                  </div>
-                  <div>
-                    <span>Artifacts</span>
-                    <strong>{{ selectedTask.autonomy_policy?.require_artifact_review ? 'required' : 'optional' }}</strong>
-                  </div>
-                  <div>
-                    <span>Total elapsed</span>
-                    <strong>{{ taskTotalElapsedLabel(selectedTask) }}</strong>
-                  </div>
-                  <div>
-                    <span>Working elapsed</span>
-                    <strong>{{ taskWorkingElapsedLabel(selectedTask) }}</strong>
-                  </div>
-                  <div>
-                    <span>Latest report age</span>
-                    <strong>{{ latestSelectedReportAgeLabel }}</strong>
-                  </div>
-                </div>
-                <div class="autonomous-next-action">
-                  <span>Next action</span>
-                  <strong>{{ selectedTask.autonomous_run.next_action }}</strong>
-                </div>
-                <div
-                  v-if="(selectedTask.autonomous_run.evaluation_reports || []).length > 0"
-                  class="autonomous-evaluations"
-                >
-                  <strong>Evaluations</strong>
-                  <ol>
-                    <li
-                      v-for="evaluation in selectedTask.autonomous_run.evaluation_reports"
-                      :key="evaluation.id"
-                    >
-                      <span>{{ evaluation.decision }}</span>
-                      <span>round {{ evaluation.iteration }}</span>
-                      <span>{{ formatAutonomousScore(evaluation.overall_score) }}</span>
-                      <span
-                        v-if="evaluation.profile_results?.length"
-                        class="profile-summary"
-                      >
-                        {{ profileResultSummary(evaluation.profile_results) }}
-                      </span>
-                    </li>
-                  </ol>
-                </div>
-              </template>
-            </details>
-
-            <details
-              class="detail-section detail-section--collapsible"
-              open
-            >
-              <summary class="detail-section-title">
-                Progress
-              </summary>
-              <div
-                v-if="selectedReports.length > 0 && hasBilingualReport"
-                class="detail-section-controls"
-              >
-                <div
-                  class="lang-toggle"
-                  role="group"
-                  aria-label="Report language"
-                >
-                  <button
-                    type="button"
-                    class="lang-toggle-btn"
-                    :class="{ active: reportLang === 'en' }"
-                    @click="setReportLang('en')"
-                  >
-                    EN
-                  </button>
-                  <button
-                    type="button"
-                    class="lang-toggle-btn"
-                    :class="{ active: reportLang === 'zh' }"
-                    @click="setReportLang('zh')"
-                  >
-                    中
-                  </button>
-                </div>
-              </div>
-              <div
-                v-if="selectedProgressTimeline.length > 0"
-                class="progress-overview"
-              >
-                <ol class="progress-overview-timeline">
-                  <li
-                    v-for="item in selectedProgressTimeline"
-                    :key="item.id"
-                    :class="['progress-overview-item', `progress-overview-item--${item.tone}`]"
-                  >
-                    <span class="progress-overview-dot" />
-                    <span class="progress-overview-main">{{ item.label }}</span>
-                    <span class="progress-overview-time">{{ item.elapsedLabel }}</span>
-                    <span
-                      v-if="item.deltaLabel"
-                      class="progress-overview-delta"
-                    >
-                      +{{ item.deltaLabel }}
-                    </span>
-                  </li>
-                </ol>
-              </div>
-              <div
-                v-if="selectedReports.length === 0"
-                class="empty-timeline"
-              >
-                No agent reports yet.
-              </div>
-              <ol
-                v-else
-                class="timeline"
-              >
-                <li
-                  v-for="(report, reportIndex) in selectedReports"
-                  :key="report.id"
-                >
-                  <details
-                    class="report-card"
-                    :open="isLatestSelectedReport(report)"
-                  >
-                    <summary>
-                      <span class="report-state">{{ report.state }}</span>
-                      <span
-                        v-if="reportIsAwaitingAcceptance(report)"
-                        class="report-summary-label report-awaiting-acceptance"
-                      >
-                        awaiting acceptance
-                      </span>
-                      <span
-                        v-if="reportSummaryLabel(report)"
-                        class="report-summary-label"
-                      >
-                        {{ reportSummaryLabel(report) }}
-                      </span>
-                      <span class="report-summary-message">
-                        {{ reportMessagePreview(report) }}
-                      </span>
-                      <span class="report-summary-meta">
-                        <span class="report-time">{{ formatTime(report.created_at) }}</span>
-                        <span
-                          class="report-delta"
-                          :title="reportElapsedTitle(report, reportIndex)"
-                        >
-                          {{ reportElapsedLabel(report, reportIndex) }}
-                        </span>
-                      </span>
-                    </summary>
-                    <MarkdownContent
-                      class="report-message"
-                      link-markdown-paths
-                      :text="reportMessageForLang(report)"
-                      @markdown-path-click="path => openMarkdownPreviewModal(path, report)"
-                    />
-                    <div
-                      v-if="report.changed_files.length > 0"
-                      class="report-files"
-                    >
-                      <button
-                        v-for="file in report.changed_files"
-                        :key="file"
-                        type="button"
-                        :class="['report-file-chip', { 'report-file-chip--clickable': isMarkdownArtifact(file) }]"
-                        :disabled="!isMarkdownArtifact(file)"
-                        @click="openMarkdownPreviewModal(file, report)"
-                      >
-                        {{ file }}
-                      </button>
-                    </div>
-                    <details
-                      v-if="report.validation"
-                      class="report-subsection report-note"
-                      :open="isReportSubsectionOpen(report, 'validation')"
-                      @toggle="event => toggleReportSubsection(report, 'validation', event)"
-                    >
-                      <summary>
-                        <strong>Validation</strong>
-                        <span
-                          v-if="validationPreview(report)"
-                          class="report-subsection-preview"
-                        >{{ validationPreview(report) }}</span>
-                      </summary>
-                      <MarkdownContent
-                        v-if="isReportSubsectionOpen(report, 'validation')"
-                        compact
-                        link-markdown-paths
-                        :text="report.validation"
-                        @markdown-path-click="path => openMarkdownPreviewModal(path, report)"
-                      />
-                    </details>
-                    <details
-                      v-if="acceptanceChecksFor(report).length > 0"
-                      class="report-subsection report-note"
-                      :open="isReportSubsectionOpen(report, 'acceptance')"
-                      @toggle="event => toggleReportSubsection(report, 'acceptance', event)"
-                    >
-                      <summary>
-                        <strong>Acceptance Check</strong>
-                        <span
-                          v-if="acceptanceSummary(report)"
-                          class="report-summary-label"
-                        >{{ acceptanceSummary(report) }}</span>
-                        <span class="report-subsection-count">({{ acceptanceChecksFor(report).length }} checks)</span>
-                      </summary>
-                      <ol
-                        v-if="isReportSubsectionOpen(report, 'acceptance')"
-                        class="acceptance-check-list"
-                      >
-                        <li
-                          v-for="check in acceptanceChecksFor(report)"
-                          :key="`${check.criterion}-${check.status}`"
-                        >
-                          <span>{{ check.status }}</span>
-                          {{ check.criterion }} - {{ check.evidence }}
-                        </li>
-                      </ol>
-                    </details>
-                    <details
-                      v-if="profileResultsFor(report).length > 0"
-                      class="report-subsection report-note"
-                      :open="isReportSubsectionOpen(report, 'profiles')"
-                      @toggle="event => toggleReportSubsection(report, 'profiles', event)"
-                    >
-                      <summary>
-                        <strong>Review Profiles</strong>
-                        <span
-                          v-if="profileResultSummary(profileResultsFor(report))"
-                          class="report-summary-label"
-                        >{{ profileResultSummary(profileResultsFor(report)) }}</span>
-                        <span class="report-subsection-count">({{ profileResultsFor(report).length }} profiles)</span>
-                      </summary>
-                      <ol
-                        v-if="isReportSubsectionOpen(report, 'profiles')"
-                        class="profile-result-list"
-                      >
-                        <li
-                          v-for="result in profileResultsFor(report)"
-                          :key="`${result.profile}-${result.status}`"
-                        >
-                          <span>{{ result.status }}</span>
-                          {{ reviewProfileLabel(result.profile) }} - {{ result.evidence || 'No evidence recorded.' }}
-                          <template v-if="result.blocking_findings?.length">
-                            Blocking: {{ result.blocking_findings.join('; ') }}
-                          </template>
-                        </li>
-                      </ol>
-                    </details>
-                    <details
-                      v-if="artifactCount(report) > 0"
-                      class="report-subsection report-note"
-                      :open="isReportSubsectionOpen(report, 'artifacts')"
-                      @toggle="event => toggleReportSubsection(report, 'artifacts', event)"
-                    >
-                      <summary>
-                        <strong>Artifacts</strong>
-                        <span class="report-subsection-count">({{ artifactCount(report) }})</span>
-                      </summary>
-                      <template v-if="isReportSubsectionOpen(report, 'artifacts')">
-                        <div class="report-artifacts">
-                          <div
-                            v-for="artifact in report.artifact_refs"
-                            :key="artifact"
-                            class="report-artifact"
-                          >
-                            <span>{{ artifact }}</span>
-                            <button
-                              v-if="isMarkdownArtifact(artifact)"
-                              type="button"
-                              class="artifact-preview-button"
-                              :disabled="isArtifactPreviewLoading(report, artifact)"
-                              @click="toggleArtifactPreview(report, artifact)"
-                            >
-                              {{ artifactPreviewButtonLabel(report, artifact) }}
-                            </button>
-                          </div>
-                        </div>
-                        <div
-                          v-for="artifact in markdownArtifactRefs(report)"
-                          :key="`${artifact}-preview`"
-                          class="artifact-preview"
-                        >
-                          <template v-if="expandedArtifactKey === artifactPreviewKey(report, artifact)">
-                            <div
-                              v-if="artifactPreviewErrors[artifactPreviewKey(report, artifact)]"
-                              class="artifact-preview-status artifact-preview-error"
-                            >
-                              {{ artifactPreviewErrors[artifactPreviewKey(report, artifact)] }}
-                            </div>
-                            <div
-                              v-else-if="!artifactPreviews[artifactPreviewKey(report, artifact)]"
-                              class="artifact-preview-status"
-                            >
-                              Loading Markdown preview...
-                            </div>
-                            <template v-else>
-                              <div class="artifact-preview-header">
-                                <span>{{ artifactPreviews[artifactPreviewKey(report, artifact)].filename }}</span>
-                                <span>{{ formatAttachmentSize(artifactPreviews[artifactPreviewKey(report, artifact)].size_bytes) }}</span>
-                              </div>
-                              <MarkdownContent
-                                class="artifact-preview-content"
-                                :text="artifactPreviews[artifactPreviewKey(report, artifact)].content"
-                              />
-                              <div
-                                v-if="artifactPreviews[artifactPreviewKey(report, artifact)].truncated"
-                                class="artifact-preview-status"
-                              >
-                                Preview truncated to the first 512 KB.
-                              </div>
-                            </template>
-                          </template>
-                        </div>
-                      </template>
-                    </details>
-                    <div
-                      v-if="report.confidence !== null && report.confidence !== undefined"
-                      class="report-note report-note--inline"
-                    >
-                      <strong>Confidence</strong>
-                      <span>{{ formatAutonomousScore(report.confidence) }}</span>
-                      <span v-if="report.requires_human_judgment">Human judgment required</span>
-                    </div>
-                    <details
-                      v-if="report.risks"
-                      class="report-subsection report-note"
-                      :open="isReportSubsectionOpen(report, 'risks')"
-                      @toggle="event => toggleReportSubsection(report, 'risks', event)"
-                    >
-                      <summary>
-                        <strong>Risks</strong>
-                        <span
-                          v-if="risksPreview(report)"
-                          class="report-subsection-preview"
-                        >{{ risksPreview(report) }}</span>
-                      </summary>
-                      <MarkdownContent
-                        v-if="isReportSubsectionOpen(report, 'risks')"
-                        compact
-                        link-markdown-paths
-                        :text="report.risks"
-                        @markdown-path-click="path => openMarkdownPreviewModal(path, report)"
-                      />
-                    </details>
-                  </details>
-                </li>
-              </ol>
-            </details>
-
-            <details class="detail-section detail-section--collapsible markdown-output-section">
-              <summary class="detail-section-title detail-section-title--with-count">
-                <span>Markdown Outputs</span>
-                <span>{{ selectedMarkdownDocuments.length }}</span>
-              </summary>
-              <div
-                v-if="selectedMarkdownDocuments.length === 0"
-                class="empty-timeline"
-              >
-                No Markdown outputs discovered yet. Agents can report artifact_refs, or Markdown changed_files will appear here automatically.
-              </div>
-              <div
-                v-else
-                class="markdown-output-list"
-              >
-                <article
-                  v-for="document in selectedMarkdownDocuments"
-                  :key="document.id"
-                  class="markdown-output-card"
-                >
-                  <div class="markdown-output-row">
-                    <div>
-                      <strong>{{ document.label }}</strong>
-                      <span>{{ markdownDocumentSourceLabel(document.source) }}</span>
-                      <code>{{ document.path }}</code>
-                    </div>
-                    <div class="markdown-output-actions">
-                      <span v-if="document.size_bytes">{{ formatAttachmentSize(document.size_bytes) }}</span>
-                      <button
-                        type="button"
-                        class="artifact-preview-button"
-                        :disabled="isMarkdownDocumentPreviewLoading(document)"
-                        @click="toggleMarkdownDocumentPreview(document)"
-                      >
-                        {{ markdownDocumentPreviewButtonLabel(document) }}
-                      </button>
-                    </div>
-                  </div>
-                  <div
-                    v-if="expandedArtifactKey === markdownDocumentPreviewKey(document)"
-                    class="artifact-preview markdown-output-preview"
-                  >
-                    <div
-                      v-if="artifactPreviewErrors[markdownDocumentPreviewKey(document)]"
-                      class="artifact-preview-status artifact-preview-error"
-                    >
-                      {{ artifactPreviewErrors[markdownDocumentPreviewKey(document)] }}
-                    </div>
-                    <div
-                      v-else-if="!artifactPreviews[markdownDocumentPreviewKey(document)]"
-                      class="artifact-preview-status"
-                    >
-                      Loading Markdown preview...
-                    </div>
-                    <template v-else>
-                      <div class="artifact-preview-header">
-                        <span>{{ artifactPreviews[markdownDocumentPreviewKey(document)].filename }}</span>
-                        <span>{{ formatAttachmentSize(artifactPreviews[markdownDocumentPreviewKey(document)].size_bytes) }}</span>
-                      </div>
-                      <MarkdownContent
-                        class="artifact-preview-content"
-                        :text="artifactPreviews[markdownDocumentPreviewKey(document)].content"
-                      />
-                      <div
-                        v-if="artifactPreviews[markdownDocumentPreviewKey(document)].truncated"
-                        class="artifact-preview-status"
-                      >
-                        Preview truncated to the first 512 KB.
-                      </div>
-                    </template>
-                  </div>
-                </article>
-              </div>
-            </details>
-          </div>
-
-          <div class="detail-footer">
-            <button
-              type="button"
-              class="detail-footer-toggle"
-              :aria-expanded="isDetailActionsExpanded"
-              @click="toggleDetailActions"
-            >
-              <span>{{ isDetailActionsExpanded ? 'Hide actions' : 'Actions' }}</span>
-              <span class="detail-footer-chevron">
-                {{ isDetailActionsExpanded ? 'v' : '^' }}
-              </span>
-            </button>
-            <div class="detail-action-drawer">
-              <div class="detail-actions">
-                <LoadingButton
-                  v-if="selectedTask.status === 'todo'"
-                  type="button"
-                  class="primary-button"
-                  :loading="isPending(taskActionKey('start', selectedTask.id))"
-                  loading-label="Starting task"
-                  @click="startTask(selectedTask)"
-                >
-                  <span class="btn-icon">▶</span> Start
-                </LoadingButton>
-                <button
-                  v-if="canEditTask(selectedTask)"
-                  type="button"
-                  class="tool-button"
-                  @click="openEditTaskModal(selectedTask)"
-                >
-                  <span class="btn-icon">✎</span> Edit
-                </button>
-                <LoadingButton
-                  v-if="canMarkDoneTask(selectedTask)"
-                  type="button"
-                  class="tool-button"
-                  :loading="isPending(taskActionKey('mark-done', selectedTask.id))"
-                  loading-label="Marking done"
-                  @click="markTask(selectedTask.id, 'done')"
-                >
-                  <span class="btn-icon">✓</span> Done
-                </LoadingButton>
-                <LoadingButton
-                  v-if="canRequestReviewTask(selectedTask)"
-                  type="button"
-                  class="tool-button"
-                  :loading="isPending(taskActionKey('request-review', selectedTask.id))"
-                  loading-label="Requesting review"
-                  @click="requestReview(selectedTask)"
-                >
-                  <span class="btn-icon">◎</span> Request review
-                </LoadingButton>
-                <LoadingButton
-                  v-if="canAbortTask(selectedTask)"
-                  type="button"
-                  class="abort-button"
-                  :loading="isPending(taskActionKey('abort', selectedTask.id))"
-                  loading-label="Aborting task"
-                  @click="abortTask(selectedTask)"
-                >
-                  <span class="btn-icon">⬤</span> Abort
-                </LoadingButton>
-                <LoadingButton
-                  v-if="selectedSession"
-                  type="button"
-                  class="tool-button"
-                  :loading="isPending(sessionActionKey('open', selectedSession.id))"
-                  loading-label="Opening terminal"
-                  @click="openSession(selectedSession)"
-                >
-                  <span class="btn-icon">⧉</span> Open terminal
-                </LoadingButton>
-                <span
-                  class="detail-actions-sep"
-                  aria-hidden="true"
-                />
-                <LoadingButton
-                  type="button"
-                  class="danger-button"
-                  :loading="isPending(taskActionKey('delete', selectedTask.id))"
-                  loading-label="Deleting task"
-                  @click="deleteTask(selectedTask)"
-                >
-                  <span class="btn-icon">×</span> Delete
-                </LoadingButton>
-              </div>
-              <form
-                v-if="selectedSession"
-                class="send-form"
-                @submit.prevent="sendDetailMessage"
-                @paste="handleAttachmentPaste($event, detailAttachments)"
-              >
-                <textarea
-                  v-model="detailMessage"
-                  placeholder="Follow-up instructions..."
+                <MarkdownContent
+                  class="detail-copy"
+                  link-markdown-paths
+                  :text="selectedTask.prompt"
+                  @markdown-path-click="path => openMarkdownPreviewModal(path)"
                 />
                 <div
-                  v-if="detailAttachments.length > 0"
-                  class="attachment-list send-attachments"
+                  v-if="selectedTask.attachments.length > 0"
+                  class="attachment-list attachment-list--readonly"
                 >
                   <div
-                    v-for="attachment in detailAttachments"
+                    v-for="attachment in selectedTask.attachments"
                     :key="attachment.id"
                     class="attachment-row"
                   >
-                    <div class="attachment-thumb">
-                      <img
-                        :src="attachment.preview_url"
-                        :alt="attachment.filename"
-                      >
-                    </div>
-                    <div class="attachment-meta">
-                      <strong>{{ attachment.filename }}</strong>
-                      <span>{{ attachment.mime_type }} · {{ formatAttachmentSize(attachment.size_bytes) }}</span>
-                    </div>
                     <button
                       type="button"
-                      class="icon-button"
-                      aria-label="Remove attachment"
-                      @click="removeDraftAttachment(detailAttachments, attachment)"
+                      class="attachment-thumb attachment-thumb--clickable"
+                      :aria-label="`Preview ${attachment.filename}`"
+                      @click="openImageLightbox(`/api/workspaces/attachments/${attachment.id}`, attachment.filename)"
                     >
-                      ×
+                      <img
+                        :src="`/api/workspaces/attachments/${attachment.id}`"
+                        :alt="attachment.filename"
+                      >
+                    </button>
+                    <div class="attachment-meta">
+                      <strong>{{ attachment.filename }}</strong>
+                      <span>{{ persistedAttachmentMeta(attachment) }}</span>
+                      <code>{{ attachment.path }}</code>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <details class="detail-section detail-section--collapsible">
+                <summary class="detail-section-title">
+                  Goal Packet
+                </summary>
+                <div
+                  v-if="!selectedTask.goal_packet"
+                  class="empty-timeline"
+                >
+                  No goal packet recorded yet.
+                </div>
+                <div
+                  v-else
+                  class="goal-packet"
+                >
+                  <div class="goal-packet-objective">
+                    <span>Objective</span>
+                    <MarkdownContent
+                      compact
+                      :text="selectedTask.goal_packet.objective"
+                    />
+                  </div>
+                  <div class="goal-packet-meta">
+                    <span>{{ goalPacketStatusLabel(selectedTask.goal_packet.status) }}</span>
+                    <span>{{ selectedTask.goal_packet.source || 'agent_generated' }}</span>
+                  </div>
+                  <div
+                    v-for="section in goalPacketSections(selectedTask.goal_packet)"
+                    :key="section.key"
+                    class="goal-packet-section"
+                  >
+                    <strong>{{ section.label }}</strong>
+                    <ol v-if="section.items.length > 0">
+                      <li
+                        v-for="item in section.items"
+                        :key="item"
+                      >
+                        {{ item }}
+                      </li>
+                    </ol>
+                    <span
+                      v-else
+                      class="goal-packet-empty"
+                    >
+                      none
+                    </span>
+                  </div>
+                </div>
+              </details>
+
+              <details class="detail-section detail-section--collapsible">
+                <summary class="detail-section-title">
+                  Assignment
+                </summary>
+                <div class="fact-grid">
+                  <div>
+                    <span>Mode</span>
+                    <strong>{{ taskModeLabel(selectedTask.task_mode) }}</strong>
+                  </div>
+                  <div>
+                    <span>Execution</span>
+                    <strong>{{ executionComplexityLabel(selectedTask.execution_complexity) }}</strong>
+                  </div>
+                  <div>
+                    <span>Task stage</span>
+                    <strong>{{ selectedTask.status }}</strong>
+                  </div>
+                  <div>
+                    <span>Agent runtime</span>
+                    <strong>{{ selectedSession?.runtime_status || 'none' }}</strong>
+                  </div>
+                  <div>
+                    <span>Agent</span>
+                    <strong>{{ selectedSession?.title || 'auto' }}</strong>
+                  </div>
+                  <div>
+                    <span>Reviewer</span>
+                    <strong>{{ selectedTask.review_session_id ? reviewerTitle(selectedTask.review_session_id) : 'none' }}</strong>
+                  </div>
+                  <div>
+                    <span>Review state</span>
+                    <strong>{{ reviewStatusLabel(selectedTask) || 'not requested' }}</strong>
+                  </div>
+                  <div>
+                    <span>Goal Packet gate</span>
+                    <strong>{{ goalPacketGateLabel(selectedTask) }}</strong>
+                  </div>
+                  <div>
+                    <span>Review profiles</span>
+                    <strong>{{ taskReviewProfiles(selectedTask) }}</strong>
+                  </div>
+                  <div v-if="selectedTask.human_acceptance_requested_at">
+                    <span>Human acceptance</span>
+                    <strong>{{ selectedTask.human_accepted_at ? 'accepted' : 'awaiting' }}</strong>
+                  </div>
+                  <div v-if="selectedTask.review_skip_reason">
+                    <span>Review reason</span>
+                    <strong>{{ selectedTask.review_skip_reason }}</strong>
+                  </div>
+                  <div>
+                    <span>Queued behind</span>
+                    <strong>{{ selectedSession?.queued_count || 0 }}</strong>
+                  </div>
+                  <div>
+                    <span>Clear context</span>
+                    <strong>{{ selectedTask.clear_context ? 'yes' : 'no' }}</strong>
+                  </div>
+                  <div>
+                    <span>Snapshot</span>
+                    <strong>{{ board?.snapshot_path || 'none' }}</strong>
+                  </div>
+                </div>
+              </details>
+
+              <details
+                v-if="selectedTask.task_mode === 'autonomous'"
+                class="detail-section detail-section--collapsible autonomous-run-panel"
+              >
+                <summary class="detail-section-title">
+                  Autonomous Run
+                </summary>
+                <div
+                  v-if="!selectedTask.autonomous_run"
+                  class="empty-timeline"
+                >
+                  No autonomous run recorded yet.
+                </div>
+                <template v-else>
+                  <div class="fact-grid">
+                    <div>
+                      <span>Phase</span>
+                      <strong>{{ autonomousRunPhaseLabel(selectedTask.autonomous_run.phase) }}</strong>
+                    </div>
+                    <div>
+                      <span>Iteration</span>
+                      <strong>{{ selectedTask.autonomous_run.iteration }} / {{ selectedTask.autonomous_run.max_iterations }}</strong>
+                    </div>
+                    <div>
+                      <span>Score</span>
+                      <strong>{{ formatAutonomousScore(selectedTask.autonomous_run.current_score) }}</strong>
+                    </div>
+                    <div>
+                      <span>Threshold</span>
+                      <strong>{{ formatAutonomousScore(selectedTask.autonomous_run.pass_threshold) }}</strong>
+                    </div>
+                    <div>
+                      <span>Strictness</span>
+                      <strong>{{ selectedTask.autonomy_policy?.evaluation_strictness || 'balanced' }}</strong>
+                    </div>
+                    <div>
+                      <span>Artifacts</span>
+                      <strong>{{ selectedTask.autonomy_policy?.require_artifact_review ? 'required' : 'optional' }}</strong>
+                    </div>
+                    <div>
+                      <span>Total elapsed</span>
+                      <strong>{{ taskTotalElapsedLabel(selectedTask) }}</strong>
+                    </div>
+                    <div>
+                      <span>Working elapsed</span>
+                      <strong>{{ taskWorkingElapsedLabel(selectedTask) }}</strong>
+                    </div>
+                    <div>
+                      <span>Latest report age</span>
+                      <strong>{{ latestSelectedReportAgeLabel }}</strong>
+                    </div>
+                  </div>
+                  <div class="autonomous-next-action">
+                    <span>Next action</span>
+                    <strong>{{ selectedTask.autonomous_run.next_action }}</strong>
+                  </div>
+                  <div
+                    v-if="(selectedTask.autonomous_run.evaluation_reports || []).length > 0"
+                    class="autonomous-evaluations"
+                  >
+                    <strong>Evaluations</strong>
+                    <ol>
+                      <li
+                        v-for="evaluation in selectedTask.autonomous_run.evaluation_reports"
+                        :key="evaluation.id"
+                      >
+                        <span>{{ evaluation.decision }}</span>
+                        <span>round {{ evaluation.iteration }}</span>
+                        <span>{{ formatAutonomousScore(evaluation.overall_score) }}</span>
+                        <span
+                          v-if="evaluation.profile_results?.length"
+                          class="profile-summary"
+                        >
+                          {{ profileResultSummary(evaluation.profile_results) }}
+                        </span>
+                      </li>
+                    </ol>
+                  </div>
+                </template>
+              </details>
+
+              <details
+                class="detail-section detail-section--collapsible"
+                open
+              >
+                <summary class="detail-section-title">
+                  Progress
+                </summary>
+                <div
+                  v-if="selectedReports.length > 0 && hasBilingualReport"
+                  class="detail-section-controls"
+                >
+                  <div
+                    class="lang-toggle"
+                    role="group"
+                    aria-label="Report language"
+                  >
+                    <button
+                      type="button"
+                      class="lang-toggle-btn"
+                      :class="{ active: reportLang === 'en' }"
+                      @click="setReportLang('en')"
+                    >
+                      EN
+                    </button>
+                    <button
+                      type="button"
+                      class="lang-toggle-btn"
+                      :class="{ active: reportLang === 'zh' }"
+                      @click="setReportLang('zh')"
+                    >
+                      中
                     </button>
                   </div>
                 </div>
-                <LoadingButton
-                  type="submit"
-                  class="primary-button"
-                  :disabled="!detailMessage.trim() && detailAttachments.length === 0"
-                  :loading="isPending(selectedTaskSendKey)"
-                  loading-label="Sending message"
+                <div
+                  v-if="selectedProgressTimeline.length > 0"
+                  class="progress-overview"
                 >
-                  <span class="btn-icon">▶</span> Send
-                </LoadingButton>
-              </form>
+                  <ol class="progress-overview-timeline">
+                    <li
+                      v-for="item in selectedProgressTimeline"
+                      :key="item.id"
+                      :class="['progress-overview-item', `progress-overview-item--${item.tone}`]"
+                    >
+                      <span class="progress-overview-dot" />
+                      <span class="progress-overview-main">{{ item.label }}</span>
+                      <span class="progress-overview-time">{{ item.elapsedLabel }}</span>
+                      <span
+                        v-if="item.deltaLabel"
+                        class="progress-overview-delta"
+                      >
+                        +{{ item.deltaLabel }}
+                      </span>
+                    </li>
+                  </ol>
+                </div>
+                <div
+                  v-if="selectedReports.length === 0"
+                  class="empty-timeline"
+                >
+                  No agent reports yet.
+                </div>
+                <ol
+                  v-else
+                  class="timeline"
+                >
+                  <li
+                    v-for="(report, reportIndex) in selectedReports"
+                    :key="report.id"
+                  >
+                    <details
+                      class="report-card"
+                      :open="isLatestSelectedReport(report)"
+                    >
+                      <summary>
+                        <span class="report-state">{{ report.state }}</span>
+                        <span
+                          v-if="reportIsAwaitingAcceptance(report)"
+                          class="report-summary-label report-awaiting-acceptance"
+                        >
+                          awaiting acceptance
+                        </span>
+                        <span
+                          v-if="reportSummaryLabel(report)"
+                          class="report-summary-label"
+                        >
+                          {{ reportSummaryLabel(report) }}
+                        </span>
+                        <span class="report-summary-message">
+                          {{ reportMessagePreview(report) }}
+                        </span>
+                        <span class="report-summary-meta">
+                          <span class="report-time">{{ formatTime(report.created_at) }}</span>
+                          <span
+                            class="report-delta"
+                            :title="reportElapsedTitle(report, reportIndex)"
+                          >
+                            {{ reportElapsedLabel(report, reportIndex) }}
+                          </span>
+                        </span>
+                      </summary>
+                      <MarkdownContent
+                        class="report-message"
+                        link-markdown-paths
+                        :text="reportMessageForLang(report)"
+                        @markdown-path-click="path => openMarkdownPreviewModal(path, report)"
+                      />
+                      <div
+                        v-if="report.changed_files.length > 0"
+                        class="report-files"
+                      >
+                        <button
+                          v-for="file in report.changed_files"
+                          :key="file"
+                          type="button"
+                          :class="['report-file-chip', { 'report-file-chip--clickable': isMarkdownArtifact(file) }]"
+                          :disabled="!isMarkdownArtifact(file)"
+                          @click="openMarkdownPreviewModal(file, report)"
+                        >
+                          {{ file }}
+                        </button>
+                      </div>
+                      <details
+                        v-if="report.validation"
+                        class="report-subsection report-note"
+                        :open="isReportSubsectionOpen(report, 'validation')"
+                        @toggle="event => toggleReportSubsection(report, 'validation', event)"
+                      >
+                        <summary>
+                          <strong>Validation</strong>
+                          <span
+                            v-if="validationPreview(report)"
+                            class="report-subsection-preview"
+                          >{{ validationPreview(report) }}</span>
+                        </summary>
+                        <MarkdownContent
+                          v-if="isReportSubsectionOpen(report, 'validation')"
+                          compact
+                          link-markdown-paths
+                          :text="report.validation"
+                          @markdown-path-click="path => openMarkdownPreviewModal(path, report)"
+                        />
+                      </details>
+                      <details
+                        v-if="acceptanceChecksFor(report).length > 0"
+                        class="report-subsection report-note"
+                        :open="isReportSubsectionOpen(report, 'acceptance')"
+                        @toggle="event => toggleReportSubsection(report, 'acceptance', event)"
+                      >
+                        <summary>
+                          <strong>Acceptance Check</strong>
+                          <span
+                            v-if="acceptanceSummary(report)"
+                            class="report-summary-label"
+                          >{{ acceptanceSummary(report) }}</span>
+                          <span class="report-subsection-count">({{ acceptanceChecksFor(report).length }} checks)</span>
+                        </summary>
+                        <ol
+                          v-if="isReportSubsectionOpen(report, 'acceptance')"
+                          class="acceptance-check-list"
+                        >
+                          <li
+                            v-for="check in acceptanceChecksFor(report)"
+                            :key="`${check.criterion}-${check.status}`"
+                          >
+                            <span>{{ check.status }}</span>
+                            {{ check.criterion }} - {{ check.evidence }}
+                          </li>
+                        </ol>
+                      </details>
+                      <details
+                        v-if="profileResultsFor(report).length > 0"
+                        class="report-subsection report-note"
+                        :open="isReportSubsectionOpen(report, 'profiles')"
+                        @toggle="event => toggleReportSubsection(report, 'profiles', event)"
+                      >
+                        <summary>
+                          <strong>Review Profiles</strong>
+                          <span
+                            v-if="profileResultSummary(profileResultsFor(report))"
+                            class="report-summary-label"
+                          >{{ profileResultSummary(profileResultsFor(report)) }}</span>
+                          <span class="report-subsection-count">({{ profileResultsFor(report).length }} profiles)</span>
+                        </summary>
+                        <ol
+                          v-if="isReportSubsectionOpen(report, 'profiles')"
+                          class="profile-result-list"
+                        >
+                          <li
+                            v-for="result in profileResultsFor(report)"
+                            :key="`${result.profile}-${result.status}`"
+                          >
+                            <span>{{ result.status }}</span>
+                            {{ reviewProfileLabel(result.profile) }} - {{ result.evidence || 'No evidence recorded.' }}
+                            <template v-if="result.blocking_findings?.length">
+                              Blocking: {{ result.blocking_findings.join('; ') }}
+                            </template>
+                          </li>
+                        </ol>
+                      </details>
+                      <details
+                        v-if="artifactCount(report) > 0"
+                        class="report-subsection report-note"
+                        :open="isReportSubsectionOpen(report, 'artifacts')"
+                        @toggle="event => toggleReportSubsection(report, 'artifacts', event)"
+                      >
+                        <summary>
+                          <strong>Artifacts</strong>
+                          <span class="report-subsection-count">({{ artifactCount(report) }})</span>
+                        </summary>
+                        <template v-if="isReportSubsectionOpen(report, 'artifacts')">
+                          <div class="report-artifacts">
+                            <div
+                              v-for="artifact in report.artifact_refs"
+                              :key="artifact"
+                              class="report-artifact"
+                            >
+                              <span>{{ artifact }}</span>
+                              <button
+                                v-if="isMarkdownArtifact(artifact)"
+                                type="button"
+                                class="artifact-preview-button"
+                                :disabled="isArtifactPreviewLoading(report, artifact)"
+                                @click="toggleArtifactPreview(report, artifact)"
+                              >
+                                {{ artifactPreviewButtonLabel(report, artifact) }}
+                              </button>
+                            </div>
+                          </div>
+                          <div
+                            v-for="artifact in markdownArtifactRefs(report)"
+                            :key="`${artifact}-preview`"
+                            class="artifact-preview"
+                          >
+                            <template v-if="expandedArtifactKey === artifactPreviewKey(report, artifact)">
+                              <div
+                                v-if="artifactPreviewErrors[artifactPreviewKey(report, artifact)]"
+                                class="artifact-preview-status artifact-preview-error"
+                              >
+                                {{ artifactPreviewErrors[artifactPreviewKey(report, artifact)] }}
+                              </div>
+                              <div
+                                v-else-if="!artifactPreviews[artifactPreviewKey(report, artifact)]"
+                                class="artifact-preview-status"
+                              >
+                                Loading Markdown preview...
+                              </div>
+                              <template v-else>
+                                <div class="artifact-preview-header">
+                                  <span>{{ artifactPreviews[artifactPreviewKey(report, artifact)].filename }}</span>
+                                  <span>{{ formatAttachmentSize(artifactPreviews[artifactPreviewKey(report, artifact)].size_bytes) }}</span>
+                                </div>
+                                <MarkdownContent
+                                  class="artifact-preview-content"
+                                  :text="artifactPreviews[artifactPreviewKey(report, artifact)].content"
+                                />
+                                <div
+                                  v-if="artifactPreviews[artifactPreviewKey(report, artifact)].truncated"
+                                  class="artifact-preview-status"
+                                >
+                                  Preview truncated to the first 512 KB.
+                                </div>
+                              </template>
+                            </template>
+                          </div>
+                        </template>
+                      </details>
+                      <div
+                        v-if="report.confidence !== null && report.confidence !== undefined"
+                        class="report-note report-note--inline"
+                      >
+                        <strong>Confidence</strong>
+                        <span>{{ formatAutonomousScore(report.confidence) }}</span>
+                        <span v-if="report.requires_human_judgment">Human judgment required</span>
+                      </div>
+                      <details
+                        v-if="report.risks"
+                        class="report-subsection report-note"
+                        :open="isReportSubsectionOpen(report, 'risks')"
+                        @toggle="event => toggleReportSubsection(report, 'risks', event)"
+                      >
+                        <summary>
+                          <strong>Risks</strong>
+                          <span
+                            v-if="risksPreview(report)"
+                            class="report-subsection-preview"
+                          >{{ risksPreview(report) }}</span>
+                        </summary>
+                        <MarkdownContent
+                          v-if="isReportSubsectionOpen(report, 'risks')"
+                          compact
+                          link-markdown-paths
+                          :text="report.risks"
+                          @markdown-path-click="path => openMarkdownPreviewModal(path, report)"
+                        />
+                      </details>
+                    </details>
+                  </li>
+                </ol>
+              </details>
+
+              <details class="detail-section detail-section--collapsible markdown-output-section">
+                <summary class="detail-section-title detail-section-title--with-count">
+                  <span>Markdown Outputs</span>
+                  <span>{{ selectedMarkdownDocuments.length }}</span>
+                </summary>
+                <div
+                  v-if="selectedMarkdownDocuments.length === 0"
+                  class="empty-timeline"
+                >
+                  No Markdown outputs discovered yet. Agents can report artifact_refs, or Markdown changed_files will appear here automatically.
+                </div>
+                <div
+                  v-else
+                  class="markdown-output-list"
+                >
+                  <article
+                    v-for="document in selectedMarkdownDocuments"
+                    :key="document.id"
+                    class="markdown-output-card"
+                  >
+                    <div class="markdown-output-row">
+                      <div>
+                        <strong>{{ document.label }}</strong>
+                        <span>{{ markdownDocumentSourceLabel(document.source) }}</span>
+                        <code>{{ document.path }}</code>
+                      </div>
+                      <div class="markdown-output-actions">
+                        <span v-if="document.size_bytes">{{ formatAttachmentSize(document.size_bytes) }}</span>
+                        <button
+                          type="button"
+                          class="artifact-preview-button"
+                          :disabled="isMarkdownDocumentPreviewLoading(document)"
+                          @click="toggleMarkdownDocumentPreview(document)"
+                        >
+                          {{ markdownDocumentPreviewButtonLabel(document) }}
+                        </button>
+                      </div>
+                    </div>
+                    <div
+                      v-if="expandedArtifactKey === markdownDocumentPreviewKey(document)"
+                      class="artifact-preview markdown-output-preview"
+                    >
+                      <div
+                        v-if="artifactPreviewErrors[markdownDocumentPreviewKey(document)]"
+                        class="artifact-preview-status artifact-preview-error"
+                      >
+                        {{ artifactPreviewErrors[markdownDocumentPreviewKey(document)] }}
+                      </div>
+                      <div
+                        v-else-if="!artifactPreviews[markdownDocumentPreviewKey(document)]"
+                        class="artifact-preview-status"
+                      >
+                        Loading Markdown preview...
+                      </div>
+                      <template v-else>
+                        <div class="artifact-preview-header">
+                          <span>{{ artifactPreviews[markdownDocumentPreviewKey(document)].filename }}</span>
+                          <span>{{ formatAttachmentSize(artifactPreviews[markdownDocumentPreviewKey(document)].size_bytes) }}</span>
+                        </div>
+                        <MarkdownContent
+                          class="artifact-preview-content"
+                          :text="artifactPreviews[markdownDocumentPreviewKey(document)].content"
+                        />
+                        <div
+                          v-if="artifactPreviews[markdownDocumentPreviewKey(document)].truncated"
+                          class="artifact-preview-status"
+                        >
+                          Preview truncated to the first 512 KB.
+                        </div>
+                      </template>
+                    </div>
+                  </article>
+                </div>
+              </details>
             </div>
-          </div>
-        </aside>
-      </div>
+
+            <div class="detail-footer">
+              <button
+                type="button"
+                class="detail-footer-toggle"
+                :aria-expanded="isDetailActionsExpanded"
+                @click="toggleDetailActions"
+              >
+                <span>{{ isDetailActionsExpanded ? 'Hide actions' : 'Actions' }}</span>
+                <span class="detail-footer-chevron">
+                  {{ isDetailActionsExpanded ? 'v' : '^' }}
+                </span>
+              </button>
+              <div class="detail-action-drawer">
+                <div class="detail-actions">
+                  <LoadingButton
+                    v-if="selectedTask.status === 'todo'"
+                    type="button"
+                    class="primary-button"
+                    :loading="isPending(taskActionKey('start', selectedTask.id))"
+                    loading-label="Starting task"
+                    @click="startTask(selectedTask)"
+                  >
+                    <span class="btn-icon">▶</span> Start
+                  </LoadingButton>
+                  <button
+                    v-if="canEditTask(selectedTask)"
+                    type="button"
+                    class="tool-button"
+                    @click="openEditTaskModal(selectedTask)"
+                  >
+                    <span class="btn-icon">✎</span> Edit
+                  </button>
+                  <LoadingButton
+                    v-if="canMarkDoneTask(selectedTask)"
+                    type="button"
+                    class="tool-button"
+                    :loading="isPending(taskActionKey('mark-done', selectedTask.id))"
+                    loading-label="Marking done"
+                    @click="markTask(selectedTask.id, 'done')"
+                  >
+                    <span class="btn-icon">✓</span> Done
+                  </LoadingButton>
+                  <LoadingButton
+                    v-if="canRequestReviewTask(selectedTask)"
+                    type="button"
+                    class="tool-button"
+                    :loading="isPending(taskActionKey('request-review', selectedTask.id))"
+                    loading-label="Requesting review"
+                    @click="requestReview(selectedTask)"
+                  >
+                    <span class="btn-icon">◎</span> Request review
+                  </LoadingButton>
+                  <LoadingButton
+                    v-if="canAbortTask(selectedTask)"
+                    type="button"
+                    class="abort-button"
+                    :loading="isPending(taskActionKey('abort', selectedTask.id))"
+                    loading-label="Aborting task"
+                    @click="abortTask(selectedTask)"
+                  >
+                    <span class="btn-icon">⬤</span> Abort
+                  </LoadingButton>
+                  <LoadingButton
+                    v-if="selectedSession"
+                    type="button"
+                    class="tool-button"
+                    :loading="isPending(sessionActionKey('open', selectedSession.id))"
+                    loading-label="Opening terminal"
+                    @click="openSession(selectedSession)"
+                  >
+                    <span class="btn-icon">⧉</span> Open terminal
+                  </LoadingButton>
+                  <span
+                    class="detail-actions-sep"
+                    aria-hidden="true"
+                  />
+                  <LoadingButton
+                    type="button"
+                    class="danger-button"
+                    :loading="isPending(taskActionKey('delete', selectedTask.id))"
+                    loading-label="Deleting task"
+                    @click="deleteTask(selectedTask)"
+                  >
+                    <span class="btn-icon">×</span> Delete
+                  </LoadingButton>
+                </div>
+                <form
+                  v-if="selectedSession"
+                  class="send-form"
+                  @submit.prevent="sendDetailMessage"
+                  @paste="handleAttachmentPaste($event, detailAttachments)"
+                >
+                  <textarea
+                    v-model="detailMessage"
+                    placeholder="Follow-up instructions..."
+                  />
+                  <div
+                    v-if="detailAttachments.length > 0"
+                    class="attachment-list send-attachments"
+                  >
+                    <div
+                      v-for="attachment in detailAttachments"
+                      :key="attachment.id"
+                      class="attachment-row"
+                    >
+                      <div class="attachment-thumb">
+                        <img
+                          :src="attachment.preview_url"
+                          :alt="attachment.filename"
+                        >
+                      </div>
+                      <div class="attachment-meta">
+                        <strong>{{ attachment.filename }}</strong>
+                        <span>{{ attachment.mime_type }} · {{ formatAttachmentSize(attachment.size_bytes) }}</span>
+                      </div>
+                      <button
+                        type="button"
+                        class="icon-button"
+                        aria-label="Remove attachment"
+                        @click="removeDraftAttachment(detailAttachments, attachment)"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </div>
+                  <LoadingButton
+                    type="submit"
+                    class="primary-button"
+                    :disabled="!detailMessage.trim() && detailAttachments.length === 0"
+                    :loading="isPending(selectedTaskSendKey)"
+                    loading-label="Sending message"
+                  >
+                    <span class="btn-icon">▶</span> Send
+                  </LoadingButton>
+                </form>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </Transition>
     </Teleport>
 
     <Teleport to="body">
-      <div
-        v-if="markdownPreviewModalPath"
-        class="workspace-modal-overlay markdown-preview-modal-overlay"
-        @click.self="closeMarkdownPreviewModal"
-      >
+      <Transition name="modal-fade">
         <div
-          class="workspace-modal markdown-preview-modal"
-          role="dialog"
-          aria-modal="true"
-          :aria-label="`Markdown preview: ${markdownPreviewModalPath}`"
+          v-if="markdownPreviewModalPath"
+          class="workspace-modal-overlay markdown-preview-modal-overlay"
+          @click.self="closeMarkdownPreviewModal"
         >
-          <div class="markdown-preview-modal-header">
-            <div>
-              <span>Markdown Preview</span>
-              <strong>{{ markdownPreviewModalPath }}</strong>
-            </div>
-            <button
-              type="button"
-              class="icon-button"
-              aria-label="Close Markdown preview"
-              @click="closeMarkdownPreviewModal"
-            >
-              ×
-            </button>
-          </div>
           <div
-            v-if="markdownPreviewModalError"
-            class="artifact-preview-status artifact-preview-error"
+            class="workspace-modal markdown-preview-modal"
+            role="dialog"
+            aria-modal="true"
+            :aria-label="`Markdown preview: ${markdownPreviewModalPath}`"
           >
-            {{ markdownPreviewModalError }}
-          </div>
-          <div
-            v-else-if="markdownPreviewModalLoading || !markdownPreviewModalContent"
-            class="artifact-preview-status"
-          >
-            Loading Markdown preview...
-          </div>
-          <template v-else>
-            <div class="artifact-preview-header">
-              <span>{{ markdownPreviewModalContent.filename }}</span>
-              <span>{{ formatAttachmentSize(markdownPreviewModalContent.size_bytes) }}</span>
+            <div class="markdown-preview-modal-header">
+              <div>
+                <span>Markdown Preview</span>
+                <strong>{{ markdownPreviewModalPath }}</strong>
+              </div>
+              <button
+                type="button"
+                class="icon-button"
+                aria-label="Close Markdown preview"
+                @click="closeMarkdownPreviewModal"
+              >
+                ×
+              </button>
             </div>
-            <MarkdownContent
-              class="artifact-preview-content markdown-preview-modal-content"
-              :text="markdownPreviewModalContent.content"
-            />
             <div
-              v-if="markdownPreviewModalContent.truncated"
+              v-if="markdownPreviewModalError"
+              class="artifact-preview-status artifact-preview-error"
+            >
+              {{ markdownPreviewModalError }}
+            </div>
+            <div
+              v-else-if="markdownPreviewModalLoading || !markdownPreviewModalContent"
               class="artifact-preview-status"
             >
-              Preview truncated to the first 512 KB.
+              Loading Markdown preview...
             </div>
-          </template>
+            <template v-else>
+              <div class="artifact-preview-header">
+                <span>{{ markdownPreviewModalContent.filename }}</span>
+                <span>{{ formatAttachmentSize(markdownPreviewModalContent.size_bytes) }}</span>
+              </div>
+              <MarkdownContent
+                class="artifact-preview-content markdown-preview-modal-content"
+                :text="markdownPreviewModalContent.content"
+              />
+              <div
+                v-if="markdownPreviewModalContent.truncated"
+                class="artifact-preview-status"
+              >
+                Preview truncated to the first 512 KB.
+              </div>
+            </template>
+          </div>
         </div>
-      </div>
+      </Transition>
     </Teleport>
 
     <Teleport to="body">
-      <div
-        v-if="imageLightboxUrl"
-        class="workspace-modal-overlay image-lightbox-overlay"
-        @click.self="closeImageLightbox"
-      >
-        <button
-          type="button"
-          class="icon-button image-lightbox-close"
-          aria-label="Close image preview"
-          @click="closeImageLightbox"
+      <Transition name="modal-fade">
+        <div
+          v-if="imageLightboxUrl"
+          class="workspace-modal-overlay image-lightbox-overlay"
+          @click.self="closeImageLightbox"
         >
-          ×
-        </button>
-        <img
-          class="image-lightbox-img"
-          :src="imageLightboxUrl"
-          :alt="imageLightboxAlt"
-          @click.stop
-        >
-      </div>
+          <button
+            type="button"
+            class="icon-button image-lightbox-close"
+            aria-label="Close image preview"
+            @click="closeImageLightbox"
+          >
+            ×
+          </button>
+          <img
+            class="image-lightbox-img"
+            :src="imageLightboxUrl"
+            :alt="imageLightboxAlt"
+            @click.stop
+          >
+        </div>
+      </Transition>
     </Teleport>
 
-    <div
-      v-if="showWorkspaceModal"
-      class="workspace-modal-overlay"
-      @click.self="closeWorkspaceModal"
-    >
-      <div class="workspace-modal">
-        <h3>{{ workspaceModalMode === 'edit' ? 'Edit Workspace' : 'Create Workspace' }}</h3>
-        <form @submit.prevent="handleSubmitWorkspace">
-          <div class="modal-field">
-            <label>Name</label>
-            <input
-              v-model="workspaceForm.name"
-              placeholder="claude_hub"
-              autofocus
-            >
-          </div>
-          <div class="modal-field">
-            <label>Local workspace dir</label>
-            <input
-              v-model="workspaceForm.path"
-              placeholder="/Users/me/workspace"
-            >
+    <Transition name="modal-fade">
+      <div
+        v-if="showWorkspaceModal"
+        class="workspace-modal-overlay"
+        @click.self="closeWorkspaceModal"
+      >
+        <div class="workspace-modal">
+          <h3>{{ workspaceModalMode === 'edit' ? 'Edit Workspace' : 'Create Workspace' }}</h3>
+          <form @submit.prevent="handleSubmitWorkspace">
+            <div class="modal-field">
+              <label>Name</label>
+              <input
+                v-model="workspaceForm.name"
+                placeholder="claude_hub"
+                autofocus
+              >
+            </div>
+            <div class="modal-field">
+              <label>Local workspace dir</label>
+              <input
+                v-model="workspaceForm.path"
+                placeholder="/Users/me/workspace"
+              >
+              <p class="modal-hint">
+                Used as the default working directory for new agents in this workspace.
+              </p>
+            </div>
+            <div class="modal-field">
+              <label>Environment</label>
+              <div class="segmented-control">
+                <button
+                  type="button"
+                  :class="['segment-button', { active: workspaceForm.target === 'local' }]"
+                  :disabled="workspaceModalMode === 'edit'"
+                  @click="workspaceForm.target = 'local'"
+                >
+                  Local
+                </button>
+                <button
+                  type="button"
+                  :class="['segment-button', { active: workspaceForm.target === 'remote' }]"
+                  :disabled="workspaceModalMode === 'edit'"
+                  @click="workspaceForm.target = 'remote'"
+                >
+                  Remote
+                </button>
+              </div>
+            </div>
+            <template v-if="workspaceForm.target === 'remote'">
+              <div class="modal-field">
+                <label>Remote profile</label>
+                <select
+                  v-model="workspaceForm.remote_profile_id"
+                  :disabled="remoteProfilesLoading || workspaceModalMode === 'edit'"
+                >
+                  <option value="">
+                    Select server
+                  </option>
+                  <option
+                    v-for="profile in remoteProfiles"
+                    :key="profile.id"
+                    :value="profile.id"
+                  >
+                    {{ profile.name }}
+                  </option>
+                </select>
+              </div>
+              <div class="modal-field">
+                <label>Remote start dir</label>
+                <input
+                  v-model="workspaceForm.remote_cwd"
+                  placeholder="~"
+                >
+                <p class="modal-hint">
+                  Used as the default remote working directory for new agents.
+                </p>
+              </div>
+              <div class="modal-field">
+                <label class="checkbox-label">
+                  <input
+                    v-model="workspaceForm.remote_reconnect"
+                    type="checkbox"
+                  >
+                  Reconnect
+                </label>
+              </div>
+            </template>
+            <div class="form-row">
+              <div class="modal-field">
+                <label>Branch hint</label>
+                <input
+                  v-model="workspaceForm.default_branch"
+                  placeholder="main"
+                >
+              </div>
+              <div class="modal-field">
+                <label>Prefix</label>
+                <input
+                  v-model="workspaceForm.session_prefix"
+                  placeholder="chub"
+                  :disabled="workspaceModalMode === 'edit'"
+                >
+              </div>
+            </div>
+            <div class="modal-field resident-agent-section">
+              <div class="resident-summary-row">
+                <div class="resident-summary-text">
+                  <span class="resident-summary-title">Resident self-driven agent</span>
+                  <span
+                    :class="['resident-summary-status', workspaceForm.resident_agent_enabled ? 'is-on' : 'is-off']"
+                  >
+                    {{ residentSummaryLabel }}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  class="tool-button"
+                  @click="openResidentAgentModal"
+                >
+                  <span class="btn-icon">⚙</span> Configure…
+                </button>
+              </div>
+              <p class="modal-hint">
+                An optional background agent that runs on a schedule to maintain
+                lessons and propose follow-up tasks for this workspace.
+              </p>
+            </div>
+            <div class="modal-actions">
+              <button
+                v-if="workspaceModalMode === 'edit'"
+                type="button"
+                class="danger-button workspace-delete-button"
+                :disabled="isLoading || isPending('workspace:delete')"
+                @click="handleDeleteWorkspace"
+              >
+                <span class="btn-icon">×</span> Delete Workspace
+              </button>
+              <button
+                type="button"
+                class="tool-button"
+                @click="closeWorkspaceModal"
+              >
+                Cancel
+              </button>
+              <LoadingButton
+                type="submit"
+                class="primary-button"
+                :disabled="isLoading || (workspaceForm.target === 'remote' && !workspaceForm.remote_profile_id)"
+                :loading="isPending(workspaceModalMode === 'edit' ? 'workspace:update' : 'workspace:create')"
+                :loading-label="workspaceModalMode === 'edit' ? 'Saving workspace' : 'Creating workspace'"
+              >
+                <span class="btn-icon">{{ workspaceModalMode === 'edit' ? '✓' : '+' }}</span>
+                {{ workspaceModalMode === 'edit' ? 'Save workspace' : 'Create workspace' }}
+              </LoadingButton>
+            </div>
+          </form>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- Resident self-driven agent config (nested popup over the workspace modal) -->
+    <Transition name="modal-fade">
+      <div
+        v-if="showResidentAgentModal"
+        class="workspace-modal-overlay resident-agent-modal-overlay"
+        @click.self="closeResidentAgentModal"
+      >
+        <div class="workspace-modal resident-agent-modal">
+          <h3>Resident Agent</h3>
+          <div class="modal-field resident-agent-section--first">
+            <label class="checkbox-label">
+              <input
+                v-model="workspaceForm.resident_agent_enabled"
+                type="checkbox"
+              >
+              Enable resident self-driven agent
+            </label>
             <p class="modal-hint">
-              Used as the default working directory for new agents in this workspace.
+              Wakes every interval on its own — even when idle, with no task
+              running — to maintain lessons and propose follow-up tasks. It
+              never picks up normal workspace tasks.
             </p>
           </div>
-          <div class="modal-field">
-            <label>Environment</label>
-            <div class="segmented-control">
+
+          <!--
+          Everything below stays visible at all times; it is disabled/grayed
+          while Enable is unchecked (per the requested UX) instead of hidden.
+          The same elements and components as the Add-Agent form are reused so
+          the two interfaces match, but the role is fixed to resident.
+        -->
+          <fieldset
+            class="resident-config-body"
+            :disabled="!workspaceForm.resident_agent_enabled"
+            :class="{ 'is-disabled': !workspaceForm.resident_agent_enabled }"
+          >
+            <div class="modal-field">
+              <label class="checkbox-label">
+                <input
+                  v-model="workspaceForm.resident_agent_paused"
+                  type="checkbox"
+                >
+                Pause auto-scheduling (keep the session for manual chat)
+              </label>
+              <p class="modal-hint">
+                The resident session stays available for manual chat but won't
+                auto-run on its schedule.
+              </p>
+            </div>
+            <div class="modal-field">
+              <label class="checkbox-label">
+                <input
+                  v-model="workspaceForm.resident_agent_master_mode"
+                  type="checkbox"
+                >
+                Autopilot mode
+              </label>
+              <p class="modal-hint">
+                Changes what each cycle does, not whether it runs. On: the
+                resident drives the workspace on its own — it reviews the board,
+                creates and dispatches tasks to your existing worker agents, lets
+                them go through review, and accepts the finished work itself. It
+                never writes code and never adds or removes worker agents. Off:
+                read-only maintenance, no reports.
+              </p>
+            </div>
+            <div class="modal-field">
+              <label>Run interval (minutes)</label>
+              <input
+                v-model.number="workspaceForm.resident_agent_interval_minutes"
+                type="number"
+                min="1"
+                placeholder="60"
+              >
+            </div>
+            <div class="modal-field">
+              <label>Resident agent directive (optional)</label>
+              <textarea
+                v-model="workspaceForm.resident_agent_directive"
+                rows="3"
+                placeholder="A one-shot guiding instruction for the resident (e.g. 'focus on tightening test coverage this week')."
+              />
+              <p class="modal-hint">
+                Saving applies on the next scheduled cycle. To apply a changed
+                directive immediately, use "Save &amp; run now" below.
+              </p>
+            </div>
+            <div class="modal-field">
+              <label>
+                Recurring tasks
+                <span
+                  v-if="enabledPeriodicTaskCount > 0"
+                  class="modal-label-badge"
+                >{{ enabledPeriodicTaskCount }} active</span>
+              </label>
+              <p class="modal-hint">
+                The resident runs every enabled task on each wake-up (in addition
+                to its built-in maintenance). Disable a row to keep it without
+                running it; the directive above is a separate one-shot focus.
+              </p>
+              <ul
+                v-if="workspaceForm.resident_agent_periodic_tasks.length > 0"
+                class="periodic-task-list"
+              >
+                <li
+                  v-for="task in workspaceForm.resident_agent_periodic_tasks"
+                  :key="task.id"
+                  class="periodic-task-row"
+                >
+                  <input
+                    v-model="task.enabled"
+                    type="checkbox"
+                    class="periodic-task-enable"
+                    :title="task.enabled ? 'Enabled — runs every cycle' : 'Disabled — kept but not run'"
+                  >
+                  <input
+                    v-model="task.text"
+                    class="periodic-task-text"
+                    :class="{ 'periodic-task-text--disabled': !task.enabled }"
+                    placeholder="e.g. run the linter and open a task for any new warnings"
+                  >
+                  <button
+                    type="button"
+                    class="periodic-task-remove"
+                    title="Remove this recurring task"
+                    @click="removePeriodicTask(task.id)"
+                  >
+                    ×
+                  </button>
+                </li>
+              </ul>
+              <p
+                v-else
+                class="modal-hint periodic-task-empty"
+              >
+                No recurring tasks yet.
+              </p>
               <button
                 type="button"
-                :class="['segment-button', { active: workspaceForm.target === 'local' }]"
-                :disabled="workspaceModalMode === 'edit'"
-                @click="workspaceForm.target = 'local'"
+                class="tool-button periodic-task-add"
+                @click="addPeriodicTask"
               >
-                Local
-              </button>
-              <button
-                type="button"
-                :class="['segment-button', { active: workspaceForm.target === 'remote' }]"
-                :disabled="workspaceModalMode === 'edit'"
-                @click="workspaceForm.target = 'remote'"
-              >
-                Remote
+                <span class="btn-icon">+</span> Add recurring task
               </button>
             </div>
-          </div>
-          <template v-if="workspaceForm.target === 'remote'">
             <div class="modal-field">
-              <label>Remote profile</label>
+              <label>Title</label>
+              <input
+                v-model="workspaceForm.resident_agent_title"
+                placeholder="Workspace Resident"
+              >
+            </div>
+            <AgentConfigFields
+              v-model:agent-type="workspaceForm.resident_agent_type"
+              v-model:solo-mode="workspaceForm.resident_agent_solo_mode"
+              v-model:env-preset="workspaceForm.resident_env_preset"
+              v-model:env-text="workspaceForm.resident_env_text"
+              variant="modal"
+              :disabled="!workspaceForm.resident_agent_enabled"
+            />
+            <div class="modal-field">
+              <label>Run On</label>
+              <div class="segmented-control">
+                <button
+                  type="button"
+                  :class="['segment-button', { active: workspaceForm.resident_agent_target === 'local' }]"
+                  :disabled="!workspaceForm.resident_agent_enabled"
+                  @click="handleResidentTargetChange('local')"
+                >
+                  Local
+                </button>
+                <button
+                  type="button"
+                  :class="['segment-button', { active: workspaceForm.resident_agent_target === 'remote' }]"
+                  :disabled="!workspaceForm.resident_agent_enabled"
+                  @click="handleResidentTargetChange('remote')"
+                >
+                  Remote
+                </button>
+              </div>
+            </div>
+            <div
+              v-if="workspaceForm.resident_agent_target === 'remote'"
+              class="modal-field"
+            >
+              <label>Remote Server</label>
               <select
-                v-model="workspaceForm.remote_profile_id"
-                :disabled="remoteProfilesLoading || workspaceModalMode === 'edit'"
+                v-model="workspaceForm.resident_agent_remote_profile_id"
+                :disabled="remoteProfilesLoading"
               >
                 <option value="">
                   Select server
@@ -1694,320 +1995,28 @@
                   {{ profile.name }}
                 </option>
               </select>
-            </div>
-            <div class="modal-field">
-              <label>Remote start dir</label>
-              <input
-                v-model="workspaceForm.remote_cwd"
-                placeholder="~"
+              <p
+                v-if="remoteProfiles.length === 0"
+                class="modal-hint"
               >
-              <p class="modal-hint">
-                Used as the default remote working directory for new agents.
+                Add profiles in ~/.claude_hub/remote_profiles.json or ~/.ssh/config
               </p>
             </div>
-            <div class="modal-field">
+            <div
+              v-if="workspaceForm.resident_agent_target === 'remote'"
+              class="modal-field"
+            >
               <label class="checkbox-label">
                 <input
-                  v-model="workspaceForm.remote_reconnect"
+                  v-model="workspaceForm.resident_agent_remote_reconnect"
                   type="checkbox"
                 >
-                Reconnect
+                Auto reconnect
               </label>
             </div>
-          </template>
-          <div class="form-row">
-            <div class="modal-field">
-              <label>Branch hint</label>
-              <input
-                v-model="workspaceForm.default_branch"
-                placeholder="main"
-              >
-            </div>
-            <div class="modal-field">
-              <label>Prefix</label>
-              <input
-                v-model="workspaceForm.session_prefix"
-                placeholder="chub"
-                :disabled="workspaceModalMode === 'edit'"
-              >
-            </div>
-          </div>
-          <div class="modal-field resident-agent-section">
-            <div class="resident-summary-row">
-              <div class="resident-summary-text">
-                <span class="resident-summary-title">Resident self-driven agent</span>
-                <span
-                  :class="['resident-summary-status', workspaceForm.resident_agent_enabled ? 'is-on' : 'is-off']"
-                >
-                  {{ residentSummaryLabel }}
-                </span>
-              </div>
-              <button
-                type="button"
-                class="tool-button"
-                @click="openResidentAgentModal"
-              >
-                <span class="btn-icon">⚙</span> Configure…
-              </button>
-            </div>
-            <p class="modal-hint">
-              An optional background agent that runs on a schedule to maintain
-              lessons and propose follow-up tasks for this workspace.
-            </p>
-          </div>
-          <div class="modal-actions">
-            <button
-              v-if="workspaceModalMode === 'edit'"
-              type="button"
-              class="danger-button workspace-delete-button"
-              :disabled="isLoading || isPending('workspace:delete')"
-              @click="handleDeleteWorkspace"
-            >
-              <span class="btn-icon">×</span> Delete Workspace
-            </button>
-            <button
-              type="button"
-              class="tool-button"
-              @click="closeWorkspaceModal"
-            >
-              Cancel
-            </button>
-            <LoadingButton
-              type="submit"
-              class="primary-button"
-              :disabled="isLoading || (workspaceForm.target === 'remote' && !workspaceForm.remote_profile_id)"
-              :loading="isPending(workspaceModalMode === 'edit' ? 'workspace:update' : 'workspace:create')"
-              :loading-label="workspaceModalMode === 'edit' ? 'Saving workspace' : 'Creating workspace'"
-            >
-              <span class="btn-icon">{{ workspaceModalMode === 'edit' ? '✓' : '+' }}</span>
-              {{ workspaceModalMode === 'edit' ? 'Save workspace' : 'Create workspace' }}
-            </LoadingButton>
-          </div>
-        </form>
-      </div>
-    </div>
+          </fieldset>
 
-    <!-- Resident self-driven agent config (nested popup over the workspace modal) -->
-    <div
-      v-if="showResidentAgentModal"
-      class="workspace-modal-overlay resident-agent-modal-overlay"
-      @click.self="closeResidentAgentModal"
-    >
-      <div class="workspace-modal resident-agent-modal">
-        <h3>Resident Agent</h3>
-        <div class="modal-field resident-agent-section--first">
-          <label class="checkbox-label">
-            <input
-              v-model="workspaceForm.resident_agent_enabled"
-              type="checkbox"
-            >
-            Enable resident self-driven agent
-          </label>
-          <p class="modal-hint">
-            Wakes every interval on its own — even when idle, with no task
-            running — to maintain lessons and propose follow-up tasks. It
-            never picks up normal workspace tasks.
-          </p>
-        </div>
-
-        <!--
-          Everything below stays visible at all times; it is disabled/grayed
-          while Enable is unchecked (per the requested UX) instead of hidden.
-          The same elements and components as the Add-Agent form are reused so
-          the two interfaces match, but the role is fixed to resident.
-        -->
-        <fieldset
-          class="resident-config-body"
-          :disabled="!workspaceForm.resident_agent_enabled"
-          :class="{ 'is-disabled': !workspaceForm.resident_agent_enabled }"
-        >
-          <div class="modal-field">
-            <label class="checkbox-label">
-              <input
-                v-model="workspaceForm.resident_agent_paused"
-                type="checkbox"
-              >
-              Pause auto-scheduling (keep the session for manual chat)
-            </label>
-            <p class="modal-hint">
-              The resident session stays available for manual chat but won't
-              auto-run on its schedule.
-            </p>
-          </div>
-          <div class="modal-field">
-            <label class="checkbox-label">
-              <input
-                v-model="workspaceForm.resident_agent_master_mode"
-                type="checkbox"
-              >
-              Autopilot mode
-            </label>
-            <p class="modal-hint">
-              Changes what each cycle does, not whether it runs. On: the
-              resident drives the workspace on its own — it reviews the board,
-              creates and dispatches tasks to your existing worker agents, lets
-              them go through review, and accepts the finished work itself. It
-              never writes code and never adds or removes worker agents. Off:
-              read-only maintenance, no reports.
-            </p>
-          </div>
-          <div class="modal-field">
-            <label>Run interval (minutes)</label>
-            <input
-              v-model.number="workspaceForm.resident_agent_interval_minutes"
-              type="number"
-              min="1"
-              placeholder="60"
-            >
-          </div>
-          <div class="modal-field">
-            <label>Resident agent directive (optional)</label>
-            <textarea
-              v-model="workspaceForm.resident_agent_directive"
-              rows="3"
-              placeholder="A one-shot guiding instruction for the resident (e.g. 'focus on tightening test coverage this week')."
-            />
-            <p class="modal-hint">
-              Saving applies on the next scheduled cycle. To apply a changed
-              directive immediately, use "Save &amp; run now" below.
-            </p>
-          </div>
-          <div class="modal-field">
-            <label>
-              Recurring tasks
-              <span
-                v-if="enabledPeriodicTaskCount > 0"
-                class="modal-label-badge"
-              >{{ enabledPeriodicTaskCount }} active</span>
-            </label>
-            <p class="modal-hint">
-              The resident runs every enabled task on each wake-up (in addition
-              to its built-in maintenance). Disable a row to keep it without
-              running it; the directive above is a separate one-shot focus.
-            </p>
-            <ul
-              v-if="workspaceForm.resident_agent_periodic_tasks.length > 0"
-              class="periodic-task-list"
-            >
-              <li
-                v-for="task in workspaceForm.resident_agent_periodic_tasks"
-                :key="task.id"
-                class="periodic-task-row"
-              >
-                <input
-                  v-model="task.enabled"
-                  type="checkbox"
-                  class="periodic-task-enable"
-                  :title="task.enabled ? 'Enabled — runs every cycle' : 'Disabled — kept but not run'"
-                >
-                <input
-                  v-model="task.text"
-                  class="periodic-task-text"
-                  :class="{ 'periodic-task-text--disabled': !task.enabled }"
-                  placeholder="e.g. run the linter and open a task for any new warnings"
-                >
-                <button
-                  type="button"
-                  class="periodic-task-remove"
-                  title="Remove this recurring task"
-                  @click="removePeriodicTask(task.id)"
-                >
-                  ×
-                </button>
-              </li>
-            </ul>
-            <p
-              v-else
-              class="modal-hint periodic-task-empty"
-            >
-              No recurring tasks yet.
-            </p>
-            <button
-              type="button"
-              class="tool-button periodic-task-add"
-              @click="addPeriodicTask"
-            >
-              <span class="btn-icon">+</span> Add recurring task
-            </button>
-          </div>
-          <div class="modal-field">
-            <label>Title</label>
-            <input
-              v-model="workspaceForm.resident_agent_title"
-              placeholder="Workspace Resident"
-            >
-          </div>
-          <AgentConfigFields
-            v-model:agent-type="workspaceForm.resident_agent_type"
-            v-model:solo-mode="workspaceForm.resident_agent_solo_mode"
-            v-model:env-preset="workspaceForm.resident_env_preset"
-            v-model:env-text="workspaceForm.resident_env_text"
-            variant="modal"
-            :disabled="!workspaceForm.resident_agent_enabled"
-          />
-          <div class="modal-field">
-            <label>Run On</label>
-            <div class="segmented-control">
-              <button
-                type="button"
-                :class="['segment-button', { active: workspaceForm.resident_agent_target === 'local' }]"
-                :disabled="!workspaceForm.resident_agent_enabled"
-                @click="handleResidentTargetChange('local')"
-              >
-                Local
-              </button>
-              <button
-                type="button"
-                :class="['segment-button', { active: workspaceForm.resident_agent_target === 'remote' }]"
-                :disabled="!workspaceForm.resident_agent_enabled"
-                @click="handleResidentTargetChange('remote')"
-              >
-                Remote
-              </button>
-            </div>
-          </div>
-          <div
-            v-if="workspaceForm.resident_agent_target === 'remote'"
-            class="modal-field"
-          >
-            <label>Remote Server</label>
-            <select
-              v-model="workspaceForm.resident_agent_remote_profile_id"
-              :disabled="remoteProfilesLoading"
-            >
-              <option value="">
-                Select server
-              </option>
-              <option
-                v-for="profile in remoteProfiles"
-                :key="profile.id"
-                :value="profile.id"
-              >
-                {{ profile.name }}
-              </option>
-            </select>
-            <p
-              v-if="remoteProfiles.length === 0"
-              class="modal-hint"
-            >
-              Add profiles in ~/.claude_hub/remote_profiles.json or ~/.ssh/config
-            </p>
-          </div>
-          <div
-            v-if="workspaceForm.resident_agent_target === 'remote'"
-            class="modal-field"
-          >
-            <label class="checkbox-label">
-              <input
-                v-model="workspaceForm.resident_agent_remote_reconnect"
-                type="checkbox"
-              >
-              Auto reconnect
-            </label>
-          </div>
-        </fieldset>
-
-        <!--
+          <!--
           Resident lifecycle buttons. In EDIT mode these act immediately via
           PATCH (Create=enabled:true, Pause/Resume=paused toggle,
           Delete=enabled:false resident-only teardown — never the workspace).
@@ -2016,924 +2025,935 @@
           the workspace via the parent "Create workspace" button. Done dismisses
           the sub-modal and returns to the parent workspace form.
         -->
-        <p
-          v-if="isResidentCreateMode"
-          class="modal-hint"
-        >
-          The resident is configured here and created together with the
-          workspace when you press "Create workspace".
-        </p>
-        <p
-          v-else-if="residentRunPending"
-          class="modal-hint resident-queued-hint"
-        >
-          <span class="resident-queued-badge">Run queued</span>
-          A run is queued for the next monitor tick and will fire shortly.
-        </p>
-        <div class="modal-actions">
-          <button
-            type="button"
-            class="tool-button"
-            @click="closeResidentAgentModal"
+          <p
+            v-if="isResidentCreateMode"
+            class="modal-hint"
           >
-            <span class="btn-icon">✓</span> Done
-          </button>
-          <LoadingButton
-            type="button"
-            class="danger-button workspace-delete-button"
-            :disabled="isResidentCreateMode || !residentExists"
-            :loading="isPending('resident:delete')"
-            loading-label="Deleting"
-            @click="handleDeleteResident"
+            The resident is configured here and created together with the
+            workspace when you press "Create workspace".
+          </p>
+          <p
+            v-else-if="residentRunPending"
+            class="modal-hint resident-queued-hint"
           >
-            <span class="btn-icon">×</span> Delete
-          </LoadingButton>
-          <LoadingButton
-            type="button"
-            class="tool-button"
-            :disabled="isResidentCreateMode || !residentExists"
-            :loading="isPending('resident:pause')"
-            :loading-label="(activeWorkspace?.resident_agent_paused ?? false) ? 'Resuming resident' : 'Pausing resident'"
-            @click="handleToggleResidentPause"
-          >
-            <span class="btn-icon">{{ (activeWorkspace?.resident_agent_paused ?? false) ? '▶' : '⏸' }}</span>
-            {{ (activeWorkspace?.resident_agent_paused ?? false) ? 'Resume' : 'Pause' }}
-          </LoadingButton>
-          <LoadingButton
-            type="button"
-            class="primary-button"
-            :disabled="isResidentCreateMode || residentExists"
-            :loading="isPending('resident:create')"
-            loading-label="Creating"
-            @click="handleCreateResident"
-          >
-            <span class="btn-icon">+</span> Create
-          </LoadingButton>
-          <LoadingButton
-            type="button"
-            class="primary-button"
-            :disabled="isResidentCreateMode || !residentExists"
-            :title="isResidentCreateMode || !residentExists
-              ? 'Create the resident first'
-              : 'Save the directive and recurring tasks, then run this cycle immediately'"
-            :loading="isPending('resident:save-run')"
-            loading-label="Saving & running"
-            @click="handleSaveResidentAndRunNow"
-          >
-            <span class="btn-icon">▶</span> Save &amp; run now
-          </LoadingButton>
+            <span class="resident-queued-badge">Run queued</span>
+            A run is queued for the next monitor tick and will fire shortly.
+          </p>
+          <div class="modal-actions">
+            <button
+              type="button"
+              class="tool-button"
+              @click="closeResidentAgentModal"
+            >
+              <span class="btn-icon">✓</span> Done
+            </button>
+            <LoadingButton
+              type="button"
+              class="danger-button workspace-delete-button"
+              :disabled="isResidentCreateMode || !residentExists"
+              :loading="isPending('resident:delete')"
+              loading-label="Deleting"
+              @click="handleDeleteResident"
+            >
+              <span class="btn-icon">×</span> Delete
+            </LoadingButton>
+            <LoadingButton
+              type="button"
+              class="tool-button"
+              :disabled="isResidentCreateMode || !residentExists"
+              :loading="isPending('resident:pause')"
+              :loading-label="(activeWorkspace?.resident_agent_paused ?? false) ? 'Resuming resident' : 'Pausing resident'"
+              @click="handleToggleResidentPause"
+            >
+              <span class="btn-icon">{{ (activeWorkspace?.resident_agent_paused ?? false) ? '▶' : '⏸' }}</span>
+              {{ (activeWorkspace?.resident_agent_paused ?? false) ? 'Resume' : 'Pause' }}
+            </LoadingButton>
+            <LoadingButton
+              type="button"
+              class="primary-button"
+              :disabled="isResidentCreateMode || residentExists"
+              :loading="isPending('resident:create')"
+              loading-label="Creating"
+              @click="handleCreateResident"
+            >
+              <span class="btn-icon">+</span> Create
+            </LoadingButton>
+            <LoadingButton
+              type="button"
+              class="primary-button"
+              :disabled="isResidentCreateMode || !residentExists"
+              :title="isResidentCreateMode || !residentExists
+                ? 'Create the resident first'
+                : 'Save the directive and recurring tasks, then run this cycle immediately'"
+              :loading="isPending('resident:save-run')"
+              loading-label="Saving & running"
+              @click="handleSaveResidentAndRunNow"
+            >
+              <span class="btn-icon">▶</span> Save &amp; run now
+            </LoadingButton>
+          </div>
         </div>
       </div>
-    </div>
+    </Transition>
 
-    <div
-      v-if="showTaskModal"
-      class="workspace-modal-overlay"
-      @click.self="closeTaskModal"
-    >
-      <div class="workspace-modal">
-        <h3>Add Task</h3>
-        <form
-          @submit.prevent="handleCreateTask"
-          @paste="handleAttachmentPaste($event, taskForm.attachments)"
-        >
-          <div class="modal-field">
-            <label>Title</label>
-            <input
-              v-model="taskForm.title"
-              placeholder="Implement a focused change"
-              :disabled="!activeWorkspaceId"
-              autofocus
-            >
-          </div>
-          <div class="modal-field">
-            <label>Task description</label>
-            <textarea
-              v-model="taskForm.prompt"
-              placeholder="Describe what the workspace agent should implement..."
-              :disabled="!activeWorkspaceId"
-            />
-            <div
-              v-if="taskForm.attachments.length > 0"
-              class="attachment-list"
-            >
-              <div
-                v-for="attachment in taskForm.attachments"
-                :key="attachment.id"
-                class="attachment-row"
+    <Transition name="modal-fade">
+      <div
+        v-if="showTaskModal"
+        class="workspace-modal-overlay"
+        @click.self="closeTaskModal"
+      >
+        <div class="workspace-modal">
+          <h3>Add Task</h3>
+          <form
+            @submit.prevent="handleCreateTask"
+            @paste="handleAttachmentPaste($event, taskForm.attachments)"
+          >
+            <div class="modal-field">
+              <label>Title</label>
+              <input
+                v-model="taskForm.title"
+                placeholder="Implement a focused change"
+                :disabled="!activeWorkspaceId"
+                autofocus
               >
-                <div class="attachment-thumb">
-                  <img
-                    :src="attachment.preview_url"
-                    :alt="attachment.filename"
+            </div>
+            <div class="modal-field">
+              <label>Task description</label>
+              <textarea
+                v-model="taskForm.prompt"
+                placeholder="Describe what the workspace agent should implement..."
+                :disabled="!activeWorkspaceId"
+              />
+              <div
+                v-if="taskForm.attachments.length > 0"
+                class="attachment-list"
+              >
+                <div
+                  v-for="attachment in taskForm.attachments"
+                  :key="attachment.id"
+                  class="attachment-row"
+                >
+                  <div class="attachment-thumb">
+                    <img
+                      :src="attachment.preview_url"
+                      :alt="attachment.filename"
+                    >
+                  </div>
+                  <div class="attachment-meta">
+                    <strong>{{ attachment.filename }}</strong>
+                    <span>{{ attachment.mime_type }} · {{ formatAttachmentSize(attachment.size_bytes) }}</span>
+                  </div>
+                  <button
+                    type="button"
+                    class="icon-button"
+                    aria-label="Remove attachment"
+                    @click="removeDraftAttachment(taskForm.attachments, attachment)"
                   >
+                    ×
+                  </button>
                 </div>
-                <div class="attachment-meta">
-                  <strong>{{ attachment.filename }}</strong>
-                  <span>{{ attachment.mime_type }} · {{ formatAttachmentSize(attachment.size_bytes) }}</span>
-                </div>
+              </div>
+            </div>
+            <div class="modal-field">
+              <label>Mode</label>
+              <div class="segmented-control segmented-control--three">
                 <button
                   type="button"
-                  class="icon-button"
-                  aria-label="Remove attachment"
-                  @click="removeDraftAttachment(taskForm.attachments, attachment)"
+                  :class="['segment-button', { active: taskForm.task_mode === 'direct' }]"
+                  @click="taskForm.task_mode = 'direct'"
                 >
-                  ×
+                  Direct
+                </button>
+                <button
+                  type="button"
+                  :class="['segment-button', { active: taskForm.task_mode === 'reviewed' }]"
+                  @click="taskForm.task_mode = 'reviewed'"
+                >
+                  Reviewed
+                </button>
+                <button
+                  type="button"
+                  :class="['segment-button', { active: taskForm.task_mode === 'autonomous' }]"
+                  @click="taskForm.task_mode = 'autonomous'"
+                >
+                  Autonomous
                 </button>
               </div>
             </div>
-          </div>
-          <div class="modal-field">
-            <label>Mode</label>
-            <div class="segmented-control segmented-control--three">
-              <button
-                type="button"
-                :class="['segment-button', { active: taskForm.task_mode === 'direct' }]"
-                @click="taskForm.task_mode = 'direct'"
-              >
-                Direct
-              </button>
-              <button
-                type="button"
-                :class="['segment-button', { active: taskForm.task_mode === 'reviewed' }]"
-                @click="taskForm.task_mode = 'reviewed'"
-              >
-                Reviewed
-              </button>
-              <button
-                type="button"
-                :class="['segment-button', { active: taskForm.task_mode === 'autonomous' }]"
-                @click="taskForm.task_mode = 'autonomous'"
-              >
-                Autonomous
-              </button>
+            <div class="modal-field">
+              <label>Execution</label>
+              <div class="segmented-control segmented-control--three">
+                <button
+                  type="button"
+                  :class="['segment-button', { active: taskForm.execution_complexity === 'auto' }]"
+                  title="Agent self-judges. If it picks orchestrator mode, expect roughly 10–15× the token cost of a single-agent run (Anthropic multi-agent research system; Cognition “Don't Build Multi-Agents”)."
+                  @click="taskForm.execution_complexity = 'auto'"
+                >
+                  Auto
+                </button>
+                <button
+                  type="button"
+                  :class="['segment-button', { active: taskForm.execution_complexity === 'simple' }]"
+                  title="Single linear agent; no sub-agent fan-out, no extra cost beyond a normal task."
+                  @click="taskForm.execution_complexity = 'simple'"
+                >
+                  Simple
+                </button>
+                <button
+                  type="button"
+                  :class="['segment-button', { active: taskForm.execution_complexity === 'complex' }]"
+                  title="Forces orchestrator mode with sub-agent delegation. Expect roughly 10–15× the token cost of a single-agent run; pick this only when the task is breadth-parallel, exceeds one context window, or splits into cleanly isolated subtasks."
+                  @click="taskForm.execution_complexity = 'complex'"
+                >
+                  Complex
+                </button>
+              </div>
             </div>
-          </div>
-          <div class="modal-field">
-            <label>Execution</label>
-            <div class="segmented-control segmented-control--three">
-              <button
-                type="button"
-                :class="['segment-button', { active: taskForm.execution_complexity === 'auto' }]"
-                title="Agent self-judges. If it picks orchestrator mode, expect roughly 10–15× the token cost of a single-agent run (Anthropic multi-agent research system; Cognition “Don't Build Multi-Agents”)."
-                @click="taskForm.execution_complexity = 'auto'"
-              >
-                Auto
-              </button>
-              <button
-                type="button"
-                :class="['segment-button', { active: taskForm.execution_complexity === 'simple' }]"
-                title="Single linear agent; no sub-agent fan-out, no extra cost beyond a normal task."
-                @click="taskForm.execution_complexity = 'simple'"
-              >
-                Simple
-              </button>
-              <button
-                type="button"
-                :class="['segment-button', { active: taskForm.execution_complexity === 'complex' }]"
-                title="Forces orchestrator mode with sub-agent delegation. Expect roughly 10–15× the token cost of a single-agent run; pick this only when the task is breadth-parallel, exceeds one context window, or splits into cleanly isolated subtasks."
-                @click="taskForm.execution_complexity = 'complex'"
-              >
-                Complex
-              </button>
+            <div
+              v-if="taskForm.task_mode === 'autonomous'"
+              class="autonomy-form"
+            >
+              <div class="form-row">
+                <div class="modal-field">
+                  <label>Max iterations</label>
+                  <input
+                    v-model.number="taskForm.max_iterations"
+                    type="number"
+                    min="1"
+                    max="10"
+                  >
+                </div>
+                <div class="modal-field">
+                  <label>Strictness</label>
+                  <select v-model="taskForm.evaluation_strictness">
+                    <option value="lenient">
+                      Lenient
+                    </option>
+                    <option value="balanced">
+                      Balanced
+                    </option>
+                    <option value="strict">
+                      Strict
+                    </option>
+                  </select>
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="modal-field">
+                  <label class="checkbox-label">
+                    <input
+                      v-model="taskForm.allow_web_research"
+                      type="checkbox"
+                    >
+                    Web research
+                  </label>
+                </div>
+                <div class="modal-field">
+                  <label class="checkbox-label">
+                    <input
+                      v-model="taskForm.require_artifact_review"
+                      type="checkbox"
+                    >
+                    Artifact review
+                  </label>
+                </div>
+              </div>
             </div>
-          </div>
-          <div
-            v-if="taskForm.task_mode === 'autonomous'"
-            class="autonomy-form"
+            <div class="modal-field">
+              <label>Dispatch agent</label>
+              <select
+                v-model="taskForm.session_id"
+                :disabled="!activeWorkspaceId"
+              >
+                <option value="">
+                  Auto
+                </option>
+                <option
+                  v-for="agent in workspaceAgents"
+                  :key="agent.id"
+                  :value="agent.id"
+                >
+                  {{ agent.title }}
+                </option>
+              </select>
+            </div>
+            <div class="modal-field">
+              <label class="checkbox-label">
+                <input
+                  v-model="taskForm.clear_context"
+                  type="checkbox"
+                >
+                Clear context
+              </label>
+            </div>
+            <div class="modal-field">
+              <label>Related task</label>
+              <select
+                v-model="taskForm.related_task_id"
+                :disabled="!activeWorkspaceId"
+              >
+                <option value="">
+                  None
+                </option>
+                <option
+                  v-for="task in tasks"
+                  :key="task.id"
+                  :value="task.id"
+                >
+                  {{ task.title }}
+                </option>
+              </select>
+            </div>
+            <div class="modal-actions">
+              <button
+                type="button"
+                class="tool-button"
+                @click="closeTaskModal"
+              >
+                Cancel
+              </button>
+              <LoadingButton
+                type="submit"
+                class="primary-button"
+                :disabled="!activeWorkspaceId || isLoading || !taskForm.title.trim() || (!taskForm.prompt.trim() && taskForm.attachments.length === 0)"
+                :loading="isPending('task:create')"
+                loading-label="Adding task"
+              >
+                <span class="btn-icon">+</span> Add task
+              </LoadingButton>
+            </div>
+          </form>
+        </div>
+      </div>
+    </Transition>
+
+    <Transition name="modal-fade">
+      <div
+        v-if="showEditTaskModal"
+        class="workspace-modal-overlay"
+        @click.self="closeEditTaskModal"
+      >
+        <div class="workspace-modal">
+          <h3>Edit Task</h3>
+          <form
+            @submit.prevent="handleUpdateTask"
+            @paste.prevent
           >
+            <div class="modal-field">
+              <label>Title</label>
+              <input
+                v-model="editTaskForm.title"
+                autofocus
+              >
+            </div>
+            <div class="modal-field">
+              <label>Task description</label>
+              <textarea v-model="editTaskForm.prompt" />
+            </div>
+            <div class="modal-field">
+              <label>Dispatch agent</label>
+              <select v-model="editTaskForm.session_id">
+                <option value="">
+                  Auto
+                </option>
+                <option
+                  v-for="agent in workspaceAgents"
+                  :key="agent.id"
+                  :value="agent.id"
+                >
+                  {{ agent.title }}
+                </option>
+              </select>
+            </div>
+            <div class="modal-field">
+              <label>Related task</label>
+              <select v-model="editTaskForm.related_task_id">
+                <option value="">
+                  None
+                </option>
+                <option
+                  v-for="task in tasks.filter(item => item.id !== editingTaskId)"
+                  :key="task.id"
+                  :value="task.id"
+                >
+                  {{ task.title }}
+                </option>
+              </select>
+            </div>
+            <div class="modal-field">
+              <label class="checkbox-label">
+                <input
+                  v-model="editTaskForm.clear_context"
+                  type="checkbox"
+                >
+                Clear context
+              </label>
+            </div>
+            <div class="modal-actions">
+              <button
+                type="button"
+                class="tool-button"
+                @click="closeEditTaskModal"
+              >
+                Cancel
+              </button>
+              <LoadingButton
+                type="submit"
+                class="primary-button"
+                :disabled="!editingTaskId || isLoading || !editTaskForm.title.trim() || !editTaskForm.prompt.trim()"
+                :loading="isPending(taskActionKey('edit', editingTaskId))"
+                loading-label="Saving task"
+              >
+                <span class="btn-icon">✓</span> Save task
+              </LoadingButton>
+            </div>
+          </form>
+        </div>
+      </div>
+    </Transition>
+
+    <Transition name="modal-fade">
+      <div
+        v-if="showLessonsModal"
+        class="workspace-modal-overlay"
+        @click.self="closeLessonsModal"
+      >
+        <div class="workspace-modal lessons-manager-modal">
+          <div class="modal-heading-row">
+            <div>
+              <h3>Workspace Lessons</h3>
+              <p>{{ activeFeedbackLessons.length }} active rules for this workspace</p>
+            </div>
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Close lessons"
+              @click="closeLessonsModal"
+            >
+              ×
+            </button>
+          </div>
+
+          <div class="lessons-toolbar">
+            <LoadingButton
+              type="button"
+              class="tool-button"
+              :disabled="!activeWorkspaceId"
+              :loading="isPending('feedback:summarize')"
+              loading-label="Checking"
+              @click="handleSummarizeLessons(false)"
+            >
+              <span class="btn-icon">💡</span> AI summarize
+            </LoadingButton>
+            <LoadingButton
+              type="button"
+              class="tool-button"
+              :disabled="!activeWorkspaceId"
+              :loading="isPending('feedback:summarize:force')"
+              loading-label="Queueing"
+              @click="handleSummarizeLessons(true)"
+            >
+              <span class="btn-icon">↻</span> Force AI run
+            </LoadingButton>
+            <LoadingButton
+              type="button"
+              class="tool-button"
+              :loading="isPending('feedback:refresh')"
+              loading-label="Refreshing"
+              @click="refreshFeedbackLessons"
+            >
+              <span class="btn-icon">↻</span> Refresh
+            </LoadingButton>
+          </div>
+
+          <div
+            v-if="lastFeedbackSummaryRun"
+            :class="['summary-run-status', `summary-run-status--${feedbackSummaryTone(lastFeedbackSummaryRun)}`]"
+          >
+            <strong>{{ feedbackSummaryTitle(lastFeedbackSummaryRun) }}</strong>
+            <p>{{ feedbackSummaryDescription(lastFeedbackSummaryRun) }}</p>
+            <div class="summary-run-meta">
+              <span>{{ lastFeedbackSummaryRun.mode }}</span>
+              <span>{{ lastFeedbackSummaryRun.cache_hit ? 'cache hit' : 'AI queued' }}</span>
+              <span v-if="lastFeedbackSummaryRun.input_record_ids.length">
+                {{ lastFeedbackSummaryRun.input_record_ids.length }} records
+              </span>
+              <span v-if="lastFeedbackSummaryRun.task_id">
+                task {{ shortId(lastFeedbackSummaryRun.task_id) }}
+              </span>
+            </div>
+          </div>
+
+          <section class="modal-section modal-section--first">
+            <div class="modal-section-header">
+              <h4>Active Lessons</h4>
+              <span>{{ feedbackLessonMatchSummary }}</span>
+            </div>
+            <div class="lessons-list">
+              <article
+                v-for="lesson in activeFeedbackLessons"
+                :key="lesson.id"
+                class="lesson-row"
+              >
+                <div class="lesson-row-main">
+                  <strong>{{ lessonTitle(lesson) }}</strong>
+                  <p>{{ lessonDescription(lesson) }}</p>
+                  <div class="lesson-tags">
+                    <span
+                      v-for="tag in lessonTags(lesson)"
+                      :key="`${lesson.id}-${tag}`"
+                    >
+                      {{ tag }}
+                    </span>
+                  </div>
+                </div>
+                <div class="lesson-row-actions">
+                  <span>{{ lesson.scope }}</span>
+                  <LoadingButton
+                    type="button"
+                    class="danger-button"
+                    :loading="isPending(lessonActionKey('delete', lesson.id))"
+                    loading-label="Deleting"
+                    @click="deleteLesson(lesson)"
+                  >
+                    <span class="btn-icon">×</span> Delete
+                  </LoadingButton>
+                </div>
+              </article>
+              <div
+                v-if="activeFeedbackLessons.length === 0"
+                class="empty-inline"
+              >
+                No lessons yet.
+              </div>
+            </div>
+          </section>
+
+          <form
+            class="modal-section lesson-create-form"
+            @submit.prevent="handleCreateLesson"
+          >
+            <div class="modal-section-header">
+              <h4>Add Lesson</h4>
+            </div>
             <div class="form-row">
               <div class="modal-field">
-                <label>Max iterations</label>
+                <label>Title</label>
                 <input
-                  v-model.number="taskForm.max_iterations"
-                  type="number"
-                  min="1"
-                  max="10"
+                  v-model="lessonForm.title"
+                  placeholder="Check workflow docs first"
                 >
               </div>
               <div class="modal-field">
-                <label>Strictness</label>
-                <select v-model="taskForm.evaluation_strictness">
-                  <option value="lenient">
-                    Lenient
+                <label>Tags</label>
+                <input
+                  v-model="lessonForm.tags"
+                  placeholder="workflow, review"
+                >
+              </div>
+            </div>
+            <div class="modal-field">
+              <label>Description</label>
+              <textarea
+                v-model="lessonForm.description"
+                placeholder="One sentence rule that future agents should reuse."
+              />
+            </div>
+            <div class="modal-actions">
+              <button
+                type="button"
+                class="tool-button"
+                @click="resetLessonForm"
+              >
+                <span class="btn-icon">×</span> Clear
+              </button>
+              <LoadingButton
+                type="submit"
+                class="primary-button"
+                :disabled="!lessonForm.title.trim() || !lessonForm.description.trim()"
+                :loading="isPending('feedback:create')"
+                loading-label="Adding lesson"
+              >
+                <span class="btn-icon">+</span> Add lesson
+              </LoadingButton>
+            </div>
+          </form>
+        </div>
+      </div>
+    </Transition>
+
+    <Transition name="modal-fade">
+      <div
+        v-if="showAgentOptionsModal"
+        class="workspace-modal-overlay"
+        @click.self="closeAgentOptionsModal"
+      >
+        <div class="workspace-modal agent-manager-modal">
+          <h3>Manage Agents</h3>
+          <section class="modal-section modal-section--first">
+            <div class="modal-section-header">
+              <h4>Workspace Agents</h4>
+              <div
+                class="agent-manager-view-switch"
+                aria-label="Workspace agents view"
+              >
+                <button
+                  type="button"
+                  :data-active="agentManagerView === 'agents'"
+                  @click="agentManagerView = 'agents'"
+                >
+                  <span>Agents</span>
+                  <strong>{{ workspaceAgents.length + (dispatcherAgent ? 1 : 0) + (residentAgent ? 1 : 0) }}</strong>
+                </button>
+                <button
+                  type="button"
+                  :data-active="agentManagerView === 'reviewers'"
+                  @click="agentManagerView = 'reviewers'"
+                >
+                  <span>Reviewers</span>
+                  <strong>{{ reviewerSessions.length }}</strong>
+                </button>
+              </div>
+            </div>
+            <div class="agent-list">
+              <article
+                v-for="agent in agentManagerSessions"
+                :key="agent.id"
+                :class="['agent-row', { 'dispatcher-row': agent.role === 'dispatcher' }]"
+              >
+                <div>
+                  <strong>{{ agent.title }}</strong>
+                  <span>{{ agentRoleLabel(agent) }} · {{ agent.agent_type }} · {{ agent.id }}</span>
+                  <span>{{ agent.target }} · {{ agent.workspace_path }}</span>
+                </div>
+                <div class="agent-row-meta">
+                  <span :class="['runtime-pill', `runtime-pill--${agent.runtime_status}`]">
+                    {{ agent.runtime_status }}
+                  </span>
+                  <span
+                    v-if="isResidentAgent(agent) && isResidentPaused"
+                    class="runtime-pill runtime-pill--paused"
+                  >paused</span>
+                  <span
+                    v-if="isResidentAgent(agent) && isResidentMaster"
+                    class="runtime-pill runtime-pill--paused"
+                  >autopilot</span>
+                  <span v-if="agent.ephemeral">temporary</span>
+                  <span>current {{ taskTitle(agent.current_task_id) }}</span>
+                  <span>queued {{ agent.queued_count }}</span>
+                </div>
+                <div class="agent-row-actions">
+                  <LoadingButton
+                    type="button"
+                    class="tool-button"
+                    :loading="isPending(sessionActionKey('open', agent.id))"
+                    loading-label="Opening agent"
+                    @click="openSession(agent)"
+                  >
+                    <span class="btn-icon">⧉</span> Open
+                  </LoadingButton>
+                  <LoadingButton
+                    v-if="canSwitchAgentEnv(agent)"
+                    type="button"
+                    class="tool-button"
+                    title="Switch Env / Model"
+                    :loading="isPending(sessionActionKey('switch-env', agent.id))"
+                    loading-label="Switching env"
+                    @click="openSwitchEnvModal(agent)"
+                  >
+                    <span class="btn-icon">⚙</span> Env
+                  </LoadingButton>
+                  <LoadingButton
+                    v-if="isResidentAgent(agent)"
+                    type="button"
+                    class="tool-button"
+                    :loading="isPending('workspace:resident-pause')"
+                    :loading-label="isResidentPaused ? 'Resuming agent' : 'Pausing agent'"
+                    @click="toggleResidentPaused"
+                  >
+                    <span class="btn-icon">{{ isResidentPaused ? '▶' : '⏸' }}</span>
+                    {{ isResidentPaused ? 'Resume' : 'Pause' }}
+                  </LoadingButton>
+                  <LoadingButton
+                    v-if="isResidentAgent(agent)"
+                    type="button"
+                    class="tool-button"
+                    :disabled="residentRunPending"
+                    :title="residentRunPending
+                      ? 'A run is already queued for the next monitor tick'
+                      : 'Run the resident now using its saved directive and periodic tasks'"
+                    :loading="isPending('resident:run')"
+                    loading-label="Queuing run"
+                    @click="handleRunResidentNow"
+                  >
+                    <span class="btn-icon">▶</span>
+                    {{ residentRunPending ? 'Run queued' : 'Run now' }}
+                  </LoadingButton>
+                  <LoadingButton
+                    v-if="agent.role !== 'dispatcher'"
+                    type="button"
+                    class="danger-button"
+                    :disabled="!canDeleteAgent(agent)"
+                    :title="agentDeleteTitle(agent)"
+                    :loading="isPending(agentActionKey('delete', agent.id))"
+                    loading-label="Deleting agent"
+                    @click="deleteAgent(agent)"
+                  >
+                    <span class="btn-icon">×</span> Delete
+                  </LoadingButton>
+                </div>
+              </article>
+              <div
+                v-if="agentManagerSessions.length === 0"
+                class="empty-inline"
+              >
+                {{ agentManagerEmptyText }}
+              </div>
+            </div>
+          </section>
+
+          <form
+            class="modal-section agent-create-form"
+            @submit.prevent="handleCreateAdvancedAgent"
+          >
+            <div class="modal-section-header">
+              <h4>Add Agent</h4>
+            </div>
+            <div class="modal-field">
+              <label>Title</label>
+              <input
+                v-model="agentOptionsForm.title"
+                placeholder="Workspace Agent"
+              >
+            </div>
+
+            <div class="modal-field-row">
+              <div class="modal-field">
+                <label>Role</label>
+                <select v-model="agentOptionsForm.role">
+                  <option value="orchestrator">
+                    Agent
                   </option>
-                  <option value="balanced">
-                    Balanced
-                  </option>
-                  <option value="strict">
-                    Strict
+                  <option value="reviewer">
+                    Reviewer
                   </option>
                 </select>
               </div>
             </div>
-            <div class="form-row">
-              <div class="modal-field">
-                <label class="checkbox-label">
-                  <input
-                    v-model="taskForm.allow_web_research"
-                    type="checkbox"
-                  >
-                  Web research
-                </label>
-              </div>
-              <div class="modal-field">
-                <label class="checkbox-label">
-                  <input
-                    v-model="taskForm.require_artifact_review"
-                    type="checkbox"
-                  >
-                  Artifact review
-                </label>
-              </div>
-            </div>
-          </div>
-          <div class="modal-field">
-            <label>Dispatch agent</label>
-            <select
-              v-model="taskForm.session_id"
-              :disabled="!activeWorkspaceId"
-            >
-              <option value="">
-                Auto
-              </option>
-              <option
-                v-for="agent in workspaceAgents"
-                :key="agent.id"
-                :value="agent.id"
-              >
-                {{ agent.title }}
-              </option>
-            </select>
-          </div>
-          <div class="modal-field">
-            <label class="checkbox-label">
-              <input
-                v-model="taskForm.clear_context"
-                type="checkbox"
-              >
-              Clear context
-            </label>
-          </div>
-          <div class="modal-field">
-            <label>Related task</label>
-            <select
-              v-model="taskForm.related_task_id"
-              :disabled="!activeWorkspaceId"
-            >
-              <option value="">
-                None
-              </option>
-              <option
-                v-for="task in tasks"
-                :key="task.id"
-                :value="task.id"
-              >
-                {{ task.title }}
-              </option>
-            </select>
-          </div>
-          <div class="modal-actions">
-            <button
-              type="button"
-              class="tool-button"
-              @click="closeTaskModal"
-            >
-              Cancel
-            </button>
-            <LoadingButton
-              type="submit"
-              class="primary-button"
-              :disabled="!activeWorkspaceId || isLoading || !taskForm.title.trim() || (!taskForm.prompt.trim() && taskForm.attachments.length === 0)"
-              :loading="isPending('task:create')"
-              loading-label="Adding task"
-            >
-              <span class="btn-icon">+</span> Add task
-            </LoadingButton>
-          </div>
-        </form>
-      </div>
-    </div>
 
-    <div
-      v-if="showEditTaskModal"
-      class="workspace-modal-overlay"
-      @click.self="closeEditTaskModal"
-    >
-      <div class="workspace-modal">
-        <h3>Edit Task</h3>
-        <form
-          @submit.prevent="handleUpdateTask"
-          @paste.prevent
-        >
-          <div class="modal-field">
-            <label>Title</label>
-            <input
-              v-model="editTaskForm.title"
-              autofocus
-            >
-          </div>
-          <div class="modal-field">
-            <label>Task description</label>
-            <textarea v-model="editTaskForm.prompt" />
-          </div>
-          <div class="modal-field">
-            <label>Dispatch agent</label>
-            <select v-model="editTaskForm.session_id">
-              <option value="">
-                Auto
-              </option>
-              <option
-                v-for="agent in workspaceAgents"
-                :key="agent.id"
-                :value="agent.id"
-              >
-                {{ agent.title }}
-              </option>
-            </select>
-          </div>
-          <div class="modal-field">
-            <label>Related task</label>
-            <select v-model="editTaskForm.related_task_id">
-              <option value="">
-                None
-              </option>
-              <option
-                v-for="task in tasks.filter(item => item.id !== editingTaskId)"
-                :key="task.id"
-                :value="task.id"
-              >
-                {{ task.title }}
-              </option>
-            </select>
-          </div>
-          <div class="modal-field">
-            <label class="checkbox-label">
-              <input
-                v-model="editTaskForm.clear_context"
-                type="checkbox"
-              >
-              Clear context
-            </label>
-          </div>
-          <div class="modal-actions">
-            <button
-              type="button"
-              class="tool-button"
-              @click="closeEditTaskModal"
-            >
-              Cancel
-            </button>
-            <LoadingButton
-              type="submit"
-              class="primary-button"
-              :disabled="!editingTaskId || isLoading || !editTaskForm.title.trim() || !editTaskForm.prompt.trim()"
-              :loading="isPending(taskActionKey('edit', editingTaskId))"
-              loading-label="Saving task"
-            >
-              <span class="btn-icon">✓</span> Save task
-            </LoadingButton>
-          </div>
-        </form>
-      </div>
-    </div>
-
-    <div
-      v-if="showLessonsModal"
-      class="workspace-modal-overlay"
-      @click.self="closeLessonsModal"
-    >
-      <div class="workspace-modal lessons-manager-modal">
-        <div class="modal-heading-row">
-          <div>
-            <h3>Workspace Lessons</h3>
-            <p>{{ activeFeedbackLessons.length }} active rules for this workspace</p>
-          </div>
-          <button
-            type="button"
-            class="icon-button"
-            aria-label="Close lessons"
-            @click="closeLessonsModal"
-          >
-            ×
-          </button>
-        </div>
-
-        <div class="lessons-toolbar">
-          <LoadingButton
-            type="button"
-            class="tool-button"
-            :disabled="!activeWorkspaceId"
-            :loading="isPending('feedback:summarize')"
-            loading-label="Checking"
-            @click="handleSummarizeLessons(false)"
-          >
-            <span class="btn-icon">💡</span> AI summarize
-          </LoadingButton>
-          <LoadingButton
-            type="button"
-            class="tool-button"
-            :disabled="!activeWorkspaceId"
-            :loading="isPending('feedback:summarize:force')"
-            loading-label="Queueing"
-            @click="handleSummarizeLessons(true)"
-          >
-            <span class="btn-icon">↻</span> Force AI run
-          </LoadingButton>
-          <LoadingButton
-            type="button"
-            class="tool-button"
-            :loading="isPending('feedback:refresh')"
-            loading-label="Refreshing"
-            @click="refreshFeedbackLessons"
-          >
-            <span class="btn-icon">↻</span> Refresh
-          </LoadingButton>
-        </div>
-
-        <div
-          v-if="lastFeedbackSummaryRun"
-          :class="['summary-run-status', `summary-run-status--${feedbackSummaryTone(lastFeedbackSummaryRun)}`]"
-        >
-          <strong>{{ feedbackSummaryTitle(lastFeedbackSummaryRun) }}</strong>
-          <p>{{ feedbackSummaryDescription(lastFeedbackSummaryRun) }}</p>
-          <div class="summary-run-meta">
-            <span>{{ lastFeedbackSummaryRun.mode }}</span>
-            <span>{{ lastFeedbackSummaryRun.cache_hit ? 'cache hit' : 'AI queued' }}</span>
-            <span v-if="lastFeedbackSummaryRun.input_record_ids.length">
-              {{ lastFeedbackSummaryRun.input_record_ids.length }} records
-            </span>
-            <span v-if="lastFeedbackSummaryRun.task_id">
-              task {{ shortId(lastFeedbackSummaryRun.task_id) }}
-            </span>
-          </div>
-        </div>
-
-        <section class="modal-section modal-section--first">
-          <div class="modal-section-header">
-            <h4>Active Lessons</h4>
-            <span>{{ feedbackLessonMatchSummary }}</span>
-          </div>
-          <div class="lessons-list">
-            <article
-              v-for="lesson in activeFeedbackLessons"
-              :key="lesson.id"
-              class="lesson-row"
-            >
-              <div class="lesson-row-main">
-                <strong>{{ lessonTitle(lesson) }}</strong>
-                <p>{{ lessonDescription(lesson) }}</p>
-                <div class="lesson-tags">
-                  <span
-                    v-for="tag in lessonTags(lesson)"
-                    :key="`${lesson.id}-${tag}`"
-                  >
-                    {{ tag }}
-                  </span>
-                </div>
-              </div>
-              <div class="lesson-row-actions">
-                <span>{{ lesson.scope }}</span>
-                <LoadingButton
-                  type="button"
-                  class="danger-button"
-                  :loading="isPending(lessonActionKey('delete', lesson.id))"
-                  loading-label="Deleting"
-                  @click="deleteLesson(lesson)"
-                >
-                  <span class="btn-icon">×</span> Delete
-                </LoadingButton>
-              </div>
-            </article>
-            <div
-              v-if="activeFeedbackLessons.length === 0"
-              class="empty-inline"
-            >
-              No lessons yet.
-            </div>
-          </div>
-        </section>
-
-        <form
-          class="modal-section lesson-create-form"
-          @submit.prevent="handleCreateLesson"
-        >
-          <div class="modal-section-header">
-            <h4>Add Lesson</h4>
-          </div>
-          <div class="form-row">
-            <div class="modal-field">
-              <label>Title</label>
-              <input
-                v-model="lessonForm.title"
-                placeholder="Check workflow docs first"
-              >
-            </div>
-            <div class="modal-field">
-              <label>Tags</label>
-              <input
-                v-model="lessonForm.tags"
-                placeholder="workflow, review"
-              >
-            </div>
-          </div>
-          <div class="modal-field">
-            <label>Description</label>
-            <textarea
-              v-model="lessonForm.description"
-              placeholder="One sentence rule that future agents should reuse."
+            <AgentConfigFields
+              v-model:agent-type="agentOptionsForm.agent_type"
+              v-model:solo-mode="agentOptionsForm.solo_mode"
+              v-model:env-preset="agentOptionsForm.env_preset"
+              v-model:env-text="agentOptionsForm.env_text"
+              variant="modal"
             />
-          </div>
-          <div class="modal-actions">
-            <button
-              type="button"
-              class="tool-button"
-              @click="resetLessonForm"
-            >
-              <span class="btn-icon">×</span> Clear
-            </button>
-            <LoadingButton
-              type="submit"
-              class="primary-button"
-              :disabled="!lessonForm.title.trim() || !lessonForm.description.trim()"
-              :loading="isPending('feedback:create')"
-              loading-label="Adding lesson"
-            >
-              <span class="btn-icon">+</span> Add lesson
-            </LoadingButton>
-          </div>
-        </form>
-      </div>
-    </div>
 
-    <div
-      v-if="showAgentOptionsModal"
-      class="workspace-modal-overlay"
-      @click.self="closeAgentOptionsModal"
-    >
-      <div class="workspace-modal agent-manager-modal">
-        <h3>Manage Agents</h3>
-        <section class="modal-section modal-section--first">
-          <div class="modal-section-header">
-            <h4>Workspace Agents</h4>
-            <div
-              class="agent-manager-view-switch"
-              aria-label="Workspace agents view"
-            >
-              <button
-                type="button"
-                :data-active="agentManagerView === 'agents'"
-                @click="agentManagerView = 'agents'"
-              >
-                <span>Agents</span>
-                <strong>{{ workspaceAgents.length + (dispatcherAgent ? 1 : 0) + (residentAgent ? 1 : 0) }}</strong>
-              </button>
-              <button
-                type="button"
-                :data-active="agentManagerView === 'reviewers'"
-                @click="agentManagerView = 'reviewers'"
-              >
-                <span>Reviewers</span>
-                <strong>{{ reviewerSessions.length }}</strong>
-              </button>
-            </div>
-          </div>
-          <div class="agent-list">
-            <article
-              v-for="agent in agentManagerSessions"
-              :key="agent.id"
-              :class="['agent-row', { 'dispatcher-row': agent.role === 'dispatcher' }]"
-            >
-              <div>
-                <strong>{{ agent.title }}</strong>
-                <span>{{ agentRoleLabel(agent) }} · {{ agent.agent_type }} · {{ agent.id }}</span>
-                <span>{{ agent.target }} · {{ agent.workspace_path }}</span>
-              </div>
-              <div class="agent-row-meta">
-                <span :class="['runtime-pill', `runtime-pill--${agent.runtime_status}`]">
-                  {{ agent.runtime_status }}
-                </span>
-                <span
-                  v-if="isResidentAgent(agent) && isResidentPaused"
-                  class="runtime-pill runtime-pill--paused"
-                >paused</span>
-                <span
-                  v-if="isResidentAgent(agent) && isResidentMaster"
-                  class="runtime-pill runtime-pill--paused"
-                >autopilot</span>
-                <span v-if="agent.ephemeral">temporary</span>
-                <span>current {{ taskTitle(agent.current_task_id) }}</span>
-                <span>queued {{ agent.queued_count }}</span>
-              </div>
-              <div class="agent-row-actions">
-                <LoadingButton
-                  type="button"
-                  class="tool-button"
-                  :loading="isPending(sessionActionKey('open', agent.id))"
-                  loading-label="Opening agent"
-                  @click="openSession(agent)"
-                >
-                  <span class="btn-icon">⧉</span> Open
-                </LoadingButton>
-                <LoadingButton
-                  v-if="canSwitchAgentEnv(agent)"
-                  type="button"
-                  class="tool-button"
-                  title="Switch Env / Model"
-                  :loading="isPending(sessionActionKey('switch-env', agent.id))"
-                  loading-label="Switching env"
-                  @click="openSwitchEnvModal(agent)"
-                >
-                  <span class="btn-icon">⚙</span> Env
-                </LoadingButton>
-                <LoadingButton
-                  v-if="isResidentAgent(agent)"
-                  type="button"
-                  class="tool-button"
-                  :loading="isPending('workspace:resident-pause')"
-                  :loading-label="isResidentPaused ? 'Resuming agent' : 'Pausing agent'"
-                  @click="toggleResidentPaused"
-                >
-                  <span class="btn-icon">{{ isResidentPaused ? '▶' : '⏸' }}</span>
-                  {{ isResidentPaused ? 'Resume' : 'Pause' }}
-                </LoadingButton>
-                <LoadingButton
-                  v-if="isResidentAgent(agent)"
-                  type="button"
-                  class="tool-button"
-                  :disabled="residentRunPending"
-                  :title="residentRunPending
-                    ? 'A run is already queued for the next monitor tick'
-                    : 'Run the resident now using its saved directive and periodic tasks'"
-                  :loading="isPending('resident:run')"
-                  loading-label="Queuing run"
-                  @click="handleRunResidentNow"
-                >
-                  <span class="btn-icon">▶</span>
-                  {{ residentRunPending ? 'Run queued' : 'Run now' }}
-                </LoadingButton>
-                <LoadingButton
-                  v-if="agent.role !== 'dispatcher'"
-                  type="button"
-                  class="danger-button"
-                  :disabled="!canDeleteAgent(agent)"
-                  :title="agentDeleteTitle(agent)"
-                  :loading="isPending(agentActionKey('delete', agent.id))"
-                  loading-label="Deleting agent"
-                  @click="deleteAgent(agent)"
-                >
-                  <span class="btn-icon">×</span> Delete
-                </LoadingButton>
-              </div>
-            </article>
-            <div
-              v-if="agentManagerSessions.length === 0"
-              class="empty-inline"
-            >
-              {{ agentManagerEmptyText }}
-            </div>
-          </div>
-        </section>
-
-        <form
-          class="modal-section agent-create-form"
-          @submit.prevent="handleCreateAdvancedAgent"
-        >
-          <div class="modal-section-header">
-            <h4>Add Agent</h4>
-          </div>
-          <div class="modal-field">
-            <label>Title</label>
-            <input
-              v-model="agentOptionsForm.title"
-              placeholder="Workspace Agent"
-            >
-          </div>
-
-          <div class="modal-field-row">
             <div class="modal-field">
-              <label>Role</label>
-              <select v-model="agentOptionsForm.role">
-                <option value="orchestrator">
-                  Agent
+              <label>Run On</label>
+              <div class="segmented-control">
+                <button
+                  type="button"
+                  :class="['segment-button', { active: agentOptionsForm.target === 'local' }]"
+                  @click="handleAgentTargetChange('local')"
+                >
+                  Local
+                </button>
+                <button
+                  type="button"
+                  :class="['segment-button', { active: agentOptionsForm.target === 'remote' }]"
+                  @click="handleAgentTargetChange('remote')"
+                >
+                  Remote
+                </button>
+              </div>
+            </div>
+
+            <div
+              v-if="agentOptionsForm.target === 'remote'"
+              class="modal-field"
+            >
+              <label>Remote Server</label>
+              <select
+                v-model="agentOptionsForm.remote_profile_id"
+                :disabled="remoteProfilesLoading"
+              >
+                <option value="">
+                  Select server
                 </option>
-                <option value="reviewer">
-                  Reviewer
+                <option
+                  v-for="profile in remoteProfiles"
+                  :key="profile.id"
+                  :value="profile.id"
+                >
+                  {{ profile.name }}
                 </option>
               </select>
+              <p
+                v-if="remoteProfiles.length === 0"
+                class="modal-hint"
+              >
+                Add profiles in ~/.claude_hub/remote_profiles.json or ~/.ssh/config
+              </p>
             </div>
-          </div>
 
-          <AgentConfigFields
-            v-model:agent-type="agentOptionsForm.agent_type"
-            v-model:solo-mode="agentOptionsForm.solo_mode"
-            v-model:env-preset="agentOptionsForm.env_preset"
-            v-model:env-text="agentOptionsForm.env_text"
-            variant="modal"
-          />
-
-          <div class="modal-field">
-            <label>Run On</label>
-            <div class="segmented-control">
-              <button
-                type="button"
-                :class="['segment-button', { active: agentOptionsForm.target === 'local' }]"
-                @click="handleAgentTargetChange('local')"
-              >
-                Local
-              </button>
-              <button
-                type="button"
-                :class="['segment-button', { active: agentOptionsForm.target === 'remote' }]"
-                @click="handleAgentTargetChange('remote')"
-              >
-                Remote
-              </button>
+            <div class="modal-field">
+              <label>Working Directory</label>
+              <div class="path-input-row">
+                <input
+                  v-model="agentOptionsForm.cwd"
+                  :placeholder="agentOptionsForm.target === 'remote' ? '~/workspace/project' : '/Users/me/workspace'"
+                >
+                <LoadingButton
+                  type="button"
+                  class="tool-button"
+                  :disabled="agentOptionsForm.target === 'remote' && !agentOptionsForm.remote_profile_id"
+                  :loading="isPending('agent-browser:open')"
+                  loading-label="Opening browser"
+                  @click="openAgentDirectoryBrowser"
+                >
+                  <span class="btn-icon">⋯</span> Browse
+                </LoadingButton>
+              </div>
             </div>
-          </div>
 
-          <div
-            v-if="agentOptionsForm.target === 'remote'"
-            class="modal-field"
-          >
-            <label>Remote Server</label>
-            <select
-              v-model="agentOptionsForm.remote_profile_id"
-              :disabled="remoteProfilesLoading"
+            <div
+              v-if="agentOptionsForm.target === 'remote'"
+              class="modal-field"
             >
-              <option value="">
-                Select server
-              </option>
-              <option
-                v-for="profile in remoteProfiles"
-                :key="profile.id"
-                :value="profile.id"
-              >
-                {{ profile.name }}
-              </option>
-            </select>
-            <p
-              v-if="remoteProfiles.length === 0"
-              class="modal-hint"
-            >
-              Add profiles in ~/.claude_hub/remote_profiles.json or ~/.ssh/config
-            </p>
-          </div>
+              <label class="checkbox-label">
+                <input
+                  v-model="agentOptionsForm.remote_reconnect"
+                  type="checkbox"
+                >
+                Auto reconnect
+              </label>
+            </div>
 
-          <div class="modal-field">
-            <label>Working Directory</label>
-            <div class="path-input-row">
-              <input
-                v-model="agentOptionsForm.cwd"
-                :placeholder="agentOptionsForm.target === 'remote' ? '~/workspace/project' : '/Users/me/workspace'"
-              >
-              <LoadingButton
+            <div class="modal-actions">
+              <button
                 type="button"
                 class="tool-button"
-                :disabled="agentOptionsForm.target === 'remote' && !agentOptionsForm.remote_profile_id"
-                :loading="isPending('agent-browser:open')"
-                loading-label="Opening browser"
-                @click="openAgentDirectoryBrowser"
+                @click="closeAgentOptionsModal"
               >
-                <span class="btn-icon">⋯</span> Browse
+                Cancel
+              </button>
+              <LoadingButton
+                type="submit"
+                class="primary-button"
+                :disabled="isAgentOptionsCreateDisabled"
+                :loading="isPending('agent:create')"
+                loading-label="Creating agent"
+              >
+                <span class="btn-icon">+</span> Create agent
               </LoadingButton>
             </div>
-          </div>
+          </form>
+        </div>
+      </div>
+    </Transition>
 
-          <div
-            v-if="agentOptionsForm.target === 'remote'"
-            class="modal-field"
-          >
-            <label class="checkbox-label">
-              <input
-                v-model="agentOptionsForm.remote_reconnect"
-                type="checkbox"
-              >
-              Auto reconnect
-            </label>
+    <Transition name="modal-fade">
+      <div
+        v-if="showAgentFileBrowser"
+        class="workspace-modal-overlay file-browser-overlay"
+        @click.self="showAgentFileBrowser = false"
+      >
+        <div class="workspace-modal file-browser-modal">
+          <div class="file-browser-header">
+            <h3>{{ browserPlacement.target === 'remote' ? 'Select Remote Directory' : 'Select Working Directory' }}</h3>
+            <button
+              type="button"
+              class="tool-button"
+              @click="showAgentFileBrowser = false"
+            >
+              <span class="btn-icon">×</span> Close
+            </button>
           </div>
-
+          <div class="file-browser-path">
+            <LoadingButton
+              type="button"
+              class="path-nav-button"
+              :loading="isPending('agent-browser:home')"
+              loading-label="Loading home"
+              @click="navigateAgentBrowserHome"
+            >
+              Home
+            </LoadingButton>
+            <LoadingButton
+              v-if="agentBrowserParentPath"
+              type="button"
+              class="path-nav-button"
+              :loading="isPending('agent-browser:up')"
+              loading-label="Loading parent"
+              @click="navigateAgentBrowserParent"
+            >
+              Up
+            </LoadingButton>
+            <input
+              v-model="agentBrowserPathInput"
+              @keyup.enter="loadAgentDirectory(agentBrowserPathInput)"
+            >
+            <LoadingButton
+              type="button"
+              class="path-nav-button"
+              :loading="isPending('agent-browser:refresh')"
+              loading-label="Refreshing directory"
+              @click="refreshAgentDirectory"
+            >
+              <span class="btn-icon">↻</span> Refresh
+            </LoadingButton>
+          </div>
+          <div class="file-browser-list">
+            <div
+              v-if="agentBrowserParentPath"
+              class="file-item is-dir"
+              @click="loadAgentDirectory(agentBrowserParentPath)"
+            >
+              <span>Dir</span>
+              <strong>..</strong>
+            </div>
+            <div
+              v-for="item in agentBrowserItems"
+              :key="item.path"
+              :class="['file-item', { 'is-dir': item.is_dir }]"
+              @click="handleAgentFileItemClick(item)"
+            >
+              <span>{{ item.is_dir ? 'Dir' : 'File' }}</span>
+              <strong>{{ item.name }}</strong>
+            </div>
+            <div
+              v-if="agentBrowserLoading"
+              class="file-status"
+            >
+              Loading...
+            </div>
+            <div
+              v-if="agentBrowserError"
+              class="file-status file-error"
+            >
+              {{ agentBrowserError }}
+            </div>
+          </div>
           <div class="modal-actions">
             <button
               type="button"
               class="tool-button"
-              @click="closeAgentOptionsModal"
+              @click="showAgentFileBrowser = false"
             >
               Cancel
             </button>
-            <LoadingButton
-              type="submit"
+            <button
+              type="button"
               class="primary-button"
-              :disabled="isAgentOptionsCreateDisabled"
-              :loading="isPending('agent:create')"
-              loading-label="Creating agent"
+              @click="selectAgentCurrentDirectory"
             >
-              <span class="btn-icon">+</span> Create agent
-            </LoadingButton>
+              <span class="btn-icon">✓</span> Select directory
+            </button>
           </div>
-        </form>
-      </div>
-    </div>
-
-    <div
-      v-if="showAgentFileBrowser"
-      class="workspace-modal-overlay file-browser-overlay"
-      @click.self="showAgentFileBrowser = false"
-    >
-      <div class="workspace-modal file-browser-modal">
-        <div class="file-browser-header">
-          <h3>{{ browserPlacement.target === 'remote' ? 'Select Remote Directory' : 'Select Working Directory' }}</h3>
-          <button
-            type="button"
-            class="tool-button"
-            @click="showAgentFileBrowser = false"
-          >
-            <span class="btn-icon">×</span> Close
-          </button>
-        </div>
-        <div class="file-browser-path">
-          <LoadingButton
-            type="button"
-            class="path-nav-button"
-            :loading="isPending('agent-browser:home')"
-            loading-label="Loading home"
-            @click="navigateAgentBrowserHome"
-          >
-            Home
-          </LoadingButton>
-          <LoadingButton
-            v-if="agentBrowserParentPath"
-            type="button"
-            class="path-nav-button"
-            :loading="isPending('agent-browser:up')"
-            loading-label="Loading parent"
-            @click="navigateAgentBrowserParent"
-          >
-            Up
-          </LoadingButton>
-          <input
-            v-model="agentBrowserPathInput"
-            @keyup.enter="loadAgentDirectory(agentBrowserPathInput)"
-          >
-          <LoadingButton
-            type="button"
-            class="path-nav-button"
-            :loading="isPending('agent-browser:refresh')"
-            loading-label="Refreshing directory"
-            @click="refreshAgentDirectory"
-          >
-            <span class="btn-icon">↻</span> Refresh
-          </LoadingButton>
-        </div>
-        <div class="file-browser-list">
-          <div
-            v-if="agentBrowserParentPath"
-            class="file-item is-dir"
-            @click="loadAgentDirectory(agentBrowserParentPath)"
-          >
-            <span>Dir</span>
-            <strong>..</strong>
-          </div>
-          <div
-            v-for="item in agentBrowserItems"
-            :key="item.path"
-            :class="['file-item', { 'is-dir': item.is_dir }]"
-            @click="handleAgentFileItemClick(item)"
-          >
-            <span>{{ item.is_dir ? 'Dir' : 'File' }}</span>
-            <strong>{{ item.name }}</strong>
-          </div>
-          <div
-            v-if="agentBrowserLoading"
-            class="file-status"
-          >
-            Loading...
-          </div>
-          <div
-            v-if="agentBrowserError"
-            class="file-status file-error"
-          >
-            {{ agentBrowserError }}
-          </div>
-        </div>
-        <div class="modal-actions">
-          <button
-            type="button"
-            class="tool-button"
-            @click="showAgentFileBrowser = false"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            class="primary-button"
-            @click="selectAgentCurrentDirectory"
-          >
-            <span class="btn-icon">✓</span> Select directory
-          </button>
         </div>
       </div>
-    </div>
+    </Transition>
   </section>
 
   <!-- Switch Env Preset Manager (for the Switch Env modal) -->
@@ -2948,111 +2968,113 @@
   />
 
   <!-- Switch Env Modal (for hot-swapping env/solo on running Claude agents) -->
-  <div
-    v-if="showSwitchEnvModal"
-    class="workspace-modal-overlay"
-    @click.self="closeSwitchEnvModal"
-  >
-    <div class="workspace-modal switch-env-modal">
-      <div class="switch-env-header">
-        <div
-          class="switch-env-icon"
-          aria-hidden="true"
-        >
-          ⚙
-        </div>
-        <div class="switch-env-title-block">
-          <h3>Switch Environment</h3>
-          <p class="switch-env-subtitle">
-            {{ switchEnvAgent?.title }}
-          </p>
-        </div>
-      </div>
-      <p class="switch-env-callout">
-        <span
-          class="switch-env-callout-icon"
-          aria-hidden="true"
-        >↻</span>
-        <span>
-          The agent will restart and automatically resume its conversation.
-          In-flight generation will be interrupted.
-        </span>
-      </p>
-      <form @submit.prevent="handleSwitchEnv">
-        <div class="modal-field env-editor">
-          <label>Environment Preset</label>
-          <div class="env-preset-row">
-            <select
-              v-model="switchEnvForm.env_preset"
-              @change="applySwitchEnvPreset(switchEnvForm.env_preset)"
-            >
-              <option
-                v-for="preset in envPresets"
-                :key="preset.id"
-                :value="preset.id"
-              >
-                {{ preset.name }}
-              </option>
-              <option value="custom">
-                Custom (current values)
-              </option>
-            </select>
-            <button
-              type="button"
-              class="tool-button env-manage-button"
-              @click="openSwitchEnvPresetManager"
-            >
-              Manage
-            </button>
+  <Transition name="modal-fade">
+    <div
+      v-if="showSwitchEnvModal"
+      class="workspace-modal-overlay"
+      @click.self="closeSwitchEnvModal"
+    >
+      <div class="workspace-modal switch-env-modal">
+        <div class="switch-env-header">
+          <div
+            class="switch-env-icon"
+            aria-hidden="true"
+          >
+            ⚙
+          </div>
+          <div class="switch-env-title-block">
+            <h3>Switch Environment</h3>
+            <p class="switch-env-subtitle">
+              {{ switchEnvAgent?.title }}
+            </p>
           </div>
         </div>
-        <div class="modal-field">
-          <label for="wsSwitchEnvText">Environment Variables <span class="field-hint-inline">(KEY=VALUE, one per line)</span></label>
-          <textarea
-            id="wsSwitchEnvText"
-            v-model="switchEnvForm.env_text"
-            class="env-textarea"
-            rows="6"
-            placeholder="ANTHROPIC_MODEL=claude-sonnet-4-5&#10;ANTHROPIC_BASE_URL=https://..."
-          />
-          <p class="modal-hint">
-            These fully replace the agent's current environment. Include
-            <code>ANTHROPIC_MODEL</code> to switch models.
-          </p>
-        </div>
-        <div class="modal-field">
-          <label class="checkbox-label">
-            <input
-              v-model="switchEnvForm.solo_mode"
-              type="checkbox"
+        <p class="switch-env-callout">
+          <span
+            class="switch-env-callout-icon"
+            aria-hidden="true"
+          >↻</span>
+          <span>
+            The agent will restart and automatically resume its conversation.
+            In-flight generation will be interrupted.
+          </span>
+        </p>
+        <form @submit.prevent="handleSwitchEnv">
+          <div class="modal-field env-editor">
+            <label>Environment Preset</label>
+            <div class="env-preset-row">
+              <select
+                v-model="switchEnvForm.env_preset"
+                @change="applySwitchEnvPreset(switchEnvForm.env_preset)"
+              >
+                <option
+                  v-for="preset in envPresets"
+                  :key="preset.id"
+                  :value="preset.id"
+                >
+                  {{ preset.name }}
+                </option>
+                <option value="custom">
+                  Custom (current values)
+                </option>
+              </select>
+              <button
+                type="button"
+                class="tool-button env-manage-button"
+                @click="openSwitchEnvPresetManager"
+              >
+                Manage
+              </button>
+            </div>
+          </div>
+          <div class="modal-field">
+            <label for="wsSwitchEnvText">Environment Variables <span class="field-hint-inline">(KEY=VALUE, one per line)</span></label>
+            <textarea
+              id="wsSwitchEnvText"
+              v-model="switchEnvForm.env_text"
+              class="env-textarea"
+              rows="6"
+              placeholder="ANTHROPIC_MODEL=claude-sonnet-4-5&#10;ANTHROPIC_BASE_URL=https://..."
+            />
+            <p class="modal-hint">
+              These fully replace the agent's current environment. Include
+              <code>ANTHROPIC_MODEL</code> to switch models.
+            </p>
+          </div>
+          <div class="modal-field">
+            <label class="checkbox-label">
+              <input
+                v-model="switchEnvForm.solo_mode"
+                type="checkbox"
+              >
+              <span>Solo Mode</span>
+            </label>
+            <p class="modal-hint">
+              Relaunch with <code>IS_SANDBOX=1</code> and
+              <code>--dangerously-skip-permissions</code>.
+            </p>
+          </div>
+          <div class="modal-actions">
+            <button
+              type="button"
+              class="tool-button"
+              @click="closeSwitchEnvModal"
             >
-            <span>Solo Mode</span>
-          </label>
-          <p class="modal-hint">
-            Relaunch with <code>IS_SANDBOX=1</code> and
-            <code>--dangerously-skip-permissions</code>.
-          </p>
-        </div>
-        <div class="modal-actions">
-          <button
-            type="button"
-            class="tool-button"
-            @click="closeSwitchEnvModal"
-          >
-            Cancel
-          </button>
-          <LoadingButton
-            type="submit"
-            class="primary-button switch-env-submit"
-            :loading="switchEnvAgent ? isPending(sessionActionKey('switch-env', switchEnvAgent.id)) : false"
-            loading-label="Restarting…"
-          >
-            <span class="btn-icon">↻</span> Restart Agent
-          </LoadingButton>
-        </div>
-      </form>
+              Cancel
+            </button>
+            <LoadingButton
+              type="submit"
+              class="primary-button switch-env-submit"
+              :loading="switchEnvAgent ? isPending(sessionActionKey('switch-env', switchEnvAgent.id)) : false"
+              loading-label="Restarting…"
+            >
+              <span class="btn-icon">↻</span> Restart Agent
+            </LoadingButton>
+          </div>
+        </form>
+      </div>
     </div>
-  </div>
+  </Transition>
 
   <!-- Toast / notification stack for workspace mode -->
   <div
@@ -11060,5 +11082,46 @@ onUnmounted(() => {
     left: 8px;
     max-width: none;
   }
+}
+
+/* Modal enter/leave transitions — driven by existing motion tokens.
+   enter: --ch-motion-drawer (180ms cubic-bezier(0.2,0,0,1));
+   leave: --ch-motion-fast (120ms ease).
+   Transition classes attach to the overlay root (workspace-modal-overlay /
+   task-detail-overlay / image-lightbox-overlay) which fades opacity. Inner
+   dialogs (.workspace-modal, .task-detail-panel) and the image-lightbox image
+   get a subtle rise-in scale/translate.
+   Reduced-motion users are covered by the RM-01 universal net in App.vue. */
+.modal-fade-enter-active {
+  transition: opacity var(--ch-motion-drawer);
+}
+.modal-fade-enter-active .workspace-modal,
+.modal-fade-enter-active .task-detail-panel,
+.modal-fade-enter-active .image-lightbox-img {
+  transition: opacity var(--ch-motion-drawer), transform var(--ch-motion-drawer);
+}
+.modal-fade-leave-active {
+  transition: opacity var(--ch-motion-fast);
+}
+.modal-fade-leave-active .workspace-modal,
+.modal-fade-leave-active .task-detail-panel,
+.modal-fade-leave-active .image-lightbox-img {
+  transition: opacity var(--ch-motion-fast), transform var(--ch-motion-fast);
+}
+.modal-fade-enter-from,
+.modal-fade-leave-to {
+  opacity: 0;
+}
+.modal-fade-enter-from .workspace-modal,
+.modal-fade-enter-from .task-detail-panel,
+.modal-fade-enter-from .image-lightbox-img {
+  opacity: 0;
+  transform: translateY(4px) scale(0.98);
+}
+.modal-fade-leave-to .workspace-modal,
+.modal-fade-leave-to .task-detail-panel,
+.modal-fade-leave-to .image-lightbox-img {
+  opacity: 0;
+  transform: translateY(2px) scale(0.98);
 }
 </style>
