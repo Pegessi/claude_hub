@@ -6646,8 +6646,13 @@ onUnmounted(() => {
 }
 
 .agent-status-refresh {
-  height: 28px;
   width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-control);
@@ -6690,10 +6695,11 @@ onUnmounted(() => {
 
 .agent-status-card-main {
   min-width: 0;
+  flex: 1 0 auto; /* fill vertical space so .agent-status-actions pins to a uniform bottom line across all cards */
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
+  align-items: center; /* avatar + name row + status pill stay vertically centered inside the flex-grown main area for visual balance on short cards */
+  gap: var(--ch-space-3);
   border: 0;
   background: transparent;
   color: inherit;
@@ -6974,6 +6980,7 @@ onUnmounted(() => {
   justify-content: flex-end;
   padding-left: 22px;
   align-items: center;
+  margin-top: auto; /* pin to card bottom for equal-height alignment */
 }
 
 .agent-status-actions-sep,
@@ -6991,19 +6998,21 @@ onUnmounted(() => {
 .agent-status-delete {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  justify-content: center;
+  gap: var(--ch-space-1);
+  height: 26px;
+  padding: 0 var(--ch-space-2);
+  border-radius: var(--ch-radius-sm);
+  font-size: var(--ch-font-sm);
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color var(--ch-motion-fast), background var(--ch-motion-fast), color var(--ch-motion-fast), transform var(--ch-motion-fast);
 }
 
 .agent-status-pause {
-  height: 26px;
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
-  cursor: pointer;
-  font-size: 12px;
-  padding: 0 9px;
-  transition: border-color var(--ch-motion-fast), background var(--ch-motion-fast), transform var(--ch-motion-fast);
 }
 
 .agent-status-pause:hover {
@@ -7015,15 +7024,9 @@ onUnmounted(() => {
 }
 
 .agent-status-run-now {
-  height: 26px;
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
-  cursor: pointer;
-  font-size: 12px;
-  padding: 0 9px;
-  transition: border-color var(--ch-motion-fast), color var(--ch-motion-fast), background var(--ch-motion-fast), transform var(--ch-motion-fast);
 }
 
 .agent-status-run-now:hover:not(:disabled) {
@@ -7061,15 +7064,9 @@ onUnmounted(() => {
 }
 
 .agent-status-delete {
-  height: 26px;
   border: 1px solid var(--ch-color-danger-border);
-  border-radius: var(--ch-radius-sm);
   background: var(--ch-color-danger-bg);
   color: var(--ch-color-danger-text);
-  cursor: pointer;
-  font-size: 12px;
-  padding: 0 9px;
-  transition: border-color var(--ch-motion-fast), background var(--ch-motion-fast), color var(--ch-motion-fast), transform var(--ch-motion-fast);
 }
 
 .agent-status-delete:hover:not(:disabled) {
@@ -7082,19 +7079,9 @@ onUnmounted(() => {
 }
 
 .agent-status-switch-env {
-  height: 26px;
   border: 1px solid var(--ch-color-border);
-  border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-raised);
   color: var(--ch-color-text-muted);
-  cursor: pointer;
-  font-size: 12px;
-  padding: 0 9px;
-  transition:
-    color var(--ch-motion-fast),
-    border-color var(--ch-motion-fast),
-    background var(--ch-motion-fast),
-    transform var(--ch-motion-fast);
 }
 
 .agent-status-switch-env:hover {
@@ -8241,18 +8228,29 @@ onUnmounted(() => {
 }
 
 .btn-icon {
+  /* Authoritative 14x14 glyph box used across the board — matches the
+   * AgentStatusFloatingPanel panel-refresh-icon convention so every icon
+   * (Env ⚙, Pause ⏸, Run ▶, Delete ×, Refresh ↻, …) renders at one size,
+   * perfectly centered, regardless of each glyph's intrinsic advance width
+   * or emoji-vs-text presentation default. */
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 14px;
-  height: 14px;
-  font-size: 12px;
+  font-size: var(--ch-font-sm);
   line-height: 1;
+  text-align: center;
+  overflow: hidden;
   opacity: 0.85;
-  flex-shrink: 0;
   font-family: "Apple Symbols", "Segoe UI Symbol", "Noto Sans Symbols",
     "Symbola", -apple-system, BlinkMacSystemFont, sans-serif;
-  vertical-align: -1px;
+  /* Force text (outline) presentation for characters that default to emoji
+   * (⚙ U+2699, ▶ U+25B6, ⏸ U+23F8) so they match the text-rendered glyphs
+   * (× U+00D7, ↻ U+21BB) in weight and size. */
+  font-variant-emoji: text;
+  -webkit-text-fill-color: currentColor;
 }
 
 .task-actions button:active,
