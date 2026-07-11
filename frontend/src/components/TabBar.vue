@@ -1505,7 +1505,7 @@ async function handleCreateTab() {
 }
 
 .mobile-app-menu-item--mode strong {
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
   font-size: var(--ch-font-xs);
@@ -1679,7 +1679,7 @@ async function handleCreateTab() {
   font-size: var(--ch-font-xs);
   font-weight: var(--ch-weight-medium);
   padding: 1px var(--ch-space-1);
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   line-height: 1;
   min-width: var(--ch-space-4);
   text-align: center;
@@ -2374,10 +2374,6 @@ async function handleCreateTab() {
   justify-content: center;
   gap: var(--ch-space-2);
   transition: background-color var(--ch-motion-standard), transform 80ms ease, opacity var(--ch-motion-standard);
-}
-
-.btn:hover:not(:disabled) {
-  transform: translateY(-0.5px);
 }
 
 .btn:active:not(:disabled) {

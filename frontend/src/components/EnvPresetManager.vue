@@ -547,7 +547,7 @@ watch(
   border-radius: var(--ch-radius-sm);
   font-size: var(--ch-font-md);
   cursor: pointer;
-  transition: background-color 0.2s;
+  transition: background-color var(--ch-motion-fast);
 }
 
 .btn:disabled {

@@ -466,7 +466,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 4px 12px var(--ch-shadow-color-soft);
+  box-shadow: var(--ch-shadow-soft);
   transition: background-color var(--ch-motion-fast), transform var(--ch-motion-fast), box-shadow var(--ch-motion-fast);
 }
 
@@ -476,8 +476,7 @@ onUnmounted(() => {
 
 .toggle-btn:active,
 .toggle-btn.pressed {
-  transform: scale(0.88);
-  box-shadow: 0 2px 6px var(--ch-shadow-color-soft);
+  transform: scale(0.96);
   background-color: var(--ch-color-border-strong);
 }
 

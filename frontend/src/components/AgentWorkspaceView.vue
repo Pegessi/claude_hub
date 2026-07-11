@@ -6432,7 +6432,7 @@ onUnmounted(() => {
 }
 
 .workspace-mobile-menu-item--mode strong {
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
   font-size: var(--ch-font-xs);
@@ -6454,7 +6454,7 @@ onUnmounted(() => {
 }
 
 .workspace-mobile-menu-item--theme strong {
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
   font-size: var(--ch-font-xs);
@@ -6495,7 +6495,7 @@ onUnmounted(() => {
   gap: var(--ch-space-1);
   height: 22px;
   padding: 0 var(--ch-space-2);
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-chip-bg-muted);
   border: 1px solid transparent;
   font-size: var(--ch-font-xs);
@@ -6521,7 +6521,7 @@ onUnmounted(() => {
 .summary-chip-button {
   height: 22px;
   border: 1px solid var(--ch-color-border-muted);
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
   cursor: pointer;
@@ -6551,7 +6551,7 @@ onUnmounted(() => {
   align-items: center;
   gap: var(--ch-space-1);
   border: 1px solid var(--ch-color-border-muted);
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-chip-bg-muted);
   color: var(--ch-color-text-muted);
   font-size: var(--ch-font-xs);
@@ -6626,7 +6626,7 @@ onUnmounted(() => {
 
 .agent-status-view-switch strong {
   min-width: 20px;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-chip-bg);
   color: currentColor;
   font-size: var(--ch-font-xs);
@@ -6739,7 +6739,7 @@ onUnmounted(() => {
   bottom: -2px;
   width: 10px;
   height: 10px;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: currentColor;
   box-shadow: 0 0 0 2px var(--ch-color-surface);
 }
@@ -6747,7 +6747,7 @@ onUnmounted(() => {
 .agent-status-dot {
   width: 8px;
   height: 8px;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: currentColor;
 }
 
@@ -6784,7 +6784,7 @@ onUnmounted(() => {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   padding: 2px 7px;
   font-size: var(--ch-font-xs);
   font-weight: var(--ch-weight-medium);
@@ -6831,7 +6831,7 @@ onUnmounted(() => {
 
 .agent-status-meta span {
   max-width: 100%;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-chip-bg);
   color: var(--ch-color-text);
   font-size: var(--ch-font-xs);
@@ -6876,7 +6876,7 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   max-width: 100%;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-chip-bg);
   color: var(--ch-color-text-muted);
   font-size: var(--ch-font-xs);
@@ -6914,7 +6914,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   gap: 5px;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-chip-bg);
   color: currentColor;
   font-size: var(--ch-font-xs);
@@ -6928,7 +6928,7 @@ onUnmounted(() => {
   flex: 0 0 auto;
   border: 2px solid currentColor;
   border-right-color: transparent;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   animation: agent-status-spin 700ms linear infinite;
 }
 
@@ -7045,7 +7045,7 @@ onUnmounted(() => {
 
 .agent-status-paused-badge {
   flex: 0 0 auto;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   padding: 1px 7px;
   background: var(--ch-color-surface-sunken);
   color: var(--ch-color-text-muted);
@@ -7054,7 +7054,7 @@ onUnmounted(() => {
 
 .agent-status-master-badge {
   flex: 0 0 auto;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   padding: 1px 8px;
   border: 1px solid rgba(167, 139, 250, 0.45);
   background: rgba(139, 92, 246, 0.16);
@@ -7071,7 +7071,7 @@ onUnmounted(() => {
 
 .agent-status-delete:hover:not(:disabled) {
   border-color: var(--ch-color-danger-hover);
-  color: #fff;
+  color: var(--ch-color-text-inverse);
 }
 
 .agent-status-delete:active {
@@ -7164,7 +7164,7 @@ onUnmounted(() => {
   pointer-events: none;
   border: 2px solid var(--ch-color-text);
   border-right-color: transparent;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   animation: workspace-select-spin 700ms linear infinite;
 }
 
@@ -7340,7 +7340,7 @@ onUnmounted(() => {
 
 .agent-manager-view-switch strong {
   min-width: 20px;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-chip-bg);
   color: currentColor;
   font-size: var(--ch-font-xs);
@@ -7376,7 +7376,7 @@ onUnmounted(() => {
 }
 
 .runtime-pill {
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   padding: 3px 7px;
   background: var(--ch-color-border-strong);
   color: var(--ch-color-text);
@@ -7475,7 +7475,7 @@ onUnmounted(() => {
 
 .board-skeleton-line {
   height: 10px;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: linear-gradient(
     90deg,
     var(--ch-color-border-muted) 25%,
@@ -7584,7 +7584,7 @@ onUnmounted(() => {
   height: 20px;
   padding: 0 var(--ch-space-2);
   border: 1px solid var(--ch-color-border-muted);
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-chip-bg-muted);
   color: var(--ch-color-text);
   font-size: var(--ch-font-xs);
@@ -7797,7 +7797,7 @@ onUnmounted(() => {
 
 .agent-badge,
 .session-meta span {
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-chip-bg);
   color: var(--ch-color-text-muted);
   font-size: var(--ch-font-xs);
@@ -7854,7 +7854,7 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   padding: 2px 7px;
   font-size: var(--ch-font-xs);
   font-weight: var(--ch-weight-semibold);
@@ -7887,7 +7887,7 @@ onUnmounted(() => {
   position: relative;
   height: 3px;
   margin: 8px 0 0;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: rgba(20, 184, 166, 0.16);
   overflow: hidden;
 }
@@ -7922,14 +7922,14 @@ onUnmounted(() => {
   content: '';
   width: 5px;
   height: 5px;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: currentColor;
 }
 
 .review-badge-dot {
   width: 6px;
   height: 6px;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: currentColor;
   flex: 0 0 auto;
 }
@@ -7955,7 +7955,7 @@ onUnmounted(() => {
 .status-dot {
   width: 7px;
   height: 7px;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-text-subtle);
 }
 
@@ -8350,7 +8350,7 @@ onUnmounted(() => {
 }
 
 .detail-section-title--with-count > span:last-child {
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-surface-control-active);
   color: var(--ch-color-text);
   font-size: var(--ch-font-xs);
@@ -8360,7 +8360,7 @@ onUnmounted(() => {
 .lang-toggle {
   display: inline-flex;
   border: 1px solid var(--ch-color-border-muted);
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   overflow: hidden;
   text-transform: none;
 }
@@ -8575,7 +8575,7 @@ onUnmounted(() => {
 }
 
 .feedback-meta-chip {
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-accent-soft);
   color: var(--ch-color-accent);
   font-size: var(--ch-font-xs);
@@ -8686,7 +8686,6 @@ onUnmounted(() => {
 
 .attachment-thumb--clickable:hover {
   border-color: var(--ch-color-accent);
-  transform: scale(1.04);
 }
 
 .attachment-thumb--clickable:focus-visible {
@@ -8785,7 +8784,7 @@ onUnmounted(() => {
 }
 
 .goal-packet-meta span {
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text-muted);
   font-size: var(--ch-font-xs);
@@ -8889,7 +8888,7 @@ onUnmounted(() => {
   width: 7px;
   height: 7px;
   border: 2px solid var(--ch-color-surface);
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-accent);
 }
 
@@ -8949,7 +8948,7 @@ onUnmounted(() => {
   width: 9px;
   height: 9px;
   border: 2px solid var(--ch-color-surface);
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-text-muted);
 }
 
@@ -9049,7 +9048,7 @@ onUnmounted(() => {
   font-size: var(--ch-font-xs);
   color: var(--ch-color-text-muted);
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-chip-bg);
 }
 
@@ -9072,7 +9071,7 @@ onUnmounted(() => {
 }
 
 .report-delta {
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text-muted);
   font-size: var(--ch-font-xs);
@@ -9094,7 +9093,7 @@ onUnmounted(() => {
 
 .report-file-chip {
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-surface-control-active);
   color: var(--ch-color-text);
   font-size: var(--ch-font-xs);
@@ -9192,7 +9191,7 @@ onUnmounted(() => {
 
 .artifact-preview-button {
   border: 1px solid var(--ch-color-border);
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
   cursor: pointer;
@@ -9570,7 +9569,7 @@ onUnmounted(() => {
 }
 
 .summary-run-meta span {
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-chip-bg-muted);
   color: var(--ch-color-text-muted);
   font-size: var(--ch-font-xs);
@@ -9629,7 +9628,7 @@ onUnmounted(() => {
 
 .lesson-tags span,
 .lesson-row-actions > span {
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   background: var(--ch-color-chip-bg-muted);
   color: var(--ch-color-text-muted);
   font-size: var(--ch-font-xs);
@@ -9721,7 +9720,7 @@ onUnmounted(() => {
 
 .modal-label-badge {
   margin-left: 8px;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   padding: 1px 8px;
   background: var(--ch-color-surface-sunken);
   color: var(--ch-color-text-muted);
@@ -9971,7 +9970,7 @@ onUnmounted(() => {
 .resident-summary-status {
   font-size: 12px;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   border: 1px solid var(--ch-color-border);
   white-space: nowrap;
 }
@@ -10005,7 +10004,7 @@ onUnmounted(() => {
 .resident-queued-badge {
   display: inline-flex;
   align-items: center;
-  border-radius: 999px;
+  border-radius: var(--ch-radius-pill);
   padding: 2px 8px;
   background: color-mix(in srgb, var(--ch-color-accent-bg) 18%, transparent);
   color: var(--ch-color-accent-fg);
