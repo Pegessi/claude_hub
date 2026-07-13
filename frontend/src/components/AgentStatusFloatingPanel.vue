@@ -595,16 +595,15 @@ onUnmounted(() => {
   position: absolute;
   top: calc(100% + var(--ch-space-2));
   right: 0;
-  z-index: 120;
+  z-index: 1200;
   width: min(360px, calc(100vw - 16px));
   max-width: calc(100vw - 16px);
   max-height: min(60vh, 520px, calc(100vh - 72px));
   overflow: hidden;
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: var(--ch-radius-lg);
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-glass);
   box-shadow: var(--ch-shadow-popover);
-  backdrop-filter: blur(14px);
   display: flex;
   flex-direction: column;
   /* One-shot entrance only — no looping/pulsing/blinking. */
@@ -679,7 +678,7 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 14px;
+  font-size: var(--ch-font-icon-sm);
   line-height: 1;
   flex-shrink: 0;
 }

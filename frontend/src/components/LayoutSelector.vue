@@ -184,7 +184,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: var(--ch-space-2);
-  padding: 7px 10px; /* off-scale: between space-1 (4px) and space-2 (8px), rounding shifts layout */
+  padding: var(--ch-space-2) var(--ch-space-3);
   background-color: var(--ch-color-canvas);
   border-bottom: 1px solid var(--ch-color-border-muted);
 }
@@ -196,7 +196,7 @@ onUnmounted(() => {
 .layout-buttons {
   display: flex;
   align-items: center;
-  gap: 5px; /* off-scale: between space-1 (4px) and space-2 (8px), tight density between tiles */
+  gap: var(--ch-space-1);
 }
 
 .layout-btn {
@@ -210,16 +210,12 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), transform var(--ch-motion-fast);
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast);
 }
 
 .layout-btn:hover {
   background-color: var(--ch-color-surface-control-hover);
   border-color: var(--ch-color-border-hover);
-}
-
-.layout-btn:active {
-  transform: translateY(1px);
 }
 
 .layout-btn.active {
@@ -275,17 +271,13 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), transform var(--ch-motion-fast), width var(--ch-motion-standard) var(--ch-motion-ease), height var(--ch-motion-standard) var(--ch-motion-ease), border-radius var(--ch-motion-standard) var(--ch-motion-ease);
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), width var(--ch-motion-standard) var(--ch-motion-ease), height var(--ch-motion-standard) var(--ch-motion-ease), border-radius var(--ch-motion-standard) var(--ch-motion-ease);
 }
 
 .layout-menu-trigger:hover,
 .layout-menu[open] .layout-menu-trigger {
   border-color: var(--ch-color-border-hover);
   background: var(--ch-color-surface-control-hover);
-}
-
-.layout-menu-trigger:active {
-  transform: translateY(1px);
 }
 
 .layout-menu-icon,
@@ -296,17 +288,17 @@ onUnmounted(() => {
 
 .layout-menu-panel {
   position: absolute;
-  top: calc(100% + 7px); /* off-scale: tiny gap to trigger, keep as literal */
+  top: calc(100% + var(--ch-space-2));
   right: 0;
   z-index: 1200;
   width: 182px;
   max-height: min(340px, calc(var(--visual-viewport-height, 100dvh) - 96px));
   overflow-y: auto;
-  padding: 6px; /* off-scale: between space-1 (4px) and space-2 (8px), density-tuned */
+  padding: var(--ch-space-2);
   border: 1px solid var(--ch-color-border-strong);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-glass);
-  box-shadow: var(--ch-shadow-soft);
+  box-shadow: var(--ch-shadow-popover);
   animation: layout-menu-in var(--ch-motion-fast) var(--ch-motion-ease);
   transform-origin: top right;
 }
@@ -328,7 +320,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: var(--ch-space-2);
-  padding: 5px 7px; /* off-scale: dense menu item, between space-1 and space-2 */
+  padding: var(--ch-space-1) var(--ch-space-2);
   border: 1px solid transparent;
   border-radius: var(--ch-radius-sm);
   background: transparent;
@@ -340,10 +332,6 @@ onUnmounted(() => {
 
 .layout-menu-item:hover {
   background: var(--ch-color-surface-control-hover);
-}
-
-.layout-menu-item:active {
-  transform: translateY(1px);
 }
 
 .layout-menu-item.active {
@@ -411,17 +399,13 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   gap: var(--ch-space-1);
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast), transform var(--ch-motion-fast);
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast);
 }
 
 .logout-btn:hover:not(:disabled) {
   background-color: var(--ch-color-danger-bg);
   border-color: var(--ch-color-danger);
   color: var(--ch-color-danger-strong);
-}
-
-.logout-btn:active:not(:disabled) {
-  transform: translateY(1px);
 }
 
 .logout-btn:disabled {

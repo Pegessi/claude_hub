@@ -1,10 +1,10 @@
 <template>
   <div
     v-if="visible"
-    class="modal-overlay"
+    class="ch-modal-overlay"
     @click.self="handleClose"
   >
-    <div class="modal env-manage-modal">
+    <div class="ch-modal env-manage-modal">
       <div class="env-manage-header">
         <h3>Manage Environment Presets</h3>
         <button
@@ -279,33 +279,23 @@ watch(
 </script>
 
 <style scoped>
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: var(--ch-color-overlay);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-sizing: border-box;
-  padding: var(--ch-space-4);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
-  z-index: 1100;
-}
+/* R10: modal chrome (overlay bg, modal bg/border/radius/padding/shadow/
+ * animation) now lives in App.vue's global .ch-modal-overlay / .ch-modal.
+ * This component keeps only the size/overflow variants unique to the
+ * two-pane env editor via the .env-manage-modal modifier below. */
 
-.modal {
-  background: var(--ch-color-surface);
-  border: 1px solid var(--ch-color-border);
-  border-radius: var(--ch-radius-lg);
-  box-shadow: var(--ch-shadow-dialog);
-  padding: var(--ch-space-5);
+.env-manage-modal {
   min-width: 640px;
   width: min(800px, 100%);
   max-width: 100%;
   max-height: calc(100dvh - var(--ch-space-4) * 2);
-  display: flex;
-  flex-direction: column;
+  /* R9-01: converged onto TabBar's radius-md + space-6 chrome. overflow is
+     intentionally kept `hidden` (not reconciled to TabBar's overflow-y:auto):
+     this modal is a fixed-height two-pane editor whose inner regions scroll
+     independently (.env-manage-body{overflow:hidden} clips, .env-preset-list
+     and the editor's textarea scroll themselves). A modal-level overflow-y
+     would add a redundant outer scrollbar and risk double scrollbars on short
+     viewports, so the TabBar single-column scroll model does not apply here. */
   overflow: hidden;
 }
 
@@ -353,7 +343,6 @@ watch(
   color: var(--ch-color-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  border-bottom: 1px solid var(--ch-color-border);
   background: var(--ch-color-surface-sunken);
 }
 
@@ -381,12 +370,7 @@ watch(
   cursor: pointer;
   color: var(--ch-color-text);
   font-size: var(--ch-font-md);
-  border-bottom: 1px solid var(--ch-color-border-muted);
   transition: background var(--ch-motion-fast);
-}
-
-.env-preset-item:last-child {
-  border-bottom: none;
 }
 
 .env-preset-item:hover {
@@ -410,7 +394,7 @@ watch(
   font-size: var(--ch-font-xs);
   color: var(--ch-color-text-soft);
   background: var(--ch-color-surface-control);
-  padding: 2px 6px;
+  padding: 2px var(--ch-space-2); /* vertical 2px kept raw: smallest token --ch-space-1 (4px) would double chip height */
   border-radius: var(--ch-radius-sm);
   flex-shrink: 0;
   text-transform: lowercase;
@@ -431,7 +415,7 @@ watch(
 .form-group label {
   display: block;
   color: var(--ch-color-text);
-  margin-bottom: 6px;
+  margin-bottom: var(--ch-space-2);
   font-size: var(--ch-font-md);
   font-weight: var(--ch-weight-medium);
 }
@@ -462,13 +446,13 @@ watch(
   font-weight: var(--ch-weight-regular);
   font-size: var(--ch-font-sm);
   color: var(--ch-color-text-soft);
-  margin-left: 6px;
+  margin-left: var(--ch-space-2);
 }
 
 .form-hint {
   color: var(--ch-color-text-soft);
   font-size: var(--ch-font-sm);
-  margin: 6px 0 0 0;
+  margin: var(--ch-space-2) 0 0 0;
   line-height: var(--ch-leading-normal);
 }
 
@@ -542,12 +526,18 @@ watch(
 }
 
 .btn {
-  padding: var(--ch-space-2) var(--ch-space-4);
+  padding: var(--ch-space-3) var(--ch-space-5);
   border: none;
   border-radius: var(--ch-radius-sm);
   font-size: var(--ch-font-md);
+  font-weight: var(--ch-weight-medium);
+  line-height: var(--ch-leading-tight);
   cursor: pointer;
-  transition: background-color var(--ch-motion-fast);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ch-space-2);
+  transition: background-color var(--ch-motion-standard);
 }
 
 .btn:disabled {
@@ -556,7 +546,7 @@ watch(
 }
 
 .btn-small {
-  padding: var(--ch-space-1) var(--ch-space-2);
+  padding: var(--ch-space-2) var(--ch-space-3);
   font-size: var(--ch-font-sm);
 }
 
@@ -566,7 +556,7 @@ watch(
   justify-content: center;
   width: 14px;
   height: 14px;
-  font-size: var(--ch-font-sm);
+  font-size: var(--ch-font-icon-xs); /* 12px + glyph inside 14px box; r11 icon-token normalization */
   line-height: 1;
   flex-shrink: 0;
 }
@@ -599,7 +589,7 @@ watch(
 }
 
 @media (max-width: 720px) {
-  .modal {
+  .env-manage-modal {
     min-width: 0;
     width: 100%;
     max-height: calc(100dvh - 20px);

@@ -1554,11 +1554,11 @@
       <Transition name="modal-fade">
         <div
           v-if="markdownPreviewModalPath"
-          class="workspace-modal-overlay markdown-preview-modal-overlay"
+          class="ch-modal-overlay markdown-preview-modal-overlay"
           @click.self="closeMarkdownPreviewModal"
         >
           <div
-            class="workspace-modal markdown-preview-modal"
+            class="ch-modal markdown-preview-modal"
             role="dialog"
             aria-modal="true"
             :aria-label="`Markdown preview: ${markdownPreviewModalPath}`"
@@ -1614,7 +1614,7 @@
       <Transition name="modal-fade">
         <div
           v-if="imageLightboxUrl"
-          class="workspace-modal-overlay image-lightbox-overlay"
+          class="ch-modal-overlay image-lightbox-overlay"
           @click.self="closeImageLightbox"
         >
           <button
@@ -1638,10 +1638,10 @@
     <Transition name="modal-fade">
       <div
         v-if="showWorkspaceModal"
-        class="workspace-modal-overlay"
+        class="ch-modal-overlay"
         @click.self="closeWorkspaceModal"
       >
-        <div class="workspace-modal">
+        <div class="ch-modal">
           <h3>{{ workspaceModalMode === 'edit' ? 'Edit Workspace' : 'Create Workspace' }}</h3>
           <form @submit.prevent="handleSubmitWorkspace">
             <div class="modal-field">
@@ -1799,10 +1799,10 @@
     <Transition name="modal-fade">
       <div
         v-if="showResidentAgentModal"
-        class="workspace-modal-overlay resident-agent-modal-overlay"
+        class="ch-modal-overlay resident-agent-modal-overlay"
         @click.self="closeResidentAgentModal"
       >
-        <div class="workspace-modal resident-agent-modal">
+        <div class="ch-modal resident-agent-modal">
           <h3>Resident Agent</h3>
           <div class="modal-field resident-agent-section--first">
             <label class="checkbox-label">
@@ -2099,10 +2099,10 @@
     <Transition name="modal-fade">
       <div
         v-if="showTaskModal"
-        class="workspace-modal-overlay"
+        class="ch-modal-overlay"
         @click.self="closeTaskModal"
       >
-        <div class="workspace-modal">
+        <div class="ch-modal">
           <h3>Add Task</h3>
           <form
             @submit.prevent="handleCreateTask"
@@ -2330,10 +2330,10 @@
     <Transition name="modal-fade">
       <div
         v-if="showEditTaskModal"
-        class="workspace-modal-overlay"
+        class="ch-modal-overlay"
         @click.self="closeEditTaskModal"
       >
-        <div class="workspace-modal">
+        <div class="ch-modal">
           <h3>Edit Task</h3>
           <form
             @submit.prevent="handleUpdateTask"
@@ -2415,10 +2415,10 @@
     <Transition name="modal-fade">
       <div
         v-if="showLessonsModal"
-        class="workspace-modal-overlay"
+        class="ch-modal-overlay"
         @click.self="closeLessonsModal"
       >
-        <div class="workspace-modal lessons-manager-modal">
+        <div class="ch-modal lessons-manager-modal">
           <div class="modal-heading-row">
             <div>
               <h3>Workspace Lessons</h3>
@@ -2585,10 +2585,10 @@
     <Transition name="modal-fade">
       <div
         v-if="showAgentOptionsModal"
-        class="workspace-modal-overlay"
+        class="ch-modal-overlay"
         @click.self="closeAgentOptionsModal"
       >
-        <div class="workspace-modal agent-manager-modal">
+        <div class="ch-modal agent-manager-modal">
           <h3>Manage Agents</h3>
           <section class="modal-section modal-section--first">
             <div class="modal-section-header">
@@ -2856,10 +2856,10 @@
     <Transition name="modal-fade">
       <div
         v-if="showAgentFileBrowser"
-        class="workspace-modal-overlay file-browser-overlay"
+        class="ch-modal-overlay file-browser-overlay"
         @click.self="showAgentFileBrowser = false"
       >
-        <div class="workspace-modal file-browser-modal">
+        <div class="ch-modal file-browser-modal">
           <div class="file-browser-header">
             <h3>{{ browserPlacement.target === 'remote' ? 'Select Remote Directory' : 'Select Working Directory' }}</h3>
             <button
@@ -2971,10 +2971,10 @@
   <Transition name="modal-fade">
     <div
       v-if="showSwitchEnvModal"
-      class="workspace-modal-overlay"
+      class="ch-modal-overlay"
       @click.self="closeSwitchEnvModal"
     >
-      <div class="workspace-modal switch-env-modal">
+      <div class="ch-modal switch-env-modal">
         <div class="switch-env-header">
           <div
             class="switch-env-icon"
@@ -6476,7 +6476,6 @@ onUnmounted(() => {
   justify-content: space-between;
   gap: var(--ch-space-3);
   padding: var(--ch-space-2) calc(var(--ch-space-4) + 2px);
-  border-bottom: 1px solid var(--ch-color-border-muted);
   background: var(--ch-color-canvas);
 }
 
@@ -6670,7 +6669,7 @@ onUnmounted(() => {
   min-width: 0;
   display: flex;
   flex-wrap: nowrap;
-  gap: 8px;
+  gap: var(--ch-space-2);
   overflow-x: auto;
   overflow-y: hidden;
   padding-bottom: 2px;
@@ -6685,13 +6684,12 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 8px;
   border: 1px solid var(--ch-color-border-muted);
-  border-radius: var(--ch-radius-lg);
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface);
   color: inherit;
-  padding: 10px 11px;
+  padding: var(--ch-space-2) var(--ch-space-3);
   scroll-snap-align: start;
-  box-shadow: 0 1px 0 var(--ch-shadow-color-soft);
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), transform var(--ch-motion-fast), box-shadow var(--ch-motion-fast);
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast);
 }
 
 .agent-status-card:hover {
@@ -6771,8 +6769,8 @@ onUnmounted(() => {
 
 .agent-status-name {
   min-width: 0;
-  color: var(--ch-color-text);
-  font-size: 13px;
+  color: var(--ch-color-text-strong);
+  font-size: var(--ch-font-md);
   font-weight: var(--ch-weight-semibold);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -7266,7 +7264,7 @@ onUnmounted(() => {
   border: none;
   background: transparent;
   color: inherit;
-  font-size: 18px;
+  font-size: var(--ch-font-icon-sm);
   line-height: 1;
   border-radius: var(--ch-radius-sm);
   cursor: pointer;
@@ -7374,10 +7372,10 @@ onUnmounted(() => {
   border: 1px solid var(--ch-color-surface-control-active);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-soft);
-  padding: 9px;
+  padding: var(--ch-space-2);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--ch-space-2);
 }
 
 .agent-row strong {
@@ -7481,15 +7479,15 @@ onUnmounted(() => {
 .board-skeleton-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px;
+  gap: var(--ch-space-2);
+  padding: var(--ch-space-3);
 }
 
 .board-skeleton-card {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 12px;
+  padding: var(--ch-space-3);
   border: 1px solid var(--ch-color-border-muted);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface);
@@ -7686,7 +7684,7 @@ onUnmounted(() => {
   gap: var(--ch-space-2);
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 10px;
+  padding: var(--ch-space-3);
 }
 
 .task-card {
@@ -7696,32 +7694,31 @@ onUnmounted(() => {
   border: 1px solid var(--ch-color-border-muted);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface);
-  padding: 9px 10px 9px 12px;
+  padding: var(--ch-space-2) var(--ch-space-3);
   cursor: pointer;
   min-width: 0;
   -webkit-tap-highlight-color: transparent;
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), transform var(--ch-motion-fast);
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast);
 }
 
 .task-card::before {
   content: '';
   position: absolute;
-  inset: 0 auto 0 0;
-  width: 3px;
+  inset: 0 0 auto 0;
+  width: auto;
+  height: 2px;
   background: var(--ch-color-text-subtle);
 }
 
 .task-card:hover {
   border-color: var(--ch-color-border-hover);
   background: var(--ch-color-surface-raised);
-  box-shadow: 0 8px 20px var(--ch-shadow-color-soft);
-  transform: translateY(-1px);
 }
 
 .task-card.selected {
   border-color: var(--ch-color-accent);
   background: var(--ch-color-surface-selected);
-  box-shadow: 0 0 0 1px var(--ch-color-accent-ring), 0 8px 20px var(--ch-shadow-color-soft);
+  box-shadow: 0 0 0 1px var(--ch-color-accent-ring);
 }
 
 .task-card--todo::before {
@@ -7804,7 +7801,7 @@ onUnmounted(() => {
 
 .task-card-description {
   max-width: 100%;
-  margin: 4px 0 6px;
+  margin: var(--ch-space-1) 0 var(--ch-space-1);
   color: var(--ch-color-text-muted);
   font-size: var(--ch-font-xs);
   line-height: 1.35;
@@ -7850,7 +7847,7 @@ onUnmounted(() => {
 .agent-badge {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--ch-space-1);
 }
 
 .task-card-badges {
@@ -8005,11 +8002,11 @@ onUnmounted(() => {
 }
 
 .latest-report {
-  margin: 0 0 6px;
+  margin: 0 0 var(--ch-space-1);
   border-left: 2px solid var(--ch-color-border-hover);
   border-radius: 0 var(--ch-radius-sm) var(--ch-radius-sm) 0;
   background: var(--ch-color-chip-bg-muted);
-  padding: 6px 8px;
+  padding: var(--ch-space-1) var(--ch-space-2);
   color: var(--ch-color-text-muted);
   font-size: var(--ch-font-xs);
   line-height: 1.35;
@@ -8119,7 +8116,7 @@ onUnmounted(() => {
   height: 26px;
   border: 1px solid var(--ch-color-border-strong);
   border-radius: var(--ch-radius-sm);
-  background: var(--ch-color-surface-control-active);
+  background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
   padding: 0 8px;
   transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), transform var(--ch-motion-fast);
@@ -8159,7 +8156,7 @@ onUnmounted(() => {
   height: 100%;
   border: 1px solid var(--ch-color-border-strong);
   border-radius: var(--ch-radius-sm);
-  background: var(--ch-color-surface-control-active);
+  background: var(--ch-color-surface-control);
   color: var(--ch-color-text-subtle);
   font-size: 14px;
   line-height: 1;
@@ -8264,7 +8261,7 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: var(--ch-font-sm);
+  font-size: var(--ch-font-icon-xs); /* r11 icon-token; width/height already set above */
   line-height: 1;
   text-align: center;
   overflow: hidden;
@@ -8427,7 +8424,7 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 16px;
+  font-size: var(--ch-font-icon-base);
   line-height: 1;
   padding: 0;
   transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), transform var(--ch-motion-fast);
@@ -9276,14 +9273,14 @@ onUnmounted(() => {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: var(--ch-space-3);
+  margin-bottom: var(--ch-space-3);
 }
 
 .markdown-preview-modal-header > div {
   min-width: 0;
   display: grid;
-  gap: 4px;
+  gap: var(--ch-space-1);
 }
 
 .markdown-preview-modal-header span {
@@ -9295,7 +9292,7 @@ onUnmounted(() => {
 .markdown-preview-modal-header strong {
   color: var(--ch-color-text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 13px;
+  font-size: var(--ch-font-md);
   overflow-wrap: anywhere;
 }
 
@@ -9321,8 +9318,8 @@ onUnmounted(() => {
 
 .image-lightbox-close {
   position: fixed;
-  top: 16px;
-  right: 16px;
+  top: var(--ch-space-4);
+  right: var(--ch-space-4);
 }
 
 .artifact-preview-error {
@@ -9438,32 +9435,16 @@ onUnmounted(() => {
   font-size: var(--ch-font-xs);
 }
 
-.workspace-modal-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  background: var(--ch-color-overlay);
-  padding: 16px;
-}
+/* R10: modal chrome (overlay bg, modal bg/border/radius/padding/shadow/
+ * animation) now lives in App.vue's global .ch-modal-overlay / .ch-modal.
+ * Previously this component kept its own base rules with divergent values
+ * (--ch-color-overlay instead of overlay-soft, radius-lg instead of md,
+ * raw 16px/20px padding instead of space-4/space-6). Those base rules are
+ * deleted here so the global converged chrome applies; only the size/scroll
+ * modifiers (z-index, width, height, overflow) remain below. */
 
 .file-browser-overlay {
   z-index: 1100;
-}
-
-.workspace-modal {
-  width: min(520px, 100%);
-  max-height: calc(100dvh - 32px);
-  overflow-y: auto;
-  border: 1px solid var(--ch-color-border);
-  border-radius: var(--ch-radius-lg);
-  background: var(--ch-color-surface);
-  box-shadow: var(--ch-shadow-dialog);
-  padding: 20px;
 }
 
 .agent-manager-modal {
@@ -9478,7 +9459,7 @@ onUnmounted(() => {
 /* Title stays pinned; sections below manage their own scrolling. */
 .agent-manager-modal > h3 {
   flex-shrink: 0;
-  margin-bottom: 12px;
+  margin-bottom: var(--ch-space-3);
 }
 
 /* Workspace Agents list takes the larger share of the modal and scrolls
@@ -9507,14 +9488,14 @@ onUnmounted(() => {
   flex: 0 1 auto;
   min-height: 0;
   overflow-y: auto;
-  margin-top: 14px;
-  padding-top: 12px;
+  margin-top: var(--ch-space-4);
+  padding-top: var(--ch-space-3);
 }
 
 /* Two controls per row to keep the form short (e.g. Role + Agent Type). */
 .agent-manager-modal .modal-field-row {
   display: flex;
-  gap: 12px;
+  gap: var(--ch-space-3);
 }
 
 .agent-manager-modal .modal-field-row .modal-field {
@@ -9525,7 +9506,7 @@ onUnmounted(() => {
 /* Tighter vertical rhythm inside the Add Agent form so it fits without
    scrolling on a standard screen. */
 .agent-manager-modal .agent-create-form .modal-field {
-  margin-bottom: 10px;
+  margin-bottom: var(--ch-space-3);
 }
 
 .lessons-manager-modal {
@@ -9536,35 +9517,35 @@ onUnmounted(() => {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: var(--ch-space-3);
+  margin-bottom: var(--ch-space-4);
 }
 
 .modal-heading-row h3 {
-  margin-bottom: 4px;
+  margin-bottom: var(--ch-space-1);
 }
 
 .modal-heading-row p {
   margin: 0;
   color: var(--ch-color-text-muted);
-  font-size: 12px;
+  font-size: var(--ch-font-sm);
 }
 
 .lessons-toolbar {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 12px;
+  gap: var(--ch-space-2);
+  margin-bottom: var(--ch-space-3);
 }
 
 .summary-run-status {
   display: grid;
-  gap: 5px;
-  margin-bottom: 16px;
+  gap: var(--ch-space-1);
+  margin-bottom: var(--ch-space-4);
   border: 1px solid var(--ch-color-border-muted);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-soft);
-  padding: 10px 12px;
+  padding: var(--ch-space-3);
 }
 
 .summary-run-status--queued {
@@ -9577,13 +9558,13 @@ onUnmounted(() => {
 
 .summary-run-status strong {
   color: var(--ch-color-text);
-  font-size: 13px;
+  font-size: var(--ch-font-md);
 }
 
 .summary-run-status p {
   margin: 0;
   color: var(--ch-color-text-muted);
-  font-size: 12px;
+  font-size: var(--ch-font-sm);
   line-height: 1.4;
 }
 
@@ -9604,7 +9585,7 @@ onUnmounted(() => {
 
 .lessons-list {
   display: grid;
-  gap: 8px;
+  gap: var(--ch-space-2);
   /* Bound the list to a viewport-relative height so it stays compact and
      scrolls internally instead of growing with every lesson. */
   max-height: 46dvh;
@@ -9617,12 +9598,12 @@ onUnmounted(() => {
   min-width: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px;
+  gap: var(--ch-space-3);
   align-items: start;
   border: 1px solid var(--ch-color-border-muted);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-soft);
-  padding: 10px;
+  padding: var(--ch-space-3);
 }
 
 .lesson-row-main {
@@ -9632,14 +9613,14 @@ onUnmounted(() => {
 .lesson-row-main strong {
   display: block;
   color: var(--ch-color-text);
-  font-size: 13px;
+  font-size: var(--ch-font-md);
   overflow-wrap: anywhere;
 }
 
 .lesson-row-main p {
-  margin: 4px 0 0;
+  margin: var(--ch-space-1) 0 0;
   color: var(--ch-color-text-muted);
-  font-size: 12px;
+  font-size: var(--ch-font-sm);
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
@@ -9647,8 +9628,8 @@ onUnmounted(() => {
 .lesson-tags {
   display: flex;
   flex-wrap: wrap;
-  gap: 5px;
-  margin-top: 8px;
+  gap: var(--ch-space-1);
+  margin-top: var(--ch-space-2);
 }
 
 .lesson-tags span,
@@ -9664,28 +9645,28 @@ onUnmounted(() => {
 .lesson-row-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--ch-space-2);
 }
 
 .lesson-create-form textarea {
   min-height: 84px;
 }
 
-.workspace-modal h3 {
-  margin: 0 0 16px;
+.ch-modal h3 {
+  margin: 0 0 var(--ch-space-4);
   color: var(--ch-color-text-strong);
-  font-size: 18px;
+  font-size: var(--ch-font-xl);
 }
 
 .modal-field {
-  margin-bottom: 14px;
+  margin-bottom: var(--ch-space-4);
 }
 
 .modal-field label {
   display: block;
-  margin-bottom: 6px;
+  margin-bottom: var(--ch-space-1);
   color: var(--ch-color-text-muted);
-  font-size: 13px;
+  font-size: var(--ch-font-md);
 }
 
 .modal-field input,
@@ -10022,7 +10003,7 @@ onUnmounted(() => {
 .resident-queued-hint {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--ch-space-2);
   flex-wrap: wrap;
 }
 
@@ -10030,7 +10011,7 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   border-radius: var(--ch-radius-pill);
-  padding: 2px 8px;
+  padding: var(--ch-space-1) var(--ch-space-2);
   background: color-mix(in srgb, var(--ch-color-accent-bg) 18%, transparent);
   color: var(--ch-color-accent-fg);
   font-size: var(--ch-font-xs);
@@ -10047,7 +10028,7 @@ onUnmounted(() => {
   flex-direction: column;
   /* Fixed target height clamped to the viewport: the modal does not
      shrink-to-fit when Enable is unchecked vs checked. Width stays the
-     inherited min(520px, 100%) from .workspace-modal. */
+     inherited min(520px, 100%) from .ch-modal. */
   height: min(720px, calc(100dvh - 32px));
   overflow: hidden;
 }
@@ -10073,7 +10054,7 @@ onUnmounted(() => {
 /* Done button pinned at the bottom, separated from the scrolling body. */
 .resident-agent-modal .modal-actions {
   flex-shrink: 0;
-  margin-top: 16px;
+  margin-top: var(--ch-space-4);
 }
 
 /*
@@ -10106,8 +10087,8 @@ onUnmounted(() => {
 }
 
 .modal-section {
-  margin-top: 20px;
-  padding-top: 16px;
+  margin-top: var(--ch-space-5);
+  padding-top: var(--ch-space-4);
   border-top: 1px solid var(--ch-color-border);
 }
 
@@ -10121,19 +10102,19 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 10px;
+  gap: var(--ch-space-3);
+  margin-bottom: var(--ch-space-3);
 }
 
 .modal-section-header h4 {
   margin: 0;
   color: var(--ch-color-text-strong);
-  font-size: 13px;
+  font-size: var(--ch-font-md);
 }
 
 .modal-section-header span {
   color: var(--ch-color-text-muted);
-  font-size: 12px;
+  font-size: var(--ch-font-sm);
 }
 
 .file-browser-modal {
@@ -10147,12 +10128,12 @@ onUnmounted(() => {
 .file-browser-path {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--ch-space-2);
 }
 
 .file-browser-header {
   justify-content: space-between;
-  margin-bottom: 12px;
+  margin-bottom: var(--ch-space-3);
 }
 
 .file-browser-header h3 {
@@ -10244,15 +10225,15 @@ onUnmounted(() => {
     -webkit-overflow-scrolling: touch;
   }
 
-  .workspace-modal-overlay {
+  .ch-modal-overlay {
     align-items: flex-start;
-    padding: 10px;
+    padding: var(--ch-space-3);
   }
 
-  .workspace-modal {
+  .ch-modal {
     width: 100%;
     max-height: calc(100dvh - 20px);
-    padding: 14px;
+    padding: var(--ch-space-4);
     border-radius: var(--ch-radius-md);
   }
 
@@ -10279,7 +10260,7 @@ onUnmounted(() => {
     position: sticky;
     bottom: -1px;
     background: var(--ch-color-surface);
-    padding-top: 10px;
+    padding-top: var(--ch-space-3);
   }
 
   .modal-actions .tool-button,
@@ -10699,7 +10680,7 @@ onUnmounted(() => {
   .agent-status-actions .agent-status-run-now .btn-icon,
   .agent-status-actions .agent-status-switch-env .btn-icon,
   .agent-status-actions .agent-status-delete .btn-icon {
-    font-size: 16px;
+    font-size: var(--ch-font-icon-base); /* 16px glyph inside 36px icon-only button; r11 icon-token normalization */
     line-height: 1;
   }
 
@@ -10883,8 +10864,8 @@ onUnmounted(() => {
 .switch-env-header {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: var(--ch-space-3);
+  margin-bottom: var(--ch-space-4);
 }
 
 .switch-env-icon {
@@ -10897,7 +10878,7 @@ onUnmounted(() => {
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-accent-soft);
   color: var(--ch-color-accent);
-  font-size: 18px;
+  font-size: var(--ch-font-icon-base);
 }
 
 .switch-env-title-block {
@@ -10906,12 +10887,12 @@ onUnmounted(() => {
 
 .switch-env-title-block h3 {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--ch-font-lg);
 }
 
 .switch-env-subtitle {
   margin: 2px 0 0;
-  font-size: 12px;
+  font-size: var(--ch-font-sm);
   color: var(--ch-color-text-muted);
   white-space: nowrap;
   overflow: hidden;
@@ -10920,15 +10901,15 @@ onUnmounted(() => {
 
 .switch-env-callout {
   display: flex;
-  gap: 10px;
+  gap: var(--ch-space-3);
   align-items: flex-start;
-  margin: 0 0 18px;
-  padding: 10px 12px;
+  margin: 0 0 var(--ch-space-4);
+  padding: var(--ch-space-3);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-soft);
   border: 1px solid var(--ch-color-border-muted);
   border-left: 3px solid var(--ch-color-accent);
-  font-size: 12.5px;
+  font-size: var(--ch-font-sm);
   line-height: 1.5;
   color: var(--ch-color-text-muted);
 }
@@ -10952,8 +10933,8 @@ onUnmounted(() => {
 .switch-env-modal .modal-field label code,
 .switch-env-modal .modal-hint code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  padding: 1px 5px;
+  font-size: var(--ch-font-sm);
+  padding: var(--ch-space-1);
   border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
@@ -11109,15 +11090,15 @@ onUnmounted(() => {
 /* Modal enter/leave transitions — driven by existing motion tokens.
    enter: --ch-motion-drawer (180ms cubic-bezier(0.2,0,0,1));
    leave: --ch-motion-fast (120ms ease).
-   Transition classes attach to the overlay root (workspace-modal-overlay /
+   Transition classes attach to the overlay root (ch-modal-overlay /
    task-detail-overlay / image-lightbox-overlay) which fades opacity. Inner
-   dialogs (.workspace-modal, .task-detail-panel) and the image-lightbox image
+   dialogs (.ch-modal, .task-detail-panel) and the image-lightbox image
    get a subtle rise-in scale/translate.
    Reduced-motion users are covered by the RM-01 universal net in App.vue. */
 .modal-fade-enter-active {
   transition: opacity var(--ch-motion-drawer);
 }
-.modal-fade-enter-active .workspace-modal,
+.modal-fade-enter-active .ch-modal,
 .modal-fade-enter-active .task-detail-panel,
 .modal-fade-enter-active .image-lightbox-img {
   transition: opacity var(--ch-motion-drawer), transform var(--ch-motion-drawer);
@@ -11125,7 +11106,7 @@ onUnmounted(() => {
 .modal-fade-leave-active {
   transition: opacity var(--ch-motion-fast);
 }
-.modal-fade-leave-active .workspace-modal,
+.modal-fade-leave-active .ch-modal,
 .modal-fade-leave-active .task-detail-panel,
 .modal-fade-leave-active .image-lightbox-img {
   transition: opacity var(--ch-motion-fast), transform var(--ch-motion-fast);
@@ -11134,13 +11115,13 @@ onUnmounted(() => {
 .modal-fade-leave-to {
   opacity: 0;
 }
-.modal-fade-enter-from .workspace-modal,
+.modal-fade-enter-from .ch-modal,
 .modal-fade-enter-from .task-detail-panel,
 .modal-fade-enter-from .image-lightbox-img {
   opacity: 0;
   transform: translateY(4px) scale(0.98);
 }
-.modal-fade-leave-to .workspace-modal,
+.modal-fade-leave-to .ch-modal,
 .modal-fade-leave-to .task-detail-panel,
 .modal-fade-leave-to .image-lightbox-img {
   opacity: 0;
