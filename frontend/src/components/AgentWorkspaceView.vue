@@ -8221,13 +8221,12 @@ onUnmounted(() => {
   justify-content: center;
   width: 14px;
   height: 14px;
-  font-size: 12px;
+  font-size: var(--ch-font-icon-xs);
   line-height: 1;
   opacity: 0.85;
   flex-shrink: 0;
   font-family: "Apple Symbols", "Segoe UI Symbol", "Noto Sans Symbols",
     "Symbola", -apple-system, BlinkMacSystemFont, sans-serif;
-  vertical-align: -1px;
 }
 
 .task-actions button:active,

@@ -1367,13 +1367,16 @@ async function handleCreateTab() {
  *     convention; changing shifts the 48px tab-bar layout height). Glyphs
  *     use --ch-font-icon-base (16px) for optical centering in the 30px box.
  *   • 32px path-nav-btn (file-browser toolbar navigation buttons — toolbar-
- *     icon convention for modal controls).
+ *     icon convention for modal controls). Glyph uses --ch-font-icon-base
+ *     (16px) for optical centering in the 32px box.
  *   • 36px switch-env-icon (display glyph between 32 and 40).
  *   • 18px toast__icon box (sized to fit i/△/!/✓ emoji glyphs optically).
  *   • 24px tab-menu-trigger / tab-close / toast__close hit boxes (sized to
  *     sit within the 30px tab without bloating it). Glyphs use
  *     --ch-font-icon-sm (14px) for optical centering in the 24px box.
  *   • 16px inline .tab-menu-item-icon box (leading menu-item glyphs) uses
+ *     --ch-font-icon-xs (12px).
+ *   • 16px inline .file-icon box (file-browser row glyphs) uses
  *     --ch-font-icon-xs (12px).
  *   • 7×7px tab-indicator status dot (proportional ring; 1.5px ring stroke).
  *   • 999px pill border-radius on .pane-indicator / mode chip.
@@ -1980,7 +1983,7 @@ async function handleCreateTab() {
   height: var(--ch-space-6);
   background: none;
   border: none;
-  font-size: var(--ch-font-xl);
+  font-size: var(--ch-font-icon-base);
   cursor: pointer;
   padding: 0;
   border-radius: var(--ch-radius-sm);
@@ -2061,7 +2064,7 @@ async function handleCreateTab() {
 .file-icon {
   width: var(--ch-space-4);
   text-align: center;
-  font-size: var(--ch-font-md);
+  font-size: var(--ch-font-icon-xs);
   line-height: 1;
 }
 
