@@ -1,10 +1,14 @@
 # Consolidation r12 — HANDOFF
 
-**Branch:** `chore/integrate-design-perf-r12`
-**Branch tip SHA (merge THIS):** `449401805425bbd15007b2d21702189825729bbe`
-  — adds only `.review-artifacts/consolidation-r12/` verification evidence (0 code changes).
-**Code-merge SHA:** `30e422aca7e022670fdf77adbb638cd18ec327db`
-  — the actual rs01×design integration; all conflict resolutions live here.
+**Branch:** `chore/integrate-design-perf-r12`  ← **merge this by NAME** (do not hand-copy a SHA)
+**Authoritative tip:** `git ls-remote git@github.com:Pegessi/claude_hub.git refs/heads/chore/integrate-design-perf-r12`
+  — always the current HEAD; use this rather than trusting a baked-in value.
+**Branch tip SHA (as of last content push):** `__TIP_SHA__`
+  — the panel-capture + validation commit. A single trailing commit updates THIS
+  line to the value above; the tip pointer therefore lives at ls-remote, not here.
+**Code-merge SHA (stable anchor):** `30e422aca7e022670fdf77adbb638cd18ec327db`
+  — the actual rs01×design integration; all conflict resolutions live here. Every
+  commit after it is verification evidence / this handoff (0 code changes).
 **Base:** `perf/rs01-agent-config-static-edge` @ `dbeb2aff05a95c4aa14df25d68c8d253f5665bc1` (develop + 21)
 **Merged in:** `style/ui-r11-icons` @ `555792fbe56c183c03645e626a06ee6bc2139dbb` (develop + 8; r11 design tip)
 **Merge base:** `develop` @ `ec30c3daf8d14b68d988c681c5123e119fc3ace3` (LOCAL-ONLY — never pushed)
@@ -148,13 +152,30 @@ host is incomplete). Dev server run from this worktree on port 5199.
 **Capture contract (matches r12 baseline exactly):** deviceScaleFactor 2;
 viewports mobile 390×844, tablet 768×1024, desktop 1440×960; light + dark
 themes; terminal + workspace modes. 9 surfaces per combo × 2 themes × 3
-breakpoints = **54 screenshots**, at
+breakpoints = **54 screenshots** for the baseline-comparable set, at
 `.review-artifacts/consolidation-r12/screenshots/{light,dark}/{mobile,tablet,desktop}/`.
 
 Surfaces: `01-terminal-mode`, `02-tab-menu-popover`, `03-switch-env-modal`,
 `04-env-preset-manager-modal`, `05-workspace-mode`,
 `06-workspace-switch-env-modal`, `07-workspace-env-preset-manager-modal`,
 `icon-01-tab-menu-trigger`, `icon-02-pane-refresh`.
+
+**Attempt-2 follow-up (reviewer-requested):** the **AgentStatusFloatingPanel**
+was added as an AC-named combined-risk surface the first pass omitted. Captured
+via `capture-panel.cjs` across light + dark × mobile/tablet/desktop = **18
+additional shots** (6 `08-agent-status-panel-managed` + 6
+`09-agent-status-panel-manual` + 6 `icon-03-panel-refresh` clips). The panel
+lives inside `.terminal-mode-shell` (display:none in workspace mode), so it is
+captured in **terminal mode**, where both the manual "Status" and managed
+"Agents" pills are present. The r12 baseline does not contain this surface (it
+was omitted there too), so it is verified by **direct inspection** rather than
+pixel-diff: panel-header (title + subtitle), the managed `.panel-mode-switch`
+(Agents/Reviewers), grouped `.agent-group` rows with status dots + role badges,
+and the `.panel-refresh` (↻) icon all render cleanly and responsively in both
+themes; the refresh glyph is optically centered per the r11 icon-token
+convention. No duplicated rule, broken layout, or combined-state regression —
+rs01's A7 grouped-row structure + design's r10/r11 glass/token/icon pass compose
+correctly. **Total screenshots: 72** (54 baseline-comparable + 18 panel).
 
 **Baseline:** r12 design-tip (555792f) capture from task 121722b5 at
 `/Users/bytedance/claude_hub-verify-r12/.review-artifacts/r12-verify/screenshots/`
@@ -165,9 +186,11 @@ localization + direct visual inspection):**
 
 - **Count parity:** 54 new == 54 baseline. **Dimension parity:** 0 mismatches
   (all 2× resolutions identical → no layout-size regression).
-- **Icon close-ups (icon-01, icon-02): ~0.000% changed pixels — byte-identical**
-  across all 6 theme×breakpoint combos. Icon-token normalization (r11) survived
-  the merge with zero drift.
+- **Icon close-ups (icon-01, icon-02): threshold-identical** across all 6
+  theme×breakpoint combos — **0.0000% of pixels exceed luma-threshold 24, and
+  the maximum per-pixel luma delta is ≤ 2** (sub-perceptual, attributable to
+  Chrome AA/subpixel rounding, not a rendering change). Icon-token normalization
+  (r11) survived the merge with no observable drift.
 - **Modal chrome verified pixel-identical by direct inspection:**
   - `04`/`07` EnvPresetManager modal (the most conflict-heavy surface) —
     pixel-identical header / two-pane / footer / buttons.
@@ -178,6 +201,10 @@ localization + direct visual inspection):**
     shadow, top-right origin.
   - `05` workspace-mode — identical header, agent cards, kanban columns,
     tokens, spacing.
+  - `08`/`09` AgentStatusFloatingPanel (attempt-2 add; no baseline to diff) —
+    verified clean by direct inspection in both themes × 3 breakpoints; header,
+    mode-switch, grouped rows, badges, and `.panel-refresh` (↻) all render
+    correctly and responsively.
 - **Where changed pixels DO appear**, grid localization + inspection attributes
   every one to **live application state captured at a different moment**, NOT to
   merge-induced style:
@@ -208,8 +235,9 @@ render cleanly together.
 
 ## EXACT remaining human step
 
-**Merge `chore/integrate-design-perf-r12` (tip `4494018`) → `main` over SSH**,
-resolving the rs01 × main `2d034f6` functional conflict in
+**Merge `chore/integrate-design-perf-r12` → `main` over SSH** (merge by branch
+name; the current tip is whatever `ls-remote` reports — see header). Resolve the
+rs01 × main `2d034f6` functional conflict in
 **`AgentWorkspaceView.vue`** + **`TabBar.vue`** + **`CHANGELOG.md`**. `develop` is local-only, so it rides
 along as the merge base — no separate develop→main step is needed. When
 resolving the AWV/TabBar conflict, keep main's `2d034f6` functional changes and
