@@ -1,7 +1,10 @@
 # Consolidation r12 — HANDOFF
 
 **Branch:** `chore/integrate-design-perf-r12`
-**Tip SHA:** `30e422aca7e022670fdf77adbb638cd18ec327db`
+**Branch tip SHA (merge THIS):** `449401805425bbd15007b2d21702189825729bbe`
+  — adds only `.review-artifacts/consolidation-r12/` verification evidence (0 code changes).
+**Code-merge SHA:** `30e422aca7e022670fdf77adbb638cd18ec327db`
+  — the actual rs01×design integration; all conflict resolutions live here.
 **Base:** `perf/rs01-agent-config-static-edge` @ `dbeb2aff05a95c4aa14df25d68c8d253f5665bc1` (develop + 21)
 **Merged in:** `style/ui-r11-icons` @ `555792fbe56c183c03645e626a06ee6bc2139dbb` (develop + 8; r11 design tip)
 **Merge base:** `develop` @ `ec30c3daf8d14b68d988c681c5123e119fc3ace3` (LOCAL-ONLY — never pushed)
@@ -205,9 +208,9 @@ render cleanly together.
 
 ## EXACT remaining human step
 
-**Merge `chore/integrate-design-perf-r12` → `main` over SSH**, resolving the
-rs01 × main `2d034f6` functional conflict in **`AgentWorkspaceView.vue`** +
-**`TabBar.vue`** + **`CHANGELOG.md`**. `develop` is local-only, so it rides
+**Merge `chore/integrate-design-perf-r12` (tip `4494018`) → `main` over SSH**,
+resolving the rs01 × main `2d034f6` functional conflict in
+**`AgentWorkspaceView.vue`** + **`TabBar.vue`** + **`CHANGELOG.md`**. `develop` is local-only, so it rides
 along as the merge base — no separate develop→main step is needed. When
 resolving the AWV/TabBar conflict, keep main's `2d034f6` functional changes and
 this branch's consolidated styling; and reconcile the **toast/error-feedback
