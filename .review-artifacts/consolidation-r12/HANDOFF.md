@@ -3,7 +3,7 @@
 **Branch:** `chore/integrate-design-perf-r12`  ← **merge this by NAME** (do not hand-copy a SHA)
 **Authoritative tip:** `git ls-remote git@github.com:Pegessi/claude_hub.git refs/heads/chore/integrate-design-perf-r12`
   — always the current HEAD; use this rather than trusting a baked-in value.
-**Branch tip SHA (as of last content push):** `__TIP_SHA__`
+**Branch tip SHA (as of last content push):** `ff65733f804e2e83b92f3682468bc4fe452c864b`
   — the panel-capture + validation commit. A single trailing commit updates THIS
   line to the value above; the tip pointer therefore lives at ls-remote, not here.
 **Code-merge SHA (stable anchor):** `30e422aca7e022670fdf77adbb638cd18ec327db`
