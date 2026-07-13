@@ -194,8 +194,8 @@ onUnmounted(() => {
  *     matching token pair)
  *   • .pane-action-button width/height:22px (icon button geometry; nearest
  *     token 24 would shift the button grid)
- *   • .pane-action-icon font-size:14px (glyph size inside the 22px button;
- *     lg=15px would visibly enlarge the ↻ glyph)
+ *   • .pane-action-icon font-size:var(--ch-font-icon-sm) (=14px, glyph size inside
+ *     the 22px button; r11 icon-token normalization, zero visual delta)
  *   • .empty-icon font-size:32px (large emoji glyph; no 32px font token,
  *     xl=18px is UI body scale)
  *   • .pane-tab-name font-weight now uses var(--ch-weight-medium) (=500);
@@ -292,7 +292,7 @@ onUnmounted(() => {
 
 .pane-action-icon {
   display: inline-block;
-  font-size: 14px; /* ↻ glyph size inside 22px button; lg=15px would enlarge glyph */
+  font-size: var(--ch-font-icon-sm); /* 14px ↻ glyph inside 22px button; r11 icon-token normalization */
   line-height: 1;
 }
 

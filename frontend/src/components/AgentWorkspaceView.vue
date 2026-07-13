@@ -10635,7 +10635,7 @@ onUnmounted(() => {
   .agent-status-actions .agent-status-run-now .btn-icon,
   .agent-status-actions .agent-status-switch-env .btn-icon,
   .agent-status-actions .agent-status-delete .btn-icon {
-    font-size: 16px;
+    font-size: var(--ch-font-icon-base); /* 16px glyph inside 36px icon-only button; r11 icon-token normalization */
     line-height: 1;
   }
 

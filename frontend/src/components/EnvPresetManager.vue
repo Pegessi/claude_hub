@@ -555,7 +555,7 @@ watch(
   justify-content: center;
   width: 14px;
   height: 14px;
-  font-size: var(--ch-font-sm);
+  font-size: var(--ch-font-icon-xs); /* 12px + glyph inside 14px box; r11 icon-token normalization */
   line-height: 1;
   flex-shrink: 0;
 }
