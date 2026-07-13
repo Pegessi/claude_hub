@@ -184,7 +184,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: var(--ch-space-2);
-  padding: 7px 10px; /* off-scale: between space-1 (4px) and space-2 (8px), rounding shifts layout */
+  padding: var(--ch-space-2) var(--ch-space-3);
   background-color: var(--ch-color-canvas);
   border-bottom: 1px solid var(--ch-color-border-muted);
 }
@@ -196,7 +196,7 @@ onUnmounted(() => {
 .layout-buttons {
   display: flex;
   align-items: center;
-  gap: 5px; /* off-scale: between space-1 (4px) and space-2 (8px), tight density between tiles */
+  gap: var(--ch-space-1);
 }
 
 .layout-btn {
@@ -288,17 +288,17 @@ onUnmounted(() => {
 
 .layout-menu-panel {
   position: absolute;
-  top: calc(100% + 7px); /* off-scale: tiny gap to trigger, keep as literal */
+  top: calc(100% + var(--ch-space-2));
   right: 0;
   z-index: 1200;
   width: 182px;
   max-height: min(340px, calc(var(--visual-viewport-height, 100dvh) - 96px));
   overflow-y: auto;
-  padding: 6px; /* off-scale: between space-1 (4px) and space-2 (8px), density-tuned */
+  padding: var(--ch-space-2);
   border: 1px solid var(--ch-color-border-strong);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-glass);
-  box-shadow: var(--ch-shadow-soft);
+  box-shadow: var(--ch-shadow-popover);
   animation: layout-menu-in var(--ch-motion-fast) var(--ch-motion-ease);
   transform-origin: top right;
 }
@@ -320,7 +320,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: var(--ch-space-2);
-  padding: 5px 7px; /* off-scale: dense menu item, between space-1 and space-2 */
+  padding: var(--ch-space-1) var(--ch-space-2);
   border: 1px solid transparent;
   border-radius: var(--ch-radius-sm);
   background: transparent;

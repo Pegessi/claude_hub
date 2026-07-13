@@ -1,10 +1,10 @@
 <template>
   <div
     v-if="visible"
-    class="modal-overlay"
+    class="ch-modal-overlay"
     @click.self="handleClose"
   >
-    <div class="modal env-manage-modal">
+    <div class="ch-modal env-manage-modal">
       <div class="env-manage-header">
         <h3>Manage Environment Presets</h3>
         <button
@@ -278,33 +278,16 @@ watch(
 </script>
 
 <style scoped>
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: var(--ch-color-overlay-soft);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-sizing: border-box;
-  padding: var(--ch-space-4);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
-  z-index: 1000;
-}
+/* R10: modal chrome (overlay bg, modal bg/border/radius/padding/shadow/
+ * animation) now lives in App.vue's global .ch-modal-overlay / .ch-modal.
+ * This component keeps only the size/overflow variants unique to the
+ * two-pane env editor via the .env-manage-modal modifier below. */
 
-.modal {
-  background: var(--ch-color-surface);
-  border: 1px solid var(--ch-color-border);
-  border-radius: var(--ch-radius-md);
-  box-shadow: var(--ch-shadow-dialog);
-  padding: var(--ch-space-6);
+.env-manage-modal {
   min-width: 640px;
   width: min(800px, 100%);
   max-width: 100%;
   max-height: calc(100dvh - var(--ch-space-4) * 2);
-  display: flex;
-  flex-direction: column;
   /* R9-01: converged onto TabBar's radius-md + space-6 chrome. overflow is
      intentionally kept `hidden` (not reconciled to TabBar's overflow-y:auto):
      this modal is a fixed-height two-pane editor whose inner regions scroll
@@ -605,7 +588,7 @@ watch(
 }
 
 @media (max-width: 720px) {
-  .modal {
+  .env-manage-modal {
     min-width: 0;
     width: 100%;
     max-height: calc(100dvh - 20px);

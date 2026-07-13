@@ -413,13 +413,26 @@ onUnmounted(() => {
   position: absolute;
   top: calc(100% + var(--ch-space-2));
   right: 0;
-  z-index: 60;
+  z-index: 1200;
   width: min(360px, calc(100vw - 24px));
-  padding: var(--ch-space-3);
-  border: 1px solid var(--ch-color-border);
+  padding: var(--ch-space-2);
+  border: 1px solid var(--ch-color-border-strong);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-glass);
   box-shadow: var(--ch-shadow-popover);
+  animation: network-access-panel-in var(--ch-motion-fast) var(--ch-motion-ease);
+  transform-origin: top right;
+}
+
+@keyframes network-access-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .network-access-panel-header,

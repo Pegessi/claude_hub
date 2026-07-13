@@ -195,10 +195,10 @@
     <!-- Create Tab Modal -->
     <div
       v-if="showModal"
-      class="modal-overlay"
+      class="ch-modal-overlay"
       @click.self="closeCreateModal"
     >
-      <div class="modal">
+      <div class="ch-modal">
         <h3>Create New Terminal</h3>
         <form @submit.prevent="handleCreateTab">
           <div class="form-group">
@@ -338,10 +338,10 @@
     <!-- File Browser Modal -->
     <div
       v-if="showFileBrowser"
-      class="modal-overlay file-browser-overlay"
+      class="ch-modal-overlay file-browser-overlay"
       @click.self="showFileBrowser = false"
     >
-      <div class="modal file-browser-modal">
+      <div class="ch-modal file-browser-modal">
         <div class="file-browser-header">
           <h3>{{ form.target === 'remote' ? 'Select Remote Directory' : 'Select Working Directory' }}</h3>
           <button
@@ -447,10 +447,10 @@
     <!-- Close Tab Confirmation Modal -->
     <div
       v-if="showCloseConfirm"
-      class="modal-overlay"
+      class="ch-modal-overlay"
       @click.self="showCloseConfirm = false"
     >
-      <div class="modal">
+      <div class="ch-modal">
         <h3>Close Terminal</h3>
         <p class="confirm-message">
           Are you sure you want to close "{{ tabToClose?.name }}"?
@@ -480,10 +480,10 @@
     <!-- Switch Env Modal -->
     <div
       v-if="showSwitchEnv"
-      class="modal-overlay"
+      class="ch-modal-overlay"
       @click.self="closeSwitchEnvModal"
     >
-      <div class="modal switch-env-modal">
+      <div class="ch-modal switch-env-modal">
         <div class="switch-env-header">
           <div
             class="switch-env-icon"
@@ -1364,13 +1364,17 @@ async function handleCreateTab() {
  * --ch-motion-*, --ch-shadow-*, --ch-color-*). Hardcoded px values remain
  * only for functional constants:
  *   • 30px tab / add-tab / mobile-app-menu-trigger sizes (toolbar-icon
- *     convention; changing shifts the 48px tab-bar layout height).
+ *     convention; changing shifts the 48px tab-bar layout height). Glyphs
+ *     use --ch-font-icon-base (16px) for optical centering in the 30px box.
  *   • 32px path-nav-btn (file-browser toolbar navigation buttons — toolbar-
  *     icon convention for modal controls).
  *   • 36px switch-env-icon (display glyph between 32 and 40).
  *   • 18px toast__icon box (sized to fit i/△/!/✓ emoji glyphs optically).
  *   • 24px tab-menu-trigger / tab-close / toast__close hit boxes (sized to
- *     sit within the 30px tab without bloating it).
+ *     sit within the 30px tab without bloating it). Glyphs use
+ *     --ch-font-icon-sm (14px) for optical centering in the 24px box.
+ *   • 16px inline .tab-menu-item-icon box (leading menu-item glyphs) uses
+ *     --ch-font-icon-xs (12px).
  *   • 7×7px tab-indicator status dot (proportional ring; 1.5px ring stroke).
  *   • 999px pill border-radius on .pane-indicator / mode chip.
  *   • 1px/2px/3px borders, outline offsets, rings, drag indicators, toast
@@ -1404,7 +1408,7 @@ async function handleCreateTab() {
   transition: max-height var(--ch-motion-drawer), padding var(--ch-motion-drawer), gap var(--ch-motion-drawer), border-color var(--ch-motion-drawer);
 }
 
-.tab-bar > :not(.modal-overlay) {
+.tab-bar > :not(.ch-modal-overlay) {
   transition: opacity var(--ch-motion-fast);
 }
 
@@ -1435,7 +1439,7 @@ async function handleCreateTab() {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  font-size: var(--ch-font-xl);
+  font-size: var(--ch-font-icon-base);
   line-height: 1;
   transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast);
 }
@@ -1459,10 +1463,23 @@ async function handleCreateTab() {
   border: 1px solid var(--ch-color-border-strong);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-glass);
-  box-shadow: var(--ch-shadow-soft);
+  box-shadow: var(--ch-shadow-popover);
   scrollbar-width: thin;
   touch-action: pan-y;
   -webkit-overflow-scrolling: touch;
+  animation: mobile-app-menu-in var(--ch-motion-fast) var(--ch-motion-ease);
+  transform-origin: top right;
+}
+
+@keyframes mobile-app-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .mobile-app-menu-item {
@@ -1684,7 +1701,7 @@ async function handleCreateTab() {
   background: none;
   border: none;
   color: var(--ch-color-text-soft);
-  font-size: var(--ch-font-lg);
+  font-size: var(--ch-font-icon-sm);
   line-height: 1;
   padding: 0;
   border-radius: var(--ch-radius-sm);
@@ -1705,7 +1722,7 @@ async function handleCreateTab() {
   background: none;
   border: none;
   color: var(--ch-color-text-soft);
-  font-size: var(--ch-font-lg);
+  font-size: var(--ch-font-icon-sm);
   cursor: pointer;
   padding: 0;
   line-height: 1;
@@ -1743,13 +1760,13 @@ async function handleCreateTab() {
   z-index: 1200;
   padding: var(--ch-space-2);
   border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface-raised);
-  border: 1px solid var(--ch-color-border);
+  background: var(--ch-color-surface-glass);
+  border: 1px solid var(--ch-color-border-strong);
   box-shadow: var(--ch-shadow-popover);
   display: flex;
   flex-direction: column;
   gap: 0;
-  animation: tab-menu-in var(--ch-motion-fast);
+  animation: tab-menu-in var(--ch-motion-fast) var(--ch-motion-ease);
   transform-origin: top right;
 }
 
@@ -1795,7 +1812,7 @@ async function handleCreateTab() {
   width: var(--ch-space-4);
   text-align: center;
   color: var(--ch-color-text-muted);
-  font-size: var(--ch-font-md);
+  font-size: var(--ch-font-icon-xs);
   line-height: 1;
 }
 
@@ -1820,7 +1837,7 @@ async function handleCreateTab() {
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-accent-soft);
   color: var(--ch-color-accent);
-  font-size: var(--ch-font-xl);
+  font-size: var(--ch-font-icon-base);
   line-height: 1;
 }
 
@@ -1894,7 +1911,7 @@ async function handleCreateTab() {
   border: 1px solid var(--ch-color-border-muted);
   box-sizing: border-box;
   color: var(--ch-color-text);
-  font-size: var(--ch-font-xl);
+  font-size: var(--ch-font-icon-base);
   width: 30px;
   height: 30px;
   border-radius: var(--ch-radius-md);
@@ -1918,42 +1935,11 @@ async function handleCreateTab() {
   cursor: not-allowed;
 }
 
-/* Modal Styles */
-.modal-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background-color: var(--ch-color-overlay-soft);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-sizing: border-box;
-  padding: var(--ch-space-4);
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-  z-index: 1000;
-}
+/* Modal Styles — base .ch-modal-overlay and .ch-modal are global in App.vue;
+ * only per-modal size modifiers and component-specific descendants remain here. */
 
 .file-browser-overlay {
   z-index: 1100;
-}
-
-.modal {
-  background-color: var(--ch-color-surface);
-  border: 1px solid var(--ch-color-border);
-  border-radius: var(--ch-radius-md);
-  padding: var(--ch-space-6);
-  min-width: 400px;
-  width: min(520px, 100%);
-  max-width: 100%;
-  max-height: calc(100dvh - var(--ch-space-6));
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
-  display: flex;
-  flex-direction: column;
 }
 
 .file-browser-modal {
@@ -2048,7 +2034,7 @@ async function handleCreateTab() {
 .file-browser-list {
   flex: 1;
   overflow-y: auto;
-  border: 1px solid var(--ch-color-border);
+  border: 1px solid var(--ch-color-border-strong);
   border-radius: var(--ch-radius-sm);
   background-color: var(--ch-color-app-bg);
   margin-bottom: var(--ch-space-4);
@@ -2102,7 +2088,7 @@ async function handleCreateTab() {
   flex-shrink: 0;
 }
 
-.modal h3 {
+.ch-modal h3 {
   margin: 0 0 var(--ch-space-5) 0;
   color: var(--ch-color-text);
   font-size: var(--ch-font-xl);
@@ -2169,7 +2155,7 @@ async function handleCreateTab() {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--ch-space-1);
   background-color: var(--ch-color-surface-sunken);
-  border: 1px solid var(--ch-color-border);
+  border: 1px solid var(--ch-color-border-strong);
   border-radius: var(--ch-radius-sm);
   padding: var(--ch-space-1);
 }
@@ -2304,7 +2290,7 @@ async function handleCreateTab() {
   display: flex;
   flex-direction: column;
   gap: var(--ch-space-2);
-  border: 1px solid var(--ch-color-border);
+  border: 1px solid var(--ch-color-border-strong);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-muted);
   padding: var(--ch-space-3);
@@ -2403,13 +2389,13 @@ async function handleCreateTab() {
 }
 
 @media (max-width: 640px) {
-  .modal-overlay {
+  .ch-modal-overlay {
     align-items: flex-start;
     justify-content: flex-start;
     padding: var(--ch-space-3);
   }
 
-  .modal {
+  .ch-modal {
     min-width: 0;
     width: 100%;
     max-height: calc(100dvh - var(--ch-space-5));
@@ -2457,7 +2443,7 @@ async function handleCreateTab() {
   position: fixed;
   top: 72px;
   right: var(--ch-space-4);
-  z-index: 1000;
+  z-index: 1300;
   display: flex;
   flex-direction: column;
   gap: var(--ch-space-2);
@@ -2472,15 +2458,15 @@ async function handleCreateTab() {
   gap: var(--ch-space-3);
   padding: var(--ch-space-3) var(--ch-space-3) var(--ch-space-3) calc(var(--ch-space-3) + var(--ch-space-1));
   border-radius: var(--ch-radius-md);
-  border: 1px solid var(--ch-color-border);
-  background: var(--ch-color-surface-raised);
+  border: 1px solid var(--ch-color-border-strong);
+  background: var(--ch-color-surface-glass);
   color: var(--ch-color-text);
   box-shadow: var(--ch-shadow-popover);
   font-size: var(--ch-font-md);
   line-height: var(--ch-leading-normal);
   overflow: hidden;
   pointer-events: auto;
-  animation: toast-in var(--ch-motion-standard);
+  animation: toast-in var(--ch-motion-standard) var(--ch-motion-ease);
 }
 
 @keyframes toast-in {
@@ -2506,13 +2492,12 @@ async function handleCreateTab() {
 
 .toast__icon {
   flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
-  margin-top: 1px;
+  width: 20px;
+  height: 20px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: var(--ch-font-md);
+  font-size: var(--ch-font-icon-base);
   font-weight: var(--ch-weight-semibold);
   line-height: 1;
 }
@@ -2521,7 +2506,6 @@ async function handleCreateTab() {
   flex: 1 1 auto;
   min-width: 0;
   word-break: break-word;
-  padding-top: 1px;
 }
 
 .toast__close {
@@ -2531,10 +2515,9 @@ async function handleCreateTab() {
   background: transparent;
   border: none;
   color: var(--ch-color-text-subtle);
-  font-size: var(--ch-font-lg);
+  font-size: var(--ch-font-icon-sm);
   line-height: 1;
   padding: 0;
-  margin-top: -1px;
   cursor: pointer;
   transition: color var(--ch-motion-fast), background var(--ch-motion-fast);
   border-radius: var(--ch-radius-sm);

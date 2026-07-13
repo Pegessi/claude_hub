@@ -562,6 +562,9 @@ onUnmounted(() => {
   --ch-font-md: 13px;          /* column headers, secondary headings, card titles */
   --ch-font-lg: 15px;          /* section/sub heads */
   --ch-font-xl: 18px;          /* page-level heading (workspace h1) */
+  --ch-font-icon-sm: 14px;     /* 24px hit-box glyph: tab-close, add-tab, toast-close */
+  --ch-font-icon-base: 16px;   /* 30/32px toolbar-box glyph: triggers, menu heads */
+  --ch-font-icon-xs: 12px;     /* 14px inline-box glyph: leading menu-item icons */
   --ch-leading-tight: 1.25;    /* headings: dense, multi-line safe */
   --ch-leading-normal: 1.5;    /* body/paragraph: comfortable reading rhythm */
   --ch-weight-regular: 400;    /* body, placeholder, meta */
@@ -1042,6 +1045,83 @@ textarea {
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+/* ------------------------------------------------------------------
+ * R10: shared modal chrome — single source of truth for overlay + dialog
+ * box. TabBar, EnvPresetManager, and AgentWorkspaceView all consume
+ * .ch-modal-overlay / .ch-modal; per-component size modifiers (e.g.
+ * .file-browser-modal, .env-manage-modal, .agent-manager-modal) set
+ * only width/height/min-width variants.
+ */
+.ch-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  padding: var(--ch-space-4);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  background: var(--ch-color-overlay-soft);
+}
+
+.ch-modal {
+  background: var(--ch-color-surface);
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-md);
+  box-shadow: var(--ch-shadow-dialog);
+  padding: var(--ch-space-6);
+  min-width: 400px;
+  width: min(520px, 100%);
+  max-width: 100%;
+  max-height: calc(100dvh - var(--ch-space-6));
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  animation: ch-modal-in var(--ch-motion-standard) var(--ch-motion-ease);
+}
+
+@keyframes ch-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* ------------------------------------------------------------------
+ * R10: shared popover chrome — dropdowns, floating panels, menus.
+ * Consumed by NetworkAccessMenu, AgentStatusFloatingPanel, TabBar
+ * tab-menu + mobile-app-menu, and LayoutSelector layout-menu-panel.
+ */
+.ch-popover {
+  background: var(--ch-color-surface-glass);
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-md);
+  box-shadow: var(--ch-shadow-popover);
+  padding: var(--ch-space-2);
+  animation: ch-popover-in var(--ch-motion-fast) var(--ch-motion-ease);
+  transform-origin: top right;
+}
+
+@keyframes ch-popover-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
   }
 }
 
