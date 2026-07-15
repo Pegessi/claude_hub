@@ -80,6 +80,14 @@ TMUX_SUBMIT_SETTLE_SECONDS = 0.7
 AUTO_CONTINUE_MAX_ATTEMPTS = 10
 AUTO_CONTINUE_MIN_INTERVAL_SECONDS = 15
 AUTO_CONTINUE_IDLE_GRACE_SECONDS = 20
+# Clean-idle grace: when an agent is idle at a prompt with no error patterns
+# and no completion patterns, wait this long before sending the first nudge.
+# Longer than the error/completion grace because agents legitimately sit at a
+# clean prompt while reading files, thinking, or between output bursts — but a
+# prompt that was never delivered (e.g. continue_task Enter failed) leaves the
+# agent at a permanently clean idle, and we need to recover within ~1 minute
+# rather than leaving the task stuck in WORKING forever.
+AUTO_CONTINUE_CLEAN_IDLE_GRACE_SECONDS = 60
 # After this many soft auto-continue prompts fail to revive an agent stuck on
 # an API error, escalate to hard recovery: interrupt, /clear, re-inject prompt.
 AUTO_CONTINUE_SOFT_ATTEMPTS_BEFORE_HARD_RECOVERY = 3
@@ -120,6 +128,15 @@ AUTO_CONTINUE_MESSAGE = (
     "continue from the last actionable step. If the task is already complete and only missed "
     "the workspace report, immediately POST a ready_for_review or completed report instead of "
     "doing more work."
+)
+AUTO_CONTINUE_IDLE_PROMPT_MESSAGE = (
+    "You are the workspace agent assigned to this task and appear to be at a clean idle prompt. "
+    "Read the state snapshot at the path given in your original assignment, inspect the current "
+    "state of any files you were editing, and resume work from the last actionable step. "
+    "If the task was already complete before this nudge (for example, if you already posted a "
+    "ready_for_review report that did not reach the server), immediately POST a ready_for_review "
+    "or completed report with changed_files, validation, risks, the stored Goal Packet, and "
+    "acceptance_check evidence."
 )
 AUTO_CONTINUE_REVIEWER_MESSAGE = (
     "Please inspect the review state. If the review was interrupted by an API error, continue "
@@ -223,6 +240,8 @@ __all__ = [
     "ARTIFACT_PREVIEW_MAX_BYTES",
     "ATTACHMENT_MAX_BYTES",
     "AUTO_CONTINUE_IDLE_GRACE_SECONDS",
+    "AUTO_CONTINUE_CLEAN_IDLE_GRACE_SECONDS",
+    "AUTO_CONTINUE_IDLE_PROMPT_MESSAGE",
     "AUTO_CONTINUE_MAX_ATTEMPTS",
     "AUTO_CONTINUE_MAX_HARD_RECOVERIES",
     "AUTO_CONTINUE_MESSAGE",

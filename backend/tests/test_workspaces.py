@@ -6262,8 +6262,15 @@ def test_monitor_surfaces_worker_prompt_stuck_in_input(
     updated_task = workspace_manager.tasks[started["id"]]
     updated_session = workspace_manager.sessions[started["session_id"]]
     report = list(workspace_manager.reports.values())[-1]
-    assert updated_task.status == WorkspaceTaskStatus.REVIEW
+    # Worker prompt stuck: task stays WORKING (it never completed the work
+    # phase to justify moving to REVIEW), but the session is flagged
+    # NEEDS_INPUT/ATTENTION so the human sees attention is required. Previously
+    # this incorrectly set status=REVIEW, which made a stuck initial-dispatch
+    # look like a completed work phase awaiting review. Reviewer prompt-stuck
+    # is the only case that keeps status=REVIEW.
+    assert updated_task.status == WorkspaceTaskStatus.WORKING
     assert updated_session.runtime_status == AgentRuntimeStatus.ATTENTION
+    assert updated_session.status == ManagedSessionStatus.NEEDS_INPUT
     assert report.state.value == "needs_input"
     assert report.risk_level == "prompt_dispatch_stalled"
     assert "terminal input box" in report.message
@@ -8229,22 +8236,37 @@ def test_continue_task_marks_working_before_send_verification_failure(
         f"/api/workspaces/tasks/{task['id']}/continue",
         json={"message": "Please address review feedback"},
     )
-    assert continue_response.status_code == 400
+    # Send failure is caught internally; the task stays in WORKING state and a
+    # prompt-dispatch-stalled report is recorded (risk_level=prompt_dispatch_stalled,
+    # state=needs_input) so the monitor's stall detector and auto-continue loop
+    # can nudge the worker. The endpoint returns 200 because state is
+    # consistent — no manual recovery is required; auto-recovery handles it.
+    assert continue_response.status_code == 200
 
     board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
     assert board["tasks"][0]["status"] == "working"
-    assert board["sessions"][0]["status"] == "working"
-    assert board["sessions"][0]["runtime_status"] == "working"
-    assert board["sessions"][0]["current_task_id"] == task["id"]
+    # Find the worker session (not the reviewer) to verify its stall state.
+    worker_sessions = [s for s in board["sessions"] if s["id"] == started["session_id"]]
+    assert len(worker_sessions) == 1
+    worker_session = worker_sessions[0]
+    assert worker_session["status"] == "needs_input"
+    assert worker_session["runtime_status"] == "attention"
+    assert worker_session["current_task_id"] == task["id"]
     # The board carries only the latest report per task; the full history lives
     # behind the on-demand per-task endpoint.
-    assert [report["state"] for report in board["reports"]] == ["working"]
+    assert [report["state"] for report in board["reports"]] == ["needs_input"]
     history = client.get(f"/api/workspaces/{workspace['id']}/tasks/{task['id']}/reports").json()
     assert [report["state"] for report in history] == [
         "ready_for_review",
         "review_needs_input",
         "working",
+        "needs_input",
     ]
+    # The stall report carries the risk_level marker so the monitor's
+    # ATTENTION+WORKING handler does NOT incorrectly fire _request_task_review
+    # (which would demote the task to REVIEW mid-work-phase).
+    stall_report = history[-1]
+    assert stall_report["risk_level"] == "prompt_dispatch_stalled"
 
 
 def test_remote_workspace_default_agent_uses_local_tab(

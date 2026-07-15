@@ -454,10 +454,37 @@ class _DispatchMixin:
         self.reports[continue_report.id] = continue_report
         self._save_state()
 
-        await self.send_session_message(
-            session.id,
-            self._build_continue_prompt(self.tasks[task.id], payload, session),
-        )
+        # Send the continue prompt; on tmux submit failure mark the dispatch
+        # as stalled so the monitor stall-detector and auto-continue can
+        # recover. Without this, a RuntimeError from _submit_tmux_message
+        # propagates to the HTTP layer while state is already persisted as
+        # WORKING, leaving a window where the task appears working but the
+        # worker never received the prompt.
+        try:
+            await self.send_session_message(
+                session.id,
+                self._build_continue_prompt(self.tasks[task.id], payload, session),
+            )
+        except Exception as exc:
+            logger.exception(
+                "Failed to dispatch workspace continue prompt task_id=%s session_id=%s",
+                task.id,
+                session.id,
+            )
+            self._mark_prompt_dispatch_stalled(
+                task_id=task.id,
+                session_id=session.id,
+                message=(
+                    "Continue prompt could not be submitted to the terminal; "
+                    "auto-recovery will nudge the worker. "
+                    f"Error: {exc}"
+                ),
+                message_zh=(
+                    "Continue prompt 未能提交到终端；自动恢复将提示 worker。" f"错误：{exc}"
+                ),
+                report_state=AgentReportState.NEEDS_INPUT,
+                sampled_at=_wm._now(),
+            )
         return self.tasks[task.id]
 
     def _ensure_session_can_continue_task(

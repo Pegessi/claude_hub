@@ -328,10 +328,13 @@ class _TmuxQueriesMixin:
                 exc,
             )
             return False
-        return self._message_still_in_input(
-            output,
-            self._expected_pending_prompt_prefix(reviewer, task),
-        )
+        # Check every prefix that could legitimately be in the reviewer's
+        # input box (review prompt or hard-recovery reviewer prompt). If none
+        # match, the prompt was submitted and the reviewer is genuinely idle.
+        for prefix in self._expected_pending_prompt_prefixes(reviewer, task):
+            if self._message_still_in_input(output, prefix):
+                return True
+        return False
 
     async def _review_dispatch_failed(self, task: WorkspaceTask) -> bool:
         """Reaper gate: True when this task's review dispatch should be re-sent.
@@ -511,13 +514,21 @@ class _TmuxQueriesMixin:
         ``_reviewer_is_active`` reports False, because the terminal
         classifier briefly reports IDLE between bursts of model output.
 
-        We grant the grace based on whichever of the two timestamps is
-        more recent: when the review was last requested, or when the
-        assigned reviewer last had terminal activity recorded.
+        We grant the grace based on whichever of the timestamps is
+        more recent: when the review was last requested, when the goal
+        packet was submitted (for pending-GP cases where review_requested_at
+        was never set), or when the assigned reviewer last had terminal
+        activity recorded.
         """
         candidates: list[datetime] = []
         if task.review_requested_at:
             candidates.append(task.review_requested_at)
+        if (
+            task.goal_packet is not None
+            and task.goal_packet.status == GoalPacketStatus.PENDING_REVIEW
+            and task.goal_packet.updated_at
+        ):
+            candidates.append(task.goal_packet.updated_at)
         if task.review_session_id:
             reviewer = self.sessions.get(task.review_session_id)
             if reviewer and reviewer.last_activity_at:
@@ -586,6 +597,25 @@ class _TmuxQueriesMixin:
                 # reconciler or manual status transition set REVIEW without
                 # actually dispatching a reviewer.
                 needs_review_dispatch = True
+            elif (
+                task.task_mode == WorkspaceTaskMode.REVIEWED
+                and task.status == WorkspaceTaskStatus.WORKING
+                and task.goal_packet is not None
+                and task.goal_packet.status == GoalPacketStatus.PENDING_REVIEW
+                and not state_policy.review_in_flight(
+                    task.review_requested_at, task.review_completed_at
+                )
+            ):
+                # Goal packet was marked PENDING_REVIEW (the worker submitted
+                # its GP working report) but _request_task_review never fired
+                # or threw before persisting review_requested_at — e.g.
+                # reviewer creation failed between the goal-packet status
+                # write and the review dispatch save. The task appears in
+                # WORKING state with a pending-review GP but no reviewer
+                # bound; recover by re-dispatching a GP review. The grace
+                # check below uses goal_packet.updated_at so a freshly-submitted
+                # GP gets the same 60s dispatch window as a normal review.
+                needs_review_dispatch = True
             if not needs_review_dispatch:
                 continue
             if not task.session_id:
@@ -602,17 +632,58 @@ class _TmuxQueriesMixin:
                 )
                 continue
             latest_state = self._latest_report_state(task.id)
-            trigger_state = (
-                latest_state
-                if latest_state
-                in {
-                    AgentReportState.READY_FOR_REVIEW,
-                    AgentReportState.COMPLETED,
-                    AgentReportState.BLOCKED,
-                    AgentReportState.NEEDS_INPUT,
-                }
-                else AgentReportState.READY_FOR_REVIEW
+            # Detect the pending-goal-packet case: the task carries a GP in
+            # PENDING_REVIEW but review was never dispatched (review_requested_at
+            # is None). The trigger report must be WORKING state so that
+            # _build_review_prompt produces the Goal Packet approval review
+            # instructions rather than implementation review instructions.
+            is_pending_gp_recovery = (
+                task.task_mode == WorkspaceTaskMode.REVIEWED
+                and task.goal_packet is not None
+                and task.goal_packet.status == GoalPacketStatus.PENDING_REVIEW
+                and not state_policy.review_in_flight(
+                    task.review_requested_at, task.review_completed_at
+                )
             )
+            if is_pending_gp_recovery:
+                trigger_state = AgentReportState.WORKING
+                trigger_message = (
+                    "Re-dispatching pending Goal Packet review (fallback reaper); "
+                    "initial GP review dispatch did not complete."
+                )
+                trigger_message_en = (
+                    "Re-dispatching pending Goal Packet review (fallback reaper); "
+                    "initial GP review dispatch did not complete."
+                )
+                trigger_message_zh = (
+                    "重新分派等待中的 Goal Packet 评审（fallback reaper）；"
+                    "初始 GP 评审分派未完成。"
+                )
+                trigger_reason = "Pending Goal Packet review recovered by background dispatcher."
+            else:
+                trigger_state = (
+                    latest_state
+                    if latest_state
+                    in {
+                        AgentReportState.READY_FOR_REVIEW,
+                        AgentReportState.COMPLETED,
+                        AgentReportState.BLOCKED,
+                        AgentReportState.NEEDS_INPUT,
+                    }
+                    else AgentReportState.READY_FOR_REVIEW
+                )
+                trigger_message = (
+                    "Re-dispatching stuck review task (fallback reaper); "
+                    "prior reviewer dispatch did not complete."
+                )
+                trigger_message_en = (
+                    "Re-dispatching stuck review task (fallback reaper); "
+                    "prior reviewer dispatch did not complete."
+                )
+                trigger_message_zh = (
+                    "重新分派卡住的 review 任务（fallback reaper）；" "之前的 reviewer 分派未完成。"
+                )
+                trigger_reason = "Stuck review recovered by background dispatcher."
             self._release_stale_reviewer_for_task(task, updated_at=now)
             trigger_report = AgentReport(
                 id=str(uuid.uuid4()),
@@ -620,22 +691,14 @@ class _TmuxQueriesMixin:
                 task_id=task.id,
                 session_id=task.session_id,
                 state=trigger_state,
-                message=(
-                    "Re-dispatching stuck review task (fallback reaper); "
-                    "prior reviewer dispatch did not complete."
-                ),
-                message_en=(
-                    "Re-dispatching stuck review task (fallback reaper); "
-                    "prior reviewer dispatch did not complete."
-                ),
-                message_zh=(
-                    "重新分派卡住的 review 任务（fallback reaper）；" "之前的 reviewer 分派未完成。"
-                ),
+                message=trigger_message,
+                message_en=trigger_message_en,
+                message_zh=trigger_message_zh,
                 changed_files=[],
                 validation=None,
                 risks=None,
                 review_decision=ReviewDecision.REQUEST,
-                review_reason="Stuck review recovered by background dispatcher.",
+                review_reason=trigger_reason,
                 risk_level=None,
                 review_cycle=task.review_cycle,
                 created_at=now,
