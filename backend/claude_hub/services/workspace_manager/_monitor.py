@@ -83,7 +83,18 @@ class _MonitorMixin:
                     and task
                     and task.status == WorkspaceTaskStatus.WORKING
                 ):
-                    if not state_policy.review_in_flight(
+                    # If the latest report is already a prompt-dispatch-stall
+                    # marker, the stall detector handled the state transition
+                    # (session NEEDS_INPUT, risk-level report recorded) and we
+                    # must NOT fire _request_task_review here — that would
+                    # incorrectly move the task to REVIEW when the worker never
+                    # finished implementation, losing the work phase. Prompt
+                    # stall is a delivery failure on the worker's own prompt,
+                    # not a worker request for review; nudge/auto-recovery
+                    # revives it, not a reviewer.
+                    if not self._latest_report_has_risk(
+                        task.id, PROMPT_STUCK_RISK_LEVEL
+                    ) and not state_policy.review_in_flight(
                         task.review_requested_at, task.review_completed_at
                     ):
                         report = AgentReport(
@@ -128,10 +139,17 @@ class _MonitorMixin:
             )
             return None
 
-        if not self._message_still_in_input(
-            output,
-            self._expected_pending_prompt_prefix(session, task),
-        ):
+        # Check ALL known prompt prefixes rather than a single one. The
+        # continue_task and hard-recovery paths send prompts that start with
+        # different first lines than the initial-dispatch / review prompts;
+        # previously the detector only looked for "New workspace task assigned."
+        # / "Review workspace task." and silently missed stalled continue /
+        # hard-recovery pastes, so a stuck Enter key on the continue prompt
+        # was never retried and the worker sat idle indefinitely.
+        for prefix in self._expected_pending_prompt_prefixes(session, task):
+            if self._message_still_in_input(output, prefix):
+                break
+        else:
             return None
         if self._latest_report_has_risk(task.id, PROMPT_STUCK_RISK_LEVEL):
             return {
@@ -187,14 +205,44 @@ class _MonitorMixin:
             "updated_at": sampled_at,
         }
 
-    def _expected_pending_prompt_prefix(
+    # Prompt prefixes that can appear in a terminal input box. The stall
+    # detector checks for ALL of these so that continue / hard-recovery
+    # prompts — which start with different first lines than initial dispatch
+    # or review prompts — are not silently missed when Enter fails to submit.
+    _PROMPT_PREFIX_INITIAL_DISPATCH = "New workspace task assigned."
+    _PROMPT_PREFIX_REVIEW = "Review workspace task."
+    _PROMPT_PREFIX_CONTINUE = "Continue workspace task from review."
+    # Both hard-recovery messages share the first ~60 chars; use enough to
+    # disambiguate but not enough to diverge on the "agent" vs "reviewer" word.
+    _PROMPT_PREFIX_HARD_RECOVERY = "⚠️  Your previous context was automatically cleared because the"
+
+    def _expected_pending_prompt_prefixes(
         self,
         session: ManagedSession,
         task: WorkspaceTask,
-    ) -> str:
+    ) -> list[str]:
+        """Return prompt first-lines that could legitimately be in the input box."""
         if session.role == WorkspaceSessionRole.REVIEWER:
-            return "Review workspace task."
-        return "New workspace task assigned."
+            prefixes = [self._PROMPT_PREFIX_REVIEW]
+            # A reviewer that just underwent hard recovery will have the
+            # hard-recovery reviewer prompt sitting in the input box.
+            if (
+                session.hard_recovery_task_id == task.id
+                and session.last_hard_recovery_at
+                and task.review_requested_at
+                and session.last_hard_recovery_at >= task.review_requested_at
+            ):
+                prefixes.append(self._PROMPT_PREFIX_HARD_RECOVERY)
+            return prefixes
+        prefixes = [self._PROMPT_PREFIX_INITIAL_DISPATCH, self._PROMPT_PREFIX_CONTINUE]
+        if (
+            session.hard_recovery_task_id == task.id
+            and session.last_hard_recovery_at
+            and task.started_at
+            and session.last_hard_recovery_at >= task.started_at
+        ):
+            prefixes.append(self._PROMPT_PREFIX_HARD_RECOVERY)
+        return prefixes
 
     def _prompt_dispatch_still_in_grace_period(
         self,
@@ -264,6 +312,21 @@ class _MonitorMixin:
         if not task or not session:
             return
 
+        # When the prompt is stuck for a REVIEWER, the task was already in
+        # REVIEW state (reviewer binding completed before send). Keep it there
+        # and mark the session NEEDS_INPUT so the human sees attention needed.
+        # When the prompt is stuck for any other role (worker/orchestrator/
+        # dispatcher — i.e. an implementation-phase session), the task is
+        # already in WORKING state; do NOT demote it to REVIEW — that would
+        # incorrectly close the work phase and confuse the dispatch loop.
+        # Instead, keep the task in WORKING and mark the session NEEDS_INPUT;
+        # the monitor's auto-continue / stall-detector will nudge the worker
+        # and retry the prompt.
+        is_reviewer = session.role == WorkspaceSessionRole.REVIEWER
+        updated_task_status = WorkspaceTaskStatus.REVIEW if is_reviewer else task.status
+        updated_session_status = ManagedSessionStatus.NEEDS_INPUT
+        updated_runtime_status = AgentRuntimeStatus.ATTENTION
+
         report = AgentReport(
             id=str(uuid.uuid4()),
             workspace_id=task.workspace_id,
@@ -285,15 +348,15 @@ class _MonitorMixin:
         self.reports[report.id] = report
         self.tasks[task.id] = task.model_copy(
             update={
-                "status": WorkspaceTaskStatus.REVIEW,
-                "reviewed_at": task.reviewed_at or sampled_at,
+                "status": updated_task_status,
+                "reviewed_at": task.reviewed_at or sampled_at if is_reviewer else task.reviewed_at,
                 "updated_at": sampled_at,
             }
         )
         self.sessions[session.id] = session.model_copy(
             update={
-                "status": ManagedSessionStatus.NEEDS_INPUT,
-                "runtime_status": AgentRuntimeStatus.ATTENTION,
+                "status": updated_session_status,
+                "runtime_status": updated_runtime_status,
                 "task_id": task.id,
                 "current_task_id": task.id,
                 "last_activity_at": sampled_at,
@@ -364,15 +427,28 @@ class _MonitorMixin:
             }
 
         last_activity_at = session.last_activity_at
-        if (
-            last_activity_at
-            and (sampled_at - last_activity_at).total_seconds() < AUTO_CONTINUE_IDLE_GRACE_SECONDS
-        ):
-            return None
-
         is_reviewer_session = (
             task.review_session_id is not None and task.review_session_id == session.id
         )
+        if last_activity_at:
+            idle_seconds = (sampled_at - last_activity_at).total_seconds()
+            # Pre-compute pattern checks so we can choose the right grace.
+            _interruption_check = self._auto_continue_interruption_reason(output)
+            _completion_check = (
+                None if is_reviewer_session else self._auto_continue_completion_reason(output)
+            )
+            # Use a longer grace for the clean-idle case (no error/completion
+            # patterns) because agents legitimately sit at a clean prompt while
+            # reading or thinking; nudging too early creates spam. Error and
+            # completion patterns use the shorter standard grace.
+            effective_grace = (
+                AUTO_CONTINUE_CLEAN_IDLE_GRACE_SECONDS
+                if not _interruption_check and not _completion_check
+                else AUTO_CONTINUE_IDLE_GRACE_SECONDS
+            )
+            if idle_seconds < effective_grace:
+                return None
+
         interruption_reason = self._auto_continue_interruption_reason(output)
         completion_reason = None
         # Completion patterns (e.g. "ready_for_review", "changed_files") only apply
@@ -380,7 +456,19 @@ class _MonitorMixin:
         # and don't need completion-nudge prompts.
         if not interruption_reason and not is_reviewer_session:
             completion_reason = self._auto_continue_completion_reason(output)
-        if not interruption_reason and not completion_reason:
+        # Idle-clean-prompt nudge: when a worker is past the clean-idle grace
+        # period, not showing busy output, not showing an API error, and not
+        # showing completion patterns, it is likely sitting at a fresh input
+        # prompt without having received (or having lost) its task/continue
+        # prompt. Previously this case returned None and the task stayed stuck
+        # in WORKING with an IDLE worker forever; send the inspect-state nudge
+        # so the agent reads the snapshot and resumes. Reviewers are NOT nudged
+        # here — the stuck-review reaper handles them with its own grace and
+        # dispatch-retry logic.
+        idle_clean_prompt_reason = None
+        if not interruption_reason and not completion_reason and not is_reviewer_session:
+            idle_clean_prompt_reason = "idle_clean_prompt"
+        if not interruption_reason and not completion_reason and not idle_clean_prompt_reason:
             return None
 
         attempts = session.auto_continue_attempts if session.auto_continue_task_id == task.id else 0
@@ -538,6 +626,8 @@ class _MonitorMixin:
             message = (
                 AUTO_CONTINUE_REVIEWER_MESSAGE if is_reviewer_session else AUTO_CONTINUE_MESSAGE
             )
+        elif idle_clean_prompt_reason:
+            message = AUTO_CONTINUE_IDLE_PROMPT_MESSAGE
         else:
             message = AUTO_REPORT_MISSING_MESSAGE
         # The agent's context may have been cleared since it learned the report
@@ -553,8 +643,12 @@ class _MonitorMixin:
             task.id,
             attempts,
             AUTO_CONTINUE_MAX_ATTEMPTS,
-            "continue" if interruption_reason else "report_missing",
-            interruption_reason or completion_reason,
+            (
+                "continue"
+                if interruption_reason
+                else ("idle_prompt_nudge" if idle_clean_prompt_reason else "report_missing")
+            ),
+            interruption_reason or idle_clean_prompt_reason or completion_reason,
         )
         return {
             "status": ManagedSessionStatus.WORKING,

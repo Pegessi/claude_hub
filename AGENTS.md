@@ -120,6 +120,7 @@ task.
 | Auto Mode sub-agent orchestration | `docs/working-logs/2026-06-01-auto-mode-cli-subagent-orchestration.md` |
 | Long-running autonomous timing / heartbeat | `docs/working-logs/2026-06-04-auto-mode-observability.md` |
 | Agent API error hard-context recovery | `docs/working-logs/2026-07-11-agent-error-hard-recovery.md` |
+| Dispatch chain recovery (GP review / continue stalls) | `docs/working-logs/2026-07-15-dispatch-chain-recovery.md` |
 | Resident agent: lifecycle, run-now, periodic tasks, next-run | `docs/working-logs/2026-06-25-resident-agent-three-state-lifecycle.md`, `docs/working-logs/2026-07-01-resident-behavior-optimization.md` |
 | Feedback harness / lesson retrieval plan | `docs/working-logs/2026-06-06-feedback-harness-plan.md` |
 | Active lessons / workspace feedback | `docs/working-logs/lessons-catalog.md` |

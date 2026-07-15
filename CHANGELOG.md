@@ -5,6 +5,73 @@
 
 ## Unreleased
 
+### fix: Robust dispatch-chain recovery for goal packet review and continue prompts
+
+- **What**: four chained fixes for the intermittent "agent fails to submit
+  goal packet review request" and "goal packet approved but worker never
+  resumes" bugs. Together they close three gaps where a tmux submit failure
+  or stale terminal state could leave a task in WORKING/REVIEW state with an
+  IDLE agent and no automatic recovery path.
+- **Why**: three independent gaps combined to produce the reported symptoms:
+  (1) the prompt-stall detector only checked for the initial-dispatch and
+  review prefixes — a continue or hard-recovery prompt stuck in the input box
+  was invisible to Enter-retry and never escalated; (2) `continue_task`
+  didn't wrap `send_session_message` in a try/except, so a tmux submit
+  verification RuntimeError propagated to the HTTP layer while state was
+  already persisted as WORKING (leaving the worker idle with no prompt);
+  (3) the auto-continue nudge logic returned `None` for the clean-idle case
+  (no error/completion patterns in terminal output), so an agent sitting at
+  a fresh input prompt after a failed delivery was never nudged. A fourth
+  fix adds a reaper safety net for pending Goal Packet reviews whose
+  reviewer-create step threw before setting `review_requested_at`.
+- **How**:
+  - Replaced `_expected_pending_prompt_prefix(session, task) -> str` with
+    `_expected_pending_prompt_prefixes(...) -> list[str]` covering four
+    prefixes: initial dispatch (`"New workspace task assigned."`), review
+    (`"Review workspace task."`), continue (`"Continue workspace task from
+    review."`), and hard-recovery (the ⚠️ prefix). The hard-recovery prefix
+    is conditionally included based on `session.hard_recovery_task_id` and
+    timestamp comparisons; both the monitor's stall detector and the
+    reaper's `_reviewer_prompt_still_pending` iterate all prefixes.
+  - Wrapped the `send_session_message` call in `continue_task` with
+    try/except that calls `_mark_prompt_dispatch_stalled` on failure —
+    matching the existing pattern in `_request_task_review`. The endpoint
+    now returns 200 (state is consistent) instead of 400; the stall-marker
+    report flags the session for nudge recovery.
+  - Fixed `_mark_prompt_dispatch_stalled` to preserve the task's existing
+    status for worker/orchestrator sessions (only reviewer stalls set
+    status=REVIEW). Previously the function hardcoded status=REVIEW, which
+    incorrectly re-opened a review phase when a worker's own initial or
+    continue prompt failed to submit; that in turn triggered the
+    ATTENTION+WORKING handler in `_refresh_session_statuses` which fired
+    `_request_task_review` and completed the spurious transition.
+  - Added a guard in `_refresh_session_statuses`: the ATTENTION+WORKING
+    auto-review path now skips firing `_request_task_review` when the
+    latest report already carries `risk_level=prompt_dispatch_stalled`
+    (delivery failure on the worker's own prompt is not a request for
+    human/reviewer attention — it's a transport failure the nudge loop
+    recovers from).
+  - Added a clean-idle nudge path in `_auto_continue_stopped_task`: when a
+    non-reviewer worker is past the grace period, shows no error patterns,
+    and no completion patterns, it now sends an inspect-state nudge
+    (`AUTO_CONTINUE_IDLE_PROMPT_MESSAGE`) instead of returning `None`. To
+    avoid false positives on agents legitimately reading/thinking, the
+    clean-idle case uses a dedicated longer grace
+    (`AUTO_CONTINUE_CLEAN_IDLE_GRACE_SECONDS=60`) vs the existing
+    20-second grace for error/completion cases (`AUTO_CONTINUE_IDLE_GRACE_SECONDS`).
+  - Extended the fallback reaper `_reap_stuck_reviews` to recognize a
+    third wedged state: REVIEWED-mode task in WORKING with an approved-or-
+    pending Goal Packet but no `review_requested_at` (reviewer creation
+    threw between binding the task and dispatching the GP review prompt).
+    `_review_dispatch_in_reaper_grace` now also treats
+    `goal_packet.updated_at` as a grace anchor when the GP is in
+    PENDING_REVIEW state; the trigger uses trigger_state=WORKING so the
+    re-dispatched review prompt carries GP-approval instructions.
+- **Tests**: `tests/test_workspaces.py` (119 pass); two existing tests
+  updated to reflect corrected behavior
+  (`test_continue_task_marks_working_before_send_verification_failure`,
+  `test_monitor_surfaces_worker_prompt_stuck_in_input`); mypy clean.
+
 ### feat: Hard context recovery for agents stuck on persistent API errors
 
 - **What**: when a Claude agent (worker or reviewer) gets stuck on a
