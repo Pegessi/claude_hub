@@ -5,6 +5,35 @@
 
 ## Unreleased
 
+### feat: Auto-refresh visible terminal when agent finishes a turn
+
+- **What**: when an agent's runtime status transitions from `working` to
+  `idle` (shell prompt visible) or `attention` (agent waiting for input),
+  the currently-displayed terminal automatically triggers a history refresh +
+  scroll-to-bottom. This avoids display misalignment caused by output content
+  changes during a turn.
+- **Why**: after a round of conversation processing, the terminal output can
+  end up in a visually misaligned state (e.g. the prompt line not at the
+  bottom). Manually hitting the refresh button worked but was easy to forget;
+  auto-refreshing on the working → idle/attention edge keeps the view in sync.
+- **How**:
+  - Added a `currentAgentStatus` computed in `TerminalView.vue` that resolves
+    the `agentStatuses` store entry for `props.tabId` (the only terminal this
+    component displays).
+  - Added a `lastAgentStatus` ref that tracks the previously-seen status; it is
+    reset to `null` whenever `props.tabId` changes so cross-tab status
+    comparisons never fire a spurious refresh.
+  - Added a `watch(currentAgentStatus, …)` that detects the
+    `working` → `idle`/`attention` edge and calls the component-local
+    `postTerminalHistoryRefresh(props.tabId, { reason: 'auto-round-complete',
+    scrollToBottom: true })`. The global
+    `window.__claudeHub.refreshTerminalHistory` is intentionally **not** used
+    to avoid split-pane targeting issues.
+  - Only the displayed terminal (`props.tabId`) is refreshed; hidden/cached
+    iframes and other panes are untouched.
+- **Validation**: `pnpm lint` and `pnpm build` (vue-tsc + vite) both pass
+  with no errors.
+
 ### feat: Hard context recovery for agents stuck on persistent API errors
 
 - **What**: when a Claude agent (worker or reviewer) gets stuck on a
