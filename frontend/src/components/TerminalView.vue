@@ -19,11 +19,11 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch, ComponentPublicInstance, } from 'vue'
+import { onMounted, onUnmounted, ref, watch, computed, ComponentPublicInstance, } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
-import type { AgentType,} from '@/types'
+import type { AgentType, AgentRuntimeStatus } from '@/types'
 
 const props = defineProps<{
   tabId: string
@@ -338,7 +338,20 @@ const terminalContainer = ref<HTMLElement | null>(null)
 const appStore = useAppStore()
 const terminalStore = useTerminalStore()
 const { colorScheme } = storeToRefs(appStore)
-const { layoutType } = storeToRefs(terminalStore)
+const { layoutType, agentStatuses } = storeToRefs(terminalStore)
+
+// Track the last-seen agent runtime status for this tab so we can detect the
+// working → idle/attention transition that marks the end of a conversation
+// turn. Reset to null whenever props.tabId changes (see the tabId watcher
+// below) to avoid cross-tab status comparisons triggering a spurious refresh.
+const lastAgentStatus = ref<AgentRuntimeStatus | null>(null)
+
+// The agent status for the currently-displayed tab (props.tabId). The
+// terminalStore polls agentStatuses every 5s; only the entry matching
+// props.tabId is relevant since this TerminalView only displays props.tabId.
+const currentAgentStatus = computed<AgentRuntimeStatus | null>(
+  () => agentStatuses.value.find(s => s.tab_id === props.tabId)?.status ?? null
+)
 let terminalResizeObserver: ResizeObserver | null = null
 let keyboardResizeSettleTimer: number | null = null
 let keyboardResizeSettlesAt = 0
@@ -397,6 +410,10 @@ watch(
   () => props.tabId,
   (newTabId, oldTabId) => {
     cacheTabId(newTabId)
+    // Reset agent-status tracking so a status transition on the previous tab
+    // does not trigger an auto-refresh on the newly-active tab (acceptance
+    // criterion 3: switching tabs must not accidentally trigger a refresh).
+    lastAgentStatus.value = null
     requestAnimationFrame(() => {
       scheduleTerminalResize(newTabId)
       scheduleMobileTerminalActivation(newTabId)
@@ -413,6 +430,27 @@ watch(
   },
   { immediate: true }
 )
+
+// Auto-refresh the displayed terminal when the agent finishes a turn.
+// When the agent status transitions working → idle (shell prompt visible) or
+// working → attention (agent waiting for input), the output content has
+// changed; refreshing the terminal history + scrolling to the bottom avoids
+// display misalignment. Only props.tabId is refreshed (acceptance criterion 2:
+// hidden/cached iframes and other panes are untouched), and the refresh only
+// fires when this TerminalView is mounted — which is exactly the "displayed
+// state" (acceptance criterion 1).
+watch(currentAgentStatus, (newStatus) => {
+  if (
+    lastAgentStatus.value === 'working' &&
+    (newStatus === 'idle' || newStatus === 'attention')
+  ) {
+    postTerminalHistoryRefresh(props.tabId, {
+      reason: 'auto-round-complete',
+      scrollToBottom: true,
+    })
+  }
+  lastAgentStatus.value = newStatus
+})
 
 watch(layoutType, () => {
   if (layoutType.value !== '1x1' && props.tabId) {
