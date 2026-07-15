@@ -44,7 +44,11 @@ _BARE_SHELL_PROMPT_RE = re.compile(r"[❯>$#%»→λ]\s*$")
 
 # Strict tail anchors used for classification. Each tuple is matched against
 # the lowercased last 5 non-empty lines of the captured pane. Order of checks
-# in `_classify_agent_status` is: ATTENTION → WORKING → IDLE hints.
+# in `_classify_agent_status` is: ATTENTION → bare shell prompt (IDLE) → IDLE
+# hints → WORKING. A bare shell prompt or idle hint on the last lines takes
+# priority over working markers higher in the scrollback, so an agent that has
+# finished and returned to a prompt is promptly classified idle rather than
+# lingering in "working" on a stale "esc to interrupt" marker.
 _ATTENTION_TAIL_PATTERNS = (
     "do you want to proceed",
     "do you want to continue",
@@ -95,9 +99,12 @@ _STATUS_CACHE_TTL_SECONDS = 0.75
 # pane still shows working markers (spinner / "esc to interrupt") but its
 # content has not changed for this long, the agent has stopped while leaving a
 # frozen "working" frame on screen — treat it as stuck rather than working.
-# Kept well above the monitor interval and spinner tick, with generous headroom
-# so a slow tool call that briefly stops repainting is not flagged prematurely.
-_WORKING_FRAME_STALE_SECONDS = 180.0
+# Kept well above the monitor interval and spinner tick, with enough headroom
+# so a slow tool call that briefly stops repainting is not flagged prematurely,
+# but short enough that a genuinely stopped agent (e.g. one that finished
+# without emitting a clean shell prompt) is surfaced promptly instead of
+# lingering in "working" for up to 3 minutes.
+_WORKING_FRAME_STALE_SECONDS = 45.0
 _PORT_CHECK_TIMEOUT_SECONDS = 0.2
 _REMOTE_CAPTURE_TIMEOUT_SECONDS = 10.0
 _VOLCENGINE_CODING_PLAN_MODEL_ALIASES = {
@@ -2022,14 +2029,41 @@ class TTYDManager:
                     last_changed_at,
                 )
 
+        # A bare shell prompt on the last line means the agent has returned to
+        # an idle prompt. This takes priority over working markers higher in
+        # the scrollback (e.g. a lingering "esc to interrupt" from the
+        # just-finished turn), so an agent that has finished is promptly
+        # classified idle instead of lingering in "working".
+        if _BARE_SHELL_PROMPT_RE.search(last_line):
+            return (
+                AgentRuntimeStatus.IDLE,
+                "Idle",
+                "shell prompt visible",
+                last_changed_at,
+            )
+
+        # Claude Code / Codex idle hints ("? for shortcuts", "/ for commands")
+        # on the bottom lines also mean the agent is idle and waiting for
+        # input. Like the shell prompt, these take priority over working
+        # markers in the scrollback above.
+        for hint in _IDLE_TAIL_HINTS:
+            if hint in tail:
+                return (
+                    AgentRuntimeStatus.IDLE,
+                    "Idle",
+                    "agent prompt visible",
+                    last_changed_at,
+                )
+
         # Codex (GPT-5.5) renders its working indicator ("⠞ Working  4.03k
         # tokens" / "• Working (3s • esc to interrupt)") ABOVE a tall persistent
         # bottom chrome — the ›/❯ composer, a growing "Queued follow-up inputs"
         # panel, and a model footer — so the indicator falls outside the
         # bottom-10 window scanned below. Detect it against the wider frame
-        # using the codex-specific marker set. Runs after the ATTENTION check so
-        # a codex selection prompt still wins, and through working_or_stale() so
-        # the frozen-frame guard still applies.
+        # using the codex-specific marker set. Runs after the ATTENTION and
+        # idle-prompt checks so a codex selection prompt or idle hint still
+        # wins, and through working_or_stale() so the frozen-frame guard still
+        # applies.
         if process.agent_type == AgentType.CODEX and codex_output_is_working(output):
             return working_or_stale()
 
@@ -2042,23 +2076,6 @@ class TTYDManager:
 
         if _CURSOR_WORKING_STATUS_RE.search("\n".join(status_tail_lines)):
             return working_or_stale()
-
-        if _BARE_SHELL_PROMPT_RE.search(last_line):
-            return (
-                AgentRuntimeStatus.IDLE,
-                "Idle",
-                "shell prompt visible",
-                last_changed_at,
-            )
-
-        for hint in _IDLE_TAIL_HINTS:
-            if hint in tail:
-                return (
-                    AgentRuntimeStatus.IDLE,
-                    "Idle",
-                    "agent prompt visible",
-                    last_changed_at,
-                )
 
         if foreground_command and foreground_command in {"claude", "codex", "agent"}:
             return (

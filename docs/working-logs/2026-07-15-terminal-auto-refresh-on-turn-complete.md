@@ -14,6 +14,12 @@ they require explicit user action or a tab switch. The user requested a small
 optimization: when a turn completes, if the terminal is currently displayed,
 automatically trigger a refresh to avoid the misalignment.
 
+A follow-up concern was that the `working` status classification itself was
+inaccurate: sometimes the agent stops working or finishes but forgets to
+report, and the status stays `working` for up to 3 minutes. This prevents the
+auto-refresh (which depends on the `working` → `idle`/`attention` transition)
+from firing promptly.
+
 ## Solution
 
 The fix is a single watcher in `TerminalView.vue` that reacts to the agent's
@@ -72,6 +78,71 @@ triggering a refresh after the user switches to tab B (acceptance criterion 3).
 The reset happens before any `currentAgentStatus` reaction, so the edge
 detection always compares statuses belonging to the same tab.
 
+## Backend: making `working` status accurate
+
+The frontend watcher depends on the backend `_classify_agent_status`
+(`ttyd_manager.py`) correctly flipping from `working` to `idle`/`attention`
+when the agent finishes. Two issues made this flip slow or unreliable:
+
+### Issue 1: working markers took priority over a bare shell prompt
+
+The classification order was ATTENTION → WORKING → IDLE. Working markers
+(`esc to interrupt`, `running…`, the Claude spinner line, etc.) are matched
+against the bottom 10 lines, while the bare shell prompt (`❯`, `$`, `#`, …)
+was only checked on the last line — *after* the working patterns. So an agent
+that had finished and returned to a shell prompt but still showed
+`esc to interrupt` a few lines up stayed `working` instead of flipping to
+`idle`.
+
+**Fix:** reorder `_classify_agent_status` so a bare shell prompt on the last
+line and the Claude/Codex idle hints (`? for shortcuts`, `/ for commands`)
+are checked *before* the working patterns. ATTENTION still wins (an agent
+asking for input is more specific than a prompt). The new order is:
+
+1. ATTENTION tail patterns (bottom 5 lines)
+2. Bare shell prompt (last line) → IDLE
+3. IDLE tail hints (bottom 5 lines) → IDLE
+4. Codex working (full frame)
+5. WORKING tail patterns (bottom 10 lines)
+6. Claude working status regex (bottom 10 lines)
+7. Cursor working status regex (bottom 10 lines)
+8. Foreground command is `claude`/`codex`/`agent` → IDLE
+9. Default → IDLE
+
+A shell prompt on the last line is the canonical "the turn is done" signal,
+so it must take priority over working markers in the scrollback above.
+
+### Issue 2: 180-second staleness window
+
+When an agent stops working (frame freezes) without emitting a clean shell
+prompt — e.g. it crashed or got stuck — `working_or_stale()` kept the status
+as `working` for `_WORKING_FRAME_STALE_SECONDS = 180` (3 minutes) before
+flipping to `attention`. During those 3 minutes the auto-refresh never fired.
+
+**Fix:** reduce `_WORKING_FRAME_STALE_SECONDS` from 180.0 to 45.0. This is
+still well above the ~1s spinner tick and the 5s frontend poll interval (so a
+slow tool call that briefly stops repainting is not flagged prematurely), but
+surfaces a genuinely stopped agent in ~45s instead of ~3min. The hash is
+computed on ANSI-stripped output, so cursor blinks and color codes do not
+reset the staleness timer — only real content changes do.
+
+### Tests
+
+Added to `tests/test_ttyd_manager.py`:
+
+- `test_shell_prompt_takes_priority_over_working_markers` — a frame with
+  `❯` on the last line and `esc to interrupt` in the bottom 10 → IDLE.
+- `test_idle_hints_take_priority_over_working_markers` — a frame with
+  `? for shortcuts` in the bottom 5 and `esc to interrupt` in the bottom
+  10 → IDLE.
+- `test_frozen_working_frame_45s_window_classifies_as_stuck` — a frame
+  frozen past the 45s window → ATTENTION.
+- `test_working_frame_within_45s_window_stays_working` — a frame frozen
+  within the 45s window → WORKING (no false positive on slow tool calls).
+
+All 16 classification tests and the full 74-test suite pass. black / isort /
+mypy clean on the touched backend files; frontend lint + build clean.
+
 ## Key issues / pitfalls
 
 - **Flicker is acceptable.** The existing tab-switch code deliberately avoids a
@@ -110,5 +181,11 @@ detection always compares statuses belonging to the same tab.
   `lastAgentStatus` ref, `currentAgentStatus` computed, the status-transition
   watcher, and the `lastAgentStatus` reset in the existing `props.tabId`
   watcher.
+- `backend/claude_hub/services/ttyd_manager.py` — reordered
+  `_classify_agent_status` so a bare shell prompt and idle hints take priority
+  over working markers; reduced `_WORKING_FRAME_STALE_SECONDS` from 180.0 to
+  45.0 so a frozen working frame flips to `attention` faster.
+- `backend/tests/test_ttyd_manager.py` — added 4 tests for the new
+  classification behavior.
 - `CHANGELOG.md` — added "Unreleased / feat: Auto-refresh visible terminal
   when agent finishes a turn" entry.

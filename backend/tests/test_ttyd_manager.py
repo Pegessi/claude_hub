@@ -1095,6 +1095,164 @@ def test_codex_frozen_working_frame_classifies_as_stuck(monkeypatch: MonkeyPatch
     assert status_text == "Agent may be stuck"
 
 
+def test_shell_prompt_takes_priority_over_working_markers(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """A bare shell prompt on the last line means the agent has finished and
+    returned to a prompt. This must take priority over working markers
+    (e.g. "esc to interrupt") lingering in the bottom-10 scrollback, so the
+    agent is promptly classified idle instead of stuck in "working"."""
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._status_snapshots = {}
+    process = TTYDProcess(
+        tab_id="tab-prompt-priority",
+        port=12370,
+        name="Prompt Priority",
+        agent_type=AgentType.CLAUDE,
+    )
+
+    # Frame: the agent has finished; the shell prompt is on the last line, but
+    # "esc to interrupt" (a working marker) is still visible a few lines up.
+    output = "\n".join(
+        [
+            "✻ Implementing frontend task edit modal enhancements… (8m 2s · ↑ 9k tokens)",
+            "  ⎿  ✔ Implement backend schema and update_task changes",
+            "     ◼ Implement frontend task edit/create modal enhancements",
+            "────────────────────────────────────────────────────",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ctrl+t to hide tasks",
+            "❯ ",
+        ]
+    )
+
+    status, status_text, detail, _last_changed_at = manager._classify_agent_status(
+        process,
+        output,
+        "prompt-priority-hash",
+        "zsh",
+    )
+
+    assert status == AgentRuntimeStatus.IDLE
+    assert status_text == "Idle"
+    assert detail == "shell prompt visible"
+
+
+def test_idle_hints_take_priority_over_working_markers(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Claude Code idle hints ("? for shortcuts") on the bottom lines must
+    take priority over working markers higher in the scrollback."""
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._status_snapshots = {}
+    process = TTYDProcess(
+        tab_id="tab-idle-hint-priority",
+        port=12371,
+        name="Idle Hint Priority",
+        agent_type=AgentType.CLAUDE,
+    )
+
+    # Frame: idle hints are visible on the bottom lines, but a working marker
+    # ("esc to interrupt") is still in the bottom-10 scrollback.
+    output = "\n".join(
+        [
+            "✻ Implementing frontend task edit modal enhancements… (8m 2s · ↑ 9k tokens)",
+            "  ⎿  ✔ Implement backend schema and update_task changes",
+            "     ◼ Implement frontend task edit/create modal enhancements",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ctrl+t to hide tasks",
+            "  ? for shortcuts",
+            "  / for commands",
+        ]
+    )
+
+    status, status_text, detail, _last_changed_at = manager._classify_agent_status(
+        process,
+        output,
+        "idle-hint-priority-hash",
+        "zsh",
+    )
+
+    assert status == AgentRuntimeStatus.IDLE
+    assert status_text == "Idle"
+    assert detail == "agent prompt visible"
+
+
+def test_frozen_working_frame_45s_window_classifies_as_stuck(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """A working frame that has not changed for longer than the (45s) staleness
+    window must be classified as ATTENTION, not linger in WORKING."""
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
+    manager = TTYDManager.__new__(TTYDManager)
+    first_seen = datetime.now() - timedelta(
+        seconds=ttyd_manager_module._WORKING_FRAME_STALE_SECONDS + 5
+    )
+    manager._status_snapshots = {
+        "tab-frozen-45s": {
+            "hash": "frozen-45s-hash",
+            "last_changed_at": first_seen,
+            "frame_first_seen_at": first_seen,
+        }
+    }
+    process = TTYDProcess(
+        tab_id="tab-frozen-45s",
+        port=12372,
+        name="Frozen 45s",
+        agent_type=AgentType.CLAUDE,
+    )
+
+    status, status_text, _detail, _last_changed_at = manager._classify_agent_status(
+        process,
+        _FROZEN_WORKING_FRAME,
+        "frozen-45s-hash",
+        "zsh",
+    )
+
+    assert status == AgentRuntimeStatus.ATTENTION
+    assert status_text == "Agent may be stuck"
+
+
+def test_working_frame_within_45s_window_stays_working(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """A working frame that has not changed but is still within the (45s)
+    staleness window must stay WORKING (e.g. a slow tool call that briefly
+    stops repainting)."""
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
+    manager = TTYDManager.__new__(TTYDManager)
+    first_seen = datetime.now() - timedelta(
+        seconds=ttyd_manager_module._WORKING_FRAME_STALE_SECONDS - 5
+    )
+    manager._status_snapshots = {
+        "tab-within-45s": {
+            "hash": "within-45s-hash",
+            "last_changed_at": first_seen,
+            "frame_first_seen_at": first_seen,
+        }
+    }
+    process = TTYDProcess(
+        tab_id="tab-within-45s",
+        port=12373,
+        name="Within 45s",
+        agent_type=AgentType.CLAUDE,
+    )
+
+    status, status_text, detail, _last_changed_at = manager._classify_agent_status(
+        process,
+        _FROZEN_WORKING_FRAME,
+        "within-45s-hash",
+        "zsh",
+    )
+
+    assert status == AgentRuntimeStatus.WORKING
+    assert status_text == "Working"
+    assert detail == "agent is processing"
+
+
 @pytest.mark.asyncio
 async def test_ensure_tab_running_starts_missing_ttyd_listener(monkeypatch: MonkeyPatch) -> None:
     manager = TTYDManager.__new__(TTYDManager)

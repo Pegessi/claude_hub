@@ -31,8 +31,24 @@
     to avoid split-pane targeting issues.
   - Only the displayed terminal (`props.tabId`) is refreshed; hidden/cached
     iframes and other panes are untouched.
+- **Backend accuracy**: the auto-refresh depends on the `working` →
+  `idle`/`attention` transition, so the backend `_classify_agent_status`
+  (`ttyd_manager.py`) was made more responsive:
+  - A bare shell prompt (`❯`, `$`, `#`, …) on the last line and the
+    Claude/Codex idle hints (`? for shortcuts`, `/ for commands`) now take
+    priority over working markers (`esc to interrupt`, the spinner line, …)
+    in the scrollback above. Previously an agent that had finished and
+    returned to a prompt but still showed `esc to interrupt` a few lines up
+    lingered in `working` for up to 3 minutes.
+  - `_WORKING_FRAME_STALE_SECONDS` was reduced from 180.0 to 45.0, so a
+    frozen working frame (an agent that stopped without a clean shell prompt)
+    flips to `attention` in ~45s instead of ~3min. 45s is still well above
+    the ~1s spinner tick and 5s frontend poll, so slow tool calls that
+    briefly stop repainting are not false-positived.
 - **Validation**: `pnpm lint` and `pnpm build` (vue-tsc + vite) both pass
-  with no errors.
+  with no errors. Backend: `black`/`isort`/`mypy` clean on touched files;
+  `pytest tests/test_ttyd_manager.py` — 74 passed (4 new tests for the
+  reorder and staleness window).
 
 ### feat: Hard context recovery for agents stuck on persistent API errors
 
