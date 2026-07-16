@@ -457,11 +457,22 @@ onUnmounted(() => {
   --ch-shadow-dialog: 0 24px 80px rgba(0, 0, 0, 0.45);
   --ch-shadow-soft: 0 4px 20px rgba(0, 0, 0, 0.4);
   --ch-shadow-color-soft: rgba(0, 0, 0, 0.32);
-  --ch-radius-sm: 5px;
-  --ch-radius-md: 7px;
-  --ch-radius-lg: 10px;
-  --ch-motion-fast: 120ms ease;
-  --ch-motion-standard: 180ms ease;
+  --ch-radius-sm: 6px;
+  --ch-radius-md: 8px;
+  --ch-radius-lg: 12px;
+  --ch-radius-xl: 16px;
+  --ch-font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --ch-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --ch-motion-fast: 150ms cubic-bezier(0.2, 0, 0, 1);
+  --ch-motion-standard: 200ms cubic-bezier(0.2, 0, 0, 1);
+  --ch-shadow-button: 0 1px 2px rgba(0, 0, 0, 0.08);
+  --ch-shadow-button-hover: 0 4px 12px rgba(0, 0, 0, 0.15);
+  --ch-shadow-button-primary: 0 2px 6px rgba(59, 130, 246, 0.35);
+  --ch-font-size-xs: 11px;
+  --ch-font-size-sm: 12px;
+  --ch-font-size-base: 13px;
+  --ch-font-size-md: 14px;
+  --ch-font-size-lg: 15px;
   --ch-tab-fade-start: #1e1e1e;
   --ch-tab-fade-end: rgba(30, 30, 30, 0);
   --ch-terminal-bg: #1f1f1f;
@@ -514,12 +525,12 @@ onUnmounted(() => {
   --ch-color-text-subtle: #9a9a96;
   --ch-color-text-soft: #777771;
   --ch-color-text-code: #242424;
-  --ch-color-accent: #4a4a44;
-  --ch-color-accent-strong: #30302d;
-  --ch-color-accent-hover: #242421;
-  --ch-color-accent-soft: #ececea;
-  --ch-color-accent-ring: rgba(38, 38, 38, 0.09);
-  --ch-color-accent-ring-strong: rgba(38, 38, 38, 0.2);
+  --ch-color-accent: #60a5fa;
+  --ch-color-accent-strong: #3b82f6;
+  --ch-color-accent-hover: #2563eb;
+  --ch-color-accent-soft: rgba(59, 130, 246, 0.12);
+  --ch-color-accent-ring: rgba(59, 130, 246, 0.15);
+  --ch-color-accent-ring-strong: rgba(59, 130, 246, 0.4);
   --ch-color-success: #36734d;
   --ch-color-success-strong: #2f6543;
   --ch-color-success-hover: #28583a;
@@ -546,11 +557,22 @@ onUnmounted(() => {
   --ch-shadow-dialog: 0 24px 70px rgba(24, 24, 24, 0.13);
   --ch-shadow-soft: 0 12px 30px rgba(24, 24, 24, 0.08);
   --ch-shadow-color-soft: rgba(24, 24, 24, 0.08);
-  --ch-radius-sm: 5px;
-  --ch-radius-md: 7px;
-  --ch-radius-lg: 10px;
-  --ch-motion-fast: 120ms ease;
-  --ch-motion-standard: 180ms ease;
+  --ch-radius-sm: 6px;
+  --ch-radius-md: 8px;
+  --ch-radius-lg: 12px;
+  --ch-radius-xl: 16px;
+  --ch-font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --ch-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --ch-motion-fast: 150ms cubic-bezier(0.2, 0, 0, 1);
+  --ch-motion-standard: 200ms cubic-bezier(0.2, 0, 0, 1);
+  --ch-shadow-button: 0 1px 2px rgba(0, 0, 0, 0.08);
+  --ch-shadow-button-hover: 0 4px 12px rgba(0, 0, 0, 0.15);
+  --ch-shadow-button-primary: 0 2px 6px rgba(59, 130, 246, 0.35);
+  --ch-font-size-xs: 11px;
+  --ch-font-size-sm: 12px;
+  --ch-font-size-base: 13px;
+  --ch-font-size-md: 14px;
+  --ch-font-size-lg: 15px;
   --ch-tab-fade-start: #fcfcfb;
   --ch-tab-fade-end: rgba(252, 252, 251, 0);
   --ch-terminal-bg: #f6f6f4;
@@ -584,7 +606,11 @@ html, body, #app {
 body {
   background: var(--ch-color-app-bg);
   color: var(--ch-color-text);
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--ch-font-sans);
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: -0.01em;
 }
 
 h1,
@@ -599,6 +625,256 @@ input,
 select,
 textarea {
   font: inherit;
+}
+
+/* ==========================================================================
+   Unified Design System — Global UI primitives
+   ========================================================================== */
+
+/* Default form input / select / textarea */
+.ch-input,
+.ch-select,
+.ch-textarea {
+  width: 100%;
+  background: var(--ch-color-surface-control);
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-md);
+  color: var(--ch-color-text);
+  font-size: var(--ch-font-size-md);
+  line-height: 1.4;
+  transition: border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), background var(--ch-motion-fast);
+}
+
+.ch-input,
+.ch-select {
+  height: 36px;
+  padding: 0 12px;
+}
+
+.ch-textarea {
+  min-height: 120px;
+  padding: 10px 12px;
+  resize: vertical;
+}
+
+.ch-input:hover,
+.ch-select:hover,
+.ch-textarea:hover {
+  border-color: var(--ch-color-border-hover);
+}
+
+.ch-input:focus,
+.ch-select:focus,
+.ch-textarea:focus {
+  outline: none;
+  border-color: var(--ch-color-accent);
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+}
+
+.ch-input:disabled,
+.ch-select:disabled,
+.ch-textarea:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Base button — all .ch-btn variants share these */
+.ch-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  font-size: var(--ch-font-size-base);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--ch-motion-fast),
+              border-color var(--ch-motion-fast),
+              color var(--ch-motion-fast),
+              box-shadow var(--ch-motion-fast),
+              transform var(--ch-motion-fast);
+}
+
+.ch-btn:hover:not(:disabled) {
+  background: var(--ch-color-surface-control-hover);
+  border-color: var(--ch-color-border-hover);
+}
+
+.ch-btn:active:not(:disabled) {
+  background: var(--ch-color-surface-pressed);
+  transform: translateY(1px);
+}
+
+.ch-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+  border-color: var(--ch-color-accent);
+}
+
+.ch-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Primary CTA */
+.ch-btn--primary {
+  background: var(--ch-color-accent-strong);
+  border-color: var(--ch-color-accent-strong);
+  color: var(--ch-color-text-inverse);
+  font-weight: 600;
+  box-shadow: var(--ch-shadow-button);
+}
+
+.ch-btn--primary:hover:not(:disabled) {
+  background: var(--ch-color-accent-hover);
+  border-color: var(--ch-color-accent-hover);
+  box-shadow: var(--ch-shadow-button-primary);
+}
+
+.ch-btn--primary:active:not(:disabled) {
+  background: var(--ch-color-accent-hover);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+/* Danger button */
+.ch-btn--danger {
+  background: var(--ch-color-danger-bg);
+  border-color: var(--ch-color-danger-border);
+  color: var(--ch-color-danger-text);
+}
+
+.ch-btn--danger:hover:not(:disabled) {
+  background: var(--ch-color-danger-strong);
+  border-color: var(--ch-color-danger-hover);
+  color: var(--ch-color-text-inverse);
+}
+
+/* Ghost/text button — no border, transparent bg */
+.ch-btn--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--ch-color-text-muted);
+}
+
+.ch-btn--ghost:hover:not(:disabled) {
+  background: var(--ch-color-chip-bg);
+  border-color: transparent;
+  color: var(--ch-color-text);
+}
+
+/* Warning / abort button */
+.ch-btn--warning {
+  background: var(--ch-color-warning-bg);
+  border-color: color-mix(in srgb, var(--ch-color-warning-strong) 50%, var(--ch-color-border-strong));
+  color: var(--ch-color-warning);
+}
+
+.ch-btn--warning:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ch-color-warning-bg) 60%, var(--ch-color-warning-strong));
+  border-color: var(--ch-color-warning-strong);
+  color: var(--ch-color-text-strong);
+}
+
+/* Size variants */
+.ch-btn--sm {
+  height: 28px;
+  padding: 0 10px;
+  font-size: var(--ch-font-size-sm);
+  border-radius: var(--ch-radius-sm);
+}
+
+.ch-btn--lg {
+  height: 40px;
+  padding: 0 20px;
+  font-size: var(--ch-font-size-md);
+  border-radius: var(--ch-radius-lg);
+}
+
+/* Icon-only square button */
+.ch-btn--icon {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: var(--ch-radius-md);
+}
+
+.ch-btn--icon.ch-btn--sm {
+  width: 28px;
+  height: 28px;
+}
+
+/* Chip / pill button */
+.ch-btn--chip {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: var(--ch-font-size-xs);
+  font-weight: 600;
+}
+
+/* Segmented control container */
+.ch-segmented {
+  display: inline-grid;
+  grid-auto-flow: column;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-sunken);
+}
+
+.ch-segmented__btn {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: var(--ch-radius-sm);
+  background: transparent;
+  color: var(--ch-color-text-muted);
+  font-size: var(--ch-font-size-sm);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast);
+}
+
+.ch-segmented__btn:hover {
+  color: var(--ch-color-text);
+}
+
+.ch-segmented__btn.active {
+  background: var(--ch-color-surface-control-hover);
+  border-color: var(--ch-color-accent-ring-strong);
+  color: var(--ch-color-text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+.ch-segmented__btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Label */
+.ch-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--ch-color-text-muted);
+  font-size: var(--ch-font-size-sm);
+  font-weight: 500;
+}
+
+/* Hint text */
+.ch-hint {
+  margin-top: 6px;
+  color: var(--ch-color-text-soft);
+  font-size: var(--ch-font-size-xs);
+  line-height: 1.4;
 }
 
 .app {
@@ -644,16 +920,26 @@ textarea {
   background: var(--ch-color-warning);
   color: #1a1a1a;
   border: 1px solid var(--ch-color-warning-strong);
-  border-radius: var(--ch-radius-sm);
-  padding: 4px 10px;
-  font-size: 12px;
-  font-weight: 700;
+  border-radius: var(--ch-radius-md);
+  padding: 6px 14px;
+  height: 30px;
+  font-size: var(--ch-font-size-sm);
+  font-weight: 600;
   cursor: pointer;
-  transition: background var(--ch-motion-fast);
+  transition: background var(--ch-motion-fast), transform var(--ch-motion-fast);
 }
 
 .auth-error-banner__retry:hover {
   background: var(--ch-color-warning-strong);
+}
+
+.auth-error-banner__retry:active {
+  transform: translateY(1px);
+}
+
+.auth-error-banner__retry:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
 .auth-error-banner__close {
@@ -692,36 +978,42 @@ textarea {
   display: inline-grid;
   grid-auto-flow: column;
   grid-auto-columns: minmax(108px, max-content);
-  gap: 4px;
+  gap: 2px;
   padding: 3px;
   border: 1px solid var(--ch-color-border);
-  border-radius: var(--ch-radius-md);
+  border-radius: var(--ch-radius-lg);
   background: var(--ch-color-surface-sunken);
 }
 
 .mode-button {
   height: 30px;
   border: 1px solid transparent;
-  border-radius: var(--ch-radius-sm);
+  border-radius: var(--ch-radius-md);
   background: transparent;
   color: var(--ch-color-text-muted);
   cursor: pointer;
-  padding: 0 12px;
-  font-size: 13px;
-  font-weight: 700;
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast);
+  padding: 0 14px;
+  font-size: var(--ch-font-size-sm);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast), box-shadow var(--ch-motion-fast);
 }
 
-.mode-button:hover,
+.mode-button:hover {
+  color: var(--ch-color-text);
+  background: var(--ch-color-surface-control);
+}
+
 .mode-button.active {
   background: var(--ch-color-surface-control-hover);
+  border-color: var(--ch-color-accent-ring-strong);
   color: var(--ch-color-text);
+  box-shadow: 0 1px 3px var(--ch-shadow-color-soft);
 }
 
-.mode-button.active {
-  background: var(--ch-color-surface-selected);
-  border-color: var(--ch-color-accent-ring-strong);
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+.mode-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
 .app-mode-tools {
@@ -736,7 +1028,7 @@ textarea {
   display: inline-grid;
   grid-template-columns: 1fr 1fr;
   align-items: center;
-  width: 112px;
+  width: 108px;
   height: 32px;
   border: 1px solid var(--ch-color-border);
   border-radius: 999px;
@@ -744,8 +1036,19 @@ textarea {
   color: var(--ch-color-text-muted);
   cursor: pointer;
   padding: 3px;
-  font-size: 11px;
-  font-weight: 700;
+  font-size: var(--ch-font-size-xs);
+  font-weight: 600;
+  transition: border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast);
+}
+
+.theme-switch:hover {
+  border-color: var(--ch-color-border-hover);
+}
+
+.theme-switch:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+  border-color: var(--ch-color-accent);
 }
 
 .theme-switch-label {
@@ -762,7 +1065,7 @@ textarea {
   height: calc(100% - 6px);
   border-radius: 999px;
   background: var(--ch-color-surface-control-hover);
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.16);
+  box-shadow: 0 1px 4px var(--ch-shadow-color-soft);
   transition: transform var(--ch-motion-standard), background var(--ch-motion-fast);
 }
 
@@ -779,10 +1082,18 @@ textarea {
   background: none;
   border: none;
   color: var(--ch-color-text-inverse);
-  font-size: 20px;
+  font-size: 18px;
   cursor: pointer;
-  padding: 0 4px;
+  padding: 4px 8px;
   line-height: 1;
+  border-radius: var(--ch-radius-sm);
+  transition: opacity var(--ch-motion-fast), background var(--ch-motion-fast);
+  opacity: 0.85;
+}
+
+.error-close:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.15);
 }
 
 .terminal-mode-shell {

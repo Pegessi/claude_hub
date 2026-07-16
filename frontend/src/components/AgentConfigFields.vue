@@ -250,50 +250,55 @@ function onAgentTypeChange(value: string) {
   display: block;
   margin-bottom: 6px;
   color: var(--ch-color-text-muted);
-  font-size: 13px;
+  font-size: var(--ch-font-size-sm);
+  font-weight: 500;
 }
 
 .agent-config-fields--form .acf-label {
   color: var(--ch-color-text);
-  font-size: 14px;
+  font-size: var(--ch-font-size-sm);
 }
 
 .agent-config-fields .acf-select {
   width: 100%;
-  height: 34px;
-  padding: 0 10px;
+  height: 36px;
+  padding: 0 12px;
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: var(--ch-radius-sm);
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
-  font-size: 14px;
+  font-size: var(--ch-font-size-md);
+  font-family: var(--ch-font-sans);
   box-sizing: border-box;
   cursor: pointer;
+  transition: border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast);
 }
 
 .agent-config-fields--form .acf-select {
   height: auto;
   padding: 10px 12px;
-  border-radius: 4px;
+  border-radius: var(--ch-radius-md);
 }
 
 .agent-config-fields .acf-select:hover {
   border-color: var(--ch-color-border-hover);
 }
 
-.agent-config-fields .acf-select:focus {
+.agent-config-fields .acf-select:focus,
+.agent-config-fields .acf-select:focus-visible {
   outline: none;
   border-color: var(--ch-color-accent);
-  box-shadow: 0 0 0 2px var(--ch-color-accent-ring);
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
 .agent-config-fields .acf-checkbox-label {
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   margin-bottom: 0;
   color: var(--ch-color-text);
+  font-size: var(--ch-font-size-base);
   cursor: pointer;
 }
 
@@ -303,13 +308,14 @@ function onAgentTypeChange(value: string) {
   margin: 0;
   cursor: pointer;
   flex-shrink: 0;
+  accent-color: var(--ch-color-accent);
 }
 
 .agent-config-fields .acf-hint {
   margin: 6px 0 0;
   color: var(--ch-color-text-soft);
-  font-size: 12px;
-  line-height: 1.35;
+  font-size: var(--ch-font-size-xs);
+  line-height: 1.4;
 }
 
 .env-editor {

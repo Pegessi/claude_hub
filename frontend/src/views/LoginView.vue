@@ -8,7 +8,7 @@
 
       <div class="login-content">
         <LoadingButton
-          class="feishu-login-btn"
+          class="feishu-login-btn ch-btn ch-btn--primary ch-btn--lg"
           :loading="isLoggingIn"
           loading-label="Redirecting to Feishu"
           @click="handleLogin"
@@ -54,7 +54,7 @@ function handleLogin() {
 .login-container {
   background: var(--ch-color-surface);
   border: 1px solid var(--ch-color-border);
-  border-radius: 8px;
+  border-radius: var(--ch-radius-xl);
   padding: 48px;
   box-shadow: var(--ch-shadow-dialog);
   text-align: center;
@@ -65,43 +65,48 @@ function handleLogin() {
 .login-header h1 {
   margin: 0 0 8px 0;
   font-size: 2rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
   color: var(--ch-color-text-strong);
 }
 
 .login-header p {
   margin: 0 0 40px 0;
   color: var(--ch-color-text-muted);
-  font-size: 0.95rem;
+  font-size: var(--ch-font-size-base);
 }
 
 .feishu-login-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
   gap: 12px;
   width: 100%;
-  padding: 16px 24px;
-  background: var(--ch-color-accent-strong);
-  color: var(--ch-color-text-inverse);
-  border: none;
-  border-radius: 10px;
-  font-size: 1.1rem;
-  cursor: pointer;
-  transition: all 0.2s ease;
+  height: 44px;
+  padding: 0 24px;
+  border-radius: var(--ch-radius-lg);
+  font-size: var(--ch-font-size-lg);
+  font-weight: 600;
+  transition: background var(--ch-motion-standard),
+              border-color var(--ch-motion-standard),
+              color var(--ch-motion-standard),
+              box-shadow var(--ch-motion-standard),
+              transform var(--ch-motion-standard);
 }
 
-.feishu-login-btn:hover {
-  background: var(--ch-color-accent-hover);
+.feishu-login-btn:hover:not(:disabled) {
   transform: translateY(-2px);
   box-shadow: 0 8px 20px var(--ch-color-accent-ring);
 }
 
-.feishu-login-btn:active {
+.feishu-login-btn:active:not(:disabled) {
   transform: translateY(0);
 }
 
+.feishu-login-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring), 0 8px 20px var(--ch-color-accent-ring);
+}
+
 .feishu-icon {
-  font-size: 1.3rem;
+  font-size: 18px;
 }
 
 .login-footer {
@@ -113,6 +118,6 @@ function handleLogin() {
 .login-footer p {
   margin: 0;
   color: var(--ch-color-text-soft);
-  font-size: 0.85rem;
+  font-size: var(--ch-font-size-sm);
 }
 </style>

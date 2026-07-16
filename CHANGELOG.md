@@ -5,6 +5,53 @@
 
 ## Unreleased
 
+### feat: Unified UI design system — Inter font, consistent buttons, refined typography
+
+- **What**: comprehensive visual polish pass establishing a unified design
+  system across the entire frontend. Buttons, inputs, toggles, and
+  interactive controls now share consistent sizing, border-radius, focus
+  rings, hover states, and typography; the Inter and JetBrains Mono web
+  fonts replace the generic system font stack; light-theme accent color is
+  now blue (matching dark theme) for cross-theme consistency.
+- **Why**: button styles were defined independently in three places
+  (TabBar `.btn` family, AgentWorkspaceView `.tool-button` family, and
+  EnvPresetManager duplicate `.btn` family) with inconsistent padding,
+  font-size, border-radius (4px vs 5px vs 7px), and hover behavior. Form
+  inputs also varied between modals. The system font stack produced
+  slightly different rendering on each OS; Inter provides a consistent,
+  modern look.
+- **How**:
+  - Added Inter (400/500/600/700) and JetBrains Mono (400/500) from Google
+    Fonts via `<link>` in `index.html`. Enabled OpenType features
+    (`cv02`, `cv03`, `cv04`, `cv11`) and `-webkit-font-smoothing` for
+    crisp rendering.
+  - New global CSS primitives in `App.vue`: `.ch-btn`, `.ch-btn--primary`,
+    `.ch-btn--danger`, `.ch-btn--ghost`, `.ch-btn--warning`, `.ch-btn--sm`,
+    `.ch-btn--lg`, `.ch-btn--icon`, `.ch-btn--chip`, `.ch-segmented`,
+    `.ch-segmented__btn`, `.ch-input`, `.ch-select`, `.ch-textarea`,
+    `.ch-label`, `.ch-hint` — plus design tokens for font sizes
+    (`--ch-font-size-{xs,sm,base,md,lg}`), font families
+    (`--ch-font-sans`, `--ch-font-mono`), button shadows, and an
+    `--ch-radius-xl` (16px) radius tier.
+  - Updated radius scale from `5/7/10` to `6/8/12/16` (sm/md/lg/xl) for a
+    softer, more modern look.
+  - Replaced the light-theme neutral-gray accent (`#4a4a44`) with the
+    same blue palette used in dark theme (`#60a5fa`/`#3b82f6`/`#2563eb`).
+  - Standardized button heights: 32px default, 28px small, 40px large,
+    44px for the login CTA.
+  - All interactive elements now have consistent `:focus-visible` styles
+    with a 3px accent ring.
+  - Primary CTAs gain subtle hover elevation (`translateY(-1px)` +
+    shadow).
+  - Migrated all components (TabBar, AgentWorkspaceView, LoginView,
+    LayoutSelector, NetworkAccessMenu, EnvPresetManager,
+    AgentConfigFields, MobileControls, AgentStatusFloatingPanel,
+    AgentAvatar, MarkdownContent) to use global `ch-btn` classes and
+    updated CSS tokens; removed duplicate `.btn` definitions from TabBar
+    and EnvPresetManager.
+  - Font weights normalized: 500 for most UI text, 600 for headings/CTAs
+    (reduced overuse of 700/800 weights that looked heavy).
+
 ### fix: Robust dispatch-chain recovery for goal packet review and continue prompts
 
 - **What**: four chained fixes for the intermittent "agent fails to submit

@@ -166,20 +166,23 @@ function handleClick(event: MouseEvent) {
 
 .markdown-content :deep(code) {
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   background: var(--ch-color-canvas);
   color: var(--ch-color-text-code);
-  padding: 1px 4px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  padding: 1px 5px;
+  font-family: var(--ch-font-mono);
   font-size: 0.92em;
 }
 
 .markdown-content :deep(pre) {
   overflow-x: auto;
   border: 1px solid var(--ch-color-surface-control-active);
-  border-radius: 6px;
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-canvas);
-  padding: 10px;
+  padding: 12px;
+  font-family: var(--ch-font-mono);
+  font-size: 0.9em;
+  line-height: 1.5;
 }
 
 .markdown-content :deep(pre code) {

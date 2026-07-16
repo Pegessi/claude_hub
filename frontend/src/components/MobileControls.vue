@@ -328,7 +328,7 @@ onUnmounted(() => {
   pointer-events: auto;
   background-color: var(--ch-color-surface-glass);
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 12px;
+  border-radius: var(--ch-radius-xl);
   padding: 10px 12px;
   display: flex;
   flex-direction: column;
@@ -374,24 +374,30 @@ onUnmounted(() => {
   background-color: var(--ch-color-surface-control-hover);
   color: var(--ch-color-text);
   border: 1px solid var(--ch-color-border-hover);
-  border-radius: 8px;
+  border-radius: var(--ch-radius-lg);
   padding: 10px 8px;
-  font-size: 13px;
+  font-size: var(--ch-font-size-sm);
   font-weight: 500;
+  font-family: var(--ch-font-sans);
   cursor: pointer;
   user-select: none;
   min-width: 42px;
   text-align: center;
-  transition: background-color 0.08s, transform 0.08s, box-shadow 0.08s, border-color 0.08s;
+  transition: background-color var(--ch-motion-fast), transform var(--ch-motion-fast), box-shadow var(--ch-motion-fast), border-color var(--ch-motion-fast);
   touch-action: manipulation;
   flex-shrink: 0;
+}
+
+.control-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
 .control-btn:active,
 .control-btn.pressed {
   background-color: var(--ch-color-border-hover);
   transform: scale(0.92);
-  box-shadow: inset 0 2px 8px var(--ch-shadow-color-soft);
+  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.35);
   border-color: var(--ch-color-text-subtle);
 }
 
@@ -399,7 +405,7 @@ onUnmounted(() => {
   background-color: var(--ch-color-accent-strong);
   border-color: var(--ch-color-accent);
   color: var(--ch-color-text-inverse);
-  box-shadow: 0 0 0 2px var(--ch-color-accent-ring);
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
 .control-btn.active:active,
@@ -419,6 +425,7 @@ onUnmounted(() => {
   border-color: var(--ch-color-success-hover);
   color: var(--ch-color-text-inverse);
   min-width: 58px;
+  border-radius: var(--ch-radius-lg);
 }
 
 .control-btn-enter:active,
@@ -430,16 +437,17 @@ onUnmounted(() => {
 .control-btn-wide {
   flex: 1;
   max-width: 120px;
-  font-size: 12px;
+  font-size: var(--ch-font-size-sm);
 }
 
 .control-btn-shortcut {
   background-color: var(--ch-color-accent-soft);
   border-color: var(--ch-color-border-hover);
-  font-size: 11px;
+  font-size: var(--ch-font-size-xs);
   min-width: 50px;
   padding: 8px 6px;
   white-space: nowrap;
+  border-radius: var(--ch-radius-md);
 }
 
 .control-btn-shortcut:active,
@@ -461,8 +469,13 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 4px 12px var(--ch-shadow-color-soft);
-  transition: background-color 0.1s, transform 0.1s, box-shadow 0.1s;
+  box-shadow: 0 6px 16px var(--ch-shadow-color-soft);
+  transition: background-color var(--ch-motion-standard), transform var(--ch-motion-standard), box-shadow var(--ch-motion-standard);
+}
+
+.toggle-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring), 0 6px 16px var(--ch-shadow-color-soft);
 }
 
 .toggle-btn:hover {
@@ -503,7 +516,7 @@ onUnmounted(() => {
   max-width: none;
   margin-bottom: 6px;
   padding: 6px;
-  border-radius: 8px;
+  border-radius: var(--ch-radius-lg);
 }
 
 :global(html[data-keyboard-open='true'] .controls-row) {
@@ -513,8 +526,8 @@ onUnmounted(() => {
 :global(html[data-keyboard-open='true'] .control-btn) {
   min-width: 34px;
   padding: 7px 6px;
-  border-radius: 6px;
-  font-size: 12px;
+  border-radius: var(--ch-radius-md);
+  font-size: var(--ch-font-size-sm);
 }
 
 :global(html[data-keyboard-open='true'] .control-btn-arrow) {
@@ -530,7 +543,7 @@ onUnmounted(() => {
 :global(html[data-keyboard-open='true'] .control-btn-shortcut) {
   min-width: 44px;
   padding: 6px 5px;
-  font-size: 10px;
+  font-size: var(--ch-font-size-xs);
 }
 
 :global(html[data-keyboard-open='true'] .toggle-btn) {
