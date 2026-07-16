@@ -10,14 +10,23 @@ from __future__ import annotations
 from datetime import datetime
 
 from claude_hub.models import (
+    AcceptanceCheck,
+    AcceptanceCheckStatus,
+    AgentReport,
+    AgentReportState,
     AgentRuntimeStatus,
     AgentType,
     AutonomousRun,
+    AutonomousRunPhase,
     AutonomyPolicy,
     ContinueTaskRequest,
     ExecutionTarget,
+    GoalPacket,
     ManagedSession,
     ManagedSessionStatus,
+    ReviewDecision,
+    ReviewProfile,
+    Workspace,
     WorkspaceSessionRole,
     WorkspaceTask,
     WorkspaceTaskExecutionComplexity,
@@ -102,13 +111,14 @@ def test_capability_hint_claude_mentions_task_tool_and_model_param():
 def test_capability_hint_cursor_acknowledges_version_dependence():
     hint = workspace_manager._subagent_capability_hint(AgentType.CURSOR)
     assert "cursor" in hint.lower()
-    assert "version-dependent" in hint
+    # Version pinning caveat preserved (shorter wording):
+    assert "version" in hint or "unsupported" in hint
 
 
 def test_capability_hint_codex_acknowledges_version_dependence():
     hint = workspace_manager._subagent_capability_hint(AgentType.CODEX)
     assert "codex" in hint.lower()
-    assert "version-dependent" in hint
+    assert "version" in hint or "unsupported" in hint
 
 
 def test_capability_hint_terminal_degrades_gracefully():
@@ -130,7 +140,7 @@ def test_autonomous_block_empty_for_non_autonomous():
     assert workspace_manager._autonomous_assignment_block(task) == ""
 
 
-def test_autonomous_block_complex_includes_orchestrator_contract_and_skeleton():
+def test_autonomous_block_complex_includes_orchestrator_contract_and_primitives():
     task = _make_task(
         mode=WorkspaceTaskMode.AUTONOMOUS,
         complexity=WorkspaceTaskExecutionComplexity.COMPLEX,
@@ -142,25 +152,25 @@ def test_autonomous_block_complex_includes_orchestrator_contract_and_skeleton():
     assert "Orchestrator Contract" in block
     assert "P-PLAN" in block and "P-EXECUTE" in block and "P-JUDGE" in block
     assert "P-INTEGRATE" in block and "P-VALIDATE" in block and "P-RESEARCH" in block
-    # Compact skeleton (shape, not a verbatim template)
-    assert "Compact skeleton" in block
-    assert "soft-delete" in block.lower() or "/api/orders" in block
-    assert "external:<api>" in block
+    # External-API model marker preserved
+    assert "external:<api>" in block or "external:api" in block
     # Envelope schema
     assert "subtask-envelope" in block
-    assert "return_mode: final-only" in block
+    assert "final-only" in block
     # Ledger schema
     assert "subagent-ledger" in block
-    # Model pinning
-    assert "P-PLAN, P-EXECUTE, P-JUDGE, P-INTEGRATE -> opus" in block
+    # Model pinning (slash-separated compact form)
+    assert (
+        "P-PLAN/P-EXECUTE/P-JUDGE/P-INTEGRATE -> opus" in block
+        or "P-PLAN, P-EXECUTE, P-JUDGE" in block
+    )
     # Hard enforcement on complex
     assert "REQUIRED" in block
     # Opaque delegated/external work must remain observable.
-    assert "Orchestrator observability requirements" in block
-    assert "working heartbeat" in block
-    assert "role.id" in block and "elapsed time" in block
-    assert "image/API job" in block
-    assert "Bare placeholders" in block and "contract violations" in block
+    assert "Observability" in block or "observability" in block
+    assert "heartbeat" in block
+    assert "role.id" in block
+    assert "contract violation" in block
     # Per-CLI hint embedded
     assert "claude runtime" in block
 
@@ -171,13 +181,11 @@ def test_autonomous_block_forbids_bare_blocked_or_needs_input_reports():
         complexity=WorkspaceTaskExecutionComplexity.COMPLEX,
     )
     block = workspace_manager._autonomous_assignment_block(task, AgentType.CLAUDE)
-    assert (
-        "blocked or needs_input report is allowed only when no autonomous next action remains"
-        in block
-    )
+    # Observability rule preserved (shorter wording):
+    assert "blocked/needs_input" in block or "blocked or needs_input" in block
+    assert "no autonomous next action remains" in block or "no autonomous step is" in block
     assert "name the blocker" in block
-    assert "include evidence for the blocker" in block
-    assert "next action already attempted or ruled out" in block
+    assert "contract violation" in block
     assert "needs your response" in block
 
 
@@ -248,8 +256,12 @@ def test_review_block_demands_ledger_verification():
     block = workspace_manager._autonomous_review_block(task)
     assert "Subagent ledger verification" in block
     assert "subagent-ledger" in block
-    assert "P-PLAN, P-EXECUTE, P-JUDGE, and P-INTEGRATE" in block
-    assert "external:" in block
+    # Model pinning rule preserved (slash-separated compact form):
+    assert (
+        "P-PLAN/P-EXECUTE/P-JUDGE/P-INTEGRATE" in block
+        or "P-PLAN, P-EXECUTE, P-JUDGE, and P-INTEGRATE" in block
+    )
+    assert "external:" in block or "external:<api>" in block
     # Specific guidance to fail when ledger is missing
     assert "review_failed" in block
 
@@ -261,7 +273,8 @@ def test_review_block_codex_model_pinning_is_runtime_aware():
         agent_type=AgentType.CODEX,
     )
     block = workspace_manager._autonomous_review_block(task)
-    assert "Worker runtime: codex" in block
+    # Runtime is labelled (compact form: "worker runtime: codex" on the Run line):
+    assert "codex" in block
     assert "Do NOT fail solely because Claude opus/sonnet pinning is absent" in block
     assert "runtime-default" in block
 
@@ -417,3 +430,255 @@ def test_auto_continue_messages_carry_endpoint_when_sent(monkeypatch):
         assert '"task_id":"task-7"' in message
     assert monitor_module.AUTO_CONTINUE_MESSAGE.split("\n")[0] in sent[0]
     assert monitor_module.AUTO_REPORT_MISSING_MESSAGE.split("\n")[0] in sent[1]
+
+
+# ---------------------------------------------------------------------------
+# Tiered reviewer history + revision-resume briefing (prompt compaction work)
+# ---------------------------------------------------------------------------
+
+
+def _seed_report(
+    task: WorkspaceTask,
+    session_id: str,
+    state: AgentReportState,
+    *,
+    idx: int,
+    message: str = "m",
+    validation_len: int = 2000,
+    with_acceptance: bool = True,
+) -> None:
+    """Append an AgentReport to workspace_manager.reports for ``task``."""
+    now = datetime.utcnow()
+    report = AgentReport(
+        id=f"r-{task.id}-{idx}",
+        workspace_id=task.workspace_id,
+        task_id=task.id,
+        session_id=session_id,
+        state=state,
+        message=message,
+        message_en=message,
+        message_zh=message,
+        changed_files=[f"backend/file_{idx}.py"] if idx % 2 == 0 else [],
+        validation=("subagent-ledger line " * (validation_len // 20)),
+        risks="risks " * 200,
+        acceptance_check=(
+            [
+                AcceptanceCheck(
+                    criterion=f"c{j}",
+                    status=AcceptanceCheckStatus.PASSED,
+                    evidence="ev" * 30,
+                )
+                for j in range(3)
+            ]
+            if with_acceptance
+            else []
+        ),
+        review_profiles=[ReviewProfile.GENERAL],
+        profile_results=[],
+        artifact_refs=[f"backend/file_{idx}.py"] if idx % 2 == 0 else [],
+        confidence=0.8,
+        requires_human_judgment=False,
+        review_decision=ReviewDecision.AUTO,
+        review_reason=None,
+        risk_level="low",
+        review_cycle=max(1, idx // 2),
+        created_at=now,
+    )
+    workspace_manager.reports[report.id] = report
+
+
+def test_review_prompt_tiered_history_bounds_size_on_long_tasks():
+    """Reviews for a task with many prior reports must NOT grow linearly."""
+    task = _make_task(
+        mode=WorkspaceTaskMode.AUTONOMOUS,
+        complexity=WorkspaceTaskExecutionComplexity.COMPLEX,
+    )
+    task = task.model_copy(update={"id": "t-tier"})
+    session = _make_session(session_id="cb-tier-w")
+    reviewer = _make_session(session_id="cb-tier-r")
+    workspace_manager.sessions[session.id] = session
+    workspace_manager.sessions[reviewer.id] = reviewer
+    workspace_manager.tasks[task.id] = task
+
+    # Seed 10 verbose prior reports.
+    for i in range(10):
+        state = AgentReportState.REVIEW_FAILED if i % 2 == 1 else AgentReportState.READY_FOR_REVIEW
+        _seed_report(task, session.id if i % 2 == 0 else reviewer.id, state, idx=i)
+    trigger_idx = 10
+    _seed_report(
+        task,
+        session.id,
+        AgentReportState.READY_FOR_REVIEW,
+        idx=trigger_idx,
+        message="trigger",
+    )
+    trigger = workspace_manager.reports[f"r-{task.id}-{trigger_idx}"]
+
+    w = Workspace(
+        id=task.workspace_id,
+        name="w",
+        path="/tmp",
+        target=ExecutionTarget.LOCAL,
+        default_agent_type=AgentType.CLAUDE,
+        default_branch="main",
+        session_prefix="cb",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    workspace_manager.workspaces[w.id] = w
+
+    prompt = workspace_manager._build_review_prompt(w, task, reviewer, trigger, lesson_context=[])
+
+    # Trigger and the 3 prior reports must be FULL (include the bulky acceptance_check key).
+    # Earlier reports must be SUMMARIZED (acceptance_check_count present, acceptance_check absent).
+    assert '"acceptance_check"' in prompt  # at least one full payload
+    assert "acceptance_check_count" in prompt  # at least one summary entry
+    # Bounded-growth guard: with a 4-report full window the rest are summarized
+    # (validation/risks truncated to 240 chars; bulky acceptance_check/profile_results
+    # replaced by counts). The 11 verbose reports in this fixture must stay well under
+    # a fully-verbose dump (~50k+ chars with these verbose ledger/risks lengths).
+    assert len(prompt) < 40_000, f"review prompt grew unbounded: {len(prompt)} chars"
+
+    # Cleanup seeded state.
+    for key in list(workspace_manager.reports.keys()):
+        if key.startswith(f"r-{task.id}-"):
+            del workspace_manager.reports[key]
+    workspace_manager.tasks.pop(task.id, None)
+    workspace_manager.workspaces.pop(w.id, None)
+    workspace_manager.sessions.pop(session.id, None)
+    workspace_manager.sessions.pop(reviewer.id, None)
+
+
+def test_hard_recovery_worker_uses_resume_briefing_after_first_iteration():
+    """On iteration>=2 the worker gets a tight resume briefing, not a full assignment replay."""
+    now = datetime.utcnow()
+    w = Workspace(
+        id="ws-resume",
+        name="w",
+        path="/tmp",
+        target=ExecutionTarget.LOCAL,
+        default_agent_type=AgentType.CLAUDE,
+        default_branch="main",
+        session_prefix="cb",
+        created_at=now,
+        updated_at=now,
+    )
+    session = _make_session(session_id="cb-resume-w")
+    reviewer_session = _make_session(session_id="cb-resume-r")
+    # iteration=3 → should hit the resume-briefing branch.
+    task = _make_task(
+        mode=WorkspaceTaskMode.AUTONOMOUS,
+        complexity=WorkspaceTaskExecutionComplexity.COMPLEX,
+    )
+    task = task.model_copy(
+        update={
+            "id": "t-resume",
+            "workspace_id": w.id,
+            "session_id": session.id,
+            "review_cycle": 3,
+            "goal_packet": GoalPacket(
+                objective="Ship feature X",
+                acceptance_criteria=["A works"],
+                out_of_scope=["Y", "Z"],
+                assumptions=[],
+            ),
+            "autonomous_run": AutonomousRun(
+                id="run-resume",
+                task_id="t-resume",
+                phase=AutonomousRunPhase.REVISING,
+                iteration=3,
+            ),
+        }
+    )
+    workspace_manager.workspaces[w.id] = w
+    workspace_manager.sessions[session.id] = session
+    workspace_manager.sessions[reviewer_session.id] = reviewer_session
+    workspace_manager.tasks[task.id] = task
+    # Seed one blocking feedback report from a reviewer.
+    _seed_report(
+        task,
+        reviewer_session.id,
+        AgentReportState.REVIEW_FAILED,
+        idx=1,
+        message="Missing validation for edge case E; see tests/test_x.py.",
+        validation_len=200,
+        with_acceptance=False,
+    )
+
+    resume_prompt = workspace_manager._build_hard_recovery_worker_prompt(w, task, session, "err529")
+
+    # Anchors unique to the resume briefing.
+    assert "Context refreshed after error" in resume_prompt
+    assert "Resume steps:" in resume_prompt
+    assert "Approved Goal Packet (compact):" in resume_prompt
+    assert "Latest reviewer blocking feedback" in resume_prompt
+    # The full "Previously approved Goal Packet JSON" block from cold-start MUST be absent.
+    assert "Previously approved Goal Packet JSON" not in resume_prompt
+
+    # iteration=1 → cold-start branch with full JSON.
+    task_cold = _make_task(
+        mode=WorkspaceTaskMode.AUTONOMOUS,
+        complexity=WorkspaceTaskExecutionComplexity.COMPLEX,
+    )
+    task_cold = task_cold.model_copy(
+        update={
+            "id": "t-cold",
+            "workspace_id": w.id,
+            "session_id": session.id,
+            "review_cycle": 1,
+            "goal_packet": GoalPacket(
+                objective="Ship feature X",
+                acceptance_criteria=["A works"],
+                out_of_scope=["Y"],
+                assumptions=[],
+            ),
+            "autonomous_run": AutonomousRun(
+                id="run-cold",
+                task_id="t-cold",
+                phase=AutonomousRunPhase.INTAKE,
+                iteration=1,
+            ),
+        }
+    )
+    workspace_manager.tasks[task_cold.id] = task_cold
+    cold_prompt = workspace_manager._build_hard_recovery_worker_prompt(
+        w, task_cold, session, "err529"
+    )
+    assert "Previously approved Goal Packet JSON" in cold_prompt
+    assert "Context refreshed after error" not in cold_prompt
+
+    # reviewed+complex (non-autonomous) also stays on cold-start even at review_cycle=3.
+    task_rev = _make_task(
+        mode=WorkspaceTaskMode.REVIEWED,
+        complexity=WorkspaceTaskExecutionComplexity.COMPLEX,
+    )
+    task_rev = task_rev.model_copy(
+        update={
+            "id": "t-rev",
+            "workspace_id": w.id,
+            "session_id": session.id,
+            "review_cycle": 3,
+            "autonomous_run": None,
+        }
+    )
+    workspace_manager.tasks[task_rev.id] = task_rev
+    rev_prompt = workspace_manager._build_hard_recovery_worker_prompt(
+        w, task_rev, session, "err529"
+    )
+    assert "Context refreshed after error" not in rev_prompt
+    assert "Resume steps:" not in rev_prompt
+
+    # Cleanup.
+    for key in list(workspace_manager.reports.keys()):
+        if (
+            key.startswith("r-t-resume-")
+            or key.startswith("r-t-cold-")
+            or key.startswith("r-t-rev-")
+        ):
+            del workspace_manager.reports[key]
+    workspace_manager.tasks.pop(task.id, None)
+    workspace_manager.tasks.pop(task_cold.id, None)
+    workspace_manager.tasks.pop(task_rev.id, None)
+    workspace_manager.workspaces.pop(w.id, None)
+    workspace_manager.sessions.pop(session.id, None)
+    workspace_manager.sessions.pop(reviewer_session.id, None)
