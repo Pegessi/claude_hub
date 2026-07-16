@@ -143,57 +143,32 @@ class _PromptsMixin:
         session: ManagedSession,
     ) -> str:
         return (
-            "You are an independent reviewer agent for this workspace.\n\n"
+            "You are an independent reviewer agent for this workspace. Wait for explicit review "
+            "assignments. Stay read-only: do not implement, refactor, format, or edit files.\n\n"
             f"Workspace: {workspace.name}\n"
             f"Session: {session.id}\n"
             f"{self._session_environment_lines(workspace, session)}\n"
             f"State snapshot: {self.snapshot_path(workspace.id)}\n\n"
-            "Wait for explicit review assignments. Do not implement, refactor, format, or edit files.\n\n"
-            "Reviewer mindset (read first):\n"
-            "- Your primary job is to FIND defects and risks, not to confirm success. A clean, "
-            "confident, or well-written implementation report is not evidence that the code is correct.\n"
-            "- Approval is the exception, not the default. Assume something is wrong until you have "
-            "actively looked for it and failed to find it. Passing without having tried to break the "
-            "change is a review failure.\n"
-            "- Do not defer to the implementation agent. Its confidence, tone, and report polish carry "
-            "no weight; only the actual code and observed state do. Disregard formatting and verbosity "
-            "when judging quality — judge substance, not presentation.\n"
-            "- It is correct and expected to fail a review or request changes when you find real "
-            "blocking defects. Do not soften or wave through borderline issues to avoid friction.\n\n"
-            "Reviewer operating contract:\n"
-            "- Derive concrete acceptance criteria from the task description, user intent, "
-            "recent task reports, changed files, and repository conventions.\n"
-            "- Review against those criteria plus regression risk, integration fit, validation quality, "
-            "and whether the implementation stayed within scope.\n"
-            "- Treat reported validation as claims to verify, not proof. Independently inspect the code "
-            "and state behind the highest-risk claims; do not accept self-reported validation at face "
-            "value. If you cannot confirm a critical claim, treat it as unverified, not as passing.\n"
-            "- Report review_started when you begin.\n"
-            "- Finish by reporting exactly one of review_passed, review_failed, or review_needs_input.\n\n"
-            "Review exit rules:\n"
-            "- Use review_passed only after you have actively tried to find defects (edge cases, error "
-            "paths, regressions, scope leakage) and failed to find any blocking one — and all acceptance "
-            "criteria are met, validation is adequate for the risk, and residual risks are acceptable for "
-            "final human acceptance. Do not pass merely because nothing obvious looked wrong.\n"
-            "- Use review_failed when the implementation agent can fix concrete defects or missing checks. "
-            "Include required fixes specific enough for the implementation agent to follow.\n"
-            "- Use review_needs_input only when a product, credential, environment, or requirement decision "
-            "is genuinely required before review can finish.\n\n"
-            "Reporting style:\n"
-            "- The message field must be a SHORT scannable summary so a human can read it at a glance. "
-            "Do NOT dump every finding, validation log, or full criterion list into message. "
-            "Put detailed evidence into the structured fields (validation, risks, acceptance_check, "
-            "profile_results, artifact_refs) instead.\n"
-            "- Every report must include both message_en (concise English) and message_zh (concise 中文); "
-            "keep the legacy message field as a short fallback.\n\n"
-            "Final review message body (keep each section to 1-3 short bullets, total under ~12 lines):\n"
-            "Verdict: review_passed | review_failed | review_needs_input\n"
-            "Summary: one or two sentences describing what was actually delivered.\n"
-            'Acceptance criteria: rollup like "3/4 passed (1 partial: <criterion>)"; full per-criterion '
-            "evidence belongs in the acceptance_check field.\n"
-            "Required fixes: only for review_failed; the 1-3 highest-priority concrete fixes.\n"
-            "Notes: at most one line for residual risk or follow-up; deeper detail goes in risks.\n\n"
-            "Report endpoint for assigned reviews:\n"
+            "Reviewer mindset:\n"
+            "- Your job is to FIND defects and risks, not confirm success. A confident or "
+            "well-written implementation report is not evidence the code is correct. Assume "
+            "something is wrong until you have actively looked for it; do not pass merely "
+            "because nothing obvious looked wrong.\n"
+            "- Do not defer to the implementation agent. Judge code and observed state, not "
+            "tone, confidence, or formatting.\n"
+            "- It is correct to fail a review for real blocking defects. Do not soften or wave "
+            "through borderline issues to avoid friction.\n"
+            "- Treat self-reported validation as claims to independently spot-check, not proof; "
+            "if you cannot verify a critical claim, it is unverified, not passing.\n\n"
+            "Reporting rules (details repeated in each review prompt):\n"
+            "- POST review_started when you begin; finish with exactly one review_passed, "
+            "review_failed, or review_needs_input.\n"
+            "- Keep message SHORT (<=12 lines; Verdicts/Summary/Acceptance rollup/Required fixes/Notes); "
+            "put evidence in structured fields (validation/risks/acceptance_check/profile_results/artifact_refs).\n"
+            "- Every report carries message_en (English) and message_zh (中文); legacy message is a short fallback.\n"
+            "- Use review_failed when the impl agent can fix concrete defects; review_needs_input only for "
+            "genuine product/credential/environment blockers you cannot infer.\n\n"
+            "Report endpoint (task_id supplied with each assignment):\n"
             f"curl -sS -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             '-d \'{"task_id":"TASK_ID","state":"review_started",'
@@ -794,14 +769,21 @@ class _PromptsMixin:
         self,
         task: WorkspaceTask,
         trigger_report: AgentReport,
+        *,
+        include_trigger: bool = False,
     ) -> list[dict[str, Any]]:
         """Tiered serialization of task reports for reviewer prompts.
 
         Strategy: the most recent ``_FULL_REPORT_WINDOW`` reports (ending with
-        ``trigger_report``) are serialized verbatim; earlier reports are summarized
-        with verbose fields truncated. This keeps reviewer prompt size bounded
-        across iterations while preserving the trigger context and the latest
-        verdicts fully.
+        ``trigger_report`` when ``include_trigger`` is True, or the report just
+        before it otherwise) are serialized verbatim; earlier reports are
+        summarized with verbose fields truncated. This keeps reviewer prompt
+        size bounded across iterations while preserving the latest verdicts
+        fully.
+
+        The default ``include_trigger=False`` is used when ``trigger_report``
+        is already rendered verbatim elsewhere in the prompt (e.g. the
+        "Trigger report (full JSON)" block) so history does not duplicate it.
         """
         task_reports = [
             r for r in self.reports_for_workspace(task.workspace_id) if r.task_id == task.id
@@ -814,12 +796,17 @@ class _PromptsMixin:
             if r.id == trigger_report.id:
                 trigger_idx = i
                 break
-        # Full window: last _FULL_REPORT_WINDOW reports, but ensure trigger is IN it.
-        full_start = (
-            max(0, trigger_idx - self._FULL_REPORT_WINDOW + 1)
-            if trigger_idx >= 0
-            else max(0, len(task_reports) - self._FULL_REPORT_WINDOW)
-        )
+        if not include_trigger and trigger_idx >= 0:
+            # Exclude trigger: history ends at the report before it. The
+            # full-window anchor moves to trigger_idx-1 so the N reports
+            # immediately preceding the trigger are still full.
+            task_reports = task_reports[:trigger_idx]
+            full_anchor = len(task_reports) - 1
+        else:
+            full_anchor = trigger_idx if trigger_idx >= 0 else len(task_reports) - 1
+        if not task_reports:
+            return []
+        full_start = max(0, full_anchor - self._FULL_REPORT_WINDOW + 1)
         out: list[dict[str, Any]] = []
         for i, report in enumerate(task_reports):
             out.append(self._serialize_report_for_review(report, full=(i >= full_start)))
@@ -874,8 +861,8 @@ class _PromptsMixin:
             'partial: <criterion>)"); Required fixes (1-3 concrete, only for review_failed); '
             "Notes (residual risk, at most one line).\n\n"
             f"Trigger report (full JSON):\n{trigger_report.model_dump_json()}\n\n"
-            f"Task history JSON (most recent {self._FULL_REPORT_WINDOW} full; earlier "
-            f"summarized with verbose fields truncated):\n"
+            f"Task history JSON (prior reports; most recent {self._FULL_REPORT_WINDOW} full; "
+            f"earlier summarized with verbose fields truncated; trigger report is above):\n"
             f"{json.dumps(report_payload, indent=2)}\n\n"
             "Report workflow: first POST review_started, then exactly one final verdict:\n"
             f"curl -sS -X POST {self._report_base_url(reviewer)}/api/workspaces/sessions/{reviewer.id}/reports "
@@ -1248,7 +1235,8 @@ class _PromptsMixin:
             f"Stored Goal Packet JSON:\n"
             f"{task.goal_packet.model_dump_json() if task.goal_packet else 'null'}\n\n"
             f"Trigger report (full JSON):\n{trigger_report.model_dump_json()}\n\n"
-            f"Task history JSON (recent {self._FULL_REPORT_WINDOW} full; earlier summarized):\n"
+            f"Task history JSON (prior reports; recent {self._FULL_REPORT_WINDOW} full; "
+            f"earlier summarized; trigger report is above):\n"
             f"{json.dumps(report_payload, indent=2)}\n\n"
             "Resume the review now. Read the worker's latest report, check changed files for "
             "evidence, and issue review_passed, review_failed, or review_needs_input.\n\n"

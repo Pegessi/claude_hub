@@ -24,6 +24,17 @@
     tighter lines, kept all semantic invariants (subagent ledger, opus/sonnet
     pinning per primitive, P-JUDGE pre-flight, GP plan-gate exit criteria,
     adversarial defect hunt).
+  - Reviewer bootstrap tightened from ~952 to ~487 tokens by collapsing
+    repetitive "reviewer mindset" / "operating contract" / "exit rules" /
+    "reporting style" sections into a single tighter block (the per-review
+    prompt repeats format/exit-criteria details anyway, so the bootstrap only
+    needs to set mindset and endpoint).
+  - Fixed a double-serialization bug where the trigger report was rendered
+    twice in review prompts (once as "Trigger report (full JSON)" and once
+    inside "Task history JSON"). `_serialize_task_reports_for_review` now
+    defaults to `include_trigger=False` and excludes the trigger from the
+    history list, with a relabeled header making the split explicit ("prior
+    reports" vs trigger block).
   - New helpers `_serialize_report_for_review` and
     `_serialize_task_reports_for_review` implement the tiered window:
     `_FULL_REPORT_WINDOW = 4`, `_SUMMARY_VERBOSE_FIELD_MAX = 240`,
@@ -42,16 +53,18 @@
     to match shortened wording where assertions were string-exact.
 - **Validation**:
   - Static scaffold: `_orchestrator_contract_block` ~1230 → ~664 tokens;
-    `_review_workflow_block` ~1338 → ~797 tokens; bootstrap prompt ~452 → ~305;
-    assignment prompt for autonomous+complex from ~2.6k tokens of static
-    scaffold down to ~1.5k (precise numbers vary with dynamic GP and lesson
-    context).
+    `_review_workflow_block` ~1338 → ~797 tokens; worker bootstrap ~491 → ~305;
+    reviewer bootstrap ~952 → ~487; assignment for autonomous+complex 2538 → 1724
+    tokens (~32% reduction); reviewer bootstrap+body for 1-prior case 3597 → 2554
+    tokens (~29% reduction), measured apples-to-apples against main via a
+    subprocess-isolated fixture (synthetic task, no lessons/REVIEW.md, trigger
+    + one review_passed prior report).
   - Hard recovery on iter≥2: ~1.7k token full-replay path → ~380 token resume
     briefing.
   - Reviewer history bounded growth: past the 4-report full window each
     additional report adds ~80 tokens (truncated) instead of ~600–1200 tokens
     (full ledger + structured fields).
-  - `pytest` (271 relevant tests) passes; `black`, `isort`, `mypy` clean.
+  - `pytest` (273 relevant tests) passes; `black`, `isort`, `mypy` clean.
 
 ### feat: Unified UI design system — Inter font, consistent buttons, refined typography
 
