@@ -335,8 +335,9 @@ onUnmounted(() => {
   width: 32px;
   height: 32px;
   min-height: 32px;
-  display: grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: 0 0 32px;
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-md);
@@ -346,8 +347,9 @@ onUnmounted(() => {
   list-style: none;
   line-height: 1;
   padding: 0;
+  font-size: var(--ch-font-size-base);
   appearance: none;
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast);
+  transition: var(--ch-motion-fast);
 }
 
 .network-access-trigger::-webkit-details-marker {
@@ -359,6 +361,11 @@ onUnmounted(() => {
   background: var(--ch-color-surface-control-hover);
   border-color: var(--ch-color-accent-ring-strong);
   color: var(--ch-color-text);
+}
+
+.network-access-trigger:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
 .network-access-icon {
@@ -394,11 +401,11 @@ onUnmounted(() => {
   right: 0;
   z-index: 60;
   width: min(360px, calc(100vw - 24px));
-  padding: 10px;
+  padding: 12px;
   border: 1px solid var(--ch-color-border);
-  border-radius: var(--ch-radius-md);
+  border-radius: var(--ch-radius-lg);
   background: var(--ch-color-surface-glass);
-  box-shadow: var(--ch-shadow-lg);
+  box-shadow: var(--ch-shadow-popover);
 }
 
 .network-access-panel-header,
@@ -418,29 +425,40 @@ onUnmounted(() => {
 
 .network-access-panel-header strong,
 .network-access-menu-heading span {
-  font-size: 13px;
-  font-weight: 800;
+  font-size: var(--ch-font-size-sm);
+  font-weight: 600;
   color: var(--ch-color-text);
 }
 
 .network-access-panel-header span,
 .network-access-menu-heading strong {
-  font-size: 11px;
-  font-weight: 700;
+  font-size: var(--ch-font-size-xs);
+  font-weight: 600;
   color: var(--ch-color-text-muted);
 }
 
 .network-access-refresh {
-  height: 26px;
+  height: 28px;
   flex: 0 0 auto;
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
-  padding: 0 8px;
-  font-size: 11px;
-  font-weight: 800;
+  padding: 0 10px;
+  font-size: var(--ch-font-size-xs);
+  font-weight: 600;
   cursor: pointer;
+  transition: var(--ch-motion-fast);
+}
+
+.network-access-refresh:hover {
+  border-color: var(--ch-color-accent-ring-strong);
+  background: var(--ch-color-surface-control-hover);
+}
+
+.network-access-refresh:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
 .network-access-refresh:disabled {
@@ -451,12 +469,12 @@ onUnmounted(() => {
 .network-access-port {
   width: fit-content;
   margin-top: 8px;
-  padding: 3px 7px;
+  padding: 3px 8px;
   border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-soft);
   color: var(--ch-color-text-muted);
-  font-size: 11px;
-  font-weight: 800;
+  font-size: var(--ch-font-size-xs);
+  font-weight: 600;
 }
 
 .network-access-list {
@@ -472,12 +490,13 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   border: 1px solid var(--ch-color-border);
-  border-radius: var(--ch-radius-sm);
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface);
   color: var(--ch-color-text);
-  padding: 7px 8px;
+  padding: 8px 10px;
   cursor: pointer;
   text-align: left;
+  transition: var(--ch-motion-fast);
 }
 
 .network-access-link:hover {
@@ -485,30 +504,36 @@ onUnmounted(() => {
   background: var(--ch-color-surface-control-hover);
 }
 
+.network-access-link:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+}
+
 .network-access-link span {
   color: var(--ch-color-text-muted);
-  font-size: 11px;
-  font-weight: 800;
+  font-size: var(--ch-font-size-xs);
+  font-weight: 600;
 }
 
 .network-access-link code {
   overflow: hidden;
   color: var(--ch-color-text);
-  font-size: 12px;
+  font-size: var(--ch-font-size-sm);
+  font-family: var(--ch-font-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .network-access-link strong {
   color: var(--ch-color-accent);
-  font-size: 11px;
-  font-weight: 800;
+  font-size: var(--ch-font-size-xs);
+  font-weight: 600;
 }
 
 .network-access-status {
   margin: 8px 0 0;
   color: var(--ch-color-text-muted);
-  font-size: 11px;
+  font-size: var(--ch-font-size-xs);
 }
 
 .network-access-status--error {
@@ -531,17 +556,18 @@ onUnmounted(() => {
 
 .network-access-menu-summary {
   width: 100%;
-  min-height: 34px;
+  min-height: 36px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   border: 1px solid transparent;
-  border-radius: var(--ch-radius-sm);
+  border-radius: var(--ch-radius-md);
   background: transparent;
   color: var(--ch-color-text);
-  padding: 5px 8px;
+  padding: 8px 10px;
   cursor: pointer;
+  transition: var(--ch-motion-fast);
 }
 
 .network-access-menu-summary:hover,
@@ -550,8 +576,8 @@ onUnmounted(() => {
 }
 
 .network-access-menu-summary:focus-visible {
-  outline: 2px solid var(--ch-color-accent-ring-strong);
-  outline-offset: 2px;
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
 .network-access-menu-summary > div {
@@ -563,16 +589,16 @@ onUnmounted(() => {
 .network-access-menu-summary span {
   overflow: hidden;
   color: var(--ch-color-text);
-  font-size: 12px;
-  font-weight: 700;
+  font-size: var(--ch-font-size-sm);
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .network-access-menu-summary strong {
   color: var(--ch-color-text-muted);
-  font-size: 10px;
-  font-weight: 800;
+  font-size: var(--ch-font-size-xs);
+  font-weight: 600;
   text-transform: uppercase;
 }
 

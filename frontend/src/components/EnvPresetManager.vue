@@ -9,7 +9,7 @@
         <h3>Manage Environment Presets</h3>
         <button
           type="button"
-          class="btn btn-secondary btn-small"
+          class="ch-btn ch-btn--sm"
           @click="handleClose"
         >
           Close
@@ -21,7 +21,7 @@
             <span>Presets</span>
             <button
               type="button"
-              class="btn btn-secondary btn-small env-new-btn"
+              class="ch-btn ch-btn--sm env-new-btn"
               title="Create new preset"
               @click="handleNew"
             >
@@ -102,7 +102,7 @@
       <div class="env-manage-footer">
         <button
           type="button"
-          class="btn btn-danger"
+          class="ch-btn ch-btn--danger"
           :disabled="!canDeleteSelected"
           @click="handleDelete"
         >
@@ -111,14 +111,14 @@
         <div class="env-manage-footer-right">
           <button
             type="button"
-            class="btn btn-secondary"
+            class="ch-btn"
             @click="handleClose"
           >
             Cancel
           </button>
           <button
             type="button"
-            class="btn btn-primary"
+            class="ch-btn ch-btn--primary"
             :disabled="!canSaveSelected"
             @click="handleSave"
           >
@@ -289,7 +289,7 @@ watch(
 .modal {
   background-color: var(--ch-color-surface);
   border: 1px solid var(--ch-color-border);
-  border-radius: 8px;
+  border-radius: var(--ch-radius-lg);
   padding: 20px;
   min-width: 640px;
   width: min(800px, 100%);
@@ -312,6 +312,7 @@ watch(
   margin: 0;
   color: var(--ch-color-text);
   font-size: 18px;
+  font-weight: 600;
 }
 
 .env-manage-body {
@@ -328,7 +329,7 @@ watch(
   display: flex;
   flex-direction: column;
   border: 1px solid var(--ch-color-border);
-  border-radius: 6px;
+  border-radius: var(--ch-radius-lg);
   background: var(--ch-color-surface-soft);
   overflow: hidden;
 }
@@ -338,7 +339,7 @@ watch(
   justify-content: space-between;
   align-items: center;
   padding: 10px 12px;
-  font-size: 12px;
+  font-size: var(--ch-font-size-sm);
   font-weight: 600;
   color: var(--ch-color-text-muted);
   text-transform: uppercase;
@@ -348,8 +349,6 @@ watch(
 }
 
 .env-new-btn {
-  font-size: 11px;
-  padding: 4px 8px;
   text-transform: none;
   letter-spacing: normal;
 }
@@ -364,10 +363,10 @@ watch(
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
+  padding: 10px 12px;
   cursor: pointer;
   color: var(--ch-color-text);
-  font-size: 13px;
+  font-size: var(--ch-font-size-sm);
   border-bottom: 1px solid var(--ch-color-border-muted);
   transition: background var(--ch-motion-fast);
 }
@@ -378,11 +377,19 @@ watch(
 
 .env-preset-item:hover {
   background: var(--ch-color-surface-control-hover);
+  border-radius: var(--ch-radius-md);
 }
 
 .env-preset-item.active {
   background: var(--ch-color-accent-soft);
   color: var(--ch-color-text);
+  border-radius: var(--ch-radius-md);
+}
+
+.env-preset-item:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--ch-color-accent);
+  border-radius: var(--ch-radius-md);
 }
 
 .env-preset-item-name {
@@ -394,11 +401,12 @@ watch(
 }
 
 .env-preset-item-badge {
-  font-size: 10px;
+  font-size: var(--ch-font-size-xs);
+  font-weight: 600;
   color: var(--ch-color-text-soft);
   background: var(--ch-color-surface-control);
-  padding: 2px 6px;
-  border-radius: 4px;
+  padding: 2px 8px;
+  border-radius: var(--ch-radius-sm);
   flex-shrink: 0;
   text-transform: lowercase;
 }
@@ -417,26 +425,30 @@ watch(
 
 .form-group label {
   display: block;
-  color: var(--ch-color-text);
+  color: var(--ch-color-text-muted);
   margin-bottom: 6px;
-  font-size: 14px;
+  font-size: var(--ch-font-size-sm);
   font-weight: 500;
 }
 
 .form-group input {
   width: 100%;
-  padding: 8px 12px;
+  height: 36px;
+  padding: 0 12px;
   background-color: var(--ch-color-surface-control);
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-md);
   color: var(--ch-color-text);
-  font-size: 14px;
+  font-size: var(--ch-font-size-md);
+  font-family: var(--ch-font-sans);
   box-sizing: border-box;
+  transition: border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast);
 }
 
 .form-group input:focus {
   outline: none;
   border-color: var(--ch-color-accent);
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
 .form-group input:disabled {
@@ -446,14 +458,14 @@ watch(
 
 .form-hint-inline {
   font-weight: normal;
-  font-size: 12px;
+  font-size: var(--ch-font-size-sm);
   color: var(--ch-color-text-soft);
   margin-left: 6px;
 }
 
 .form-hint {
   color: var(--ch-color-text-soft);
-  font-size: 12px;
+  font-size: var(--ch-font-size-sm);
   margin: 6px 0 0 0;
 }
 
@@ -473,18 +485,20 @@ watch(
   padding: 10px 12px;
   background-color: var(--ch-color-surface-control);
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-md);
   color: var(--ch-color-text);
-  font-family: monospace !important;
-  font-size: 13px;
-  line-height: 1.45;
+  font-family: var(--ch-font-mono);
+  font-size: var(--ch-font-size-sm);
+  line-height: 1.5;
   resize: vertical;
   spellcheck: false;
+  transition: border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast);
 }
 
 .env-textarea:focus {
   outline: none;
   border-color: var(--ch-color-accent);
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
 .env-textarea:disabled {
@@ -504,9 +518,9 @@ watch(
   justify-content: center;
   height: 100%;
   color: var(--ch-color-text-soft);
-  font-size: 14px;
+  font-size: var(--ch-font-size-md);
   border: 1px dashed var(--ch-color-border);
-  border-radius: 6px;
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-soft);
 }
 
@@ -523,52 +537,6 @@ watch(
 .env-manage-footer-right {
   display: flex;
   gap: 10px;
-}
-
-.btn {
-  padding: 8px 16px;
-  border: none;
-  border-radius: 4px;
-  font-size: 13px;
-  cursor: pointer;
-  transition: background-color 0.2s;
-}
-
-.btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.btn-small {
-  padding: 5px 10px;
-  font-size: 12px;
-}
-
-.btn-secondary {
-  background-color: var(--ch-color-surface-control-hover);
-  color: var(--ch-color-text);
-}
-
-.btn-secondary:hover:not(:disabled) {
-  background-color: var(--ch-color-surface-pressed);
-}
-
-.btn-primary {
-  background-color: var(--ch-color-accent);
-  color: var(--ch-color-text-inverse);
-}
-
-.btn-primary:hover:not(:disabled) {
-  background-color: var(--ch-color-accent-hover);
-}
-
-.btn-danger {
-  background-color: var(--ch-color-danger-strong);
-  color: var(--ch-color-text-inverse);
-}
-
-.btn-danger:hover:not(:disabled) {
-  background-color: var(--ch-color-danger-hover);
 }
 
 @media (max-width: 720px) {

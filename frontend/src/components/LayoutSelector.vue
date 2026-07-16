@@ -200,16 +200,17 @@ onUnmounted(() => {
 }
 
 .layout-btn {
-  width: 32px;
-  height: 30px;
+  width: 34px;
+  height: 32px;
   background: var(--ch-color-surface-control);
   border: 1px solid var(--ch-color-border-muted);
   border-radius: var(--ch-radius-md);
   padding: 4px;
   cursor: pointer;
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
+  font-size: var(--ch-font-size-base);
   transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), transform var(--ch-motion-fast);
 }
 
@@ -218,10 +219,16 @@ onUnmounted(() => {
   border-color: var(--ch-color-border-hover);
 }
 
+.layout-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+  border-color: var(--ch-color-accent);
+}
+
 .layout-btn.active {
   border-color: var(--ch-color-accent-strong);
   background-color: var(--ch-color-accent-soft);
-  box-shadow: 0 1px 3px var(--ch-shadow-color-soft);
+  box-shadow: var(--ch-shadow-button);
 }
 
 .layout-icon {
@@ -253,8 +260,8 @@ onUnmounted(() => {
 }
 
 .layout-menu-trigger {
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   border: 1px solid var(--ch-color-border-muted);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-control);
@@ -262,14 +269,21 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
+  font-size: var(--ch-font-size-base);
   cursor: pointer;
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), width 180ms cubic-bezier(0.2, 0, 0, 1), height 180ms cubic-bezier(0.2, 0, 0, 1), border-radius 180ms cubic-bezier(0.2, 0, 0, 1);
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast);
 }
 
 .layout-menu-trigger:hover,
 .layout-menu[open] .layout-menu-trigger {
   border-color: var(--ch-color-border-hover);
   background: var(--ch-color-surface-control-hover);
+}
+
+.layout-menu-trigger:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+  border-color: var(--ch-color-accent);
 }
 
 .layout-menu-icon,
@@ -288,28 +302,37 @@ onUnmounted(() => {
   overflow-y: auto;
   padding: 6px;
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: var(--ch-radius-md);
+  border-radius: var(--ch-radius-lg);
   background: var(--ch-color-surface-glass);
-  box-shadow: var(--ch-shadow-soft);
+  box-shadow: var(--ch-shadow-popover);
 }
 
 .layout-menu-item {
   width: 100%;
-  min-height: 34px;
+  min-height: 36px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 7px;
+  padding: 8px 10px;
   border: 1px solid transparent;
-  border-radius: var(--ch-radius-sm);
+  border-radius: var(--ch-radius-md);
   background: transparent;
   color: var(--ch-color-text);
+  font-size: var(--ch-font-size-sm);
+  font-weight: 500;
   text-align: left;
   cursor: pointer;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast);
 }
 
 .layout-menu-item:hover {
   background: var(--ch-color-surface-control-hover);
+}
+
+.layout-menu-item:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+  border-color: var(--ch-color-accent);
 }
 
 .layout-menu-item.active {
@@ -322,8 +345,8 @@ onUnmounted(() => {
 }
 
 .layout-menu-item-label {
-  font-size: 12px;
-  font-weight: 600;
+  font-size: var(--ch-font-size-sm);
+  font-weight: 500;
 }
 
 .user-section {
@@ -355,7 +378,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   font-weight: bold;
-  font-size: 12px;
+  font-size: var(--ch-font-size-sm);
 }
 
 .user-name {
@@ -364,20 +387,28 @@ onUnmounted(() => {
 }
 
 .logout-btn {
-  background: none;
-  border: 1px solid var(--ch-color-text-subtle);
-  color: var(--ch-color-text);
-  padding: 3px 10px;
-  border-radius: 4px;
+  background: transparent;
+  border: 1px solid var(--ch-color-border);
+  color: var(--ch-color-text-muted);
+  height: 28px;
+  padding: 0 12px;
+  border-radius: var(--ch-radius-md);
   cursor: pointer;
-  font-size: 11px;
-  transition: all 0.2s;
+  font-size: var(--ch-font-size-xs);
+  font-weight: 500;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast);
 }
 
 .logout-btn:hover {
-  background-color: var(--ch-color-border-strong);
-  border-color: var(--ch-color-text-soft);
+  background-color: var(--ch-color-surface-control-hover);
+  border-color: var(--ch-color-border-hover);
   color: var(--ch-color-text);
+}
+
+.logout-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+  border-color: var(--ch-color-accent);
 }
 
 @media (max-width: 768px) {
@@ -394,8 +425,8 @@ onUnmounted(() => {
   }
 
   .layout-menu-trigger {
-    width: 30px;
-    height: 30px;
+    width: 32px;
+    height: 32px;
   }
 }
 

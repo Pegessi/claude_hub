@@ -89,7 +89,7 @@ const title = computed(() => `${kind.value} agent`)
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  border-radius: 8px;
+  border-radius: var(--ch-radius-md);
   width: 28px;
   height: 28px;
   color: #fff;
@@ -101,7 +101,7 @@ const title = computed(() => `${kind.value} agent`)
 .agent-avatar[data-size='sm'] {
   width: 22px;
   height: 22px;
-  border-radius: 6px;
+  border-radius: var(--ch-radius-sm);
 }
 
 .agent-avatar__glyph {

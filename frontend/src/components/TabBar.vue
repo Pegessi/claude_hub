@@ -316,14 +316,14 @@
           <div class="modal-actions">
             <button
               type="button"
-              class="btn btn-secondary"
+              class="ch-btn"
               @click="closeCreateModal"
             >
               Cancel
             </button>
             <LoadingButton
               type="submit"
-              class="btn btn-primary"
+              class="ch-btn ch-btn--primary"
               :disabled="isCreateDisabled"
               :loading="isPending('tab:create')"
               loading-label="Creating tab"
@@ -346,7 +346,7 @@
           <h3>{{ form.target === 'remote' ? 'Select Remote Directory' : 'Select Working Directory' }}</h3>
           <button
             type="button"
-            class="btn btn-secondary btn-small"
+            class="ch-btn ch-btn--sm"
             @click="showFileBrowser = false"
           >
             Close
@@ -428,14 +428,14 @@
         <div class="file-browser-footer">
           <button
             type="button"
-            class="btn btn-secondary"
+            class="ch-btn"
             @click="showFileBrowser = false"
           >
             Cancel
           </button>
           <button
             type="button"
-            class="btn btn-primary"
+            class="ch-btn ch-btn--primary"
             @click="selectCurrentDirectory"
           >
             Select This Directory
@@ -458,14 +458,14 @@
         <div class="modal-actions">
           <button
             type="button"
-            class="btn btn-secondary"
+            class="ch-btn"
             @click="showCloseConfirm = false"
           >
             Cancel
           </button>
           <LoadingButton
             type="button"
-            class="btn btn-danger"
+            class="ch-btn ch-btn--danger"
             :disabled="isLoading"
             :loading="tabToClose ? isPending(tabActionKey('close', tabToClose.id)) : false"
             loading-label="Closing tab"
@@ -530,7 +530,7 @@
               </select>
               <button
                 type="button"
-                class="btn btn-secondary env-manage-button"
+                class="ch-btn ch-btn--sm env-manage-button"
                 @click="openSwitchEnvPresetManager"
               >
                 Manage
@@ -583,14 +583,14 @@
           <div class="modal-actions">
             <button
               type="button"
-              class="btn btn-secondary"
+              class="ch-btn"
               @click="closeSwitchEnvModal"
             >
               Cancel
             </button>
             <LoadingButton
               type="submit"
-              class="btn btn-primary switch-env-submit"
+              class="ch-btn ch-btn--primary switch-env-submit"
               :loading="switchEnvTab ? isPending(tabActionKey('switch-env', switchEnvTab.id)) : false"
               loading-label="Restarting…"
             >
@@ -1343,7 +1343,7 @@ async function handleCreateTab() {
 }
 
 .tab-bar > :not(.modal-overlay) {
-  transition: opacity 120ms ease;
+  transition: opacity var(--ch-motion-fast);
 }
 
 .mobile-app-menu {
@@ -1384,6 +1384,11 @@ async function handleCreateTab() {
   background: var(--ch-color-surface-control-hover);
 }
 
+.mobile-app-menu-trigger:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+}
+
 .mobile-app-menu-panel {
   position: absolute;
   top: calc(100% + 7px);
@@ -1410,17 +1415,23 @@ async function handleCreateTab() {
   align-items: center;
   padding: 5px 8px;
   border: 1px solid transparent;
-  border-radius: var(--ch-radius-sm);
+  border-radius: var(--ch-radius-md);
   background: transparent;
   color: var(--ch-color-text);
-  font-size: 12px;
-  font-weight: 600;
+  font-size: var(--ch-font-size-sm);
+  font-weight: 500;
   text-align: left;
   cursor: pointer;
+  transition: background var(--ch-motion-fast);
 }
 
 .mobile-app-menu-item:hover {
   background: var(--ch-color-surface-control-hover);
+}
+
+.mobile-app-menu-item:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
 .mobile-app-menu-item--mode {
@@ -1463,7 +1474,7 @@ async function handleCreateTab() {
   width: 14px;
   pointer-events: none;
   opacity: 0;
-  transition: opacity 0.2s;
+  transition: opacity var(--ch-motion-standard);
   z-index: 2;
 }
 
@@ -1524,6 +1535,11 @@ async function handleCreateTab() {
   background-color: var(--ch-color-surface-control-hover);
 }
 
+.tab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+}
+
 .tab.active {
   background-color: var(--ch-color-surface-selected);
   border-color: var(--ch-color-accent-ring-strong);
@@ -1555,7 +1571,8 @@ async function handleCreateTab() {
 
 .tab-name {
   color: var(--ch-color-text);
-  font-size: 14px;
+  font-size: var(--ch-font-size-base);
+  font-weight: 500;
   max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1567,7 +1584,8 @@ async function handleCreateTab() {
   background: transparent;
   border: none;
   color: var(--ch-color-text);
-  font-size: 14px;
+  font-size: var(--ch-font-size-base);
+  font-weight: 500;
   outline: 1px solid var(--ch-color-accent);
   padding: 2px 4px;
   border-radius: 2px;
@@ -1579,7 +1597,7 @@ async function handleCreateTab() {
   height: 7px;
   border-radius: 50%;
   background-color: var(--ch-color-success);
-  transition: background-color 120ms ease, box-shadow 120ms ease;
+  transition: background-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast);
 }
 
 .tab-indicator[data-status='idle'] {
@@ -1606,7 +1624,7 @@ async function handleCreateTab() {
   font-size: 10px;
   font-weight: bold;
   padding: 1px 5px;
-  border-radius: 8px;
+  border-radius: var(--ch-radius-md);
   line-height: 1;
   min-width: 14px;
   text-align: center;
@@ -1661,9 +1679,19 @@ async function handleCreateTab() {
   background: var(--ch-color-chip-bg);
 }
 
+.tab-menu-trigger:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+}
+
 .tab-close:hover {
   background: var(--ch-color-chip-bg);
   color: var(--ch-color-text);
+}
+
+.tab-close:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
 .tab-menu-panel {
@@ -1676,7 +1704,7 @@ async function handleCreateTab() {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  animation: tab-menu-in 120ms cubic-bezier(0.2, 0, 0, 1);
+  animation: tab-menu-in var(--ch-motion-fast);
   transform-origin: top right;
 }
 
@@ -1700,10 +1728,11 @@ async function handleCreateTab() {
   background: transparent;
   border: none;
   color: var(--ch-color-text);
-  font-size: 13px;
+  font-size: var(--ch-font-size-sm);
+  font-weight: 500;
   line-height: 1.2;
-  padding: 7px 10px;
-  border-radius: var(--ch-radius-sm);
+  padding: 8px 10px;
+  border-radius: var(--ch-radius-md);
   cursor: pointer;
   transition: background var(--ch-motion-fast), color var(--ch-motion-fast);
 }
@@ -1717,12 +1746,17 @@ async function handleCreateTab() {
   cursor: not-allowed;
 }
 
+.tab-menu-item:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+}
+
 .tab-menu-item-icon {
   flex: 0 0 auto;
   width: 16px;
   text-align: center;
   color: var(--ch-color-text-muted);
-  font-size: 13px;
+  font-size: var(--ch-font-size-sm);
 }
 
 .switch-env-modal {
@@ -1755,12 +1789,12 @@ async function handleCreateTab() {
 
 .switch-env-title-block h3 {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--ch-font-size-lg);
 }
 
 .switch-env-subtitle {
   margin: 2px 0 0;
-  font-size: 12px;
+  font-size: var(--ch-font-size-sm);
   color: var(--ch-color-text-muted);
   white-space: nowrap;
   overflow: hidden;
@@ -1777,7 +1811,7 @@ async function handleCreateTab() {
   background: var(--ch-color-surface-soft, rgba(255, 255, 255, 0.04));
   border: 1px solid var(--ch-color-border-muted);
   border-left: 3px solid var(--ch-color-accent);
-  font-size: 12.5px;
+  font-size: var(--ch-font-size-sm);
   line-height: 1.5;
   color: var(--ch-color-text-muted);
 }
@@ -1801,10 +1835,10 @@ async function handleCreateTab() {
 .switch-env-modal .form-group label code,
 .switch-env-modal .checkbox-desc code,
 .switch-env-modal .form-hint code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
+  font-family: var(--ch-font-mono);
+  font-size: var(--ch-font-size-sm);
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
 }
@@ -1831,6 +1865,11 @@ async function handleCreateTab() {
   background-color: var(--ch-color-surface-control-hover);
   border-color: var(--ch-color-border-hover);
   color: var(--ch-color-text);
+}
+
+.add-tab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
 .add-tab:disabled {
@@ -1863,7 +1902,7 @@ async function handleCreateTab() {
 .modal {
   background-color: var(--ch-color-surface);
   border: 1px solid var(--ch-color-border);
-  border-radius: 8px;
+  border-radius: var(--ch-radius-lg);
   padding: 24px;
   min-width: 400px;
   width: min(520px, 100%);
@@ -1904,7 +1943,7 @@ async function handleCreateTab() {
   gap: 8px;
   background-color: var(--ch-color-surface-control);
   padding: 8px 12px;
-  border-radius: 4px;
+  border-radius: var(--ch-radius-md);
   margin-bottom: 12px;
   flex-shrink: 0;
 }
@@ -1915,11 +1954,18 @@ async function handleCreateTab() {
   font-size: 18px;
   cursor: pointer;
   padding: 4px;
-  border-radius: 4px;
+  border-radius: var(--ch-radius-md);
+  transition: background var(--ch-motion-fast);
+  color: var(--ch-color-text);
 }
 
 .path-nav-btn:hover {
   background-color: var(--ch-color-surface-control-hover);
+}
+
+.path-nav-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
 .current-path-input {
@@ -1927,22 +1973,23 @@ async function handleCreateTab() {
   flex: 1;
   background-color: var(--ch-color-app-bg);
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-md);
   color: var(--ch-color-text);
-  font-size: 13px;
-  font-family: monospace;
+  font-size: var(--ch-font-size-sm);
+  font-family: var(--ch-font-mono);
   padding: 6px 8px;
 }
 
 .current-path-input:focus {
   outline: none;
   border-color: var(--ch-color-accent);
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
 .current-path {
   color: var(--ch-color-text);
-  font-size: 13px;
-  font-family: monospace;
+  font-size: var(--ch-font-size-base);
+  font-family: var(--ch-font-mono);
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1953,7 +2000,7 @@ async function handleCreateTab() {
   flex: 1;
   overflow-y: auto;
   border: 1px solid var(--ch-color-border);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-md);
   background-color: var(--ch-color-app-bg);
   margin-bottom: 16px;
   min-height: 200px;
@@ -1981,7 +2028,7 @@ async function handleCreateTab() {
 }
 
 .file-name {
-  font-size: 14px;
+  font-size: var(--ch-font-size-base);
 }
 
 .file-loading,
@@ -2010,7 +2057,7 @@ async function handleCreateTab() {
 
 .confirm-message {
   color: var(--ch-color-text);
-  font-size: 14px;
+  font-size: var(--ch-font-size-base);
   margin: 0 0 24px 0;
 }
 
@@ -2023,35 +2070,39 @@ async function handleCreateTab() {
   display: block;
   color: var(--ch-color-text);
   margin-bottom: 6px;
-  font-size: 14px;
+  font-size: var(--ch-font-size-md);
 }
 
 .form-group input {
   width: 100%;
-  padding: 10px 12px;
+  height: 36px;
+  padding: 0 12px;
   background-color: var(--ch-color-surface-control);
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-md);
   color: var(--ch-color-text);
-  font-size: 14px;
+  font-size: var(--ch-font-size-md);
   box-sizing: border-box;
 }
 
 .form-group input:focus,
-.form-group select:focus {
+.form-group select:focus,
+.form-group textarea:focus,
+.select-input:focus {
   outline: none;
   border-color: var(--ch-color-accent);
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
 .form-error {
   color: var(--ch-color-danger);
-  font-size: 12px;
+  font-size: var(--ch-font-size-sm);
   margin: 6px 0 0 0;
 }
 
 .form-hint {
   color: var(--ch-color-text-soft);
-  font-size: 12px;
+  font-size: var(--ch-font-size-sm);
   margin: 6px 0 0 0;
 }
 
@@ -2061,18 +2112,20 @@ async function handleCreateTab() {
   gap: 4px;
   background-color: var(--ch-color-surface-sunken);
   border: 1px solid var(--ch-color-border);
-  border-radius: 4px;
-  padding: 4px;
+  border-radius: var(--ch-radius-lg);
+  padding: 3px;
 }
 
 .segment-button {
   background-color: transparent;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--ch-radius-md);
   color: var(--ch-color-text-muted);
   cursor: pointer;
-  font-size: 14px;
-  padding: 8px 10px;
+  font-size: var(--ch-font-size-sm);
+  font-weight: 600;
+  padding: 8px 12px;
+  transition: background var(--ch-motion-fast), color var(--ch-motion-fast), border-color var(--ch-motion-fast);
 }
 
 .segment-button.active {
@@ -2085,14 +2138,20 @@ async function handleCreateTab() {
   color: var(--ch-color-text);
 }
 
+.segment-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+}
+
 .select-input {
   width: 100%;
-  padding: 10px 12px;
+  height: 36px;
+  padding: 0 12px;
   background-color: var(--ch-color-surface-control);
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-md);
   color: var(--ch-color-text);
-  font-size: 14px;
+  font-size: var(--ch-font-size-md);
   box-sizing: border-box;
   cursor: pointer;
 }
@@ -2116,17 +2175,24 @@ async function handleCreateTab() {
   background-color: var(--ch-color-surface-control-hover);
   border: 1px solid var(--ch-color-border-strong);
   border-left: none;
-  border-top-right-radius: 4px;
-  border-bottom-right-radius: 4px;
+  border-top-right-radius: var(--ch-radius-md);
+  border-bottom-right-radius: var(--ch-radius-md);
   color: var(--ch-color-text);
   padding: 0 12px;
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--ch-font-size-md);
+  height: 36px;
 }
 
 .cwd-dropdown-btn:hover {
   background-color: var(--ch-color-surface-pressed);
   color: var(--ch-color-text);
+}
+
+.cwd-dropdown-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+  z-index: 1;
 }
 
 .cwd-dropdown-btn:disabled {
@@ -2151,17 +2217,18 @@ async function handleCreateTab() {
   width: 16px;
   height: 16px;
   cursor: pointer;
+  accent-color: var(--ch-color-accent);
 }
 
 .checkbox-text {
   color: var(--ch-color-text);
-  font-size: 14px;
+  font-size: var(--ch-font-size-md);
   font-weight: 500;
 }
 
 .checkbox-desc {
   color: var(--ch-color-text-soft);
-  font-size: 12px;
+  font-size: var(--ch-font-size-sm);
   margin-left: 24px;
 }
 
@@ -2196,8 +2263,10 @@ async function handleCreateTab() {
 .env-textarea {
   width: 100%;
   min-height: 92px;
+  height: auto;
+  padding: 10px 12px;
   resize: vertical;
-  font-family: monospace !important;
+  font-family: var(--ch-font-mono) !important;
   line-height: 1.45;
 }
 
@@ -2206,10 +2275,12 @@ async function handleCreateTab() {
   width: 100%;
   resize: none;
   min-height: 60px;
+  height: auto;
+  padding: 10px 12px;
   opacity: 0.75;
   cursor: default;
   white-space: pre-wrap;
-  font-family: monospace !important;
+  font-family: var(--ch-font-mono) !important;
 }
 
 .env-editor-actions {
@@ -2225,53 +2296,6 @@ async function handleCreateTab() {
   margin-top: 24px;
 }
 
-.btn {
-  padding: 10px 20px;
-  border: none;
-  border-radius: 4px;
-  font-size: 14px;
-  cursor: pointer;
-  transition: background-color 0.2s;
-}
-
-.btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.btn-small {
-  padding: 6px 12px;
-  font-size: 12px;
-}
-
-.btn-secondary {
-  background-color: var(--ch-color-surface-control-hover);
-  color: var(--ch-color-text);
-}
-
-.btn-secondary:hover:not(:disabled) {
-  background-color: var(--ch-color-surface-pressed);
-  color: var(--ch-color-text);
-}
-
-.btn-primary {
-  background-color: var(--ch-color-accent);
-  color: var(--ch-color-text-inverse);
-}
-
-.btn-primary:hover:not(:disabled) {
-  background-color: var(--ch-color-accent-hover);
-}
-
-.btn-danger {
-  background-color: var(--ch-color-danger-strong);
-  color: var(--ch-color-text-inverse);
-}
-
-.btn-danger:hover:not(:disabled) {
-  background-color: var(--ch-color-danger-hover);
-}
-
 @media (max-width: 640px) {
   .modal-overlay {
     align-items: flex-start;
@@ -2284,7 +2308,7 @@ async function handleCreateTab() {
     width: 100%;
     max-height: calc(100dvh - 20px);
     padding: 16px;
-    border-radius: 6px;
+    border-radius: var(--ch-radius-md);
   }
 
   .file-browser-modal {
@@ -2306,8 +2330,8 @@ async function handleCreateTab() {
     padding-top: 12px;
   }
 
-  .modal-actions .btn,
-  .file-browser-footer .btn {
+  .modal-actions .ch-btn,
+  .file-browser-footer .ch-btn {
     flex: 1;
   }
 }
@@ -2346,7 +2370,7 @@ async function handleCreateTab() {
   background: var(--ch-color-surface-raised);
   color: var(--ch-color-text);
   box-shadow: var(--ch-shadow-popover);
-  font-size: 13px;
+  font-size: var(--ch-font-size-base);
   line-height: 1.45;
   overflow: hidden;
   pointer-events: auto;
@@ -2382,7 +2406,7 @@ async function handleCreateTab() {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 13px;
+  font-size: var(--ch-font-size-base);
   font-weight: 700;
   line-height: 1;
 }
@@ -2404,13 +2428,18 @@ async function handleCreateTab() {
   padding: 2px;
   margin-top: -1px;
   cursor: pointer;
-  transition: color var(--ch-motion-fast);
-  border-radius: 3px;
+  transition: color var(--ch-motion-fast), background var(--ch-motion-fast);
+  border-radius: var(--ch-radius-sm);
 }
 
 .toast__close:hover {
   color: var(--ch-color-text);
   background: var(--ch-color-row-hover);
+}
+
+.toast__close:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
 .toast__timer {

@@ -5845,21 +5845,28 @@ onUnmounted(() => {
 }
 
 .summary-chip-button {
-  height: 24px;
+  height: 26px;
   border: 1px solid var(--ch-color-border-muted);
   border-radius: 999px;
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
   cursor: pointer;
-  font-size: 12px;
-  font-weight: 700;
+  font-size: var(--ch-font-size-xs);
+  font-weight: 600;
   padding: 0 10px;
   white-space: nowrap;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast);
 }
 
 .summary-chip-button:hover {
   border-color: var(--ch-color-border-hover);
   background: var(--ch-color-surface-control-hover);
+}
+
+.summary-chip-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+  border-color: var(--ch-color-accent);
 }
 
 .workspace-column-tabs {
@@ -6330,7 +6337,7 @@ onUnmounted(() => {
 .danger-button,
 .advanced-start select {
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: var(--ch-radius-sm);
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
 }
@@ -6340,9 +6347,23 @@ onUnmounted(() => {
 .primary-button,
 .abort-button,
 .danger-button {
-  height: 30px;
-  padding: 0 10px;
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast), transform var(--ch-motion-fast);
+  height: 32px;
+  padding: 0 14px;
+  font-size: var(--ch-font-size-base);
+  font-weight: 500;
+  font-family: var(--ch-font-sans);
+  transition: all var(--ch-motion-fast);
+}
+
+.tool-button,
+.primary-button,
+.abort-button,
+.danger-button {
+  gap: 6px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .tool-button:hover,
@@ -6350,6 +6371,17 @@ onUnmounted(() => {
 .abort-button:hover,
 .danger-button:hover {
   border-color: var(--ch-color-border-hover);
+}
+
+.tool-button:focus-visible,
+.primary-button:focus-visible,
+.abort-button:focus-visible,
+.danger-button:focus-visible,
+.workspace-select:focus-visible,
+.path-nav-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+  border-color: var(--ch-color-accent);
 }
 
 .workspace-select {
@@ -6406,18 +6438,26 @@ onUnmounted(() => {
   background: var(--ch-color-accent-strong);
   border-color: var(--ch-color-accent-strong);
   color: var(--ch-color-text-inverse);
-  font-weight: 700;
+  font-weight: 600;
+  box-shadow: var(--ch-shadow-button);
 }
 
 .primary-button:hover {
   background: var(--ch-color-accent-hover);
   border-color: var(--ch-color-accent-hover);
+  box-shadow: var(--ch-shadow-button-primary);
 }
 
 .danger-button {
   background: var(--ch-color-danger-bg);
   border-color: var(--ch-color-danger-border);
   color: var(--ch-color-danger-text);
+}
+
+.danger-button:hover {
+  background: var(--ch-color-danger-strong);
+  border-color: var(--ch-color-danger-hover);
+  color: white;
 }
 
 .abort-button {
@@ -6456,12 +6496,13 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 5px;
   color: var(--ch-color-text-muted);
-  font-size: 12px;
+  font-size: var(--ch-font-size-sm);
+  font-weight: 500;
 }
 
 .advanced-start select {
-  height: 32px;
-  padding: 0 9px;
+  height: 34px;
+  padding: 0 10px;
 }
 
 .form-row > label,
@@ -6493,19 +6534,28 @@ onUnmounted(() => {
 }
 
 .agent-manager-view-switch button {
-  height: 30px;
+  height: 32px;
   min-width: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   border: 1px solid var(--ch-color-border-muted);
-  border-radius: var(--ch-radius-sm);
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text-muted);
   cursor: pointer;
   padding: 0 12px;
   text-align: left;
+  font-size: var(--ch-font-size-sm);
+  font-weight: 500;
+  transition: all var(--ch-motion-fast);
+}
+
+.agent-manager-view-switch button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+  border-color: var(--ch-color-accent);
 }
 
 .agent-manager-view-switch button[data-active='true'] {
@@ -6531,7 +6581,7 @@ onUnmounted(() => {
 
 .agent-row {
   border: 1px solid var(--ch-color-surface-control-active);
-  border-radius: 6px;
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-soft);
   padding: 9px;
   display: flex;
@@ -6694,7 +6744,7 @@ onUnmounted(() => {
 
 .board-skeleton-fade-enter-active,
 .board-skeleton-fade-leave-active {
-  transition: opacity 240ms ease;
+  transition: opacity var(--ch-motion-standard);
 }
 
 .board-skeleton-fade-enter-from,
@@ -7068,6 +7118,7 @@ onUnmounted(() => {
 .advanced-start input[type='checkbox'] {
   width: 14px;
   height: 14px;
+  accent-color: var(--ch-color-accent);
 }
 
 .task-actions {
@@ -7086,8 +7137,8 @@ onUnmounted(() => {
   text-align: center;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
-  font-weight: 700;
+  font-size: var(--ch-font-size-xs);
+  font-weight: 600;
   line-height: 1;
 }
 
@@ -7095,16 +7146,23 @@ onUnmounted(() => {
 .agent-row button {
   height: 26px;
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-control-active);
   color: var(--ch-color-text);
-  padding: 0 8px;
-  transition: background 0.12s ease, border-color 0.12s ease, transform 0.08s ease;
+  padding: 0 10px;
+  transition: all var(--ch-motion-fast);
   -webkit-tap-highlight-color: var(--ch-color-accent-ring);
 }
 
 .task-actions button {
   height: 30px;
+}
+
+.task-actions button:focus-visible,
+.agent-row button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+  border-color: var(--ch-color-accent);
 }
 
 .task-actions button:active,
@@ -7240,19 +7298,28 @@ onUnmounted(() => {
 }
 
 .icon-button {
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   border: 1px solid var(--ch-color-border);
-  border-radius: var(--ch-radius-sm);
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
   cursor: pointer;
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), transform var(--ch-motion-fast);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--ch-motion-fast);
 }
 
 .icon-button:hover {
   border-color: var(--ch-color-border-hover);
   background: var(--ch-color-surface-control-hover);
+}
+
+.icon-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+  border-color: var(--ch-color-accent);
 }
 
 .detail-body {
@@ -7375,13 +7442,21 @@ onUnmounted(() => {
 .send-form textarea {
   min-height: 100px;
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: var(--ch-radius-sm);
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
-  font-size: 13px;
+  font-size: var(--ch-font-size-base);
+  font-family: var(--ch-font-sans);
   line-height: 1.45;
-  padding: 9px;
+  padding: 10px 12px;
   resize: vertical;
+  transition: all var(--ch-motion-fast);
+}
+
+.send-form textarea:focus {
+  outline: none;
+  border-color: var(--ch-color-accent);
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
 .send-form .primary-button {
@@ -7406,7 +7481,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 10px;
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 6px;
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-soft);
   padding: 8px;
 }
@@ -7420,7 +7495,7 @@ onUnmounted(() => {
   height: 42px;
   overflow: hidden;
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-sunken);
 }
 
@@ -7503,7 +7578,7 @@ onUnmounted(() => {
 .goal-packet-section {
   min-width: 0;
   border: 1px solid var(--ch-color-border-muted);
-  border-radius: 6px;
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-soft);
   padding: 10px;
 }
@@ -7914,8 +7989,8 @@ onUnmounted(() => {
 .report-artifact > span {
   overflow-wrap: anywhere;
   color: var(--ch-color-text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 11px;
+  font-family: var(--ch-font-mono);
+  font-size: var(--ch-font-size-xs);
 }
 
 .artifact-preview-button {
@@ -7943,10 +8018,10 @@ onUnmounted(() => {
   gap: 8px;
   border: 1px solid var(--ch-color-border-muted);
   border-bottom: 0;
-  border-radius: 8px 8px 0 0;
+  border-radius: var(--ch-radius-md) var(--ch-radius-md) 0 0;
   background: var(--ch-color-surface);
   color: var(--ch-color-text-muted);
-  font-size: 11px;
+  font-size: var(--ch-font-size-xs);
   padding: 7px 9px;
 }
 
@@ -7954,17 +8029,17 @@ onUnmounted(() => {
   max-height: 420px;
   overflow: auto;
   border: 1px solid var(--ch-color-border-muted);
-  border-radius: 0 0 8px 8px;
+  border-radius: 0 0 var(--ch-radius-md) var(--ch-radius-md);
   background: var(--ch-color-surface);
   padding: 10px;
 }
 
 .artifact-preview-status {
   border: 1px solid var(--ch-color-border-muted);
-  border-radius: 8px;
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface);
   color: var(--ch-color-text-subtle);
-  font-size: 12px;
+  font-size: var(--ch-font-size-sm);
   padding: 8px 10px;
 }
 
@@ -7998,8 +8073,8 @@ onUnmounted(() => {
 
 .markdown-preview-modal-header strong {
   color: var(--ch-color-text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 13px;
+  font-family: var(--ch-font-mono);
+  font-size: var(--ch-font-size-base);
   overflow-wrap: anywhere;
 }
 
@@ -8331,7 +8406,8 @@ onUnmounted(() => {
   display: block;
   margin-bottom: 6px;
   color: var(--ch-color-text-muted);
-  font-size: 13px;
+  font-size: var(--ch-font-size-sm);
+  font-weight: 500;
 }
 
 .modal-field input,
@@ -8340,23 +8416,25 @@ onUnmounted(() => {
 .file-browser-path input {
   width: 100%;
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: var(--ch-radius-sm);
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
-  font-size: 14px;
+  font-size: var(--ch-font-size-md);
+  font-family: var(--ch-font-sans);
   box-sizing: border-box;
+  transition: all var(--ch-motion-fast);
 }
 
 .modal-field input,
 .modal-field select {
-  height: 34px;
-  padding: 0 10px;
+  height: 36px;
+  padding: 0 12px;
 }
 
 .modal-field textarea {
   min-height: 120px;
   resize: vertical;
-  padding: 10px;
+  padding: 10px 12px;
 }
 
 .modal-field input:focus,
@@ -8365,7 +8443,7 @@ onUnmounted(() => {
 .file-browser-path input:focus {
   outline: none;
   border-color: var(--ch-color-accent);
-  box-shadow: 0 0 0 2px var(--ch-color-accent-ring);
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
 .modal-field .checkbox-label {
@@ -8380,12 +8458,13 @@ onUnmounted(() => {
 .modal-field .checkbox-label input {
   width: 16px;
   height: 16px;
+  accent-color: var(--ch-color-accent);
 }
 
 .modal-hint {
   margin: 6px 0 0;
   color: var(--ch-color-text-soft);
-  font-size: 12px;
+  font-size: var(--ch-font-size-xs);
   line-height: 1.35;
 }
 
@@ -8516,7 +8595,7 @@ onUnmounted(() => {
   width: 100%;
   min-height: 92px;
   resize: vertical;
-  font-family: monospace !important;
+  font-family: var(--ch-font-mono) !important;
   line-height: 1.45;
 }
 
@@ -8528,7 +8607,7 @@ onUnmounted(() => {
   opacity: 0.75;
   cursor: default;
   white-space: pre-wrap;
-  font-family: monospace !important;
+  font-family: var(--ch-font-mono) !important;
 }
 
 .env-editor-actions {
@@ -8540,11 +8619,11 @@ onUnmounted(() => {
 .segmented-control {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px;
+  gap: 2px;
   border: 1px solid var(--ch-color-border);
-  border-radius: var(--ch-radius-md);
+  border-radius: var(--ch-radius-lg);
   background: var(--ch-color-surface-sunken);
-  padding: 4px;
+  padding: 3px;
 }
 
 .segmented-control--three {
@@ -8553,13 +8632,21 @@ onUnmounted(() => {
 
 .segment-button {
   border: 1px solid transparent;
-  border-radius: var(--ch-radius-sm);
+  border-radius: var(--ch-radius-md);
   background: transparent;
   color: var(--ch-color-text-muted);
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--ch-font-size-sm);
+  font-weight: 600;
   padding: 8px 10px;
-  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast);
+  font-family: var(--ch-font-sans);
+  transition: all var(--ch-motion-fast);
+}
+
+.segment-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+  border-color: var(--ch-color-accent);
 }
 
 .segment-button.active {
@@ -8782,7 +8869,7 @@ onUnmounted(() => {
 }
 
 .file-browser-path {
-  border-radius: 4px;
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-soft);
   padding: 8px;
 }
@@ -8790,20 +8877,32 @@ onUnmounted(() => {
 .file-browser-path input {
   min-width: 0;
   flex: 1;
-  height: 30px;
-  padding: 0 8px;
-  font-family: monospace;
-  font-size: 12px;
+  height: 32px;
+  padding: 0 10px;
+  font-family: var(--ch-font-mono);
+  font-size: var(--ch-font-size-sm);
 }
 
 .path-nav-button {
-  height: 30px;
+  height: 32px;
   border: 1px solid var(--ch-color-border-strong);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
   cursor: pointer;
-  padding: 0 8px;
+  padding: 0 12px;
+  font-size: var(--ch-font-size-base);
+  font-weight: 500;
+  font-family: var(--ch-font-sans);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--ch-motion-fast);
+}
+
+.path-nav-button:hover {
+  border-color: var(--ch-color-border-hover);
+  background: var(--ch-color-surface-control-hover);
 }
 
 .file-browser-list {
@@ -8811,7 +8910,7 @@ onUnmounted(() => {
   min-height: 160px;
   overflow-y: auto;
   border: 1px solid var(--ch-color-border);
-  border-radius: 4px;
+  border-radius: var(--ch-radius-md);
   background: var(--ch-color-app-bg);
   margin-top: 12px;
 }
@@ -9198,13 +9297,21 @@ onUnmounted(() => {
     height: 28px;
     min-width: 54px;
     border: 1px solid var(--ch-color-border-strong);
-    border-radius: 4px;
+    border-radius: var(--ch-radius-md);
     background: var(--ch-color-surface-control-active);
     color: var(--ch-color-text);
-    font-size: 12px;
+    font-size: var(--ch-font-size-sm);
+    font-weight: 500;
     padding: 0 8px;
     cursor: pointer;
     -webkit-tap-highlight-color: var(--ch-color-accent-ring);
+    transition: all var(--ch-motion-fast);
+  }
+
+  .column-collapse-button:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+    border-color: var(--ch-color-accent);
   }
 
   .column-collapse-button:active {
@@ -9335,16 +9442,23 @@ onUnmounted(() => {
     justify-content: center;
     gap: 8px;
     border: 1px solid var(--ch-color-border-strong);
-    border-radius: 6px;
+    border-radius: var(--ch-radius-md);
     background: var(--ch-color-surface-control);
     color: var(--ch-color-text);
-    font-size: 14px;
-    font-weight: 700;
+    font-size: var(--ch-font-size-md);
+    font-weight: 600;
+    transition: all var(--ch-motion-fast);
+  }
+
+  .detail-footer-toggle:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+    border-color: var(--ch-color-accent);
   }
 
   .detail-footer-chevron {
     color: var(--ch-color-accent);
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-family: var(--ch-font-mono);
   }
 
   .detail-action-drawer {
@@ -9489,8 +9603,8 @@ onUnmounted(() => {
 
 .switch-env-modal .modal-field label code,
 .switch-env-modal .modal-hint code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
+  font-family: var(--ch-font-mono);
+  font-size: var(--ch-font-size-sm);
   padding: 1px 5px;
   border-radius: 3px;
   background: var(--ch-color-surface-control);
