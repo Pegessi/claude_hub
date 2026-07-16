@@ -119,6 +119,51 @@
   (`test_continue_task_marks_working_before_send_verification_failure`,
   `test_monitor_surfaces_worker_prompt_stuck_in_input`); mypy clean.
 
+### feat: Auto-refresh visible terminal when agent finishes a turn
+
+- **What**: when an agent's runtime status transitions from `working` to
+  `idle` (shell prompt visible) or `attention` (agent waiting for input),
+  the currently-displayed terminal automatically triggers a history refresh +
+  scroll-to-bottom. This avoids display misalignment caused by output content
+  changes during a turn.
+- **Why**: after a round of conversation processing, the terminal output can
+  end up in a visually misaligned state (e.g. the prompt line not at the
+  bottom). Manually hitting the refresh button worked but was easy to forget;
+  auto-refreshing on the working → idle/attention edge keeps the view in sync.
+- **How**:
+  - Added a `currentAgentStatus` computed in `TerminalView.vue` that resolves
+    the `agentStatuses` store entry for `props.tabId` (the only terminal this
+    component displays).
+  - Added a `lastAgentStatus` ref that tracks the previously-seen status; it is
+    reset to `null` whenever `props.tabId` changes so cross-tab status
+    comparisons never fire a spurious refresh.
+  - Added a `watch(currentAgentStatus, …)` that detects the
+    `working` → `idle`/`attention` edge and calls the component-local
+    `postTerminalHistoryRefresh(props.tabId, { reason: 'auto-round-complete',
+    scrollToBottom: true })`. The global
+    `window.__claudeHub.refreshTerminalHistory` is intentionally **not** used
+    to avoid split-pane targeting issues.
+  - Only the displayed terminal (`props.tabId`) is refreshed; hidden/cached
+    iframes and other panes are untouched.
+- **Backend accuracy**: the auto-refresh depends on the `working` →
+  `idle`/`attention` transition, so the backend `_classify_agent_status`
+  (`ttyd_manager.py`) was made more responsive:
+  - A bare shell prompt (`❯`, `$`, `#`, …) on the last line and the
+    Claude/Codex idle hints (`? for shortcuts`, `/ for commands`) now take
+    priority over working markers (`esc to interrupt`, the spinner line, …)
+    in the scrollback above. Previously an agent that had finished and
+    returned to a prompt but still showed `esc to interrupt` a few lines up
+    lingered in `working` for up to 3 minutes.
+  - `_WORKING_FRAME_STALE_SECONDS` was reduced from 180.0 to 45.0, so a
+    frozen working frame (an agent that stopped without a clean shell prompt)
+    flips to `attention` in ~45s instead of ~3min. 45s is still well above
+    the ~1s spinner tick and 5s frontend poll, so slow tool calls that
+    briefly stop repainting are not false-positived.
+- **Validation**: `pnpm lint` and `pnpm build` (vue-tsc + vite) both pass
+  with no errors. Backend: `black`/`isort`/`mypy` clean on touched files;
+  `pytest tests/test_ttyd_manager.py` — 74 passed (4 new tests for the
+  reorder and staleness window).
+
 ### feat: Hard context recovery for agents stuck on persistent API errors
 
 - **What**: when a Claude agent (worker or reviewer) gets stuck on a
