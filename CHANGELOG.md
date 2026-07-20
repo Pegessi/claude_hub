@@ -5,6 +5,67 @@
 
 ## Unreleased
 
+### perf: Prompt compaction and revision-resume briefing for long autonomous tasks
+
+- **What**: three-legged optimization to reduce prompt size and combat context rot
+  on long autonomous/complex tasks: (a) tightened static prompt scaffolding
+  (assignment / review / continue blocks), (b) tiered reviewer report history
+  (last 4 reports full, older reports summarized with verbose fields truncated
+  to 240 chars and bulky structured fields replaced by counts), (c) a new
+  revision-resume briefing used by hard recovery after the first iteration
+  instead of replaying the full assignment prompt.
+- **Why**: under autonomous+complex, long-running tasks accumulated unbounded
+  reviewer history and replayed full assignment text on every hard recovery,
+  leading to "context rot" late in iterations where the agent lost track of
+  earlier decisions and issued contradictory instructions.
+- **How**:
+  - `_prompts.py`: removed the worked `/api/orders` compact-skeleton example,
+    collapsed role primitives, model pinning, and observability rules onto
+    tighter lines, kept all semantic invariants (subagent ledger, opus/sonnet
+    pinning per primitive, P-JUDGE pre-flight, GP plan-gate exit criteria,
+    adversarial defect hunt).
+  - Reviewer bootstrap tightened from ~952 to ~487 tokens by collapsing
+    repetitive "reviewer mindset" / "operating contract" / "exit rules" /
+    "reporting style" sections into a single tighter block (the per-review
+    prompt repeats format/exit-criteria details anyway, so the bootstrap only
+    needs to set mindset and endpoint).
+  - Fixed a double-serialization bug where the trigger report was rendered
+    twice in review prompts (once as "Trigger report (full JSON)" and once
+    inside "Task history JSON"). `_serialize_task_reports_for_review` now
+    defaults to `include_trigger=False` and excludes the trigger from the
+    history list, with a relabeled header making the split explicit ("prior
+    reports" vs trigger block).
+  - New helpers `_serialize_report_for_review` and
+    `_serialize_task_reports_for_review` implement the tiered window:
+    `_FULL_REPORT_WINDOW = 4`, `_SUMMARY_VERBOSE_FIELD_MAX = 240`,
+    `_MAX_REPORT_HISTORY = 12`.
+  - New `_build_revision_resume_prompt` produces a tight briefing (~380 tokens)
+    with task metadata, compact GP (objective + top acceptance + out-of-scope),
+    current changed files (dedup from worker reports, last 20), latest reviewer
+    blocking feedback (truncated to 1500 chars), and 4-step resume
+    instructions. `_build_hard_recovery_worker_prompt` now branches to this
+    briefing on iteration ≥ 2 or review_cycle ≥ 2 for autonomous tasks.
+  - Added a one-line orchestrator reminder on continue: "if your own context
+    feels decayed, prefer a fresh sub-agent rather than reasoning in the main
+    thread."
+  - All existing enforcement/contract text for simple/reviewed/direct modes and
+    non-claude runtimes (cursor/codex/terminal) preserved; tests updated only
+    to match shortened wording where assertions were string-exact.
+- **Validation**:
+  - Static scaffold: `_orchestrator_contract_block` ~1230 → ~664 tokens;
+    `_review_workflow_block` ~1338 → ~797 tokens; worker bootstrap ~491 → ~305;
+    reviewer bootstrap ~952 → ~487; assignment for autonomous+complex 2538 → 1724
+    tokens (~32% reduction); reviewer bootstrap+body for 1-prior case 3597 → 2554
+    tokens (~29% reduction), measured apples-to-apples against main via a
+    subprocess-isolated fixture (synthetic task, no lessons/REVIEW.md, trigger
+    + one review_passed prior report).
+  - Hard recovery on iter≥2: ~1.7k token full-replay path → ~380 token resume
+    briefing.
+  - Reviewer history bounded growth: past the 4-report full window each
+    additional report adds ~80 tokens (truncated) instead of ~600–1200 tokens
+    (full ledger + structured fields).
+  - `pytest` (273 relevant tests) passes; `black`, `isort`, `mypy` clean.
+
 ### feat: Unified UI design system — Inter font, consistent buttons, refined typography
 
 - **What**: comprehensive visual polish pass establishing a unified design
