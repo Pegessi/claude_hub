@@ -546,7 +546,9 @@ def test_task_execution_complexity_prompts_and_legacy_normalization(
     assignment_prompt = sent_messages[-1][1]
     assert "Task execution complexity: complex" in assignment_prompt
     assert "Selected complexity: complex" in assignment_prompt
-    assert "Act as the task orchestrator" in assignment_prompt
+    # "Act as the orchestrator" idea preserved (shorter wording "Act as orchestrator"):
+    assert "orchestrator" in assignment_prompt.lower()
+    assert "decompose" in assignment_prompt.lower() or "delegate" in assignment_prompt.lower()
     sent_messages.clear()
 
     report_response = client.post(
