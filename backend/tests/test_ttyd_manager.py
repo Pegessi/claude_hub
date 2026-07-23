@@ -4,7 +4,9 @@ import os
 import shlex
 import stat
 import subprocess
-from datetime import datetime, timedelta
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from pytest import MonkeyPatch
@@ -1326,8 +1328,29 @@ def test_claude_fresh_launch_pins_stable_session_id() -> None:
     assert "--resume" not in cmd[-1]
 
 
-def test_non_claude_agents_do_not_pin_session_id() -> None:
-    for agent_type in (AgentType.CODEX, AgentType.CURSOR, AgentType.TERMINAL):
+def test_codex_tabs_get_placeholder_session_id() -> None:
+    # Codex now gets a placeholder uuid at construction time (overwritten by
+    # the real codex-assigned id via post-launch discovery). This placeholder
+    # lets tabs.json round-trip a value for agent_session_id before discovery
+    # completes.
+    process = TTYDProcess(
+        tab_id="tab-codex-placeholder",
+        port=12361,
+        name="Codex Placeholder",
+        agent_type=AgentType.CODEX,
+    )
+    assert process.agent_session_id is not None
+    # Looks like a uuid.
+    import re as _re
+
+    assert _re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        process.agent_session_id,
+    )
+
+
+def test_cursor_and_terminal_do_not_pin_session_id() -> None:
+    for agent_type in (AgentType.CURSOR, AgentType.TERMINAL):
         process = TTYDProcess(
             tab_id=f"tab-no-session-{agent_type.value}",
             port=12361,
@@ -1424,6 +1447,8 @@ def test_claude_live_session_reattaches_without_resume() -> None:
 
 def test_codex_recovery_resumes_last_with_fallback() -> None:
     # Solo codex (the workspace default) recovers via the solo-mode launch path.
+    # With a freshly-generated placeholder id (not yet verified in codex's
+    # session_index), recovery falls back to --last.
     process = TTYDProcess(
         tab_id="tab-codex-recover",
         port=12368,
@@ -1443,9 +1468,43 @@ def test_codex_recovery_resumes_last_with_fallback() -> None:
     assert "|| codex --ask-for-approval never --sandbox danger-full-access" in launch
 
 
+def test_codex_recovery_with_pinned_id_resumes_exact_uuid(monkeypatch: MonkeyPatch) -> None:
+    """When agent_session_id is a verified codex session, resume by uuid."""
+
+    # Monkeypatch the index check to treat our test id as verified.
+    def _fake_id_in_index(sid: str) -> bool:
+        return sid == "019f8e90-79d1-7a92-a165-8075ab17f552"
+
+    monkeypatch.setattr(ttyd_manager_module, "_codex_id_in_index", _fake_id_in_index)
+
+    process = TTYDProcess(
+        tab_id="tab-codex-pinned",
+        port=12369,
+        name="Codex Pinned",
+        agent_type=AgentType.CODEX,
+        solo_mode=True,
+        from_persisted_state=True,
+        agent_session_id="019f8e90-79d1-7a92-a165-8075ab17f552",
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+    launch = cmd[-1]
+    assert "codex resume 019f8e90-79d1-7a92-a165-8075ab17f552" in launch
+    assert "resume --last" not in launch
+    assert "||" in launch
+    # Solo flags must ride on BOTH branches (resume and fresh fallback).
+    assert (
+        "codex resume 019f8e90-79d1-7a92-a165-8075ab17f552 --ask-for-approval never --sandbox danger-full-access"
+        in launch
+    )
+    assert "|| codex --ask-for-approval never --sandbox danger-full-access" in launch
+
+
 def test_non_solo_codex_recovery_resumes_last() -> None:
     # Non-solo codex normally launches via the bare "codex" shell; on recovery
-    # it must still route through the agent command so `resume --last` runs.
+    # it must still route through the agent command so `resume --last` runs
+    # (or `resume <uuid>` when a verified id is pinned; this test covers the
+    # fallback --last path for a freshly-created/unpinned tab).
     process = TTYDProcess(
         tab_id="tab-codex-nonsolo-recover",
         port=12378,
@@ -1465,6 +1524,30 @@ def test_non_solo_codex_recovery_resumes_last() -> None:
     # A live session (backend-only restart) must NOT resume — bare reattach.
     live_cmd = process._build_ttyd_command(session_exists=True)
     assert "resume" not in live_cmd[-1]
+
+
+def test_non_solo_codex_recovery_with_pinned_id_resumes_uuid(monkeypatch: MonkeyPatch) -> None:
+    pinned = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    def _fake_id_in_index(sid: str) -> bool:
+        return sid == pinned
+
+    monkeypatch.setattr(ttyd_manager_module, "_codex_id_in_index", _fake_id_in_index)
+
+    process = TTYDProcess(
+        tab_id="tab-codex-nonsolo-pinned",
+        port=12379,
+        name="Codex NonSolo Pinned",
+        agent_type=AgentType.CODEX,
+        solo_mode=False,
+        from_persisted_state=True,
+        agent_session_id=pinned,
+    )
+
+    recover_cmd = process._build_ttyd_command(session_exists=False)
+    assert f"codex resume {pinned}" in recover_cmd[-1]
+    assert "--last" not in recover_cmd[-1]
+    assert "--ask-for-approval" not in recover_cmd[-1]
 
 
 def test_cursor_recovery_continues_with_fallback() -> None:
@@ -2066,6 +2149,61 @@ async def test_switch_env_codex_rolls_back_on_failure(monkeypatch: MonkeyPatch, 
 
 
 @pytest.mark.asyncio
+async def test_switch_env_codex_with_pinned_id_resumes_uuid(
+    monkeypatch: MonkeyPatch, tmp_path
+) -> None:
+    """AC6: switch_env (hot-swap) for codex uses `codex resume <uuid>` when a
+    verified session id is pinned, not `--last`."""
+    pinned = "11111111-2222-3333-4444-555555555555"
+
+    def _fake_id_in_index(sid: str) -> bool:
+        return sid == pinned
+
+    monkeypatch.setattr(ttyd_manager_module, "_codex_id_in_index", _fake_id_in_index)
+
+    process = TTYDProcess(
+        tab_id="tab-codex-switch-pinned",
+        port=12499,
+        name="Codex Switch Pinned",
+        solo_mode=True,
+        agent_type=AgentType.CODEX,
+        env={},
+        agent_session_id=pinned,
+    )
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    monkeypatch.setattr(ttyd_manager_module, "LAUNCH_ENV_DIR", tmp_path)
+    captured: dict = {}
+
+    async def _fake_exists(_session: str) -> bool:
+        return True
+
+    async def _fake_spawn(*args, **kwargs):
+        captured["args"] = args
+        return _FakeProcess(0)
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", _fake_exists)
+    monkeypatch.setattr(
+        ttyd_manager_module.asyncio, "create_subprocess_exec", _fake_spawn, raising=False
+    )
+
+    await process.switch_env({"OPENAI_API_KEY": "test-key"})
+
+    args = captured["args"]
+    lc_index = args.index("-lc")
+    respawn_cmd = args[lc_index + 1]
+
+    assert f"codex resume {pinned}" in respawn_cmd
+    assert "resume --last" not in respawn_cmd
+    assert "|| codex" in respawn_cmd
+    # Solo flags must ride on both branches, just like the launch path.
+    assert (
+        f"codex resume {pinned} --ask-for-approval never --sandbox danger-full-access"
+        in respawn_cmd
+    )
+    assert "|| codex --ask-for-approval never --sandbox danger-full-access" in respawn_cmd
+
+
+@pytest.mark.asyncio
 async def test_switch_env_manager_missing_tab_raises(monkeypatch: MonkeyPatch, tmp_path) -> None:
     state_file = tmp_path / "tabs.json"
     monkeypatch.setattr(ttyd_manager_module, "STATE_FILE", state_file)
@@ -2079,3 +2217,173 @@ async def test_switch_env_manager_missing_tab_raises(monkeypatch: MonkeyPatch, t
     manager._start_locks = {}
     with pytest.raises(KeyError):
         await manager.switch_env("nonexistent", {"X": "Y"})
+
+
+# --- Codex session-id pinning and discovery ----------------------------------
+
+
+def test_codex_session_start_epoch_parses_meta_line(tmp_path) -> None:
+    """_codex_session_start_epoch extracts (sid, cwd, epoch) from a rollout file."""
+    rollout = tmp_path / "rollout-2026-07-23T10-00-00-test.jsonl"
+    meta = {
+        "timestamp": "2026-07-23T10:00:00.000Z",
+        "type": "session_meta",
+        "payload": {
+            "session_id": "019f8e90-79d1-7a92-a165-8075ab17f552",
+            "cwd": "/Users/bytedance/claude_hub",
+            "timestamp": "2026-07-23T10:00:00.000Z",
+        },
+    }
+    rollout.write_text(json.dumps(meta) + "\n", encoding="utf-8")
+    result = ttyd_manager_module._codex_session_start_epoch(str(rollout))
+    assert result is not None
+    sid, cwd, epoch = result
+    assert sid == "019f8e90-79d1-7a92-a165-8075ab17f552"
+    assert cwd == "/Users/bytedance/claude_hub"
+    assert abs(epoch - datetime(2026, 7, 23, 10, 0, 0, tzinfo=timezone.utc).timestamp()) < 1.0
+
+
+def test_codex_session_start_epoch_returns_none_for_bad_file(tmp_path) -> None:
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text("not json\n", encoding="utf-8")
+    assert ttyd_manager_module._codex_session_start_epoch(str(bad)) is None
+    missing = tmp_path / "missing.jsonl"
+    assert ttyd_manager_module._codex_session_start_epoch(str(missing)) is None
+
+
+def test_codex_id_exists_finds_session_by_rollout(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    """_codex_id_exists is rollout-based (not index-based), because
+    session_index.jsonl only records interactive/VSCode sessions and never
+    CLI-launched sessions (source=cli, which is what Claude Hub spawns). The
+    verifier looks for an active or archived rollout whose session_id matches.
+    """
+    codex_home = tmp_path / "codex_home"
+    active_dir = codex_home / "sessions" / "2026" / "07" / "23"
+    archived_dir = codex_home / "archived_sessions"
+    active_dir.mkdir(parents=True)
+    archived_dir.mkdir(parents=True)
+    monkeypatch.setattr(ttyd_manager_module, "_codex_home_dir", lambda: codex_home)
+
+    # Empty home → False (placeholder uuid must not be treated as verified).
+    assert ttyd_manager_module._codex_id_exists("00000000-0000-0000-0000-000000000000") is False
+    # Backward-compat alias kept.
+    assert ttyd_manager_module._codex_id_in_index is ttyd_manager_module._codex_id_exists
+
+    def _rollout(sid: str, cwd: str, dir_path: Path, ts: str) -> Path:
+        path = (
+            dir_path
+            / f"rollout-{ts.replace(':','-')}-{sid[:8]}-{sid[9:13]}-{sid[14:18]}-{sid[19:23]}-{sid[24:]}.jsonl"
+        )
+        meta = {
+            "timestamp": ts,
+            "type": "session_meta",
+            "payload": {"session_id": sid, "id": sid, "timestamp": ts, "cwd": cwd},
+        }
+        path.write_text(json.dumps(meta) + "\n", encoding="utf-8")
+        return path
+
+    real_sid = "019f8e90-79d1-7a92-a165-8075ab17f552"
+    other_cwd_sid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    archived_sid = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    _rollout(real_sid, "/workspace", active_dir, "2026-07-23T10:00:00Z")
+    _rollout(other_cwd_sid, "/other", active_dir, "2026-07-23T10:01:00Z")
+    _rollout(archived_sid, "/workspace", archived_dir, "2026-06-01T10:00:00Z")
+
+    # Active rollout matched with cwd filter.
+    assert ttyd_manager_module._codex_id_exists(real_sid, cwd="/workspace") is True
+    # Cwd mismatch → False.
+    assert ttyd_manager_module._codex_id_exists(real_sid, cwd="/other") is False
+    # Cwd omitted → matches regardless of cwd.
+    assert ttyd_manager_module._codex_id_exists(real_sid) is True
+    # Archived rollouts also count (sessions get moved there after ~N days, but
+    # `codex resume <uuid>` still works for them).
+    assert ttyd_manager_module._codex_id_exists(archived_sid, cwd="/workspace") is True
+    # Placeholder uuid (no rollout) → False.
+    assert ttyd_manager_module._codex_id_exists("deadbeef-dead-dead-dead-deaddeaaaaad") is False
+
+
+def test_codex_iter_rollouts_walks_active_and_archived(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    codex_home = tmp_path / "codex_home"
+    active_dir = codex_home / "sessions" / "2026" / "07" / "23"
+    archived_dir = codex_home / "archived_sessions"
+    active_dir.mkdir(parents=True)
+    archived_dir.mkdir(parents=True)
+    monkeypatch.setattr(ttyd_manager_module, "_codex_home_dir", lambda: codex_home)
+
+    def _rollout(sid: str, cwd: str, dir_path: Path, ts: str) -> None:
+        # Filenames must match rollout-*.jsonl for the glob to find them.
+        ts_safe = ts.replace(":", "-")
+        path = dir_path / f"rollout-{ts_safe}-{sid}.jsonl"
+        meta = {
+            "timestamp": ts,
+            "type": "session_meta",
+            "payload": {"session_id": sid, "id": sid, "timestamp": ts, "cwd": cwd},
+        }
+        path.write_text(json.dumps(meta) + "\n", encoding="utf-8")
+
+    _rollout("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "/a", active_dir, "2026-07-23T10:00:00Z")
+    _rollout("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "/b", archived_dir, "2026-06-01T10:00:00Z")
+
+    found = {sid for sid, _c, _e, _p in ttyd_manager_module._codex_iter_rollouts()}
+    assert found == {"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"}
+
+
+def test_claude_defensive_session_id_when_missing() -> None:
+    """_claude_session_arg generates an id if agent_session_id is somehow None."""
+    process = TTYDProcess(
+        tab_id="tab-claude-noid",
+        port=12400,
+        name="Claude NoId",
+        agent_type=AgentType.CLAUDE,
+    )
+    # Force None to simulate a corrupted/legacy tab
+    process.agent_session_id = None
+    arg = process._claude_session_arg()
+    assert arg.startswith(" --session-id ")
+    assert process.agent_session_id is not None
+
+
+def test_codex_agent_type_change_resets_session_id() -> None:
+    """Switching agent_type resets agent_session_id appropriately."""
+    process = TTYDProcess(
+        tab_id="tab-type-switch",
+        port=12401,
+        name="Type Switch",
+        agent_type=AgentType.CLAUDE,
+        agent_session_id="my-claude-session",
+    )
+    assert process.agent_session_id == "my-claude-session"
+
+    # Simulate what update_tab does: detect type change, reset id
+    new_type = AgentType.CODEX
+    if process.agent_type != new_type:
+        process.agent_session_id = None
+        if new_type in (AgentType.CLAUDE, AgentType.CODEX):
+            process.agent_session_id = str(uuid.uuid4())
+        process.agent_type = new_type
+    assert process.agent_type == AgentType.CODEX
+    assert process.agent_session_id is not None
+    assert process.agent_session_id != "my-claude-session"
+
+
+def test_codex_session_id_round_trips_through_state(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    state_file = tmp_path / "tabs.json"
+    monkeypatch.setattr(ttyd_manager_module, "STATE_FILE", state_file)
+
+    process = TTYDProcess(
+        tab_id="tab-codex-roundtrip",
+        port=12402,
+        name="Codex Roundtrip",
+        agent_type=AgentType.CODEX,
+        agent_session_id="019f8e90-79d1-7a92-a165-8075ab17f552",
+    )
+    state_file.write_text(json.dumps([process.to_dict()]), encoding="utf-8")
+
+    manager = TTYDManager.__new__(TTYDManager)
+    manager.processes = {}
+    manager._next_port = 10000
+    manager._load_state()
+
+    restored = manager.processes["tab-codex-roundtrip"]
+    assert restored.agent_session_id == "019f8e90-79d1-7a92-a165-8075ab17f552"
+    assert restored.agent_type == AgentType.CODEX
