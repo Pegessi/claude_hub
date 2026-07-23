@@ -5,6 +5,92 @@
 
 ## Unreleased
 
+### fix: Codex session restore across backend restarts — pin per-tab UUID instead of cwd-scoped `--last`
+
+- **What**: codex (and to a lesser degree claude code) tabs would frequently
+  restore the wrong conversation — or fail to find any — after a backend
+  restart or machine reboot. Claude tabs already pinned a `--session-id` at
+  launch, but codex tabs relied on `codex resume --last`, which is scoped to
+  "most recent session in current cwd". Because every workspace agent tab
+  shares the same working directory, concurrent restarts cross-wired tabs:
+  tab A could resume tab B's conversation and vice versa.
+- **Why**: codex has no `--session-id` launch flag (unlike Claude Code's
+  `--session-id`/`--resume <uuid>` pair), so there was no way to hand an
+  exact session UUID to a fresh codex process. The only resume handles are
+  `codex resume <uuid>` (positional arg, requires that UUID to already exist
+  in codex's session index) and `codex resume --last` (cwd-relative MRU,
+  racy under concurrency).
+- **How**:
+  - `TTYDProcess.__init__` now generates a placeholder UUID for codex tabs at
+    construction time (same shape as Claude) and persists it through state,
+    so the tab has a stable session-id slot across restarts even before the
+    real codex-assigned UUID is known.
+  - New helper `_discover_codex_session_id(launch_epoch)` runs post-launch
+    and reads `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` (and
+    `~/.codex/archived_sessions/rollout-*.jsonl` for older sessions),
+    parsing the first-line `session_meta` JSON to find the rollout
+    unambiguously started near the tab's launch time, then overwrites the
+    placeholder with the real codex UUID. Prefers `payload.session_id`
+    (stable across resumes, present since codex 0.143) and falls back to
+    `payload.id` (filename match) for older rollouts. Discovered UUIDs are
+    persisted to state so future restarts use the verified id.
+  - Verification gate: `_codex_id_exists(sid)` checks whether a rollout
+    file with a matching `session_id` exists in active or archived
+    sessions — NOT `session_index.jsonl`, which empirically only records
+    interactive/VSCode sessions (`source: "vscode"`) and never CLI-launched
+    sessions (`source: "cli"`, which is what Claude Hub spawns). The
+    initial revision (review-1) used the index and would have rejected
+    every real CLI session id (0/73 workspace sessions were indexed); the
+    rollout-based gate fixes this while still rejecting random placeholder
+    UUIDs (they have no rollout), so unverified ids continue to fall back
+    to `codex resume --last` with a `|| codex` (fresh) fallback — same
+    behavior as before this fix when verification fails, never worse.
+  - Three discovery paths cover every lifecycle: (a) startup backfill
+    `_backfill_codex_session_ids` uses tmux `session_created` time to
+    correlate long-running codex tabs with on-disk rollouts (same
+    conservative thresholds as Claude backfill: 90s match window, 600s
+    isolation, 5s mtime slack), (b) post-`start_all_tabs` bulk sweep
+    `_discover_codex_sessions_after_start` for parallel-started tabs, (c)
+    per-tab scheduled discovery after `create_tab` and
+    `ensure_tab_tmux_session` (5s delay, 30s window).
+  - `_codex_launch_command(recover=True)` now emits `codex resume <verified-uuid>`
+    when the pinned id is in the session index, otherwise falls back to
+    `codex resume --last` as before.
+  - Defensive: `_claude_session_arg()` now generates a fresh UUID if a
+    claude tab somehow has `agent_session_id=None` at launch, instead of
+    emitting `--session-id None`.
+  - Defensive: `update_tab()` resets `agent_session_id` when switching
+    agent types (claude↔codex↔cursor/terminal) so an old uuid isn't
+    accidentally reused against the wrong CLI.
+  - Cursor (`agent --continue`) shares the same cwd-race bug but is
+    explicitly OUT OF SCOPE per this task's Goal Packet (cursor resume
+    semantics differ and need separate investigation).
+- **Files**: `backend/claude_hub/services/ttyd_manager.py`,
+  `backend/tests/test_ttyd_manager.py`, plus this changelog and working log.
+- **Validation**:
+  - 85/85 tests in `test_ttyd_manager.py` pass, including new tests
+    covering: codex placeholder generation, cursor/terminal `None`
+    preservation, verified-uuid resume in both solo/non-solo modes (launch
+    and switch_env respawn), `session_meta` parsing (UTC-aware,
+    `session_id`-over-`id` preference), bad-rollout handling, rollout-based
+    id verification (active + archived + cwd filter + placeholder
+    rejection; `_codex_iter_rollouts` walks both dirs), claude defensive
+    uuid generation, agent-type-change reset, and full state round-trip.
+  - Empirical sanity check against real codex home (513 unique session_ids
+    across active/archived rollouts; 73 workspace-cwd rollouts):
+    `_codex_id_exists` now verifies the newest workspace-cwd session (the
+    review-1 index-based gate returned False for all 73 because CLI
+    sessions are never added to `session_index.jsonl`); a random uuid4
+    placeholder is still correctly rejected.
+  - `black`, `isort --check`, `mypy claude_hub/services/ttyd_manager.py`
+    all clean.
+- **Risk**: low. Codex resume behavior is strictly a superset: rollout-
+  verified ids use `resume <uuid>`, unverified/ambiguous/unknown fall back
+  to the pre-fix `resume --last` path. Ambiguity in backfill (multiple
+  rollouts in the match window) is handled conservatively — the tab keeps
+  its placeholder and falls back to `--last`, rather than risking a cross-
+  wire. Worst case is the same pre-fix behavior for a tab, never worse.
+
 ### perf: Prompt compaction and revision-resume briefing for long autonomous tasks
 
 - **What**: three-legged optimization to reduce prompt size and combat context rot
