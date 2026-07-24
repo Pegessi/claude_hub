@@ -89,7 +89,7 @@
           </button>
         </div>
 
-        <!-- Modifier row: Ctrl, Shift -->
+        <!-- Modifier row: Ctrl, Shift, Select text -->
         <div class="controls-row controls-row-modifiers">
           <button
             type="button"
@@ -106,6 +106,14 @@
             @pointerdown.prevent="toggleShift()"
           >
             Shift{{ shiftHeld ? ' ON' : '' }}
+          </button>
+          <button
+            type="button"
+            class="control-btn control-btn-wide"
+            :class="{ active: selectMode }"
+            @pointerdown.prevent="toggleSelectMode()"
+          >
+            {{ selectMode ? (copyFeedback || '选择中') : '选择' }}
           </button>
         </div>
 
@@ -197,10 +205,13 @@ const isMobile = ref(false)
 const isExpanded = ref(false)
 const ctrlHeld = ref(false)
 const shiftHeld = ref(false)
+const selectMode = ref(false)
+const copyFeedback = ref('')
 const pressedKeys = reactive(new Set<string>())
 let repeatStartTimer: number | null = null
 let repeatIntervalTimer: number | null = null
 let repeatKey: string | null = null
+let copyFeedbackTimer: number | null = null
 
 function checkIsMobile() {
   isMobile.value = window.innerWidth <= 768 || /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
@@ -295,14 +306,48 @@ function toggleShift() {
   shiftHeld.value = !shiftHeld.value
 }
 
+function toggleSelectMode() {
+  selectMode.value = !selectMode.value
+  copyFeedback.value = ''
+  window.__claudeHub.setTerminalSelectMode?.(selectMode.value)
+}
+
+function handleSelectCopied(event: Event) {
+  const detail = (event as CustomEvent).detail as { status?: string } | undefined
+  if (!detail) return
+  if (detail.status === 'copied') {
+    copyFeedback.value = '已复制'
+  } else if (detail.status === 'empty') {
+    copyFeedback.value = '无选择'
+  } else {
+    copyFeedback.value = '复制失败'
+  }
+  if (copyFeedbackTimer !== null) {
+    window.clearTimeout(copyFeedbackTimer)
+  }
+  copyFeedbackTimer = window.setTimeout(() => {
+    copyFeedback.value = ''
+    copyFeedbackTimer = null
+  }, 1500)
+}
+
 onMounted(() => {
   checkIsMobile()
   window.addEventListener('resize', checkIsMobile)
+  window.addEventListener('terminal-select-copied', handleSelectCopied)
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', checkIsMobile)
+  window.removeEventListener('terminal-select-copied', handleSelectCopied)
   clearArrowRepeat()
+  if (copyFeedbackTimer !== null) {
+    window.clearTimeout(copyFeedbackTimer)
+    copyFeedbackTimer = null
+  }
+  if (selectMode.value) {
+    window.__claudeHub.setTerminalSelectMode?.(false)
+  }
 })
 </script>
 

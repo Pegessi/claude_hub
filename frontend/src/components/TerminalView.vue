@@ -1301,6 +1301,14 @@ function handleMessage(event: MessageEvent) {
     }))
   }
 
+  if (event.data.type === 'terminal-select-copied') {
+    // Re-dispatch as a window event so a toast layer (or MobileControls) can
+    // surface copy feedback without coupling to the iframe message shape.
+    window.dispatchEvent(new CustomEvent('terminal-select-copied', {
+      detail: event.data,
+    }))
+  }
+
   // terminal-click is handled by TerminalPane.vue
 }
 
@@ -1327,6 +1335,18 @@ onMounted(() => {
         console.warn('No iframe found for tab:', targetTabId)
         queueTerminalKey(targetTabId, item)
       }
+    }
+
+    // Mobile "select text" mode toggle. Posts to the active terminal iframe,
+    // which translates single-finger touches into xterm selection while the
+    // mode is on (see terminal.py injected select-mode handler).
+    window.__claudeHub.setTerminalSelectMode = function(enabled: boolean, tabId?: string) {
+      const targetTabId = tabId || window.__claudeHub.activePaneTabId || props.tabId
+      if (!targetTabId) return
+      postTerminalMessage(targetTabId, {
+        type: 'terminal-select-mode',
+        enabled: !!enabled,
+      })
     }
 
     window.addEventListener('message', handleMessage)
@@ -1362,6 +1382,9 @@ onUnmounted(() => {
   // onMounted; delete the slot if it's this component's identity heuristically.
   if (sendKeyFn) {
     delete window.__claudeHub.sendTerminalKey
+  }
+  if (window.__claudeHub.setTerminalSelectMode) {
+    delete window.__claudeHub.setTerminalSelectMode
   }
   terminalResizeObserver?.disconnect()
   terminalResizeObserver = null
