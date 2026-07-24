@@ -2,6 +2,7 @@ import asyncio
 import json
 import shutil
 import subprocess
+import uuid
 from datetime import datetime, timedelta
 from importlib import import_module
 from pathlib import Path
@@ -9865,6 +9866,18 @@ def test_monitor_recovers_sealed_gp_verdict_when_worker_idle(
             "goal_packet": approved_packet,
         }
     )
+    # Seed the sealing reviewer report at the sealed cycle so the verdict-state
+    # predicate (which gates recovery on PASSED/FAILED) recognises this round.
+    workspace_manager.reports["gp-seal-passed"] = AgentReport(
+        id="gp-seal-passed",
+        workspace_id=workspace["id"],
+        task_id=task["id"],
+        session_id=reviewer_id,
+        state=AgentReportState.REVIEW_PASSED,
+        message="approved",
+        review_cycle=gp_review_cycle,
+        created_at=datetime.now() - timedelta(seconds=30),
+    )
     # Ensure no next-cycle reports exist.
     for rid in [
         rid
@@ -10043,3 +10056,286 @@ def test_monitor_does_not_auto_continue_parked_human_acceptance(
     assert still_parked.human_acceptance_requested_at is not None
     # No continue prompt sent to the worker.
     assert sent_messages == []
+
+
+def _seed_sealed_round(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+    *,
+    tab_id: str,
+    port: int,
+    prefix: str,
+    workspace_name: str,
+    task_title: str,
+    prompt: str,
+    verdict_state: AgentReportState,
+    packet_status: Optional[GoalPacketStatus] = None,
+) -> tuple[
+    TestClient,
+    dict,
+    dict,
+    dict,
+    "ManagedSession",
+    list[tuple[str, str]],
+    list["TerminalAgentStatus"],
+]:
+    """Shared helper for sealed-round recovery tests.
+
+    Drives start → GP working → reviewer verdict, then constructs the
+    stranded shape (sealed review_cycle, no next-cycle report, worker idle,
+    HA unset) with the given verdict_state recorded as the sealing reviewer
+    report and the optional packet_status applied to the goal packet.
+    Returns (client, workspace, task, started, worker, sent_messages, status_samples).
+    """
+    repo = tmp_path / f"repo-{prefix}"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    status_samples: list[TerminalAgentStatus] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id=tab_id,
+        port=port,
+        sent_messages=sent_messages,
+    )
+
+    async def fake_list_statuses(*_a, **_kw) -> list[TerminalAgentStatus]:
+        return status_samples
+
+    async def fake_capture(_tmux: str) -> str:
+        return "❯ "
+
+    monkeypatch.setattr(
+        workspace_module.ttyd_manager, "list_tab_agent_statuses", fake_list_statuses
+    )
+    monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture)
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": workspace_name, "path": str(repo), "session_prefix": prefix},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": task_title, "prompt": prompt},
+    ).json()
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+    client.post(
+        f"/api/workspaces/sessions/{started['session_id']}/reports",
+        json={
+            "task_id": task["id"],
+            "state": "working",
+            "message": "GP",
+            "goal_packet": {
+                "objective": "x",
+                "acceptance_criteria": ["y"],
+                "validation_plan": ["z"],
+                "assumptions": [],
+                "out_of_scope": [],
+                "handoff_requirements": [],
+            },
+        },
+    )
+    reviewer_id = workspace_manager.tasks[task["id"]].review_session_id
+    worker = workspace_manager.sessions[started["session_id"]]
+    review_cycle = workspace_manager.tasks[task["id"]].review_cycle
+
+    packet_update: dict = {}
+    if packet_status is not None:
+        current_packet = workspace_manager.tasks[task["id"]].goal_packet
+        packet_update["goal_packet"] = (
+            current_packet.model_copy(
+                update={"status": packet_status, "updated_at": datetime.now()}
+            )
+            if current_packet is not None
+            else None
+        )
+    workspace_manager.tasks[task["id"]] = workspace_manager.tasks[task["id"]].model_copy(
+        update={
+            "status": WorkspaceTaskStatus.REVIEW,
+            "review_completed_at": datetime.now(),
+            "reviewed_at": datetime.now(),
+            "reviewed_cycle": review_cycle,
+            "review_requested_at": None,
+            "started_at": None,
+            "human_acceptance_requested_at": None,
+            "human_accepted_at": None,
+            **packet_update,
+        }
+    )
+    # Plant the sealing reviewer report at the sealed cycle so the verdict
+    # predicate can classify it.
+    workspace_manager.reports[f"seal-{tab_id}"] = AgentReport(
+        id=f"seal-{tab_id}",
+        workspace_id=workspace["id"],
+        task_id=task["id"],
+        session_id=reviewer_id,
+        state=verdict_state,
+        message=f"sealed verdict {verdict_state.value}",
+        review_cycle=review_cycle,
+        created_at=datetime.now() - timedelta(seconds=30),
+    )
+    # Drop any next-cycle reports that the happy-path continue may have created.
+    for rid in [
+        rid
+        for rid, rpt in workspace_manager.reports.items()
+        if rpt.task_id == task["id"]
+        and rpt.review_cycle is not None
+        and rpt.review_cycle > review_cycle
+    ]:
+        del workspace_manager.reports[rid]
+    workspace_manager.sessions[started["session_id"]] = worker.model_copy(
+        update={
+            "status": ManagedSessionStatus.IDLE,
+            "runtime_status": AgentRuntimeStatus.IDLE,
+            "task_id": task["id"],
+            "current_task_id": task["id"],
+            "auto_continue_task_id": None,
+            "auto_continue_attempts": 0,
+            "prompt_retry_task_id": None,
+            "last_activity_at": datetime.now() - timedelta(seconds=120),
+            "last_auto_continue_at": None,
+        }
+    )
+    sent_messages.clear()
+    sampled_at = datetime.now()
+    status_samples[:] = [
+        TerminalAgentStatus(
+            tab_id=worker.tab_id,
+            tab_name="w",
+            agent_type=AgentType.CLAUDE,
+            status=AgentRuntimeStatus.IDLE,
+            status_text="Idle",
+            detail="clean prompt",
+            tmux_session=f"claude-hub-{worker.tab_id}",
+            last_changed_at=sampled_at - timedelta(seconds=120),
+            sampled_at=sampled_at,
+        )
+    ]
+    return client, workspace, task, started, worker, sent_messages, status_samples
+
+
+def test_monitor_does_not_auto_continue_review_needs_input_parking(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """AC4 negative case (fix #1): sealed round with review_needs_input verdict
+    (HA unset, round sealed, but the verdict requires human action) must NOT
+    be auto-continued."""
+    _, workspace, task, _, _, sent_messages, _ = _seed_sealed_round(
+        monkeypatch,
+        tmp_path,
+        tab_id="no-needs-input-tab",
+        port=12607,
+        prefix="noneeds",
+        workspace_name="NoNeedsInput",
+        task_title="noneeds",
+        prompt="x",
+        verdict_state=AgentReportState.REVIEW_NEEDS_INPUT,
+    )
+
+    asyncio.run(
+        workspace_manager._refresh_session_statuses(workspace["id"], run_auto_continue=True)
+    )
+
+    still_parked = workspace_manager.tasks[task["id"]]
+    # Must stay REVIEW — review_needs_input requires human judgment.
+    assert still_parked.status == WorkspaceTaskStatus.REVIEW
+    assert sent_messages == []
+
+
+def test_monitor_recovers_sealed_gp_rejected_verdict(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """AC6(b): sealed GP-rejected (REVIEW_FAILED) verdict, worker idle →
+    monitor dispatches continue_task so the worker can revise the GP."""
+    _, workspace, task, _, _, sent_messages, _ = _seed_sealed_round(
+        monkeypatch,
+        tmp_path,
+        tab_id="gp-rej-tab",
+        port=12608,
+        prefix="gprej",
+        workspace_name="GPRej",
+        task_title="gprej",
+        prompt="x",
+        verdict_state=AgentReportState.REVIEW_FAILED,
+        packet_status=GoalPacketStatus.REJECTED,
+    )
+
+    asyncio.run(
+        workspace_manager._refresh_session_statuses(workspace["id"], run_auto_continue=True)
+    )
+
+    recovered = workspace_manager.tasks[task["id"]]
+    assert (
+        recovered.status == WorkspaceTaskStatus.WORKING
+    ), f"expected WORKING after GP-rejected recovery, got {recovered.status}"
+    assert sent_messages, "expected a continue prompt dispatched to worker"
+
+
+def test_monitor_recovers_sealed_impl_review_failed_verdict(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """AC6(c): sealed impl-review-failed verdict (post-implementation, no GP
+    pending, no HA flag), worker idle → monitor dispatches continue_task so
+    the worker can address reviewer fixes."""
+    _, workspace, task, started, _, sent_messages, _ = _seed_sealed_round(
+        monkeypatch,
+        tmp_path,
+        tab_id="impl-fail-tab",
+        port=12609,
+        prefix="implfail",
+        workspace_name="ImplFail",
+        task_title="implfail",
+        prompt="build",
+        verdict_state=AgentReportState.REVIEW_FAILED,
+    )
+    # The helper above seeds a GP-pending state; for impl-failed the GP was
+    # already approved and implementation happened. Convert: packet APPROVED,
+    # then advance review_cycle once (impl round), then re-seal with
+    # reviewed_cycle matching.
+    t = workspace_manager.tasks[task["id"]]
+    approved_packet = t.goal_packet.model_copy(
+        update={"status": GoalPacketStatus.APPROVED, "updated_at": datetime.now()}
+    )
+    impl_cycle = t.review_cycle + 1
+    # Replant the sealing verdict at the impl cycle.
+    del workspace_manager.reports[f"seal-impl-fail-tab"]
+    workspace_manager.reports["seal-impl-fail-tab-impl"] = AgentReport(
+        id="seal-impl-fail-tab-impl",
+        workspace_id=workspace["id"],
+        task_id=task["id"],
+        session_id=t.review_session_id or "reviewer",
+        state=AgentReportState.REVIEW_FAILED,
+        message="needs fixes",
+        review_cycle=impl_cycle,
+        created_at=datetime.now() - timedelta(seconds=20),
+    )
+    workspace_manager.tasks[task["id"]] = t.model_copy(
+        update={
+            "review_cycle": impl_cycle,
+            "reviewed_cycle": impl_cycle,
+            "goal_packet": approved_packet,
+        }
+    )
+    # Drop any next-cycle reports.
+    for rid in [
+        rid
+        for rid, rpt in workspace_manager.reports.items()
+        if rpt.task_id == task["id"]
+        and rpt.review_cycle is not None
+        and rpt.review_cycle > impl_cycle
+    ]:
+        del workspace_manager.reports[rid]
+
+    asyncio.run(
+        workspace_manager._refresh_session_statuses(workspace["id"], run_auto_continue=True)
+    )
+
+    recovered = workspace_manager.tasks[task["id"]]
+    assert (
+        recovered.status == WorkspaceTaskStatus.WORKING
+    ), f"expected WORKING after impl-review-failed recovery, got {recovered.status}"
+    assert sent_messages, "expected a continue prompt dispatched to worker"
