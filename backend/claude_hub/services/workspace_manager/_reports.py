@@ -332,6 +332,19 @@ class _ReportsMixin:
                 # preserved) so the board timeline matches when the reviewer
                 # rendered a decision; review_completed_at and (for passed)
                 # human_acceptance_requested_at keep any existing value.
+                #
+                # Goal Packet reviews auto-continue back to the worker and must
+                # NEVER set human_acceptance_requested_at — that flag is for
+                # implementation-phase passes that legitimately park on human
+                # acceptance. Passing human_acceptance_for_passed=False (and
+                # clearing any pre-existing value) keeps the UI from showing
+                # "Awaiting human acceptance" on GP approvals, and also ensures
+                # the auto-recovery predicate can recognise stranded GP verdicts.
+                is_gp_review = (
+                    current_task.task_mode == WorkspaceTaskMode.REVIEWED
+                    and current_task.goal_packet is not None
+                    and current_task.goal_packet.status == GoalPacketStatus.PENDING_REVIEW
+                )
                 task_update.update(
                     state_policy.compute_reviewer_verdict_task_update(
                         report_state=payload.state,
@@ -345,9 +358,14 @@ class _ReportsMixin:
                         ),
                         preserve_existing_review_completed_at=True,
                         preserve_existing_reviewed_at=False,
-                        preserve_existing_human_acceptance_requested_at=True,
+                        preserve_existing_human_acceptance_requested_at=(not is_gp_review),
+                        human_acceptance_for_passed=(not is_gp_review),
                     )
                 )
+                if is_gp_review:
+                    # Explicitly clear any stale human-acceptance flag so the
+                    # fast-path state is consistent with "GP auto-continues".
+                    task_update["human_acceptance_requested_at"] = None
                 # Autonomous mode: recompute next phase so the task remains
                 # in sync with _autonomous_run_after_evaluation.
                 if current_task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
