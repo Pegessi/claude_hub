@@ -388,17 +388,20 @@ class _MonitorMixin:
             # Normally during REVIEW only the reviewer is auto-continued
             # (the worker waits). Exception: a verdict has sealed the round
             # (reviewed_cycle == review_cycle), no human acceptance is being
-            # waited on, and no next-cycle WORKING report exists — i.e.
-            # continue_task never ran (typically because the worker was STOPPED
-            # when the reviewer submitted their verdict and the guard
-            # RuntimeError propagated before this recovery path existed).
-            # This catches pre-existing stranded GP-approval / impl-review-failed
-            # tasks as well as any future strandings from cold-resume races.
+            # waited on, no next-cycle WORKING report exists, and the sealing
+            # verdict is a terminal auto-continuable state (REVIEW_PASSED or
+            # REVIEW_FAILED — NOT review_needs_input, which must wait for a
+            # human). This catches pre-existing stranded GP-approval /
+            # GP-rejected / impl-review-failed tasks as well as any future
+            # strandings from cold-resume races.
+            sealed_verdict_state = self._sealed_cycle_verdict_state(task.id, task.review_cycle)
             sealed_round_awaiting_continue = (
                 is_worker
                 and state_policy.current_round_has_verdict(task.review_cycle, task.reviewed_cycle)
                 and task.human_acceptance_requested_at is None
                 and not self._task_has_post_cycle_report(task.id, task.review_cycle)
+                and sealed_verdict_state
+                in {AgentReportState.REVIEW_PASSED, AgentReportState.REVIEW_FAILED}
             )
             if not is_reviewer and not sealed_round_awaiting_continue:
                 return None
@@ -434,6 +437,11 @@ class _MonitorMixin:
                     session.id,
                     exc,
                 )
+                # Do NOT mark the session WORKING on failure — let downstream
+                # stall detection / next monitor tick retry; forcing WORKING
+                # here would mask persistent failures (e.g. the worker really
+                # is STOPPED and can't receive input).
+                return None
             return {
                 "status": ManagedSessionStatus.WORKING,
                 "runtime_status": AgentRuntimeStatus.WORKING,
@@ -852,6 +860,38 @@ class _MonitorMixin:
             if report.review_cycle is not None and report.review_cycle > cycle:
                 return True
         return False
+
+    def _sealed_cycle_verdict_state(self, task_id: str, cycle: int) -> AgentReportState | None:
+        """Return the terminal review verdict state at `cycle`, or None.
+
+        Iterates review_* reports for the task scoped to exactly `cycle`,
+        preferring terminal states (REVIEW_PASSED / REVIEW_FAILED /
+        REVIEW_NEEDS_INPUT) over intermediate ones. Used by sealed-round
+        recovery to distinguish auto-continuable verdicts from
+        review_needs_input, which parks for human attention and must NOT be
+        auto-continued.
+        """
+        terminal = {
+            AgentReportState.REVIEW_PASSED,
+            AgentReportState.REVIEW_FAILED,
+            AgentReportState.REVIEW_NEEDS_INPUT,
+        }
+        latest_terminal: AgentReportState | None = None
+        latest_any: AgentReportState | None = None
+        latest_ts = None
+        for report in self.reports.values():
+            if report.task_id != task_id:
+                continue
+            if not report.state.value.startswith("review_"):
+                continue
+            if report.review_cycle is None or report.review_cycle != cycle:
+                continue
+            if latest_ts is None or report.created_at > latest_ts:
+                latest_ts = report.created_at
+                latest_any = report.state
+            if report.state in terminal:
+                latest_terminal = report.state
+        return latest_terminal or latest_any
 
     def _reconcile_task_report_statuses(self, workspace_id: str) -> None:
         changed = False

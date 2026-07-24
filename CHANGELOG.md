@@ -39,16 +39,22 @@
     human-acceptance flag.
   - Defensive clear of `human_acceptance_requested_at` in the GP handler's
     `already_applied` branch for any pre-fix stranded state with a stale flag.
-  - New `_task_has_post_cycle_report` helper; `_auto_continue_stopped_task`
-    now also fires for WORKER sessions in `status=REVIEW` when (a) the round
-    is sealed (`current_round_has_verdict`), (b) `human_acceptance_requested_at
-    is None`, and (c) no next-cycle report exists. On match it calls
-    `continue_task` directly, which re-opens the work phase and dispatches the
-    continue prompt — recovering pre-existing stranded tasks and any future
-    strandings from cold-resume/session-flip races. The predicate explicitly
-    excludes post-impl-approval parking (human_acceptance set) so those still
-    wait on human action.
-  - Negative test: `REVIEW+APPROVED+human_acceptance set` is NOT
+  - New `_task_has_post_cycle_report` and `_sealed_cycle_verdict_state` helpers;
+    `_auto_continue_stopped_task` now also fires for WORKER sessions in
+    `status=REVIEW` when (a) the round is sealed (`current_round_has_verdict`),
+    (b) `human_acceptance_requested_at is None`, (c) no next-cycle report
+    exists, and (d) the sealing verdict state is `REVIEW_PASSED` or
+    `REVIEW_FAILED` (NOT `review_needs_input`, which must wait for a human).
+    On match it calls `continue_task` directly, which re-opens the work phase
+    and dispatches the continue prompt — recovering pre-existing stranded
+    tasks and any future strandings from cold-resume/session-flip races. The
+    predicate explicitly excludes post-impl-approval parking (human_acceptance
+    set) and `review_needs_input` parking so those still wait on human action.
+    If `continue_task` raises during recovery (worker still STOPPED), the
+    session is NOT forced to WORKING; downstream stall detection / the next
+    monitor tick will retry.
+  - Negative tests: `REVIEW+APPROVED+human_acceptance set` (post-impl parking)
+    and `REVIEW+review_needs_input` (human-judgment parking) are NOT
     auto-continued. Positive tests for GP-approved, GP-rejected, and
     impl-review-failed sealed-verdict recovery.
 
