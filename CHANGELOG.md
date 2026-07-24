@@ -5,6 +5,59 @@
 
 ## Unreleased
 
+### fix: Goal Packet (and impl-review-failed) review-pass callbacks survive a stopped worker
+
+- **What**: when a reviewer approved (or rejected) a Goal Packet while the
+  worker agent's session was `STOPPED` (post-backend-restart race, tmux crash,
+  cold `claude --resume`), the task silently stranded at `status=review` with
+  `goal_packet.status=approved`/`rejected` and `reviewed_cycle == review_cycle`
+  — the worker never received the "begin implementation" continue prompt and
+  no recovery path fired. The HTTP response to the reviewer carried a 500, but
+  the UI showed "Approved" because the verdict was already persisted.
+- **Why**: `continue_task(...)` raises `RuntimeError` ("Review task original
+  agent is stopped") on a stopped worker BEFORE its internal try/except around
+  tmux delivery. The two calls in `_handle_goal_packet_review_report` (GP
+  approve / GP reject) and the one in `_handle_review_report` (impl-review
+  failure reopen) were `await`ed bare, so the exception propagated all the way
+  out of `_after_report_recorded` to the HTTP layer. Meanwhile the
+  `create_report` fast-path had already sealed the round (advanced
+  `reviewed_cycle`, transitioned `goal_packet.status`), which in turn made the
+  reaper's sealed-round guard skip the task forever. Secondary: the fast-path
+  called `compute_reviewer_verdict_task_update` with default
+  `human_acceptance_for_passed=True`, so GP approvals incorrectly showed the
+  "Awaiting human acceptance" chip (until/unless `continue_task` cleared it).
+- **How**:
+  - Wrap all three bare `continue_task(...)` calls in try/except that invokes
+    `_mark_prompt_dispatch_stalled(...)` (session marked `NEEDS_INPUT`,
+    `prompt_dispatch_stalled` risk report recorded) instead of letting the
+    exception escape, matching the pattern already used by `request_task_review`
+    and `continue_task`'s own tmux-delivery block.
+  - In the `create_report` fast-path, detect GP reviews (same predicate already
+    used for the packet status transition) and pass
+    `human_acceptance_for_passed=False` + clear any pre-existing
+    `human_acceptance_requested_at`, so GP verdicts never carry the
+    human-acceptance flag.
+  - Defensive clear of `human_acceptance_requested_at` in the GP handler's
+    `already_applied` branch for any pre-fix stranded state with a stale flag.
+  - New `_task_has_post_cycle_report` and `_sealed_cycle_verdict_state` helpers;
+    `_auto_continue_stopped_task` now also fires for WORKER sessions in
+    `status=REVIEW` when (a) the round is sealed (`current_round_has_verdict`),
+    (b) `human_acceptance_requested_at is None`, (c) no next-cycle report
+    exists, and (d) the sealing verdict state is `REVIEW_PASSED` or
+    `REVIEW_FAILED` (NOT `review_needs_input`, which must wait for a human).
+    On match it calls `continue_task` directly, which re-opens the work phase
+    and dispatches the continue prompt — recovering pre-existing stranded
+    tasks and any future strandings from cold-resume/session-flip races. The
+    predicate explicitly excludes post-impl-approval parking (human_acceptance
+    set) and `review_needs_input` parking so those still wait on human action.
+    If `continue_task` raises during recovery (worker still STOPPED), the
+    session is NOT forced to WORKING; downstream stall detection / the next
+    monitor tick will retry.
+  - Negative tests: `REVIEW+APPROVED+human_acceptance set` (post-impl parking)
+    and `REVIEW+review_needs_input` (human-judgment parking) are NOT
+    auto-continued. Positive tests for GP-approved, GP-rejected, and
+    impl-review-failed sealed-verdict recovery.
+
 ### fix: Codex session restore across backend restarts — pin per-tab UUID instead of cwd-scoped `--last`
 
 - **What**: codex (and to a lesser degree claude code) tabs would frequently
