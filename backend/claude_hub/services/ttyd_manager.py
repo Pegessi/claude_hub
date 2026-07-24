@@ -999,12 +999,20 @@ asyncio.run(_main())
     #                              makes the UI feel janky on repaint-heavy
     #                              frames. Saves ~1 repaint/500ms and removes a
     #                              common source of perceived typing jitter.
-    #   rendererType=webgl       — WebGL2 renderer is ~2–5× faster than the
-    #                              default canvas renderer under high output
-    #                              throughput; frees the main thread so key
-    #                              events are dispatched sooner.
-    #   allowProposedApi=true    — required for rendererType=webgl in some
-    #                              ttyd/xterm.js version combos.
+    #   rendererType=canvas      — the WebGL renderer (xterm.js v4, bundled by
+    #                              ttyd 1.7.x) mis-renders the text-selection
+    #                              highlight: the blue highlight rectangle is
+    #                              painted offset from the glyphs it covers, so
+    #                              dragging to select "串行"/drifts visually even
+    #                              though the copied text is correct (xterm.js
+    #                              issue #5198; there is no .xterm-selection DOM
+    #                              node in WebGL mode, so the CSS workaround does
+    #                              not apply). The 2D canvas renderer paints the
+    #                              selection on its own layer, aligned with the
+    #                              text. Output throughput is slightly lower than
+    #                              WebGL but ample for agent TUIs; input latency
+    #                              (SAB fast path) is renderer-independent.
+    #   allowProposedApi=true    — harmless; kept from the previous baseline.
     #   drawBoldTextInBrightColors=false — avoids extra color map lookups.
     #   minimumContrastRatio=1   — skip contrast adjustment work per glyph.
     #   scrollback=100000        — kept from the previous baseline.
@@ -1015,7 +1023,7 @@ asyncio.run(_main())
         ("fastScrollModifier", "alt"),
         ("macOptionIsMeta", "false"),
         ("cursorBlink", "false"),
-        ("rendererType", "webgl"),
+        ("rendererType", "canvas"),
         ("allowProposedApi", "true"),
         ("drawBoldTextInBrightColors", "false"),
         ("minimumContrastRatio", "1"),
