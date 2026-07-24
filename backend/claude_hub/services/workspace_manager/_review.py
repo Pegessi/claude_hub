@@ -313,7 +313,33 @@ class _ReviewMixin:
             f"{report.message}\n\n"
             "Address the required fixes, rerun appropriate validation, and report completed again."
         )
-        await self.continue_task(updated_task.id, ContinueTaskRequest(message=feedback))
+        try:
+            await self.continue_task(updated_task.id, ContinueTaskRequest(message=feedback))
+        except Exception as exc:
+            logger.exception(
+                "Failed to continue task after reviewer failure verdict "
+                "task_id=%s reviewer_id=%s",
+                updated_task.id,
+                reviewer.id,
+            )
+            worker_session_id = updated_task.session_id
+            if not worker_session_id or worker_session_id not in self.sessions:
+                # continue_task would have raised on missing session; nothing more to mark.
+                return
+            self._mark_prompt_dispatch_stalled(
+                task_id=updated_task.id,
+                session_id=worker_session_id,
+                message=(
+                    "Continue prompt after reviewer-requested changes could not be submitted; "
+                    f"auto-recovery will nudge the worker. Error: {exc}"
+                ),
+                message_zh=(
+                    "评审要求修改后的 continue prompt 未能提交；自动恢复将提示 worker。"
+                    f"错误：{exc}"
+                ),
+                report_state=AgentReportState.NEEDS_INPUT,
+                sampled_at=_wm._now(),
+            )
 
     async def _handle_goal_packet_review_report(
         self,
@@ -380,6 +406,18 @@ class _ReviewMixin:
                 packet_status.value,
             )
         else:
+            # If the fast-path has already written the verdict it may (on older
+            # code paths) have left a stray human_acceptance_requested_at on a
+            # GP verdict. GP verdicts auto-continue; clear it so recovery
+            # predicates do not mistake this for a parked post-impl approval.
+            if task.human_acceptance_requested_at is not None:
+                self.tasks[task.id] = task.model_copy(
+                    update={
+                        "human_acceptance_requested_at": None,
+                        "updated_at": now,
+                    }
+                )
+                self._save_state()
             logger.info(
                 "Goal packet reviewer decision already applied; "
                 "_handle_goal_packet_review_report skipping writes "
@@ -400,7 +438,9 @@ class _ReviewMixin:
                 "approved Goal Packet boundaries, run the validation plan, and map final "
                 "acceptance_check evidence to the approved criteria before requesting final review."
             )
-            await self.continue_task(task.id, ContinueTaskRequest(message=feedback))
+            await self._safe_continue_worker(
+                task.id, feedback, reviewer.id, verdict="goal_packet_approved"
+            )
             return
         if report.state == AgentReportState.REVIEW_FAILED:
             feedback = (
@@ -411,4 +451,53 @@ class _ReviewMixin:
                 "Revise the Goal Packet and POST a new working report with goal_packet. "
                 "Do not start implementation until a revised Goal Packet receives review_passed."
             )
-            await self.continue_task(task.id, ContinueTaskRequest(message=feedback))
+            await self._safe_continue_worker(
+                task.id, feedback, reviewer.id, verdict="goal_packet_rejected"
+            )
+
+    async def _safe_continue_worker(
+        self,
+        task_id: str,
+        feedback: str,
+        reviewer_id: str,
+        *,
+        verdict: str,
+    ) -> None:
+        """Dispatch continue_task to the worker, marking prompt-dispatch stalled
+        (rather than letting RuntimeError escape to HTTP) when the worker session
+        is STOPPED or otherwise unable to receive the prompt.
+
+        Without this guard, an uncaught RuntimeError from continue_task's
+        precondition checks propagates past _after_report_recorded while the
+        create_report fast-path has already sealed the review round
+        (reviewed_cycle advanced, goal_packet transitioned), leaving the task
+        permanently stranded in status=REVIEW with no recovery path.
+        """
+        try:
+            await self.continue_task(task_id, ContinueTaskRequest(message=feedback))
+        except Exception as exc:
+            logger.exception(
+                "Failed to continue worker after reviewer verdict task_id=%s "
+                "reviewer_id=%s verdict=%s",
+                task_id,
+                reviewer_id,
+                verdict,
+            )
+            task = self.tasks.get(task_id)
+            worker_session_id = task.session_id if task else None
+            if not worker_session_id or worker_session_id not in self.sessions:
+                return
+            self._mark_prompt_dispatch_stalled(
+                task_id=task_id,
+                session_id=worker_session_id,
+                message=(
+                    f"Continue prompt after {verdict} could not be submitted to the worker; "
+                    f"auto-recovery will nudge the worker when it returns to idle. Error: {exc}"
+                ),
+                message_zh=(
+                    f"{verdict} 后未能向 worker 提交 continue prompt；"
+                    f"worker 回到空闲后自动恢复将重试。错误：{exc}"
+                ),
+                report_state=AgentReportState.NEEDS_INPUT,
+                sampled_at=_wm._now(),
+            )

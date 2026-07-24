@@ -378,16 +378,78 @@ class _MonitorMixin:
         #   reviewer as a worker owing a report and endlessly auto-prompt it.
         # - During REVIEW: the reviewer (task.review_session_id). The worker may
         #   also be idle but should not be auto-continued while review is in flight.
-        is_worker = task.session_id and task.session_id == session.id
-        is_reviewer = task.review_session_id and task.review_session_id == session.id
+        is_worker = bool(task.session_id and task.session_id == session.id)
+        is_reviewer = bool(task.review_session_id and task.review_session_id == session.id)
+        sealed_round_awaiting_continue = False
         if task.status == WorkspaceTaskStatus.WORKING:
             if not is_worker:
                 return None
         elif task.status == WorkspaceTaskStatus.REVIEW:
-            if not is_reviewer:
+            # Normally during REVIEW only the reviewer is auto-continued
+            # (the worker waits). Exception: a verdict has sealed the round
+            # (reviewed_cycle == review_cycle), no human acceptance is being
+            # waited on, no next-cycle WORKING report exists, and the sealing
+            # verdict is a terminal auto-continuable state (REVIEW_PASSED or
+            # REVIEW_FAILED — NOT review_needs_input, which must wait for a
+            # human). This catches pre-existing stranded GP-approval /
+            # GP-rejected / impl-review-failed tasks as well as any future
+            # strandings from cold-resume races.
+            sealed_verdict_state = self._sealed_cycle_verdict_state(task.id, task.review_cycle)
+            sealed_round_awaiting_continue = (
+                is_worker
+                and state_policy.current_round_has_verdict(task.review_cycle, task.reviewed_cycle)
+                and task.human_acceptance_requested_at is None
+                and not self._task_has_post_cycle_report(task.id, task.review_cycle)
+                and sealed_verdict_state
+                in {AgentReportState.REVIEW_PASSED, AgentReportState.REVIEW_FAILED}
+            )
+            if not is_reviewer and not sealed_round_awaiting_continue:
                 return None
         else:
             return None
+        # Sealed-verdict recovery: dispatch the proper continue transition
+        # rather than a generic "inspect state" soft-nudge. Continue_task will
+        # move the task to WORKING, write the next-cycle report, and deliver
+        # the saved verdict feedback; if the session is still unable to receive
+        # input the new try/except wrappers in _review.py will mark the
+        # dispatch stalled and the next monitor tick will retry.
+        if sealed_round_awaiting_continue:
+            try:
+                await self.continue_task(
+                    task.id,
+                    ContinueTaskRequest(
+                        message=(
+                            "Continue workspace task from review "
+                            "(auto-recovered sealed verdict)."
+                        )
+                    ),
+                )
+                logger.info(
+                    "Auto-recovered sealed review verdict for task_id=%s session_id=%s",
+                    task.id,
+                    session.id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Auto-recovery continue_task still failing for sealed verdict "
+                    "task_id=%s session_id=%s: %s",
+                    task.id,
+                    session.id,
+                    exc,
+                )
+                # Do NOT mark the session WORKING on failure — let downstream
+                # stall detection / next monitor tick retry; forcing WORKING
+                # here would mask persistent failures (e.g. the worker really
+                # is STOPPED and can't receive input).
+                return None
+            return {
+                "status": ManagedSessionStatus.WORKING,
+                "runtime_status": AgentRuntimeStatus.WORKING,
+                "auto_continue_task_id": task.id,
+                "auto_continue_attempts": 0,
+                "updated_at": sampled_at,
+                "last_activity_at": sampled_at,
+            }
         if state_policy.review_in_flight(task.review_requested_at, task.review_completed_at):
             # For workers during WORKING, review_in_flight means a reviewer is active
             # and the worker should not be prodded. For reviewers during REVIEW,
@@ -783,6 +845,53 @@ class _MonitorMixin:
 
     def _auto_continue_output_looks_busy(self, output: str) -> bool:
         return state_policy.auto_continue_output_looks_busy(output)
+
+    def _task_has_post_cycle_report(self, task_id: str, cycle: int) -> bool:
+        """Return True if any report for this task has review_cycle > cycle.
+
+        Used to detect whether continue_task successfully wrote its next-cycle
+        WORKING report after a sealed verdict. If such a report exists, the
+        verdict-reopen path already ran and the sealed-round auto-continue
+        must not fire a second time.
+        """
+        for report in self.reports.values():
+            if report.task_id != task_id:
+                continue
+            if report.review_cycle is not None and report.review_cycle > cycle:
+                return True
+        return False
+
+    def _sealed_cycle_verdict_state(self, task_id: str, cycle: int) -> AgentReportState | None:
+        """Return the terminal review verdict state at `cycle`, or None.
+
+        Iterates review_* reports for the task scoped to exactly `cycle`,
+        preferring terminal states (REVIEW_PASSED / REVIEW_FAILED /
+        REVIEW_NEEDS_INPUT) over intermediate ones. Used by sealed-round
+        recovery to distinguish auto-continuable verdicts from
+        review_needs_input, which parks for human attention and must NOT be
+        auto-continued.
+        """
+        terminal = {
+            AgentReportState.REVIEW_PASSED,
+            AgentReportState.REVIEW_FAILED,
+            AgentReportState.REVIEW_NEEDS_INPUT,
+        }
+        latest_terminal: AgentReportState | None = None
+        latest_any: AgentReportState | None = None
+        latest_ts = None
+        for report in self.reports.values():
+            if report.task_id != task_id:
+                continue
+            if not report.state.value.startswith("review_"):
+                continue
+            if report.review_cycle is None or report.review_cycle != cycle:
+                continue
+            if latest_ts is None or report.created_at > latest_ts:
+                latest_ts = report.created_at
+                latest_any = report.state
+            if report.state in terminal:
+                latest_terminal = report.state
+        return latest_terminal or latest_any
 
     def _reconcile_task_report_statuses(self, workspace_id: str) -> None:
         changed = False
