@@ -1738,6 +1738,21 @@ async def proxy_terminal_request(
 
         var _selAnchor = null;
 
+        // ---- Long-press to select (no mode toggle required) ----
+        // The explicit "选择" toggle above still works, but the natural mobile
+        // gesture is a long-press: hold a finger still on the text for a moment
+        // to start a selection, drag to extend, lift to copy. We arm a timer on
+        // touchstart and only activate selection if the finger stays roughly
+        // still until it fires; any early movement cancels the timer so a normal
+        // swipe still scrolls with native inertia.
+        var LONG_PRESS_MS = 450;
+        var LONG_PRESS_MOVE_TOLERANCE_PX = 10;
+        var _longPressTimer = null;
+        var _longPressSelectionShown = false;
+        var _touchDown = false;
+        var _touchStartX = 0;
+        var _touchStartY = 0;
+
         function _screenEl() {{
           return document.querySelector('.xterm-screen');
         }}
@@ -1855,32 +1870,131 @@ async def proxy_terminal_request(
           }} catch (error) {{}}
         }}
 
-        function selectTouchStart(event) {{
-          if (!_selectModeActive) return;
-          if (!event.touches || event.touches.length !== 1) return;
-          var t = event.touches[0];
-          var cell = _cellFromPoint(t.clientX, t.clientY);
+        function _cancelLongPress() {{
+          if (_longPressTimer !== null) {{
+            clearTimeout(_longPressTimer);
+            _longPressTimer = null;
+          }}
+        }}
+
+        // Select the whole word under a cell for a useful long-press-then-lift
+        // (copying a single character is rarely what the user wants). Returns
+        // true when a non-empty word selection was produced; the caller falls
+        // back to a single-cell anchor otherwise. Dragging afterwards extends
+        // the selection cell-by-cell from the anchor, matching select-mode drag.
+        function _selectWordAtCell(cell) {{
+          try {{
+            var term = _getTerm();
+            var ss = term && term._core && term._core._selectionService;
+            // Prefer xterm's own word selection when this build exposes it
+            // (handles wide glyphs correctly).
+            if (ss && typeof ss.selectWordAt === 'function') {{
+              ss.selectWordAt([cell[0], cell[1]], false);
+              if (typeof ss.refresh === 'function') ss.refresh();
+              if (term && typeof term.getSelection === 'function' && term.getSelection()) {{
+                return true;
+              }}
+            }}
+            // Manual fallback: derive the word span from the buffer line text.
+            var buf = term && term.buffer && term.buffer.active;
+            var line = buf && typeof buf.getLine === 'function' ? buf.getLine(cell[1]) : null;
+            if (!line || typeof line.translateToString !== 'function') return false;
+            var text = line.translateToString(true);
+            var col = cell[0];
+            if (col < 0 || col >= text.length) return false;
+            // Cell index only maps 1:1 to the string without wide/non-latin
+            // glyphs; skip word selection on such lines so we never highlight
+            // the wrong span (cell-precise drag selection still works there).
+            if (/[^\\x00-\\xff]/.test(text)) return false;
+            var isWord = function(c) {{ return !!c && !/\\s/.test(c); }};
+            if (!isWord(text.charAt(col))) return false;
+            var start = col;
+            var end = col;
+            while (start > 0 && isWord(text.charAt(start - 1))) start--;
+            while (end < text.length - 1 && isWord(text.charAt(end + 1))) end++;
+            _selAnchor = [start, cell[1]];
+            _applySelection([start, cell[1]], [end, cell[1]]);
+            return true;
+          }} catch (error) {{}}
+          return false;
+        }}
+
+        function _activateLongPressSelection() {{
+          _longPressTimer = null;
+          if (!_touchDown || _selectModeActive) return;
+          var cell = _cellFromPoint(_touchStartX, _touchStartY);
           if (!cell) return;
+          _longPressSelectionShown = true;
           _selTouchActive = true;
           _selAnchor = cell;
-          _applySelection(cell, cell);
-          event.preventDefault();
-          event.stopPropagation();
+          // Select the whole word under the finger so a long-press-then-lift
+          // copies something useful; drag afterwards extends from there.
+          if (!_selectWordAtCell(cell)) {{
+            _applySelection(cell, cell);
+          }}
+          // Light haptic confirmation where supported (Android). Best-effort.
+          try {{ if (navigator.vibrate) navigator.vibrate(15); }} catch (error) {{}}
+        }}
+
+        function selectTouchStart(event) {{
+          if (!event.touches || event.touches.length !== 1) return;
+          var t = event.touches[0];
+
+          // Explicit select mode: keep the original tap-to-anchor behavior.
+          if (_selectModeActive) {{
+            var cell = _cellFromPoint(t.clientX, t.clientY);
+            if (!cell) return;
+            _selTouchActive = true;
+            _selAnchor = cell;
+            _applySelection(cell, cell);
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+          }}
+
+          // Implicit long-press path. Do NOT preventDefault here so a swipe can
+          // still start a native scroll; the timer only fires on a still hold.
+          if (_longPressSelectionShown) {{
+            // Clear a lingering long-press highlight when a new touch begins.
+            _longPressSelectionShown = false;
+            var prevTerm = _getTerm();
+            if (prevTerm && typeof prevTerm.clearSelection === 'function') {{
+              try {{ prevTerm.clearSelection(); }} catch (error) {{}}
+            }}
+          }}
+          _touchDown = true;
+          _touchStartX = t.clientX;
+          _touchStartY = t.clientY;
+          _cancelLongPress();
+          _longPressTimer = setTimeout(_activateLongPressSelection, LONG_PRESS_MS);
         }}
 
         function selectTouchMove(event) {{
-          if (!_selectModeActive || !_selTouchActive) return;
           if (!event.touches || event.touches.length !== 1) return;
           var t = event.touches[0];
-          var cell = _cellFromPoint(t.clientX, t.clientY);
-          if (!cell || !_selAnchor) return;
-          _applySelection(_selAnchor, cell);
+
+          // Arming phase: a moved finger means "scroll", not "select".
+          if (_longPressTimer !== null && !_selTouchActive) {{
+            var dx = Math.abs(t.clientX - _touchStartX);
+            var dy = Math.abs(t.clientY - _touchStartY);
+            if (dx > LONG_PRESS_MOVE_TOLERANCE_PX || dy > LONG_PRESS_MOVE_TOLERANCE_PX) {{
+              _cancelLongPress();
+            }}
+            return; // let native scroll proceed
+          }}
+
+          if (!_selTouchActive) return;
+          var moveCell = _cellFromPoint(t.clientX, t.clientY);
+          if (!moveCell || !_selAnchor) return;
+          _applySelection(_selAnchor, moveCell);
           event.preventDefault();
           event.stopPropagation();
         }}
 
         function selectTouchEnd(event) {{
-          if (!_selectModeActive || !_selTouchActive) return;
+          _touchDown = false;
+          _cancelLongPress();
+          if (!_selTouchActive) return;
           _selTouchActive = false;
           copyCurrentSelection();
           event.preventDefault();
