@@ -13,7 +13,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional, Tuple, TypedDict
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, TypedDict
 
 from ..config import settings
 from ..models import (
@@ -504,6 +504,133 @@ def _codex_candidates_for_cwd(cwd: str) -> List[Tuple[float, str, str]]:
     return out
 
 
+# Prefixes that mark a user message as boilerplate context (env / permissions /
+# AGENTS.md / recommended plugins) rather than the user's actual first prompt.
+# These are injected by codex (or the AGENTS.md preamble) at the start of every
+# session and should not be used as the session title. A message counts as
+# boilerplate if ANY of its content items starts with one of these prefixes.
+_CODEX_SKIP_TITLE_PREFIXES = (
+    "<environment_context>",
+    "<permissions instructions>",
+    "<system-reminder>",
+    "<recommended_plugins>",
+    "# AGENTS.md instructions",
+)
+
+# Maximum length of the extracted session title (truncated with ellipsis).
+_CODEX_TITLE_MAX_LEN = 80
+
+
+def _codex_session_title(path: str) -> str:
+    """Extract a human-readable title from a codex rollout file.
+
+    The title is the first real user message (a ``response_item`` record with
+    ``role=user`` whose ``input_text`` content is not boilerplate
+    environment/permission/AGENTS.md/plugin context). Returns an empty string
+    if no usable message is found. Defensive against malformed files: silently
+    returns "".
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("type") != "response_item":
+                    continue
+                payload = record.get("payload") or {}
+                if payload.get("role") != "user":
+                    continue
+                content = payload.get("content")
+                if not isinstance(content, list):
+                    continue
+                # Collect real text items; if ANY item is boilerplate, the
+                # whole record is considered a preamble and we keep scanning.
+                texts: List[str] = []
+                is_preamble = False
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("type") != "input_text":
+                        continue
+                    text = str(item.get("text", "")).strip()
+                    if not text:
+                        continue
+                    if any(text.startswith(p) for p in _CODEX_SKIP_TITLE_PREFIXES):
+                        is_preamble = True
+                        break
+                    texts.append(text)
+                if is_preamble or not texts:
+                    continue
+                # First real user message: join its text blocks and collapse
+                # whitespace for display.
+                title = " ".join(" ".join(texts).split())
+                if len(title) > _CODEX_TITLE_MAX_LEN:
+                    title = title[: _CODEX_TITLE_MAX_LEN - 1] + "…"
+                return title
+    except OSError:
+        return ""
+    return ""
+
+
+def list_codex_sessions() -> List[Dict[str, Any]]:
+    """List available Codex sessions from on-disk rollout files.
+
+    Returns a list of session dicts grouped by working directory, each with:
+    - ``session_id``: stable codex session UUID (for ``codex resume <id>``)
+    - ``cwd``: working directory the session was started in
+    - ``start_time``: ISO-8601 timestamp of the session start
+    - ``title``: human-readable title from the first real user message
+
+    Sessions are sorted most-recent-first within each cwd group, and cwd
+    groups are ordered by their most recent session. Walks both active
+    (``sessions/``) and archived (``archived_sessions/``) locations since
+    ``codex resume`` works against both.
+    """
+    # Collect raw sessions: {session_id: {session_id, cwd, start_epoch, title}}.
+    # A session may have multiple rollout files (resumes); keep the most recent.
+    raw: Dict[str, Dict[str, Any]] = {}
+    for sid, cwd, start_epoch, path in _codex_iter_rollouts():
+        existing = raw.get(sid)
+        if existing and existing["start_epoch"] >= start_epoch:
+            continue
+        title = _codex_session_title(path)
+        raw[sid] = {
+            "session_id": sid,
+            "cwd": cwd,
+            "start_epoch": start_epoch,
+            "start_time": datetime.fromtimestamp(start_epoch).isoformat(),
+            "title": title,
+        }
+
+    # Group by cwd.
+    by_cwd: Dict[str, List[Dict[str, Any]]] = {}
+    for sess in raw.values():
+        by_cwd.setdefault(sess["cwd"], []).append(sess)
+
+    # Sort within each group (most recent first) and order groups by latest.
+    result: List[Dict[str, Any]] = []
+    for cwd, sessions in sorted(
+        by_cwd.items(),
+        key=lambda kv: max(s["start_epoch"] for s in kv[1]),
+        reverse=True,
+    ):
+        sessions.sort(key=lambda s: s["start_epoch"], reverse=True)
+        for s in sessions:
+            s.pop("start_epoch", None)  # internal-only, not for the API
+        result.append(
+            {
+                "cwd": cwd,
+                "sessions": sessions,
+            }
+        )
+    return result
+
+
 def _agent_spawn_env() -> dict:
     """Environment for ttyd/tmux-spawned agent panes.
 
@@ -615,6 +742,12 @@ class TTYDProcess:
             self.agent_session_id = str(uuid.uuid4())
         else:
             self.agent_session_id = None
+        # True only when an explicit session id was supplied at construction
+        # time (e.g. the user selected a specific Codex session to resume in
+        # the create-tab UI). A generated uuid4 placeholder (above) is used
+        # solely for conversation pinning and must NOT be treated as a
+        # "resume this session" signal — see _should_recover.
+        self._has_explicit_session_id: bool = bool(agent_session_id)
         # True when this process was reconstructed from persisted tabs.json on
         # startup (vs. freshly created by a user/API call). Combined with an
         # absent tmux session, this is the signal that we are recovering after a
@@ -1119,17 +1252,31 @@ asyncio.run(_main())
         return f"{base}{self._claude_settings_arg()}{self._claude_model_arg()}{session_flag}"
 
     def _should_recover(self, session_exists: bool) -> bool:
-        """Recover (resume prior conversation) only when relaunching a tab that
-        was persisted across a restart and whose tmux session is gone — i.e. a
-        machine reboot. A live tmux session (backend-only restart) reattaches
-        and must not resume. Scoped to local agents that expose resume flags.
+        """Recover (resume prior conversation) when:
+        1. Relaunching a persisted tab whose tmux session is gone (machine
+           reboot), OR
+        2. A fresh tab was created with an explicit ``agent_session_id`` to
+           resume (e.g. the user selected a specific Codex session in the
+           create-tab UI).
+
+        A live tmux session (backend-only restart) reattaches and must not
+        resume. Scoped to local agents that expose resume flags.
         """
-        return (
-            self.from_persisted_state
-            and not session_exists
-            and self.target == ExecutionTarget.LOCAL
-            and self.agent_type in {AgentType.CLAUDE, AgentType.CODEX, AgentType.CURSOR}
-        )
+        if session_exists:
+            return False
+        if self.target != ExecutionTarget.LOCAL:
+            return False
+        if self.agent_type not in {AgentType.CLAUDE, AgentType.CODEX, AgentType.CURSOR}:
+            return False
+        if self.from_persisted_state:
+            return True
+        # Fresh tab created with an explicit session id to resume. The
+        # launch command will use codex resume <id> / claude --resume <id>.
+        # A generated uuid4 placeholder (no explicit id) is for pinning only
+        # and must not trigger recovery of a (non-existent) session.
+        if self._has_explicit_session_id:
+            return True
+        return False
 
     def _discover_codex_session_id(self, launch_epoch: float) -> Optional[str]:
         """Discover this tab's codex-assigned session UUID from the rollout file.
@@ -2038,9 +2185,10 @@ class TTYDManager:
         workspace_name: Optional[str] = None,
         workspace_role: Optional[WorkspaceSessionRole] = None,
         env: Optional[Dict[str, str]] = None,
+        agent_session_id: Optional[str] = None,
     ) -> TerminalTab:
         logger.info(
-            f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}, target={target}, remote_profile_id={remote_profile_id}, remote_forward_port={remote_forward_port}, workspace_id={workspace_id}, workspace_role={workspace_role}"
+            f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}, target={target}, remote_profile_id={remote_profile_id}, remote_forward_port={remote_forward_port}, workspace_id={workspace_id}, workspace_role={workspace_role}, agent_session_id={agent_session_id}"
         )
         tab_id = str(uuid.uuid4())
         port = self._get_next_port()
@@ -2062,6 +2210,7 @@ class TTYDManager:
             workspace_name=workspace_name,
             workspace_role=workspace_role,
             env=env,
+            agent_session_id=agent_session_id,
         )
         logger.info(
             f"Created TTYDProcess with solo_mode={process.solo_mode}, agent_type={process.agent_type}"
