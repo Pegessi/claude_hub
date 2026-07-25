@@ -5,6 +5,37 @@
 
 ## Unreleased
 
+### feat: mobile terminals support long-press to select text and copy
+
+- **What**: on touch devices you can now **long-press** directly on terminal
+  text to start a selection — no need to open the mobile controls panel and
+  toggle the "选择" (Select) mode first. Long-press selects the word under your
+  finger, dragging extends the selection cell-by-cell, and lifting your finger
+  copies the selection to the clipboard (with the existing 已复制/无选择/复制失败
+  toast). A normal quick swipe still scrolls the terminal with native inertia.
+- **Why**: mobile users reported they still could not long-press to select and
+  copy ("移动端还是无法长按选中文本进行复制呢"). The prior work only added an
+  explicit select-mode toggle; the natural long-press gesture — the first thing
+  users try — did nothing.
+- **How**: extended the touch handlers injected into the ttyd proxy page
+  (`backend/claude_hub/api/terminal.py`). On touchstart (when explicit select
+  mode is off) a ~450ms long-press timer is armed; moving the finger past a
+  10px tolerance before it fires cancels it so swipes still scroll. When it
+  fires, an implicit selection session starts at the press point, selects the
+  word there (via xterm's `selectWordAt` when available, else a manual
+  ASCII word-boundary fallback; wide/non-latin lines fall back to a single-cell
+  anchor so we never highlight the wrong span), and drag/lift reuse the existing
+  `_applySelection` / `copyCurrentSelection` helpers. The explicit "选择" toggle
+  and desktop mouse selection are unchanged. No frontend or backend API change.
+- **Verified**: automated Playwright touch test (Pixel 5 emulation, coarse
+  pointer) against a live proxied terminal — (1) bare long-press selects and
+  copies the whole word `bytedance@K22QP73Q9Y` (clipboard verified); (2)
+  long-press + drag extends to `bytedance@K22QP73Q9Y backend %` and copies;
+  (3) a quick swipe scrolls (scrollTop 737→549) with no selection. Backend
+  `black`/`isort`/`mypy` and the terminal test suite (`test_terminal_proxy.py`,
+  `test_terminal_replay.py`, `test_terminal_input_latency_guard.py`, 32 passed)
+  pass; the rendered injected script passes `node --check`.
+
 ### fix: mobile agent terminals (Codex) lost their bottom input box — force WebGL renderer on touch devices
 
 - **What**: after the "terminal显示优化" MR
