@@ -58,6 +58,67 @@
     auto-continued. Positive tests for GP-approved, GP-rejected, and
     impl-review-failed sealed-verdict recovery.
 
+### fix: terminal display — selection alignment, mobile text selection, and reliable scroll-to-bottom on tab switch
+
+- **What**: three long-standing terminal display defects are fixed:
+  1. **Desktop text selection drifted visually.** Dragging to select terminal
+     text painted the highlight offset from the glyphs it covered, with the
+     mismatch growing down the screen ("串行/错位"). The *copied* text was
+     always correct — only the rendered highlight was wrong.
+  2. **Mobile could not select terminal text.** Long-press/drag only scrolled;
+     there was no way to select and copy text on touch devices.
+  3. **Switching to a terminal tab sometimes showed history, not the bottom.**
+     The newly-activated tab occasionally stuck mid-scrollback instead of at
+     the latest prompt.
+- **Why**:
+  1. The terminal used the xterm.js v4 **WebGL renderer** (bundled by ttyd
+     1.7.x). Its selection layer mis-renders the highlight rectangle (xterm.js
+     issue #5198); there is no `.xterm-selection` DOM node in WebGL mode, so
+     the usual CSS workaround does not apply. Confirmed via Playwright: the
+     selection *model* is correct at devicePixelRatio 1/1.25/1.5/2, scrolled or
+     at bottom — only the WebGL-painted highlight drifts.
+  2. `.xterm-screen { pointer-events: none }` (added for mobile inertial
+     scroll passthrough) plus `user-select: none` disabled all touch selection,
+     and xterm.js v4 has no native touch text-selection.
+  3. Tab activation issued a single fixed-delay `scroll-to-bottom` that no-ops
+     when the term is not ready or content is still settling.
+- **How**:
+  - **#1** `rendererType` switched **`webgl` → `canvas`** in
+    `ttyd_manager.py`. The 2D canvas renderer paints the selection on its own
+    aligned `xterm-selection-layer`. Input latency is unaffected (the SAB fast
+    path is renderer-independent); measured render throughput is comparable for
+    terminal-style output. `.xterm-screen { pointer-events: none }` is now
+    scoped to `@media (pointer: coarse)` so desktop mouse interaction stays on
+    the screen element.
+  - **#2** New mobile **"选择" (select-text) mode**: a MobileControls toggle
+    posts `terminal-select-mode` to the active terminal iframe. While active,
+    single-finger touches drive the xterm selection model directly from
+    computed cells (xterm.js v4 ignores synthetic MouseEvents), so partial and
+    multi-row selection match desktop; native inertial scroll is preserved when
+    the mode is off. On lift the selection is copied to the clipboard (with a
+    `document.execCommand` fallback) and MobileControls shows "已复制".
+  - **#3** `scrollBottomWhenReady` now waits for any in-flight replay to
+    settle, scrolls, then **verifies it reached the bottom and the
+    scrollHeight is stable** across two ticks, retrying briefly otherwise. It
+    remains scroll-only — no history replay is reintroduced (per the 2026-06-09
+    prompt-first activation change).
+- **Validation**: reproduced and verified each fix against an **isolated**
+  second backend (`HOME`/`PORT`/`TTYD_BASE_PORT` overridden so the live
+  workspace state was never touched) with Playwright: canvas selection
+  highlight aligned + visible (drift 0), mobile touch selection + copy working,
+  and 5/5 tab switches landing at the bottom (including while output was still
+  streaming). Perf A/B (standalone ttyd, SwiftShader): canvas ≈ webgl for a
+  4000-line burst (median 20 ms vs 19 ms). `black`/`isort`/`mypy` clean on
+  touched files; frontend `lint` + `build` (vue-tsc) pass; backend
+  `pytest` 571 passed (CI-style, E2E replay/latency excluded as in CI);
+  `test_terminal_proxy.py` + `test_terminal_input_latency_guard.py` pass.
+- **Files**: `backend/claude_hub/services/ttyd_manager.py`,
+  `backend/claude_hub/api/terminal.py`,
+  `frontend/src/components/TerminalView.vue`,
+  `frontend/src/components/MobileControls.vue`,
+  `frontend/src/types/index.ts`,
+  `docs/working-logs/2026-07-24-terminal-selection-scroll.md`.
+
 ### fix: Codex session restore across backend restarts — pin per-tab UUID instead of cwd-scoped `--last`
 
 - **What**: codex (and to a lesser degree claude code) tabs would frequently

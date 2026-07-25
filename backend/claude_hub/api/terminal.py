@@ -446,11 +446,23 @@ async def proxy_terminal_request(
          Touch events land on the topmost canvas, never reaching
          .xterm-viewport, so browser-native inertial scroll never fires.
          Fix: let touches pass through .xterm-screen to .xterm-viewport.
-         On mobile, users scroll more than they select text/click links,
-         so this is the right trade-off. Text selection via long-press
-         still works because the textarea helper captures it. */
-      .xterm-screen {
-        pointer-events: none !important;
+
+         IMPORTANT: scope this to coarse (touch) pointers only. On desktop
+         (fine pointer / mouse) the passthrough is unnecessary and semantically
+         wrong — it routes mouse events to the viewport instead of the screen —
+         so keep .xterm-screen interactive there for normal drag-selection.
+         On touch devices, drag-to-select is handled explicitly via the
+         "select text" mode (see the select-mode handler below), so we can keep
+         the passthrough for smooth inertial scrolling by default. */
+      @media (pointer: coarse) {
+        .xterm-screen {
+          pointer-events: none !important;
+        }
+        /* When the user turns on the explicit select-text mode we flip this
+           attribute on <html> so touches reach the screen for selection. */
+        html[data-select-mode='on'] .xterm-screen {
+          pointer-events: auto !important;
+        }
       }
       .xterm-viewport {
         -webkit-overflow-scrolling: touch !important;
@@ -1576,21 +1588,70 @@ async def proxy_terminal_request(
           postHistoryRefreshResult(reason, false, 'terminal not ready');
         }}
 
-        function scrollBottomWhenReady(attemptsLeft) {{
+        function terminalIsAtBottom(term) {{
+          try {{
+            const buf = term && term.buffer && term.buffer.active;
+            if (buf && Number.isInteger(buf.viewportY) && Number.isInteger(buf.baseY)) {{
+              if (buf.viewportY < buf.baseY) return false;
+            }}
+            const vp = document.querySelector('.xterm-viewport');
+            if (vp) {{
+              // Treat "within 2px of the bottom" as at-bottom (sub-pixel rounding).
+              if (vp.scrollHeight - vp.clientHeight - vp.scrollTop > 2) return false;
+            }}
+            return true;
+          }} catch (error) {{
+            return true;
+          }}
+        }}
+
+        // Robust scroll-to-bottom for tab activation / switch.
+        //
+        // The old implementation issued a single scroll the moment `term`
+        // existed. On tab switch that races with (a) the term not having
+        // finished its initial history replay and (b) the renderer not having
+        // painted, so the one-shot scroll could land mid-history and stick —
+        // the reported "switching to a new terminal shows history, not the
+        // bottom prompt" bug. Instead: wait until any in-flight replay settles
+        // (bounded), scroll, then verify we actually reached the bottom AND the
+        // scrollHeight is stable between two ticks, retrying briefly otherwise.
+        // This never reintroduces a history replay — it is scroll-only.
+        function scrollBottomWhenReady(attemptsLeft, settleTries, lastScrollHeight) {{
           const term = termForHistoryAction();
-          if (term) {{
-            if (typeof term.__claudeHubScrollToBottom === 'function') {{
-              term.__claudeHubScrollToBottom();
-            }} else {{
-              scrollTerminalToBottom(term);
+          if (!term) {{
+            if (attemptsLeft > 0) {{
+              setTimeout(function() {{
+                scrollBottomWhenReady(attemptsLeft - 1, settleTries, lastScrollHeight);
+              }}, 100);
             }}
             return;
           }}
 
-          if (attemptsLeft > 0) {{
+          // Ready check: do not scroll while the initial replay is still
+          // buffering/writing, or the buffer will be rewritten under us.
+          if (term.__claudeHubReplayBuffering === true && attemptsLeft > 0) {{
             setTimeout(function() {{
-              scrollBottomWhenReady(attemptsLeft - 1);
+              scrollBottomWhenReady(attemptsLeft - 1, settleTries, lastScrollHeight);
             }}, 100);
+            return;
+          }}
+
+          if (typeof term.__claudeHubScrollToBottom === 'function') {{
+            term.__claudeHubScrollToBottom();
+          }} else {{
+            scrollTerminalToBottom(term);
+          }}
+
+          const vp = document.querySelector('.xterm-viewport');
+          const scrollHeight = vp ? vp.scrollHeight : 0;
+          const remainingSettle = (typeof settleTries === 'number') ? settleTries : 12;
+          // Settled = visually at the bottom AND content height stable across
+          // two consecutive checks (renderer/replay no longer growing it).
+          const settled = terminalIsAtBottom(term) && scrollHeight === lastScrollHeight;
+          if (remainingSettle > 0 && !settled) {{
+            setTimeout(function() {{
+              scrollBottomWhenReady(0, remainingSettle - 1, scrollHeight);
+            }}, 60);
           }}
         }}
 
@@ -1612,6 +1673,11 @@ async def proxy_terminal_request(
 
           if (event.data.type === 'terminal-scroll-bottom') {{
             scrollBottomWhenReady(50);
+            return;
+          }}
+
+          if (event.data.type === 'terminal-select-mode') {{
+            setSelectMode(!!event.data.enabled);
             return;
           }}
 
@@ -1657,6 +1723,181 @@ async def proxy_terminal_request(
           return term ? (term.viewport || (term._core && term._core.viewport) || null) : null;
         }}
 
+        // ---- Mobile "select text" mode ----
+        // xterm.js v4 has no native touch text-selection: touch only scrolls.
+        // On touch devices we keep passthrough scrolling by default (see the
+        // pointer:coarse CSS above) and let the user opt into selection via an
+        // explicit toggle (MobileControls "选择" button -> terminal-select-mode
+        // message). While active, single-finger touches are translated into the
+        // synthetic mouse drag that xterm's own SelectionService understands,
+        // so selection semantics (partial first/last row, multi-row) match the
+        // desktop mouse exactly. On lift, the selection is copied to the
+        // clipboard and the parent is notified for a toast.
+        var _selectModeActive = false;
+        var _selTouchActive = false;
+
+        var _selAnchor = null;
+
+        function _screenEl() {{
+          return document.querySelector('.xterm-screen');
+        }}
+
+        // Map a viewport (clientX, clientY) point to an absolute buffer cell
+        // [col, absRow]. xterm.js v4 ignores synthetic MouseEvents for
+        // selection (it trusts real input only), so touch selection drives the
+        // selection model directly from computed cells instead.
+        function _cellFromPoint(clientX, clientY) {{
+          var term = _getTerm();
+          var screen = _screenEl();
+          if (!term || !screen) return null;
+          var rect = screen.getBoundingClientRect();
+          var core = term._core;
+          var dims = core && core._renderService && core._renderService.dimensions;
+          var cw = dims && dims.css && dims.css.cell ? dims.css.cell.width : (dims ? dims.actualCellWidth : 0);
+          var ch = dims && dims.css && dims.css.cell ? dims.css.cell.height : (dims ? dims.actualCellHeight : 0);
+          if (!cw || !ch) return null;
+          var cols = term.cols || 80;
+          var rows = term.rows || 24;
+          var col = Math.floor((clientX - rect.left) / cw);
+          var srow = Math.floor((clientY - rect.top) / ch);
+          col = Math.max(0, Math.min(cols - 1, col));
+          srow = Math.max(0, Math.min(rows - 1, srow));
+          var vy = term.buffer && term.buffer.active ? term.buffer.active.viewportY : 0;
+          return [col, vy + srow];
+        }}
+
+        // Apply a selection from anchor cell to focus cell via the selection
+        // model, ordering endpoints so a backward (upward) drag still works.
+        function _applySelection(anchor, focus) {{
+          var term = _getTerm();
+          var ss = term && term._core && term._core._selectionService;
+          if (!ss || !ss._model || !anchor || !focus) return;
+          var start = anchor;
+          var end = focus;
+          if (end[1] < start[1] || (end[1] === start[1] && end[0] < start[0])) {{
+            start = focus;
+            end = anchor;
+          }}
+          ss._model.selectionStart = [start[0], start[1]];
+          // selectionEnd is exclusive on the column, so +1 includes the focused
+          // cell under the finger.
+          ss._model.selectionEnd = [end[0] + 1, end[1]];
+          if (typeof ss.refresh === 'function') ss.refresh();
+        }}
+
+        function _fallbackCopy(text) {{
+          try {{
+            var ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', '');
+            ta.style.position = 'fixed';
+            ta.style.top = '-1000px';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            var ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            return ok;
+          }} catch (error) {{
+            return false;
+          }}
+        }}
+
+        function _notifyParentSelect(status, length) {{
+          try {{
+            var target = window.parent && window.parent !== window ? window.parent : window;
+            target.postMessage({{
+              type: 'terminal-select-copied',
+              tabId: TAB_ID,
+              status: status,
+              length: length || 0,
+            }}, '*');
+          }} catch (error) {{}}
+        }}
+
+        function copyCurrentSelection() {{
+          var term = _getTerm();
+          var text = term && typeof term.getSelection === 'function' ? term.getSelection() : '';
+          if (!text) {{
+            _notifyParentSelect('empty', 0);
+            return;
+          }}
+          var finish = function(ok) {{
+            _notifyParentSelect(ok ? 'copied' : 'failed', text.length);
+          }};
+          try {{
+            if (navigator.clipboard && navigator.clipboard.writeText) {{
+              navigator.clipboard.writeText(text).then(function() {{
+                finish(true);
+              }}, function() {{
+                finish(_fallbackCopy(text));
+              }});
+              return;
+            }}
+          }} catch (error) {{}}
+          finish(_fallbackCopy(text));
+        }}
+
+        function setSelectMode(on) {{
+          _selectModeActive = !!on;
+          try {{
+            if (_selectModeActive) {{
+              document.documentElement.setAttribute('data-select-mode', 'on');
+            }} else {{
+              document.documentElement.removeAttribute('data-select-mode');
+              _selTouchActive = false;
+              var term = _getTerm();
+              if (term && typeof term.clearSelection === 'function') {{
+                term.clearSelection();
+              }}
+            }}
+          }} catch (error) {{}}
+        }}
+
+        function selectTouchStart(event) {{
+          if (!_selectModeActive) return;
+          if (!event.touches || event.touches.length !== 1) return;
+          var t = event.touches[0];
+          var cell = _cellFromPoint(t.clientX, t.clientY);
+          if (!cell) return;
+          _selTouchActive = true;
+          _selAnchor = cell;
+          _applySelection(cell, cell);
+          event.preventDefault();
+          event.stopPropagation();
+        }}
+
+        function selectTouchMove(event) {{
+          if (!_selectModeActive || !_selTouchActive) return;
+          if (!event.touches || event.touches.length !== 1) return;
+          var t = event.touches[0];
+          var cell = _cellFromPoint(t.clientX, t.clientY);
+          if (!cell || !_selAnchor) return;
+          _applySelection(_selAnchor, cell);
+          event.preventDefault();
+          event.stopPropagation();
+        }}
+
+        function selectTouchEnd(event) {{
+          if (!_selectModeActive || !_selTouchActive) return;
+          _selTouchActive = false;
+          copyCurrentSelection();
+          event.preventDefault();
+          event.stopPropagation();
+        }}
+
+        function _hookSelectTouch(xtermEl) {{
+          if (!xtermEl || xtermEl.__claudeHubSelectHooked) return;
+          xtermEl.__claudeHubSelectHooked = true;
+          // Capture phase + non-passive so we run before (and can suppress) the
+          // native-inertia scroll listeners on the viewport while selecting.
+          xtermEl.addEventListener('touchstart', selectTouchStart, {{ capture: true, passive: false }});
+          xtermEl.addEventListener('touchmove', selectTouchMove, {{ capture: true, passive: false }});
+          xtermEl.addEventListener('touchend', selectTouchEnd, {{ capture: true, passive: false }});
+          xtermEl.addEventListener('touchcancel', selectTouchEnd, {{ capture: true, passive: false }});
+        }}
+
         function _markUserScrolling() {{
           var term = _getTerm();
           var bufferService = term && term._core && term._core._bufferService;
@@ -1697,6 +1938,10 @@ async def proxy_terminal_request(
           //    which does scrollTop += delta. Replace with no-op.
           vpObj.handleTouchStart = function() {{}};
           vpObj.handleTouchMove = function() {{ return true; }};
+
+          // Wire the explicit "select text" touch handlers onto the .xterm root
+          // so they run in the capture phase before native scrolling.
+          _hookSelectTouch(xtermEl);
 
           // Desktop wheel/trackpad scrolls can race with fast live output
           // while the viewport is still at the bottom. Mark user scrolling

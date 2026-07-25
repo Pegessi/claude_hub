@@ -677,6 +677,7 @@ export interface TerminalKeyState {
 export type TerminalKeySender = (key: string, ctrl?: boolean, shift?: boolean) => void
 export type TerminalHistoryRefresher = (tabId?: string) => void
 export type TerminalIframeRegistrar = (el: HTMLIFrameElement | null, tabId: string) => void
+export type TerminalSelectModeSetter = (enabled: boolean, tabId?: string) => void
 
 export interface ClaudeHubNamespace {
   activePaneTabId?: string | null
@@ -684,6 +685,7 @@ export interface ClaudeHubNamespace {
   registerTerminalIframe?: TerminalIframeRegistrar
   refreshTerminalHistory?: TerminalHistoryRefresher
   sendTerminalKey?: TerminalKeySender
+  setTerminalSelectMode?: TerminalSelectModeSetter
 }
 
 declare global {
