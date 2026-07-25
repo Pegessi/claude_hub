@@ -71,6 +71,7 @@ export interface TerminalTab {
   workspace_id?: string | null
   workspace_name?: string | null
   workspace_role?: WorkspaceSessionRole | null
+  agent_session_id?: string | null
 }
 
 export interface TerminalTabCreate {
@@ -84,6 +85,7 @@ export interface TerminalTabCreate {
   remote_cwd?: string | null
   remote_reconnect?: boolean
   env?: LaunchEnv
+  agent_session_id?: string
 }
 
 export interface TerminalTabUpdate {

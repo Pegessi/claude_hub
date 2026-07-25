@@ -118,6 +118,45 @@
   `frontend/src/components/MobileControls.vue`,
   `frontend/src/types/index.ts`,
   `docs/working-logs/2026-07-24-terminal-selection-scroll.md`.
+### feat: Codex local session picker — resume any local Codex conversation from the new-tab dialog
+
+- **What**: when creating a new Codex terminal tab, the "Create New Terminal"
+  dialog now shows a session picker that lists every local Codex session
+  (grouped by working directory, most-recent-first). Selecting a session
+  launches the tab with `codex resume <session-id>`, continuing that exact
+  conversation; leaving "Start a fresh session" selected starts a new one.
+- **Why**: users accumulate many Codex sessions across working directories on
+  their machine and wanted to pick up a specific prior conversation from the
+  Hub UI rather than retyping context. Remote-workspace session selection was
+  explicitly deferred to a follow-up (out of scope).
+- **How**:
+  - New backend endpoint `GET /api/codex/sessions` (`api/codex.py`) returns
+    sessions grouped by cwd, each with `session_id`, `cwd`, `start_time`
+    (ISO), and a display `title`. Backed by `list_codex_sessions()` in
+    `ttyd_manager.py`, which walks active `~/.codex/sessions/` and archived
+    `~/.codex/archived_sessions/` rollouts (reusing `_codex_iter_rollouts`),
+    dedupes by stable `session_id` (keeping the most recent rollout), and
+    extracts the title from the first real user message via
+    `_codex_session_title()`, skipping boilerplate
+    `<environment_context>` / `<permissions instructions>` /
+    `<recommended_plugins>` / `# AGENTS.md instructions` blocks.
+  - `TerminalTabCreate` gained an optional `agent_session_id` field; the
+    create-tab handler and `TTYDManager.create_tab` / `TTYDProcess` thread it
+    through. A fresh tab created with an explicit session id sets
+    `_has_explicit_session_id`, which makes `_should_recover()` return True so
+    `_codex_launch_command` builds `codex resume <id> || codex` (solo flags on
+    both branches). A generated uuid4 placeholder (for conversation pinning)
+    does NOT trigger recovery, preserving fresh-tab behavior.
+  - Frontend: new `CodexSessionSelector.vue` component fetches and renders the
+    grouped list with a radio for "fresh session" vs. a specific session.
+    Wired into `TabBar.vue`'s create-tab modal (shown only for local Codex
+    tabs) and `TerminalTabCreate` / `TerminalTab` types gained
+    `agent_session_id`.
+- **ACs** (reviewer-checkable): endpoint returns grouped sessions with the
+  four fields and correct sort order; title extraction skips boilerplate;
+  duplicate session ids collapse to the newest rollout; an explicit session id
+  produces `codex resume <id>` while a fresh tab stays `codex`; the picker only
+  surfaces for local Codex tabs; solo flags apply to both resume and fallback.
 
 ### fix: Codex session restore across backend restarts — pin per-tab UUID instead of cwd-scoped `--last`
 

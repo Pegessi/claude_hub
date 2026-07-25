@@ -297,6 +297,10 @@
             variant="form"
             solo-label="Solo Mode"
           />
+          <CodexSessionSelector
+            v-if="form.agent_type === 'codex' && form.target === 'local'"
+            v-model:session-id="form.agent_session_id"
+          />
           <div
             v-if="form.target === 'remote'"
             class="form-group"
@@ -658,6 +662,7 @@ import {
   useLaunchEnvPresets,
 } from '@/composables/useLaunchEnvPresets'
 import AgentConfigFields from '@/components/AgentConfigFields.vue'
+import CodexSessionSelector from '@/components/CodexSessionSelector.vue'
 import EnvPresetManager from '@/components/EnvPresetManager.vue'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { useAppStore } from '@/stores/appStore'
@@ -789,6 +794,7 @@ const form = reactive({
   remote_reconnect: true,
   env_preset: defaultLaunchEnvPresetForAgent('claude'),
   env_text: defaultPresetTextForAgent('claude'),
+  agent_session_id: '',
 })
 
 const switchEnvForm = reactive({
@@ -1202,6 +1208,7 @@ watch(showModal, (newVal) => {
     form.target = 'local'
     form.remote_profile_id = remoteProfiles.value[0]?.id || ''
     form.remote_reconnect = true
+    form.agent_session_id = ''
     resetEnvForAgentType(form.agent_type)
     showFileBrowser.value = false
   }
@@ -1212,6 +1219,9 @@ watch(
   (agentType) => {
     if (agentType === 'cursor' || agentType === 'terminal') {
       form.solo_mode = false
+    }
+    if (agentType !== 'codex') {
+      form.agent_session_id = ''
     }
   }
 )
@@ -1290,6 +1300,9 @@ async function handleCreateTab() {
   const remote_cwd = target === 'remote' ? cwd : undefined
   const remote_reconnect = target === 'remote' ? form.remote_reconnect : undefined
   const env = parseLaunchEnv(form.env_text)
+  // Only Codex local tabs support resuming a specific local session.
+  const agent_session_id =
+    form.agent_type === 'codex' && target === 'local' ? form.agent_session_id : undefined
 
   if (target === 'remote' && !selectedProfile) {
     remoteProfilesError.value = 'Select a remote server first'
@@ -1313,6 +1326,7 @@ async function handleCreateTab() {
       remote_cwd,
       remote_reconnect,
       env,
+      agent_session_id,
     })
 
     form.name = ''
@@ -1322,6 +1336,7 @@ async function handleCreateTab() {
     form.target = 'local'
     form.remote_profile_id = remoteProfiles.value[0]?.id || ''
     form.remote_reconnect = true
+    form.agent_session_id = ''
     resetEnvForAgentType(form.agent_type)
     showFileBrowser.value = false
     showModal.value = false
