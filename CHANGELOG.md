@@ -5,6 +5,35 @@
 
 ## Unreleased
 
+### fix: mobile agent terminals (Codex) lost their bottom input box — force WebGL renderer on touch devices
+
+- **What**: after the "terminal显示优化" MR
+  (`102bde1`, merged `84906d7`) switched the ttyd/xterm renderer from WebGL to
+  the 2D **canvas** renderer, mobile browsers (Android/HarmonyOS) stopped
+  painting the bottom rows of agent TUIs — the Codex composer/input box at the
+  bottom of the terminal rendered as a blank area (see reported HarmonyOS
+  screenshot). Desktop was unaffected.
+- **Why**: ttyd 1.7.7 here bundles **xterm.js v5**, which selects its renderer
+  via a loaded addon; the canvas renderer switch was made globally
+  (`ttyd_manager` `-t rendererType=canvas`) to fix desktop mouse
+  selection-highlight alignment. The 2D canvas renderer misrenders on some
+  mobile GPUs (a real-device/GPU-driver issue; it does not reproduce in
+  headless SwiftShader, which rasterizes canvas on the CPU). WebGL was the
+  pre-MR default and renders those bottom rows correctly on mobile.
+- **How**: a single ttyd process serves every client, so the renderer must be
+  chosen per client. ttyd applies `?rendererType=` from the iframe URL query
+  with the highest precedence (its own `parseOptsFromUrlQuery`). `TerminalView`
+  now appends `?rendererType=webgl` to the terminal proxy iframe `src` on
+  coarse-pointer (touch) devices only, keeping the desktop canvas renderer (and
+  its selection-highlight fix) untouched. Mobile text selection is unaffected
+  because it uses the renderer-independent touch "select" copy mode. No backend
+  change.
+- **Verified (simulated)**: full Vue app under Playwright emulation — mobile
+  (touch) loads `…/?rendererType=webgl`, WebGL renderer active (1 webgl canvas),
+  terminal fits (39 rows) and the bottom "input box" rows render at the bottom;
+  desktop loads `…/` (no query), canvas renderer active (4 layers), bottom box
+  rendered. Frontend `lint` + `build` (vue-tsc) pass.
+
 ### fix: Goal Packet (and impl-review-failed) review-pass callbacks survive a stopped worker
 
 - **What**: when a reviewer approved (or rejected) a Goal Packet while the
