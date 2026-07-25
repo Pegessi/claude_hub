@@ -1387,6 +1387,39 @@ def test_fresh_tab_never_recovers() -> None:
     assert process._should_recover(session_exists=False) is False
 
 
+def test_fresh_tab_with_explicit_session_id_recovers() -> None:
+    # A fresh tab created with an explicit agent_session_id (e.g. the user
+    # picked a specific Codex session to resume) must recover so the launch
+    # command runs codex resume <id> / claude --resume <id>.
+    process = TTYDProcess(
+        tab_id="tab-explicit-session",
+        port=12370,
+        name="Resume Session",
+        agent_type=AgentType.CODEX,
+        from_persisted_state=False,
+        agent_session_id="019f40d9-c6e4-7bd0-82ca-5d88babf205f",
+    )
+    assert process._has_explicit_session_id is True
+    assert process._should_recover(session_exists=False) is True
+    # Live tmux session still wins: reattach, no resume.
+    assert process._should_recover(session_exists=True) is False
+
+
+def test_generated_session_id_does_not_recover() -> None:
+    # A generated uuid4 placeholder (no explicit session_id) is for pinning
+    # only and must NOT trigger recovery of a non-existent session.
+    process = TTYDProcess(
+        tab_id="tab-generated-session",
+        port=12371,
+        name="Generated Session",
+        agent_type=AgentType.CODEX,
+        from_persisted_state=False,
+    )
+    assert process._has_explicit_session_id is False
+    assert process.agent_session_id  # a generated uuid exists for pinning
+    assert process._should_recover(session_exists=False) is False
+
+
 def test_terminal_and_remote_tabs_never_recover() -> None:
     terminal = TTYDProcess(
         tab_id="tab-terminal-no-recover",

@@ -45,7 +45,7 @@ async def create_tab(
 ) -> TerminalTab:
     """Create a new terminal tab."""
     logger.info(
-        f"Received create_tab request: name={tab.name}, solo_mode={tab.solo_mode}, shell={tab.shell}, cwd={tab.cwd}, agent_type={tab.agent_type}, target={tab.target}, remote_profile_id={tab.remote_profile_id}, user={current_user.email}"
+        f"Received create_tab request: name={tab.name}, solo_mode={tab.solo_mode}, shell={tab.shell}, cwd={tab.cwd}, agent_type={tab.agent_type}, target={tab.target}, remote_profile_id={tab.remote_profile_id}, agent_session_id={tab.agent_session_id}, user={current_user.email}"
     )
     return await ttyd_manager.create_tab(
         tab.name,
@@ -58,6 +58,7 @@ async def create_tab(
         tab.remote_cwd,
         tab.remote_reconnect,
         env=tab.env,
+        agent_session_id=tab.agent_session_id,
     )
 
 
