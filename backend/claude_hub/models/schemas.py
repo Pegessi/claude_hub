@@ -379,9 +379,23 @@ class TerminalTabBase(BaseModel):
 
 
 class TerminalTabCreate(TerminalTabBase):
-    """Schema for creating a TerminalTab."""
+    """Schema for creating a TerminalTab.
 
-    pass
+    ``agent_session_id`` lets a new tab pin to an existing agent conversation
+    at creation time — currently used to resume a specific Codex session via
+    ``codex resume <id>``. When omitted, Codex tabs start fresh and discover
+    their session id from the rollout file shortly after launch (existing
+    behavior).
+    """
+
+    agent_session_id: Optional[str] = Field(
+        None,
+        description=(
+            "Existing agent conversation id to resume. For Codex tabs this is "
+            "a session UUID from ~/.codex/sessions; the tab launches with "
+            "codex resume <id>. Omit for a fresh session."
+        ),
+    )
 
 
 class SwitchEnvRequest(BaseModel):
