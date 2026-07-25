@@ -7,7 +7,7 @@
       v-for="cachedTabId in cachedTabIds"
       :key="cachedTabId"
       :ref="(el) => registerIframe(el, cachedTabId)"
-      :src="`/api/terminal/proxy/${cachedTabId}/`"
+      :src="terminalIframeSrc(cachedTabId)"
       class="terminal-iframe"
       :class="{ active: cachedTabId === tabId }"
       frameborder="0"
@@ -29,6 +29,39 @@ const props = defineProps<{
   tabId: string
   agentType?: AgentType
 }>()
+
+// Per-device terminal renderer selection.
+//
+// ttyd bundles xterm.js v5 and picks its renderer via a loaded addon; the
+// server default is the 2D "canvas" renderer (set in ttyd_manager for correct
+// mouse-drag selection-highlight alignment on desktop). That canvas renderer
+// misrenders on some mobile GPUs — agent TUI bottom rows (e.g. the Codex
+// composer/input box) can paint blank on Android/HarmonyOS mobile browsers.
+// WebGL (the pre-canvas default) renders correctly there, and mobile text
+// selection is handled by the renderer-independent touch "select" mode, so we
+// force WebGL on coarse-pointer (touch) devices while keeping canvas on
+// desktop. A single ttyd serves every client, so this must be decided per
+// client: ttyd applies `?rendererType=` from the iframe URL query with the
+// highest precedence (its own parseOptsFromUrlQuery), so appending it to the
+// proxy src is sufficient and needs no backend change.
+const terminalRendererQuery = (() => {
+  try {
+    if (
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(pointer: coarse)').matches
+    ) {
+      return '?rendererType=webgl'
+    }
+  } catch {
+    // matchMedia unavailable — fall back to the server default (canvas).
+  }
+  return ''
+})()
+
+function terminalIframeSrc(cachedTabId: string): string {
+  return `/api/terminal/proxy/${cachedTabId}/${terminalRendererQuery}`
+}
 
 type TerminalKeyItem = {
   key: string
