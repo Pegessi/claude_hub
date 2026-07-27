@@ -458,6 +458,13 @@ watch(
         postTerminalScrollBottom(newTabId)
         window.setTimeout(() => postTerminalScrollBottom(newTabId), 120)
         window.setTimeout(() => postTerminalScrollBottom(newTabId), 360)
+        // Cached-tab reactivation: the iframe is absolute-positioned and
+        // never changed size while hidden, so the iframe-internal
+        // ResizeObserver doesn't fire. Explicitly send a resize so
+        // FitAddon re-measures in case rows were wrong from initial load
+        // (the classic "bottom input missing" race) and the user is
+        // switching back to this tab expecting a usable prompt.
+        window.setTimeout(() => postTerminalResize(newTabId), 200)
       }
     })
   },
@@ -745,6 +752,16 @@ function refreshTerminalHistory(tabId?: string) {
     reason: 'manual',
     scrollToBottom: true,
   })
+  // Belt-and-suspenders: also send an explicit resize so the iframe's
+  // requestTerminalResize() fires and ttyd's FitAddon re-measures. The
+  // iframe-internal ResizeObserver (in the backend-injected script) is
+  // the primary fix for rows-miscalculation, but an explicit resize on
+  // manual refresh guarantees fit() runs even if the iframe observer
+  // missed the transition and the container size hasn't actually changed.
+  window.setTimeout(() => {
+    postTerminalResize(targetTabId)
+    postTerminalScrollBottom(targetTabId)
+  }, 100)
   window.setTimeout(() => postTerminalScrollBottom(targetTabId), 400)
 }
 
