@@ -1041,6 +1041,84 @@ async def proxy_terminal_request(
             }};
           }}
 
+          // Direct container observation inside the iframe.
+          //
+          // Historically we relied on the parent frame's ResizeObserver to
+          // post a 'terminal-resize' message whenever the pane size changed,
+          // which dispatched window.resize inside the iframe and ttyd's
+          // FitAddon re-measured. That chain is fragile: (a) if the message
+          // arrives before the iframe terminal is ready it is dropped,
+          // (b) during initial mount / tab switch / CSS transitions the
+          // parent container can reach its final size between two parent
+          // rAF ticks with no subsequent ResizeObserver fire, leaving
+          // xterm fit() with stale too-small rows and the bottom input
+          // line painted off-screen. Observing the terminal host directly
+          // from inside the iframe — same frame xterm lives in — removes
+          // the cross-context timing dependency: any size change of the
+          // element xterm renders into (body, since ttyd sizes html/body
+          // to 100% of the iframe) triggers a debounced fit().
+          function callFit() {{
+            try {{
+              if (term.fitAddon && typeof term.fitAddon.fit === 'function') {{
+                term.fitAddon.fit();
+              }} else if (typeof term.fit === 'function') {{
+                term.fit();
+              }}
+              if (typeof term.__claudeHubRecomputeBottom === 'function') {{
+                term.__claudeHubRecomputeBottom();
+              }}
+            }} catch (e) {{}}
+          }}
+          // Expose on term so other closures (history refresh / replay)
+          // can request a re-fit without duplicating the fallback chain.
+          term.__claudeHubRequestFit = callFit;
+
+          let fitTimer = null;
+          function scheduleFit() {{
+            if (fitTimer !== null) clearTimeout(fitTimer);
+            fitTimer = setTimeout(function() {{
+              fitTimer = null;
+              callFit();
+              // A second fit one frame later catches the case where the
+              // first fit happens in the same frame as a CSS transition
+              // update — e.g. the pane-header max-height transition settling
+              // at 180ms shifts body height by ~28px, and the first fit may
+              // read pre-layout dimensions.
+              if (typeof requestAnimationFrame === 'function') {{
+                requestAnimationFrame(function() {{ callFit(); }});
+              }}
+            }}, DEBOUNCE_MS);
+          }}
+
+          // Observe body (covers html/body {width:100%;height:100%}) and,
+          // if present, the xterm container element. ResizeObserver is
+          // available in all evergreen desktop browsers (Chrome 64+,
+          // Firefox 69+, Safari 13.1+); fall back to a window.resize
+          // listener where it isn't.
+          if (typeof ResizeObserver !== 'undefined') {{
+            const resizeObserver = new ResizeObserver(function(entries) {{
+              // Ignore fired-before-layout observations of 0-sized
+              // elements — fitting to 0 rows/cols confuses tmux.
+              for (let i = 0; i < entries.length; i++) {{
+                const rect = entries[i] && entries[i].contentRect;
+                if (rect && (rect.width > 8) && (rect.height > 8)) {{
+                  scheduleFit();
+                  return;
+                }}
+              }}
+            }});
+            try {{ resizeObserver.observe(document.body); }} catch (e) {{}}
+            const termEl = document.getElementById('terminal')
+              || document.querySelector('.terminal')
+              || (term.element && term.element.parentElement);
+            if (termEl) {{
+              try {{ resizeObserver.observe(termEl); }} catch (e) {{}}
+            }}
+            term.__claudeHubResizeObserver = resizeObserver;
+          }} else {{
+            window.addEventListener('resize', scheduleFit);
+          }}
+
           // On mobile, visualViewport.resize fires many times as the
           // keyboard animates in/out. We only act when the keyboard
           // reaches a stable state (visible or hidden), and ignore
@@ -1059,15 +1137,7 @@ async def proxy_terminal_request(
                   keyboardVisible = nowKeyboard;
                   // Trigger a single, stable fit after keyboard
                   // animation is complete
-                  try {{
-                    if (term.fitAddon) term.fitAddon.fit();
-                    else if (typeof term.fit === 'function') term.fit();
-                    // Keyboard show/hide resized the viewport without a
-                    // scroll event: refresh the cached "at bottom" flag.
-                    if (typeof term.__claudeHubRecomputeBottom === 'function') {{
-                      term.__claudeHubRecomputeBottom();
-                    }}
-                  }} catch(e) {{}}
+                  callFit();
                 }}
                 // Keyboard state unchanged = transient jank, ignore
               }}, DEBOUNCE_MS);
@@ -1310,6 +1380,24 @@ async def proxy_terminal_request(
               if (shouldScrollToBottom) {{
                 scrollTerminalToBottom(term, {{ refresh: true }});
                 domAtBottomCached = true;
+              }}
+              // A history refresh (manual ↻ button, agent-round-complete
+              // auto-refresh, activate-on-tab-switch) is the user-visible
+              // "make the terminal right" action. Re-fit xterm to the
+              // current container dimensions so any rows that were lost
+              // to an early fit() during initial load (or after layout
+              // transitions the ResizeObserver hasn't caught yet) are
+              // recovered, matching the user expectation that "refresh"
+              // corrects display issues — without needing them to toggle
+              // the layout selector to manually force a resize.
+              if (typeof term.__claudeHubRequestFit === 'function') {{
+                // Schedule on the next frame so the just-written content
+                // has been laid out before fit() measures and scrolls.
+                if (typeof requestAnimationFrame === 'function') {{
+                  requestAnimationFrame(function() {{ term.__claudeHubRequestFit(); }});
+                }} else {{
+                  setTimeout(function() {{ term.__claudeHubRequestFit(); }}, 16);
+                }}
               }}
               if (cb) cb(ok);
             }}
@@ -2134,6 +2222,28 @@ async def proxy_terminal_request(
           if (window.term && typeof window.term === 'object' && !window.term.__claudeHubHistoryHooked) {{
             currentTerm = window.term;
             hookTerm(window.term);
+
+            // Belt-and-suspenders: when the iframe first loads, parent CSS
+            // transitions (TabBar / pane-header max-height @ 180ms) can make
+            // the container reach its final size after xterm's initial fit()
+            // has already measured a smaller height and set rows too small.
+            // The ResizeObserver in setupResizeGuard catches most cases,
+            // but if observation begins after the element has already
+            // reached its final size ResizeObserver will not fire until
+            // the next size change. Schedule two delayed fits past the
+            // longest parent transition to guarantee rows are correct.
+            // On tabs where history replay takes time (agent tabs),
+            // __claudeHubRequestFit is attached during setupResizeGuard
+            // which runs synchronously inside hookTerm.
+            function requestLateFit() {{
+              const t = currentTerm || (window.term && typeof window.term === 'object' ? window.term : null);
+              if (t && typeof t.__claudeHubRequestFit === 'function') {{
+                t.__claudeHubRequestFit();
+              }}
+            }}
+            setTimeout(requestLateFit, 250);
+            setTimeout(requestLateFit, 500);
+
             // Notify parent that terminal is ready for key input
             if (window.parent && window.parent !== window) {{
               window.parent.postMessage({{

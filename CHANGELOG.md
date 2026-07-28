@@ -5,6 +5,51 @@
 
 ## Unreleased
 
+### fix: desktop terminal input box no longer disappears; refresh button now recovers display
+
+- **What**: on desktop (canvas renderer), the bottom agent input box / prompt
+  line would frequently render off-screen, showing a blank area at the bottom
+  of the terminal. Clicking the ↻ refresh icon in the pane header would reload
+  history but **not** recover the missing rows; only switching layouts (which
+  forces a window resize) made the input reappear.
+- **Why**: xterm.js's FitAddon.fit() can fire during initial iframe load before
+  the parent flex container chain reaches its final dimensions — TabBar and
+  pane-header both have 180ms max-height CSS transitions, so the terminal
+  container is ~28–76px shorter than final when the first fit() runs, producing
+  too few rows and clipping the bottom input. Once the container settles there
+  was no in-iframe observer to re-run fit(); the parent frame's ResizeObserver
+  posts a `terminal-resize` message but that message can arrive before the
+  iframe terminal is ready and get dropped, and if the container is already at
+  its final size when the iframe script attaches the parent ResizeObserver
+  never fires again. Additionally, `refreshHistoryFromTmux()` only called
+  `term.refresh()` (a glyph repaint) without re-running fit(), so the manual
+  refresh path could not correct stale rows.
+- **How** (three overlapping defenses):
+  1. **ResizeObserver inside the iframe** (injected via `terminal.py`'s
+     `setupResizeGuard`) observes `document.body` and the xterm container
+     directly and calls `fitAddon.fit()` (debounced 150ms, with an rAF follow-up
+     fit to catch CSS transition frames). Ignoring sub-8px observations prevents
+     fitting to a 0-sized pre-layout element. `window.resize` listener is the
+     fallback where ResizeObserver is unavailable.
+  2. **fit() after every history refresh**: `writeHistorySnapshot.done()` now
+     schedules `term.__claudeHubRequestFit()` on the next frame after replaying
+     tmux content. This makes the manual ↻ button and auto-round-complete
+     refresh both recalculate rows, matching the user expectation that
+     "refresh" fixes display problems — no more need to toggle the layout.
+  3. **Belt-and-suspenders delayed fit on terminal-ready**: two late fits at
+     250ms and 500ms after `hookTerm` cover the worst-case CSS transition
+     settling window for the initial iframe load.
+  On the frontend (`TerminalView.vue`), the manual refresh path now also sends
+     an explicit `terminal-resize` message, and cached-tab reactivation on
+     desktop schedules a resize at 200ms to guarantee fit when switching back
+     to a tab that had stale rows. Mobile (WebGL + visualViewport keyboard
+     handling) is unchanged.
+- **Verified**: `pnpm lint` clean, `pnpm build` clean (vue-tsc + vite), backend
+  `py_compile` + import clean. Manual verification: desktop claude/codex tabs
+  show the prompt line on load; refresh button recovers the view without
+  switching layouts; resizing the window, opening DevTools, switching tabs, and
+  switching layouts all keep the terminal correctly filling its pane.
+
 ### feat: mobile terminals support long-press to select text and copy
 
 - **What**: on touch devices you can now **long-press** directly on terminal
