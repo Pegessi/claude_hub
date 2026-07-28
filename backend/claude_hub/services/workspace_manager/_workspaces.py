@@ -67,18 +67,18 @@ def build_resident_agent_prompt(workspace: "Workspace", base_url: str, session_i
         "tasks, perform them now (read-only investigation, status checks, summaries, etc.). "
         "Complete every enabled recurring task listed above.\n"
         "2. Review the most recent workspace task records and MAINTAIN LESSONS:\n"
-        f"   - List current lessons: curl -sS {base_url}/api/workspaces/{ws}/lessons\n"
+        f"   - List current lessons: {INTERNAL_API_CURL} {base_url}/api/workspaces/{ws}/lessons\n"
         "   - Create or merge a genuinely new, reusable lesson (only when justified):\n"
-        f"     curl -sS -X POST {base_url}/api/workspaces/{ws}/lessons "
+        f"     {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/{ws}/lessons "
         "-H 'Content-Type: application/json' "
         '-d \'{"title":"...","summary":"required one-line takeaway",'
         '"applies_when":["when this lesson applies"],'
         '"do":"what to do","avoid":"what to avoid","tags":["tag"]}\'\n'
         "   - Archive a stale or contradicted lesson (only when justified):\n"
-        f"     curl -sS -X DELETE {base_url}/api/workspaces/{ws}/lessons/<lesson_id>\n"
+        f"     {INTERNAL_API_CURL} -X DELETE {base_url}/api/workspaces/{ws}/lessons/<lesson_id>\n"
         "3. PROPOSE new tasks for the user to decide on. Create them in TODO status only — "
         "do NOT start them and do NOT spawn agents:\n"
-        f"   curl -sS -X POST {base_url}/api/workspaces/{ws}/tasks "
+        f"   {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/{ws}/tasks "
         "-H 'Content-Type: application/json' "
         '-d \'{"title":"...","prompt":"...","origin":"resident"}\'\n'
         '   Always include "origin":"resident" so the UI tags the proposal as '
@@ -122,7 +122,7 @@ def _build_resident_master_prompt(
         f"{periodic_block}"
         "## Each cycle, in order\n\n"
         "1. Read the board to understand current state:\n"
-        f"     curl -sS {base_url}/api/workspaces/{ws}/board\n"
+        f"     {INTERNAL_API_CURL} {base_url}/api/workspaces/{ws}/board\n"
         "   Inspect `tasks` (id, title, status, session_id, task_mode) and `sessions` (id, role, "
         "status, runtime_status). Review recent task outcomes and the user directive to decide "
         "what the workspace still needs next. Iterate on the requirements — refine the goal, do "
@@ -138,7 +138,7 @@ def _build_resident_master_prompt(
         "step 6.\n\n"
         "3. Create the tasks you deem necessary this cycle. Create AT MOST 3 "
         "tasks per cycle to avoid a runaway backlog:\n"
-        f"     curl -sS -X POST {base_url}/api/workspaces/{ws}/tasks "
+        f"     {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/{ws}/tasks "
         "-H 'Content-Type: application/json' "
         '-d \'{"title":"...","prompt":"detailed instructions for the worker",'
         '"origin":"resident"}\'\n'
@@ -152,7 +152,7 @@ def _build_resident_master_prompt(
         "4. Dispatch each task you just created onto an EXISTING orchestrator worker from step 2 "
         "(prefer an idle one; queuing behind a busy orchestrator is fine). Always pass an "
         "explicit target_session_id so the backend never auto-creates an agent:\n"
-        f"     curl -sS -X POST {base_url}/api/workspaces/tasks/<task_id>/start "
+        f"     {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/tasks/<task_id>/start "
         "-H 'Content-Type: application/json' "
         '-d \'{"target_session_id":"<existing-orchestrator-session-id>"}\'\n'
         '   target_session_id MUST be a session whose role is "orchestrator". NEVER target the '
@@ -168,19 +168,19 @@ def _build_resident_master_prompt(
         "awaiting-acceptance state, read the worker's latest report/output and the reviewer's "
         "verdict for that task, then validate it against what you asked for:\n"
         "   - If satisfactory, accept it:\n"
-        f"       curl -sS -X PATCH {base_url}/api/workspaces/tasks/<task_id> "
+        f"       {INTERNAL_API_CURL} -X PATCH {base_url}/api/workspaces/tasks/<task_id> "
         "-H 'Content-Type: application/json' "
         '-d \'{"status":"done"}\'\n'
         "   - If NOT satisfactory, send it back to the SAME worker with concrete feedback (this "
         "does NOT spawn a new worker; it re-dispatches to the original agent):\n"
-        f"       curl -sS -X POST {base_url}/api/workspaces/tasks/<task_id>/continue "
+        f"       {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/tasks/<task_id>/continue "
         "-H 'Content-Type: application/json' "
         '-d \'{"message":"what is wrong and what to fix"}\'\n'
         "   Only ever accept or continue tasks YOU created. Never accept or modify tasks a human "
         "created or dispatched.\n\n"
         "6. (Optional, as before) Maintain workspace lessons when genuinely justified:\n"
-        f"     curl -sS {base_url}/api/workspaces/{ws}/lessons\n"
-        f"     curl -sS -X POST {base_url}/api/workspaces/{ws}/lessons "
+        f"     {INTERNAL_API_CURL} {base_url}/api/workspaces/{ws}/lessons\n"
+        f"     {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/{ws}/lessons "
         "-H 'Content-Type: application/json' "
         '-d \'{"title":"...","summary":"one-line takeaway",'
         '"applies_when":["when this applies"],"do":"...","avoid":"...","tags":["tag"]}\'\n\n'
@@ -200,7 +200,7 @@ def _build_resident_master_prompt(
         "## Heartbeat report (REQUIRED at the END of EVERY cycle)\n"
         "Post one workspace-level heartbeat summarizing this cycle. task_id is omitted for a "
         "workspace-level heartbeat:\n"
-        f"    curl -sS -X POST {reports_endpoint} "
+        f"    {INTERNAL_API_CURL} -X POST {reports_endpoint} "
         "-H 'Content-Type: application/json' "
         '-d \'{"state":"working","message":"Resident orchestrator cycle: <summary>",'
         '"message_en":"Resident orchestrator cycle: <summary>",'

@@ -877,7 +877,7 @@ class _ReportsMixin:
             "to status passed, failed, partial, or not_checked with evidence. Then POST a new "
             "ready_for_review or completed report.\n\n"
             "Supplement report example:\n"
-            f"curl -sS -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
+            f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"completed",'
             '"message":"Supplemented Goal Packet evidence.",'
