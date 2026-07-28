@@ -58,7 +58,7 @@ class _PromptsMixin:
         task_field = task_id if task_id is not None else "TASK_ID"
         return (
             "Report endpoint:\n"
-            f"curl -sS -X POST {self._report_base_url(session)}"
+            f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}"
             f"/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task_field}","state":"working","message":"Progress update",'
@@ -113,7 +113,7 @@ class _PromptsMixin:
             "review_decision (request/skip/auto with review_reason when applicable), and risk_level; "
             "every completed task waits for human acceptance before it is done.\n\n"
             "Report endpoint (POST JSON for assigned tasks):\n"
-            f"curl -sS -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
+            f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             '-d \'{"task_id":"TASK_ID","state":"working","message":"Progress update",'
             '"message_en":"Progress update","message_zh":"进度更新"}\''
@@ -169,7 +169,7 @@ class _PromptsMixin:
             "- Use review_failed when the impl agent can fix concrete defects; review_needs_input only for "
             "genuine product/credential/environment blockers you cannot infer.\n\n"
             "Report endpoint (task_id supplied with each assignment):\n"
-            f"curl -sS -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
+            f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             '-d \'{"task_id":"TASK_ID","state":"review_started",'
             '"message":"Started review","message_en":"Started review","message_zh":"开始评审"}\''
@@ -220,7 +220,7 @@ class _PromptsMixin:
             "for related work. If the best related agent is busy, still choose that agent so "
             "the workspace queues the task behind its current work.\n\n"
             "Call this endpoint with your decision:\n"
-            f"curl -sS -X POST {self._report_base_url(dispatcher)}/api/workspaces/tasks/{task.id}/dispatch-decision "
+            f"{INTERNAL_API_CURL} -X POST {self._report_base_url(dispatcher)}/api/workspaces/tasks/{task.id}/dispatch-decision "
             "-H 'Content-Type: application/json' "
             '-d \'{"target_session_id":"AGENT_ID","clear_context":false,'
             '"reason":"why this agent is best"}\''
@@ -284,7 +284,7 @@ class _PromptsMixin:
             "review_decision=auto (workspace default). The backend may still force review for nontrivial "
             "changes.\n\n"
             "Goal Packet report example (first working report for reviewed tasks):\n"
-            f"curl -sS -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
+            f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"working",'
             '"message":"Goal Packet; awaiting approval.","message_en":"Goal Packet; awaiting approval.",'
@@ -297,7 +297,7 @@ class _PromptsMixin:
             "review_decision/review_reason/risk_level; acceptance_check maps each Goal Packet criterion "
             "to passed/failed/partial/not_checked with evidence.\n\n"
             "Report endpoint (POST JSON for other states):\n"
-            f"curl -sS -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
+            f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"started",'
             '"message":"Started","message_en":"Started","message_zh":"已开始"}}\''
@@ -865,7 +865,7 @@ class _PromptsMixin:
             f"earlier summarized with verbose fields truncated; trigger report is above):\n"
             f"{json.dumps(report_payload, indent=2)}\n\n"
             "Report workflow: first POST review_started, then exactly one final verdict:\n"
-            f"curl -sS -X POST {self._report_base_url(reviewer)}/api/workspaces/sessions/{reviewer.id}/reports "
+            f"{INTERNAL_API_CURL} -X POST {self._report_base_url(reviewer)}/api/workspaces/sessions/{reviewer.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"review_passed",'
             '"message":"Verdict + summary + acceptance rollup + notes",'

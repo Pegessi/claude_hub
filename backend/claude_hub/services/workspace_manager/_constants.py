@@ -109,6 +109,11 @@ PROMPT_DISPATCH_RETRY_GRACE_SECONDS = 10
 REVIEW_REAPER_DISPATCH_GRACE_SECONDS = 60
 PROMPT_STUCK_RISK_LEVEL = "prompt_dispatch_stalled"
 WORKSPACE_MONITOR_INTERVAL_SECONDS = 5
+# Agent-facing examples call the Hub over localhost (or a loopback SSH
+# forward). Keep external traffic on the configured proxy while forcing these
+# internal control-plane requests to stay on the machine. --fail-with-body also
+# prevents an HTTP 4xx/5xx from being mistaken for a successful report.
+INTERNAL_API_CURL = "curl --noproxy 'localhost,127.0.0.1,::1' --fail-with-body -sS"
 # Event-gated resident trigger: minimum gap between activity-triggered resident
 # runs. When real workspace activity is detected, the resident may fire as soon
 # as this debounce floor has elapsed since its last run (far shorter than the
@@ -278,6 +283,7 @@ __all__ = [
     "HARD_RECOVERY_WORKER_MESSAGE",
     "IMAGE_ATTACHMENT_TYPES",
     "INDEX_FILE",
+    "INTERNAL_API_CURL",
     "INTERRUPT_SETTLE_SECONDS",
     "LEGACY_STATE_FILE",
     "MARKDOWN_ARTIFACT_SUFFIXES",

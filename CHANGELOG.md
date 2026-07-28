@@ -5,6 +5,29 @@
 
 ## Unreleased
 
+### fix: agent control-plane requests bypass loopback proxies
+
+- **What**: every agent-facing Claude Hub API command now bypasses configured
+  proxies for `localhost`, `127.0.0.1`, and `::1`. This covers resident board
+  reads and task orchestration, worker progress reports, dispatcher decisions,
+  reviewer verdicts, recovery prompts, lesson maintenance, and resident
+  heartbeats.
+- **Why**: managed tmux sessions can inherit `HTTP_PROXY` / `HTTPS_PROXY` from
+  the local machine. The generated `curl -sS http://localhost:8173/...`
+  commands then sent Hub control-plane traffic through that proxy, returning
+  `502 Bad Gateway`. Resident cycles appeared to run but safely did no work,
+  while reports and heartbeats could be lost across every agent role.
+- **How**: all generated internal API examples share a curl prefix with
+  `--noproxy 'localhost,127.0.0.1,::1'`. External traffic keeps its existing
+  proxy behavior because bypassing is limited to loopback hosts.
+  `--fail-with-body` makes HTTP 4xx/5xx responses fail visibly instead of being
+  mistaken for successful reports.
+- **Verified**: the regression test first failed against the old templates,
+  then passed after the fix. Resident and orchestrator prompt tests, the
+  non-browser backend suite, formatting, import order, isolated typing, and a
+  live proxy/no-proxy board probe cover prompt rendering, orchestration,
+  reporting, and runtime behavior.
+
 ### fix: desktop terminal input box no longer disappears; refresh button now recovers display
 
 - **What**: on desktop (canvas renderer), the bottom agent input box / prompt

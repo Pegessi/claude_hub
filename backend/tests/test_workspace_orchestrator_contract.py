@@ -8,6 +8,7 @@ orchestrator-contract wording survives future refactors.
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from claude_hub.models import (
     AcceptanceCheck,
@@ -34,6 +35,7 @@ from claude_hub.models import (
     WorkspaceTaskStatus,
 )
 from claude_hub.services.workspace_manager import workspace_manager
+from claude_hub.services.workspace_manager._constants import INTERNAL_API_CURL
 
 
 def _make_task(
@@ -346,11 +348,22 @@ def _endpoint_path(session: ManagedSession) -> str:
 def test_report_endpoint_curl_uses_session_and_task():
     session = _make_session()
     snippet = workspace_manager._report_endpoint_curl(session, "task-42")
-    assert "curl -sS -X POST" in snippet
+    assert f"{INTERNAL_API_CURL} -X POST" in snippet
     assert _endpoint_path(session) in snippet
     assert '"task_id":"task-42"' in snippet
     # Defaults to a placeholder when no task id is supplied.
     assert '"task_id":"TASK_ID"' in workspace_manager._report_endpoint_curl(session)
+
+
+def test_all_internal_api_curl_templates_use_loopback_proxy_bypass():
+    """Every agent-facing Hub API command must bypass proxies for loopback hosts."""
+    package_root = Path(__file__).parents[1] / "claude_hub" / "services" / "workspace_manager"
+    for module_name in ("_prompts.py", "_reports.py", "_workspaces.py"):
+        source = (package_root / module_name).read_text()
+        assert "curl -sS" not in source, f"{module_name} still has a proxyable curl example"
+        assert (
+            "INTERNAL_API_CURL" in source
+        ), f"{module_name} does not use the shared Hub curl command"
 
 
 def test_report_endpoint_curl_honors_remote_forward_port():
@@ -367,7 +380,7 @@ def test_continue_prompt_includes_report_endpoint():
     session = _make_session()
     prompt = workspace_manager._build_continue_prompt(task, ContinueTaskRequest(), session)
     assert _endpoint_path(session) in prompt
-    assert "curl -sS -X POST" in prompt
+    assert f"{INTERNAL_API_CURL} -X POST" in prompt
     assert f'"task_id":"{task.id}"' in prompt
 
 
@@ -426,7 +439,7 @@ def test_auto_continue_messages_carry_endpoint_when_sent(monkeypatch):
     assert len(sent) == 2, "both auto-continue branches should send a nudge"
     for message in sent:
         assert endpoint in message, "auto-continue nudge must restate report endpoint"
-        assert "curl -sS -X POST" in message
+        assert f"{INTERNAL_API_CURL} -X POST" in message
         assert '"task_id":"task-7"' in message
     assert monitor_module.AUTO_CONTINUE_MESSAGE.split("\n")[0] in sent[0]
     assert monitor_module.AUTO_REPORT_MISSING_MESSAGE.split("\n")[0] in sent[1]
