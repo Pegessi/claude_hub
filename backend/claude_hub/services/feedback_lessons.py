@@ -337,25 +337,40 @@ class FeedbackLessonStore:
                 return lesson
         raise KeyError(lesson_id)
 
+    _CONTEXT_LIMIT_DEFAULT = 8
+
     def lesson_context_payload(
         self,
         workspace_id: str,
         query: str,
         *,
-        limit: int = 20,
+        limit: int = _CONTEXT_LIMIT_DEFAULT,
     ) -> list[dict[str, Any]]:
-        lessons = self.list_lessons(workspace_id)
+        """Return a compact relevance-ranked lesson index for prompt injection.
+
+        Uses token-overlap search against the task query; if the query is empty
+        or produces zero matches, falls back to top-N by confidence + hit_count
+        so that high-signal lessons still surface.
+        """
+        matched: list[FeedbackLesson]
+        if query.strip() and _tokens(query):
+            matched = self.search_lessons(workspace_id, query, limit=limit)
+        else:
+            matched = []
+        if not matched:
+            all_lessons = self.list_lessons(workspace_id)
+            conf = lambda l: l.confidence if l.confidence is not None else 0.0
+            hits = lambda l: l.hit_count or 0
+            matched = sorted(all_lessons, key=lambda l: (conf(l), hits(l)), reverse=True)[:limit]
+
         index: list[dict[str, Any]] = []
-        for lesson in lessons[:limit]:
+        for lesson in matched:
             index.append(
                 {
                     "id": lesson.id,
                     "title": lesson.title,
-                    "scope": lesson.scope.value,
                     "tags": lesson.tags,
                     "confidence": lesson.confidence,
-                    "hit_count": lesson.hit_count or 0,
-                    "success_count": lesson.success_count or 0,
                 }
             )
         return index

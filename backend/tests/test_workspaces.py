@@ -1049,7 +1049,7 @@ def test_direct_task_explicit_review_request_still_creates_reviewer(
     assert direct_task.feedback_lesson_ids == []
     assert "Review workspace task." in sent_messages[-1][1]
     assert "explicit-review-handoff" in sent_messages[-1][1]
-    assert "Workspace lessons index" in sent_messages[-1][1]
+    assert "Relevant workspace lessons" in sent_messages[-1][1]
     assert (
         "Check changed files, validation, risks, and acceptance evidence."
         not in sent_messages[-1][1]
@@ -3029,14 +3029,12 @@ def test_task_assignment_injects_lessons_index_with_api_and_take_tracking(
     started_task = start_response.json()
     assert started_task["feedback_lesson_ids"] == []
     assignment_prompt = sent_messages[-1][1]
-    assert "Workspace lessons index" in assignment_prompt
+    assert "Relevant workspace lessons" in assignment_prompt
     assert "cli-symbols-comma-separated" in assignment_prompt
-    assert "docs/working-logs/lessons-catalog.md" in assignment_prompt
+    assert "lessons-catalog.md" not in assignment_prompt
     assert "/api/workspaces/" in assignment_prompt
-    assert "/lessons/<lesson_id>" in assignment_prompt
-    assert "This workspace ID:" in assignment_prompt
+    assert "/lessons/<id>" in assignment_prompt
     assert workspace["id"] in assignment_prompt
-    assert "Read lessons only when you judge they may apply" in assignment_prompt
     assert "Use --symbols AAPL,MSFT" not in assignment_prompt
     task_reports = [
         report
@@ -3294,16 +3292,17 @@ def test_lessons_index_includes_all_active_lessons_without_full_body_leak(
     cjk_started_task = cjk_start_response.json()
     assert cjk_started_task["feedback_lesson_ids"] == []
     cjk_prompt = sent_messages[-1][1]
-    assert "Workspace lessons index" in cjk_prompt
+    assert "Relevant workspace lessons" in cjk_prompt
     assert "image-workflow-docs-first" in cjk_prompt
-    assert "market-data-symbols" in cjk_prompt
+    # Irrelevant lesson should NOT appear in relevance-filtered index.
+    assert "market-data-symbols" not in cjk_prompt
     assert "图片生成先读文档" in cjk_prompt
-    assert "Market data CLI uses comma-separated symbols" in cjk_prompt
+    assert "Market data CLI uses comma-separated symbols" not in cjk_prompt
     assert "先检查仓库工作流文档和已有运行记录。" not in cjk_prompt
     assert "Use --symbols AAPL,MSFT." not in cjk_prompt
     assert "Do not pass symbols as separate arguments." not in cjk_prompt
     assert "不要只看原始提示词就开始生成。" not in cjk_prompt
-    assert "docs/working-logs/lessons-catalog.md" in cjk_prompt
+    assert "lessons-catalog.md" not in cjk_prompt
     assert "/api/workspaces/" in cjk_prompt
 
     emoji_workspace = client.post(
@@ -3339,7 +3338,7 @@ def test_lessons_index_includes_all_active_lessons_without_full_body_leak(
     emoji_started_task = emoji_start_response.json()
     assert emoji_started_task["feedback_lesson_ids"] == []
     emoji_prompt = sent_messages[-1][1]
-    assert "Workspace lessons index" in emoji_prompt
+    assert "Relevant workspace lessons" in emoji_prompt
     assert "emoji-only-workspace-lesson" in emoji_prompt
     assert "Agent decides autonomously which lessons apply." not in emoji_prompt
     task_reports = [
