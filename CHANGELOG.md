@@ -5,6 +5,43 @@
 
 ## Unreleased
 
+### fix: trim workspace lessons index in agent prompts for smaller agents
+
+- **What**: the lessons index block injected into every worker and reviewer
+  prompt is shortened in three ways: (1) relevance-filters to the top 8 lessons
+  via the existing token-overlap search (with a confidence+hits fallback when
+  the query is empty or yields no matches) instead of dumping up to 20 lessons
+  unconditionally; (2) compacts each lesson to one pipe-delimited line
+  (`id | title | tags | conf`) with long titles ellipsized; (3) **removes the
+  instruction to read `docs/working-logs/lessons-catalog.md`** — that file is a
+  25 KB human-facing catalog covering 10 different workspaces (H20 GPU tasks,
+  etc.), does not contain this workspace's lessons, and was causing weak
+  agents (cursor, codex) that dutifully read it to burn ~6K tokens on
+  cross-workspace cruft. On-demand detail now points exclusively to the
+  workspace-scoped `GET /api/workspaces/<id>/lessons/<id>` endpoint, which
+  returns only the requested lesson body.
+- **Why**: two problems compounded. (a) The inline index dumped all lessons
+  regardless of task relevance, wasting tokens as the catalog grew. (b) The
+  catalog-file instruction — the real culprit — sent agents to a 25 KB
+  cross-workspace document that was never regenerated per-workspace
+  (`render_lessons_catalog_md()` is defined but never called by the backend).
+  Smaller-context agents would either stall reading it or ignore lessons
+  entirely. After this fix the inline block is ~1.3K chars (~340 tokens) and
+  agents only pay for lessons they actively fetch.
+- **How**: `FeedbackLessonStore.lesson_context_payload` calls
+  `search_lessons()` (token-overlap against title/summary/do/avoid/tags) with
+  a confidence+hit-count fallback instead of slicing the unordered list. It
+  drops unused `scope`, `hit_count`, and `success_count` fields from the
+  payload. Default limit moves from 20 to `_CONTEXT_LIMIT_DEFAULT = 8`.
+  `_lesson_context_block_from_payload` renders a denser pipe-delimited list,
+  ellipsizes titles over 72 chars, and replaces the catalog-file pointer with
+  a workspace-scoped API endpoint reference.
+- **Verified**: 3 lesson-specific tests (injection+tracking, CJK relevance
+  filtering, emoji no-match fallback; negative assertion that
+  lessons-catalog.md is no longer referenced), 63 lesson+review tests pass;
+  full backend suite 526 passed (83 pre-existing asyncio event-loop failures
+  unchanged from main). `black`, `isort`, and `mypy` are clean.
+
 ### fix: agent control-plane requests bypass loopback proxies
 
 - **What**: every agent-facing Claude Hub API command now bypasses configured

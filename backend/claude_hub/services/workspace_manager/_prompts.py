@@ -307,7 +307,6 @@ class _PromptsMixin:
         return self._feedback_store().lesson_context_payload(
             workspace.id,
             query,
-            limit=20,
         )
 
     def _lesson_context_block(self, workspace: Workspace, query: str) -> str:
@@ -324,36 +323,27 @@ class _PromptsMixin:
     ) -> str:
         if not lessons:
             return (
-                "Workspace lessons index: no active lessons yet for this workspace.\n"
-                "You do not need to reference any lessons in your report.\n\n"
+                "Workspace lessons: none active for this workspace. "
+                "State 'no lessons needed' in your report risks field.\n\n"
             )
         lines: list[str] = []
-        lines.append("Workspace lessons index (id, title, tags, confidence, hits, successes):")
+        lines.append("Relevant workspace lessons (id | title | tags | conf).")
         for lesson in lessons:
-            tags = ", ".join(f"`{t}`" for t in lesson.get("tags", [])) or "—"
+            tags = ",".join(lesson.get("tags", [])) or "—"
             conf = lesson.get("confidence")
             conf_str = f"{conf:.2f}" if isinstance(conf, (int, float)) else "?"
-            lines.append(
-                f"- `{lesson['id']}` — {lesson['title']}  "
-                f"[{tags}]  conf={conf_str}  "
-                f"hits={lesson.get('hit_count', 0)}  "
-                f"succ={lesson.get('success_count', 0)}"
-            )
-        lines.append("")
-        lines.append(
-            "Lessons catalog (human-readable): `docs/working-logs/lessons-catalog.md`  "
-            "(read this file for the full do/avoid/applies_when detail of each lesson)."
-        )
-        lines.append(
-            "To inspect a specific lesson, call `GET /api/workspaces/<workspace_id>/lessons/<lesson_id>` "
-            "which returns the full lesson body (summary, do, avoid, applies_when, evidence)."
-        )
+            title = lesson["title"]
+            if len(title) > 72:
+                title = title[:69] + "..."
+            lines.append(f"- `{lesson['id']}` | {title} | [{tags}] | c={conf_str}")
         if workspace_id:
-            lines.append(f"This workspace ID: `{workspace_id}`.")
+            lines.append(
+                f"For full do/avoid/applies_when detail on a lesson: "
+                f"GET /api/workspaces/{workspace_id}/lessons/<id>"
+            )
         lines.append(
-            "Read lessons only when you judge they may apply to this task — do not "
-            "force-fit irrelevant lessons. In the final validation or risks field, "
-            "list the IDs of any lessons you read (or state 'no lessons needed')."
+            "Fetch/apply only lessons relevant to this task; list IDs used (or 'none') "
+            "in your report risks field."
         )
         lines.append("")
         return "\n".join(lines)
