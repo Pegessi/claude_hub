@@ -1090,7 +1090,7 @@ async def proxy_terminal_request(
             }}, DEBOUNCE_MS);
           }}
 
-          // Observe body (covers html/body {width:100%;height:100%}) and,
+          // Observe body (covers html/body {{width:100%;height:100%}}) and,
           // if present, the xterm container element. ResizeObserver is
           // available in all evergreen desktop browsers (Chrome 64+,
           // Firefox 69+, Safari 13.1+); fall back to a window.resize
