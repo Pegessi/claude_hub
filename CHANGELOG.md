@@ -5,6 +5,58 @@
 
 ## Unreleased
 
+### fix: prevent codex/cursor session cross-wiring on cold restart
+
+- **What**: after a full service cold restart (tmux server gone), same-type
+  agent tabs no longer resume each other's conversations ("串台"). Codex and
+  Cursor tabs now pin stable session ids to their tab and correctly attribute
+  newly-created rollouts/chat-stores to the launching tab, with fail-closed
+  quarantine whenever ambiguity is detected.
+- **Why**: five interacting bugs caused the cross-wiring: (BUG-1) a single
+  global launch epoch made all tabs' ts windows overlap; (BUG-2) a 600s
+  discovery window picked up old unrelated rollouts; (BUG-3)
+  `codex resume --last`/`--continue` fell back to any recent session in the
+  same cwd when the intended sid was missing; (BUG-4) per-tab scanning with
+  multiple concurrent launches caused N-way ambiguity; (BUG-5) ttyd lazy
+  execution meant the epoch was stamped ~1s after codex had already started
+  writing.
+- **How**:
+  - Removed the `--last`/`--continue` fallback for codex; only resume when the
+    persisted sid is verified to exist on disk, otherwise start fresh.
+  - New global `GLOBAL_CODEX_LAUNCH_LOCK` serializes cold codex launches so
+    signal attribution sees exactly one new/appended rollout per tab.
+  - Fence-poll with 0.7s silence after rollout activity (replaces the 600s
+    wait), 200ms × 30 poll budget (~6s wall).
+  - Per-tab new-pin timestamp window anchored in `ensure_tmux_session`
+    immediately before `tmux new-session -d`, with bounds `[-2s, +8s]`.
+  - Phase-R reconciliation (R1-R8) verifies existence, cwd-realpath match,
+    ts-window/growth, non-empty, no duplicate sids, bijection between
+    expected and actual new/appended sids per cwd; extras trigger whole-cwd
+    quarantine rather than risking misattribution.
+  - Cursor CLI is a *constructive pin*: `agent --resume <uuid>` creates a
+    fresh chat store immediately if one does not exist, so every cursor tab
+    now pins a uuid4 at construction and always passes `--resume`; on-disk
+    verification uses `store.db` meta key=0 (hex-JSON, `agentId` field) with
+    `meta.json` realpath fallback via `services/_cursor_verify.py`.
+  - New persisted field `resume_quarantined` (default False, back-compat) on
+    each tab; set True on atomic rollback/Phase-R failure, cleared on
+    successful fresh pin or verified resume.
+- **Verified**:
+  - V0 empirical probes confirmed codex 0.146.1 rollout format
+    (`{type:session_meta, payload:{id, session_id, cwd, timestamp}}` with
+    `payload.id` the canonical sid; `archived_sessions/` flat layout;
+    `session_id` differs from `id` on forks).
+  - 94 unit tests in `test_ttyd_manager.py` + `test_codex_sessions.py` (all
+    pass).
+  - 8 V4/V6 integration tests in `test_recovery_integration_v4v6.py`
+    (archived-sessions flat scan, verified-resume append, 3-codex same-cwd
+    no-cross-wiring, quarantined-tab fresh start, cursor `--resume` pinning,
+    R8 extra-sid quarantine, cursor DB verification, single-tab fresh pin).
+  - V8 detached-baseline pytest: identical 61 pre-existing event-loop
+    failures on both main and fix branch (pass count grew from 549→553 due
+    to new tests only); zero new failures.
+  - `black` / `isort` / `mypy` clean on all touched files.
+
 ### fix: restore terminal history and resize injection on first load
 
 - **What**: terminal iframe HTML once again receives the history replay,
