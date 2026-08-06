@@ -5,6 +5,25 @@
 
 ## Unreleased
 
+### fix: restore terminal history and resize injection on first load
+
+- **What**: terminal iframe HTML once again receives the history replay,
+  scroll-to-bottom, manual refresh, and in-iframe ResizeObserver/fit guards.
+  First opening an existing agent tab can therefore recover scrollback and
+  keep the bottom prompt inside the pane without repeated layout toggles.
+- **Why**: the earlier desktop-fit fix added the literal CSS example
+  `html/body {width:100%;height:100%}` inside a Python f-string comment without
+  escaping its braces. Every terminal HTML request raised `NameError: name
+  'width' is not defined` while constructing the injected script; the broad
+  fallback caught the exception and silently served untouched ttyd HTML, so
+  all history and resize recovery code was absent at runtime.
+- **How**: escape the braces in the generated-script comment and add a proxy
+  regression test that executes the complete HTML injection path, consumes the
+  streaming response, and asserts the history, fit, refresh, and ResizeObserver
+  guards are present with a correct content length.
+- **Verified**: targeted backend unit coverage plus real Playwright checks of
+  the complete proxied ttyd document and first-load xterm geometry/history.
+
 ### fix: trim workspace lessons index in agent prompts for smaller agents
 
 - **What**: the lessons index block injected into every worker and reviewer
