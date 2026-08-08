@@ -17,57 +17,81 @@
   periodically to extract reusable workspace lessons) could grow unboundedly:
   incremental mode included ALL unprocessed records (223 in one workspace →
   ~1.46M chars that exceeded codex's 1,048,576-char request limit), verbose
-  validation/risks/final_summary fields were included verbatim, and
-  active_lessons carried full summary text with a 50-entry cap. Smaller agents
-  (codex, cursor) could not process the resulting prompt. Four fixes: (1) **all
+  validation/risks/final_summary/title/path/tag/id fields were included verbatim,
+  and active_lessons carried full summary text with a 50-entry cap. Even after
+  the v4 cap/fingerprint fixes, adversarial long titles/tags/paths could blow
+  the promised 128K-char bound. v5 closes the last gaps. Five fixes: (1) **all
   modes cap at 30 digests per run** (the previous "INCREMENTAL skips the cap"
   was a bug that let backlogs grow without bound); remaining unprocessed
   records stay uncached and are picked up on the next run. The request schema
   keeps the legacy `limit` range 1..200 (backward compat); the store clamps to
-  30 internally rather than returning HTTP 422. (2) **Digest fields are
-  truncated strictly**: final_summary ≤ 200 chars, validation/risks items ≤ 200
-  chars (max 2 items each), changed_files ≤ 10 items, report_state_sequence
-  emptied (counts carry the signal). Ellipsis accounting means emitted strings
-  never exceed the cap (`value[:n-3] + "..."`). (3) **Compact serialization**
-  drops path/sha256/summarized_at/completed_at local metadata and unused
-  package fields (workspace metadata, summary_run bookkeeping beyond
-  id/mode/input_record_ids). (4) **Active lessons dedup payload retains the
-  backend-assigned `fingerprint` (16-char scope-prefixed sha1 hash) plus a
-  ≤120-char summary snippet and caps at 20** so the Reaper can deterministically
-  echo an existing fingerprint on POST to merge near-duplicates; the instruction
-  preamble was compressed from ~75 to ~25 lines and explicitly tells the Reaper
-  to use the fingerprint field (title+tags alone are insufficient because the
-  backend fingerprint spans seven fields). Additionally, the worker/reviewer
-  lesson index is tightened further (limit 8→5, title 72→50 chars, tags capped
-  at 4, shorter boilerplate).
+  30 internally rather than returning HTTP 422. (2) **Every free-text field in
+  both input_task_digests and active_lessons is capped**: task_id ≤ 64, title ≤
+  80, final_summary ≤ 200, changed_files paths ≤ 120 chars and ≤ 6 items,
+  validation/risks ≤ 160 chars and ≤ 2 items each, report_states ≤ 8 items
+  each ≤ 32 chars; active-lesson id ≤ 80, title ≤ 80, summary ≤ 120, tags ≤ 6
+  each ≤ 24 chars. The `fingerprint` field is **never truncated** (it is the
+  authoritative 25-char `workspace:<16-hex>` merge key — Reaper echoes it
+  verbatim on POST and the server merges on exact match). Ellipsis accounting
+  (`value[:n-3] + "..."`) means emitted strings never exceed `n`. (3) **Global
+  hard-char budget** of 100K chars (≈25K tokens) is enforced at prompt-assembly
+  time as defense in depth; if exceeded, oldest digests are dropped until the
+  prompt fits (should never trigger with the per-field caps, but guards against
+  future regression). (4) **Compact serialization** drops path/sha256/
+  summarized_at/completed_at local metadata and unused package fields beyond
+  run id/mode/input_record_ids. (5) **Active lessons dedup payload retains the
+  exact `fingerprint`** plus ≤120-char summary snippet and caps at 20 so the
+  Reaper can deterministically echo an existing fingerprint on POST to merge
+  near-duplicates; the instruction preamble was compressed from ~75 to ~28
+  lines and explicitly tells the Reaper to use the fingerprint field and
+  keep its own POST fields within char bounds. Additionally, the worker/
+  reviewer lesson index is tightened (limit 8→5, title 72→50 chars, tags
+  capped at 4, shorter boilerplate).
 - **Why**: after the prior compact-index fix the inline worker/reviewer block
   was ~340 tokens, but the Reaper prompt itself — generated when summarizing
   workspace feedback — could exceed codex's hard 1,048,576-character request
   ceiling when a workspace accumulated many completed tasks between reaper
   runs.
 - **How**: `_REAPER_MAX_DIGESTS_PER_RUN = 30` caps all modes in
-  `prepare_summary_input`. `_truncate_str`/`_truncate_list`/
-  `_compact_digest_for_prompt()` apply strict per-field truncation (applied to
-  both fresh and cached records, so pre-existing large caches are also
-  compacted). `_build_workspace_feedback_summary_prompt` compresses instructions
-  and includes id/fingerprint/title/summary[:120]/tags/confidence in
-  active_lessons; payload example shows the optional `fingerprint` merge field.
-  `_CONTEXT_LIMIT_DEFAULT` 8→5, title/boilerplate tightened in
-  `_lesson_context_block_from_payload`. `FeedbackSummaryRequest.limit` default
-  50→30, schema max stays at 200 (clamped internally at the store).
-  `FEEDBACK_SUMMARY_PROMPT_VERSION` bumped 3→4.
-- **Verified**: measured against the real Claude Hub workspace (277 task
-  records, 5 active lessons): reaper prompt ~62,901 chars / ~15,725 tokens
-  (down from the 1,463,804 chars reported in the codex failure attachment →
-  ~95.7% char reduction, well under the 128K-char / 32K-token target). 146
-  lesson/feedback/reaper tests pass (18 feedback + 128 workspace), including
-  new coverage for deterministic fingerprint-echo merge
-  (`test_create_lesson_merges_deterministically_when_fingerprint_echoed`),
-  internal limit clamping
-  (`test_prepare_summary_input_clamps_large_limit_to_max_digests`), and
-  backward-compatible schema range
-  (`test_feedback_summary_request_accepts_legacy_limit_range`). black/isort/mypy
-  clean.
+  `prepare_summary_input`; `REAPER_PROMPT_HARD_CHAR_LIMIT = 100_000` is the
+  defense-in-depth global budget enforced in `_build_workspace_feedback_summary_
+  prompt` (oldest digests dropped if exceeded). Field-level constants
+  (`_DIGEST_MAX_TASK_ID=64`, `_DIGEST_MAX_TITLE=80`, `_DIGEST_MAX_FINAL_SUMMARY=
+  200`, `_DIGEST_MAX_ITEM_CHARS=160`, `_DIGEST_MAX_PATH_CHARS=120`,
+  `_DIGEST_MAX_CHANGED_FILES=6`, `_DIGEST_MAX_VALIDATION_ITEMS=2`,
+  `_DIGEST_MAX_RISKS_ITEMS=2`, lesson caps `_LESSON_MAX_ID=80`, `_LESSON_MAX_
+  TITLE=80`, `_LESSON_MAX_SUMMARY=120`, `_LESSON_MAX_TAG_LEN=24`, `_LESSON_MAX_
+  TAGS=6`) are applied both at digest creation (`_digest_task_record`) and in
+  `_compact_digest_for_prompt()` (so pre-v5 cached records are also compacted).
+  Fingerprint is preserved verbatim — never truncated.
+  `_build_workspace_feedback_summary_prompt` compresses instructions and
+  includes id/fingerprint/title/summary/tags/confidence in active_lessons;
+  payload example shows the optional `fingerprint` merge field and tells the
+  Reaper to keep its own POST fields within bounds. `_CONTEXT_LIMIT_DEFAULT`
+  8→5, title/boilerplate tightened in `_lesson_context_block_from_payload`.
+  `FeedbackSummaryRequest.limit` default 50→30, schema max stays at 200
+  (clamped internally at the store). `FEEDBACK_SUMMARY_PROMPT_VERSION`
+  bumped 3→5 (v5 adds comprehensive per-field caps + hard budget; the v4
+  fingerprint/title/summary/tag/id shapes are preserved so this is backward
+  compatible with in-flight Reaper runs).
+- **Verified**:
+  - *Normal workspace* (277 task records, 5 active lessons): full prompt
+    ~57,036 chars / ~14,259 tokens (~96.1% char reduction from the 1.46M-char
+    codex failure).
+  - *Adversarial worst-case* (30 tasks each with 5000-char title/final_summary/
+    validation/risks, 20×1500-char changed_files, plus 20 active lessons with
+    long titles/summaries/tags): prompt ~69,660 chars / ~17,415 tokens, under
+    both the 100K hard budget and the 128K/32K target; fingerprint field
+    preserved exactly (`workspace:<16-hex>`); long 5000-char strings do not
+    appear verbatim.
+  - 148 lesson/feedback/reaper tests pass (20 feedback + 128 workspace),
+    including 4 new adversarial and contract tests:
+    `test_compact_digest_for_prompt_bounds_every_free_text_field`,
+    `test_prepare_summary_input_clamps_large_limit_to_max_digests`,
+    `test_feedback_summary_request_accepts_legacy_limit_range`,
+    `test_create_lesson_merges_deterministically_when_fingerprint_echoed`,
+    `test_reaper_prompt_stays_under_hard_budget_with_adversarial_input` (e2e).
+    black/isort/mypy clean.
 
 ### fix: restore terminal history and resize injection on first load
 

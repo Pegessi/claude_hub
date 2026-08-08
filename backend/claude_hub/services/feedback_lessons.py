@@ -26,16 +26,29 @@ from ..models import (
 )
 
 FEEDBACK_INDEX_SCHEMA_VERSION = 1
-FEEDBACK_SUMMARY_PROMPT_VERSION = 4
+FEEDBACK_SUMMARY_PROMPT_VERSION = 5
 
 # Reaper-prompt digest truncation limits keep Feedback Reaper prompts bounded
-# so smaller-context agents (codex, cursor) can process them. Target: total
-# reaper prompt < ~32K tokens for worst-case (30 digests).
+# so smaller-context agents (codex, cursor) can process them. All free-text
+# fields that flow into the prompt are capped to a fixed char/item maximum.
+# A global hard char budget (_REAPER_PROMPT_HARD_CHAR_LIMIT) is enforced at
+# prompt-assembly time as defense in depth. Target worst-case (30 digests,
+# all fields at cap) fits safely under ~128K chars / ~32K tokens.
+_DIGEST_MAX_TASK_ID = 64
+_DIGEST_MAX_TITLE = 80
 _DIGEST_MAX_FINAL_SUMMARY = 200
-_DIGEST_MAX_ITEM_CHARS = 200
+_DIGEST_MAX_ITEM_CHARS = 160
+_DIGEST_MAX_PATH_CHARS = 120
 _DIGEST_MAX_VALIDATION_ITEMS = 2
 _DIGEST_MAX_RISKS_ITEMS = 2
-_DIGEST_MAX_CHANGED_FILES = 10
+_DIGEST_MAX_CHANGED_FILES = 6
+# Active-lesson payload caps (these must keep the fingerprint field EXACT —
+# it is the authoritative merge key; Reaper echoes it back verbatim).
+_LESSON_MAX_ID = 80
+_LESSON_MAX_TITLE = 80
+_LESSON_MAX_SUMMARY = 120
+_LESSON_MAX_TAG_LEN = 24
+_LESSON_MAX_TAGS = 6
 
 
 def _now() -> datetime:
@@ -492,6 +505,12 @@ class FeedbackLessonStore:
     # long-inactive workspace can accumulate hundreds of unprocessed records,
     # producing a 500K+ token prompt that exceeds smaller agents' context.
     _REAPER_MAX_DIGESTS_PER_RUN = 30
+    # Global hard char budget for the assembled Reaper prompt (instructions +
+    # package JSON). Enforced by the WorkspaceManager after building the
+    # prompt; if exceeded, oldest digests are dropped until the prompt fits.
+    # 100K chars ≈ 25K tokens, leaving safe margin under codex's ~1M-char
+    # request ceiling and well under our 128K/32K target.
+    REAPER_PROMPT_HARD_CHAR_LIMIT = 100_000
 
     def prepare_summary_input(
         self,
@@ -897,15 +916,24 @@ class FeedbackLessonStore:
         final_summary = self._truncate_str(
             str(payload.get("final_summary") or ""), _DIGEST_MAX_FINAL_SUMMARY
         )
+        # Truncate free-text fields at digest creation too, so cached records
+        # don't carry oversized title/status/task_id. _compact_digest_for_prompt
+        # re-applies truncation defensively for records cached before v5.
+        task_id = self._truncate_str(
+            str(task.get("id") or payload.get("task_id") or ""), _DIGEST_MAX_TASK_ID
+        )
+        title = self._truncate_str(str(task.get("title") or ""), _DIGEST_MAX_TITLE)
+        changed_files_raw = self._list_value(artifacts.get("changed_files"))
+        changed_files = self._truncate_list(
+            [self._truncate_str(str(f), _DIGEST_MAX_PATH_CHARS) for f in changed_files_raw],
+            _DIGEST_MAX_CHANGED_FILES,
+        )
         return FeedbackTaskDigest(
-            task_id=str(task.get("id") or payload.get("task_id") or ""),
-            title=str(task.get("title") or ""),
-            status=str(task.get("status") or ""),
+            task_id=task_id,
+            title=title,
+            status=self._truncate_str(str(task.get("status") or ""), 16),
             final_summary=final_summary,
-            changed_files=self._truncate_list(
-                self._list_value(artifacts.get("changed_files")),
-                _DIGEST_MAX_CHANGED_FILES,
-            ),
+            changed_files=changed_files,
             validation=self._truncate_list(
                 [
                     self._truncate_str(item, _DIGEST_MAX_ITEM_CHARS)
@@ -934,12 +962,14 @@ class FeedbackLessonStore:
     def _compact_digest_for_prompt(self, digest: FeedbackTaskDigest) -> dict[str, Any]:
         """Serialize a digest into the compact prompt format, applying truncation
         even to records loaded from the existing cache (which may have been
-        created before truncation was added)."""
+        created before truncation was added). Every free-text field is bounded
+        so adversarial title/path/validation content cannot blow the budget."""
         return {
-            "title": digest.title,
+            "task_id": self._truncate_str(digest.task_id, _DIGEST_MAX_TASK_ID),
+            "title": self._truncate_str(digest.title, _DIGEST_MAX_TITLE),
             "final_summary": self._truncate_str(digest.final_summary, _DIGEST_MAX_FINAL_SUMMARY),
             "changed_files": self._truncate_list(
-                [self._truncate_str(f, 200) for f in digest.changed_files],
+                [self._truncate_str(f, _DIGEST_MAX_PATH_CHARS) for f in digest.changed_files],
                 _DIGEST_MAX_CHANGED_FILES,
             ),
             "validation": self._truncate_list(
@@ -953,7 +983,9 @@ class FeedbackLessonStore:
             "review_failed_count": digest.review_failed_count,
             "needs_input_count": digest.needs_input_count,
             "report_total": digest.report_total,
-            "report_states": digest.report_states[:8],
+            "report_states": self._truncate_list(
+                [self._truncate_str(s, 32) for s in digest.report_states], 8
+            ),
         }
 
     def _truncate_str(self, value: str, max_len: int) -> str:

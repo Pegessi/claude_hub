@@ -3227,6 +3227,121 @@ def test_workspace_feedback_summary_uses_hidden_internal_reaper_task(
     assert sent_messages
 
 
+def test_reaper_prompt_stays_under_hard_budget_with_adversarial_input(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Adversarial end-to-end: 30 tasks with 5000-char titles/summaries,
+    50 long changed_files/validation/risks items per task, plus 20 active
+    lessons with long ids/titles/summaries/tags. The assembled prompt must
+    stay under REAPER_PROMPT_HARD_CHAR_LIMIT (100K) and every bounded field
+    must respect its cap."""
+    import json
+
+    from claude_hub.services.feedback_lessons import FEEDBACK_SUMMARY_PROMPT_VERSION
+
+    repo = tmp_path / "repo-adv"
+    repo.mkdir()
+    state_root = tmp_path / "state-adv"
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", state_root)
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="adversarial-reaper-tab",
+        port=12540,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    ws = client.post(
+        "/api/workspaces",
+        json={"name": "Adv Reaper", "path": str(repo), "session_prefix": "adv"},
+    ).json()
+    record_dir = state_root / ws["id"] / "task_records"
+    record_dir.mkdir(parents=True)
+    long_title = "T" * 5000
+    long_summary = "S" * 5000
+    long_item = "I" * 5000
+    long_path = "very/long/path/component/" * 50 + "file.py"  # ~1500 chars/path
+    for i in range(30):
+        task_id = f"task-{i:03d}"
+        # Filename must contain task_id to match _task_iteration_signal glob
+        # (real system writes {timestamp}-{task.id}.json).
+        record_dir.joinpath(f"2026-06-07T12-{i:02d}-00-{task_id}.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "workspace_id": ws["id"],
+                    "task": {"id": task_id, "title": long_title, "status": "done"},
+                    "reports": [{"state": "review_failed"}] * 3
+                    + [{"state": "completed", "message": long_summary}],
+                    "artifacts": {
+                        "changed_files": [long_path] * 50,
+                        "validation": [long_item] * 30,
+                        "risks": [long_item] * 30,
+                    },
+                    "final_summary": long_summary,
+                }
+            ),
+            encoding="utf-8",
+        )
+    # Create 20 active lessons with long titles/summaries/tags. Use realistic
+    # lesson ids (slug <80 chars) so id truncation path is exercised but not
+    # triggered; adversarial length is in title/summary/tags.
+    for i in range(20):
+        resp = client.post(
+            f"/api/workspaces/{ws['id']}/lessons",
+            json={
+                "id": f"lesson-adversarial-{i:02d}",
+                "title": long_title[:200],
+                "summary": long_summary,
+                "applies_when": ["whenever processing adversarial input"],
+                "do": "Apply per-field truncation before serializing.",
+                "avoid": "Do not include verbatim long strings.",
+                "tags": [f"tag-{j:02d}-" + ("y" * 100) for j in range(15)],
+                "scope": "workspace",
+                "evidence_task_ids": [f"task-{i:03d}"],
+                "confidence": 0.6,
+            },
+        )
+        assert resp.status_code == 201, resp.text
+
+    response = client.post(f"/api/workspaces/{ws['id']}/lessons/summarize")
+    assert response.status_code == 201
+    run = response.json()
+    assert run["prompt_version"] == FEEDBACK_SUMMARY_PROMPT_VERSION
+    assert sent_messages
+    reaper_prompt = sent_messages[-1][1]
+    store = workspace_manager._feedback_store()
+    # Hard budget honored.
+    assert len(reaper_prompt) <= store.REAPER_PROMPT_HARD_CHAR_LIMIT, (
+        f"adversarial prompt {len(reaper_prompt)} chars exceeds "
+        f"{store.REAPER_PROMPT_HARD_CHAR_LIMIT}"
+    )
+    # Sanity: actual size is a small fraction of the cap — under 32K tokens (~128K
+    # chars), well within codex's budget. With per-field caps we expect ~20-60K.
+    assert len(reaper_prompt) < 128_000
+    # package JSON contains all 30 digests (bounded but not dropped by budget
+    # because per-field caps keep us under budget even at max).
+    assert '"input_task_digests"' in reaper_prompt
+    # Long 5000-char strings MUST NOT appear verbatim.
+    assert long_title not in reaper_prompt
+    assert long_summary not in reaper_prompt
+    assert long_item not in reaper_prompt
+    # Fingerprint preserved exactly (format: scope:16-hex). Skip the example
+    # placeholder "<existing-fingerprint-if-merge>" that appears in instructions.
+    import re as _re
+
+    fp_matches = _re.findall(r'"fingerprint":\s*"([^"]+)"', reaper_prompt)
+    real_fps = [fp for fp in fp_matches if not fp.startswith("<")]
+    assert real_fps, "no real fingerprints found in prompt"
+    for fp in real_fps:
+        assert _re.match(
+            r"^workspace:[0-9a-f]{16}$", fp
+        ), f"fingerprint truncated or malformed: {fp!r}"
+
+
 def test_lessons_index_includes_all_active_lessons_without_full_body_leak(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
