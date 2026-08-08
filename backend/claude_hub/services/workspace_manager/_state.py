@@ -12,6 +12,7 @@ class _StateMixin:
         self.sessions: dict[str, ManagedSession] = {}
         self.reports: dict[str, AgentReport] = {}
         self._dispatch_locks: dict[str, asyncio.Lock] = {}
+        self._feedback_summary_locks: dict[str, asyncio.Lock] = {}
         self._monitor_task: asyncio.Task[None] | None = None
         # Cache of resolved git worktree roots per workspace id: (timestamp, roots).
         # Used by artifact preview to resolve markdown produced inside a worktree.

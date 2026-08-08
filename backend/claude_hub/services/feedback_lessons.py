@@ -119,6 +119,9 @@ class FeedbackLessonStore:
     def _summary_runs_dir(self, workspace_id: str) -> Path:
         return self._feedback_dir(workspace_id) / "summary-runs"
 
+    def _summary_stage_path(self, workspace_id: str, run_id: str) -> Path:
+        return self._summary_runs_dir(workspace_id) / f"{run_id}.pending.json"
+
     def reap_task_feedback(
         self,
         workspace: Workspace,
@@ -699,6 +702,96 @@ class FeedbackLessonStore:
         self._write_feedback_index(workspace_id, index)
         return len(sorted_processed)
 
+    def stage_summary_input(
+        self,
+        summary_input: dict[str, Any],
+        committed_paths: list[str],
+    ) -> None:
+        """Persist the exact post-budget selection until its task succeeds.
+
+        A Feedback Reaper task must not mark records processed merely because
+        its prompt was dispatched.  Keeping this bounded commit package beside
+        the summary run lets completion commit the index after a restart, while
+        abort/delete can discard it so a later trigger retries the records.
+        """
+
+        workspace_id = str(summary_input["_workspace_id"])
+        run_id = str(summary_input["run_id"])
+        selected_dumps_by_path: dict[str, dict[str, Any]] = summary_input.get(
+            "_selected_dumps_by_path", {}
+        )
+        committed_set = set(committed_paths)
+        payload = {
+            "schema_version": 1,
+            "workspace_id": workspace_id,
+            "run_id": run_id,
+            "prepared_at": summary_input["_now"].isoformat(),
+            "record_paths": list(summary_input["_record_paths"]),
+            "first_scan": bool(summary_input["_first_scan_raw"]),
+            "committed_paths": list(committed_paths),
+            "selected_dumps_by_path": {
+                path: dump for path, dump in selected_dumps_by_path.items() if path in committed_set
+            },
+        }
+        path = self._summary_stage_path(workspace_id, run_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def commit_staged_summary_input(self, workspace_id: str, run_id: str) -> int | None:
+        """Idempotently commit a successful run's staged records.
+
+        The stage file is intentionally retained until the caller also
+        persists the completed run.  A crash between the two writes can then
+        replay this commit safely instead of losing the recovery package.
+        """
+
+        path = self._summary_stage_path(workspace_id, run_id)
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("workspace_id") != workspace_id or data.get("run_id") != run_id:
+            raise ValueError("Feedback summary pending input does not match its run")
+        index = self._read_feedback_index(workspace_id)
+        existing_entries = {
+            str(item.get("path")): item
+            for item in index.get("processed_task_records", [])
+            if isinstance(item, dict) and item.get("path")
+        }
+        summary_input = {
+            "_workspace_id": workspace_id,
+            "_now": datetime.fromisoformat(str(data["prepared_at"])),
+            "_existing_entries": existing_entries,
+            "_record_paths": list(data.get("record_paths", [])),
+            "_first_scan_raw": bool(data.get("first_scan")),
+            "_selected_dumps_by_path": dict(data.get("selected_dumps_by_path", {})),
+        }
+        processed_count = self.commit_summary_input(
+            summary_input,
+            list(data.get("committed_paths", [])),
+        )
+        return processed_count
+
+    def discard_staged_summary_input(self, workspace_id: str, run_id: str) -> None:
+        """Remove a pending package after completion or explicit abandonment."""
+
+        self._summary_stage_path(workspace_id, run_id).unlink(missing_ok=True)
+
+    def has_staged_summary_input(self, workspace_id: str, run_id: str) -> bool:
+        """Return whether a summary run has a valid prepared commit package."""
+
+        path = self._summary_stage_path(workspace_id, run_id)
+        if not path.is_file():
+            return False
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        return bool(
+            isinstance(data, dict)
+            and data.get("workspace_id") == workspace_id
+            and data.get("run_id") == run_id
+        )
+
     def write_summary_run(self, workspace_id: str, run: FeedbackSummaryRun) -> None:
         directory = self._summary_runs_dir(workspace_id)
         directory.mkdir(parents=True, exist_ok=True)
@@ -726,6 +819,37 @@ class FeedbackLessonStore:
                 "completed_at": now,
             }
         )
+        run_path.write_text(updated.model_dump_json(indent=2), encoding="utf-8")
+        return updated
+
+    def summary_run_for_task(
+        self,
+        workspace_id: str,
+        task_id: str,
+    ) -> FeedbackSummaryRun | None:
+        """Return the persisted run associated with a managed summary task."""
+
+        _, run = self._find_summary_run_by_task(workspace_id, task_id)
+        return run
+
+    def abandon_summary_run(
+        self,
+        workspace_id: str,
+        task_id: str,
+        *,
+        reason: str,
+        now: datetime | None = None,
+    ) -> FeedbackSummaryRun | None:
+        """Make an unfinished run terminal without consuming its staged input."""
+
+        now = now or _now()
+        run_path, run = self._find_summary_run_by_task(workspace_id, task_id)
+        if not run_path or not run:
+            return None
+        self._summary_stage_path(workspace_id, run.id).unlink(missing_ok=True)
+        if run.completed_at is not None:
+            return run
+        updated = run.model_copy(update={"skipped_reason": reason, "completed_at": now})
         run_path.write_text(updated.model_dump_json(indent=2), encoding="utf-8")
         return updated
 
@@ -1096,6 +1220,8 @@ class FeedbackLessonStore:
         if not directory.exists():
             return None, None
         for path in sorted(directory.glob("*.json"), reverse=True):
+            if path.name.endswith(".pending.json"):
+                continue
             try:
                 run = FeedbackSummaryRun(**json.loads(path.read_text(encoding="utf-8")))
             except Exception:

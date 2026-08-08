@@ -736,24 +736,16 @@ class _TmuxQueriesMixin:
             [
                 task
                 for task in self.tasks.values()
-                if task.session_id == session_id
-                and task.status == WorkspaceTaskStatus.QUEUED
-                and not task.system_internal
+                if task.session_id == session_id and task.status == WorkspaceTaskStatus.QUEUED
             ]
         )
 
     def _with_assignment_summary(self, session: ManagedSession) -> ManagedSession:
         current_task_id = session.current_task_id or session.task_id
-        current_task = self.tasks.get(current_task_id or "")
-        visible_current_task_id = (
-            None if current_task and current_task.system_internal else current_task_id
-        )
         return session.model_copy(
             update={
-                "task_id": (
-                    None if current_task and current_task.system_internal else session.task_id
-                ),
-                "current_task_id": visible_current_task_id,
+                "task_id": session.task_id,
+                "current_task_id": current_task_id,
                 "queued_count": self._queued_count(session.id),
             }
         )
@@ -768,9 +760,20 @@ class _TmuxQueriesMixin:
         await self._prune_orphan_workspace_tabs(workspace_id)
         self._sync_workspace_tab_metadata(workspace_id)
         tasks = [
-            task
+            (
+                task.model_copy(
+                    update={
+                        "prompt": (
+                            "System-managed Feedback Reaper task. Inspect its reports and "
+                            "summary-run audit for lifecycle details."
+                        )
+                    }
+                )
+                if task.system_internal and task.internal_kind == "feedback_reaper"
+                else task
+            )
             for task in self.tasks.values()
-            if task.workspace_id == workspace_id and not task.system_internal
+            if task.workspace_id == workspace_id
         ]
         sessions = self.sessions_for_workspace(workspace_id)
         reports = self.latest_reports_per_task_for_workspace(workspace_id)
