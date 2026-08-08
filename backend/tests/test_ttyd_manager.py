@@ -1,9 +1,11 @@
+import asyncio
 import importlib
 import json
 import os
 import shlex
 import stat
 import subprocess
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,6 +27,24 @@ from claude_hub.services.ttyd_manager import (
 )
 
 ttyd_manager_module = importlib.import_module("claude_hub.services.ttyd_manager")
+
+
+def _run_coro_in_isolated_thread(coro) -> None:
+    """Run an async assertion outside pytest-asyncio's shared-loop state."""
+    errors = []
+
+    def _runner() -> None:
+        try:
+            asyncio.run(coro)
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join(timeout=10)
+    assert not thread.is_alive(), "isolated async assertion timed out"
+    if errors:
+        raise errors[0]
 
 
 def _wrapper_script(command: str) -> str:
@@ -1546,6 +1566,33 @@ def test_codex_recovery_with_pinned_id_resumes_exact_uuid(monkeypatch: MonkeyPat
     assert "|| codex --ask-for-approval never --sandbox danger-full-access" in launch
 
 
+def test_codex_recovery_rejects_sid_owned_by_another_cwd(monkeypatch: MonkeyPatch) -> None:
+    """A globally existing SID is not resumable when its rollout cwd differs."""
+    pinned = "019f8e90-79d1-7a92-a165-8075ab17f552"
+    calls = []
+
+    def _fake_id_exists(sid: str, cwd=None) -> bool:
+        calls.append((sid, cwd))
+        return sid == pinned and cwd == "/owner-workspace"
+
+    monkeypatch.setattr(ttyd_manager_module, "_codex_id_exists", _fake_id_exists)
+    process = TTYDProcess(
+        tab_id="tab-codex-wrong-cwd",
+        port=12380,
+        name="Codex Wrong Cwd",
+        agent_type=AgentType.CODEX,
+        cwd="/different-workspace",
+        from_persisted_state=True,
+        agent_session_id=pinned,
+    )
+
+    launch = process._build_ttyd_command(session_exists=False)[-1]
+
+    assert calls == [(pinned, "/different-workspace")]
+    assert "codex resume" not in launch
+    assert pinned not in launch
+
+
 def test_non_solo_codex_recovery_starts_fresh_when_unpinned() -> None:
     """Non-solo codex without a verified sid starts fresh (no --last)."""
     process = TTYDProcess(
@@ -1616,6 +1663,27 @@ def test_cursor_recovery_uses_resume_uuid() -> None:
     assert "agent --resume" in launch
     assert "--continue" not in launch
     assert process.agent_session_id in launch
+
+
+def test_cursor_recovery_rotates_sid_not_verified_for_cwd(monkeypatch: MonkeyPatch) -> None:
+    """A Cursor SID from another cwd is replaced with a constructive fresh pin."""
+    stale_sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    monkeypatch.setattr(ttyd_manager_module, "_cursor_id_exists", lambda sid, cwd: False)
+    process = TTYDProcess(
+        tab_id="tab-cursor-wrong-cwd",
+        port=12371,
+        name="Cursor Wrong Cwd",
+        agent_type=AgentType.CURSOR,
+        cwd="/different-workspace",
+        from_persisted_state=True,
+        agent_session_id=stale_sid,
+    )
+
+    launch = process._build_ttyd_command(session_exists=False)[-1]
+
+    assert process.agent_session_id != stale_sid
+    assert stale_sid not in launch
+    assert f"agent --resume {process.agent_session_id}" in launch
 
 
 def test_cursor_launch_no_double_resume_when_live() -> None:
@@ -2539,3 +2607,58 @@ def test_codex_quarantined_does_not_issue_resume() -> None:
     launch = cmd[-1]
     assert "codex resume" not in launch
     assert "old-bad-sid" not in launch
+
+
+def test_tmux_kill_session_raises_when_session_survives(monkeypatch: MonkeyPatch) -> None:
+    """Ownership quarantine must not claim success while tmux is still live."""
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def _fake_exec(*args, **kwargs):
+        return _FakeProc()
+
+    async def _still_exists(session_name: str) -> bool:
+        return session_name == "claude-hub-live"
+
+    monkeypatch.setattr(ttyd_manager_module.asyncio, "create_subprocess_exec", _fake_exec)
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", _still_exists)
+
+    async def _exercise() -> None:
+        with pytest.raises(RuntimeError, match="still exists after kill-session"):
+            await ttyd_manager_module._tmux_kill_session("claude-hub-live")
+
+    _run_coro_in_isolated_thread(_exercise())
+
+
+def test_quarantine_preserves_sid_when_teardown_cannot_be_proven(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Do not erase the last owner SID when its process may still be writing."""
+    manager = TTYDManager.__new__(TTYDManager)
+    tab = TTYDProcess(
+        tab_id="tab-live-writer",
+        port=12407,
+        name="Live Writer",
+        agent_type=AgentType.CODEX,
+        agent_session_id="owned-sid",
+    )
+
+    async def _failed_stop(*, kill_tmux: bool = False) -> None:
+        assert kill_tmux is True
+        raise RuntimeError("tmux survived")
+
+    monkeypatch.setattr(tab, "stop", _failed_stop)
+
+    async def _exercise() -> None:
+        with pytest.raises(RuntimeError, match="failed to stop owned tmux/ttyd"):
+            await manager._quarantine_codex_tab(tab, "ambiguous attribution")
+
+    _run_coro_in_isolated_thread(_exercise())
+
+    assert tab.agent_session_id == "owned-sid"
+    assert tab.resume_quarantined is True
+    assert "cleanup failed" in (tab._pending_quarantine_reason or "")
