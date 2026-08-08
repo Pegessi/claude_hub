@@ -1,8 +1,19 @@
 """Feedback lesson management."""
 
+import re
+
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
 from ._constants import *  # noqa: F401,F403
+
+# Canonical fingerprint format produced by FeedbackLessonStore._lesson_fingerprint:
+# scope (workspace|family|global) + ":" + 16 hex chars. Max length is 26
+# ("workspace:" + 16 hex). Legacy data may carry non-canonical or oversized
+# fingerprints from before v5; those are filtered OUT of the active_lessons
+# payload (the Reaper cannot echo-merge against them anyway) so the prompt
+# stays bounded.
+_CANONICAL_FP_RE = re.compile(r"^(workspace|family|global):[0-9a-f]{16}$")
+_MAX_FP_LEN_HARD = 64  # absolute ceiling — anything longer is treated as legacy
 
 
 class _FeedbackMixin:
@@ -31,119 +42,131 @@ class _FeedbackMixin:
         self,
         workspace: Workspace,
         summary_input: dict[str, Any],
-    ) -> str:
-        lessons = self.feedback_lessons(workspace.id, limit=50)
+    ) -> tuple[str, list[str], list[str]]:
+        """Build the Reaper prompt, enforcing the global hard char budget by
+        dropping oldest digests until the prompt fits. Returns (prompt,
+        committed_task_ids, committed_paths) so the caller can (a) record the
+        final id list on FeedbackSummaryRun and (b) commit only the actually-
+        sent records to the processed index.
+
+        Budget is strict: we allow dropping ALL the way to zero digests if
+        necessary (e.g. the instruction preamble + active_lessons alone could
+        theoretically exceed budget, though our caps prevent that in practice).
+        A zero-digest prompt is still well-formed JSON and the Reaper simply
+        produces zero lessons."""
+        # Cap active lessons for dedup context. Keep the backend-assigned
+        # fingerprint EXACT (it is the 16-char sha1 scope:prefixed hash that
+        # drives server-side merge on POST; truncating it would break dedup).
+        # All other fields are bounded to fixed maxima so adversarial
+        # title/summary/tags/id values cannot blow the prompt.
+        store = self._feedback_store()
+        _HARD_BUDGET = store.REAPER_PROMPT_HARD_CHAR_LIMIT  # defense in depth
+        _LESSON_MAX = 20
+        _LESSON_MAX_ID = 80
+        _LESSON_MAX_TITLE = 80
+        _LESSON_MAX_SUMMARY = 120
+        _LESSON_MAX_TAG_LEN = 24
+        _LESSON_MAX_TAGS = 6
+        # Instruction preamble (fixed text). Measured ~1.9K chars; keep small.
+        _INSTRUCTIONS = (
+            "You are the internal Feedback Reaper. System-internal task — do not ask the human for acceptance.\n"
+            "\n"
+            "Goal: extract reusable workspace lessons from input_task_digests. Quality > quantity. "
+            "Zero lessons is correct when no signal exists. Use only the input package; do not scan the workspace.\n"
+            "\n"
+            "Extraction signals (at least one required per lesson):\n"
+            "  A) Iteration cost: single task with review_failed_count>=1 OR needs_input_count>=2.\n"
+            "  B) Cross-task recurrence: same root pattern in >=2 digests.\n"
+            "Implementation-detail lessons need A or B with observable evidence; a single clean-pass final_summary is not a lesson.\n"
+            "\n"
+            "Required lesson fields (server validates; HTTP 400 on violation — do not retry):\n"
+            "  title (short), summary (1-2 sentences, <=200 chars), applies_when (>=1, <=4 items each <=60 chars), do (<=200 chars),\n"
+            "  avoid (<=200 chars), tags (<=6, each <=24 chars, lowercase-dashed), scope ('workspace'),\n"
+            "  confidence (<=0.6 single / <=0.85 multi), evidence_task_ids (<=5 items from input).\n"
+            "Server enforcement: applies_when/do/avoid non-empty; single-evidence tasks need review_failed>=1 or needs_input>=2;\n"
+            "multi-evidence needs >=2 cited tasks with >=1 showing iteration. Pure summary similarity is not evidence.\n"
+            "\n"
+            "Dedup (deterministic via fingerprint): compare against active_lessons. If a new lesson would duplicate an\n"
+            "existing one (matching core meaning even if wording differs), EITHER skip creation OR POST with the existing\n"
+            "lesson's fingerprint field echoed verbatim — the server merges on exact fingerprint match. The fingerprint is\n"
+            "the authoritative merge key; do not try to recompute it. Do not rely on title+tags alone.\n"
+            "\n"
+            f"POST /api/workspaces/{workspace.id}/lessons\n"
+            'Payload: {"title":"...","summary":"...","applies_when":["..."],"do":"...","avoid":"...","tags":["..."],"scope":"workspace","confidence":0.6,"evidence_task_ids":["..."],"fingerprint":"<existing-fingerprint-if-merge>"}\n'
+            "\n"
+            "Completion: POST completed report (changed_files=[], review_decision=skip, risk_level=system_audit) with validation:\n"
+            "created_lesson_ids=<ids>|merged_lesson_ids=<ids>|skipped_reason=<reason>\n"
+            "\n"
+            "Input package JSON:\n"
+        )
+
+        def _clip(text: str, n: int) -> str:
+            if len(text) <= n:
+                return text
+            if n <= 3:
+                return text[:n]
+            return text[: n - 3].rstrip() + "..."
+
+        def _clamp_tags(tags: list[str]) -> list[str]:
+            return [_clip(str(t), _LESSON_MAX_TAG_LEN) for t in tags[:_LESSON_MAX_TAGS]]
+
+        def _sanitize_fp(fp: str) -> str:
+            """Include a lesson's fingerprint only when it is a canonical
+            `scope:16hex` merge key AND fits within the absolute ceiling.
+            Legacy non-canonical fingerprints are dropped (set to "") so
+            they cannot inflate the prompt or confuse the Reaper into
+            echoing a bogus value that would 400 on POST."""
+            if not fp:
+                return ""
+            if len(fp) > _MAX_FP_LEN_HARD:
+                return ""
+            if not _CANONICAL_FP_RE.match(fp):
+                return ""
+            return fp
+
+        lessons = self.feedback_lessons(workspace.id, limit=_LESSON_MAX)
         lesson_payload = [
             {
-                "id": lesson.id,
-                "title": lesson.title,
-                "fingerprint": lesson.fingerprint,
-                "summary": lesson.summary,
-                "tags": lesson.tags,
+                "id": _clip(str(lesson.id or ""), _LESSON_MAX_ID),
+                "fingerprint": _sanitize_fp(lesson.fingerprint or ""),
+                "title": _clip(lesson.title or "", _LESSON_MAX_TITLE),
+                "summary": _clip(lesson.summary or "", _LESSON_MAX_SUMMARY),
+                "tags": _clamp_tags(lesson.tags or []),
                 "confidence": lesson.confidence,
             }
             for lesson in lessons
         ]
-        package = {
-            "summary_run": {
-                "id": summary_input["run_id"],
-                "mode": summary_input["mode"],
-                "force": summary_input["force"],
-                "limit": summary_input["limit"],
-                "prompt_version": summary_input["prompt_version"],
-                "first_scan": summary_input["first_scan"],
-                "processed_count": summary_input["processed_count"],
-                "input_record_ids": summary_input["input_record_ids"],
-            },
-            "workspace": {
-                "id": workspace.id,
-                "name": workspace.name,
-                "target": workspace.target.value,
-                "path": workspace.path,
-            },
-            "active_lessons": lesson_payload,
-            "input_task_digests": summary_input["input_records"],
-        }
-        return "\n".join(
-            [
-                "You are the internal Feedback Reaper for this Claude Hub workspace.",
-                "",
-                "This is a system-internal task. Do not ask the human user for acceptance, and do "
-                "not treat this as an ordinary visible workspace task.",
-                "",
-                "Use only the bounded input package below. Do not scan the entire workspace or "
-                "read unrelated old task records unless a listed digest explicitly points to a "
-                "missing artifact you must inspect.",
-                "",
-                "Goal: extract reusable workspace lessons that help future tasks avoid known "
-                "pitfalls. Quality matters more than quantity. Emitting zero lessons is the "
-                "correct answer when no signal is present.",
-                "",
-                "Extraction signals — emit a lesson ONLY when at least one of these is supported "
-                "by the input_task_digests:",
-                "  Signal A — Iteration cost. A single task whose report_state_sequence shows "
-                "review_failed_count >= 1 OR needs_input_count >= 2, OR whose risks describe "
-                "rework. The lesson is the underlying issue that caused the extra rounds, NOT "
-                "the final fix recipe.",
-                "  Signal B — Cross-task recurrence. The same root problem (or a close variant) "
-                "appears in >= 2 distinct task digests. The lesson is the recurring pattern.",
-                "",
-                "Specific implementation-detail lessons (a particular file, function, error "
-                "message, or version-specific quirk) are allowed ONLY if Signal A or Signal B "
-                "applies AND the evidence makes the difficulty observable. A lesson whose only "
-                "support is a single task's final_summary with no review_failed / needs_input "
-                "trail is a fix recipe, not a lesson — skip it.",
-                "",
-                "Required fields per lesson (the backend rejects payloads that violate this):",
-                "  - title (short)",
-                "  - summary (one-to-two sentence description)",
-                "  - applies_when (>=1 condition: file glob, runtime, command, env, task shape)",
-                "  - do (recommended action; non-empty)",
-                "  - avoid (failure pattern to avoid; non-empty)",
-                "  - tags",
-                "  - scope (default 'workspace')",
-                "  - confidence: server-capped at 0.6 for single-evidence lessons and at 0.85 "
-                "for multi-evidence lessons; pick a value that already respects this.",
-                "  - evidence_task_ids (cite the supporting input task_ids; for Signal A "
-                "single-task lessons cite that one task; for Signal B cite all supporting tasks)",
-                "",
-                "Server-side enforcement (these rules are mechanically checked against "
-                "input_task_digests, NOT inferred from prose; lessons that fail are rejected "
-                "with HTTP 400 and you must move on rather than retrying with massaged text):",
-                "  - applies_when / do / avoid must be non-empty.",
-                "  - Single-evidence lessons must cite a task whose report_state_sequence has "
-                "review_failed_count >= 1 OR needs_input_count >= 2. If no input digest meets "
-                "this bar, do NOT submit a single-evidence lesson — emit a multi-evidence one "
-                "or skip the candidate.",
-                "  - Multi-evidence lessons must cite >=2 evidence_task_ids and at least one "
-                "cited task must show review_failed_count + needs_input_count >= 1. Pure "
-                "final_summary text similarity is NOT a substitute for iteration evidence.",
-                "",
-                "Deduplication rule: before creating a lesson, compare against active_lessons. "
-                "If the idea already exists, call the lesson API with matching title/summary/tags "
-                "so the backend merges evidence by fingerprint instead of creating a duplicate.",
-                "",
-                "Lessons API:",
-                f"POST /api/workspaces/{workspace.id}/lessons",
-                "Payload shape:",
-                '{"title":"short title","summary":"one-sentence description",'
-                '"applies_when":["condition"],"do":"recommended action",'
-                '"avoid":"failure pattern","tags":["tag"],"scope":"workspace",'
-                '"confidence":0.6,"evidence_task_ids":["task-id"]}',
-                "",
-                "Completion report requirement:",
-                "POST a completed report for this internal task with changed_files=[], "
-                "review_decision=skip, risk_level=system_audit, and validation containing one "
-                "of these exact fields (do NOT append free prose after the value; if you need "
-                "commentary put it on a separate line):",
-                "- created_lesson_ids=<comma-separated ids>",
-                "- merged_lesson_ids=<comma-separated ids>",
-                "- skipped_reason=<reason>",
-                "",
-                "Input package JSON:",
-                json.dumps(package, indent=2, ensure_ascii=False),
-            ]
-        )
+
+        digests = list(summary_input["input_records"])  # defensive copy
+
+        def _assemble(selected_digests: list[dict[str, Any]]) -> str:
+            # Strip internal bookkeeping (_path) before serializing into the
+            # prompt — the Reaper does not need local filesystem paths.
+            clean = []
+            for d in selected_digests:
+                clean.append({k: v for k, v in d.items() if not k.startswith("_")})
+            package = {
+                "summary_run": {
+                    "id": summary_input["run_id"],
+                    "mode": summary_input["mode"],
+                    "input_record_ids": [d.get("task_id", "") for d in clean],
+                },
+                "active_lessons": lesson_payload,
+                "input_task_digests": clean,
+            }
+            return _INSTRUCTIONS + json.dumps(package, indent=2, ensure_ascii=False)
+
+        prompt = _assemble(digests)
+        # Defense-in-depth global budget: if the prompt exceeds the hard
+        # budget, drop oldest digests (list is oldest-first appended by
+        # input_records; keep the newest) until it fits OR zero digests
+        # remain (strict — allow dropping all if truly necessary).
+        while len(prompt) > _HARD_BUDGET and len(digests) >= 1:
+            digests.pop(0)
+            prompt = _assemble(digests)
+        committed_task_ids = [d.get("task_id", "") for d in digests]
+        committed_paths = [d.get("_path", "") for d in digests if d.get("_path")]
+        return prompt, committed_task_ids, committed_paths
 
     def feedback_lessons(
         self,
