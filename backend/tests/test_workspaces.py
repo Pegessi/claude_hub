@@ -3148,6 +3148,12 @@ def test_workspace_feedback_summary_uses_hidden_internal_reaper_task(
     assert "input_task_digests" in reaper_prompt
     assert "task-one" in reaper_prompt
     assert "POST /api/workspaces/" in reaper_prompt
+    # active_lessons payload must include fingerprint + truncated summary so
+    # the Reaper can deterministically dedup (not just title+tags).
+    assert '"fingerprint":' in reaper_prompt
+    assert '"summary":' in reaper_prompt
+    assert "cli-symbols-comma-separated" in reaper_prompt
+    assert "merge" in reaper_prompt.lower()  # dedup/merge instruction present
 
     board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
     assert internal_task.id not in {task["id"] for task in board["tasks"]}

@@ -32,13 +32,24 @@ class _FeedbackMixin:
         workspace: Workspace,
         summary_input: dict[str, Any],
     ) -> str:
-        # Cap active lessons for dedup context: full summaries aren't needed,
-        # just id/title/tags/confidence to detect duplicates.
+        # Cap active lessons for dedup context. Keep the backend-assigned
+        # fingerprint (short sha1 scope-prefixed hash) plus a truncated summary
+        # so the Reaper can deterministically avoid posting near-duplicates:
+        # matching fingerprint -> skip or echo it back in POST body to merge.
+        # Title+tags alone are insufficient because backend fingerprint spans
+        # seven fields (scope/title/summary/applies_when/do/avoid/tags).
+        _SUMMARY_MAX = 120
         lessons = self.feedback_lessons(workspace.id, limit=20)
+
+        def _clip(text: str, n: int) -> str:
+            return text if len(text) <= n else text[: n - 3] + "..."
+
         lesson_payload = [
             {
                 "id": lesson.id,
+                "fingerprint": lesson.fingerprint,
                 "title": lesson.title[:80],
+                "summary": _clip(lesson.summary or "", _SUMMARY_MAX),
                 "tags": lesson.tags[:8],
                 "confidence": lesson.confidence,
             }
@@ -67,14 +78,17 @@ class _FeedbackMixin:
                 "",
                 "Required lesson fields (server validates; HTTP 400 on violation — do not retry):",
                 "  title (short), summary (1-2 sentences), applies_when (>=1), do, avoid, tags,",
-                "  scope ('workspace'), confidence (≤0.6 single / ≤0.85 multi), evidence_task_ids.",
-                "Server enforcement: applies_when/do/avoid non-empty; single-evidence tasks need review_failed≥1 or needs_input≥2;",
-                "multi-evidence needs ≥2 cited tasks with ≥1 showing iteration. Pure summary similarity is not evidence.",
+                "  scope ('workspace'), confidence (<=0.6 single / <=0.85 multi), evidence_task_ids.",
+                "Server enforcement: applies_when/do/avoid non-empty; single-evidence tasks need review_failed>=1 or needs_input>=2;",
+                "multi-evidence needs >=2 cited tasks with >=1 showing iteration. Pure summary similarity is not evidence.",
                 "",
-                "Dedup: compare against active_lessons; match existing via matching title/tags so backend merges by fingerprint.",
+                "Dedup (deterministic via fingerprint): compare against active_lessons. If a new lesson would duplicate an",
+                "existing one (matching core meaning even if wording differs), EITHER skip creation OR POST with the existing",
+                "lesson's fingerprint field echoed back — the server merges on fingerprint match. Do not rely on title+tags",
+                "alone; use the summary snippet to judge semantic equivalence.",
                 "",
                 f"POST /api/workspaces/{workspace.id}/lessons",
-                'Payload: {"title":"...","summary":"...","applies_when":["..."],"do":"...","avoid":"...","tags":["..."],"scope":"workspace","confidence":0.6,"evidence_task_ids":["..."]}',
+                'Payload: {"title":"...","summary":"...","applies_when":["..."],"do":"...","avoid":"...","tags":["..."],"scope":"workspace","confidence":0.6,"evidence_task_ids":["..."],"fingerprint":"<existing-fingerprint-if-merge>"}',
                 "",
                 "Completion: POST completed report (changed_files=[], review_decision=skip, risk_level=system_audit) with validation:",
                 "created_lesson_ids=<ids>|merged_lesson_ids=<ids>|skipped_reason=<reason>",
