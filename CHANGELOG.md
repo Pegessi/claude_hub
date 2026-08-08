@@ -7,41 +7,67 @@
 
 ### fix: bound Feedback Reaper prompt size for small-context agents
 
+- **Strategy — SIMPLE (drop fields, truncate, cap)**: single-commit fix that
+  shrinks the Feedback Reaper prompt without redesigning the feedback pipeline.
+  Bounds are hard caps (no dynamic budgeting), verbose fields are clipped to
+  fixed maxima, unneeded local metadata is omitted, and the inline lesson
+  index is tightened by small constant factors. No new subsystems, no retrieval
+  overhaul.
 - **What**: the internal Feedback Reaper summarization prompt (which runs
   periodically to extract reusable workspace lessons) could grow unboundedly:
   incremental mode included ALL unprocessed records (223 in one workspace →
-  ~550K chars / ~137K tokens), verbose validation/risks/final_summary fields
-  were included verbatim, and active_lessons carried full summary text with
-  fingerprint metadata. Smaller agents (codex, cursor) could not process the
-  resulting prompt. Four fixes: (1) **all modes cap at 30 digests per run**
-  (the previous "INCREMENTAL skips the cap" was a bug that let backlogs grow
-  without bound); remaining unprocessed records stay uncached and are picked
-  up on the next run. (2) **Digest fields are truncated**: final_summary ≤ 200
-  chars, validation/risks items ≤ 200 chars (max 2 items each), changed_files
-  ≤ 10 items, report_state_sequence emptied (counts carry the signal). (3)
-  **Compact serialization** drops path/sha256/summarized_at/completed_at local
-  metadata and unused package fields (workspace metadata, summary_run bookkeeping).
-  (4) **Active lessons dedup payload** drops fingerprint/summary and caps at 20;
-  instruction preamble compressed from ~75 to ~20 lines. Additionally, the
-  worker/reviewer lesson index is tightened further (limit 8→5, title 72→50
-  chars, tags capped at 4, shorter boilerplate).
+  ~1.46M chars that exceeded codex's 1,048,576-char request limit), verbose
+  validation/risks/final_summary fields were included verbatim, and
+  active_lessons carried full summary text with a 50-entry cap. Smaller agents
+  (codex, cursor) could not process the resulting prompt. Four fixes: (1) **all
+  modes cap at 30 digests per run** (the previous "INCREMENTAL skips the cap"
+  was a bug that let backlogs grow without bound); remaining unprocessed
+  records stay uncached and are picked up on the next run. The request schema
+  keeps the legacy `limit` range 1..200 (backward compat); the store clamps to
+  30 internally rather than returning HTTP 422. (2) **Digest fields are
+  truncated strictly**: final_summary ≤ 200 chars, validation/risks items ≤ 200
+  chars (max 2 items each), changed_files ≤ 10 items, report_state_sequence
+  emptied (counts carry the signal). Ellipsis accounting means emitted strings
+  never exceed the cap (`value[:n-3] + "..."`). (3) **Compact serialization**
+  drops path/sha256/summarized_at/completed_at local metadata and unused
+  package fields (workspace metadata, summary_run bookkeeping beyond
+  id/mode/input_record_ids). (4) **Active lessons dedup payload retains the
+  backend-assigned `fingerprint` (16-char scope-prefixed sha1 hash) plus a
+  ≤120-char summary snippet and caps at 20** so the Reaper can deterministically
+  echo an existing fingerprint on POST to merge near-duplicates; the instruction
+  preamble was compressed from ~75 to ~25 lines and explicitly tells the Reaper
+  to use the fingerprint field (title+tags alone are insufficient because the
+  backend fingerprint spans seven fields). Additionally, the worker/reviewer
+  lesson index is tightened further (limit 8→5, title 72→50 chars, tags capped
+  at 4, shorter boilerplate).
 - **Why**: after the prior compact-index fix the inline worker/reviewer block
   was ~340 tokens, but the Reaper prompt itself — generated when summarizing
-  workspace feedback — could hit 137K+ tokens when a workspace accumulated
-  many completed tasks between reaper runs. Codex's smaller context window
-  could not handle it.
-- **How**: `_REAPER_MAX_DIGESTS_PER_RUN = 30` caps all modes.
-  `_digest_task_record` applies per-field truncation constants.
-  `_compact_digest_for_prompt()` serializes a minimal digest for the prompt
-  (applied to both fresh and cached records, so pre-existing large caches
-  are also compacted). `_build_workspace_feedback_summary_prompt` compresses
-  instructions and lesson payload. `_CONTEXT_LIMIT_DEFAULT` 8→5, title/boilerplate
-  tightened in `_lesson_context_block_from_payload`. `FeedbackSummaryRequest.limit`
-  default 50→30, schema max 200→30.
-- **Verified**: measured against current Claude Hub workspace (277 task records,
-  5 active lessons): reaper prompt ~51K chars / ~12.7K tokens (down from
-  ~550K / ~137K → ~91% reduction). 26 lesson/feedback/reaper tests pass;
-  black/isort/mypy clean.
+  workspace feedback — could exceed codex's hard 1,048,576-character request
+  ceiling when a workspace accumulated many completed tasks between reaper
+  runs.
+- **How**: `_REAPER_MAX_DIGESTS_PER_RUN = 30` caps all modes in
+  `prepare_summary_input`. `_truncate_str`/`_truncate_list`/
+  `_compact_digest_for_prompt()` apply strict per-field truncation (applied to
+  both fresh and cached records, so pre-existing large caches are also
+  compacted). `_build_workspace_feedback_summary_prompt` compresses instructions
+  and includes id/fingerprint/title/summary[:120]/tags/confidence in
+  active_lessons; payload example shows the optional `fingerprint` merge field.
+  `_CONTEXT_LIMIT_DEFAULT` 8→5, title/boilerplate tightened in
+  `_lesson_context_block_from_payload`. `FeedbackSummaryRequest.limit` default
+  50→30, schema max stays at 200 (clamped internally at the store).
+  `FEEDBACK_SUMMARY_PROMPT_VERSION` bumped 3→4.
+- **Verified**: measured against the real Claude Hub workspace (277 task
+  records, 5 active lessons): reaper prompt ~62,901 chars / ~15,725 tokens
+  (down from the 1,463,804 chars reported in the codex failure attachment →
+  ~95.7% char reduction, well under the 128K-char / 32K-token target). 146
+  lesson/feedback/reaper tests pass (18 feedback + 128 workspace), including
+  new coverage for deterministic fingerprint-echo merge
+  (`test_create_lesson_merges_deterministically_when_fingerprint_echoed`),
+  internal limit clamping
+  (`test_prepare_summary_input_clamps_large_limit_to_max_digests`), and
+  backward-compatible schema range
+  (`test_feedback_summary_request_accepts_legacy_limit_range`). black/isort/mypy
+  clean.
 
 ### fix: restore terminal history and resize injection on first load
 

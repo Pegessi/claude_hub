@@ -894,9 +894,9 @@ class FeedbackLessonStore:
         ]
         review_failed_count = sum(1 for state in report_state_sequence if state == "review_failed")
         needs_input_count = sum(1 for state in report_state_sequence if state == "needs_input")
-        final_summary = str(payload.get("final_summary") or "")
-        if len(final_summary) > _DIGEST_MAX_FINAL_SUMMARY:
-            final_summary = final_summary[:_DIGEST_MAX_FINAL_SUMMARY].rstrip() + "..."
+        final_summary = self._truncate_str(
+            str(payload.get("final_summary") or ""), _DIGEST_MAX_FINAL_SUMMARY
+        )
         return FeedbackTaskDigest(
             task_id=str(task.get("id") or payload.get("task_id") or ""),
             title=str(task.get("title") or ""),
@@ -959,7 +959,9 @@ class FeedbackLessonStore:
     def _truncate_str(self, value: str, max_len: int) -> str:
         if len(value) <= max_len:
             return value
-        return value[:max_len].rstrip() + "..."
+        if max_len <= 3:
+            return value[:max_len]
+        return value[: max_len - 3].rstrip() + "..."
 
     def _truncate_list(self, items: list[str], max_items: int) -> list[str]:
         if len(items) <= max_items:

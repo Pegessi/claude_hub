@@ -157,11 +157,12 @@ def test_digest_preserves_iteration_counts_and_truncates_verbose_fields(
     assert digest.needs_input_count == 1
     assert digest.report_total == 9
     assert "review_failed" in digest.report_states  # deduped, kept for back-compat
-    # Truncation applied:
-    assert len(digest.final_summary) <= 203  # 200 + "..."
+    # Truncation applied (_truncate_str honors max_len strictly: value[:n-3]+"..."):
+    assert len(digest.final_summary) <= 200
     assert digest.final_summary.endswith("...")
     assert len(digest.changed_files) == 10
-    assert len(digest.validation[1]) <= 203  # 200 + "..."
+    assert len(digest.validation[1]) <= 200  # ≤ 200 chars strictly
+    assert digest.validation[1].endswith("...")
     assert len(digest.risks) == 2  # capped to 2 items
 
 
@@ -369,3 +370,92 @@ def test_create_lesson_rejects_single_evidence_with_missing_record(
     workspace_id = "ws"
     with pytest.raises(FeedbackLessonValidationError, match="no task record was found"):
         store.create_lesson(workspace_id, _make_payload(evidence_task_ids=["nonexistent"]))
+
+
+def test_create_lesson_merges_deterministically_when_fingerprint_echoed(
+    store: FeedbackLessonStore, tmp_path: Path
+) -> None:
+    """Reaper can echo an existing fingerprint on POST; server must merge
+    instead of creating a duplicate even when title/wording differs.
+    Guards the active_lessons fingerprint-in-payload contract."""
+    from claude_hub.models import FeedbackLessonCreate, FeedbackLessonScope
+
+    workspace_id = "ws"
+    _write_iteration_record(tmp_path, workspace_id, "task-a", review_failed_count=2)
+
+    first = store.create_lesson(workspace_id, _make_payload(evidence_task_ids=["task-a"]))
+    assert first.fingerprint
+    # Reaper posts a semantically-identical lesson with different wording
+    # but echoes the existing fingerprint. Must merge.
+    second = store.create_lesson(
+        workspace_id,
+        FeedbackLessonCreate(
+            summary="Always push commits before reporting DONE.",  # reworded
+            applies_when=["any MR delivery"],
+            do="Run git push before marking done.",
+            avoid="Do not report done with unpushed changes.",
+            tags=["delivery"],
+            scope=FeedbackLessonScope.WORKSPACE,
+            evidence_task_ids=["task-a"],
+            confidence=0.6,
+            fingerprint=first.fingerprint,
+        ),
+        enforce_iteration_signal=False,
+    )
+    assert second.id == first.id  # merged, not a new lesson
+    assert "task-a" in second.evidence_task_ids
+    assert len(store.list_lessons(workspace_id, include_inactive=True)) == 1
+
+
+def test_prepare_summary_input_clamps_large_limit_to_max_digests(
+    store: FeedbackLessonStore, tmp_path: Path
+) -> None:
+    """Caller may pass limit up to 200 (backward compat); store internally
+    clamps to _REAPER_MAX_DIGESTS_PER_RUN=30 to keep prompts bounded."""
+    from claude_hub.models import FeedbackSummaryMode
+
+    workspace_id = "ws"
+    records_dir = tmp_path / "task_records"
+    for index in range(60):
+        _write_record(
+            records_dir,
+            f"2026-05-{index:02d}-task-{index:02d}",
+            {
+                "task": {"id": f"task-{index:02d}", "title": f"T{index}", "status": "done"},
+                "reports": [{"state": "completed"}],
+                "artifacts": {},
+                "final_summary": "ok",
+            },
+        )
+
+    result = store.prepare_summary_input(
+        workspace_id,
+        records_dir,
+        mode=FeedbackSummaryMode.INCREMENTAL,
+        limit=200,  # large but permitted by schema
+        force=False,
+    )
+    assert len(result["input_record_ids"]) == 30  # clamped to cap
+    assert result["limit"] == 30
+    assert result["processed_count"] == 30
+    result2 = store.prepare_summary_input(
+        workspace_id,
+        records_dir,
+        mode=FeedbackSummaryMode.INCREMENTAL,
+        limit=200,
+        force=False,
+    )
+    assert len(result2["input_record_ids"]) == 30
+    assert result2["processed_count"] == 60
+
+
+def test_feedback_summary_request_accepts_legacy_limit_range() -> None:
+    """Schema must accept 1..200 (backward-compat); previously-valid
+    limits 31..200 must NOT 422. Internal clamp (see previous test)
+    enforces the 30-digest safety bound."""
+    from claude_hub.models import FeedbackSummaryMode, FeedbackSummaryRequest
+
+    req = FeedbackSummaryRequest(limit=200)
+    assert req.limit == 200
+    assert req.mode == FeedbackSummaryMode.INCREMENTAL
+    assert FeedbackSummaryRequest().limit == 30
