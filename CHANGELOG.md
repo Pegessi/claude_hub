@@ -84,14 +84,47 @@
     both the 100K hard budget and the 128K/32K target; fingerprint field
     preserved exactly (`workspace:<16-hex>`); long 5000-char strings do not
     appear verbatim.
-  - 148 lesson/feedback/reaper tests pass (20 feedback + 128 workspace),
-    including 4 new adversarial and contract tests:
+  - 152 lesson/feedback/reaper tests pass (22 feedback + 130 workspace),
+    including new adversarial and contract tests covering long outer
+    task_id clamping, unknown-fingerprint rejection, strict-budget zero-
+    digest termination, exact post-budget digest/ID alignment, and next-run
+    carry-over for budget-dropped records:
     `test_compact_digest_for_prompt_bounds_every_free_text_field`,
     `test_prepare_summary_input_clamps_large_limit_to_max_digests`,
     `test_feedback_summary_request_accepts_legacy_limit_range`,
     `test_create_lesson_merges_deterministically_when_fingerprint_echoed`,
+    `test_create_lesson_rejects_unknown_client_fingerprint`,
+    `test_prepare_summary_input_clamps_outer_task_id`,
+    `test_budget_loop_drops_oldest_and_carry_over_works`,
+    `test_create_lesson_rejects_unknown_fingerprint_e2e`,
     `test_reaper_prompt_stays_under_hard_budget_with_adversarial_input` (e2e).
     black/isort/mypy clean.
+- **Cycle-7 hardening**: three correctness fixes on top of v5:
+    (a) **Outer `task_id` clamped** at record-build time so the compact
+    wrapper `task_id`, `input_record_ids`, and digest-inner `task_id`
+    all respect `_DIGEST_MAX_TASK_ID=64` even for pre-v5 legacy cache
+    entries or records with oversized id-in-JSON;
+    (b) **Client fingerprints validated**: `create_lesson` rejects a
+    client-provided fingerprint that does not reference an existing
+    active lesson with HTTP 400 — bogus fingerprints no longer create
+    unreachable lessons with non-deterministic keys. The server always
+    recomputes a canonical `workspace:<16hex>` fingerprint when the
+    client omits the field;
+    (c) **Processed-index write deferred until after budget trimming**:
+    `prepare_summary_input()` no longer marks records processed on
+    entry selection. The new `commit_summary_input(summary_input,
+    committed_paths)` method writes the index AFTER
+    `_build_workspace_feedback_summary_prompt` returns the final
+    (post-budget) digest set, so records dropped by the hard global
+    budget are **never** marked processed and are retried on the next
+    Reaper run (carry-over). `FeedbackSummaryRun.input_record_ids`
+    and the audit-log `input_record_ids=` field now reflect the final
+    committed IDs, not the pre-budget selection. The budget-dropping
+    loop is strict (`while len(prompt) > budget and len(digests) >= 1`)
+    and terminates cleanly even when the fixed preamble alone exceeds
+    the budget (zero-digest prompt, no crash, all records carried over).
+    Internal `_path` bookkeeping is stripped from the serialized prompt
+    so local filesystem paths never leak to the agent.
 
 ### fix: restore terminal history and resize injection on first load
 

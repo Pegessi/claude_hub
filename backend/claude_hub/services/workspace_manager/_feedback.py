@@ -31,7 +31,18 @@ class _FeedbackMixin:
         self,
         workspace: Workspace,
         summary_input: dict[str, Any],
-    ) -> str:
+    ) -> tuple[str, list[str], list[str]]:
+        """Build the Reaper prompt, enforcing the global hard char budget by
+        dropping oldest digests until the prompt fits. Returns (prompt,
+        committed_task_ids, committed_paths) so the caller can (a) record the
+        final id list on FeedbackSummaryRun and (b) commit only the actually-
+        sent records to the processed index.
+
+        Budget is strict: we allow dropping ALL the way to zero digests if
+        necessary (e.g. the instruction preamble + active_lessons alone could
+        theoretically exceed budget, though our caps prevent that in practice).
+        A zero-digest prompt is still well-formed JSON and the Reaper simply
+        produces zero lessons."""
         # Cap active lessons for dedup context. Keep the backend-assigned
         # fingerprint EXACT (it is the 16-char sha1 scope:prefixed hash that
         # drives server-side merge on POST; truncating it would break dedup).
@@ -104,27 +115,33 @@ class _FeedbackMixin:
         digests = list(summary_input["input_records"])  # defensive copy
 
         def _assemble(selected_digests: list[dict[str, Any]]) -> str:
+            # Strip internal bookkeeping (_path) before serializing into the
+            # prompt — the Reaper does not need local filesystem paths.
+            clean = []
+            for d in selected_digests:
+                clean.append({k: v for k, v in d.items() if not k.startswith("_")})
             package = {
                 "summary_run": {
                     "id": summary_input["run_id"],
                     "mode": summary_input["mode"],
-                    "input_record_ids": [d.get("task_id", "") for d in selected_digests],
+                    "input_record_ids": [d.get("task_id", "") for d in clean],
                 },
                 "active_lessons": lesson_payload,
-                "input_task_digests": selected_digests,
+                "input_task_digests": clean,
             }
             return _INSTRUCTIONS + json.dumps(package, indent=2, ensure_ascii=False)
 
         prompt = _assemble(digests)
         # Defense-in-depth global budget: if the prompt exceeds the hard
         # budget, drop oldest digests (list is oldest-first appended by
-        # input_records; keep the newest) until it fits. This should never
-        # trigger with the per-field caps above, but protects against
-        # future regression or adversarial combinations.
-        while len(prompt) > _HARD_BUDGET and len(digests) > 1:
+        # input_records; keep the newest) until it fits OR zero digests
+        # remain (strict — allow dropping all if truly necessary).
+        while len(prompt) > _HARD_BUDGET and len(digests) >= 1:
             digests.pop(0)
             prompt = _assemble(digests)
-        return prompt
+        committed_task_ids = [d.get("task_id", "") for d in digests]
+        committed_paths = [d.get("_path", "") for d in digests if d.get("_path")]
+        return prompt, committed_task_ids, committed_paths
 
     def feedback_lessons(
         self,
