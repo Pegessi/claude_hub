@@ -844,7 +844,10 @@ class FeedbackSummaryRequest(BaseModel):
     """Manual trigger payload for a workspace-level internal feedback summary."""
 
     mode: FeedbackSummaryMode = FeedbackSummaryMode.INCREMENTAL
-    limit: int = Field(default=50, ge=1, le=200)
+    # Request accepts up to 200 for backward compatibility; the store
+    # internally clamps to _REAPER_MAX_DIGESTS_PER_RUN (30) to keep prompts
+    # bounded for small-context agents (e.g. codex).
+    limit: int = Field(default=30, ge=1, le=200)
     force: bool = False
     clear_context: bool = True
 

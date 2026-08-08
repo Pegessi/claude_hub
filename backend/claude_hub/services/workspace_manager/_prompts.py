@@ -327,24 +327,18 @@ class _PromptsMixin:
                 "State 'no lessons needed' in your report risks field.\n\n"
             )
         lines: list[str] = []
-        lines.append("Relevant workspace lessons (id | title | tags | conf).")
+        lines.append("Relevant lessons (id | title | tags | conf):")
         for lesson in lessons:
-            tags = ",".join(lesson.get("tags", [])) or "—"
+            tags = ",".join(lesson.get("tags", [])[:4]) or "—"
             conf = lesson.get("confidence")
             conf_str = f"{conf:.2f}" if isinstance(conf, (int, float)) else "?"
             title = lesson["title"]
-            if len(title) > 72:
-                title = title[:69] + "..."
-            lines.append(f"- `{lesson['id']}` | {title} | [{tags}] | c={conf_str}")
+            if len(title) > 50:
+                title = title[:47] + "..."
+            lines.append(f"- `{lesson['id']}` | {title} | [{tags}] c={conf_str}")
         if workspace_id:
-            lines.append(
-                f"For full do/avoid/applies_when detail on a lesson: "
-                f"GET /api/workspaces/{workspace_id}/lessons/<id>"
-            )
-        lines.append(
-            "Fetch/apply only lessons relevant to this task; list IDs used (or 'none') "
-            "in your report risks field."
-        )
+            lines.append(f"Full detail: GET /api/workspaces/{workspace_id}/lessons/<id>")
+        lines.append("Apply only relevant lessons; list IDs used (or 'none') in report risks.")
         lines.append("")
         return "\n".join(lines)
 

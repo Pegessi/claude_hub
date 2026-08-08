@@ -1049,7 +1049,7 @@ def test_direct_task_explicit_review_request_still_creates_reviewer(
     assert direct_task.feedback_lesson_ids == []
     assert "Review workspace task." in sent_messages[-1][1]
     assert "explicit-review-handoff" in sent_messages[-1][1]
-    assert "Relevant workspace lessons" in sent_messages[-1][1]
+    assert "Relevant lessons" in sent_messages[-1][1]
     assert (
         "Check changed files, validation, risks, and acceptance evidence."
         not in sent_messages[-1][1]
@@ -3029,7 +3029,7 @@ def test_task_assignment_injects_lessons_index_with_api_and_take_tracking(
     started_task = start_response.json()
     assert started_task["feedback_lesson_ids"] == []
     assignment_prompt = sent_messages[-1][1]
-    assert "Relevant workspace lessons" in assignment_prompt
+    assert "Relevant lessons" in assignment_prompt
     assert "cli-symbols-comma-separated" in assignment_prompt
     assert "lessons-catalog.md" not in assignment_prompt
     assert "/api/workspaces/" in assignment_prompt
@@ -3144,10 +3144,16 @@ def test_workspace_feedback_summary_uses_hidden_internal_reaper_task(
     assert sent_messages
     reaper_prompt = sent_messages[-1][1]
     assert "internal Feedback Reaper" in reaper_prompt
-    assert "system-internal task" in reaper_prompt
+    assert "System-internal task" in reaper_prompt
     assert "input_task_digests" in reaper_prompt
     assert "task-one" in reaper_prompt
     assert "POST /api/workspaces/" in reaper_prompt
+    # active_lessons payload must include fingerprint + truncated summary so
+    # the Reaper can deterministically dedup (not just title+tags).
+    assert '"fingerprint":' in reaper_prompt
+    assert '"summary":' in reaper_prompt
+    assert "cli-symbols-comma-separated" in reaper_prompt
+    assert "merge" in reaper_prompt.lower()  # dedup/merge instruction present
 
     board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
     assert internal_task.id not in {task["id"] for task in board["tasks"]}
@@ -3221,6 +3227,121 @@ def test_workspace_feedback_summary_uses_hidden_internal_reaper_task(
     assert sent_messages
 
 
+def test_reaper_prompt_stays_under_hard_budget_with_adversarial_input(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Adversarial end-to-end: 30 tasks with 5000-char titles/summaries,
+    50 long changed_files/validation/risks items per task, plus 20 active
+    lessons with long ids/titles/summaries/tags. The assembled prompt must
+    stay under REAPER_PROMPT_HARD_CHAR_LIMIT (100K) and every bounded field
+    must respect its cap."""
+    import json
+
+    from claude_hub.services.feedback_lessons import FEEDBACK_SUMMARY_PROMPT_VERSION
+
+    repo = tmp_path / "repo-adv"
+    repo.mkdir()
+    state_root = tmp_path / "state-adv"
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", state_root)
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="adversarial-reaper-tab",
+        port=12540,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    ws = client.post(
+        "/api/workspaces",
+        json={"name": "Adv Reaper", "path": str(repo), "session_prefix": "adv"},
+    ).json()
+    record_dir = state_root / ws["id"] / "task_records"
+    record_dir.mkdir(parents=True)
+    long_title = "T" * 5000
+    long_summary = "S" * 5000
+    long_item = "I" * 5000
+    long_path = "very/long/path/component/" * 50 + "file.py"  # ~1500 chars/path
+    for i in range(30):
+        task_id = f"task-{i:03d}"
+        # Filename must contain task_id to match _task_iteration_signal glob
+        # (real system writes {timestamp}-{task.id}.json).
+        record_dir.joinpath(f"2026-06-07T12-{i:02d}-00-{task_id}.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "workspace_id": ws["id"],
+                    "task": {"id": task_id, "title": long_title, "status": "done"},
+                    "reports": [{"state": "review_failed"}] * 3
+                    + [{"state": "completed", "message": long_summary}],
+                    "artifacts": {
+                        "changed_files": [long_path] * 50,
+                        "validation": [long_item] * 30,
+                        "risks": [long_item] * 30,
+                    },
+                    "final_summary": long_summary,
+                }
+            ),
+            encoding="utf-8",
+        )
+    # Create 20 active lessons with long titles/summaries/tags. Use realistic
+    # lesson ids (slug <80 chars) so id truncation path is exercised but not
+    # triggered; adversarial length is in title/summary/tags.
+    for i in range(20):
+        resp = client.post(
+            f"/api/workspaces/{ws['id']}/lessons",
+            json={
+                "id": f"lesson-adversarial-{i:02d}",
+                "title": long_title[:200],
+                "summary": long_summary,
+                "applies_when": ["whenever processing adversarial input"],
+                "do": "Apply per-field truncation before serializing.",
+                "avoid": "Do not include verbatim long strings.",
+                "tags": [f"tag-{j:02d}-" + ("y" * 100) for j in range(15)],
+                "scope": "workspace",
+                "evidence_task_ids": [f"task-{i:03d}"],
+                "confidence": 0.6,
+            },
+        )
+        assert resp.status_code == 201, resp.text
+
+    response = client.post(f"/api/workspaces/{ws['id']}/lessons/summarize")
+    assert response.status_code == 201
+    run = response.json()
+    assert run["prompt_version"] == FEEDBACK_SUMMARY_PROMPT_VERSION
+    assert sent_messages
+    reaper_prompt = sent_messages[-1][1]
+    store = workspace_manager._feedback_store()
+    # Hard budget honored.
+    assert len(reaper_prompt) <= store.REAPER_PROMPT_HARD_CHAR_LIMIT, (
+        f"adversarial prompt {len(reaper_prompt)} chars exceeds "
+        f"{store.REAPER_PROMPT_HARD_CHAR_LIMIT}"
+    )
+    # Sanity: actual size is a small fraction of the cap — under 32K tokens (~128K
+    # chars), well within codex's budget. With per-field caps we expect ~20-60K.
+    assert len(reaper_prompt) < 128_000
+    # package JSON contains all 30 digests (bounded but not dropped by budget
+    # because per-field caps keep us under budget even at max).
+    assert '"input_task_digests"' in reaper_prompt
+    # Long 5000-char strings MUST NOT appear verbatim.
+    assert long_title not in reaper_prompt
+    assert long_summary not in reaper_prompt
+    assert long_item not in reaper_prompt
+    # Fingerprint preserved exactly (format: scope:16-hex). Skip the example
+    # placeholder "<existing-fingerprint-if-merge>" that appears in instructions.
+    import re as _re
+
+    fp_matches = _re.findall(r'"fingerprint":\s*"([^"]+)"', reaper_prompt)
+    real_fps = [fp for fp in fp_matches if not fp.startswith("<")]
+    assert real_fps, "no real fingerprints found in prompt"
+    for fp in real_fps:
+        assert _re.match(
+            r"^workspace:[0-9a-f]{16}$", fp
+        ), f"fingerprint truncated or malformed: {fp!r}"
+
+
 def test_lessons_index_includes_all_active_lessons_without_full_body_leak(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
@@ -3292,7 +3413,7 @@ def test_lessons_index_includes_all_active_lessons_without_full_body_leak(
     cjk_started_task = cjk_start_response.json()
     assert cjk_started_task["feedback_lesson_ids"] == []
     cjk_prompt = sent_messages[-1][1]
-    assert "Relevant workspace lessons" in cjk_prompt
+    assert "Relevant lessons" in cjk_prompt
     assert "image-workflow-docs-first" in cjk_prompt
     # Irrelevant lesson should NOT appear in relevance-filtered index.
     assert "market-data-symbols" not in cjk_prompt
@@ -3338,7 +3459,7 @@ def test_lessons_index_includes_all_active_lessons_without_full_body_leak(
     emoji_started_task = emoji_start_response.json()
     assert emoji_started_task["feedback_lesson_ids"] == []
     emoji_prompt = sent_messages[-1][1]
-    assert "Relevant workspace lessons" in emoji_prompt
+    assert "Relevant lessons" in emoji_prompt
     assert "emoji-only-workspace-lesson" in emoji_prompt
     assert "Agent decides autonomously which lessons apply." not in emoji_prompt
     task_reports = [
@@ -10338,3 +10459,62 @@ def test_monitor_recovers_sealed_impl_review_failed_verdict(
         recovered.status == WorkspaceTaskStatus.WORKING
     ), f"expected WORKING after impl-review-failed recovery, got {recovered.status}"
     assert sent_messages, "expected a continue prompt dispatched to worker"
+
+
+def test_create_lesson_rejects_unknown_fingerprint_e2e(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """End-to-end: POST /lessons with a fingerprint that doesn't match any
+    active lesson must 400 with a clear error."""
+    import json as _json
+
+    repo = tmp_path / "repo-fp"
+    repo.mkdir()
+    state_root = tmp_path / "state-fp"
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", state_root)
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="fp-tab",
+        port=12543,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    ws = client.post(
+        "/api/workspaces",
+        json={"name": "FP", "path": str(repo), "session_prefix": "fp"},
+    ).json()
+    record_dir = state_root / ws["id"] / "task_records"
+    record_dir.mkdir(parents=True)
+    record_dir.joinpath("2026-06-07T14-00-00-task-x.json").write_text(
+        _json.dumps(
+            {
+                "schema_version": 1,
+                "workspace_id": ws["id"],
+                "task": {"id": "task-x", "title": "Tx", "status": "done"},
+                "reports": [{"state": "review_failed"}, {"state": "completed"}],
+                "artifacts": {},
+                "final_summary": "ok",
+            }
+        ),
+        encoding="utf-8",
+    )
+    resp = client.post(
+        f"/api/workspaces/{ws['id']}/lessons",
+        json={
+            "summary": "A lesson.",
+            "applies_when": ["cond"],
+            "do": "x",
+            "avoid": "y",
+            "tags": ["t"],
+            "scope": "workspace",
+            "evidence_task_ids": ["task-x"],
+            "confidence": 0.6,
+            "fingerprint": "workspace:0000000000000000",
+        },
+    )
+    assert resp.status_code == 400, resp.text
+    assert "fingerprint" in resp.text.lower()

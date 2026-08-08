@@ -102,6 +102,9 @@ class _TasksMixin:
             now=now,
         )
         if summary_input["cache_hit"]:
+            # Still prune the processed index of deleted-disk entries even when
+            # no new records are being summarized.
+            store.commit_summary_input(summary_input, [])
             run = FeedbackSummaryRun(
                 id=summary_input["run_id"],
                 workspace_id=workspace_id,
@@ -117,11 +120,18 @@ class _TasksMixin:
             store.write_summary_run(workspace_id, run)
             return run
 
+        prompt, committed_task_ids, committed_paths = self._build_workspace_feedback_summary_prompt(
+            workspace, summary_input
+        )
+        # Commit only the records that actually made it into the prompt
+        # (after global-budget trimming). Dropped records stay unprocessed
+        # and will be retried on the next run.
+        processed_count = store.commit_summary_input(summary_input, committed_paths)
         task = self._create_task(
             workspace_id,
             WorkspaceTaskCreate(
                 title="Feedback Reaper: summarize workspace lessons",
-                prompt=self._build_workspace_feedback_summary_prompt(workspace, summary_input),
+                prompt=prompt,
                 task_mode=WorkspaceTaskMode.REVIEWED,
                 execution_complexity=WorkspaceTaskExecutionComplexity.AUTO,
             ),
@@ -135,7 +145,8 @@ class _TasksMixin:
             validation=(
                 "system_internal=true; internal_kind=feedback_reaper; board_visible=false; "
                 f"summary_run_id={summary_input['run_id']}; "
-                f"input_record_ids={json.dumps(summary_input['input_record_ids'])}"
+                f"input_record_ids={json.dumps(committed_task_ids)}; "
+                f"processed_count={processed_count}"
             ),
         )
         run = FeedbackSummaryRun(
@@ -143,7 +154,7 @@ class _TasksMixin:
             workspace_id=workspace_id,
             task_id=task.id,
             mode=payload.mode,
-            input_record_ids=summary_input["input_record_ids"],
+            input_record_ids=committed_task_ids,
             cache_hit=False,
             prompt_version=summary_input["prompt_version"],
             created_at=now,
