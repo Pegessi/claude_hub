@@ -1,8 +1,19 @@
 """Feedback lesson management."""
 
+import re
+
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
 from ._constants import *  # noqa: F401,F403
+
+# Canonical fingerprint format produced by FeedbackLessonStore._lesson_fingerprint:
+# scope (workspace|family|global) + ":" + 16 hex chars. Max length is 26
+# ("workspace:" + 16 hex). Legacy data may carry non-canonical or oversized
+# fingerprints from before v5; those are filtered OUT of the active_lessons
+# payload (the Reaper cannot echo-merge against them anyway) so the prompt
+# stays bounded.
+_CANONICAL_FP_RE = re.compile(r"^(workspace|family|global):[0-9a-f]{16}$")
+_MAX_FP_LEN_HARD = 64  # absolute ceiling — anything longer is treated as legacy
 
 
 class _FeedbackMixin:
@@ -99,11 +110,25 @@ class _FeedbackMixin:
         def _clamp_tags(tags: list[str]) -> list[str]:
             return [_clip(str(t), _LESSON_MAX_TAG_LEN) for t in tags[:_LESSON_MAX_TAGS]]
 
+        def _sanitize_fp(fp: str) -> str:
+            """Include a lesson's fingerprint only when it is a canonical
+            `scope:16hex` merge key AND fits within the absolute ceiling.
+            Legacy non-canonical fingerprints are dropped (set to "") so
+            they cannot inflate the prompt or confuse the Reaper into
+            echoing a bogus value that would 400 on POST."""
+            if not fp:
+                return ""
+            if len(fp) > _MAX_FP_LEN_HARD:
+                return ""
+            if not _CANONICAL_FP_RE.match(fp):
+                return ""
+            return fp
+
         lessons = self.feedback_lessons(workspace.id, limit=_LESSON_MAX)
         lesson_payload = [
             {
                 "id": _clip(str(lesson.id or ""), _LESSON_MAX_ID),
-                "fingerprint": lesson.fingerprint or "",  # EXACT, never truncated
+                "fingerprint": _sanitize_fp(lesson.fingerprint or ""),
                 "title": _clip(lesson.title or "", _LESSON_MAX_TITLE),
                 "summary": _clip(lesson.summary or "", _LESSON_MAX_SUMMARY),
                 "tags": _clamp_tags(lesson.tags or []),

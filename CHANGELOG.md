@@ -7,12 +7,23 @@
 
 ### fix: bound Feedback Reaper prompt size for small-context agents
 
-- **Strategy — SIMPLE (drop fields, truncate, cap)**: single-commit fix that
-  shrinks the Feedback Reaper prompt without redesigning the feedback pipeline.
-  Bounds are hard caps (no dynamic budgeting), verbose fields are clipped to
-  fixed maxima, unneeded local metadata is omitted, and the inline lesson
-  index is tightened by small constant factors. No new subsystems, no retrieval
-  overhaul.
+- **Strategy — SIMPLE + dynamic budgeting (5 commits, 8 files)**: shrinks the
+  Feedback Reaper prompt without redesigning the feedback pipeline. Bounds are
+  hard per-field caps plus a **dynamic oldest-first budget trim**: at assembly
+  time the oldest digests are dropped until the serialized prompt fits under
+  the 100K-char hard ceiling (down to zero digests if necessary). Verbose fields
+  are clipped to fixed maxima, unneeded local metadata is omitted, the inline
+  worker/reviewer lesson index is tightened by small constant factors, and a
+  two-phase prepare/commit pattern ensures dropped digests carry over to the
+  next run. No new subsystems, no retrieval overhaul. Delivered across five
+  commits (initial bound + fingerprint/limit correction + per-field caps/hard
+  budget/deferred commit + legacy-fingerprint sanitization) touching 8 files:
+  `CHANGELOG.md`, `backend/claude_hub/models/schemas.py`,
+  `backend/claude_hub/services/feedback_lessons.py`,
+  `backend/claude_hub/services/workspace_manager/_feedback.py`,
+  `backend/claude_hub/services/workspace_manager/_prompts.py`,
+  `backend/claude_hub/services/workspace_manager/_tasks.py`,
+  `backend/tests/test_feedback_lessons.py`, `backend/tests/test_workspaces.py`.
 - **What**: the internal Feedback Reaper summarization prompt (which runs
   periodically to extract reusable workspace lessons) could grow unboundedly:
   incremental mode included ALL unprocessed records (223 in one workspace →
@@ -33,11 +44,15 @@
   each ≤ 24 chars. The `fingerprint` field is **never truncated** (it is the
   authoritative 25-char `workspace:<16-hex>` merge key — Reaper echoes it
   verbatim on POST and the server merges on exact match). Ellipsis accounting
-  (`value[:n-3] + "..."`) means emitted strings never exceed `n`. (3) **Global
-  hard-char budget** of 100K chars (≈25K tokens) is enforced at prompt-assembly
-  time as defense in depth; if exceeded, oldest digests are dropped until the
-  prompt fits (should never trigger with the per-field caps, but guards against
-  future regression). (4) **Compact serialization** drops path/sha256/
+  (`value[:n-3] + "..."`) means emitted strings never exceed `n`. (3) **Dynamic
+  oldest-first budgeting under a 100K-char hard cap**
+  (`REAPER_PROMPT_HARD_CHAR_LIMIT = 100_000`, ≈25K tokens) enforced at
+  prompt-assembly time as defense in depth: if after per-field capping the
+  serialized prompt still exceeds budget, the oldest digests are popped one by
+  one (strict — all the way to zero digests if necessary) until it fits.
+  Together with the deferred processed-index commit (cycle-7 below) this
+  guarantees carry-over: dropped digests stay unprocessed and are retried on
+  the next Reaper run. (4) **Compact serialization** drops path/sha256/
   summarized_at/completed_at local metadata and unused package fields beyond
   run id/mode/input_record_ids. (5) **Active lessons dedup payload retains the
   exact `fingerprint`** plus ≤120-char summary snippet and caps at 20 so the
@@ -84,11 +99,12 @@
     both the 100K hard budget and the 128K/32K target; fingerprint field
     preserved exactly (`workspace:<16-hex>`); long 5000-char strings do not
     appear verbatim.
-  - 152 lesson/feedback/reaper tests pass (22 feedback + 130 workspace),
+  - 153 lesson/feedback/reaper tests pass (23 feedback + 130 workspace),
     including new adversarial and contract tests covering long outer
     task_id clamping, unknown-fingerprint rejection, strict-budget zero-
-    digest termination, exact post-budget digest/ID alignment, and next-run
-    carry-over for budget-dropped records:
+    digest termination, exact post-budget digest/ID alignment, next-run
+    carry-over for budget-dropped records, and legacy oversized-
+    fingerprint sanitization:
     `test_compact_digest_for_prompt_bounds_every_free_text_field`,
     `test_prepare_summary_input_clamps_large_limit_to_max_digests`,
     `test_feedback_summary_request_accepts_legacy_limit_range`,
@@ -96,6 +112,7 @@
     `test_create_lesson_rejects_unknown_client_fingerprint`,
     `test_prepare_summary_input_clamps_outer_task_id`,
     `test_budget_loop_drops_oldest_and_carry_over_works`,
+    `test_legacy_oversized_fingerprints_are_sanitized_in_prompt`,
     `test_create_lesson_rejects_unknown_fingerprint_e2e`,
     `test_reaper_prompt_stays_under_hard_budget_with_adversarial_input` (e2e).
     black/isort/mypy clean.
@@ -125,6 +142,25 @@
     the budget (zero-digest prompt, no crash, all records carried over).
     Internal `_path` bookkeeping is stripped from the serialized prompt
     so local filesystem paths never leak to the agent.
+- **Cycle-9 hardening**: legacy fingerprint sanitization so pre-v5 lessons
+    with non-canonical or oversized fingerprints cannot bypass the hard
+    prompt ceiling. Valid canonical fingerprints
+    (`workspace|family|global:<16hex>`, ≤26 chars) are still passed
+    verbatim as merge keys; any fingerprint longer than 64 chars or not
+    matching the canonical regex is replaced with `""` in the
+    `active_lessons` payload (the Reaper cannot merge against a
+    non-canonical fp anyway, since the server rejects unknown client
+    fingerprints with HTTP 400). This enforces the 100K budget even on
+    workspaces that accumulated lessons with adversarial fingerprints
+    before the v5 validator shipped. New persisted-legacy regression
+    `test_legacy_oversized_fingerprints_are_sanitized_in_prompt` writes
+    four lessons (one canonical, one 5KB oversized fp, one short
+    non-canon fp, one empty fp) directly to disk via
+    `_write_lesson_index()` and asserts (i) the prompt stays under the
+    hard budget, (ii) oversized/non-canon fps are absent from the
+    serialized prompt, (iii) the good canonical fp appears verbatim,
+    (iv) every fp in the payload is either `""` or matches the canonical
+    regex, and (v) internal `_path` bookkeeping does not leak.
 
 ### fix: restore terminal history and resize injection on first load
 

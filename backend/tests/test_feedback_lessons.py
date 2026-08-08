@@ -740,3 +740,175 @@ def test_budget_loop_drops_oldest_and_carry_over_works(
     assert (
         len(result4["input_record_ids"]) == 3
     ), f"expected 3 records carried over, got {len(result4['input_record_ids'])}"
+
+
+def test_legacy_oversized_fingerprints_are_sanitized_in_prompt(
+    store: FeedbackLessonStore, tmp_path: Path
+) -> None:
+    """Persisted legacy lessons with non-canonical or oversized fingerprints
+    must not break the hard prompt budget. The active_lessons payload must
+    (a) drop non-canonical/oversized fingerprints (set to empty string) so
+    they can't inflate the prompt or cause bogus echo-merge 400s, while
+    (b) preserving canonical workspace:16hex fingerprints verbatim for
+    legitimate echo-merge. Budget stays under 100K even with adversarial
+    legacy data."""
+    import types
+    from datetime import datetime
+
+    from claude_hub.models import (
+        FeedbackLesson,
+        FeedbackLessonScope,
+        FeedbackLessonStatus,
+        FeedbackSummaryMode,
+    )
+    from claude_hub.services.workspace_manager._feedback import _FeedbackMixin
+
+    workspace_id = "ws-legacy-fp"
+    records_dir = tmp_path / "task_records"
+    records_dir.mkdir(parents=True, exist_ok=True)
+    # Write one normal task record so we have at least one digest.
+    (records_dir / "2026-06-08T00-00-00-task-x.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "workspace_id": workspace_id,
+                "task": {"id": "task-x", "title": "Tx", "status": "done"},
+                "reports": [{"state": "completed"}],
+                "artifacts": {},
+                "final_summary": "ok",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # Build a lesson index directly with (1) a good canonical lesson,
+    # (2) a lesson with a huge bogus fingerprint (legacy migration edge case),
+    # (3) a lesson with a non-canonical but short fingerprint (legacy format),
+    # (4) a lesson with an empty fingerprint.
+    now = datetime(2026, 6, 8, 0, 0, 0)
+    good_fp = "workspace:0123456789abcdef"
+    huge_fp = "legacy-fingerprint-" + ("x" * 5000)
+    noncanon_fp = "some-old-style-fingerprint"
+    lessons = [
+        FeedbackLesson(
+            id="good",
+            workspace_id=workspace_id,
+            title="Good Lesson",
+            fingerprint=good_fp,
+            status=FeedbackLessonStatus.ACTIVE,
+            scope=FeedbackLessonScope.WORKSPACE,
+            summary="A properly formed lesson with a canonical fingerprint.",
+            applies_when=["always"],
+            do="Right thing.",
+            avoid="Wrong thing.",
+            tags=["good"],
+            evidence_task_ids=["task-x"],
+            confidence=0.6,
+            created_at=now,
+            updated_at=now,
+            last_seen_at=now,
+        ),
+        FeedbackLesson(
+            id="huge-fp",
+            workspace_id=workspace_id,
+            title="Huge FP Lesson",
+            fingerprint=huge_fp,
+            status=FeedbackLessonStatus.ACTIVE,
+            scope=FeedbackLessonScope.WORKSPACE,
+            summary="Lesson with a 5KB fingerprint from a legacy bug.",
+            applies_when=["rare"],
+            do="Handle it.",
+            avoid="Explode.",
+            tags=["legacy"],
+            evidence_task_ids=["task-x"],
+            confidence=0.6,
+            created_at=now,
+            updated_at=now,
+            last_seen_at=now,
+        ),
+        FeedbackLesson(
+            id="noncanon",
+            workspace_id=workspace_id,
+            title="Noncanon FP Lesson",
+            fingerprint=noncanon_fp,
+            status=FeedbackLessonStatus.ACTIVE,
+            scope=FeedbackLessonScope.WORKSPACE,
+            summary="Lesson with a non-canonical short fingerprint.",
+            applies_when=["rare"],
+            do="Handle it.",
+            avoid="Explode.",
+            tags=["legacy"],
+            evidence_task_ids=["task-x"],
+            confidence=0.6,
+            created_at=now,
+            updated_at=now,
+            last_seen_at=now,
+        ),
+        FeedbackLesson(
+            id="empty-fp",
+            workspace_id=workspace_id,
+            title="Empty FP Lesson",
+            fingerprint="",
+            status=FeedbackLessonStatus.ACTIVE,
+            scope=FeedbackLessonScope.WORKSPACE,
+            summary="Lesson with an empty fingerprint (post-migration).",
+            applies_when=["rare"],
+            do="Handle it.",
+            avoid="Explode.",
+            tags=[],
+            evidence_task_ids=["task-x"],
+            confidence=0.6,
+            created_at=now,
+            updated_at=now,
+            last_seen_at=now,
+        ),
+    ]
+    # Write lesson index directly via the store's method.
+    store._write_lesson_index(workspace_id, lessons)
+
+    ws_stub = types.SimpleNamespace(id=workspace_id)
+    mixin = _FeedbackMixin()
+    mixin._feedback_store = lambda: store  # type: ignore[attr-defined]
+    # feedback_lessons() is provided by the manager; mimic it by returning
+    # all the lessons we just wrote.
+    mixin.feedback_lessons = (  # type: ignore[attr-defined]
+        lambda _wid, *, query="", limit=20, include_inactive=False: store.list_lessons(
+            _wid, include_inactive=include_inactive
+        )[:limit]
+    )
+
+    result = store.prepare_summary_input(
+        workspace_id,
+        records_dir,
+        mode=FeedbackSummaryMode.INCREMENTAL,
+        limit=30,
+        force=False,
+    )
+    prompt, committed_ids, committed_paths = mixin._build_workspace_feedback_summary_prompt(
+        ws_stub, result
+    )
+    # Hard budget honored even with adversarial legacy fingerprints.
+    assert (
+        len(prompt) <= store.REAPER_PROMPT_HARD_CHAR_LIMIT
+    ), f"legacy-fp prompt {len(prompt)} exceeds {store.REAPER_PROMPT_HARD_CHAR_LIMIT}"
+    # The 5KB bogus fingerprint MUST NOT appear verbatim in the prompt.
+    assert huge_fp not in prompt, "huge legacy fingerprint leaked into prompt"
+    # The non-canonical fingerprint also must not appear (it would 400 on echo).
+    assert noncanon_fp not in prompt, "non-canonical fingerprint leaked into prompt"
+    # The canonical fingerprint must appear verbatim so Reaper can echo-merge.
+    assert good_fp in prompt, "canonical fingerprint missing from prompt"
+    # Parse the package and verify lesson payload fields.
+    marker = "Input package JSON:\n"
+    pkg = json.loads(prompt.split(marker, 1)[1])
+    fps_in_prompt = [lesson.get("fingerprint", "") for lesson in pkg["active_lessons"]]
+    assert good_fp in fps_in_prompt
+    assert huge_fp not in fps_in_prompt
+    assert noncanon_fp not in fps_in_prompt
+    # Every fp that survived must either be empty or match the canonical regex.
+    import re
+
+    fp_re = re.compile(r"^(workspace|family|global):[0-9a-f]{16}$")
+    for fp in fps_in_prompt:
+        assert fp == "" or fp_re.match(fp), f"non-canon fp in prompt: {fp!r}"
+    # Internal bookkeeping must not leak.
+    assert "_path" not in prompt
