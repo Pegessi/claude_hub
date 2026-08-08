@@ -844,7 +844,7 @@ class FeedbackSummaryRequest(BaseModel):
     """Manual trigger payload for a workspace-level internal feedback summary."""
 
     mode: FeedbackSummaryMode = FeedbackSummaryMode.INCREMENTAL
-    limit: int = Field(default=50, ge=1, le=200)
+    limit: int = Field(default=30, ge=1, le=30)
     force: bool = False
     clear_context: bool = True
 

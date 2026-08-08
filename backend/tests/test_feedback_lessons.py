@@ -126,7 +126,7 @@ def test_summary_outcome_from_report_ignores_trailing_prose(
     assert skipped is None
 
 
-def test_digest_preserves_chronological_state_sequence(
+def test_digest_preserves_iteration_counts_and_truncates_verbose_fields(
     store: FeedbackLessonStore,
 ) -> None:
     payload = {
@@ -142,30 +142,35 @@ def test_digest_preserves_chronological_state_sequence(
             {"state": "needs_input"},
             {"state": "completed"},
         ],
-        "artifacts": {},
-        "final_summary": "fixed",
+        "artifacts": {
+            "changed_files": [f"file{i}.py" for i in range(25)],
+            "validation": ["short validation", "x" * 600],
+            "risks": ["short risk", "y" * 600, "z" * 600, "w" * 600, "v" * 600, "u" * 600],
+        },
+        "final_summary": "f" * 400,
     }
     digest = store._digest_task_record(payload)
-    assert digest.report_state_sequence == [
-        "started",
-        "working",
-        "ready_for_review",
-        "review_failed",
-        "working",
-        "ready_for_review",
-        "review_failed",
-        "needs_input",
-        "completed",
-    ]
+    # report_state_sequence intentionally emptied to save prompt tokens;
+    # counts carry the signal the Reaper needs.
+    assert digest.report_state_sequence == []
     assert digest.review_failed_count == 2
     assert digest.needs_input_count == 1
     assert digest.report_total == 9
     assert "review_failed" in digest.report_states  # deduped, kept for back-compat
+    # Truncation applied:
+    assert len(digest.final_summary) <= 203  # 200 + "..."
+    assert digest.final_summary.endswith("...")
+    assert len(digest.changed_files) == 10
+    assert len(digest.validation[1]) <= 203  # 200 + "..."
+    assert len(digest.risks) == 2  # capped to 2 items
 
 
-def test_prepare_summary_input_consumes_all_unprocessed_in_incremental_mode(
+def test_prepare_summary_input_caps_incremental_to_limit_to_prevent_oversized_prompts(
     store: FeedbackLessonStore, tmp_path: Path
 ) -> None:
+    """Incremental mode must also cap at limit to prevent unbounded prompt growth
+    when many records accumulate between reaper runs (e.g. after long inactivity).
+    Records beyond the cap stay unprocessed and are picked up on the next run."""
     workspace_id = "ws"
     records_dir = tmp_path / "task_records"
     for index in range(20):
@@ -188,9 +193,22 @@ def test_prepare_summary_input_consumes_all_unprocessed_in_incremental_mode(
         force=False,
     )
 
-    assert len(result["input_record_ids"]) == 20
-    assert result["processed_count"] == 20
+    # Capped to limit (5 most recent), NOT all 20
+    assert len(result["input_record_ids"]) == 5
+    assert result["input_record_ids"] == ["task-15", "task-16", "task-17", "task-18", "task-19"]
+    assert result["processed_count"] == 5  # only the 5 selected are marked processed
     assert result["first_scan"] is True
+
+    # Second run picks up the remaining unprocessed records
+    result2 = store.prepare_summary_input(
+        workspace_id,
+        records_dir,
+        mode=FeedbackSummaryMode.INCREMENTAL,
+        limit=5,
+        force=False,
+    )
+    assert len(result2["input_record_ids"]) == 5
+    assert result2["processed_count"] == 10
 
 
 def test_prepare_summary_input_caps_at_limit_for_full_mode(
