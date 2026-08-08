@@ -51,20 +51,26 @@ cwd-global fallback.
 
 ### F2 — Global launch lock + per-cwd batches with atomic rollback (BUG-1, BUG-4)
 New `GLOBAL_CODEX_LAUNCH_LOCK = asyncio.Lock()` serializes all cold codex
-launches. Tabs are grouped by `os.path.realpath(cwd)`. Within each cwd:
+launches and the final Phase-R scan/decision. Tabs are grouped by
+`os.path.realpath(cwd)`. Within each cwd:
 1. Verified-non-quarantined tabs launch FIRST (so their appends are observed
    before any fresh codex in the same cwd starts writing).
 2. Fresh/unverified/quarantined tabs launch second.
 3. If any tab in the cwd throws, `stop(kill_tmux=True)` every started tab in
-   that cwd, set `resume_quarantined=True` for the whole group, clear all
-   launch state, and save. Cross-cwd groups are independent.
+   that cwd, set `resume_quarantined=True` for the whole group, clear ownership
+   only after tmux teardown is proven, and save. Signal-zero/ambiguous outcomes
+   use the same path before the next sibling can launch. Cross-cwd groups are
+   independent.
 
 ### F3 — Fence-poll signal replaces 600s window (BUG-2)
 After launching each cold codex, poll every 200ms for up to 30 attempts (~6s
 wall), observing `_diff_scans(pre, post)` filtered to same-cwd
 `new`/`appended` entries. Wait an additional `_CODEX_FENCE_SILENCE_S = 0.7s`
 after the last observed change before accepting the signal. This gives tight
-attribution without the 600s blast radius.
+attribution without the 600s blast radius. The attribution diff retains the
+immutable per-tab pre-launch scan, while the silence detector advances a
+rolling post-scan; otherwise one append appears as perpetual activity and the
+fence always consumes its full timeout.
 
 ### F4 — Per-tab clock anchor in `ensure_tmux_session` (BUG-5)
 TTYDProcess gains `_launch_wall` (wall clock) and `_launch_mono` (monotonic),
@@ -79,17 +85,18 @@ After all codex tabs in a cold batch have launched, re-scan and enforce:
 | R1 | Every pinned sid exists in post-scan | quarantine tab |
 | R2 | Every entry.cwd realpath matches tab.cwd realpath | quarantine tab |
 | R3-new | New-pin sid.ts falls in [-2s, +8s] window vs _launch_wall | quarantine tab |
-| R3-append | Append-resume sid grew size AND mtime_ns vs _pre_scan | quarantine tab |
+| R3-append | Append-resume sid grew size AND mtime_ns vs exact per-tab _pre_scan | quarantine tab |
 | R4 | agent_session_id is non-empty | quarantine tab |
-| R5 | No two tabs pinned to the same sid | quarantine latter tab |
-| R6 | Every expected new-pin sid is in actual-new per cwd | log problems (tab already R1-R5 safe) |
-| R7 | Every expected append-resume sid was present in pre_scan | log problems |
-| R8 | Any new same-cwd sids NOT mapped to an expected tab → quarantine every unpinned tab in that cwd | whole-cwd unpinned quarantine |
+| R5 | No two tabs pinned to the same sid | quarantine every claimant |
+| R6 | Every expected new-pin sid appears new vs the global pre-launch scan | quarantine whole live cwd batch |
+| R7 | Every expected append-resume sid grew vs the global pre-launch scan | quarantine whole live cwd batch |
+| R8 | No other same-cwd sid changed vs the global pre-launch scan | quarantine whole live cwd batch |
 
-Crucially, R8 ensures a tab whose own rollout is indistinguishable from a
-stray rollout (concurrent external launch, tmux glitch, etc.) is quarantined
-rather than mis-pinned. On the next restart that quarantined tab starts
-fresh and gets a correctly-attributed new sid.
+Crucially, R6-R8 compare with one scan taken before any sibling launch. A later
+tab's per-tab scan may already contain an earlier sibling's rollout, so using
+those later scans for the batch bijection would hide extras and make ownership
+launch-order-dependent. Any non-bijective cwd batch is stopped in full rather
+than preserving a merely plausible mapping.
 
 ### F6 — Cursor constructive pin + `_cursor_verify.py`
 - Cursor always pins a uuid4 at `TTYDProcess.__init__` (previously only
@@ -101,15 +108,17 @@ fresh and gets a correctly-attributed new sid.
   - **Tier 2 (legacy fallback):** walk sibling `meta.json` files whose
     realpath-cwd matches and check that the chat-directory name equals the
     sid.
-- No quarantine path for cursor: `agent --resume <uuid>` always succeeds
-  (constructive pin verified in V0), so we do not need fail-closed here;
-  `|| agent` fallback handles any resume error by starting fresh.
+- A persisted Cursor sid is reused only if verification succeeds for the exact
+  cwd. A missing or wrong-cwd sid is rotated to a new uuid and constructively
+  pinned, preferring a fresh chat over cross-workspace resume.
 
 ### Persisted state: `resume_quarantined`
 New boolean on each tab, default False (back-compat), serialized into
 `tabs.json`. Set True by atomic rollback or Phase-R failure; cleared on
 successful `FRESH_PIN` or `RESUME_OK`. Quarantined tabs never issue `codex
-resume`; they start fresh next launch.
+resume`; they start fresh next launch. The last known sid is cleared only after
+`stop(kill_tmux=True)` proves the tmux session is absent; otherwise the error is
+surfaced and the owner metadata is retained.
 
 ## Files Changed
 
@@ -121,7 +130,7 @@ resume`; they start fresh next launch.
   `_schedule_codex_discovery`); new constants; TTYDProcess gets
   `resume_quarantined`, `_launch_wall`, `_launch_mono`, `_is_new_pin`,
   `_pre_scan`; cursor always gets a uuid4; `start_all_tabs()` rewritten as
-  Phase 0/1/1S/4/F lifecycle; removed old helpers `_codex_sessions_dir`,
+  Phase 0/1/1S/R/F lifecycle; removed old helpers `_codex_sessions_dir`,
   `_codex_session_start_epoch`, `_codex_rollout_dirs`, `_codex_iter_rollouts`,
   `_discover_codex_session_id`.
 - `backend/claude_hub/services/_cursor_verify.py` — NEW. Two-tier cursor
@@ -145,6 +154,9 @@ resume`; they start fresh next launch.
   tests exercising V4/V6 scenarios with subprocess stubbed (tmux/ttyd calls
   intercepted; codex rollouts created on-disk with realistic format and
   timing).
+- `backend/tests/test_recovery_real_ttyd.py` — NEW. Real ttyd/tmux cold-restart
+  oracle on a private tmux server: 7 tabs, 3 cwd values, all four tab types,
+  real ports, full identity markers, active + archived Codex resumes.
 - `CHANGELOG.md` — Unreleased/Fixes entry.
 
 ## Validation Summary
@@ -158,23 +170,25 @@ resume`; they start fresh next launch.
 | V4-A archived_sessions flat layout is discovered | Integration test passes |
 | V4-B verified-resume appends to target rollout (RESUME_OK) | Integration test passes |
 | V4-C same-cwd 3 codex (2 verified + 1 fresh) attribute to 3 distinct sids, none quarantined | Integration test passes |
-| V4-D cursor always pins uuid4 and issues `agent --resume <sid>` | Integration test passes; `test_cursor_recovery_uses_resume_uuid` unit test passes |
+| V4-D Cursor verifies exact cwd or rotates to a constructive fresh uuid, then issues `agent --resume <sid>` | Integration + unit tests pass |
 | V4-E quarantined tab does NOT resume; FRESH_PIN clears quarantine | Integration test passes |
 | V4-F R8 extra same-cwd stray rollout → quarantine unpinned tab | Integration test passes |
 | V5 `resume_quarantined` round-trips through to_dict/from_dict/state persist | Unit test passes |
 | V6 single-tab cold launch pins new sid and is discoverable via `_codex_id_exists` | Integration test passes |
 | V7 `test_codex_sessions.py` endpoint tests (grouping, sort, dedup, title-boilerplate skip) | All pass |
-| V8 detached-baseline pytest on main@2144b4a vs fix branch | Baseline 549 passed / 61 pre-existing event-loop failures; fix 553 passed / same 61 failures. **Zero new failures.** (+4 is the new unit tests added in this PR) |
+| V8 real-process cold restart | 7 tabs / 3 cwd / Codex + Cursor + Claude + Terminal; exact identity marker bijection, active + archived resumes, 0 cross-wiring; cold 7.51s, full focused test 8.88s |
 | V9 `black` / `isort` / `mypy` on all touched files | All clean |
 | V10 existing launch-command expectations (no `--last`, cursor `--resume`, quarantined codex skips resume, solo-mode flags) | Updated and pass |
+| V11 fail-closed edge cases | Wrong-cwd Codex/Cursor ids rejected; surviving tmux raises; teardown failure preserves the last known sid |
+| V12 full backend suite | 566 passed / 61 failed; identical 61 known pytest-asyncio running-loop failures as `main@2144b4a`, with no new failure class or count |
 
 ## Risks / Trade-offs
 
-1. **Serial codex launches**: under GLOBAL_CODEX_LAUNCH_LOCK, N cold codex
-   tabs take ~N × (0.5–1.5 s) wall time instead of launching in parallel. In
-   practice cold starts are rare (only full service / tmux-server restarts)
-   and N is small (< 10). Hot reattaches (backend-only restarts, the common
-   case) still launch in parallel in Phase 1.
+1. **Serial codex attribution**: under GLOBAL_CODEX_LAUNCH_LOCK, Codex tmux
+   launch + fence + reconciliation are serialized to make ownership
+   deterministic; the independent ttyd frontends start in parallel afterward.
+   In the real 7-tab oracle the complete cold recovery took 7.51s. Hot
+   reattaches still launch in parallel in Phase 1.
 2. **Quarantine is conservative**: any Phase-R anomaly quarantines rather
    than risks cross-wiring. Quarantined codex tabs start fresh on the next
    launch and lose the previous session's history, which matches the
@@ -184,10 +198,9 @@ resume`; they start fresh next launch.
    resuming someone else's session.
 3. **Cursor DB format coupling**: Tier 1 reads `meta.key = 0` as hex-JSON
    with `agentId`. If Cursor ships a new format that changes this,
-   verification falls back to Tier 2 (meta.json chatId directory name
-   match), then to failing open ("unknown" → start fresh with a new uuid4,
-   which is always correct for the constructive-pin model — it just creates
-   a new chat rather than resuming the old one).
+   verification falls back to Tier 2 (meta.json chatId directory-name match),
+   then fails closed to a constructive fresh uuid. That can lose automatic
+   resume, but cannot attach the tab to another cwd's chat.
 4. **Timestamp-based attribution**: R3-new uses a [-2s, +8s] window around
    `_launch_wall`. V0 measurements showed codex writes session_meta ~0.1–2s
    after process start on a warm cache; the +8s upper bound is generous for

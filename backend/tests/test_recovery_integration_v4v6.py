@@ -648,8 +648,7 @@ async def test_v4e_quarantined_tab_starts_fresh(
 async def test_v4d_cursor_pins_and_uses_resume(
     fake_home: Dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """V4-D: cursor tabs always pin a uuid4 at construction and always issue
-    ``agent --resume <sid>``."""
+    """V4-D: an unverified Cursor id rotates to a constructive fresh pin."""
     cwd = str(fake_home["home"] / "workspace-d")
     os.makedirs(cwd, exist_ok=True)
 
@@ -673,14 +672,18 @@ async def test_v4d_cursor_pins_and_uses_resume(
 
     await mgr.start_all_tabs()
 
-    # The tmux new-session command should contain "agent --resume <sid>"
+    # The original sid has no cwd-scoped store, so recovery must rotate it and
+    # constructively pin the replacement via ``agent --resume <new-sid>``.
     assert recorded_new_session_cmds, "expected a tmux new-session call"
     new_session_cmd = recorded_new_session_cmds[-1]
+    assert tab.agent_session_id != sid_cur
+    assert sid_cur not in new_session_cmd
+    assert tab.agent_session_id is not None
     assert (
-        f"--resume {sid_cur}" in new_session_cmd
-        or f"--resume '{sid_cur}'" in new_session_cmd
-        or f'--resume "{sid_cur}"' in new_session_cmd
-    ), f"cursor launch did not issue --resume for pinned sid {sid_cur}: {new_session_cmd[:300]}"
+        f"--resume {tab.agent_session_id}" in new_session_cmd
+        or f"--resume '{tab.agent_session_id}'" in new_session_cmd
+        or f'--resume "{tab.agent_session_id}"' in new_session_cmd
+    ), f"cursor launch did not issue --resume for pinned sid: {new_session_cmd[:300]}"
 
 
 # ─── V4-F: R8 extra same-cwd sid triggers quarantine ────────────────────

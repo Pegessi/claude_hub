@@ -26,35 +26,45 @@
   - New global `GLOBAL_CODEX_LAUNCH_LOCK` serializes cold codex launches so
     signal attribution sees exactly one new/appended rollout per tab.
   - Fence-poll with 0.7s silence after rollout activity (replaces the 600s
-    wait), 200ms × 30 poll budget (~6s wall).
+    wait), 200ms × 30 poll budget (~6s wall). A rolling observation snapshot
+    lets the fence settle while the immutable pre-launch scan remains the
+    attribution baseline.
   - Per-tab new-pin timestamp window anchored in `ensure_tmux_session`
     immediately before `tmux new-session -d`, with bounds `[-2s, +8s]`.
   - Phase-R reconciliation (R1-R8) verifies existence, cwd-realpath match,
     ts-window/growth, non-empty, no duplicate sids, bijection between
-    expected and actual new/appended sids per cwd; extras trigger whole-cwd
-    quarantine rather than risking misattribution.
+    expected and actual new/appended sids per cwd against one global pre-launch
+    scan; extras trigger whole-cwd quarantine rather than risking
+    misattribution. Signal failures must be salvaged before any sibling launch
+    or immediately roll back the cwd batch.
   - Cursor CLI is a *constructive pin*: `agent --resume <uuid>` creates a
     fresh chat store immediately if one does not exist, so every cursor tab
-    now pins a uuid4 at construction and always passes `--resume`; on-disk
-    verification uses `store.db` meta key=0 (hex-JSON, `agentId` field) with
-    `meta.json` realpath fallback via `services/_cursor_verify.py`.
+    now pins a uuid4 at construction and always passes `--resume`; persisted
+    ids resume only after cwd-scoped verification. Missing/wrong-cwd ids rotate
+    to a constructive fresh uuid. Verification uses `store.db` meta key=0
+    (hex-JSON, `agentId` field) with `meta.json` realpath fallback via
+    `services/_cursor_verify.py`.
   - New persisted field `resume_quarantined` (default False, back-compat) on
     each tab; set True on atomic rollback/Phase-R failure, cleared on
-    successful fresh pin or verified resume.
+    successful fresh pin or verified resume. Quarantine verifies tmux teardown
+    before clearing the last known owner sid and surfaces cleanup failures.
 - **Verified**:
   - V0 empirical probes confirmed codex 0.146.1 rollout format
     (`{type:session_meta, payload:{id, session_id, cwd, timestamp}}` with
     `payload.id` the canonical sid; `archived_sessions/` flat layout;
     `session_id` differs from `id` on forks).
-  - 94 unit tests in `test_ttyd_manager.py` + `test_codex_sessions.py` (all
-    pass).
+  - 98 unit tests in `test_ttyd_manager.py` + `test_codex_sessions.py` (all
+    pass), including wrong-cwd rejection and fail-closed teardown.
   - 8 V4/V6 integration tests in `test_recovery_integration_v4v6.py`
     (archived-sessions flat scan, verified-resume append, 3-codex same-cwd
     no-cross-wiring, quarantined-tab fresh start, cursor `--resume` pinning,
     R8 extra-sid quarantine, cursor DB verification, single-tab fresh pin).
-  - V8 detached-baseline pytest: identical 61 pre-existing event-loop
-    failures on both main and fix branch (pass count grew from 549→553 due
-    to new tests only); zero new failures.
+  - Real-process cold-restart oracle: 7 tabs across 3 cwd values (3 Codex,
+    2 Cursor, Claude, Terminal), exact tab/type/cwd/full-SID/tmux/port marker
+    bijection, active + flat-archived Codex resumes, 0 cross-wiring. Uses a
+    private tmux server; cold recovery 7.51s and full focused test 8.88s.
+  - Full backend suite: 566 passed; the same 61 pre-existing pytest-asyncio
+    running-loop failures as `main@2144b4a`; no new failure class or count.
   - `black` / `isort` / `mypy` clean on all touched files.
 
 ### fix: restore terminal history and resize injection on first load

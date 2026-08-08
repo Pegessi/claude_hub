@@ -240,16 +240,28 @@ async def _tmux_list_sessions() -> set[str]:
 
 
 async def _tmux_kill_session(session_name: str) -> None:
-    """Kill a tmux session."""
+    """Kill a tmux session and prove it is no longer present.
+
+    ``tmux kill-session`` can return non-zero for an already-absent session,
+    which is an acceptable terminal state.  A command that returns success
+    while the session remains present is not acceptable for ownership
+    quarantine, so always verify absence after the command completes.
+    """
     proc = await asyncio.create_subprocess_exec(
         "tmux",
         "kill-session",
         "-t",
         session_name,
         stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
     )
-    await proc.wait()
+    _, stderr = await proc.communicate()
+    if await _tmux_session_exists_async(session_name):
+        detail = stderr.decode("utf-8", errors="ignore").strip()
+        raise RuntimeError(
+            f"tmux session {session_name} still exists after kill-session "
+            f"(rc={proc.returncode}, stderr={detail!r})"
+        )
 
 
 # Conservative session-id backfill tuning (see _backfill_agent_session_ids).
@@ -860,9 +872,9 @@ class TTYDProcess:
         # Codex-only: True when a prior cold-start attribution failed and we
         # quarantined this tab to avoid cross-wiring. On the next launch we
         # MUST start fresh (no `codex resume`) to prevent replaying a
-        # potentially mis-attributed session. Cleared by a successful
-        # FRESH_PIN (Phase 1C) or SALVAGE-OK (Phase 4); preserved across
-        # backend restarts via tabs.json. Defaults to False for back-compat
+        # potentially mis-attributed session. Cleared by a successful FRESH_PIN
+        # or the pre-sibling salvage check in Phase 1S; preserved across backend
+        # restarts via tabs.json. Defaults to False for back-compat
         # with persisted states created before this field existed.
         self.resume_quarantined: bool = bool(resume_quarantined)
         # --- Runtime-only fields (NOT persisted in tabs.json) ---
@@ -876,13 +888,16 @@ class TTYDProcess:
         self._launch_wall: Optional[float] = None
         self._launch_mono: Optional[float] = None
         # True iff this cold launch produced a new rollout file (vs appending
-        # to an existing one on a successful resume). Set by Phase 1C/4.
+        # to an existing one on a successful resume). Set by Phase 1C/salvage.
         self._is_new_pin: Optional[bool] = None
         # Full dict[sidad, ScanEntry] snapshot taken immediately before
         # ensure_tmux_session. Retained so Phase-R reconciliation can verify
         # append-resume entries grew (size + mtime) relative to this
         # pre-launch baseline — a frozenset of sids cannot detect growth.
         self._pre_scan: Optional[Dict[str, ScanEntry]] = None
+        # Set by Phase 1C while signal/exception failure is being salvaged before
+        # a sibling launch. None means "launched cleanly".
+        self._pending_quarantine_reason: Optional[str] = None
         # For terminal tabs, use the user's shell instead of an agent command.
         if shell:
             self.shell = shell
@@ -1188,8 +1203,8 @@ asyncio.run(_main())
             cmd.append(self._with_env(self._agent_start_command(recover=recover)))
         elif self.agent_type == AgentType.CODEX and recover:
             # Non-solo codex normally launches via self.shell ("codex"); on
-            # recovery route through the agent command so `resume <uuid>` (or
-            # `resume --last` as fallback) runs.
+            # recovery route through the agent command so an exact verified
+            # `resume <uuid>` (or a safe fresh launch) runs.
             cmd.append(self._with_env(self._agent_start_command(recover=recover)))
         else:
             cmd.append(self._with_env(self.shell))
@@ -1377,8 +1392,8 @@ asyncio.run(_main())
             cmd.append(self._with_env(self._agent_start_command(recover=recover)))
         elif self.agent_type == AgentType.CODEX and recover:
             # Non-solo codex normally launches via self.shell ("codex"); on
-            # recovery route through the agent command so `resume <uuid>` (or
-            # `resume --last` as fallback) runs.
+            # recovery route through the agent command so an exact verified
+            # `resume <uuid>` (or a safe fresh launch) runs.
             cmd.append(self._with_env(self._agent_start_command(recover=recover)))
         else:
             cmd.append(self._with_env(self.shell))
@@ -1504,7 +1519,10 @@ asyncio.run(_main())
             recover
             and not self.resume_quarantined
             and self.agent_session_id
-            and _codex_id_exists(self.agent_session_id)
+            # cwd-scoped verification (BUG-3 class): a sid that exists on disk
+            # but belongs to a DIFFERENT cwd must NOT be resumed here — that
+            # would attach this tab to another workspace's conversation.
+            and _codex_id_exists(self.agent_session_id, self.cwd)
         ):
             quoted_sid = shlex.quote(self.agent_session_id)
             return f"codex resume {quoted_sid}{flags} || {fresh}"
@@ -1519,23 +1537,24 @@ asyncio.run(_main())
         if self.agent_type == AgentType.CURSOR:
             # Cursor CLI supports constructive pinning via `agent --resume <uuid>`:
             # V0 verified that passing an arbitrary uuid causes Cursor to create
-            # a fresh store.db immediately (rather than erroring out). So we
-            # ALWAYS pin this tab's stable agent_session_id: on recovery, resume
-            # the existing session; on fresh launch, the same uuid creates a new
-            # store that will be found on future restarts. If we don't yet have a
-            # sid (legacy tab created before pinning shipped), generate one and
-            # fall back to plain `agent` for this launch — Phase 0 (S3) will
-            # assign a new sid before the first cold launch anyway.
+            # a fresh store.db immediately (rather than erroring out). A persisted
+            # sid is resumed only when its store verifies against this cwd. If it
+            # is missing or belongs to another cwd, rotate to a fresh uuid rather
+            # than asking Cursor to resolve an unsafe cross-workspace id.
             if not self.agent_session_id:
                 self.agent_session_id = str(uuid.uuid4())
-            quoted_sid = shlex.quote(self.agent_session_id)
             flags = " --yolo" if self.solo_mode else ""
             if (
                 recover
                 and not self.resume_quarantined
                 and _cursor_id_exists(self.agent_session_id, self.cwd or "")
             ):
+                quoted_sid = shlex.quote(self.agent_session_id)
                 return f"agent --resume {quoted_sid}{flags} || agent{flags}"
+            if recover:
+                self.agent_session_id = str(uuid.uuid4())
+                self.resume_quarantined = False
+            quoted_sid = shlex.quote(self.agent_session_id)
             return f"agent --resume {quoted_sid}{flags}"
         if self.agent_type == AgentType.TERMINAL:
             return "${SHELL:-/bin/bash} -l"
@@ -1558,8 +1577,8 @@ asyncio.run(_main())
 
         For Claude: resumes via ``--resume <agent_session_id>`` (falling back to
         ``--session-id`` so the conversation id is re-pinned).
-        For Codex: resumes via ``codex resume <uuid>`` when an id is pinned,
-        falling back to ``codex resume --last`` for unpinned legacy tabs.
+        For Codex: resumes via ``codex resume <uuid>`` only when the id is
+        verified for this cwd, otherwise starts fresh.
 
         Raises:
             ValueError: if the tab is not a local Claude/Codex tab.
@@ -1610,10 +1629,9 @@ asyncio.run(_main())
         user_shell = os.environ.get("SHELL", "/bin/bash")
 
         if self.agent_type == AgentType.CODEX:
-            # Codex: resume via the pinned session uuid if we have one, else
-            # best-effort resume --last. Solo flags apply to BOTH branches so
-            # a successful resume keeps solo mode (delegated to
-            # _codex_launch_command).
+            # Codex: resume only via a pinned, cwd-verified session uuid;
+            # otherwise start fresh. Solo flags apply to both the exact-resume
+            # and fallback branches (delegated to _codex_launch_command).
             inner_cmd = self._codex_launch_command(recover=True)
         else:
             # Claude path
@@ -2933,7 +2951,7 @@ class TTYDManager:
         while tmux sessions are still alive so we can anchor on tmux
         ``session_created`` time. Pinning is conservative: cross-wiring a tab
         to the wrong conversation is worse than leaving it unpinned (in which
-        case we fall back to ``codex resume --last``).
+        case cold recovery starts fresh and attributes the new rollout).
 
         Also handles the upgrade case: tabs created before codex pinning
         shipped have a freshly-generated placeholder uuid at construction
@@ -2989,41 +3007,194 @@ class TTYDManager:
         if backfilled:
             self._save_state()
 
+    async def _quarantine_codex_tab(self, tab: TTYDProcess, reason: str) -> None:
+        """Fail-closed quarantine for a codex tab whose attribution failed.
+
+        Kills the partially-started tmux session (so no stale codex process
+        keeps writing to an unattributed rollout), clears ``agent_session_id``,
+        resets all per-launch runtime fields, and sets
+        ``resume_quarantined=True`` so the next launch starts fresh. The tab
+        is NOT removed from the manager — it stays in processes so the UI
+        still shows it; when the user next opens it (or the next restart),
+        it will get a fresh codex session with a correctly-attributed sid.
+        """
+        logger.warning(
+            "codex quarantine for tab %s (sid=%s): %s",
+            tab.tab_id,
+            tab.agent_session_id,
+            reason,
+        )
+        # Kill the tmux session to stop a possibly-misattributed codex from
+        # continuing to write to a rollout we no longer trust.
+        stop_error: Optional[Exception] = None
+        for attempt in range(1, 3):
+            try:
+                await tab.stop(kill_tmux=True)
+                stop_error = None
+                break
+            except Exception as e:
+                stop_error = e
+                logger.error(
+                    "quarantine: stop(kill_tmux=True) attempt %d for %s failed: %s",
+                    attempt,
+                    tab.tab_id,
+                    e,
+                )
+        if stop_error is not None:
+            # Do not erase ownership metadata while an unattributed writer may
+            # still be alive.  Persist quarantine with the last known SID and
+            # surface the cleanup failure to the caller/reviewer.
+            tab.resume_quarantined = True
+            tab._pending_quarantine_reason = f"{reason}; cleanup failed: {stop_error!r}"
+            raise RuntimeError(
+                f"failed to stop owned tmux/ttyd for quarantined tab {tab.tab_id}"
+            ) from stop_error
+        # Reset all per-launch state; clear agent_session_id so we don't carry
+        # forward a now-untrustworthy sid. Phase 0 of the next start_all_tabs
+        # will assign a fresh uuid4 for codex just like it does for legacy
+        # cursor tabs.
+        tab.agent_session_id = None
+        tab._is_new_pin = None
+        tab._pre_scan = None
+        tab._launch_wall = None
+        tab._launch_mono = None
+        tab._pending_quarantine_reason = None
+        tab.resume_quarantined = True
+        tab.is_active = False
+
     async def _codex_poll_signal(self, tab: TTYDProcess) -> Dict[str, str]:
         """Fence-poll after launching a codex tab until activity is observed
         plus ``_CODEX_FENCE_SILENCE_S`` of silence.
 
         Returns the ``_diff_scans`` result against ``tab._pre_scan`` at the
-        moment of the final post-fence snapshot. Polls at
+        moment of the final post-fence snapshot, filtered to same-cwd
+        ``new``/``appended`` entries (so cross-cwd activity from unrelated
+        codex processes cannot leak into the per-tab signal). Polls at
         ``_CODEX_POLL_INTERVAL_S`` up to ``_CODEX_POLL_MAX_ATTEMPTS`` times
         (~6 s wall budget per tab).
         """
         assert tab._pre_scan is not None
-        last_seen_change: Optional[Dict[str, ScanEntry]] = None
-        silent_since: Optional[float] = None
+        # ``tab._pre_scan`` is the immutable attribution baseline.  A second,
+        # rolling snapshot is required for the silence fence: comparing every
+        # poll to the immutable baseline makes the same already-observed append
+        # look "new" forever and forces every launch to consume the full timeout.
+        previous_post = tab._pre_scan
+        saw_signal = False
+        last_activity_at: Optional[float] = None
+        try:
+            target_cwd = os.path.realpath(tab.cwd) if tab.cwd else ""
+        except OSError:
+            target_cwd = tab.cwd or ""
+
+        def _filter_same_cwd(post: Dict[str, ScanEntry], diff: Dict[str, str]) -> Dict[str, str]:
+            out: Dict[str, str] = {}
+            for s, ct in diff.items():
+                if ct not in ("new", "appended"):
+                    continue
+                entry = post.get(s)
+                if not entry or not entry.cwd:
+                    continue
+                if not target_cwd:
+                    continue
+                try:
+                    if os.path.realpath(entry.cwd) != target_cwd:
+                        continue
+                except OSError:
+                    continue
+                out[s] = ct
+            return out
+
         for _ in range(_CODEX_POLL_MAX_ATTEMPTS):
             await asyncio.sleep(_CODEX_POLL_INTERVAL_S)
             post = _codex_scan_sessions()
-            changed = {
-                s: ct
-                for s, ct in _diff_scans(tab._pre_scan, post).items()
-                if ct in ("new", "appended")
-                and post[s].cwd
-                and os.path.realpath(post[s].cwd or "") == os.path.realpath(tab.cwd or "")
-            }
+            signal = _filter_same_cwd(post, _diff_scans(tab._pre_scan, post))
+            incremental = _filter_same_cwd(post, _diff_scans(previous_post, post))
             now = time.monotonic()
-            if changed:
-                last_seen_change = {s: post[s] for s in changed}
-                silent_since = now
-            elif last_seen_change is not None and silent_since is not None:
-                if now - silent_since >= _CODEX_FENCE_SILENCE_S:
-                    return _diff_scans(tab._pre_scan, post)
-        # Timeout: return last diff we saw (caller treats empty as SignalZero)
-        if last_seen_change is not None:
+            if signal:
+                saw_signal = True
+            if incremental:
+                last_activity_at = now
+            previous_post = post
+            if (
+                saw_signal
+                and last_activity_at is not None
+                and now - last_activity_at >= _CODEX_FENCE_SILENCE_S
+            ):
+                final_post = _codex_scan_sessions()
+                final_incremental = _filter_same_cwd(
+                    final_post, _diff_scans(previous_post, final_post)
+                )
+                if final_incremental:
+                    # Activity raced with the settling poll; restart the silence
+                    # window instead of accepting a moving target.
+                    previous_post = final_post
+                    last_activity_at = time.monotonic()
+                    continue
+                return _filter_same_cwd(final_post, _diff_scans(tab._pre_scan, final_post))
+        # Timeout: return last same-cwd diff we saw (caller treats empty as SignalZero)
+        if saw_signal:
             # Re-scan once more to get a stable final view
-            post = _codex_scan_sessions()
-            return _diff_scans(tab._pre_scan, post)
+            final_post = _codex_scan_sessions()
+            return _filter_same_cwd(final_post, _diff_scans(tab._pre_scan, final_post))
         return {}
+
+    def _salvage_pending_codex_signal(self, tab: TTYDProcess) -> Optional[Tuple[str, str]]:
+        """Resolve a failed signal before any sibling launch can begin.
+
+        This runs while the global Codex launch lock is held and before the
+        next same-cwd tab is started, so a candidate cannot belong to a later
+        sibling.  Only exact append growth of the persisted target or exactly
+        one new same-cwd rollout in this tab's timestamp window is salvageable.
+        """
+        assert tab._pre_scan is not None
+        post = _codex_scan_sessions()
+        try:
+            target_cwd = os.path.realpath(tab.cwd) if tab.cwd else ""
+        except OSError:
+            target_cwd = tab.cwd or ""
+
+        def _same_cwd(entry: ScanEntry) -> bool:
+            if not target_cwd or not entry.cwd:
+                return False
+            try:
+                return bool(os.path.realpath(entry.cwd) == target_cwd)
+            except OSError:
+                return bool(entry.cwd == target_cwd)
+
+        target_sid = tab.agent_session_id
+        if target_sid:
+            pre_target = tab._pre_scan.get(target_sid)
+            post_target = post.get(target_sid)
+            if (
+                pre_target is not None
+                and post_target is not None
+                and _same_cwd(post_target)
+                and post_target.size > pre_target.size
+                and post_target.mtime_ns > pre_target.mtime_ns
+            ):
+                tab._is_new_pin = False
+                tab.resume_quarantined = False
+                tab._pending_quarantine_reason = None
+                return "SALVAGE_RESUME", target_sid
+
+        new_candidates: List[str] = []
+        for sid, entry in post.items():
+            if sid in tab._pre_scan or not _same_cwd(entry):
+                continue
+            if entry.ts is None or tab._launch_wall is None:
+                continue
+            delta = entry.ts - tab._launch_wall
+            if -_CODEX_NEW_PIN_TS_EARLY_S <= delta <= _CODEX_NEW_PIN_TS_LATE_S:
+                new_candidates.append(sid)
+        if len(new_candidates) != 1:
+            return None
+
+        new_sid = new_candidates[0]
+        tab.agent_session_id = new_sid
+        tab._is_new_pin = True
+        tab.resume_quarantined = False
+        tab._pending_quarantine_reason = None
+        return "SALVAGE_FRESH", new_sid
 
     async def _launch_one_cold_codex_locked(self, tab: TTYDProcess) -> Tuple[str, Optional[str]]:
         """Launch ONE cold codex tab under the global lock, attribute its
@@ -3034,20 +3205,28 @@ class TTYDManager:
           FRESH_PIN     — no/quarantined/unverified id; started fresh; new sid pinned
           FALLBACK      — verified id FAILED to resume (new rollout with different sid);
                           pinned the new sid instead; quarantine cleared
-          SignalZero    — no rollout activity observed within budget; quarantine set
-          SignalAmbiguous — two or more candidate sids; quarantine set
-          SignalBadDiscriminator — unexpected diff state; quarantine set
+          SALVAGE_*     — a signal race was resolved before any sibling launch
+          PendingQ      — signal failure could not be proven; caller rolls back
+
+        Launch exceptions propagate to the cwd-group rollback.  Signal failures
+        get one immediate, launch-isolated salvage attempt; an unresolved signal
+        returns PendingQ and the caller rolls back the whole cwd group before a
+        sibling can start.
         """
         assert tab._launch_wall is None
         assert tab._pre_scan is None
+        tab._pending_quarantine_reason = None  # type: ignore[attr-defined]
         target_sid = tab.agent_session_id
         is_verified = bool(
             not tab.resume_quarantined and target_sid and _codex_id_exists(target_sid, tab.cwd)
         )
         tab._pre_scan = _codex_scan_sessions()
-        # ensure_tmux_session stamps _launch_wall/_launch_mono and spawns codex
+        # ensure_tmux_session stamps _launch_wall/_launch_mono and spawns Codex.
+        # The ttyd process itself is intentionally started only after all SID
+        # attribution/reconciliation completes: ttyd does not participate in
+        # rollout ownership, and serializing its configure/safety waits adds
+        # ~1.5 s per tab without improving correctness.
         await tab.ensure_tmux_session()
-        await tab.start()
         diff = await self._codex_poll_signal(tab)
         # Filter to same-cwd new/appended entries
         post = _codex_scan_sessions()
@@ -3068,26 +3247,18 @@ class TTYDManager:
             changed[s] = ct
 
         if not changed:
-            logger.warning(
-                "codex Phase 1C tab %s: SignalZero (no rollout activity within budget); quarantining",
-                tab.tab_id,
-            )
-            tab.agent_session_id = target_sid
-            tab._is_new_pin = None
-            tab.resume_quarantined = True
-            return "SignalZero", None
+            reason = f"SignalZero (no same-cwd rollout activity within {_CODEX_POLL_MAX_ATTEMPTS * _CODEX_POLL_INTERVAL_S:.1f}s budget)"
+            logger.warning("codex Phase 1C tab %s: %s", tab.tab_id, reason)
+            tab._pending_quarantine_reason = reason  # type: ignore[attr-defined]
+            return self._salvage_pending_codex_signal(tab) or ("PendingQ", None)
 
         if len(changed) != 1:
-            logger.warning(
-                "codex Phase 1C tab %s: SignalAmbiguous (%d changed sids: %s); quarantining",
-                tab.tab_id,
-                len(changed),
-                list(changed.keys()),
+            reason = (
+                f"SignalAmbiguous ({len(changed)} same-cwd changed sids: {sorted(changed.keys())})"
             )
-            tab.agent_session_id = target_sid
-            tab._is_new_pin = None
-            tab.resume_quarantined = True
-            return "SignalAmbiguous", None
+            logger.warning("codex Phase 1C tab %s: %s", tab.tab_id, reason)
+            tab._pending_quarantine_reason = reason  # type: ignore[attr-defined]
+            return self._salvage_pending_codex_signal(tab) or ("PendingQ", None)
 
         ((new_sid, ct),) = changed.items()
         is_appended = ct == "appended"
@@ -3104,32 +3275,20 @@ class TTYDManager:
                     new_sid,
                 )
                 return "RESUME_OK", new_sid
-            # Appending to a non-target sid: unexpected, treat as bad discriminator
-            logger.warning(
-                "codex Phase 1C tab %s: append to %s but target was %s; quarantining",
-                tab.tab_id,
-                new_sid,
-                target_sid,
-            )
-            tab.agent_session_id = target_sid
-            tab._is_new_pin = None
-            tab.resume_quarantined = True
-            return "SignalBadDiscriminator", None
+            # Appending to a non-target sid: unexpected, defer to Phase R.
+            reason = f"SignalBadDiscriminator: append to {new_sid} but target was {target_sid}"
+            logger.warning("codex Phase 1C tab %s: %s", tab.tab_id, reason)
+            tab._pending_quarantine_reason = reason  # type: ignore[attr-defined]
+            return self._salvage_pending_codex_signal(tab) or ("PendingQ", None)
 
         # New file: codex created a fresh rollout.
         if entry.ts is not None:
             delta = entry.ts - (tab._launch_wall or time.time())
             if delta < -_CODEX_NEW_PIN_TS_EARLY_S or delta > _CODEX_NEW_PIN_TS_LATE_S:
-                logger.warning(
-                    "codex Phase 1C tab %s: new rollout %s ts delta %.1fs outside window; quarantining",
-                    tab.tab_id,
-                    new_sid,
-                    delta,
-                )
-                tab.agent_session_id = target_sid
-                tab._is_new_pin = None
-                tab.resume_quarantined = True
-                return "SignalBadDiscriminator", None
+                reason = f"SignalBadDiscriminator: new rollout {new_sid} ts delta {delta:.1f}s outside [-{_CODEX_NEW_PIN_TS_EARLY_S:.0f}s, +{_CODEX_NEW_PIN_TS_LATE_S:.0f}s] window"
+                logger.warning("codex Phase 1C tab %s: %s", tab.tab_id, reason)
+                tab._pending_quarantine_reason = reason  # type: ignore[attr-defined]
+                return self._salvage_pending_codex_signal(tab) or ("PendingQ", None)
         if is_verified and new_sid == target_sid:
             # Verified resume that also created new file — shouldn't happen for a
             # resume, but if sids match, trust it.
@@ -3181,7 +3340,9 @@ class TTYDManager:
                     if process._launch_wall is not None
                     else time.time() - delay
                 )
-                if process.agent_session_id and _codex_id_exists(process.agent_session_id):
+                if process.agent_session_id and _codex_id_exists(
+                    process.agent_session_id, process.cwd
+                ):
                     return
                 discovered = process._discover_codex_session_id(launch_epoch)
                 if discovered and discovered != process.agent_session_id:
@@ -3217,8 +3378,8 @@ class TTYDManager:
         if any tab in a cwd group throws, stop(kill_tmux=True) every tab in
         that cwd and mark them quarantine=True.
 
-        Phase 4 — Salvage reconciliation (Phase R). After all codex tabs are
-        launched, re-scan and enforce R1-R8 bijection:
+        Phase R — After all successfully-attributed codex tabs are launched,
+        re-scan and enforce R1-R8 bijection:
           R1 every expected pinned sid exists in post scan
           R2 every entry.cwd realpath matches the tab's cwd realpath
           R3 new-pin sids fall in ts window; append-resume sids grew
@@ -3226,11 +3387,13 @@ class TTYDManager:
           R4 no empty entries
           R5 no duplicate sid assignments across tabs
           R6 every actual new-pin sid in this batch is assigned to exactly one tab
-          R7 every append-resume sid was present in _pre_scan
-          R8 extras: any new-same-cwd sids not mapped to a tab → quarantine
-             every unpinned cwd-matched tab
-        Any failure quarantines the implicated tab(s) rather than risking
-        cross-wiring.
+          R7 every append-resume sid was present in that tab's exact _pre_scan
+          R8 extras: any new same-cwd sid relative to the immutable global
+             pre-launch scan is rejected
+        Any R6-R8 failure quarantines the whole live cwd batch rather than
+        risking cross-wiring. Signal failures are salvaged, if provable, while
+        the lock is still held and before the next sibling launches; unresolved
+        ownership rolls back the cwd immediately.
 
         Phase F — Persist final state to tabs.json so the next restart can
         resume the correctly-pinned sids.
@@ -3344,195 +3507,252 @@ class TTYDManager:
             for cwd_key in sorted(by_cwd.keys()):
                 tabs = by_cwd[cwd_key]
                 started_this_cwd: List[TTYDProcess] = []
-                cwd_failed = False
                 try:
                     for tab in tabs:
-                        try:
-                            outcome, pinned = await self._launch_one_cold_codex_locked(tab)
-                            started_this_cwd.append(tab)
-                            launched_codex.append(tab)
-                        except Exception as e:
-                            logger.error(
-                                "Cold codex launch failed for tab %s (cwd %s): %s",
-                                tab.tab_id,
-                                cwd_key,
-                                e,
+                        outcome, pinned = await self._launch_one_cold_codex_locked(tab)
+                        started_this_cwd.append(tab)
+                        if outcome == "PendingQ":
+                            raise RuntimeError(
+                                f"unresolved Codex ownership signal for tab {tab.tab_id}: "
+                                f"{tab._pending_quarantine_reason}"
                             )
-                            cwd_failed = True
-                            raise
-                except Exception:
-                    # Atomic rollback: kill every started tab in this cwd and
-                    # quarantine ALL tabs in this cwd group.
-                    for t in started_this_cwd:
-                        try:
-                            await t.stop(kill_tmux=True)
-                        except Exception as se:
-                            logger.error(
-                                "rollback stop(kill_tmux=True) for %s failed: %s",
-                                t.tab_id,
-                                se,
-                            )
+                        launched_codex.append(tab)
+                except Exception as e:
+                    logger.error(
+                        "Cold codex launch cwd-group rollback for cwd %s: %s",
+                        cwd_key,
+                        e,
+                    )
+                    # Atomic rollback: _quarantine_codex_tab kills tmux, clears SID,
+                    # resets runtime fields, and sets resume_quarantined=True.
+                    rollback_failures: List[str] = []
                     for t in tabs:
-                        t.agent_session_id = None
-                        t.resume_quarantined = True
-                        t._is_new_pin = None
-                        t._pre_scan = None
-                        t._launch_wall = None
-                        t._launch_mono = None
+                        try:
+                            await self._quarantine_codex_tab(
+                                t, f"cwd-group exception rollback: {e!r}"
+                            )
+                        except Exception as qe:
+                            logger.error("rollback quarantine for %s failed: %s", t.tab_id, qe)
+                            rollback_failures.append(f"{t.tab_id}: {qe!r}")
                     self._save_state()
+                    # Remove all tabs in this cwd from launched_codex; Phase R skips them.
                     launched_codex = [x for x in launched_codex if x not in tabs]
+                    if rollback_failures:
+                        raise RuntimeError(
+                            "Codex cwd rollback could not prove process teardown: "
+                            + "; ".join(rollback_failures)
+                        ) from e
                     continue
 
-        # Phase 4: Phase-R reconciliation across ALL launched codex tabs.
-        await self._reconcile_codex_phase_r(launched_codex, pre_global_scan)
+            # Phase R must stay inside the same global lock as launch. Releasing
+            # the lock first would let another cold-recovery batch create rollout
+            # activity between our final scan and ownership decision.
+            await self._reconcile_codex_phase_r(launched_codex, pre_global_scan)
+
+        # Attribution is complete and the global lock has excluded competing
+        # cold Codex recovery.  Start the independent ttyd frontends in
+        # parallel; quarantined tabs have no owned tmux and remain stopped.
+        await asyncio.gather(
+            *(_start_one(tab) for tab in launched_codex if not tab.resume_quarantined)
+        )
 
         # Final persist.
         self._save_state()
 
     async def _reconcile_codex_phase_r(
-        self, launched: List[TTYDProcess], pre_global_scan: Dict[str, Any]
+        self, launched: List[TTYDProcess], pre_global_scan: Dict[str, ScanEntry]
     ) -> None:
-        """Phase R: R1-R8 bijection. Quarantines any tab whose attribution
-        does not survive reconciliation rather than risking cross-wiring."""
+        """Phase R: enforce the final R1-R8 ownership bijection.
+
+        Any failure calls ``_quarantine_codex_tab`` (which kills tmux, clears
+        the SID only after teardown is proven, resets runtime fields, and sets
+        ``resume_quarantined=True``) rather than risking cross-wiring.
+        """
         if not launched:
             return
         post = _codex_scan_sessions()
         problems: List[str] = []
-        assigned_new: Dict[str, str] = {}  # sid -> tab_id
+        quarantine_failures: List[str] = []
         cwd_to_tabs: Dict[str, List[TTYDProcess]] = {}
         for t in launched:
             key = os.path.realpath(t.cwd) if t.cwd else ""
             cwd_to_tabs.setdefault(key, []).append(t)
 
+        def _same_cwd(entry: ScanEntry, cwd_key: str) -> bool:
+            if not entry.cwd or not cwd_key:
+                return False
+            try:
+                return bool(os.path.realpath(entry.cwd) == cwd_key)
+            except OSError:
+                return bool(entry.cwd == cwd_key)
+
+        # ---- R1-R5 per-tab bijection ----
+        quarantine_reasons: Dict[str, List[str]] = {}
+
+        def _queue_quarantine(tab: TTYDProcess, reason: str) -> None:
+            quarantine_reasons.setdefault(tab.tab_id, []).append(reason)
+
+        sid_claims: Dict[str, List[TTYDProcess]] = {}
+        for t in launched:
+            if t._pending_quarantine_reason is not None:
+                _queue_quarantine(t, f"R-fail signal/launch: {t._pending_quarantine_reason}")
+            elif not t.agent_session_id:
+                _queue_quarantine(t, f"tab {t.tab_id} R4 empty agent_session_id")
+            else:
+                sid_claims.setdefault(t.agent_session_id, []).append(t)
+
+        # A duplicate invalidates every claimant, not only whichever tab happens
+        # to be visited second.
+        for claimed_sid, claimants in sid_claims.items():
+            if len(claimants) > 1:
+                labels = sorted(t.tab_id for t in claimants)
+                for t in claimants:
+                    _queue_quarantine(t, f"tab {t.tab_id} R5 duplicate sid {claimed_sid}: {labels}")
+
         for t in launched:
             label = f"tab {t.tab_id}"
-            sid = t.agent_session_id
-            # R4 non-empty
-            if not sid:
-                problems.append(f"{label} R4 empty agent_session_id")
-                t.resume_quarantined = True
+            if quarantine_reasons.get(t.tab_id):
                 continue
-            entry = post.get(sid)
+            sid: Optional[str] = t.agent_session_id
+            assert sid is not None
+            post_entry: Optional[ScanEntry] = post.get(sid)
             # R1 exists
-            if entry is None:
-                problems.append(f"{label} R1 sid {sid} missing from post-scan")
-                t.resume_quarantined = True
+            if post_entry is None:
+                _queue_quarantine(t, f"{label} R1 sid {sid} missing from post-scan")
                 continue
             # R2 cwd realpath match
-            if t.cwd and entry.cwd:
+            if t.cwd and not post_entry.cwd:
+                _queue_quarantine(t, f"{label} R2 rollout cwd missing")
+                continue
+            if t.cwd and post_entry.cwd:
                 try:
-                    if os.path.realpath(entry.cwd) != os.path.realpath(t.cwd):
-                        problems.append(f"{label} R2 cwd mismatch: {entry.cwd} vs {t.cwd}")
-                        t.resume_quarantined = True
-                        continue
+                    if os.path.realpath(post_entry.cwd) != os.path.realpath(t.cwd):
+                        _queue_quarantine(
+                            t, f"{label} R2 cwd mismatch: {post_entry.cwd} vs {t.cwd}"
+                        )
                 except OSError:
-                    pass
+                    if post_entry.cwd != t.cwd:
+                        _queue_quarantine(
+                            t, f"{label} R2 cwd mismatch: {post_entry.cwd} vs {t.cwd}"
+                        )
+            if quarantine_reasons.get(t.tab_id):
+                continue
             # R3 check
-            pre_entry = None
-            if t._pre_scan is not None:
-                pre_entry = t._pre_scan.get(sid)
-            if pre_entry is None:
-                pre_entry = pre_global_scan.get(sid)
-            if t._is_new_pin:
-                if entry.ts is None or t._launch_wall is None:
-                    problems.append(f"{label} R3-new missing ts")
-                    t.resume_quarantined = True
-                    continue
-                delta = entry.ts - t._launch_wall
-                if delta < -_CODEX_NEW_PIN_TS_EARLY_S or delta > _CODEX_NEW_PIN_TS_LATE_S:
-                    problems.append(f"{label} R3-new ts delta {delta:.1f}s outside window")
-                    t.resume_quarantined = True
-                    continue
-            else:
+            pre_entry = t._pre_scan.get(sid) if t._pre_scan is not None else None
+            r3_fail: Optional[str] = None
+            if t._is_new_pin is True:
+                if post_entry.ts is None or t._launch_wall is None:
+                    r3_fail = f"{label} R3-new missing ts"
+                else:
+                    delta = post_entry.ts - t._launch_wall
+                    if delta < -_CODEX_NEW_PIN_TS_EARLY_S or delta > _CODEX_NEW_PIN_TS_LATE_S:
+                        r3_fail = f"{label} R3-new ts delta {delta:.1f}s outside window"
+            elif t._is_new_pin is False:
                 # append-resume: must have grown size+mtime vs pre
                 if pre_entry is None:
-                    problems.append(f"{label} R3-append no pre_entry for resumed sid {sid}")
-                    t.resume_quarantined = True
-                    continue
-                size_grew = entry.size > pre_entry.size
-                mtime_grew = entry.mtime_ns > pre_entry.mtime_ns
-                if not (size_grew and mtime_grew):
-                    problems.append(
-                        f"{label} R3-append no grow: size {pre_entry.size}->{entry.size}, mtime {pre_entry.mtime_ns}->{entry.mtime_ns}"
-                    )
-                    t.resume_quarantined = True
-                    continue
-            # R5 duplicate
-            if sid in assigned_new:
-                problems.append(f"{label} R5 duplicate sid {sid} with {assigned_new[sid]}")
-                t.resume_quarantined = True
-                continue
-            assigned_new[sid] = t.tab_id
+                    r3_fail = f"{label} R3-append no pre_entry for resumed sid {sid}"
+                else:
+                    size_grew = post_entry.size > pre_entry.size
+                    mtime_grew = post_entry.mtime_ns > pre_entry.mtime_ns
+                    if not (size_grew and mtime_grew):
+                        r3_fail = (
+                            f"{label} R3-append no grow: size {pre_entry.size}->{post_entry.size}, "
+                            f"mtime {pre_entry.mtime_ns}->{post_entry.mtime_ns}"
+                        )
+            else:
+                r3_fail = f"{label} R3 unknown pin kind"
+            if r3_fail:
+                _queue_quarantine(t, r3_fail)
 
-        # R6/R7/R8: compute actual new/appended sids per cwd and compare to expected
+        # Quarantine R1-R5 failures (kill_tmux + SID clear).
+        quarantined_ids: set[str] = set()
+        for t in launched:
+            reasons = quarantine_reasons.get(t.tab_id)
+            if not reasons:
+                continue
+            reason = "; ".join(reasons)
+            problems.append(reason)
+            logger.warning("Phase R: quarantining %s — %s", t.tab_id, reason)
+            try:
+                await self._quarantine_codex_tab(t, reason)
+            except Exception as qe:
+                logger.error("Phase R quarantine for %s failed: %s", t.tab_id, qe)
+                quarantine_failures.append(f"{t.tab_id}: {qe!r}")
+            quarantined_ids.add(t.tab_id)
+
+        # ---- R6/R7/R8 global/per-cwd bijection ----
+        # All activity is classified relative to the ONE global snapshot taken
+        # before any cold Codex launch.  A later tab's per-tab pre-scan may
+        # already contain an earlier tab's new sid, so using ``any(per_tab_pre)``
+        # here would hide extras and make the result order-dependent.
         for cwd_key, tabs in cwd_to_tabs.items():
+            live_tabs = [t for t in tabs if t.tab_id not in quarantined_ids]
+            if not live_tabs:
+                continue
             expected_new = {
-                t.agent_session_id for t in tabs if t._is_new_pin and not t.resume_quarantined
+                t.agent_session_id
+                for t in live_tabs
+                if t._is_new_pin is True and t.agent_session_id
             }
             expected_append = {
-                t.agent_session_id for t in tabs if not t._is_new_pin and not t.resume_quarantined
+                t.agent_session_id
+                for t in live_tabs
+                if t._is_new_pin is False and t.agent_session_id
             }
             expected_all = expected_new | expected_append
-            actual_new: set = set()
-            actual_append: set = set()
-            extras: set = set()
-            for t in tabs:
-                pre = t._pre_scan or pre_global_scan
-                for sid, entry in post.items():
-                    if not entry.cwd:
-                        continue
-                    try:
-                        if os.path.realpath(entry.cwd) != cwd_key:
-                            continue
-                    except OSError:
-                        continue
-                    if sid in pre:
-                        pre_entry = pre[sid]
-                        if entry.size > pre_entry.size and entry.mtime_ns > pre_entry.mtime_ns:
-                            actual_append.add(sid)
-                    else:
-                        actual_new.add(sid)
-                    if sid not in expected_all and not any(
-                        sid in (tt._pre_scan or pre_global_scan) for tt in tabs
-                    ):
-                        # R8: a sid we didn't expect — extra new sid for this cwd
-                        extras.add(sid)
+            actual_new: set[str] = set()
+            actual_append: set[str] = set()
+            for sid, entry in post.items():
+                if not _same_cwd(entry, cwd_key):
+                    continue
+                pre_entry = pre_global_scan.get(sid)
+                if pre_entry is None:
+                    actual_new.add(sid)
+                elif entry.size > pre_entry.size and entry.mtime_ns > pre_entry.mtime_ns:
+                    actual_append.add(sid)
+
             # R6 every expected_new is in actual_new
             missing_new = expected_new - actual_new
+            missing_append = expected_append - actual_append
+            extras = (actual_new | actual_append) - expected_all
+            batch_failures: List[str] = []
             if missing_new:
-                for sid in missing_new:
-                    problems.append(f"cwd {cwd_key} R6 expected new sid {sid} not in actual_new")
-            # R7 every expected_append was in pre
-            for sid in expected_append:
-                in_pre = sid in pre_global_scan or any(sid in (t._pre_scan or {}) for t in tabs)
-                if not in_pre:
-                    problems.append(f"cwd {cwd_key} R7 expected append sid {sid} not in pre_scan")
+                batch_failures.append(
+                    f"R6 expected new sids missing from global diff: {sorted(missing_new)}"
+                )
+            if missing_append:
+                batch_failures.append(
+                    f"R7 expected append sids missing growth from global pre-scan: {sorted(missing_append)}"
+                )
             if extras:
-                problems.append(f"cwd {cwd_key} R8 extra sids: {sorted(extras)}")
-                # Quarantine every unpinned tab in this cwd
-                for t in tabs:
-                    if (
-                        t._is_new_pin
-                        and t.agent_session_id
-                        and t.agent_session_id in actual_new
-                        and t.agent_session_id not in extras
-                    ):
-                        # Trusted new-pin whose file we created — keep it pinned
-                        continue
-                    # Only quarantine if we can't prove it's correct
-                    if not t.resume_quarantined:
-                        logger.warning(
-                            "Phase R R8: quarantining tab %s due to extras in cwd %s",
-                            t.tab_id,
-                            cwd_key,
-                        )
-                        t.resume_quarantined = True
+                batch_failures.append(f"R8 extra changed sids: {sorted(extras)}")
+
+            if batch_failures:
+                batch_reason = f"cwd {cwd_key} bijection failure: " + "; ".join(batch_failures)
+                problems.append(batch_reason)
+                # Ownership for the cwd batch is no longer bijective.  Kill and
+                # clear every still-live claimant rather than preserving a tab
+                # based on launch order or a merely plausible timestamp.
+                for t in live_tabs:
+                    logger.warning("Phase R batch quarantine for %s — %s", t.tab_id, batch_reason)
+                    try:
+                        await self._quarantine_codex_tab(t, batch_reason)
+                    except Exception as qe:
+                        logger.error("Phase R batch quarantine for %s failed: %s", t.tab_id, qe)
+                        quarantine_failures.append(f"{t.tab_id}: {qe!r}")
+                    quarantined_ids.add(t.tab_id)
 
         if problems:
             logger.warning("Phase R reconciliation problems: %s", "; ".join(problems))
             self._save_state()
         else:
             logger.info("Phase R reconciliation OK for %d codex tabs", len(launched))
+        if quarantine_failures:
+            self._save_state()
+            raise RuntimeError(
+                "Codex reconciliation could not prove process teardown: "
+                + "; ".join(quarantine_failures)
+            )
 
     async def cleanup(self) -> None:
         """Stop ttyd processes but keep tmux sessions alive for next startup."""
