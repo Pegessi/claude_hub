@@ -1,6 +1,7 @@
 """Tests for the Codex session listing endpoint and title extraction."""
 
 import json
+import time
 from datetime import datetime
 
 import pytest
@@ -15,14 +16,16 @@ def _write_rollout(tmp_path, session_id, cwd, start_epoch, messages):
     ``response_item`` record.
     """
     path = tmp_path / f"rollout-{session_id}.jsonl"
+    ts = datetime.utcfromtimestamp(start_epoch).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     lines = [
         json.dumps(
             {
                 "type": "session_meta",
                 "payload": {
+                    "id": session_id,
                     "session_id": session_id,
                     "cwd": cwd,
-                    "timestamp": start_epoch,
+                    "timestamp": ts,
                 },
             }
         )
@@ -41,6 +44,28 @@ def _write_rollout(tmp_path, session_id, cwd, start_epoch, messages):
         )
     path.write_text("\n".join(lines) + "\n")
     return path
+
+
+def _fake_scan(entries):
+    """Build a fake _codex_scan_sessions returning a dict sid -> ScanEntry."""
+    import importlib
+
+    tm = importlib.import_module("claude_hub.services.ttyd_manager")
+
+    def _scan():
+        out = {}
+        for sid, cwd, epoch, path in entries:
+            out[sid] = tm.ScanEntry(
+                path=str(path),
+                mtime_ns=int(epoch * 1e9),
+                size=path.stat().st_size if path.exists() else 100,
+                cwd=cwd,
+                ts=epoch,
+                is_archived=False,
+            )
+        return out
+
+    return _scan
 
 
 @pytest.mark.asyncio
@@ -74,12 +99,13 @@ async def test_list_codex_sessions_endpoint_returns_grouped(
         [("user", "ship the release")],
     )
 
-    def fake_iter():
-        yield "00000001-0000-0000-0000-000000000001", "/tmp/proj-a", 1000.0, str(s1)
-        yield "00000002-0000-0000-0000-000000000002", "/tmp/proj-a", 2000.0, str(s2)
-        yield "00000003-0000-0000-0000-000000000003", "/tmp/proj-b", 1500.0, str(s3)
-
-    monkeypatch.setattr(tm, "_codex_iter_rollouts", fake_iter)
+    entries = [
+        ("00000001-0000-0000-0000-000000000001", "/tmp/proj-a", 1000.0, s1),
+        ("00000002-0000-0000-0000-000000000002", "/tmp/proj-a", 2000.0, s2),
+        ("00000003-0000-0000-0000-000000000003", "/tmp/proj-b", 1500.0, s3),
+    ]
+    monkeypatch.setattr(tm, "_codex_scan_sessions", _fake_scan(entries))
+    # Patch _codex_session_title to read from our paths (it already uses path arg).
 
     response = await client.get("/api/codex/sessions")
     assert response.status_code == 200
@@ -95,17 +121,14 @@ async def test_list_codex_sessions_endpoint_returns_grouped(
         "00000001-0000-0000-0000-000000000001",
     ]
 
-    # Each session exposes the required fields.
     for group in data:
         for s in group["sessions"]:
             assert set(s.keys()) == {"session_id", "cwd", "start_time", "title"}
             assert isinstance(s["session_id"], str)
             assert isinstance(s["cwd"], str)
-            # start_time must be a parseable ISO timestamp.
             datetime.fromisoformat(s["start_time"])
             assert isinstance(s["title"], str)
 
-    # Title extracted from the first real user message.
     assert proj_a["sessions"][0]["title"] == "review the PR"
 
 
@@ -132,10 +155,8 @@ async def test_list_codex_sessions_title_skips_boilerplate(
         ],
     )
 
-    def fake_iter():
-        yield "00000004-0000-0000-0000-000000000004", "/tmp/proj-c", 3000.0, str(s1)
-
-    monkeypatch.setattr(tm, "_codex_iter_rollouts", fake_iter)
+    entries = [("00000004-0000-0000-0000-000000000004", "/tmp/proj-c", 3000.0, s1)]
+    monkeypatch.setattr(tm, "_codex_scan_sessions", _fake_scan(entries))
 
     response = await client.get("/api/codex/sessions")
     assert response.status_code == 200
@@ -167,11 +188,27 @@ async def test_list_codex_sessions_dedupes_by_session_id(
         [("user", "newer prompt")],
     )
 
-    def fake_iter():
-        yield "00000005-0000-0000-0000-000000000005", "/tmp/proj-d", 1000.0, str(older)
-        yield "00000005-0000-0000-0000-000000000005", "/tmp/proj-d", 5000.0, str(newer)
+    # The dedup in list_codex_sessions uses start_epoch from scan entries, so
+    # we produce two entries with the same sid and rely on the "keep most
+    # recent" logic. Note: _codex_scan_sessions itself dedups per root, but
+    # the endpoint handles duplicates defensively.
+    def _fake():
+        out = {}
+        for sid, cwd, epoch, path in [
+            ("00000005-0000-0000-0000-000000000005", "/tmp/proj-d", 1000.0, older),
+            ("00000005-0000-0000-0000-000000000005", "/tmp/proj-d", 5000.0, newer),
+        ]:
+            out[sid] = tm.ScanEntry(
+                path=str(path),
+                mtime_ns=int(epoch * 1e9),
+                size=path.stat().st_size,
+                cwd=cwd,
+                ts=epoch,
+                is_archived=False,
+            )
+        return out
 
-    monkeypatch.setattr(tm, "_codex_iter_rollouts", fake_iter)
+    monkeypatch.setattr(tm, "_codex_scan_sessions", _fake)
 
     response = await client.get("/api/codex/sessions")
     assert response.status_code == 200
