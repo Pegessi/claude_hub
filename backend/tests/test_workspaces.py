@@ -10459,3 +10459,62 @@ def test_monitor_recovers_sealed_impl_review_failed_verdict(
         recovered.status == WorkspaceTaskStatus.WORKING
     ), f"expected WORKING after impl-review-failed recovery, got {recovered.status}"
     assert sent_messages, "expected a continue prompt dispatched to worker"
+
+
+def test_create_lesson_rejects_unknown_fingerprint_e2e(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """End-to-end: POST /lessons with a fingerprint that doesn't match any
+    active lesson must 400 with a clear error."""
+    import json as _json
+
+    repo = tmp_path / "repo-fp"
+    repo.mkdir()
+    state_root = tmp_path / "state-fp"
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", state_root)
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="fp-tab",
+        port=12543,
+        sent_messages=sent_messages,
+    )
+
+    client = TestClient(app)
+    ws = client.post(
+        "/api/workspaces",
+        json={"name": "FP", "path": str(repo), "session_prefix": "fp"},
+    ).json()
+    record_dir = state_root / ws["id"] / "task_records"
+    record_dir.mkdir(parents=True)
+    record_dir.joinpath("2026-06-07T14-00-00-task-x.json").write_text(
+        _json.dumps(
+            {
+                "schema_version": 1,
+                "workspace_id": ws["id"],
+                "task": {"id": "task-x", "title": "Tx", "status": "done"},
+                "reports": [{"state": "review_failed"}, {"state": "completed"}],
+                "artifacts": {},
+                "final_summary": "ok",
+            }
+        ),
+        encoding="utf-8",
+    )
+    resp = client.post(
+        f"/api/workspaces/{ws['id']}/lessons",
+        json={
+            "summary": "A lesson.",
+            "applies_when": ["cond"],
+            "do": "x",
+            "avoid": "y",
+            "tags": ["t"],
+            "scope": "workspace",
+            "evidence_task_ids": ["task-x"],
+            "confidence": 0.6,
+            "fingerprint": "workspace:0000000000000000",
+        },
+    )
+    assert resp.status_code == 400, resp.text
+    assert "fingerprint" in resp.text.lower()

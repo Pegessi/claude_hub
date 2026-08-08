@@ -189,15 +189,33 @@ class FeedbackLessonStore:
             confidence=payload.confidence,
             enforce_iteration_signal=enforce_iteration_signal,
         )
-        fingerprint = (payload.fingerprint or "").strip() or self._lesson_fingerprint(
-            scope=payload.scope.value,
-            title=title,
-            summary=summary,
-            applies_when=applies_when,
-            do=do,
-            avoid=avoid,
-            tags=tags,
-        )
+        fingerprint = (payload.fingerprint or "").strip()
+        existing_fingerprints = {
+            lesson.fingerprint
+            for lesson in lessons
+            if lesson.status == FeedbackLessonStatus.ACTIVE and lesson.fingerprint
+        }
+        if fingerprint:
+            # Client-provided fingerprints must reference an existing active
+            # lesson (echo-merge contract). Reject made-up fingerprints rather
+            # than creating a lesson with a non-deterministic fingerprint that
+            # can never be matched again.
+            if fingerprint not in existing_fingerprints:
+                raise FeedbackLessonValidationError(
+                    f"fingerprint '{fingerprint}' does not match any active lesson; "
+                    "either omit the field (server will compute a canonical fingerprint) "
+                    "or echo an existing fingerprint from active_lessons verbatim to merge."
+                )
+        else:
+            fingerprint = self._lesson_fingerprint(
+                scope=payload.scope.value,
+                title=title,
+                summary=summary,
+                applies_when=applies_when,
+                do=do,
+                avoid=avoid,
+                tags=tags,
+            )
         existing = next(
             (
                 lesson
@@ -522,6 +540,12 @@ class FeedbackLessonStore:
         force: bool,
         now: datetime | None = None,
     ) -> dict[str, Any]:
+        """Build the reaper input selection (candidates + compact records) WITHOUT
+        writing the processed-records index yet. The caller must invoke
+        commit_summary_input() with the subset of selected entries that actually
+        made it into the final prompt (after the global budget drops excess
+        digests), so budget-dropped records stay unprocessed and are retried on
+        the next run."""
         now = now or _now()
         limit = min(max(limit, 1), self._REAPER_MAX_DIGESTS_PER_RUN)
         index = self._read_feedback_index(workspace_id)
@@ -531,8 +555,7 @@ class FeedbackLessonStore:
             if item.get("path")
         }
         record_paths = sorted(task_records_dir.glob("*.json")) if task_records_dir.exists() else []
-        selected_entries: list[FeedbackProcessedTaskRecord] = []
-        processed_entries: dict[str, dict[str, Any]] = dict(existing_entries)
+        record_path_set = {str(p) for p in record_paths}
 
         first_scan = not existing_entries
         candidates: list[FeedbackProcessedTaskRecord] = []
@@ -553,8 +576,12 @@ class FeedbackLessonStore:
                     record_payload = json.loads(digest_bytes.decode("utf-8"))
                 except (OSError, UnicodeDecodeError, json.JSONDecodeError):
                     continue
+                # Clamp task_id at the outer record level too so compact wrapper
+                # and input_record_ids never leak an oversized id into the prompt.
+                raw_task_id = str(record_payload.get("task", {}).get("id") or path.stem)
+                clamped_task_id = self._truncate_str(raw_task_id, _DIGEST_MAX_TASK_ID)
                 entry = FeedbackProcessedTaskRecord(
-                    task_id=str(record_payload.get("task", {}).get("id") or path.stem),
+                    task_id=clamped_task_id,
                     path=path_key,
                     sha256=sha256,
                     digest=self._digest_task_record(record_payload),
@@ -567,41 +594,38 @@ class FeedbackLessonStore:
         # stay un-cached (not added to processed_entries) and will be picked
         # up on the next run.
         selected_entries = candidates[-limit:]
-        selected_paths = {e.path for e in selected_entries}
-        for entry in selected_entries:
-            processed_entries[entry.path] = entry.model_dump(mode="json")
 
-        if first_scan and selected_entries:
-            index["last_full_scan_at"] = now.isoformat()
-        sorted_processed = [
-            processed_entries[key]
-            for key in sorted(processed_entries)
-            if key in {str(path) for path in record_paths}
-        ]
-        index.update(
-            {
-                "schema_version": FEEDBACK_INDEX_SCHEMA_VERSION,
-                "workspace_id": workspace_id,
-                "prompt_version": FEEDBACK_SUMMARY_PROMPT_VERSION,
-                "processed_task_records": sorted_processed,
-            }
-        )
-        self._write_feedback_index(workspace_id, index)
-
+        # Fallback for force/full with no new records: re-select from existing
+        # processed entries that are still on disk so the Reaper gets data to
+        # work from on an explicit full rescan.
         if not selected_entries and (force or mode == FeedbackSummaryMode.FULL):
-            fallback_candidates = [FeedbackProcessedTaskRecord(**item) for item in sorted_processed]
+            fallback_candidates: list[FeedbackProcessedTaskRecord] = []
+            for key in sorted(existing_entries):
+                if key not in record_path_set:
+                    continue
+                try:
+                    fallback_candidates.append(FeedbackProcessedTaskRecord(**existing_entries[key]))
+                except Exception:
+                    continue
             selected_entries = fallback_candidates[-limit:]
-        # Serialize compact records: drop path/sha256/summarized_at (local metadata
-        # not useful to the Reaper) and truncate verbose fields. Truncation is
-        # applied to both freshly-digested and cached records.
+
+        # Defensively clamp task_id on fallback entries loaded from a pre-v5
+        # index that may have stored unclamped ids.
+        for entry in selected_entries:
+            if len(entry.task_id) > _DIGEST_MAX_TASK_ID:
+                entry.task_id = self._truncate_str(entry.task_id, _DIGEST_MAX_TASK_ID)
+
         compact_records = []
+        selected_dumps_by_path: dict[str, dict[str, Any]] = {}
         for entry in selected_entries:
             compact_records.append(
                 {
                     "task_id": entry.task_id,
                     "digest": self._compact_digest_for_prompt(entry.digest),
+                    "_path": entry.path,  # internal, stripped before serialization
                 }
             )
+            selected_dumps_by_path[entry.path] = entry.model_dump(mode="json")
         return {
             "run_id": str(uuid.uuid4()),
             "workspace_id": workspace_id,
@@ -610,12 +634,70 @@ class FeedbackLessonStore:
             "limit": limit,
             "cache_hit": not selected_entries,
             "prompt_version": FEEDBACK_SUMMARY_PROMPT_VERSION,
-            "first_scan": first_scan,
-            "processed_count": len(sorted_processed),
+            "first_scan": bool(first_scan and selected_entries),
+            "processed_count": 0,  # set after commit, when final count is known
             "input_records": compact_records,
             "input_record_ids": [entry.task_id for entry in selected_entries],
             "skipped_reason": "no_new_task_records" if not selected_entries else None,
+            # Internal book-keeping for commit_summary_input():
+            "_workspace_id": workspace_id,
+            "_now": now,
+            "_existing_entries": existing_entries,
+            "_record_paths": [str(p) for p in record_paths],
+            "_first_scan_raw": first_scan,
+            "_selected_dumps_by_path": selected_dumps_by_path,
         }
+
+    def commit_summary_input(
+        self,
+        summary_input: dict[str, Any],
+        committed_paths: list[str],
+    ) -> int:
+        """Write the processed-records index after prompt assembly. Only the
+        entries whose paths appear in committed_paths are marked processed;
+        records dropped by the global budget stay unprocessed and will be
+        retried on the next run (carry-over). Returns the new processed_count.
+
+        Caller MUST call this after _build_workspace_feedback_summary_prompt
+        returns (since that is where global-budget trimming happens), passing
+        the _path values from the compact records that actually survived
+        budget trimming. If no records are committed (all dropped), the index
+        is still pruned of deleted-disk entries but no new paths are marked."""
+        workspace_id = summary_input["_workspace_id"]
+        now = summary_input["_now"]
+        existing_entries: dict[str, dict[str, Any]] = dict(summary_input["_existing_entries"])
+        record_path_set: set[str] = set(summary_input["_record_paths"])
+        first_scan: bool = summary_input["_first_scan_raw"]
+        selected_dumps_by_path: dict[str, dict[str, Any]] = summary_input.get(
+            "_selected_dumps_by_path", {}
+        )
+
+        committed_set = set(committed_paths)
+        for p in committed_set:
+            dump = selected_dumps_by_path.get(p)
+            if dump:
+                existing_entries[p] = dump
+
+        # Prune entries whose files no longer exist on disk.
+        sorted_processed = [
+            existing_entries[key] for key in sorted(existing_entries) if key in record_path_set
+        ]
+        index = self._read_feedback_index(workspace_id)
+        index.update(
+            {
+                "schema_version": FEEDBACK_INDEX_SCHEMA_VERSION,
+                "workspace_id": workspace_id,
+                "prompt_version": FEEDBACK_SUMMARY_PROMPT_VERSION,
+                "processed_task_records": sorted_processed,
+                "last_full_scan_at": (
+                    now.isoformat()
+                    if first_scan and committed_set
+                    else index.get("last_full_scan_at")
+                ),
+            }
+        )
+        self._write_feedback_index(workspace_id, index)
+        return len(sorted_processed)
 
     def write_summary_run(self, workspace_id: str, run: FeedbackSummaryRun) -> None:
         directory = self._summary_runs_dir(workspace_id)
