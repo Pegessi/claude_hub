@@ -160,8 +160,8 @@ def test_digest_preserves_iteration_counts_and_truncates_verbose_fields(
     # Truncation applied (_truncate_str honors max_len strictly: value[:n-3]+"..."):
     assert len(digest.final_summary) <= 200
     assert digest.final_summary.endswith("...")
-    assert len(digest.changed_files) == 10
-    assert len(digest.validation[1]) <= 200  # ≤ 200 chars strictly
+    assert len(digest.changed_files) == 6  # capped to _DIGEST_MAX_CHANGED_FILES=6
+    assert len(digest.validation[1]) <= 160  # ≤ _DIGEST_MAX_ITEM_CHARS strictly
     assert digest.validation[1].endswith("...")
     assert len(digest.risks) == 2  # capped to 2 items
 
@@ -459,3 +459,55 @@ def test_feedback_summary_request_accepts_legacy_limit_range() -> None:
     assert req.limit == 200
     assert req.mode == FeedbackSummaryMode.INCREMENTAL
     assert FeedbackSummaryRequest().limit == 30
+
+
+def test_compact_digest_for_prompt_bounds_every_free_text_field(
+    store: FeedbackLessonStore, tmp_path: Path
+) -> None:
+    """Adversarial: every free-text field in a task record is oversized;
+    _compact_digest_for_prompt must bound each field so the serialized
+    record fits in a small fixed envelope."""
+    from claude_hub.services.feedback_lessons import (
+        _DIGEST_MAX_CHANGED_FILES,
+        _DIGEST_MAX_FINAL_SUMMARY,
+        _DIGEST_MAX_ITEM_CHARS,
+        _DIGEST_MAX_PATH_CHARS,
+        _DIGEST_MAX_RISKS_ITEMS,
+        _DIGEST_MAX_TITLE,
+        _DIGEST_MAX_VALIDATION_ITEMS,
+    )
+
+    long_title = "T" * 5000
+    long_summary = "S" * 5000
+    long_item = "I" * 5000
+    long_path = "very/long/path/" * 200 + "file.py"
+    payload = {
+        "task": {"id": "task-" + "x" * 500, "title": long_title, "status": "completed"},
+        "reports": [{"state": "completed"}] * 5,
+        "artifacts": {
+            "changed_files": [long_path] * 50,
+            "validation": [long_item] * 30,
+            "risks": [long_item] * 30,
+        },
+        "final_summary": long_summary,
+    }
+    digest = store._digest_task_record(payload)
+    compact = store._compact_digest_for_prompt(digest)
+    assert len(compact["title"]) <= _DIGEST_MAX_TITLE
+    assert len(compact["final_summary"]) <= _DIGEST_MAX_FINAL_SUMMARY
+    assert len(compact["changed_files"]) <= _DIGEST_MAX_CHANGED_FILES
+    for f in compact["changed_files"]:
+        assert len(f) <= _DIGEST_MAX_PATH_CHARS
+    assert len(compact["validation"]) <= _DIGEST_MAX_VALIDATION_ITEMS
+    for v in compact["validation"]:
+        assert len(v) <= _DIGEST_MAX_ITEM_CHARS
+    assert len(compact["risks"]) <= _DIGEST_MAX_RISKS_ITEMS
+    for r in compact["risks"]:
+        assert len(r) <= _DIGEST_MAX_ITEM_CHARS
+    # JSON-serialized size of one bounded digest must be a small constant.
+    import json as _json
+
+    one_digest_chars = len(_json.dumps(compact, ensure_ascii=False))
+    # Conservative: one compacted adversarial digest < 3 KB even when every
+    # input field is thousands of chars.
+    assert one_digest_chars < 3_000, f"one digest = {one_digest_chars} chars"
