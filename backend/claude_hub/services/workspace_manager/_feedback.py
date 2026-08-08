@@ -32,14 +32,14 @@ class _FeedbackMixin:
         workspace: Workspace,
         summary_input: dict[str, Any],
     ) -> str:
-        lessons = self.feedback_lessons(workspace.id, limit=50)
+        # Cap active lessons for dedup context: full summaries aren't needed,
+        # just id/title/tags/confidence to detect duplicates.
+        lessons = self.feedback_lessons(workspace.id, limit=20)
         lesson_payload = [
             {
                 "id": lesson.id,
-                "title": lesson.title,
-                "fingerprint": lesson.fingerprint,
-                "summary": lesson.summary,
-                "tags": lesson.tags,
+                "title": lesson.title[:80],
+                "tags": lesson.tags[:8],
                 "confidence": lesson.confidence,
             }
             for lesson in lessons
@@ -48,97 +48,36 @@ class _FeedbackMixin:
             "summary_run": {
                 "id": summary_input["run_id"],
                 "mode": summary_input["mode"],
-                "force": summary_input["force"],
-                "limit": summary_input["limit"],
-                "prompt_version": summary_input["prompt_version"],
-                "first_scan": summary_input["first_scan"],
-                "processed_count": summary_input["processed_count"],
                 "input_record_ids": summary_input["input_record_ids"],
-            },
-            "workspace": {
-                "id": workspace.id,
-                "name": workspace.name,
-                "target": workspace.target.value,
-                "path": workspace.path,
             },
             "active_lessons": lesson_payload,
             "input_task_digests": summary_input["input_records"],
         }
         return "\n".join(
             [
-                "You are the internal Feedback Reaper for this Claude Hub workspace.",
+                "You are the internal Feedback Reaper. System-internal task — do not ask the human for acceptance.",
                 "",
-                "This is a system-internal task. Do not ask the human user for acceptance, and do "
-                "not treat this as an ordinary visible workspace task.",
+                "Goal: extract reusable workspace lessons from input_task_digests. Quality > quantity. "
+                "Zero lessons is correct when no signal exists. Use only the input package; do not scan the workspace.",
                 "",
-                "Use only the bounded input package below. Do not scan the entire workspace or "
-                "read unrelated old task records unless a listed digest explicitly points to a "
-                "missing artifact you must inspect.",
+                "Extraction signals (at least one required per lesson):",
+                "  A) Iteration cost: single task with review_failed_count>=1 OR needs_input_count>=2.",
+                "  B) Cross-task recurrence: same root pattern in >=2 digests.",
+                "Implementation-detail lessons need A or B with observable evidence; a single clean-pass final_summary is not a lesson.",
                 "",
-                "Goal: extract reusable workspace lessons that help future tasks avoid known "
-                "pitfalls. Quality matters more than quantity. Emitting zero lessons is the "
-                "correct answer when no signal is present.",
+                "Required lesson fields (server validates; HTTP 400 on violation — do not retry):",
+                "  title (short), summary (1-2 sentences), applies_when (>=1), do, avoid, tags,",
+                "  scope ('workspace'), confidence (≤0.6 single / ≤0.85 multi), evidence_task_ids.",
+                "Server enforcement: applies_when/do/avoid non-empty; single-evidence tasks need review_failed≥1 or needs_input≥2;",
+                "multi-evidence needs ≥2 cited tasks with ≥1 showing iteration. Pure summary similarity is not evidence.",
                 "",
-                "Extraction signals — emit a lesson ONLY when at least one of these is supported "
-                "by the input_task_digests:",
-                "  Signal A — Iteration cost. A single task whose report_state_sequence shows "
-                "review_failed_count >= 1 OR needs_input_count >= 2, OR whose risks describe "
-                "rework. The lesson is the underlying issue that caused the extra rounds, NOT "
-                "the final fix recipe.",
-                "  Signal B — Cross-task recurrence. The same root problem (or a close variant) "
-                "appears in >= 2 distinct task digests. The lesson is the recurring pattern.",
+                "Dedup: compare against active_lessons; match existing via matching title/tags so backend merges by fingerprint.",
                 "",
-                "Specific implementation-detail lessons (a particular file, function, error "
-                "message, or version-specific quirk) are allowed ONLY if Signal A or Signal B "
-                "applies AND the evidence makes the difficulty observable. A lesson whose only "
-                "support is a single task's final_summary with no review_failed / needs_input "
-                "trail is a fix recipe, not a lesson — skip it.",
-                "",
-                "Required fields per lesson (the backend rejects payloads that violate this):",
-                "  - title (short)",
-                "  - summary (one-to-two sentence description)",
-                "  - applies_when (>=1 condition: file glob, runtime, command, env, task shape)",
-                "  - do (recommended action; non-empty)",
-                "  - avoid (failure pattern to avoid; non-empty)",
-                "  - tags",
-                "  - scope (default 'workspace')",
-                "  - confidence: server-capped at 0.6 for single-evidence lessons and at 0.85 "
-                "for multi-evidence lessons; pick a value that already respects this.",
-                "  - evidence_task_ids (cite the supporting input task_ids; for Signal A "
-                "single-task lessons cite that one task; for Signal B cite all supporting tasks)",
-                "",
-                "Server-side enforcement (these rules are mechanically checked against "
-                "input_task_digests, NOT inferred from prose; lessons that fail are rejected "
-                "with HTTP 400 and you must move on rather than retrying with massaged text):",
-                "  - applies_when / do / avoid must be non-empty.",
-                "  - Single-evidence lessons must cite a task whose report_state_sequence has "
-                "review_failed_count >= 1 OR needs_input_count >= 2. If no input digest meets "
-                "this bar, do NOT submit a single-evidence lesson — emit a multi-evidence one "
-                "or skip the candidate.",
-                "  - Multi-evidence lessons must cite >=2 evidence_task_ids and at least one "
-                "cited task must show review_failed_count + needs_input_count >= 1. Pure "
-                "final_summary text similarity is NOT a substitute for iteration evidence.",
-                "",
-                "Deduplication rule: before creating a lesson, compare against active_lessons. "
-                "If the idea already exists, call the lesson API with matching title/summary/tags "
-                "so the backend merges evidence by fingerprint instead of creating a duplicate.",
-                "",
-                "Lessons API:",
                 f"POST /api/workspaces/{workspace.id}/lessons",
-                "Payload shape:",
-                '{"title":"short title","summary":"one-sentence description",'
-                '"applies_when":["condition"],"do":"recommended action",'
-                '"avoid":"failure pattern","tags":["tag"],"scope":"workspace",'
-                '"confidence":0.6,"evidence_task_ids":["task-id"]}',
+                'Payload: {"title":"...","summary":"...","applies_when":["..."],"do":"...","avoid":"...","tags":["..."],"scope":"workspace","confidence":0.6,"evidence_task_ids":["..."]}',
                 "",
-                "Completion report requirement:",
-                "POST a completed report for this internal task with changed_files=[], "
-                "review_decision=skip, risk_level=system_audit, and validation containing one "
-                "of these exact fields (do NOT append free prose after the value; if you need "
-                "commentary put it on a separate line):",
-                "- created_lesson_ids=<comma-separated ids>",
-                "- merged_lesson_ids=<comma-separated ids>",
-                "- skipped_reason=<reason>",
+                "Completion: POST completed report (changed_files=[], review_decision=skip, risk_level=system_audit) with validation:",
+                "created_lesson_ids=<ids>|merged_lesson_ids=<ids>|skipped_reason=<reason>",
                 "",
                 "Input package JSON:",
                 json.dumps(package, indent=2, ensure_ascii=False),

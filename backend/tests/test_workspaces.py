@@ -1049,7 +1049,7 @@ def test_direct_task_explicit_review_request_still_creates_reviewer(
     assert direct_task.feedback_lesson_ids == []
     assert "Review workspace task." in sent_messages[-1][1]
     assert "explicit-review-handoff" in sent_messages[-1][1]
-    assert "Relevant workspace lessons" in sent_messages[-1][1]
+    assert "Relevant lessons" in sent_messages[-1][1]
     assert (
         "Check changed files, validation, risks, and acceptance evidence."
         not in sent_messages[-1][1]
@@ -3029,7 +3029,7 @@ def test_task_assignment_injects_lessons_index_with_api_and_take_tracking(
     started_task = start_response.json()
     assert started_task["feedback_lesson_ids"] == []
     assignment_prompt = sent_messages[-1][1]
-    assert "Relevant workspace lessons" in assignment_prompt
+    assert "Relevant lessons" in assignment_prompt
     assert "cli-symbols-comma-separated" in assignment_prompt
     assert "lessons-catalog.md" not in assignment_prompt
     assert "/api/workspaces/" in assignment_prompt
@@ -3144,7 +3144,7 @@ def test_workspace_feedback_summary_uses_hidden_internal_reaper_task(
     assert sent_messages
     reaper_prompt = sent_messages[-1][1]
     assert "internal Feedback Reaper" in reaper_prompt
-    assert "system-internal task" in reaper_prompt
+    assert "System-internal task" in reaper_prompt
     assert "input_task_digests" in reaper_prompt
     assert "task-one" in reaper_prompt
     assert "POST /api/workspaces/" in reaper_prompt
@@ -3292,7 +3292,7 @@ def test_lessons_index_includes_all_active_lessons_without_full_body_leak(
     cjk_started_task = cjk_start_response.json()
     assert cjk_started_task["feedback_lesson_ids"] == []
     cjk_prompt = sent_messages[-1][1]
-    assert "Relevant workspace lessons" in cjk_prompt
+    assert "Relevant lessons" in cjk_prompt
     assert "image-workflow-docs-first" in cjk_prompt
     # Irrelevant lesson should NOT appear in relevance-filtered index.
     assert "market-data-symbols" not in cjk_prompt
@@ -3338,7 +3338,7 @@ def test_lessons_index_includes_all_active_lessons_without_full_body_leak(
     emoji_started_task = emoji_start_response.json()
     assert emoji_started_task["feedback_lesson_ids"] == []
     emoji_prompt = sent_messages[-1][1]
-    assert "Relevant workspace lessons" in emoji_prompt
+    assert "Relevant lessons" in emoji_prompt
     assert "emoji-only-workspace-lesson" in emoji_prompt
     assert "Agent decides autonomously which lessons apply." not in emoji_prompt
     task_reports = [

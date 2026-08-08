@@ -26,7 +26,16 @@ from ..models import (
 )
 
 FEEDBACK_INDEX_SCHEMA_VERSION = 1
-FEEDBACK_SUMMARY_PROMPT_VERSION = 3
+FEEDBACK_SUMMARY_PROMPT_VERSION = 4
+
+# Reaper-prompt digest truncation limits keep Feedback Reaper prompts bounded
+# so smaller-context agents (codex, cursor) can process them. Target: total
+# reaper prompt < ~32K tokens for worst-case (30 digests).
+_DIGEST_MAX_FINAL_SUMMARY = 200
+_DIGEST_MAX_ITEM_CHARS = 200
+_DIGEST_MAX_VALIDATION_ITEMS = 2
+_DIGEST_MAX_RISKS_ITEMS = 2
+_DIGEST_MAX_CHANGED_FILES = 10
 
 
 def _now() -> datetime:
@@ -337,7 +346,7 @@ class FeedbackLessonStore:
                 return lesson
         raise KeyError(lesson_id)
 
-    _CONTEXT_LIMIT_DEFAULT = 8
+    _CONTEXT_LIMIT_DEFAULT = 5
 
     def lesson_context_payload(
         self,
@@ -479,6 +488,11 @@ class FeedbackLessonStore:
             lines.append("")
         return "\n".join(lines)
 
+    # Maximum digests per reaper run across ALL modes. Without this cap a
+    # long-inactive workspace can accumulate hundreds of unprocessed records,
+    # producing a 500K+ token prompt that exceeds smaller agents' context.
+    _REAPER_MAX_DIGESTS_PER_RUN = 30
+
     def prepare_summary_input(
         self,
         workspace_id: str,
@@ -490,7 +504,7 @@ class FeedbackLessonStore:
         now: datetime | None = None,
     ) -> dict[str, Any]:
         now = now or _now()
-        limit = min(max(limit, 1), 200)
+        limit = min(max(limit, 1), self._REAPER_MAX_DIGESTS_PER_RUN)
         index = self._read_feedback_index(workspace_id)
         existing_entries = {
             str(item.get("path") or ""): item
@@ -502,6 +516,7 @@ class FeedbackLessonStore:
         processed_entries: dict[str, dict[str, Any]] = dict(existing_entries)
 
         first_scan = not existing_entries
+        candidates: list[FeedbackProcessedTaskRecord] = []
         for path in record_paths:
             path_key = str(path)
             digest_bytes = path.read_bytes()
@@ -526,8 +541,16 @@ class FeedbackLessonStore:
                     digest=self._digest_task_record(record_payload),
                     summarized_at=now,
                 )
-                processed_entries[path_key] = entry.model_dump(mode="json")
-                selected_entries.append(entry)
+                candidates.append(entry)
+
+        # Cap ALL modes (including incremental) to prevent unbounded prompts
+        # when many records accumulate between reaper runs. Remaining records
+        # stay un-cached (not added to processed_entries) and will be picked
+        # up on the next run.
+        selected_entries = candidates[-limit:]
+        selected_paths = {e.path for e in selected_entries}
+        for entry in selected_entries:
+            processed_entries[entry.path] = entry.model_dump(mode="json")
 
         if first_scan and selected_entries:
             index["last_full_scan_at"] = now.isoformat()
@@ -547,11 +570,19 @@ class FeedbackLessonStore:
         self._write_feedback_index(workspace_id, index)
 
         if not selected_entries and (force or mode == FeedbackSummaryMode.FULL):
-            selected_entries = [
-                FeedbackProcessedTaskRecord(**item) for item in sorted_processed[-limit:]
-            ]
-        if mode != FeedbackSummaryMode.INCREMENTAL:
-            selected_entries = selected_entries[-limit:]
+            fallback_candidates = [FeedbackProcessedTaskRecord(**item) for item in sorted_processed]
+            selected_entries = fallback_candidates[-limit:]
+        # Serialize compact records: drop path/sha256/summarized_at (local metadata
+        # not useful to the Reaper) and truncate verbose fields. Truncation is
+        # applied to both freshly-digested and cached records.
+        compact_records = []
+        for entry in selected_entries:
+            compact_records.append(
+                {
+                    "task_id": entry.task_id,
+                    "digest": self._compact_digest_for_prompt(entry.digest),
+                }
+            )
         return {
             "run_id": str(uuid.uuid4()),
             "workspace_id": workspace_id,
@@ -562,7 +593,7 @@ class FeedbackLessonStore:
             "prompt_version": FEEDBACK_SUMMARY_PROMPT_VERSION,
             "first_scan": first_scan,
             "processed_count": len(sorted_processed),
-            "input_records": [entry.model_dump(mode="json") for entry in selected_entries],
+            "input_records": compact_records,
             "input_record_ids": [entry.task_id for entry in selected_entries],
             "skipped_reason": "no_new_task_records" if not selected_entries else None,
         }
@@ -863,21 +894,77 @@ class FeedbackLessonStore:
         ]
         review_failed_count = sum(1 for state in report_state_sequence if state == "review_failed")
         needs_input_count = sum(1 for state in report_state_sequence if state == "needs_input")
+        final_summary = str(payload.get("final_summary") or "")
+        if len(final_summary) > _DIGEST_MAX_FINAL_SUMMARY:
+            final_summary = final_summary[:_DIGEST_MAX_FINAL_SUMMARY].rstrip() + "..."
         return FeedbackTaskDigest(
             task_id=str(task.get("id") or payload.get("task_id") or ""),
             title=str(task.get("title") or ""),
             status=str(task.get("status") or ""),
-            final_summary=str(payload.get("final_summary") or ""),
-            changed_files=self._list_value(artifacts.get("changed_files")),
-            validation=self._list_value(artifacts.get("validation")),
-            risks=self._list_value(artifacts.get("risks")),
+            final_summary=final_summary,
+            changed_files=self._truncate_list(
+                self._list_value(artifacts.get("changed_files")),
+                _DIGEST_MAX_CHANGED_FILES,
+            ),
+            validation=self._truncate_list(
+                [
+                    self._truncate_str(item, _DIGEST_MAX_ITEM_CHARS)
+                    for item in self._list_value(artifacts.get("validation"))
+                ],
+                _DIGEST_MAX_VALIDATION_ITEMS,
+            ),
+            risks=self._truncate_list(
+                [
+                    self._truncate_str(item, _DIGEST_MAX_ITEM_CHARS)
+                    for item in self._list_value(artifacts.get("risks"))
+                ],
+                _DIGEST_MAX_RISKS_ITEMS,
+            ),
             report_states=self._unique_strings(report_state_sequence),
-            report_state_sequence=report_state_sequence,
+            # report_state_sequence intentionally omitted: the unique states + counts
+            # (review_failed_count, needs_input_count, report_total) carry the signal
+            # the Reaper needs; the full per-report sequence is redundant bulk.
+            report_state_sequence=[],
             review_failed_count=review_failed_count,
             needs_input_count=needs_input_count,
             report_total=len(reports),
             completed_at=str(task.get("completed_at") or ""),
         )
+
+    def _compact_digest_for_prompt(self, digest: FeedbackTaskDigest) -> dict[str, Any]:
+        """Serialize a digest into the compact prompt format, applying truncation
+        even to records loaded from the existing cache (which may have been
+        created before truncation was added)."""
+        return {
+            "title": digest.title,
+            "final_summary": self._truncate_str(digest.final_summary, _DIGEST_MAX_FINAL_SUMMARY),
+            "changed_files": self._truncate_list(
+                [self._truncate_str(f, 200) for f in digest.changed_files],
+                _DIGEST_MAX_CHANGED_FILES,
+            ),
+            "validation": self._truncate_list(
+                [self._truncate_str(v, _DIGEST_MAX_ITEM_CHARS) for v in digest.validation],
+                _DIGEST_MAX_VALIDATION_ITEMS,
+            ),
+            "risks": self._truncate_list(
+                [self._truncate_str(r, _DIGEST_MAX_ITEM_CHARS) for r in digest.risks],
+                _DIGEST_MAX_RISKS_ITEMS,
+            ),
+            "review_failed_count": digest.review_failed_count,
+            "needs_input_count": digest.needs_input_count,
+            "report_total": digest.report_total,
+            "report_states": digest.report_states[:8],
+        }
+
+    def _truncate_str(self, value: str, max_len: int) -> str:
+        if len(value) <= max_len:
+            return value
+        return value[:max_len].rstrip() + "..."
+
+    def _truncate_list(self, items: list[str], max_items: int) -> list[str]:
+        if len(items) <= max_items:
+            return items
+        return items[:max_items]
 
     def _list_value(self, value: Any) -> list[str]:
         if not isinstance(value, list):

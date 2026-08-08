@@ -5,6 +5,44 @@
 
 ## Unreleased
 
+### fix: bound Feedback Reaper prompt size for small-context agents
+
+- **What**: the internal Feedback Reaper summarization prompt (which runs
+  periodically to extract reusable workspace lessons) could grow unboundedly:
+  incremental mode included ALL unprocessed records (223 in one workspace →
+  ~550K chars / ~137K tokens), verbose validation/risks/final_summary fields
+  were included verbatim, and active_lessons carried full summary text with
+  fingerprint metadata. Smaller agents (codex, cursor) could not process the
+  resulting prompt. Four fixes: (1) **all modes cap at 30 digests per run**
+  (the previous "INCREMENTAL skips the cap" was a bug that let backlogs grow
+  without bound); remaining unprocessed records stay uncached and are picked
+  up on the next run. (2) **Digest fields are truncated**: final_summary ≤ 200
+  chars, validation/risks items ≤ 200 chars (max 2 items each), changed_files
+  ≤ 10 items, report_state_sequence emptied (counts carry the signal). (3)
+  **Compact serialization** drops path/sha256/summarized_at/completed_at local
+  metadata and unused package fields (workspace metadata, summary_run bookkeeping).
+  (4) **Active lessons dedup payload** drops fingerprint/summary and caps at 20;
+  instruction preamble compressed from ~75 to ~20 lines. Additionally, the
+  worker/reviewer lesson index is tightened further (limit 8→5, title 72→50
+  chars, tags capped at 4, shorter boilerplate).
+- **Why**: after the prior compact-index fix the inline worker/reviewer block
+  was ~340 tokens, but the Reaper prompt itself — generated when summarizing
+  workspace feedback — could hit 137K+ tokens when a workspace accumulated
+  many completed tasks between reaper runs. Codex's smaller context window
+  could not handle it.
+- **How**: `_REAPER_MAX_DIGESTS_PER_RUN = 30` caps all modes.
+  `_digest_task_record` applies per-field truncation constants.
+  `_compact_digest_for_prompt()` serializes a minimal digest for the prompt
+  (applied to both fresh and cached records, so pre-existing large caches
+  are also compacted). `_build_workspace_feedback_summary_prompt` compresses
+  instructions and lesson payload. `_CONTEXT_LIMIT_DEFAULT` 8→5, title/boilerplate
+  tightened in `_lesson_context_block_from_payload`. `FeedbackSummaryRequest.limit`
+  default 50→30, schema max 200→30.
+- **Verified**: measured against current Claude Hub workspace (277 task records,
+  5 active lessons): reaper prompt ~51K chars / ~12.7K tokens (down from
+  ~550K / ~137K → ~91% reduction). 26 lesson/feedback/reaper tests pass;
+  black/isort/mypy clean.
+
 ### fix: restore terminal history and resize injection on first load
 
 - **What**: terminal iframe HTML once again receives the history replay,
