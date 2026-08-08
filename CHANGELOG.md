@@ -5,6 +5,37 @@
 
 ## Unreleased
 
+### fix: make Feedback Reaper summary tasks visible, idempotent, and retryable
+
+- **What**: `/lessons/summarize` now exposes its managed Feedback Reaper task on
+  the workspace board, in snapshots, and on the assigned agent instead of
+  showing an apparently idle `no task` agent that could not be deleted.
+  `system_internal` still owns the automatic review-skip/completion semantics;
+  it no longer implies that lifecycle state must be hidden. The board receives
+  a short system-task description rather than the up-to-100K prompt payload.
+- **Idempotency**: summary triggers are serialized per workspace. Concurrent or
+  repeated calls return the existing active `FeedbackSummaryRun` and task,
+  rather than creating duplicate tasks or agent assignments. A missing persisted
+  assignment is reset to a visible retryable Todo before redispatch.
+- **Failure recovery**: the post-budget record selection is persisted as a
+  bounded `*.pending.json` commit package. Records enter the processed index
+  only after the Feedback Reaper posts a successful completion report.
+  Prompt preparation failures retain a visible provisional task/run; dispatch
+  errors, completion-persistence errors, and `blocked`/`needs_input` reports
+  release the agent while preserving input for same-task retry. Manual abort
+  and task deletion terminate the run, discard the pending package, and leave
+  records available for a fresh summary task.
+- **Cleanup**: removed legacy task
+  `45e5e7eb-7551-4388-ab01-0f2c67fd5848` and its five active reports from the
+  Claude Hub workspace state. Its former agent `cb-agent-2-8b1de3` was already
+  absent; the delete-safe task record and summary-run audit remain available.
+- **Verified**: 257 focused feedback/state-policy/workspace tests pass, including visible
+  task/session ownership, repeated duplicate triggers,
+  prompt/dispatch/completion failure retry, `needs_input` recovery, deferred
+  processed-index commit, and abort/delete requeue behavior. The full backend
+  suite reports 579 passed with the same 61 pre-existing pytest-asyncio
+  event-loop failures documented on `main`; Black, isort, and mypy pass.
+
 ### fix: prevent codex/cursor session cross-wiring on cold restart
 
 - **What**: after a full service cold restart (tmux server gone), same-type
