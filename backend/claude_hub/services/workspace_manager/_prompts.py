@@ -380,13 +380,14 @@ class _PromptsMixin:
         message_zh: str,
         validation: str,
         session_id: str = "system",
+        state: AgentReportState = AgentReportState.WORKING,
     ) -> None:
         report = AgentReport(
             id=str(uuid.uuid4()),
             workspace_id=task.workspace_id,
             task_id=task.id,
             session_id=session_id,
-            state=AgentReportState.WORKING,
+            state=state,
             message=message,
             message_en=message,
             message_zh=message_zh,
