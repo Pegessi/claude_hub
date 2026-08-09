@@ -606,6 +606,7 @@ class _DispatchMixin:
         )
         self.reports[report.id] = report
         task_before_release = task
+        is_feedback_summary = task.system_internal and task.internal_kind == "feedback_reaper"
 
         # Collect sessions to interrupt before we clear the session IDs on the
         # task object.  Only sessions actually assigned to THIS task are targeted
@@ -646,7 +647,9 @@ class _DispatchMixin:
 
         self.tasks[task.id] = task.model_copy(
             update={
-                "status": WorkspaceTaskStatus.TODO,
+                "status": (
+                    WorkspaceTaskStatus.DONE if is_feedback_summary else WorkspaceTaskStatus.TODO
+                ),
                 "session_id": None,
                 "clear_context": None,
                 "dispatch_reason": f"Manually aborted: {reason}",
@@ -654,8 +657,12 @@ class _DispatchMixin:
                 "review_session_id": None,
                 "review_requested_at": None,
                 "review_completed_at": None,
-                "review_skipped_at": None,
-                "review_skip_reason": None,
+                "review_skipped_at": now if is_feedback_summary else None,
+                "review_skip_reason": (
+                    "Feedback Reaper was manually aborted; pending input was released."
+                    if is_feedback_summary
+                    else None
+                ),
                 "manual_aborted_at": now,
                 "manual_abort_reason": reason,
                 "human_acceptance_requested_at": None,
@@ -663,10 +670,25 @@ class _DispatchMixin:
                 "queued_at": None,
                 "started_at": None,
                 "reviewed_at": None,
-                "completed_at": None,
+                "completed_at": now if is_feedback_summary else None,
                 "updated_at": now,
             }
         )
+        if is_feedback_summary:
+            try:
+                self._feedback_store().abandon_summary_run(
+                    task.workspace_id,
+                    task.id,
+                    reason="manually_aborted",
+                    now=now,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to abandon Feedback Reaper summary run during manual abort "
+                    "workspace_id=%s task_id=%s",
+                    task.workspace_id,
+                    task.id,
+                )
         self._release_task_session(task_before_release)
         await self._cleanup_reviewer_for_terminal_task(task_before_release, updated_at=now)
         self._save_state()
