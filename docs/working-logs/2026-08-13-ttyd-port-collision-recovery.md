@@ -43,7 +43,8 @@ cancellation before the original exception is propagated.
 ## Verification
 
 - Added unit tests proving allocation skips three consecutive occupied ports,
-  handles both outcomes at the maximum TCP port, and retries a raced bind.
+  handles both outcomes at the maximum TCP port, retries a raced bind, and
+  immediately propagates non-collision bind errors such as `EACCES`.
 - Added async tests that externally cancel an in-flight creation task, cancel
   it again during suspended cleanup, and cancel while tmux ownership is being
   resolved. They prove cleanup finishes and only removes sessions owned by the
@@ -52,10 +53,10 @@ cancellation before the original exception is propagated.
 - Confirmed a live duplicate of the QFO Codex tab returned active on port
   `10394` after the three verified orphan listeners were stopped.
 - After rebasing the fix onto `origin/main@fa76748`, the targeted manager,
-  route, Codex-session, and cold-recovery suites pass `123/123`; Black, isort,
+  route, Codex-session, and cold-recovery suites pass `124/124`; Black, isort,
   and mypy report no issues in the touched production source. The earlier
   repository-wide backend run
   reached `549 passed, 63 failed`; nearly all failures share the pre-existing
   `Runner.run() cannot be called from a running event loop` test-runner
   contamination, plus one Playwright scroll-alignment failure. The new async
-  regression passes both alone and in the targeted 123-test run.
+  regression passes both alone and in the targeted 124-test run.

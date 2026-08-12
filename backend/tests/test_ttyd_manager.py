@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import importlib
 import json
 import os
@@ -101,6 +102,27 @@ def test_get_next_port_can_allocate_max_tcp_port(monkeypatch: MonkeyPatch) -> No
 
     assert manager._get_next_port() == ttyd_manager_module._MAX_TCP_PORT
     assert manager._next_port == ttyd_manager_module._MAX_TCP_PORT + 1
+
+
+def test_local_port_available_propagates_non_collision_bind_error(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DeniedSocket:
+        def __enter__(self) -> "DeniedSocket":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def bind(self, address: tuple[str, int]) -> None:
+            raise OSError(errno.EACCES, "permission denied")
+
+    monkeypatch.setattr(ttyd_manager_module.socket, "socket", lambda *args: DeniedSocket())
+
+    with pytest.raises(OSError) as exc_info:
+        ttyd_manager_module._is_local_port_available(12000)
+
+    assert exc_info.value.errno == errno.EACCES
 
 
 @pytest.mark.asyncio
