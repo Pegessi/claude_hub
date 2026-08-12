@@ -536,6 +536,20 @@ class _ReportsMixin:
         session: ManagedSession,
         report: AgentReport,
     ) -> None:
+        if task.internal_kind == "feedback_reaper" and report.state in {
+            AgentReportState.BLOCKED,
+            AgentReportState.NEEDS_INPUT,
+        }:
+            updated = self._mark_feedback_summary_retryable(
+                task,
+                reason=f"Feedback Reaper reported {report.state.value}; ready to retry",
+                validation=(
+                    f"report_id={report.id}; report_state={report.state.value}; "
+                    "pending_input_preserved=true"
+                ),
+            )
+            await self.dispatch_workspace(updated.workspace_id)
+            return
         if report.state not in {
             AgentReportState.COMPLETED,
             AgentReportState.READY_FOR_REVIEW,
@@ -554,13 +568,39 @@ class _ReportsMixin:
         )
         self.tasks[task.id] = updated
         summary_run = None
+        processed_count = None
         if updated.internal_kind == "feedback_reaper":
-            summary_run = self._feedback_store().complete_summary_run(
-                updated.workspace_id,
-                updated.id,
-                report,
-                now=now,
-            )
+            store = self._feedback_store()
+            pending_run = store.summary_run_for_task(updated.workspace_id, updated.id)
+            try:
+                if pending_run is not None:
+                    processed_count = store.commit_staged_summary_input(
+                        updated.workspace_id,
+                        pending_run.id,
+                    )
+                summary_run = store.complete_summary_run(
+                    updated.workspace_id,
+                    updated.id,
+                    report,
+                    now=now,
+                )
+                if pending_run is not None:
+                    store.discard_staged_summary_input(
+                        updated.workspace_id,
+                        pending_run.id,
+                    )
+            except Exception as exc:
+                error_text = str(exc).replace("\n", " ")[:400]
+                retryable = self._mark_feedback_summary_retryable(
+                    updated,
+                    reason="Feedback Reaper completion persistence failed; ready to retry",
+                    validation=(
+                        f"completion_report_id={report.id}; pending_input_preserved=true; "
+                        f"error_type={type(exc).__name__}; error={error_text}"
+                    ),
+                )
+                await self.dispatch_workspace(retryable.workspace_id)
+                return
         self._record_system_task_audit(
             task=updated,
             message=(
@@ -574,7 +614,8 @@ class _ReportsMixin:
                     f"; summary_run_id={summary_run.id}; "
                     f"created_lesson_ids={json.dumps(summary_run.created_lesson_ids)}; "
                     f"merged_lesson_ids={json.dumps(summary_run.merged_lesson_ids)}; "
-                    f"skipped_reason={summary_run.skipped_reason}"
+                    f"skipped_reason={summary_run.skipped_reason}; "
+                    f"processed_count={processed_count}"
                     if summary_run
                     else ""
                 )

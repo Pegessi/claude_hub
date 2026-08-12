@@ -11,9 +11,25 @@ class _SessionsMixin:
     reports: "dict[str, AgentReport]"
 
     def delete_task(self, task_id: str) -> None:
-        task = self.tasks.pop(task_id, None)
+        task = self.tasks.get(task_id)
         if not task:
             raise KeyError(task_id)
+        if task.system_internal and task.internal_kind == "feedback_reaper":
+            try:
+                self._feedback_store().abandon_summary_run(
+                    task.workspace_id,
+                    task.id,
+                    reason="task_deleted",
+                    now=_wm._now(),
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to abandon Feedback Reaper summary run during task deletion "
+                    "workspace_id=%s task_id=%s",
+                    task.workspace_id,
+                    task.id,
+                )
+        self.tasks.pop(task_id, None)
 
         self.reports = {
             report_id: report
