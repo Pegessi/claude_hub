@@ -14,14 +14,17 @@ current tab in `tabs.json` owned any of them.
 
 ## Module design
 
-`TTYDManager._get_next_port()` now advances past any candidate with a live
-loopback listener. This protects tab creation from stale Hub processes and
-unrelated local processes without changing persisted tab ports.
+`TTYDManager._get_next_port()` now advances past any candidate that cannot be
+bound on loopback. The bind probe detects listeners and bound-but-not-listening
+sockets without connecting to unrelated services. Because the probe cannot
+reserve the port for ttyd, startup retries with a new candidate if another
+process wins the check-to-bind race.
 
-`TTYDManager.create_tab()` now treats startup as a rollback boundary. If
-`TTYDProcess.start()` fails or the request task is cancelled during a backend
-reload, the unpersisted process is stopped and its newly-created tmux session
-is removed before the original exception is propagated.
+`TTYDManager.create_tab()` now treats startup as a rollback boundary. It tracks
+whether this request created the tmux session, so failure never kills a
+pre-existing session. If `TTYDProcess.start()` fails or the request task is
+cancelled during a backend reload, cleanup finishes despite repeated
+cancellation before the original exception is propagated.
 
 ## Key issues and pitfalls
 
@@ -39,18 +42,20 @@ is removed before the original exception is propagated.
 
 ## Verification
 
-- Added unit tests proving allocation skips three consecutive occupied ports
-  and handles both outcomes at the maximum TCP port.
-- Added an async unit test that externally cancels an in-flight creation task
-  and proves suspended cleanup still completes with tmux cleanup enabled.
+- Added unit tests proving allocation skips three consecutive occupied ports,
+  handles both outcomes at the maximum TCP port, and retries a raced bind.
+- Added async tests that externally cancel an in-flight creation task, cancel
+  it again during suspended cleanup, and cancel while tmux ownership is being
+  resolved. They prove cleanup finishes and only removes sessions owned by the
+  failed request.
 - Confirmed both tests fail on the old implementation and pass on the fix.
 - Confirmed a live duplicate of the QFO Codex tab returned active on port
   `10394` after the three verified orphan listeners were stopped.
 - After rebasing the fix onto `origin/main@fa76748`, the targeted manager,
-  route, Codex-session, and cold-recovery suites pass `119/119`; Black, isort,
+  route, Codex-session, and cold-recovery suites pass `123/123`; Black, isort,
   and mypy report no issues in the touched production source. The earlier
   repository-wide backend run
   reached `549 passed, 63 failed`; nearly all failures share the pre-existing
   `Runner.run() cannot be called from a running event loop` test-runner
   contamination, plus one Playwright scroll-alignment failure. The new async
-  regression passes both alone and in the targeted 119-test run.
+  regression passes both alone and in the targeted 123-test run.
