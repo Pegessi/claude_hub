@@ -5,6 +5,22 @@
 
 ## Unreleased
 
+### fix: prevent orphan ttyd listeners from blocking new tabs
+
+- **What**: new terminal tabs skip ports that already have a live listener,
+  and a tab creation cancelled by backend reload now stops its unpersisted
+  `ttyd` process and tmux session.
+- **Why**: a reload could interrupt `create_tab()` after `ttyd` bound its port
+  but before the tab reached `tabs.json`. The orphan listener survived with
+  no owning tab, so later Codex tab creation repeatedly failed with
+  `EADDRINUSE` and the UI only reported `Failed to duplicate tab`.
+- **How**: `_get_next_port()` checks each candidate against loopback before
+  returning it. The startup path also rolls back both ordinary failures and
+  task cancellation before re-raising the original error.
+- **Verified**: both regression tests failed before the implementation and
+  pass after it; a live duplicate of the affected QFO Codex tab succeeded on
+  port `10394` after three stale listeners were identified and stopped.
+
 ### fix: restore terminal history and resize injection on first load
 
 - **What**: terminal iframe HTML once again receives the history replay,
