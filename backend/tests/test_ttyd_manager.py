@@ -81,10 +81,31 @@ def test_get_next_port_skips_existing_listener(monkeypatch: MonkeyPatch) -> None
     assert checked == [12000, 12001, 12002, 12003]
 
 
+def test_get_next_port_raises_when_port_range_is_exhausted(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._next_port = ttyd_manager_module._MAX_TCP_PORT
+    monkeypatch.setattr(ttyd_manager_module, "_is_local_port_listening", lambda port: True)
+
+    with pytest.raises(RuntimeError, match="No available ttyd ports remain"):
+        manager._get_next_port()
+
+    assert manager._next_port == ttyd_manager_module._MAX_TCP_PORT + 1
+
+
+def test_get_next_port_can_allocate_max_tcp_port(monkeypatch: MonkeyPatch) -> None:
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._next_port = ttyd_manager_module._MAX_TCP_PORT
+    monkeypatch.setattr(ttyd_manager_module, "_is_local_port_listening", lambda port: False)
+
+    assert manager._get_next_port() == ttyd_manager_module._MAX_TCP_PORT
+    assert manager._next_port == ttyd_manager_module._MAX_TCP_PORT + 1
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("error_type", [RuntimeError, asyncio.CancelledError])
 async def test_create_tab_start_failure_stops_unpersisted_process(
-    monkeypatch: MonkeyPatch, tmp_path: Path, error_type: type[BaseException]
+    monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
     manager = TTYDManager.__new__(TTYDManager)
     manager._next_port = 12010
@@ -93,7 +114,7 @@ async def test_create_tab_start_failure_stops_unpersisted_process(
     stopped: list[tuple[str, bool]] = []
 
     async def fake_start(self: TTYDProcess) -> None:
-        raise error_type("start interrupted")
+        raise RuntimeError("start interrupted")
 
     async def fake_ensure_tmux_session(self: TTYDProcess) -> bool:
         return False
@@ -105,7 +126,7 @@ async def test_create_tab_start_failure_stops_unpersisted_process(
     monkeypatch.setattr(TTYDProcess, "start", fake_start)
     monkeypatch.setattr(TTYDProcess, "stop", fake_stop)
 
-    with pytest.raises(error_type, match="start interrupted"):
+    with pytest.raises(RuntimeError, match="start interrupted"):
         await manager.create_tab(
             name="Cancelled tab",
             shell="/bin/zsh",
@@ -113,6 +134,55 @@ async def test_create_tab_start_failure_stops_unpersisted_process(
             agent_type=AgentType.TERMINAL,
         )
 
+    assert len(stopped) == 1
+    assert stopped[0][1] is True
+    assert manager.processes == {}
+    assert manager._tab_order == []
+
+
+@pytest.mark.asyncio
+async def test_create_tab_cancellation_shields_unpersisted_process_cleanup(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._next_port = 12011
+    manager.processes = {}
+    manager._tab_order = []
+    start_entered = asyncio.Event()
+    cleanup_completed = asyncio.Event()
+    stopped: list[tuple[str, bool]] = []
+
+    async def fake_start(self: TTYDProcess) -> None:
+        start_entered.set()
+        await asyncio.Event().wait()
+
+    async def fake_ensure_tmux_session(self: TTYDProcess) -> bool:
+        return False
+
+    async def fake_stop(self: TTYDProcess, kill_tmux: bool = False) -> None:
+        await asyncio.sleep(0)
+        stopped.append((self.tab_id, kill_tmux))
+        cleanup_completed.set()
+
+    monkeypatch.setattr(TTYDProcess, "ensure_tmux_session", fake_ensure_tmux_session)
+    monkeypatch.setattr(TTYDProcess, "start", fake_start)
+    monkeypatch.setattr(TTYDProcess, "stop", fake_stop)
+
+    create_task = asyncio.create_task(
+        manager.create_tab(
+            name="Cancelled tab",
+            shell="/bin/zsh",
+            cwd=str(tmp_path),
+            agent_type=AgentType.TERMINAL,
+        )
+    )
+    await start_entered.wait()
+    create_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await create_task
+
+    assert cleanup_completed.is_set()
     assert len(stopped) == 1
     assert stopped[0][1] is True
     assert manager.processes == {}
