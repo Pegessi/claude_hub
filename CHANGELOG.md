@@ -21,6 +21,256 @@
   pass after it; a live duplicate of the affected QFO Codex tab succeeded on
   port `10394` after three stale listeners were identified and stopped.
 
+### fix: make Feedback Reaper summary tasks visible, idempotent, and retryable
+
+- **What**: `/lessons/summarize` now exposes its managed Feedback Reaper task on
+  the workspace board, in snapshots, and on the assigned agent instead of
+  showing an apparently idle `no task` agent that could not be deleted.
+  `system_internal` still owns the automatic review-skip/completion semantics;
+  it no longer implies that lifecycle state must be hidden. The board receives
+  a short system-task description rather than the up-to-100K prompt payload.
+- **Idempotency**: summary triggers are serialized per workspace. Concurrent or
+  repeated calls return the existing active `FeedbackSummaryRun` and task,
+  rather than creating duplicate tasks or agent assignments. A missing persisted
+  assignment is reset to a visible retryable Todo before redispatch.
+- **Failure recovery**: the post-budget record selection is persisted as a
+  bounded `*.pending.json` commit package. Records enter the processed index
+  only after the Feedback Reaper posts a successful completion report.
+  Prompt preparation failures retain a visible provisional task/run; dispatch
+  errors, completion-persistence errors, and `blocked`/`needs_input` reports
+  release the agent while preserving input for same-task retry. Manual abort
+  and task deletion terminate the run, discard the pending package, and leave
+  records available for a fresh summary task.
+- **Cleanup**: removed legacy task
+  `45e5e7eb-7551-4388-ab01-0f2c67fd5848` and its five active reports from the
+  Claude Hub workspace state. Its former agent `cb-agent-2-8b1de3` was already
+  absent; the delete-safe task record and summary-run audit remain available.
+- **Verified**: 257 focused feedback/state-policy/workspace tests pass, including visible
+  task/session ownership, repeated duplicate triggers,
+  prompt/dispatch/completion failure retry, `needs_input` recovery, deferred
+  processed-index commit, and abort/delete requeue behavior. The full backend
+  suite reports 579 passed with the same 61 pre-existing pytest-asyncio
+  event-loop failures documented on `main`; Black, isort, and mypy pass.
+
+### fix: prevent codex/cursor session cross-wiring on cold restart
+
+- **What**: after a full service cold restart (tmux server gone), same-type
+  agent tabs no longer resume each other's conversations ("串台"). Codex and
+  Cursor tabs now pin stable session ids to their tab and correctly attribute
+  newly-created rollouts/chat-stores to the launching tab, with fail-closed
+  quarantine whenever ambiguity is detected.
+- **Why**: five interacting bugs caused the cross-wiring: (BUG-1) a single
+  global launch epoch made all tabs' ts windows overlap; (BUG-2) a 600s
+  discovery window picked up old unrelated rollouts; (BUG-3)
+  `codex resume --last`/`--continue` fell back to any recent session in the
+  same cwd when the intended sid was missing; (BUG-4) per-tab scanning with
+  multiple concurrent launches caused N-way ambiguity; (BUG-5) ttyd lazy
+  execution meant the epoch was stamped ~1s after codex had already started
+  writing.
+- **How**:
+  - Removed the `--last`/`--continue` fallback for codex; only resume when the
+    persisted sid is verified to exist on disk, otherwise start fresh.
+  - New global `GLOBAL_CODEX_LAUNCH_LOCK` serializes cold codex launches so
+    signal attribution sees exactly one new/appended rollout per tab.
+  - Fence-poll with 0.7s silence after rollout activity (replaces the 600s
+    wait), 200ms × 30 poll budget (~6s wall). A rolling observation snapshot
+    lets the fence settle while the immutable pre-launch scan remains the
+    attribution baseline.
+  - Per-tab new-pin timestamp window anchored in `ensure_tmux_session`
+    immediately before `tmux new-session -d`, with bounds `[-2s, +8s]`.
+  - Phase-R reconciliation (R1-R8) verifies existence, cwd-realpath match,
+    ts-window/growth, non-empty, no duplicate sids, bijection between
+    expected and actual new/appended sids per cwd against one global pre-launch
+    scan; extras trigger whole-cwd quarantine rather than risking
+    misattribution. Signal failures must be salvaged before any sibling launch
+    or immediately roll back the cwd batch.
+  - Cursor CLI is a *constructive pin*: `agent --resume <uuid>` creates a
+    fresh chat store immediately if one does not exist, so every cursor tab
+    now pins a uuid4 at construction and always passes `--resume`; persisted
+    ids resume only after cwd-scoped verification. Missing/wrong-cwd ids rotate
+    to a constructive fresh uuid. Verification uses `store.db` meta key=0
+    (hex-JSON, `agentId` field) with `meta.json` realpath fallback via
+    `services/_cursor_verify.py`.
+  - New persisted field `resume_quarantined` (default False, back-compat) on
+    each tab; set True on atomic rollback/Phase-R failure, cleared on
+    successful fresh pin or verified resume. Quarantine verifies tmux teardown
+    before clearing the last known owner sid and surfaces cleanup failures.
+- **Verified**:
+  - V0 empirical probes confirmed codex 0.146.1 rollout format
+    (`{type:session_meta, payload:{id, session_id, cwd, timestamp}}` with
+    `payload.id` the canonical sid; `archived_sessions/` flat layout;
+    `session_id` differs from `id` on forks).
+  - 98 unit tests in `test_ttyd_manager.py` + `test_codex_sessions.py` (all
+    pass), including wrong-cwd rejection and fail-closed teardown.
+  - 8 V4/V6 integration tests in `test_recovery_integration_v4v6.py`
+    (archived-sessions flat scan, verified-resume append, 3-codex same-cwd
+    no-cross-wiring, quarantined-tab fresh start, cursor `--resume` pinning,
+    R8 extra-sid quarantine, cursor DB verification, single-tab fresh pin).
+  - Real-process cold-restart oracle: 7 tabs across 3 cwd values (3 Codex,
+    2 Cursor, Claude, Terminal), exact tab/type/cwd/full-SID/tmux/port marker
+    bijection, active + flat-archived Codex resumes, 0 cross-wiring. Uses a
+    private tmux server; cold recovery 7.51s and full focused test 8.88s.
+  - Full backend suite: 566 passed; the same 61 pre-existing pytest-asyncio
+    running-loop failures as `main@2144b4a`; no new failure class or count.
+  - `black` / `isort` / `mypy` clean on all touched files.
+
+### fix: bound Feedback Reaper prompt size for small-context agents
+
+- **Strategy — SIMPLE + dynamic budgeting (5 commits, 8 files)**: shrinks the
+  Feedback Reaper prompt without redesigning the feedback pipeline. Bounds are
+  hard per-field caps plus a **dynamic oldest-first budget trim**: at assembly
+  time the oldest digests are dropped until the serialized prompt fits under
+  the 100K-char hard ceiling (down to zero digests if necessary). Verbose fields
+  are clipped to fixed maxima, unneeded local metadata is omitted, the inline
+  worker/reviewer lesson index is tightened by small constant factors, and a
+  two-phase prepare/commit pattern ensures dropped digests carry over to the
+  next run. No new subsystems, no retrieval overhaul. Delivered across five
+  commits (initial bound + fingerprint/limit correction + per-field caps/hard
+  budget/deferred commit + legacy-fingerprint sanitization) touching 8 files:
+  `CHANGELOG.md`, `backend/claude_hub/models/schemas.py`,
+  `backend/claude_hub/services/feedback_lessons.py`,
+  `backend/claude_hub/services/workspace_manager/_feedback.py`,
+  `backend/claude_hub/services/workspace_manager/_prompts.py`,
+  `backend/claude_hub/services/workspace_manager/_tasks.py`,
+  `backend/tests/test_feedback_lessons.py`, `backend/tests/test_workspaces.py`.
+- **What**: the internal Feedback Reaper summarization prompt (which runs
+  periodically to extract reusable workspace lessons) could grow unboundedly:
+  incremental mode included ALL unprocessed records (223 in one workspace →
+  ~1.46M chars that exceeded codex's 1,048,576-char request limit), verbose
+  validation/risks/final_summary/title/path/tag/id fields were included verbatim,
+  and active_lessons carried full summary text with a 50-entry cap. Even after
+  the v4 cap/fingerprint fixes, adversarial long titles/tags/paths could blow
+  the promised 128K-char bound. v5 closes the last gaps. Five fixes: (1) **all
+  modes cap at 30 digests per run** (the previous "INCREMENTAL skips the cap"
+  was a bug that let backlogs grow without bound); remaining unprocessed
+  records stay uncached and are picked up on the next run. The request schema
+  keeps the legacy `limit` range 1..200 (backward compat); the store clamps to
+  30 internally rather than returning HTTP 422. (2) **Every free-text field in
+  both input_task_digests and active_lessons is capped**: task_id ≤ 64, title ≤
+  80, final_summary ≤ 200, changed_files paths ≤ 120 chars and ≤ 6 items,
+  validation/risks ≤ 160 chars and ≤ 2 items each, report_states ≤ 8 items
+  each ≤ 32 chars; active-lesson id ≤ 80, title ≤ 80, summary ≤ 120, tags ≤ 6
+  each ≤ 24 chars. The `fingerprint` field is **never truncated** (it is the
+  authoritative 25-char `workspace:<16-hex>` merge key — Reaper echoes it
+  verbatim on POST and the server merges on exact match). Ellipsis accounting
+  (`value[:n-3] + "..."`) means emitted strings never exceed `n`. (3) **Dynamic
+  oldest-first budgeting under a 100K-char hard cap**
+  (`REAPER_PROMPT_HARD_CHAR_LIMIT = 100_000`, ≈25K tokens) enforced at
+  prompt-assembly time as defense in depth: if after per-field capping the
+  serialized prompt still exceeds budget, the oldest digests are popped one by
+  one (strict — all the way to zero digests if necessary) until it fits.
+  Together with the deferred processed-index commit (cycle-7 below) this
+  guarantees carry-over: dropped digests stay unprocessed and are retried on
+  the next Reaper run. (4) **Compact serialization** drops path/sha256/
+  summarized_at/completed_at local metadata and unused package fields beyond
+  run id/mode/input_record_ids. (5) **Active lessons dedup payload retains the
+  exact `fingerprint`** plus ≤120-char summary snippet and caps at 20 so the
+  Reaper can deterministically echo an existing fingerprint on POST to merge
+  near-duplicates; the instruction preamble was compressed from ~75 to ~28
+  lines and explicitly tells the Reaper to use the fingerprint field and
+  keep its own POST fields within char bounds. Additionally, the worker/
+  reviewer lesson index is tightened (limit 8→5, title 72→50 chars, tags
+  capped at 4, shorter boilerplate).
+- **Why**: after the prior compact-index fix the inline worker/reviewer block
+  was ~340 tokens, but the Reaper prompt itself — generated when summarizing
+  workspace feedback — could exceed codex's hard 1,048,576-character request
+  ceiling when a workspace accumulated many completed tasks between reaper
+  runs.
+- **How**: `_REAPER_MAX_DIGESTS_PER_RUN = 30` caps all modes in
+  `prepare_summary_input`; `REAPER_PROMPT_HARD_CHAR_LIMIT = 100_000` is the
+  defense-in-depth global budget enforced in `_build_workspace_feedback_summary_
+  prompt` (oldest digests dropped if exceeded). Field-level constants
+  (`_DIGEST_MAX_TASK_ID=64`, `_DIGEST_MAX_TITLE=80`, `_DIGEST_MAX_FINAL_SUMMARY=
+  200`, `_DIGEST_MAX_ITEM_CHARS=160`, `_DIGEST_MAX_PATH_CHARS=120`,
+  `_DIGEST_MAX_CHANGED_FILES=6`, `_DIGEST_MAX_VALIDATION_ITEMS=2`,
+  `_DIGEST_MAX_RISKS_ITEMS=2`, lesson caps `_LESSON_MAX_ID=80`, `_LESSON_MAX_
+  TITLE=80`, `_LESSON_MAX_SUMMARY=120`, `_LESSON_MAX_TAG_LEN=24`, `_LESSON_MAX_
+  TAGS=6`) are applied both at digest creation (`_digest_task_record`) and in
+  `_compact_digest_for_prompt()` (so pre-v5 cached records are also compacted).
+  Fingerprint is preserved verbatim — never truncated.
+  `_build_workspace_feedback_summary_prompt` compresses instructions and
+  includes id/fingerprint/title/summary/tags/confidence in active_lessons;
+  payload example shows the optional `fingerprint` merge field and tells the
+  Reaper to keep its own POST fields within bounds. `_CONTEXT_LIMIT_DEFAULT`
+  8→5, title/boilerplate tightened in `_lesson_context_block_from_payload`.
+  `FeedbackSummaryRequest.limit` default 50→30, schema max stays at 200
+  (clamped internally at the store). `FEEDBACK_SUMMARY_PROMPT_VERSION`
+  bumped 3→5 (v5 adds comprehensive per-field caps + hard budget; the v4
+  fingerprint/title/summary/tag/id shapes are preserved so this is backward
+  compatible with in-flight Reaper runs).
+- **Verified**:
+  - *Normal workspace* (277 task records, 5 active lessons): full prompt
+    ~57,036 chars / ~14,259 tokens (~96.1% char reduction from the 1.46M-char
+    codex failure).
+  - *Adversarial worst-case* (30 tasks each with 5000-char title/final_summary/
+    validation/risks, 20×1500-char changed_files, plus 20 active lessons with
+    long titles/summaries/tags): prompt ~69,660 chars / ~17,415 tokens, under
+    both the 100K hard budget and the 128K/32K target; fingerprint field
+    preserved exactly (`workspace:<16-hex>`); long 5000-char strings do not
+    appear verbatim.
+  - 153 lesson/feedback/reaper tests pass (23 feedback + 130 workspace),
+    including new adversarial and contract tests covering long outer
+    task_id clamping, unknown-fingerprint rejection, strict-budget zero-
+    digest termination, exact post-budget digest/ID alignment, next-run
+    carry-over for budget-dropped records, and legacy oversized-
+    fingerprint sanitization:
+    `test_compact_digest_for_prompt_bounds_every_free_text_field`,
+    `test_prepare_summary_input_clamps_large_limit_to_max_digests`,
+    `test_feedback_summary_request_accepts_legacy_limit_range`,
+    `test_create_lesson_merges_deterministically_when_fingerprint_echoed`,
+    `test_create_lesson_rejects_unknown_client_fingerprint`,
+    `test_prepare_summary_input_clamps_outer_task_id`,
+    `test_budget_loop_drops_oldest_and_carry_over_works`,
+    `test_legacy_oversized_fingerprints_are_sanitized_in_prompt`,
+    `test_create_lesson_rejects_unknown_fingerprint_e2e`,
+    `test_reaper_prompt_stays_under_hard_budget_with_adversarial_input` (e2e).
+    black/isort/mypy clean.
+- **Cycle-7 hardening**: three correctness fixes on top of v5:
+    (a) **Outer `task_id` clamped** at record-build time so the compact
+    wrapper `task_id`, `input_record_ids`, and digest-inner `task_id`
+    all respect `_DIGEST_MAX_TASK_ID=64` even for pre-v5 legacy cache
+    entries or records with oversized id-in-JSON;
+    (b) **Client fingerprints validated**: `create_lesson` rejects a
+    client-provided fingerprint that does not reference an existing
+    active lesson with HTTP 400 — bogus fingerprints no longer create
+    unreachable lessons with non-deterministic keys. The server always
+    recomputes a canonical `workspace:<16hex>` fingerprint when the
+    client omits the field;
+    (c) **Processed-index write deferred until after budget trimming**:
+    `prepare_summary_input()` no longer marks records processed on
+    entry selection. The new `commit_summary_input(summary_input,
+    committed_paths)` method writes the index AFTER
+    `_build_workspace_feedback_summary_prompt` returns the final
+    (post-budget) digest set, so records dropped by the hard global
+    budget are **never** marked processed and are retried on the next
+    Reaper run (carry-over). `FeedbackSummaryRun.input_record_ids`
+    and the audit-log `input_record_ids=` field now reflect the final
+    committed IDs, not the pre-budget selection. The budget-dropping
+    loop is strict (`while len(prompt) > budget and len(digests) >= 1`)
+    and terminates cleanly even when the fixed preamble alone exceeds
+    the budget (zero-digest prompt, no crash, all records carried over).
+    Internal `_path` bookkeeping is stripped from the serialized prompt
+    so local filesystem paths never leak to the agent.
+- **Cycle-9 hardening**: legacy fingerprint sanitization so pre-v5 lessons
+    with non-canonical or oversized fingerprints cannot bypass the hard
+    prompt ceiling. Valid canonical fingerprints
+    (`workspace|family|global:<16hex>`, ≤26 chars) are still passed
+    verbatim as merge keys; any fingerprint longer than 64 chars or not
+    matching the canonical regex is replaced with `""` in the
+    `active_lessons` payload (the Reaper cannot merge against a
+    non-canonical fp anyway, since the server rejects unknown client
+    fingerprints with HTTP 400). This enforces the 100K budget even on
+    workspaces that accumulated lessons with adversarial fingerprints
+    before the v5 validator shipped. New persisted-legacy regression
+    `test_legacy_oversized_fingerprints_are_sanitized_in_prompt` writes
+    four lessons (one canonical, one 5KB oversized fp, one short
+    non-canon fp, one empty fp) directly to disk via
+    `_write_lesson_index()` and asserts (i) the prompt stays under the
+    hard budget, (ii) oversized/non-canon fps are absent from the
+    serialized prompt, (iii) the good canonical fp appears verbatim,
+    (iv) every fp in the payload is either `""` or matches the canonical
+    regex, and (v) internal `_path` bookkeeping does not leak.
+
 ### fix: restore terminal history and resize injection on first load
 
 - **What**: terminal iframe HTML once again receives the history replay,

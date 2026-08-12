@@ -45,9 +45,11 @@ is removed before the original exception is propagated.
 - Confirmed both tests fail on the old implementation and pass on the fix.
 - Confirmed a live duplicate of the QFO Codex tab returned active on port
   `10394` after the three verified orphan listeners were stopped.
-- The targeted manager and route suites pass `97/97`, and mypy reports no
-  issues in the touched source and test files. The repository-wide backend run
+- After rebasing the fix onto `origin/main@fa76748`, the targeted manager,
+  route, Codex-session, and cold-recovery suites pass `117/117`; Black, isort,
+  and mypy report no issues in the touched production source. The earlier
+  repository-wide backend run
   reached `549 passed, 63 failed`; nearly all failures share the pre-existing
   `Runner.run() cannot be called from a running event loop` test-runner
   contamination, plus one Playwright scroll-alignment failure. The new async
-  regression passes both alone and in the targeted 97-test run.
+  regression passes both alone and in the targeted 117-test run.

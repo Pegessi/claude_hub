@@ -45,11 +45,7 @@ class _PersistenceMixin:
             return
 
         sessions = self._sessions_for_workspace_raw(workspace_id)
-        tasks = [
-            task
-            for task in self.tasks.values()
-            if task.workspace_id == workspace_id and not task.system_internal
-        ]
+        tasks = [task for task in self.tasks.values() if task.workspace_id == workspace_id]
         lines = [
             "# Claude Hub Workspace State",
             "",
@@ -67,12 +63,7 @@ class _PersistenceMixin:
             lines.append("- No managed agents yet.")
         for session in sorted(sessions, key=lambda item: item.created_at):
             current_task_id = session.current_task_id or session.task_id
-            current_task = self.tasks.get(current_task_id or "")
-            current = (
-                "system-internal"
-                if current_task and current_task.system_internal
-                else current_task_id or "none"
-            )
+            current = current_task_id or "none"
             lines.append(
                 "- "
                 f"{session.id}: role={session.role.value}, type={session.agent_type.value}, "
