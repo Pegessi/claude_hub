@@ -70,11 +70,11 @@ def test_get_next_port_skips_existing_listener(monkeypatch: MonkeyPatch) -> None
     manager._next_port = 12000
     checked: list[int] = []
 
-    def fake_is_listening(port: int) -> bool:
+    def fake_is_available(port: int) -> bool:
         checked.append(port)
-        return port in {12000, 12001, 12002}
+        return port not in {12000, 12001, 12002}
 
-    monkeypatch.setattr(ttyd_manager_module, "_is_local_port_listening", fake_is_listening)
+    monkeypatch.setattr(ttyd_manager_module, "_is_local_port_available", fake_is_available)
 
     assert manager._get_next_port() == 12003
     assert manager._next_port == 12004
@@ -86,7 +86,7 @@ def test_get_next_port_raises_when_port_range_is_exhausted(
 ) -> None:
     manager = TTYDManager.__new__(TTYDManager)
     manager._next_port = ttyd_manager_module._MAX_TCP_PORT
-    monkeypatch.setattr(ttyd_manager_module, "_is_local_port_listening", lambda port: True)
+    monkeypatch.setattr(ttyd_manager_module, "_is_local_port_available", lambda port: False)
 
     with pytest.raises(RuntimeError, match="No available ttyd ports remain"):
         manager._get_next_port()
@@ -97,15 +97,16 @@ def test_get_next_port_raises_when_port_range_is_exhausted(
 def test_get_next_port_can_allocate_max_tcp_port(monkeypatch: MonkeyPatch) -> None:
     manager = TTYDManager.__new__(TTYDManager)
     manager._next_port = ttyd_manager_module._MAX_TCP_PORT
-    monkeypatch.setattr(ttyd_manager_module, "_is_local_port_listening", lambda port: False)
+    monkeypatch.setattr(ttyd_manager_module, "_is_local_port_available", lambda port: True)
 
     assert manager._get_next_port() == ttyd_manager_module._MAX_TCP_PORT
     assert manager._next_port == ttyd_manager_module._MAX_TCP_PORT + 1
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tmux_created", [False, True])
 async def test_create_tab_start_failure_stops_unpersisted_process(
-    monkeypatch: MonkeyPatch, tmp_path: Path
+    monkeypatch: MonkeyPatch, tmp_path: Path, tmux_created: bool
 ) -> None:
     manager = TTYDManager.__new__(TTYDManager)
     manager._next_port = 12010
@@ -117,7 +118,7 @@ async def test_create_tab_start_failure_stops_unpersisted_process(
         raise RuntimeError("start interrupted")
 
     async def fake_ensure_tmux_session(self: TTYDProcess) -> bool:
-        return False
+        return tmux_created
 
     async def fake_stop(self: TTYDProcess, kill_tmux: bool = False) -> None:
         stopped.append((self.tab_id, kill_tmux))
@@ -134,8 +135,7 @@ async def test_create_tab_start_failure_stops_unpersisted_process(
             agent_type=AgentType.TERMINAL,
         )
 
-    assert len(stopped) == 1
-    assert stopped[0][1] is True
+    assert [kill_tmux for _, kill_tmux in stopped] == ([False, True] if tmux_created else [False])
     assert manager.processes == {}
     assert manager._tab_order == []
 
@@ -157,7 +157,7 @@ async def test_create_tab_cancellation_shields_unpersisted_process_cleanup(
         await asyncio.Event().wait()
 
     async def fake_ensure_tmux_session(self: TTYDProcess) -> bool:
-        return False
+        return True
 
     async def fake_stop(self: TTYDProcess, kill_tmux: bool = False) -> None:
         await asyncio.sleep(0)
@@ -187,6 +187,156 @@ async def test_create_tab_cancellation_shields_unpersisted_process_cleanup(
     assert stopped[0][1] is True
     assert manager.processes == {}
     assert manager._tab_order == []
+
+
+@pytest.mark.asyncio
+async def test_create_tab_repeated_cancellation_waits_for_cleanup(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._next_port = 12012
+    manager.processes = {}
+    manager._tab_order = []
+    start_entered = asyncio.Event()
+    cleanup_entered = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    cleanup_completed = asyncio.Event()
+
+    async def fake_start(self: TTYDProcess) -> None:
+        start_entered.set()
+        await asyncio.Event().wait()
+
+    async def fake_ensure_tmux_session(self: TTYDProcess) -> bool:
+        return True
+
+    async def fake_stop(self: TTYDProcess, kill_tmux: bool = False) -> None:
+        assert kill_tmux is True
+        cleanup_entered.set()
+        await allow_cleanup.wait()
+        cleanup_completed.set()
+
+    monkeypatch.setattr(TTYDProcess, "ensure_tmux_session", fake_ensure_tmux_session)
+    monkeypatch.setattr(TTYDProcess, "start", fake_start)
+    monkeypatch.setattr(TTYDProcess, "stop", fake_stop)
+
+    create_task = asyncio.create_task(
+        manager.create_tab(
+            name="Repeatedly cancelled tab",
+            shell="/bin/zsh",
+            cwd=str(tmp_path),
+            agent_type=AgentType.TERMINAL,
+        )
+    )
+    await start_entered.wait()
+    create_task.cancel()
+    await cleanup_entered.wait()
+    create_task.cancel()
+    await asyncio.sleep(0)
+
+    assert not create_task.done()
+    assert not cleanup_completed.is_set()
+
+    allow_cleanup.set()
+    with pytest.raises(asyncio.CancelledError):
+        await create_task
+    assert cleanup_completed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_create_tab_cancellation_during_tmux_creation_preserves_ownership(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._next_port = 12013
+    manager.processes = {}
+    manager._tab_order = []
+    ensure_entered = asyncio.Event()
+    allow_ensure = asyncio.Event()
+    stopped: list[bool] = []
+
+    async def fake_ensure_tmux_session(self: TTYDProcess) -> bool:
+        ensure_entered.set()
+        await allow_ensure.wait()
+        return True
+
+    async def fake_start(self: TTYDProcess) -> None:
+        pytest.fail("ttyd must not start after cancellation during tmux creation")
+
+    async def fake_stop(self: TTYDProcess, kill_tmux: bool = False) -> None:
+        stopped.append(kill_tmux)
+
+    monkeypatch.setattr(TTYDProcess, "ensure_tmux_session", fake_ensure_tmux_session)
+    monkeypatch.setattr(TTYDProcess, "start", fake_start)
+    monkeypatch.setattr(TTYDProcess, "stop", fake_stop)
+
+    create_task = asyncio.create_task(
+        manager.create_tab(
+            name="Cancelled during tmux create",
+            shell="/bin/zsh",
+            cwd=str(tmp_path),
+            agent_type=AgentType.TERMINAL,
+        )
+    )
+    await ensure_entered.wait()
+    create_task.cancel()
+    await asyncio.sleep(0)
+    assert not create_task.done()
+
+    allow_ensure.set()
+    with pytest.raises(asyncio.CancelledError):
+        await create_task
+
+    assert stopped == [True]
+
+
+@pytest.mark.asyncio
+async def test_create_tab_retries_when_allocated_port_is_claimed(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._next_port = 12020
+    manager.processes = {}
+    manager._tab_order = []
+    attempted_ports: list[int] = []
+    stopped: list[tuple[int, bool]] = []
+    availability_checks: list[int] = []
+
+    async def fake_ensure_tmux_session(self: TTYDProcess) -> bool:
+        return True
+
+    async def fake_start(self: TTYDProcess) -> None:
+        attempted_ports.append(self.port)
+        if len(attempted_ports) == 1:
+            raise RuntimeError("ttyd failed to start")
+        self.is_active = True
+
+    async def fake_stop(self: TTYDProcess, kill_tmux: bool = False) -> None:
+        stopped.append((self.port, kill_tmux))
+
+    def fake_is_available(port: int) -> bool:
+        availability_checks.append(port)
+        return port != 12020 or availability_checks.count(12020) == 1
+
+    monkeypatch.setattr(TTYDProcess, "ensure_tmux_session", fake_ensure_tmux_session)
+    monkeypatch.setattr(TTYDProcess, "start", fake_start)
+    monkeypatch.setattr(TTYDProcess, "stop", fake_stop)
+    monkeypatch.setattr(ttyd_manager_module, "_is_local_port_available", fake_is_available)
+    monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_order", lambda: None)
+    monkeypatch.setattr(manager, "_schedule_codex_discovery", lambda process: None)
+
+    tab = await manager.create_tab(
+        name="Raced port",
+        shell="/bin/zsh",
+        cwd=str(tmp_path),
+        agent_type=AgentType.TERMINAL,
+    )
+
+    assert attempted_ports == [12020, 12021]
+    assert availability_checks == [12020, 12020, 12021]
+    assert stopped == [(12020, False)]
+    assert tab.port == 12021
+    assert manager.processes[tab.id].port == 12021
 
 
 def test_codex_tab_uses_codex_command() -> None:

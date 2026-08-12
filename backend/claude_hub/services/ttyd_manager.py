@@ -110,6 +110,7 @@ _STATUS_CACHE_TTL_SECONDS = 0.75
 _WORKING_FRAME_STALE_SECONDS = 45.0
 _PORT_CHECK_TIMEOUT_SECONDS = 0.2
 _MAX_TCP_PORT = 65535
+_MAX_TTYD_BIND_ATTEMPTS = 3
 _REMOTE_CAPTURE_TIMEOUT_SECONDS = 10.0
 _VOLCENGINE_CODING_PLAN_MODEL_ALIASES = {
     "ark/seed-code-0602": "doubao-seed-2.0-code",
@@ -150,6 +151,21 @@ def _is_local_port_listening(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(_PORT_CHECK_TIMEOUT_SECONDS)
         return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _is_local_port_available(port: int) -> bool:
+    """Return whether a loopback TCP port can currently be bound.
+
+    Unlike a connect probe this detects bound-but-not-yet-listening sockets and
+    does not send traffic to unrelated local services. The check cannot reserve
+    the port for ttyd, so create_tab also retries a raced bind failure.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
 
 
 def _tmux_session_name(tab_id: str) -> str:
@@ -2343,10 +2359,21 @@ class TTYDManager:
         while self._next_port <= _MAX_TCP_PORT:
             port = self._next_port
             self._next_port += 1
-            if not _is_local_port_listening(port):
+            if _is_local_port_available(port):
                 return port
             logger.warning("Skipping occupied ttyd port %s", port)
         raise RuntimeError("No available ttyd ports remain")
+
+    @staticmethod
+    async def _finish_startup_cleanup(process: TTYDProcess, *, kill_tmux: bool) -> None:
+        """Finish rollback even if shutdown delivers repeated cancellation."""
+        cleanup_task = asyncio.create_task(process.stop(kill_tmux=kill_tmux))
+        while not cleanup_task.done():
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                continue
+        await cleanup_task
 
     async def create_tab(
         self,
@@ -2394,26 +2421,64 @@ class TTYDManager:
         logger.info(
             f"Created TTYDProcess with solo_mode={process.solo_mode}, agent_type={process.agent_type}"
         )
+        tmux_created = False
+        process_stopped_without_tmux = False
         try:
             # Stamp launch clocks before starting (ttyd lazy-executes: start()
             # awaits ~1 s during which the agent is already running in tmux).
             # For hot reattaches this is harmless (ensure_tmux_session is a
             # no-op when the session already exists); for cold creates we need
             # the anchor set before start() spawns the new tmux session.
-            await process.ensure_tmux_session()
-            await process.start()
+            # Keep the ownership result reliable if cancellation arrives while
+            # tmux is being created. Rollback must never kill a session that
+            # predated this create request.
+            ensure_task = asyncio.create_task(process.ensure_tmux_session())
+            ensure_cancel: Optional[asyncio.CancelledError] = None
+            while not ensure_task.done():
+                try:
+                    tmux_created = await asyncio.shield(ensure_task)
+                except asyncio.CancelledError as exc:
+                    ensure_cancel = ensure_cancel or exc
+            if ensure_task.done():
+                tmux_created = ensure_task.result()
+            if ensure_cancel is not None:
+                raise ensure_cancel
+
+            for attempt in range(1, _MAX_TTYD_BIND_ATTEMPTS + 1):
+                try:
+                    await process.start()
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # A port can be claimed after allocation but before ttyd
+                    # binds. Stop the failed attempt, then retry only when the
+                    # candidate is demonstrably occupied by another process.
+                    await process.stop(kill_tmux=False)
+                    process_stopped_without_tmux = True
+                    if attempt >= _MAX_TTYD_BIND_ATTEMPTS or _is_local_port_available(process.port):
+                        raise
+                    old_port = process.port
+                    process.port = self._get_next_port()
+                    logger.warning(
+                        "Retrying ttyd startup for tab %s after port %s was claimed; using %s",
+                        tab_id,
+                        old_port,
+                        process.port,
+                    )
         except asyncio.CancelledError:
             # A reload can cancel creation after ttyd has bound its port but
             # before the tab is persisted. Stop that untracked process so the
             # next create does not collide with an orphan listener.
             try:
-                await asyncio.shield(process.stop(kill_tmux=True))
+                await self._finish_startup_cleanup(process, kill_tmux=tmux_created)
             except Exception:
                 logger.exception("Failed to clean up cancelled tab %s", tab_id)
             raise
         except Exception:
             try:
-                await process.stop(kill_tmux=True)
+                if tmux_created or not process_stopped_without_tmux:
+                    await self._finish_startup_cleanup(process, kill_tmux=tmux_created)
             except Exception:
                 logger.exception("Failed to clean up unsuccessful tab %s", tab_id)
             raise
