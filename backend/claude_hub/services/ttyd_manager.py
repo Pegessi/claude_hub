@@ -109,6 +109,7 @@ _STATUS_CACHE_TTL_SECONDS = 0.75
 # lingering in "working" for up to 3 minutes.
 _WORKING_FRAME_STALE_SECONDS = 45.0
 _PORT_CHECK_TIMEOUT_SECONDS = 0.2
+_MAX_TCP_PORT = 65535
 _REMOTE_CAPTURE_TIMEOUT_SECONDS = 10.0
 _VOLCENGINE_CODING_PLAN_MODEL_ALIASES = {
     "ark/seed-code-0602": "doubao-seed-2.0-code",
@@ -2072,7 +2073,7 @@ asyncio.run(_main())
 
         Args:
             kill_tmux: If True, also kill the tmux session. Only use this when
-                      explicitly deleting a tab that the user no longer wants.
+                      deleting a tab or rolling back an unpersisted tab startup.
         """
         if self.process and self.process.returncode is None:
             logger.info(f"Stopping ttyd for tab {self.tab_id} (PID {self.process.pid})")
@@ -2085,7 +2086,7 @@ asyncio.run(_main())
                 await self.process.wait()
 
         if kill_tmux:
-            logger.warning(f"Explicitly killing tmux session {self.tmux_session} (tab deletion)")
+            logger.warning(f"Killing tmux session {self.tmux_session}")
             await _tmux_kill_session(self.tmux_session)
         else:
             logger.info(f"Preserving tmux session {self.tmux_session} for future reattachment")
@@ -2339,7 +2340,7 @@ class TTYDManager:
             self._save_order()
 
     def _get_next_port(self) -> int:
-        while self._next_port <= 65535:
+        while self._next_port <= _MAX_TCP_PORT:
             port = self._next_port
             self._next_port += 1
             if not _is_local_port_listening(port):
