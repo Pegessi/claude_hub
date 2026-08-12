@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import glob
 import hashlib
 import json
@@ -163,8 +164,10 @@ def _is_local_port_available(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         try:
             sock.bind(("127.0.0.1", port))
-        except OSError:
-            return False
+        except OSError as exc:
+            if exc.errno == errno.EADDRINUSE:
+                return False
+            raise
     return True
 
 
