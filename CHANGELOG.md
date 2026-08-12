@@ -5,6 +5,23 @@
 
 ## Unreleased
 
+### fix: prevent orphan ttyd listeners from blocking new tabs
+
+- **What**: new terminal tabs skip ports that already have a live listener,
+  and a tab creation cancelled by backend reload now stops its unpersisted
+  `ttyd` process and tmux session.
+- **Why**: a reload could interrupt `create_tab()` after `ttyd` bound its port
+  but before the tab reached `tabs.json`. The orphan listener survived with
+  no owning tab, so later Codex tab creation repeatedly failed with
+  `EADDRINUSE` and the UI only reported `Failed to duplicate tab`.
+- **How**: `_get_next_port()` bind-probes each candidate without connecting to
+  unrelated services, and startup retries if another process wins the bind
+  race. Rollback tracks tmux ownership and completes despite repeated task
+  cancellation before re-raising the original error.
+- **Verified**: both regression tests failed before the implementation and
+  pass after it; a live duplicate of the affected QFO Codex tab succeeded on
+  port `10394` after three stale listeners were identified and stopped.
+
 ### fix: make Feedback Reaper summary tasks visible, idempotent, and retryable
 
 - **What**: `/lessons/summarize` now exposes its managed Feedback Reaper task on
