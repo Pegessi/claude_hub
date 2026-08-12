@@ -2173,9 +2173,13 @@ class TTYDManager:
             self._save_order()
 
     def _get_next_port(self) -> int:
-        port = self._next_port
-        self._next_port += 1
-        return port
+        while self._next_port <= 65535:
+            port = self._next_port
+            self._next_port += 1
+            if not _is_local_port_listening(port):
+                return port
+            logger.warning("Skipping occupied ttyd port %s", port)
+        raise RuntimeError("No available ttyd ports remain")
 
     async def create_tab(
         self,
@@ -2223,7 +2227,23 @@ class TTYDManager:
         logger.info(
             f"Created TTYDProcess with solo_mode={process.solo_mode}, agent_type={process.agent_type}"
         )
-        await process.start()
+        try:
+            await process.start()
+        except asyncio.CancelledError:
+            # A reload can cancel creation after ttyd has bound its port but
+            # before the tab is persisted. Stop that untracked process so the
+            # next create does not collide with an orphan listener.
+            try:
+                await asyncio.shield(process.stop(kill_tmux=True))
+            except Exception:
+                logger.exception("Failed to clean up cancelled tab %s", tab_id)
+            raise
+        except Exception:
+            try:
+                await process.stop(kill_tmux=True)
+            except Exception:
+                logger.exception("Failed to clean up unsuccessful tab %s", tab_id)
+            raise
 
         self.processes[tab_id] = process
         self._ensure_tab_in_order(tab_id)

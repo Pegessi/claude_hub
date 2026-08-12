@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import json
 import os
@@ -43,6 +44,56 @@ def _claude_settings_path(command: str) -> str:
         parts = shlex.split(parts[2])
     settings_index = parts.index("--settings")
     return parts[settings_index + 1]
+
+
+def test_get_next_port_skips_existing_listener(monkeypatch: MonkeyPatch) -> None:
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._next_port = 12000
+    checked: list[int] = []
+
+    def fake_is_listening(port: int) -> bool:
+        checked.append(port)
+        return port in {12000, 12001, 12002}
+
+    monkeypatch.setattr(ttyd_manager_module, "_is_local_port_listening", fake_is_listening)
+
+    assert manager._get_next_port() == 12003
+    assert manager._next_port == 12004
+    assert checked == [12000, 12001, 12002, 12003]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [RuntimeError, asyncio.CancelledError])
+async def test_create_tab_start_failure_stops_unpersisted_process(
+    monkeypatch: MonkeyPatch, tmp_path: Path, error_type: type[BaseException]
+) -> None:
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._next_port = 12010
+    manager.processes = {}
+    manager._tab_order = []
+    stopped: list[tuple[str, bool]] = []
+
+    async def fake_start(self: TTYDProcess) -> None:
+        raise error_type("start interrupted")
+
+    async def fake_stop(self: TTYDProcess, kill_tmux: bool = False) -> None:
+        stopped.append((self.tab_id, kill_tmux))
+
+    monkeypatch.setattr(TTYDProcess, "start", fake_start)
+    monkeypatch.setattr(TTYDProcess, "stop", fake_stop)
+
+    with pytest.raises(error_type, match="start interrupted"):
+        await manager.create_tab(
+            name="Cancelled tab",
+            shell="/bin/zsh",
+            cwd=str(tmp_path),
+            agent_type=AgentType.TERMINAL,
+        )
+
+    assert len(stopped) == 1
+    assert stopped[0][1] is True
+    assert manager.processes == {}
+    assert manager._tab_order == []
 
 
 def test_codex_tab_uses_codex_command() -> None:
