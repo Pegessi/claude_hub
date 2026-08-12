@@ -28,6 +28,13 @@ from claude_hub.services.ttyd_manager import (
 )
 
 ttyd_manager_module = importlib.import_module("claude_hub.services.ttyd_manager")
+_REAL_IS_LOCAL_PORT_AVAILABLE = ttyd_manager_module._is_local_port_available
+
+
+@pytest.fixture(autouse=True)
+def _stub_available_ttyd_port(monkeypatch: MonkeyPatch) -> None:
+    """Keep unit tests independent of host/sandbox socket permissions."""
+    monkeypatch.setattr(ttyd_manager_module, "_is_local_port_available", lambda port: True)
 
 
 def _run_coro_in_isolated_thread(coro) -> None:
@@ -117,6 +124,9 @@ def test_local_port_available_propagates_non_collision_bind_error(
         def bind(self, address: tuple[str, int]) -> None:
             raise OSError(errno.EACCES, "permission denied")
 
+    monkeypatch.setattr(
+        ttyd_manager_module, "_is_local_port_available", _REAL_IS_LOCAL_PORT_AVAILABLE
+    )
     monkeypatch.setattr(ttyd_manager_module.socket, "socket", lambda *args: DeniedSocket())
 
     with pytest.raises(OSError) as exc_info:
