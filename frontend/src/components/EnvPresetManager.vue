@@ -202,12 +202,12 @@ function handleNew() {
   isNewPreset.value = true
 }
 
-function handleSave() {
+async function handleSave() {
   if (!canSaveSelected.value) return
   const name = draftName.value.trim()
   const text = draftText.value
   const id = isNewPreset.value ? undefined : selectedId.value
-  const result = savePreset(name, text, id)
+  const result = await savePreset(name, text, id)
   if (result) {
     selectedId.value = result.id
     emit('update:modelValue', result.id)
@@ -215,13 +215,14 @@ function handleSave() {
   }
 }
 
-function handleDelete() {
+async function handleDelete() {
   if (!canDeleteSelected.value) return
   if (!selectedPreset.value) return
   const id = selectedPreset.value.id
   const name = selectedPreset.value.name
   if (!confirm(`Delete preset "${name}"?`)) return
-  if (deletePreset(id)) {
+  const ok = await deletePreset(id)
+  if (ok) {
     // Select 'none' after deletion
     selectedId.value = 'none'
     emit('update:modelValue', 'none')
