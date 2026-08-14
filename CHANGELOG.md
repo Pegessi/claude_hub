@@ -5,6 +5,29 @@
 
 ## Unreleased
 
+### fix: persist custom env presets to backend so they survive cross-origin access
+
+- **What**: user-defined Launch Environment presets (the named KEY=VALUE sets in
+  "Manage Environment Presets") are now persisted to `~/.claude_hub/env_presets.json`
+  and synced via new `GET/POST/PUT/PATCH/DELETE /api/env-presets` endpoints.
+  Hidden built-in preset visibility is also persisted.
+- **Why**: previously presets lived only in `localStorage` under key
+  `claude-hub.launch-env-presets`, which is scoped to a single browser origin.
+  Accessing the UI via LAN IP (e.g. `http://192.168.x.x:8173`) instead of
+  `http://127.0.0.1:8173` silently hid every previously saved preset because the
+  two origins have isolated localStorage.
+- **How**: frontend `useLaunchEnvPresets` composable now loads from backend on
+  first use (with localStorage as an optimistic cache and offline fallback),
+  performs a one-time bulk-import merge when backend is empty but localStorage
+  has data, and syncs every save/delete/hide mutation to the backend. Built-in
+  presets remain hardcoded; their hidden state is now cross-origin. Backend
+  never logs preset text values (which may contain API tokens).
+- **Verified**: 39 new backend unit + API tests (service CRUD, persistence,
+  corrupt-file handling, bulk-import merge, REST endpoints); frontend
+  `pnpm lint`, `pnpm vue-tsc --noEmit`, `pnpm build` all pass; Playwright
+  cross-origin verification sets a preset on localhost and reads it back via
+  a different origin.
+
 ### fix: prevent orphan ttyd listeners from blocking new tabs
 
 - **What**: new terminal tabs skip ports that already have a live listener,
