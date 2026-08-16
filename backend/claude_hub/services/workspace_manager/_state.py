@@ -2,6 +2,7 @@
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
+from ..agent_tree import AgentTreeManager
 from ._constants import *  # noqa: F401,F403
 
 
@@ -17,6 +18,11 @@ class _StateMixin:
         # Cache of resolved git worktree roots per workspace id: (timestamp, roots).
         # Used by artifact preview to resolve markdown produced inside a worktree.
         self._worktree_root_cache: dict[str, tuple[float, list[Path]]] = {}
+        # Unified agent tree + durable mailbox coordination layer. Owns the
+        # parent/child run tree, the append-only event stream, and call_id
+        # idempotency. Managed tasks are bridged into this layer via
+        # context_ref (task id) so reports surface as agent events.
+        self.agent_tree = AgentTreeManager(self)  # type: ignore[arg-type]
         self._load_state()
 
     def _workspace_dir(self, workspace_id: str) -> Path:
@@ -70,6 +76,8 @@ class _StateMixin:
                 for item in data.get("reports", []):
                     report = AgentReport(**self._normalize_report_item(item))
                     self.reports[report.id] = report
+                # Load the agent tree (runs + event stream) for this workspace.
+                self.agent_tree.load_from_dict(workspace_id, data)
         except Exception as e:
             logger.error(f"Failed to load nested workspace state: {e}")
 

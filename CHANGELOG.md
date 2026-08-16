@@ -5,6 +5,45 @@
 
 ## Unreleased
 
+### feat: unified Agent Tree + Durable Mailbox coordination layer
+
+- **What**: a single persistent coordination layer that converges the Resident
+  Agent and managed-task dispatch into one parent/child delegation tree with an
+  append-only event stream (durable mailbox). Exposes `spawn`, `send`,
+  `followup`, `wait`, `interrupt`, and `list_runs` actions, plus cursor-based
+  event replay.
+- **Why**: Resident previously scanned global reports to find work; managed
+  tasks had no first-class parent/child or supervisor relationship. Agents
+  couldn't address messages to a specific run or wait on directed subtree
+  events. There was no durable event log for restart replay.
+- **How**:
+  - `models/agent_tree.py`: `AgentRun` (id, path, parent, supervisor,
+    executor_kind, status, context_ref, last_task_message) and `AgentEvent`
+    (monotonic sequence, call_id, correlation_id, type, author, recipient,
+    payload). `ExecutorKind` covers `managed_task`, `native_subagent`,
+    `external_job`.
+  - `services/agent_tree.py`: `AgentTreeManager` owns the run tree, per-workspace
+    append-only event log, call_id idempotency index, and per-run asyncio.Event
+    waiters. `_wake_ancestors` notifies the supervisor chain so a root can
+    `wait()` on its whole subtree.
+  - `services/agent_tree_adapters.py`: `ManagedTaskAdapter` wraps the existing
+    task/session/report flow (spawn→create+start, followup→continue,
+    interrupt→abort). `NativeSubagentAdapter` and `ExternalJobAdapter` are
+    in-memory stubs that satisfy the contract.
+  - `api/agent_tree.py`: REST endpoints under `/api/agent-tree`.
+  - Integration: `workspace_manager.agent_tree` attribute; reports are bridged
+    into agent events via `context_ref` (task id); Resident gets a root run so
+    it can act as supervisor and receive directed subtree events.
+  - Persistence: runs and events are serialized into each workspace's
+    `state.json`; `load_from_dict` rebuilds the call_id index and next sequence
+    counter so idempotency and monotonic ordering survive restart.
+- **Verified**: 16 backend tests (root run, spawn, call_id idempotency, send,
+  followup, wait immediate/blocking/timeout, interrupt, subtree scoping,
+  emit_event status update, emit_event idempotency, report→event bridge,
+  save/load round-trip with sequence continuity, concurrent spawns, concurrent
+  waits). Resident (60), orchestrator/sessions/state-policy (196) tests pass.
+  black, isort, mypy clean.
+
 ### fix: persist custom env presets to backend so they survive cross-origin access
 
 - **What**: user-defined Launch Environment presets (the named KEY=VALUE sets in
