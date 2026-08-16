@@ -425,7 +425,64 @@ class _ReportsMixin:
             await self._after_report_recorded(
                 self.tasks[task_id], self.sessions[session.id], report
             )
+        # Bridge the report into the agent tree event stream so supervisors
+        # can observe managed-task progress via the unified mailbox instead
+        # of scanning global reports.
+        self._bridge_report_to_agent_event(report, session)
         return report
+
+    def _bridge_report_to_agent_event(
+        self,
+        report: AgentReport,
+        session: ManagedSession,
+    ) -> None:
+        """Translate a managed-task report into an agent tree event.
+
+        Finds the agent run whose ``context_ref`` matches the report's task
+        id and emits the corresponding event type. Reports from sessions
+        that are not part of an agent tree (e.g. direct human-driven tasks)
+        are silently skipped.
+        """
+        if not report.task_id:
+            return
+        run = self.agent_tree.get_run_by_context_ref(
+            report.workspace_id, report.task_id
+        )
+        if run is None:
+            return
+
+        from claude_hub.models.agent_tree import AgentEventType
+
+        state_map = {
+            AgentReportState.STARTED: AgentEventType.STARTED,
+            AgentReportState.WORKING: AgentEventType.PROGRESS,
+            AgentReportState.BLOCKED: AgentEventType.BLOCKED,
+            AgentReportState.NEEDS_INPUT: AgentEventType.APPROVAL_REQUIRED,
+            AgentReportState.READY_FOR_REVIEW: AgentEventType.PROGRESS,
+            AgentReportState.COMPLETED: AgentEventType.COMPLETED,
+            AgentReportState.REVIEW_STARTED: AgentEventType.PROGRESS,
+            AgentReportState.REVIEW_PASSED: AgentEventType.COMPLETED,
+            AgentReportState.REVIEW_FAILED: AgentEventType.FAILED,
+            AgentReportState.REVIEW_NEEDS_INPUT: AgentEventType.BLOCKED,
+        }
+        event_type = state_map.get(report.state, AgentEventType.PROGRESS)
+
+        # The author is the run itself (the executor); the recipient is the
+        # run's supervisor so the directed mailbox delivers it.
+        self.agent_tree.emit_event(
+            workspace_id=report.workspace_id,
+            agent_run_id=run.id,
+            event_type=event_type,
+            author=run.id,
+            recipient=run.supervisor_id,
+            call_id=f"report:{report.id}",
+            payload={
+                "message": report.message,
+                "report_id": report.id,
+                "report_state": report.state.value,
+                "task_id": report.task_id,
+            },
+        )
 
     async def _after_report_recorded(
         self,

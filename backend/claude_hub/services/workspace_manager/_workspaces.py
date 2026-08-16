@@ -769,6 +769,11 @@ class _WorkspacesMixin:
         )
         self._save_state()
 
+        # Ensure the resident has a root run in the agent tree so it can act as
+        # a supervisor that spawns child runs and receives directed events from
+        # its subtree. The root run's context_ref is the resident session id.
+        self._ensure_resident_root_run(workspace.id, session.id)
+
         # A TERMINAL resident has no LLM agent to drive: advance the timer (done
         # above) and keep the tab, but never send the self-drive prompt.
         if workspace.resident_agent_type == AgentType.TERMINAL:
@@ -786,6 +791,28 @@ class _WorkspacesMixin:
         await self.send_session_message(
             session.id,
             build_resident_agent_prompt(workspace, base_url, session.id),
+        )
+
+    def _ensure_resident_root_run(
+        self, workspace_id: str, session_id: str
+    ) -> None:
+        """Ensure the resident has a root run in the agent tree.
+
+        The resident acts as the root supervisor: it can spawn child runs
+        (managed tasks) and receive directed events from its subtree. The
+        root run's ``context_ref`` is the resident session id so we can
+        locate it later.
+        """
+        from claude_hub.models.agent_tree import ExecutorKind
+
+        existing = self.agent_tree.get_run_by_context_ref(workspace_id, session_id)
+        if existing is not None:
+            return
+        self.agent_tree.create_root_run(
+            workspace_id=workspace_id,
+            executor_kind=ExecutorKind.MANAGED_TASK,
+            title="Resident Agent",
+            context_ref=session_id,
         )
 
     async def delete_workspace(self, workspace_id: str) -> None:

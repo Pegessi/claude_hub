@@ -33,6 +33,8 @@ class _PersistenceMixin:
                     if item.workspace_id == workspace.id
                 ],
             }
+            # Persist the agent tree (runs + event stream) for this workspace.
+            payload.update(self.agent_tree.to_dict(workspace.id))
             self._workspace_state_file(workspace.id).write_text(
                 json.dumps(payload, indent=2),
                 encoding="utf-8",
