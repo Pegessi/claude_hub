@@ -661,6 +661,7 @@ _CODEX_WORKSPACE_BOOTSTRAP_PREFIXES = (
     "You are the dispatcher agent for this workspace.",
     "You are an independent reviewer agent for this workspace.",
     "You are this workspace's RESIDENT self-driven maintenance agent.",
+    "You are this workspace's RESIDENT MASTER agent",
 )
 
 # Prefixes for workspace-manager task-delivery prompts. These ARE meaningful
@@ -728,6 +729,7 @@ def _bootstrap_role_label(text: str) -> str | None:
         "You are the dispatcher agent for this workspace.": "Dispatcher",
         "You are an independent reviewer agent for this workspace.": "Reviewer",
         "You are this workspace's RESIDENT self-driven maintenance agent.": "Resident",
+        "You are this workspace's RESIDENT MASTER agent": "Resident",
     }
     role = None
     for prefix, label in role_map.items():
