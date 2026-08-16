@@ -651,21 +651,155 @@ _CODEX_SKIP_TITLE_PREFIXES = (
     "# AGENTS.md instructions",
 )
 
+# Prefixes for workspace-manager-injected bootstrap/role prompts. These are
+# idle-session preamble (waiting instructions, reviewer guidelines, dispatcher
+# setup, resident-agent directives) and do not contain a task title. They are
+# skipped in the same way as codex's own boilerplate so that later real
+# messages (task assignment, review, or human input) can surface as the title.
+_CODEX_WORKSPACE_BOOTSTRAP_PREFIXES = (
+    "You are a resident workspace agent.",
+    "You are the dispatcher agent for this workspace.",
+    "You are an independent reviewer agent for this workspace.",
+    "You are this workspace's RESIDENT self-driven maintenance agent.",
+)
+
+# Prefixes for workspace-manager task-delivery prompts. These ARE meaningful
+# first messages but start with a system line rather than a human-authored
+# title. For these we extract the "Task title:" field (or inline variant) and
+# use it as the session title.
+_CODEX_WORKSPACE_TASK_PREFIXES = (
+    "New workspace task assigned.",
+    "Review workspace task.",
+    "Continue workspace task from review.",
+    "Dispatch decision needed.",
+)
+
+# Prefixes for workspace-manager hard-recovery prompts. These start with a
+# warning emoji paragraph but contain a "Task title:" line further down.
+_CODEX_WORKSPACE_RECOVERY_PREFIXES = (
+    "⚠️  Your previous context was automatically cleared",
+    "⚠️  Context refreshed after error.",
+)
+
+# Regex to extract "Task title: <title>" from a task-delivery prompt body.
+_CODEX_TASK_TITLE_RE = re.compile(r"^\s*Task title:\s*(.+?)\s*$", re.MULTILINE)
+
+# Regex to extract the inline "Task: <id> (<title>)" variant used in the
+# revision-resume prompt.
+_CODEX_TASK_INLINE_RE = re.compile(
+    r"^\s*Task:\s*[0-9a-fA-F-]+\s+\((.+?)\)\s*(?:mode=|complexity=|iteration=|$)",
+    re.MULTILINE,
+)
+
+# Regex to extract "Workspace: <name>" and "Session: <id>" from bootstrap
+# prompts so we can fall back to a role label like "Reviewer (my-ws)".
+_CODEX_WORKSPACE_LINE_RE = re.compile(r"^\s*Workspace:\s*(.+?)\s*$", re.MULTILINE)
+_CODEX_SESSION_LINE_RE = re.compile(r"^\s*Session:\s*(.+?)\s*$", re.MULTILINE)
+
 # Maximum length of the extracted session title (truncated with ellipsis).
 _CODEX_TITLE_MAX_LEN = 80
+
+
+def _extract_task_title_from_text(text: str) -> str | None:
+    """Try to pull a task title from a workspace task/recovery prompt body.
+
+    Checks for both ``Task title: <x>`` and the inline ``Task: <id> (<x>)``
+    variants. Returns the first match stripped, or None if neither is found.
+    """
+    m = _CODEX_TASK_TITLE_RE.search(text)
+    if m:
+        return m.group(1).strip()
+    m = _CODEX_TASK_INLINE_RE.search(text)
+    if m:
+        return m.group(1).strip()
+    return None
+
+
+def _bootstrap_role_label(text: str) -> str | None:
+    """Derive a short role label from a workspace bootstrap/idle prompt.
+
+    Uses the role-identifying first line plus workspace name when available,
+    e.g. "Reviewer (my-workspace)". Returns None if the text does not look like
+    a bootstrap prompt.
+    """
+    first_line = text.strip().split("\n", 1)[0]
+    role_map = {
+        "You are a resident workspace agent.": "Agent",
+        "You are the dispatcher agent for this workspace.": "Dispatcher",
+        "You are an independent reviewer agent for this workspace.": "Reviewer",
+        "You are this workspace's RESIDENT self-driven maintenance agent.": "Resident",
+    }
+    role = None
+    for prefix, label in role_map.items():
+        if first_line.startswith(prefix):
+            role = label
+            break
+    if role is None:
+        return None
+    ws_match = _CODEX_WORKSPACE_LINE_RE.search(text)
+    if ws_match:
+        return f"{role} ({ws_match.group(1).strip()})"
+    return role
+
+
+def _codex_classify_and_extract(text: str) -> tuple[str, str | None]:
+    """Classify a user message and return (action, extracted_title).
+
+    Returns one of:
+      - ("skip", None)   — boilerplate / bootstrap preamble, keep scanning
+      - ("title", t)     — use ``t`` as the session title
+      - ("fallback", t)  — use ``t`` (truncated first-line / collapsed text)
+                           when no task title or role label applied
+    """
+    stripped = text.strip()
+    if not stripped:
+        return ("skip", None)
+
+    # Workspace bootstrap/idle prompts: these come FIRST in a managed session
+    # (before any task is assigned), so we do NOT return the role label
+    # immediately — we remember it as a fallback and keep scanning for a later
+    # task message. If the session is truly idle the caller will pick up the
+    # remembered fallback at end-of-rollout.
+    if any(stripped.startswith(p) for p in _CODEX_WORKSPACE_BOOTSTRAP_PREFIXES):
+        label = _bootstrap_role_label(stripped)
+        if label:
+            return ("fallback", label)
+        return ("skip", None)
+
+    # Task-delivery prompts (assignment / review / continue / dispatch):
+    # extract the embedded Task title.
+    if any(stripped.startswith(p) for p in _CODEX_WORKSPACE_TASK_PREFIXES):
+        t = _extract_task_title_from_text(stripped)
+        if t:
+            return ("title", t)
+        return ("fallback", stripped)
+
+    # Hard-recovery / revision-resume prompts: same extraction, just prefixed
+    # with the warning emoji.
+    if any(stripped.startswith(p) for p in _CODEX_WORKSPACE_RECOVERY_PREFIXES):
+        t = _extract_task_title_from_text(stripped)
+        if t:
+            return ("title", t)
+        return ("fallback", stripped)
+
+    return ("fallback", stripped)
 
 
 def _codex_session_title(path: str) -> str:
     """Extract a human-readable title from a codex rollout file.
 
-    The title is the first real user message (a ``response_item`` record with
-    ``role=user`` whose ``input_text`` content is not boilerplate
-    environment/permission/AGENTS.md/plugin context). Returns an empty string
-    if no usable message is found. Defensive against malformed files: silently
-    returns "".
+    The title is resolved from the first meaningful user message, skipping
+    codex-internal boilerplate (environment/permissions/AGENTS.md/plugins) and
+    workspace-manager bootstrap preamble. For workspace task-delivery prompts
+    (assignment, review, continue, hard-recovery) the embedded ``Task title:``
+    is used; for idle role-bootstrap sessions a label like
+    ``"Reviewer (my-workspace)"`` is produced; for plain sessions the first
+    real user message text is returned. Returns an empty string if no usable
+    message is found. Defensive against malformed files: silently returns "".
     """
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            fallback_title = ""
             for line in f:
                 line = line.strip()
                 if not line:
@@ -682,8 +816,9 @@ def _codex_session_title(path: str) -> str:
                 content = payload.get("content")
                 if not isinstance(content, list):
                     continue
-                # Collect real text items; if ANY item is boilerplate, the
-                # whole record is considered a preamble and we keep scanning.
+                # Collect all non-empty input_text blocks in this record and
+                # check for codex boilerplate. If ANY block is boilerplate, the
+                # whole record is preamble.
                 texts: List[str] = []
                 is_preamble = False
                 for item in content:
@@ -698,17 +833,35 @@ def _codex_session_title(path: str) -> str:
                         is_preamble = True
                         break
                     texts.append(text)
-                if is_preamble or not texts:
+                if is_preamble:
                     continue
-                # First real user message: join its text blocks and collapse
-                # whitespace for display.
-                title = " ".join(" ".join(texts).split())
-                if len(title) > _CODEX_TITLE_MAX_LEN:
-                    title = title[: _CODEX_TITLE_MAX_LEN - 1] + "…"
-                return title
+                if not texts:
+                    continue
+
+                joined = "\n\n".join(texts)
+                action, extracted = _codex_classify_and_extract(joined)
+                if action == "skip":
+                    continue
+                if action == "title" and extracted:
+                    title = " ".join(extracted.split())
+                    if len(title) > _CODEX_TITLE_MAX_LEN:
+                        title = title[: _CODEX_TITLE_MAX_LEN - 1] + "…"
+                    return title
+                # fallback: remember the first non-bootstrap candidate; later
+                # fallbacks are also remembered (override) so that e.g. a task
+                # prompt whose title-regex missed beats the earlier bootstrap
+                # role label. A successful "title" match below returns
+                # immediately and always wins over any fallback.
+                if action == "fallback" and extracted:
+                    collapsed = " ".join(extracted.split())
+                    if len(collapsed) > _CODEX_TITLE_MAX_LEN:
+                        collapsed = collapsed[: _CODEX_TITLE_MAX_LEN - 1] + "…"
+                    fallback_title = collapsed
+
+            # End of rollout: return the best fallback we saw, or "".
+            return fallback_title
     except OSError:
         return ""
-    return ""
 
 
 def list_codex_sessions() -> List[Dict[str, Any]]:
