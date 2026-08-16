@@ -657,11 +657,10 @@ _CODEX_SKIP_TITLE_PREFIXES = (
 # skipped in the same way as codex's own boilerplate so that later real
 # messages (task assignment, review, or human input) can surface as the title.
 _CODEX_WORKSPACE_BOOTSTRAP_PREFIXES = (
-    "You are a resident workspace agent.",
+    "You are a resident",
     "You are the dispatcher agent for this workspace.",
     "You are an independent reviewer agent for this workspace.",
-    "You are this workspace's RESIDENT self-driven maintenance agent.",
-    "You are this workspace's RESIDENT MASTER agent",
+    "You are this workspace's RESIDENT",
 )
 
 # Prefixes for workspace-manager task-delivery prompts. These ARE meaningful
@@ -725,11 +724,10 @@ def _bootstrap_role_label(text: str) -> str | None:
     """
     first_line = text.strip().split("\n", 1)[0]
     role_map = {
-        "You are a resident workspace agent.": "Agent",
+        "You are a resident": "Agent",
         "You are the dispatcher agent for this workspace.": "Dispatcher",
         "You are an independent reviewer agent for this workspace.": "Reviewer",
-        "You are this workspace's RESIDENT self-driven maintenance agent.": "Resident",
-        "You are this workspace's RESIDENT MASTER agent": "Resident",
+        "You are this workspace's RESIDENT": "Resident",
     }
     role = None
     for prefix, label in role_map.items():
