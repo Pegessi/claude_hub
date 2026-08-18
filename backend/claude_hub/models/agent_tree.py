@@ -123,6 +123,11 @@ class AgentEvent(BaseModel):
     ``send``, ``followup``, ``interrupt``) and the run id it targets, so the
     call_id idempotency index can be rebuilt after a restart and reject
     mismatched call_id reuse.
+
+    ``fingerprint`` is a hash of the full request payload that produced this
+    event. It is persisted so that a restarted process can still detect a
+    call_id reused with a different request body (not just a different
+    action/target).
     """
 
     sequence: int
@@ -139,6 +144,10 @@ class AgentEvent(BaseModel):
     # The target run id of the action. Used for call_id idempotency
     # namespacing.
     target: Optional[str] = None
+    # Full request fingerprint (SHA-256 of the canonicalized request body).
+    # Persisted so call_id reuse with a different payload is detected even
+    # after a process restart.
+    fingerprint: Optional[str] = None
     payload: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -154,6 +163,10 @@ class SpawnRequest(BaseModel):
     The child is created under ``parent_id`` with the given executor kind.
     ``initial_message`` is the first task instruction delivered to the
     child's mailbox as a ``dispatched`` event.
+
+    ``session_id`` is an optional hint for the managed-task adapter: when
+    provided, the task is dispatched to that specific orchestrator session
+    (used by the resident master mode to route work to existing workers).
     """
 
     workspace_id: str
@@ -163,6 +176,7 @@ class SpawnRequest(BaseModel):
     initial_message: str
     call_id: str
     context_ref: Optional[str] = None
+    session_id: Optional[str] = None
 
 
 class SendRequest(BaseModel):

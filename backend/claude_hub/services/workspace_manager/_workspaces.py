@@ -124,26 +124,41 @@ def _build_agent_tree_block(base_url: str, workspace_id: str, root_run_id: Optio
         "-H 'Content-Type: application/json' "
         f'-d \'{{"workspace_id":"{workspace_id}","parent_id":"{root_run_id}",'
         '"executor_kind":"managed_task","title":"...","initial_message":"...",'
-        '"call_id":"<unique-call-id>"}\'\n'
-        "   The response is the child run. Save its `id` for tracking.\n\n"
+        '"call_id":"<unique-call-id>","session_id":"<orchestrator-session-id>"}\'\n'
+        "   The response is the child run. Save its `id` for tracking. "
+        "`session_id` is optional: when provided, the task is dispatched to that "
+        "specific orchestrator worker session (use this to route work to an "
+        "existing worker). When omitted, the backend picks an available worker.\n\n"
         "2. Wait for directed events from your subtree (blocks until events arrive "
         "or timeout):\n"
         f"   {INTERNAL_API_CURL} -X POST {base_url}/api/agent-tree/wait "
         "-H 'Content-Type: application/json' "
         f'-d \'{{"workspace_id":"{workspace_id}","recipient_id":"{root_run_id}",'
         '"since_sequence":0,"subtree":true,"timeout_seconds":30}}\'\n'
-        "   Returns events addressed to you or authored within your subtree.\n\n"
-        "3. Acknowledge events up to a sequence cursor (persists your progress):\n"
+        "   Returns events addressed to you or authored within your subtree. "
+        "Track the highest `sequence` you have seen and pass it as `since_sequence` "
+        "on the next call to get only new events.\n\n"
+        "3. Acknowledge events up to a sequence cursor (persists your progress "
+        "so a restarted resident resumes from where it left off):\n"
         f"   {INTERNAL_API_CURL} -X POST '{base_url}/api/agent-tree/ack?"
         f"workspace_id={workspace_id}&run_id={root_run_id}&sequence=<max_seq>'\n\n"
-        "4. Interrupt a child run (preserves context for later resume):\n"
+        "4. Send a follow-up message to a child run AND resume its turn (use this "
+        "to send reviewed work back to the worker with feedback; maps to "
+        "continue_task):\n"
+        f"   {INTERNAL_API_CURL} -X POST {base_url}/api/agent-tree/followup "
+        "-H 'Content-Type: application/json' "
+        f'-d \'{{"workspace_id":"{workspace_id}","recipient_id":"<child_run_id>",'
+        f'"author_id":"{root_run_id}","message":"what is wrong and what to fix",'
+        '"call_id":"<unique-call-id>"}\'\n\n'
+        "5. Interrupt a child run (preserves context for later resume):\n"
         f"   {INTERNAL_API_CURL} -X POST {base_url}/api/agent-tree/interrupt "
         "-H 'Content-Type: application/json' "
         f'-d \'{{"workspace_id":"{workspace_id}","run_id":"<child_run_id>",'
         '"call_id":"<unique-call-id>"}\'\n\n'
         "Child runs emit events (progress, blocked, completed, failed) that are "
         "delivered to your mailbox. Use `wait` to observe them and `ack` to mark "
-        "them processed."
+        "them processed. A `completed` event means the child run finished "
+        "successfully; a `failed` event means it failed."
     )
 
 
@@ -159,12 +174,13 @@ def _build_resident_master_prompt(
 
     Each cycle the resident reads the board, creates a small number of tasks
     (default ``reviewed`` mode — a reviewer agent vets the work), dispatches them
-    to EXISTING orchestrator worker sessions via an explicit
-    ``target_session_id``, and performs the final acceptance itself once review
-    has passed (PATCH ``status=done``) or sends the work back via ``continue``.
-    It NEVER writes code and NEVER creates or deletes orchestrator worker
-    sessions (the backend may auto-spawn an ephemeral reviewer to vet a task —
-    that is allowed; the resident just never provisions worker agents itself).
+    to EXISTING orchestrator worker sessions via the agent tree ``spawn`` action
+    (passing ``session_id`` for explicit worker routing), and performs the final
+    acceptance itself once review has passed (PATCH ``status=done``) or sends the
+    work back via the agent tree ``followup`` action. It NEVER writes code and
+    NEVER creates or deletes orchestrator worker sessions (the backend may
+    auto-spawn an ephemeral reviewer to vet a task — that is allowed; the
+    resident just never provisions worker agents itself).
     """
     ws = workspace.id
     reports_endpoint = f"{base_url}/api/workspaces/sessions/{session_id}/reports"
@@ -192,51 +208,55 @@ def _build_resident_master_prompt(
         "is idle or working (NOT offline and NOT attention).\n"
         "   - If there are NO such orchestrator sessions, you MUST NOT create one and you MUST "
         "NOT start any task. Instead, degrade to proposal-only: create any tasks you think are "
-        "needed in TODO status (step 3, but WITHOUT the start call) and say so in your heartbeat "
+        "needed in TODO status (step 3, but WITHOUT the spawn call) and say so in your heartbeat "
         '("no worker agents available — proposed N tasks for the user to start"). Then skip to '
         "step 6.\n\n"
-        "3. Create the tasks you deem necessary this cycle. Create AT MOST 3 "
-        "tasks per cycle to avoid a runaway backlog:\n"
-        f"     {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/{ws}/tasks "
+        "3. Create and dispatch the tasks you deem necessary this cycle. Create AT MOST 3 "
+        "tasks per cycle to avoid a runaway backlog. Use the agent tree `spawn` action to create "
+        "a managed task AND dispatch it to an existing orchestrator worker in one call:\n"
+        f"     {INTERNAL_API_CURL} -X POST {base_url}/api/agent-tree/spawn "
         "-H 'Content-Type: application/json' "
-        '-d \'{"title":"...","prompt":"detailed instructions for the worker",'
-        '"origin":"resident"}\'\n'
-        '   Always include "origin":"resident" so the UI tags the task as '
-        "agent-created (distinguishing it from human-created tasks). "
-        "Leave task_mode at its default (reviewed): when the worker finishes, a "
-        "reviewer agent vets the work before it returns to you for final acceptance. "
-        "The backend reuses an idle reviewer or briefly spins one up on its own — that "
-        "is fine and is NOT you creating an agent. Record each new task id from the "
-        "response.\n\n"
-        "4. Dispatch each task you just created onto an EXISTING orchestrator worker from step 2 "
-        "(prefer an idle one; queuing behind a busy orchestrator is fine). Always pass an "
-        "explicit target_session_id so the backend never auto-creates an agent:\n"
-        f"     {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/tasks/<task_id>/start "
+        f'-d \'{{"workspace_id":"{ws}","parent_id":"<your-root-run-id>",'
+        '"executor_kind":"managed_task","title":"...","initial_message":"detailed instructions '
+        'for the worker","call_id":"<unique-call-id>",'
+        '"session_id":"<existing-orchestrator-session-id>"}\'\n'
+        "   This creates a managed task (default reviewed mode — a reviewer agent vets the work "
+        "before it returns to you) and dispatches it to the specified orchestrator session. "
+        "The response is the child run; save its `id` (the run id) and `context_ref` (the task "
+        "id) for tracking. Always pass an explicit `session_id` so the backend never auto-creates "
+        "an agent. If the spawn call returns an error (e.g. the agent went offline), leave the "
+        "task undone and note it in the heartbeat — do NOT retry against a different role and do "
+        "NOT create an agent.\n\n"
+        "4. Observe child run progress via the agent tree event stream instead of polling the "
+        "board. Use `wait` to fetch directed events from your subtree since your last acknowledged "
+        "sequence, then `ack` to advance your cursor:\n"
+        f"     {INTERNAL_API_CURL} -X POST {base_url}/api/agent-tree/wait "
         "-H 'Content-Type: application/json' "
-        '-d \'{"target_session_id":"<existing-orchestrator-session-id>"}\'\n'
-        '   target_session_id MUST be a session whose role is "orchestrator". NEVER target the '
-        "resident, dispatcher, or reviewer sessions. If the start call returns an error (e.g. the "
-        "agent went offline), leave the task in TODO and note it in the heartbeat — do NOT retry "
-        "against a different role and do NOT create an agent.\n\n"
-        "5. Accept reviewed work. Re-read the board and, for each task YOU created (this cycle "
-        "or a previous one — track their ids; do NOT touch human-created tasks), wait until "
-        'review has finished: that is when `status == "review" AND '
-        "`human_acceptance_requested_at` is set AND `human_accepted_at` is null. (While the "
-        "reviewer is still working the task is in review with no `human_acceptance_requested_at` "
-        "yet — leave it alone and check again next cycle.) When a task reaches that "
-        "awaiting-acceptance state, read the worker's latest report/output and the reviewer's "
-        "verdict for that task, then validate it against what you asked for:\n"
-        "   - If satisfactory, accept it:\n"
+        f'-d \'{{"workspace_id":"{ws}","recipient_id":"<your-root-run-id>",'
+        '"since_sequence":<last_acked_seq>,"subtree":true,"timeout_seconds":5}}\'\n'
+        f"     {INTERNAL_API_CURL} -X POST '{base_url}/api/agent-tree/ack?"
+        f"workspace_id={ws}&run_id=<your-root-run-id>&sequence=<max_seq_seen>'\n"
+        "   A `completed` event on a child run means the task finished (review passed). A "
+        "`failed` event means review failed or the task errored. A `blocked` event means the "
+        "worker needs input.\n\n"
+        "5. Accept reviewed work or send it back. For each child run that reached `completed` "
+        "(review passed), read the worker's latest report/output and the reviewer's verdict, then "
+        "validate it against what you asked for:\n"
+        "   - If satisfactory, accept the task (this moves it from review to done):\n"
         f"       {INTERNAL_API_CURL} -X PATCH {base_url}/api/workspaces/tasks/<task_id> "
         "-H 'Content-Type: application/json' "
         '-d \'{"status":"done"}\'\n'
-        "   - If NOT satisfactory, send it back to the SAME worker with concrete feedback (this "
-        "does NOT spawn a new worker; it re-dispatches to the original agent):\n"
-        f"       {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/tasks/<task_id>/continue "
+        "   - If NOT satisfactory, send it back to the SAME worker with concrete feedback using "
+        "the agent tree `followup` action (this re-dispatches to the original agent, not a new "
+        "one):\n"
+        f"       {INTERNAL_API_CURL} -X POST {base_url}/api/agent-tree/followup "
         "-H 'Content-Type: application/json' "
-        '-d \'{"message":"what is wrong and what to fix"}\'\n'
+        f'-d \'{{"workspace_id":"{ws}","recipient_id":"<child_run_id>",'
+        f'"author_id":"<your-root-run-id>","message":"what is wrong and what to fix",'
+        '"call_id":"<unique-call-id>"}\'\n'
         "   Only ever accept or continue tasks YOU created. Never accept or modify tasks a human "
-        "created or dispatched.\n\n"
+        "created or dispatched. Only accept a task after review has finished (the child run "
+        "emitted a `completed` event).\n\n"
         "6. (Optional, as before) Maintain workspace lessons when genuinely justified:\n"
         f"     {INTERNAL_API_CURL} {base_url}/api/workspaces/{ws}/lessons\n"
         f"     {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/{ws}/lessons "
@@ -249,13 +269,13 @@ def _build_resident_master_prompt(
         "already-existing orchestrator sessions. If none exist, you propose tasks and stop. "
         "(The backend may auto-spawn a short-lived REVIEWER to vet a reviewed task — that is the "
         "backend's doing and is allowed; you never provision agents yourself.)\n"
-        "- ALWAYS pass an explicit target_session_id when starting a task, and NEVER start a task "
+        "- ALWAYS pass an explicit `session_id` when spawning a task, and NEVER spawn a task "
         "when no orchestrator session exists (so the backend never auto-creates a default "
         "worker agent).\n"
         "- NEVER write code, edit files, commit, merge, push, or run destructive git commands. "
         "You are an orchestrator; the worker agents do the implementation.\n"
         "- Only accept/continue tasks YOU created; never touch human-driven tasks. Only accept a "
-        "task after review has finished (`human_acceptance_requested_at` is set).\n\n"
+        "task after review has finished (the child run emitted a `completed` event).\n\n"
         "## Heartbeat report (REQUIRED at the END of EVERY cycle)\n"
         "Post one workspace-level heartbeat summarizing this cycle. task_id is omitted for a "
         "workspace-level heartbeat:\n"
@@ -301,6 +321,15 @@ class _WorkspacesMixin:
             self._monitor_task = None
 
     async def _background_monitor_loop(self) -> None:
+        # One-time agent tree crash recovery: retry any PENDING runs whose
+        # adapter spawn was lost (process crashed after the run was persisted
+        # but before the executor context was created). Runs that already have
+        # a context_ref are advanced to RUNNING.
+        for workspace_id in list(self.workspaces):
+            try:
+                await self.agent_tree.recover_pending_runs(workspace_id)
+            except Exception:
+                logger.exception("Agent tree recovery failed for workspace %s", workspace_id)
         while True:
             try:
                 await self._refresh_session_statuses(run_auto_continue=True)
