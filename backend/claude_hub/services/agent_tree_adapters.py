@@ -148,6 +148,8 @@ class ManagedTaskAdapter(ExecutorAdapter):
             )
             await self._wm.start_task(new_task.id)
             run.context_ref = str(new_task.id)
+            # Persist the new task so a crash does not lose it.
+            self._wm._save_state()
             return
 
         # Exactly-once delivery: if this call_id was already delivered to
@@ -161,24 +163,34 @@ class ManagedTaskAdapter(ExecutorAdapter):
             )
             return
 
-        # Resume the task based on its current status:
-        # - TODO (including after abort): start it
-        # - QUEUED: append the followup message to the task prompt so the
-        #   worker sees it when dispatched.
-        # - WORKING: deliver the message directly to the running session.
-        # - REVIEW / DONE: continue it back to working.
+        # Re-fetch the task in case it changed (e.g. dispatched to a worker
+        # between the top check and now). Each branch is idempotent: it
+        # checks the current status before acting, so a re-delivery after a
+        # crash (receipt not yet persisted) is a no-op or safe repeat.
+        task = self._wm.tasks.get(task_id)
+        if task is None:
+            return
+
         if task.status == WorkspaceTaskStatus.TODO:
             # The task hasn't started yet. Append the followup message to
             # the prompt so the worker sees it when dispatched, then start
-            # the task.
-            updated = task.model_copy(update={"prompt": f"{task.prompt}\n\n[followup] {message}"})
-            self._wm.tasks[task_id] = updated
+            # the task. Idempotent: if the task is no longer TODO (e.g.
+            # started by a concurrent dispatch), skip.
+            if f"[followup] {message}" not in task.prompt:
+                updated = task.model_copy(
+                    update={"prompt": f"{task.prompt}\n\n[followup] {message}"}
+                )
+                self._wm.tasks[task_id] = updated
             await self._wm.start_task(task_id)
         elif task.status == WorkspaceTaskStatus.QUEUED:
             # The task is waiting for a worker. Append the followup message
             # to the prompt so the worker picks it up when dispatched.
-            updated = task.model_copy(update={"prompt": f"{task.prompt}\n\n[followup] {message}"})
-            self._wm.tasks[task_id] = updated
+            # Idempotent: skip if the message is already in the prompt.
+            if f"[followup] {message}" not in task.prompt:
+                updated = task.model_copy(
+                    update={"prompt": f"{task.prompt}\n\n[followup] {message}"}
+                )
+                self._wm.tasks[task_id] = updated
         elif task.status == WorkspaceTaskStatus.WORKING:
             # The agent is actively running. Send the followup message
             # directly to its session so it processes it immediately.
@@ -195,6 +207,9 @@ class ManagedTaskAdapter(ExecutorAdapter):
 
         # Record the call_id as delivered so a retry (e.g. after a crash
         # between adapter success and outcome persist) does not re-deliver.
+        # Persist immediately so the receipt is durable before the adapter
+        # returns; the agent tree's outcome-event persist is a secondary
+        # guarantee.
         if call_id:
             current = self._wm.tasks.get(task_id)
             if current is not None and call_id not in current.delivered_call_ids:
@@ -202,6 +217,7 @@ class ManagedTaskAdapter(ExecutorAdapter):
                     update={"delivered_call_ids": current.delivered_call_ids + [call_id]}
                 )
                 self._wm.tasks[task_id] = updated
+                self._wm._save_state()
 
     async def interrupt(self, run: "AgentRun", reason: Optional[str] = None) -> None:
         from claude_hub.models.schemas import ManualTaskControlRequest

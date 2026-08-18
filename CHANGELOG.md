@@ -50,12 +50,15 @@
       the next successful persist (or restart reconciliation) catches up.
       `_append_event`, `_update_run_status`, and `_set_last_message` accept
       `persist: bool = True` to support batching.
-    - **Recovery by latest event**: `recover_pending_runs` decides the
-      intended state from each run's latest event (by `sequence`):
-      `INTERRUPTED` → retry interrupt; followup `MESSAGE` → retry followup
-      (resumes `INTERRUPTED`/`COMPLETED` runs; `FAILED` excluded); `PENDING`
-      without `context_ref` → retry spawn; `PENDING` with `context_ref` →
-      set `RUNNING`.
+    - **Recovery replays all unmatched followups in sequence**:
+      `recover_pending_runs` finds every followup `MESSAGE` event that lacks
+      a matching `:outcome` event and replays them in sequence order (not
+      just the latest). Each followup is replayed with its *own* payload
+      message (not the run's `last_task_message`). The managed-task adapter
+      persists the `delivered_call_ids` receipt atomically with delivery, so
+      a crash between delivery and outcome-event persist does not cause
+      re-delivery on restart. After replaying followups, recovery still
+      reconciles the run's status via the adapter's `get_status()`.
     - **Subtree messaging boundary**: `_validate_messaging_boundary` restricts
       `send`/`followup` so an author may message only its supervisor, a run in
       its own subtree, or itself. Cross-subtree (sibling) messaging is
@@ -99,20 +102,25 @@
     `state.json`; `load_from_dict` rebuilds the call_id index (using persisted
     fingerprints) and next sequence counter so idempotency and monotonic
     ordering survive restart.
-- **Verified**: 60 agent-tree tests (root run, spawn, call_id idempotency,
+- **Verified**: 88 agent-tree tests (root run, spawn, call_id idempotency,
   send, followup, wait immediate/blocking/timeout, interrupt, subtree scoping,
   emit_event status update, emit_event idempotency, report→event bridge,
   save/load round-trip with sequence continuity, concurrent spawns, concurrent
   waits, crash recovery via `recover_pending_runs` for spawn-lost,
-  interrupt-lost, and followup-lost runs, late-persist-failure keeps in-memory
-  state, duplicate delivery does not re-trigger adapter, `ResidentRootAdapter`
-  behaviour, followup resume `INTERRUPTED`/`COMPLETED`→`RUNNING` and `FAILED`
-  cannot resume, API authority non-owner 403 / owner 200,
+  interrupt-lost, and followup-lost runs, multiple unmatched followups
+  replayed in sequence with each event's own payload message,
+  `delivered_call_ids` receipt persisted atomically so re-delivery is skipped,
+  status reconciliation runs after followup replay, late-persist-failure keeps
+  in-memory state, duplicate delivery does not re-trigger adapter,
+  `ResidentRootAdapter` behaviour, followup resume `INTERRUPTED`/`COMPLETED`→`RUNNING`
+  and `FAILED` cannot resume, API authority non-owner 403 / owner 200,
   `ManagedTaskAdapter.followup` starts TODO task and recreates deleted task,
   quota enforcement, terminal status guards, ACK cursor forward-only +
   max-sequence bounds, subtree messaging boundary rejection, outbound-mixing
   exclusion of self-authored events, legacy `followup`→`continue_task`, API
-  endpoint smoke test). Resident (60), workspace (133),
+  endpoint smoke test, non-local no-cookie requests fail closed with 403,
+  ManagedSession reads scoped to own workspace and owned subtree,
+  cross-workspace reads rejected). Resident (60), workspace (133),
   sessions/state-policy/orchestrator-contract (238 combined) tests pass.
   black, isort, mypy clean.
 
