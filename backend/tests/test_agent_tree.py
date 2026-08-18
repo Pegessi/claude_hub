@@ -4336,15 +4336,14 @@ def test_forged_session_cookie_rejected_for_all_actions(
 async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
     manager: WorkspaceManager, ws_id: str
 ) -> None:
-    """Exactly-once delivery at the executor boundary.
+    """At-least-once delivery at the executor boundary.
 
     A hard exit after send_session_message sends the message but before the
     session-level delivered_call_ids persist leaves the call_id in
-    pending_call_ids. On reload, send_session_message must inspect the tmux
-    pane output for the [call_id:<id>] marker. If the marker is present the
-    message already reached the executor, so it is marked delivered WITHOUT
-    re-sending (delivery_count == 1). A subsequent call with the same call_id
-    is also skipped.
+    pending_call_ids. On reload, send_session_message re-sends the message
+    (at-least-once). The [call_id:<id>] marker embedded in the message lets
+    the receiving executor dedupe any duplicate. A subsequent call with the
+    same call_id (now in delivered_call_ids) is skipped.
     """
     session_id = "outbox-session"
     _make_managed_session(manager, session_id, ws_id)
@@ -4359,9 +4358,10 @@ async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
         sent.append(text)
 
     async def _fake_capture_tmux(tmux_session: str) -> str:
-        # The tmux pane already contains the call_id marker from the first
-        # (crashed) send. Recovery must detect this and skip the re-send.
-        return f"... previous output ...\n{marker}\n{message}\n"
+        # tmux output capture is not used for delivery inference anymore.
+        # It is still used by _ensure_session_ready_for_send to detect the
+        # agent input prompt.
+        return "claude code\n? for shortcuts\n"
 
     manager._send_tmux_message = _fake_send_tmux  # type: ignore[assignment]
     manager._capture_tmux_output = _fake_capture_tmux  # type: ignore[assignment]
@@ -4372,8 +4372,8 @@ async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
     assert call_id in session.delivered_call_ids
     assert call_id not in session.pending_call_ids
     assert len(sent) == 1
-    # The sent message must include the call_id marker so delivery can be
-    # verified by inspecting tmux output.
+    # The sent message must include the call_id marker so the receiving
+    # executor can dedupe any duplicate delivery.
     assert marker in sent[0]
 
     # Simulate a hard exit between send and phase-2 persist: the call_id is
@@ -4394,21 +4394,20 @@ async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
     assert call_id in reloaded_session.pending_call_ids
     assert call_id not in reloaded_session.delivered_call_ids
 
-    # Recovery: the call_id is in pending. send_session_message checks the
-    # tmux pane output for the call_id marker. The marker is present (the
-    # message was delivered before the crash), so the message is NOT re-sent
-    # and the call_id is moved to delivered. delivery_count == 1.
+    # Recovery: the call_id is in pending. send_session_message re-sends the
+    # message (at-least-once). The receiver dedupes via the call_id marker.
     reloaded._send_tmux_message = _fake_send_tmux  # type: ignore[assignment]
     reloaded._capture_tmux_output = _fake_capture_tmux  # type: ignore[assignment]
     sent.clear()
     await reloaded.send_session_message(session_id, message, call_id=call_id)
-    assert len(sent) == 0  # exactly-once: no re-send
+    assert len(sent) == 1  # at-least-once: re-send on crash recovery
+    assert marker in sent[0]
     reloaded_session = reloaded.sessions[session_id]
     assert call_id in reloaded_session.delivered_call_ids
     assert call_id not in reloaded_session.pending_call_ids
 
-    # A third call with the same call_id must be skipped: the executor has
-    # already acknowledged it (delivered_call_ids is the durable ACK record).
+    # A third call with the same call_id must be skipped: it is now in
+    # delivered_call_ids (sender-side dedup).
     sent.clear()
     await reloaded.send_session_message(session_id, message, call_id=call_id)
     assert len(sent) == 0
@@ -4419,9 +4418,17 @@ async def test_deleted_task_recreation_persists_context_ref_before_start_task(
     manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
 ) -> None:
     """When a followup recreates a deleted task, run.context_ref must be
-    persisted BEFORE start_task is called. If start_task crashes the process,
-    a retry must find the already-persisted context_ref and reuse the task
-    instead of creating a duplicate."""
+    persisted BEFORE start_task is called. If start_task's dispatch side
+    effect crashes the process, a retry must:
+      1. reuse the already-persisted task (one task id, no duplicate), and
+      2. NOT re-run the start side effect (the task was already QUEUED by
+         start_task before the dispatch crash, so followup skips start_task).
+
+    start_task persists status=QUEUED before calling dispatch_workspace, so a
+    crash during dispatch leaves QUEUED on disk. followup only calls
+    start_task when the task is TODO, so the retry is a no-op for the start
+    side effect.
+    """
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
     )
@@ -4445,30 +4452,42 @@ async def test_deleted_task_recreation_persists_context_ref_before_start_task(
     call_id = "followup-recreate-crash"
     message = "recreate me"
 
-    # Make start_task raise after the context_ref persist, simulating a
-    # hard exit during dispatch.
-    async def _crash_after_persist(task_id_arg: str):
-        # Verify context_ref was already persisted before start_task runs.
-        run = manager.agent_tree.get_run(child.id)
-        assert run.context_ref is not None
-        assert run.context_ref != task_id
-        # Persist again to make sure the new context_ref is on disk.
-        manager._save_state()
-        raise RuntimeError("simulated hard exit during start_task")
+    # Count start_task and dispatch_workspace calls. We wrap the real
+    # start_task so it still persists QUEUED, and make dispatch_workspace
+    # crash to simulate a hard exit during the dispatch side effect.
+    start_task_calls = 0
+    dispatch_calls = 0
+    real_start_task = manager.start_task
 
-    monkeypatch.setattr(manager, "start_task", _crash_after_persist)
+    async def _counting_start_task(task_id_arg: str, payload=None):
+        nonlocal start_task_calls
+        start_task_calls += 1
+        return await real_start_task(task_id_arg, payload)
+
+    async def _crashing_dispatch(workspace_id: str, **kwargs):
+        nonlocal dispatch_calls
+        dispatch_calls += 1
+        raise RuntimeError("simulated hard exit during dispatch")
+
+    monkeypatch.setattr(manager, "start_task", _counting_start_task)
+    monkeypatch.setattr(manager, "dispatch_workspace", _crashing_dispatch)
 
     run = manager.agent_tree.get_run(child.id)
     adapter = manager.agent_tree._adapter(run.executor_kind)
 
-    with pytest.raises(RuntimeError, match="simulated hard exit"):
+    with pytest.raises(RuntimeError, match="simulated hard exit during dispatch"):
         await adapter.followup(run, message, call_id=call_id)
 
-    # The new task must exist and run.context_ref must point to it.
+    # start_task ran once and persisted QUEUED before dispatch crashed.
+    assert start_task_calls == 1
+    assert dispatch_calls == 1
     new_task_id = run.context_ref
     assert new_task_id is not None
     assert new_task_id != task_id
-    assert new_task_id in manager.tasks
+    new_task = manager.tasks[new_task_id]
+    from claude_hub.models.schemas import WorkspaceTaskStatus
+
+    assert new_task.status == WorkspaceTaskStatus.QUEUED
 
     # Reload the manager from disk and verify the task is still there and
     # context_ref still points to it (no duplicate created on retry).
@@ -4478,13 +4497,37 @@ async def test_deleted_task_recreation_persists_context_ref_before_start_task(
     assert reloaded_run.context_ref == new_task_id
     assert new_task_id in reloaded.tasks
 
-    # A retry of followup must NOT create another task: the existing task
-    # (with agent_run_id == run.id) is reused.
+    # A retry of followup must NOT create another task AND must NOT re-run
+    # the start side effect: the task is already QUEUED, so followup skips
+    # start_task entirely.
+    reloaded_start_calls = 0
+    reloaded_dispatch_calls = 0
+    reloaded_real_start = reloaded.start_task
+
+    async def _reloaded_counting_start(task_id_arg: str, payload=None):
+        nonlocal reloaded_start_calls
+        reloaded_start_calls += 1
+        return await reloaded_real_start(task_id_arg, payload)
+
+    async def _reloaded_counting_dispatch(workspace_id: str, **kwargs):
+        nonlocal reloaded_dispatch_calls
+        reloaded_dispatch_calls += 1
+
+    monkeypatch.setattr(reloaded, "start_task", _reloaded_counting_start)
+    monkeypatch.setattr(reloaded, "dispatch_workspace", _reloaded_counting_dispatch)
+
     task_count_before = len(reloaded.tasks)
     reloaded_run = reloaded.agent_tree.get_run(child.id)
     reloaded_adapter = reloaded.agent_tree._adapter(reloaded_run.executor_kind)
     await reloaded_adapter.followup(reloaded_run, message, call_id=call_id)
+
+    # Exactly one task id, no duplicate.
     assert len(reloaded.tasks) == task_count_before
+    assert reloaded_run.context_ref == new_task_id
+    # Exactly one total start side effect: followup saw QUEUED and skipped
+    # start_task, so neither start_task nor dispatch_workspace ran again.
+    assert reloaded_start_calls == 0
+    assert reloaded_dispatch_calls == 0
 
 
 def test_stopped_session_rejected_for_all_actions(

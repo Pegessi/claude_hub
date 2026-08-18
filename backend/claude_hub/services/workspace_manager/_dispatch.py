@@ -29,6 +29,18 @@ class _DispatchMixin:
         if task.status == WorkspaceTaskStatus.DONE:
             raise RuntimeError("Done tasks cannot be started")
 
+        # Idempotency: if the task was already started (QUEUED or WORKING),
+        # do not re-dispatch. A crash between the dispatch side effect and
+        # the state persist could leave a stale TODO status on disk; in that
+        # case a retry would call start_task again. To avoid duplicate
+        # dispatch, we check the task's session_id: if it is set, the task
+        # was already assigned to a worker and we only ensure the dispatch
+        # runs (dispatch_workspace is idempotent).
+        if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
+            if task.session_id:
+                await self.dispatch_workspace(workspace.id)
+            return self.tasks[task_id]
+
         logger.info(
             "Starting workspace task id=%s workspace_id=%s title=%r payload_target_session_id=%s "
             "payload_related_task_id=%s stored_related_task_id=%s current_session_id=%s status=%s",

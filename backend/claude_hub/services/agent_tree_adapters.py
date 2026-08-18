@@ -43,9 +43,12 @@ class ExecutorAdapter(ABC):
     async def followup(self, run: "AgentRun", message: str, call_id: Optional[str] = None) -> None:
         """Deliver a message and resume the executor's turn.
 
-        ``call_id`` is the deduplication key for exactly-once delivery.
-        Adapters that cannot make the delivery idempotent by inspecting
-        executor state should record delivered call_ids and skip duplicates.
+        ``call_id`` is the deduplication key. The sender guarantees
+        at-least-once delivery (a crash between send and the delivered-call_id
+        persist causes a re-send). Adapters should record delivered call_ids
+        and skip duplicates on the sender side; the ``[call_id:<id>]`` marker
+        embedded in the message lets the receiving executor dedupe any
+        duplicate that slips through.
         """
 
     @abstractmethod
@@ -258,13 +261,12 @@ class ManagedTaskAdapter(ExecutorAdapter):
         elif task.status == WorkspaceTaskStatus.WORKING:
             # The agent is actively running. Send the followup message
             # directly to its session so it processes it immediately.
-            # Exactly-once delivery: send_session_message embeds a
-            # [call_id:<id>] marker in the message and verifies delivery by
-            # inspecting the tmux pane output. On crash recovery, if the
-            # marker is already present in the terminal output, the message
-            # is not re-sent (delivery_count == 1). The marker also lets
-            # the receiving executor dedupe any duplicate that slips
-            # through.
+            # Delivery is at-least-once: send_session_message persists the
+            # call_id as pending before sending and moves it to delivered
+            # after. A crash between send and delivered-persist leaves the
+            # call_id in pending, so recovery re-sends. The [call_id:<id>]
+            # marker in the message lets the receiving executor dedupe any
+            # duplicate.
             if task.session_id:
                 await self._wm.send_session_message(task.session_id, message, call_id=call_id)
         elif task.status in (
