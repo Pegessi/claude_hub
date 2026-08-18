@@ -50,6 +50,7 @@ from .agent_tree_adapters import (
     ExternalJobAdapter,
     ManagedTaskAdapter,
     NativeSubagentAdapter,
+    ResidentRootAdapter,
 )
 
 if TYPE_CHECKING:
@@ -111,6 +112,7 @@ class AgentTreeManager:
             ExecutorKind.MANAGED_TASK: ManagedTaskAdapter(workspace_manager),
             ExecutorKind.NATIVE_SUBAGENT: NativeSubagentAdapter(),
             ExecutorKind.EXTERNAL_JOB: ExternalJobAdapter(),
+            ExecutorKind.RESIDENT_ROOT: ResidentRootAdapter(workspace_manager),
         }
 
     # ------------------------------------------------------------------
@@ -202,6 +204,8 @@ class AgentTreeManager:
         fingerprint: str,
         correlation_id: Optional[str] = None,
         payload: Optional[dict] = None,
+        rollback_on_error: bool = True,
+        persist: bool = True,
     ) -> Tuple[AgentEvent, bool]:
         """Append an event to the workspace stream.
 
@@ -218,6 +222,16 @@ class AgentTreeManager:
         event is removed from the stream, the call record is dropped, and
         the sequence counter is decremented so the in-memory state matches
         the durable state.
+
+        When ``rollback_on_error=False`` (used in the outcome phase after a
+        side-effect has already been applied), a persistence failure is
+        logged but the in-memory event is kept: the durable state will be
+        reconciled by the next successful persist or on shutdown.
+
+        When ``persist=False``, the event is appended in-memory but not
+        persisted. The caller is responsible for calling ``_persist()``
+        once after batching multiple mutations (intent/delivery/outcome
+        protocol).
         """
         existing = self._call_record(workspace_id, call_id)
         if existing is not None:
@@ -253,17 +267,42 @@ class AgentTreeManager:
         ws_events.append(event)
         self._record_call(workspace_id, call_id, action, target, fingerprint, event)
 
+        if not persist:
+            # Caller will persist as part of a batch.
+            return event, True
+
         try:
             self._persist()
         except Exception:
-            # Rollback: undo the in-memory append so state matches disk.
-            ws_events.pop()
-            self._call_index.get(workspace_id, {}).pop(call_id, None)
-            self._next_seq[workspace_id] = seq
+            if rollback_on_error:
+                # Rollback: undo the in-memory append so state matches disk.
+                ws_events.pop()
+                self._call_index.get(workspace_id, {}).pop(call_id, None)
+                self._next_seq[workspace_id] = seq
+            else:
+                # Side-effect already applied; keep the in-memory event and
+                # let the next successful persist reconcile durable state.
+                logger.exception(
+                    "Late persist failure after side-effect for event seq=%s "
+                    "call_id=%s; keeping in-memory event for later flush",
+                    seq,
+                    call_id,
+                )
             raise
 
         # Wake any waiters on the recipient run (and its ancestors, since
         # supervisors listen to their subtree).
+        self._wake_for_run(agent_run_id, recipient)
+
+        return event, True
+
+    def _wake_for_run(self, agent_run_id: str, recipient: Optional[str]) -> None:
+        """Wake waiters on the run and its ancestors, plus the recipient.
+
+        Extracted from ``_append_event`` so callers that batch multiple
+        in-memory mutations with ``persist=False`` can wake waiters after
+        the single batched ``_persist()`` succeeds.
+        """
         run = self._runs.get(agent_run_id)
         if run is not None:
             self._wake_ancestors(run)
@@ -271,8 +310,6 @@ class AgentTreeManager:
             ev = self._run_events.get(recipient)
             if ev is not None:
                 ev.set()
-
-        return event, True
 
     def _wake_ancestors(self, run: AgentRun) -> None:
         """Wake waiters on the run and all its ancestors."""
@@ -283,19 +320,52 @@ class AgentTreeManager:
                 ev.set()
             node = self._runs.get(node.parent_id) if node.parent_id else None
 
-    def _update_run_status(self, run_id: str, status: AgentRunStatus) -> None:
+    def _update_run_status(
+        self,
+        run_id: str,
+        status: AgentRunStatus,
+        rollback_on_error: bool = True,
+        persist: bool = True,
+    ) -> None:
         """Update a run's status with transition validation and rollback.
 
         Terminal runs (COMPLETED, FAILED, INTERRUPTED) may not transition
-        to any other status. If persistence fails, the previous status is
-        restored.
+        to any other status, EXCEPT that INTERRUPTED and COMPLETED runs may
+        transition back to RUNNING via ``followup`` (resume). FAILED runs
+        are truly terminal and cannot be resumed.
+
+        If persistence fails, the previous status is restored.
+
+        When ``rollback_on_error=False`` (used in the outcome phase after a
+        side-effect has already been applied), a persistence failure is
+        logged but the new status is kept: the durable state will be
+        reconciled by the next successful persist or on shutdown.
+
+        When ``persist=False``, the status is updated in-memory but not
+        persisted. The caller is responsible for calling ``_persist()``
+        once after batching multiple mutations (intent/delivery/outcome
+        protocol).
         """
         run = self._runs.get(run_id)
         if run is None:
             return
-        if run.status in _TERMINAL_STATUSES and run.status != status:
+        # Terminal guard: FAILED is truly terminal. INTERRUPTED and COMPLETED
+        # may be resumed via followup (transition back to RUNNING).
+        if run.status == AgentRunStatus.FAILED and run.status != status:
             logger.warning(
-                "Refusing status transition %s -> %s for terminal run %s",
+                "Refusing status transition %s -> %s for FAILED run %s",
+                run.status,
+                status,
+                run_id,
+            )
+            return
+        if run.status in (
+            AgentRunStatus.COMPLETED,
+            AgentRunStatus.INTERRUPTED,
+        ) and status not in (AgentRunStatus.RUNNING, run.status):
+            logger.warning(
+                "Refusing status transition %s -> %s for terminal run %s "
+                "(only RUNNING resume allowed)",
                 run.status,
                 status,
                 run_id,
@@ -305,14 +375,26 @@ class AgentTreeManager:
         old_updated_at = run.updated_at
         run.status = status
         run.updated_at = datetime.utcnow()
+
+        if not persist:
+            return
+
         try:
             self._persist()
         except Exception:
-            run.status = old_status
-            run.updated_at = old_updated_at
+            if rollback_on_error:
+                run.status = old_status
+                run.updated_at = old_updated_at
+            else:
+                logger.exception(
+                    "Late persist failure after side-effect for run %s status "
+                    "-> %s; keeping in-memory status for later flush",
+                    run_id,
+                    status,
+                )
             raise
 
-    def _set_last_message(self, run_id: str, message: str) -> None:
+    def _set_last_message(self, run_id: str, message: str, persist: bool = True) -> None:
         run = self._runs.get(run_id)
         if run is None:
             return
@@ -320,6 +402,10 @@ class AgentTreeManager:
         old_updated_at = run.updated_at
         run.last_task_message = message
         run.updated_at = datetime.utcnow()
+
+        if not persist:
+            return
+
         try:
             self._persist()
         except Exception:
@@ -405,6 +491,7 @@ class AgentTreeManager:
                 "title": req.title,
                 "initial_message": req.initial_message,
                 "session_id": req.session_id,
+                "context_ref": req.context_ref,
             },
         )
 
@@ -479,37 +566,22 @@ class AgentTreeManager:
             payload={"message": req.initial_message},
         )
 
-        # Start the executor.
+        # Start the executor. The adapter call is in its own try/except so
+        # that an adapter failure is distinguished from a late persist
+        # failure (which must NOT mark the run FAILED — the side-effect
+        # already applied).
+        adapter = self._adapter(req.executor_kind)
         try:
-            adapter = self._adapter(req.executor_kind)
             if req.executor_kind == ExecutorKind.MANAGED_TASK and req.session_id:
-                # Managed-task adapter accepts a target session hint via
-                # the run's context_ref pre-set? No — pass it through the
-                # adapter's spawn by stashing it on the run temporarily.
                 context_ref = await self._spawn_managed_task(
                     run, req.initial_message, req.session_id
                 )
             else:
                 context_ref = await adapter.spawn(run, req.initial_message)
-            run.context_ref = context_ref
-            self._update_run_status(run.id, AgentRunStatus.RUNNING)
-            self._append_event(
-                workspace_id=req.workspace_id,
-                agent_run_id=run.id,
-                event_type=AgentEventType.STARTED,
-                author=run.id,
-                recipient=parent.id,
-                call_id=f"{req.call_id}:started",
-                action="spawn:started",
-                target=run.id,
-                fingerprint=_request_fingerprint(
-                    "spawn:started",
-                    {"run_id": run.id, "context_ref": context_ref},
-                ),
-                payload={"context_ref": context_ref},
-            )
         except Exception as exc:
             logger.exception("spawn failed for run %s", run.id)
+            # Adapter failed: no side-effect applied, so rollback_on_error
+            # stays True (default) for the FAILED status + event.
             self._update_run_status(run.id, AgentRunStatus.FAILED)
             self._append_event(
                 workspace_id=req.workspace_id,
@@ -526,6 +598,50 @@ class AgentTreeManager:
                 payload={"error": str(exc)},
             )
             raise
+
+        # Outcome phase: the side-effect (executor spawn) already
+        # succeeded. Batch all in-memory mutations (context_ref,
+        # RUNNING status, STARTED event) and persist them as a single
+        # atomic unit. If the persist fails, the in-memory state is
+        # kept (it matches the executor's actual state) and the next
+        # successful persist will reconcile the durable state. We do
+        # NOT mark the run FAILED here — the executor is running.
+        run.context_ref = context_ref
+        self._update_run_status(
+            run.id, AgentRunStatus.RUNNING, rollback_on_error=False, persist=False
+        )
+        self._append_event(
+            workspace_id=req.workspace_id,
+            agent_run_id=run.id,
+            event_type=AgentEventType.STARTED,
+            author=run.id,
+            recipient=parent.id,
+            call_id=f"{req.call_id}:started",
+            action="spawn:started",
+            target=run.id,
+            fingerprint=_request_fingerprint(
+                "spawn:started",
+                {"run_id": run.id, "context_ref": context_ref},
+            ),
+            payload={"context_ref": context_ref},
+            rollback_on_error=False,
+            persist=False,
+        )
+        try:
+            self._persist()
+        except Exception:
+            logger.exception(
+                "Late persist failure after spawn side-effect for run %s; "
+                "keeping in-memory state (context_ref=%s, status=RUNNING) "
+                "for later flush",
+                run.id,
+                context_ref,
+            )
+            raise
+
+        # Wake waiters (the parent supervisor is listening for the STARTED
+        # event) after the batched persist succeeds.
+        self._wake_for_run(run.id, parent.id)
 
         return run
 
@@ -573,6 +689,29 @@ class AgentTreeManager:
         await self._wm.start_task(task.id)
         return str(task.id)
 
+    def _validate_messaging_boundary(self, author: AgentRun, recipient: AgentRun) -> None:
+        """Enforce subtree messaging boundaries.
+
+        An author may send/followup only to:
+        - Its supervisor (``recipient.id == author.supervisor_id``),
+        - A run in its own subtree (``recipient.path`` starts with
+          ``author.path``), or
+        - Itself (``recipient.id == author.id``).
+
+        Cross-subtree messaging (e.g. between siblings) is not allowed.
+        """
+        if recipient.id == author.id:
+            return
+        if recipient.id == author.supervisor_id:
+            return
+        if recipient.path.startswith(f"{author.path}/"):
+            return
+        raise ValueError(
+            f"Run {author.id} may not message run {recipient.id}: "
+            "recipient must be the author's supervisor, in the author's "
+            "subtree, or the author itself"
+        )
+
     async def send(self, req: SendRequest) -> AgentEvent:
         """Append a message to the recipient's mailbox without waking it."""
         self._validate_workspace(req.workspace_id)
@@ -589,6 +728,10 @@ class AgentTreeManager:
         if author.workspace_id != req.workspace_id:
             raise ValueError("Author run belongs to a different workspace")
 
+        # Subtree boundary: an author may send only to its supervisor, a run
+        # in its own subtree, or itself.
+        self._validate_messaging_boundary(author, recipient)
+
         fingerprint = _request_fingerprint(
             "send",
             {
@@ -596,6 +739,7 @@ class AgentTreeManager:
                 "recipient_id": req.recipient_id,
                 "author_id": req.author_id,
                 "message": req.message,
+                "correlation_id": req.correlation_id,
             },
         )
 
@@ -611,9 +755,27 @@ class AgentTreeManager:
             fingerprint=fingerprint,
             correlation_id=req.correlation_id,
             payload={"message": req.message},
+            persist=False,
         )
         if is_new:
-            self._set_last_message(recipient.id, req.message)
+            # Batch the MESSAGE event with last_task_message update and
+            # persist as a single atomic unit. If persist fails, both are
+            # rolled back.
+            self._set_last_message(recipient.id, req.message, persist=False)
+            try:
+                self._persist()
+            except Exception:
+                ws_events = self._events.get(req.workspace_id, [])
+                if ws_events and ws_events[-1] is event:
+                    ws_events.pop()
+                self._call_index.get(req.workspace_id, {}).pop(req.call_id, None)
+                self._next_seq[req.workspace_id] = event.sequence
+                recipient.last_task_message = None
+                raise
+            # Wake the recipient (and its ancestors) after the batched
+            # persist succeeds so supervisors observing the mailbox see
+            # the new message.
+            self._wake_for_run(recipient.id, recipient.id)
         return event
 
     async def followup(self, req: FollowupRequest) -> AgentEvent:
@@ -637,6 +799,11 @@ class AgentTreeManager:
         if author.workspace_id != req.workspace_id:
             raise ValueError("Author run belongs to a different workspace")
 
+        # Subtree boundary: an author may follow up only its supervisor, a
+        # run in its own subtree, or itself. Cross-subtree messaging is not
+        # allowed (siblings cannot directly wake each other).
+        self._validate_messaging_boundary(author, recipient)
+
         fingerprint = _request_fingerprint(
             "followup",
             {
@@ -644,6 +811,7 @@ class AgentTreeManager:
                 "recipient_id": req.recipient_id,
                 "author_id": req.author_id,
                 "message": req.message,
+                "correlation_id": req.correlation_id,
             },
         )
 
@@ -659,18 +827,36 @@ class AgentTreeManager:
             fingerprint=fingerprint,
             correlation_id=req.correlation_id,
             payload={"message": req.message, "followup": True},
+            persist=False,
         )
         if not is_new:
             return event
 
-        self._set_last_message(recipient.id, req.message)
+        # Intent phase: the MESSAGE event is the durable intent record.
+        # Batch it with last_task_message update and persist as a single
+        # atomic unit. If persist fails, both are rolled back.
+        self._set_last_message(recipient.id, req.message, persist=False)
+        try:
+            self._persist()
+        except Exception:
+            # Rollback: remove the event and restore last_message.
+            ws_events = self._events.get(req.workspace_id, [])
+            if ws_events and ws_events[-1] is event:
+                ws_events.pop()
+            self._call_index.get(req.workspace_id, {}).pop(req.call_id, None)
+            self._next_seq[req.workspace_id] = event.sequence
+            recipient.last_task_message = None
+            raise
 
-        # Resume the executor's turn.
+        # Delivery: resume the executor's turn. The adapter call is in its
+        # own try/except so that an adapter failure is distinguished from a
+        # late persist failure (which must NOT mark the run FAILED).
         try:
             await self._adapter(recipient.executor_kind).followup(recipient, req.message)
-            self._update_run_status(recipient.id, AgentRunStatus.RUNNING)
         except Exception as exc:
             logger.exception("followup failed for run %s", recipient.id)
+            # Adapter failed: no side-effect applied, so rollback_on_error
+            # stays True (default) for the FAILED status + event.
             self._update_run_status(recipient.id, AgentRunStatus.FAILED)
             self._append_event(
                 workspace_id=req.workspace_id,
@@ -688,6 +874,17 @@ class AgentTreeManager:
                 payload={"error": str(exc)},
             )
             raise
+
+        # Outcome phase: the side-effect succeeded. Set status to RUNNING.
+        # This is a single persist; if it fails, the in-memory status is
+        # kept (matches executor state) and recovery will reconcile. We do
+        # NOT mark the run FAILED here — the executor was resumed.
+        self._update_run_status(recipient.id, AgentRunStatus.RUNNING, rollback_on_error=False)
+
+        # Wake the recipient (and its ancestors) after the outcome persist
+        # so the supervisor observing the mailbox sees the run is RUNNING
+        # again.
+        self._wake_for_run(recipient.id, recipient.id)
 
         return event
 
@@ -816,12 +1013,9 @@ class AgentTreeManager:
         if run.status in _TERMINAL_STATUSES:
             return run
 
-        try:
-            await self._adapter(run.executor_kind).interrupt(run, req.reason)
-        except Exception:
-            logger.exception("interrupt failed for run %s", run.id)
-
-        self._update_run_status(run.id, AgentRunStatus.INTERRUPTED)
+        # Persist the INTERRUPTED intent event BEFORE the adapter call so a
+        # crash mid-interrupt leaves a durable record that recovery can act
+        # on. The event is the source of truth for the run's terminal state.
         self._append_event(
             workspace_id=req.workspace_id,
             agent_run_id=run.id,
@@ -834,6 +1028,21 @@ class AgentTreeManager:
             fingerprint=fingerprint,
             payload={"reason": req.reason},
         )
+
+        # Apply the side-effect. If it fails, do NOT swallow: re-raise so the
+        # caller knows the interrupt did not complete. The INTERRUPTED event
+        # is already persisted, so recovery will retry the adapter call.
+        await self._adapter(run.executor_kind).interrupt(run, req.reason)
+
+        # Outcome phase: the side-effect succeeded. Mark the run INTERRUPTED
+        # with rollback_on_error=False so a late save failure does not undo
+        # the status that matches the executor's actual state.
+        self._update_run_status(run.id, AgentRunStatus.INTERRUPTED, rollback_on_error=False)
+
+        # Wake the supervisor after the outcome persist so it observes the
+        # INTERRUPTED status.
+        self._wake_for_run(run.id, run.supervisor_id)
+
         return run
 
     def list_runs(self, req: ListRunsRequest) -> List[AgentRun]:
@@ -876,16 +1085,20 @@ class AgentTreeManager:
             return []
         all_events = self._events.get(workspace_id, [])
         if subtree:
-            # Events addressed to this run, or authored by any run in its
-            # subtree. We do NOT include events merely because their
-            # agent_run_id is in the subtree — that would leak events
-            # directed at a sibling's mailbox to this supervisor.
+            # A supervisor's mailbox contains:
+            # - Events addressed directly to it (recipient == run_id),
+            #   including self-messages (author == recipient == run_id).
+            # - Events authored by any run in its subtree EXCEPT itself
+            #   (child progress/reports). The run's own outbound messages
+            #   (author == run_id, recipient != run_id) are excluded to
+            #   avoid "outbound mixing" — the run already knows what it
+            #   sent.
             subtree_ids = self._subtree_run_ids(run)
             return [
                 e
                 for e in all_events
                 if e.sequence > since_sequence
-                and (e.recipient == run_id or e.author in subtree_ids)
+                and (e.recipient == run_id or (e.author in subtree_ids and e.author != run_id))
             ]
         return [
             e
@@ -925,6 +1138,10 @@ class AgentTreeManager:
         This is how managed-task reports, native-subagent progress, etc.
         flow back into the tree. The Hub updates the run's status and
         last_task_message from the event.
+
+        All in-memory mutations (event append, status projection,
+        last_task_message) are batched into a single ``_persist()`` call
+        so the durable state is consistent.
         """
         fingerprint = _request_fingerprint(
             "emit",
@@ -948,6 +1165,7 @@ class AgentTreeManager:
             target=agent_run_id,
             fingerprint=fingerprint,
             payload=payload,
+            persist=False,
         )
         if not is_new:
             return event
@@ -960,24 +1178,35 @@ class AgentTreeManager:
                     AgentEventType.FAILED: AgentRunStatus.FAILED,
                     AgentEventType.INTERRUPTED: AgentRunStatus.INTERRUPTED,
                 }
-                self._update_run_status(agent_run_id, status_map[event_type])
+                self._update_run_status(agent_run_id, status_map[event_type], persist=False)
             elif event_type == AgentEventType.BLOCKED:
-                self._update_run_status(agent_run_id, AgentRunStatus.BLOCKED)
+                self._update_run_status(agent_run_id, AgentRunStatus.BLOCKED, persist=False)
             elif event_type == AgentEventType.APPROVAL_REQUIRED:
-                self._update_run_status(agent_run_id, AgentRunStatus.WAITING)
+                self._update_run_status(agent_run_id, AgentRunStatus.WAITING, persist=False)
             elif event_type == AgentEventType.TOOL_WAIT:
-                self._update_run_status(agent_run_id, AgentRunStatus.WAITING)
+                self._update_run_status(agent_run_id, AgentRunStatus.WAITING, persist=False)
             else:
                 # For non-terminal events, check the report_state in the
                 # payload. READY_FOR_REVIEW and REVIEW_STARTED mean the run
-                # is waiting for review to complete.
+                # is waiting for review to complete. REVIEW_FAILED means the
+                # task was sent back to WORKING for revisions, so the run
+                # should be RUNNING again.
                 report_state = (payload or {}).get("report_state")
                 if report_state in {"ready_for_review", "review_started"}:
-                    self._update_run_status(agent_run_id, AgentRunStatus.WAITING)
+                    self._update_run_status(agent_run_id, AgentRunStatus.WAITING, persist=False)
+                elif report_state == "review_failed":
+                    self._update_run_status(agent_run_id, AgentRunStatus.RUNNING, persist=False)
 
             msg = (payload or {}).get("message")
             if msg:
-                self._set_last_message(agent_run_id, str(msg))
+                self._set_last_message(agent_run_id, str(msg), persist=False)
+
+        # Single atomic persist for the event + status + last_message.
+        self._persist()
+
+        # Wake the recipient (and its ancestors) after the batched persist
+        # so supervisors observing the mailbox see the new event.
+        self._wake_for_run(agent_run_id, recipient)
 
         return event
 
@@ -1083,26 +1312,108 @@ class AgentTreeManager:
         self._next_seq[workspace_id] = max_seq + 1
 
     async def recover_pending_runs(self, workspace_id: str) -> None:
-        """Recover runs that were persisted but never reached a terminal state.
+        """Recover runs that were persisted but never reached a consistent state.
 
-        After a crash, a run may be in PENDING status with a DISPATCHED
-        event but no context_ref (the adapter call was lost). This method
-        retries the adapter's spawn for each such run. The adapter is
-        idempotent: if the executor context already exists (e.g. a
-        workspace task with ``agent_run_id == run.id``), it is reused.
+        After a crash, a run may be in an inconsistent state:
 
-        Runs that are already RUNNING, WAITING, BLOCKED, or terminal are
-        left untouched.
+        1. **PENDING with no context_ref**: the adapter spawn was lost. Retry
+           the spawn (the adapter is idempotent and reuses any existing
+           executor context keyed by ``agent_run_id``).
+
+        2. **PENDING with context_ref**: the spawn succeeded but the status
+           update was lost. Advance to RUNNING.
+
+        3. **Non-terminal with an INTERRUPTED event**: the interrupt intent
+           was persisted but the adapter call or status update was lost.
+           Retry the adapter interrupt (idempotent) and set status to
+           INTERRUPTED.
+
+        4. **Non-terminal with a followup MESSAGE event but not RUNNING**:
+           the followup intent was persisted but the adapter call or status
+           update was lost. Retry the adapter followup (idempotent) and set
+           status to RUNNING.
+
+        Runs that are already RUNNING, WAITING, BLOCKED, or consistently
+        terminal are left untouched.
         """
         for run in list(self._runs.values()):
             if run.workspace_id != workspace_id:
                 continue
+
+            run_events = sorted(
+                [e for e in self._events.get(workspace_id, []) if e.agent_run_id == run.id],
+                key=lambda e: e.sequence,
+            )
+
+            # Determine the intended state from the latest event. The latest
+            # event is the source of truth for what the last action was.
+            latest_event = run_events[-1] if run_events else None
+
+            # Case 3: the latest event is INTERRUPTED — the interrupt intent
+            # was persisted but the adapter call or status update was lost.
+            # Retry the adapter interrupt (idempotent) and set status to
+            # INTERRUPTED only after the adapter call succeeds.
+            if (
+                latest_event is not None
+                and latest_event.type == AgentEventType.INTERRUPTED
+                and run.status != AgentRunStatus.INTERRUPTED
+            ):
+                try:
+                    await self._adapter(run.executor_kind).interrupt(run, None)
+                    self._update_run_status(
+                        run.id, AgentRunStatus.INTERRUPTED, rollback_on_error=False
+                    )
+                except Exception:
+                    logger.exception("Failed to recover interrupt for run %s", run.id)
+                continue
+
+            # Case 4: the latest event is a followup MESSAGE — the followup
+            # intent was persisted but the adapter call or status update was
+            # lost. Retry the adapter followup (idempotent) and set status to
+            # RUNNING only after the adapter call succeeds. This applies even
+            # to INTERRUPTED/COMPLETED runs because followup resumes them.
+            # FAILED runs cannot be resumed.
+            if (
+                latest_event is not None
+                and latest_event.type == AgentEventType.MESSAGE
+                and (latest_event.payload or {}).get("followup") is True
+                and run.status != AgentRunStatus.FAILED
+                and run.status != AgentRunStatus.RUNNING
+            ):
+                try:
+                    last_msg = run.last_task_message or ""
+                    await self._adapter(run.executor_kind).followup(run, last_msg)
+                    self._update_run_status(run.id, AgentRunStatus.RUNNING, rollback_on_error=False)
+                except Exception:
+                    logger.exception("Failed to recover followup for run %s", run.id)
+                continue
+
+            # Reconcile non-terminal, non-PENDING runs with the executor's
+            # actual status. The in-memory status may be stale after a crash
+            # (e.g. a managed task moved to REVIEW while the run was still
+            # RUNNING). Use the adapter's get_status() as the source of truth.
+            if run.status not in (
+                AgentRunStatus.PENDING,
+                AgentRunStatus.COMPLETED,
+                AgentRunStatus.FAILED,
+                AgentRunStatus.INTERRUPTED,
+            ):
+                try:
+                    actual = self._adapter(run.executor_kind).get_status(run)
+                    if actual != run.status:
+                        self._update_run_status(run.id, actual, rollback_on_error=False)
+                except Exception:
+                    logger.exception("Failed to reconcile status for run %s via get_status", run.id)
+                continue
+
             if run.status != AgentRunStatus.PENDING:
                 continue
+
             if run.context_ref is not None:
                 # Already has a context but still PENDING — should be RUNNING.
                 self._update_run_status(run.id, AgentRunStatus.RUNNING)
                 continue
+
             # No context_ref and PENDING: the adapter spawn was lost.
             # Retry it. The adapter will find any existing task with
             # agent_run_id == run.id and reuse it.

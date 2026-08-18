@@ -29,6 +29,7 @@ def build_resident_agent_prompt(
     base_url: str,
     session_id: str,
     root_run_id: Optional[str] = None,
+    ack_sequence: int = 0,
 ) -> str:
     """Build the self-drive prompt for a workspace's resident agent.
 
@@ -59,7 +60,7 @@ def build_resident_agent_prompt(
     )
     periodic_block = _render_periodic_tasks_block(workspace)
     ws = workspace.id
-    agent_tree_block = _build_agent_tree_block(base_url, ws, root_run_id)
+    agent_tree_block = _build_agent_tree_block(base_url, ws, root_run_id, ack_sequence)
     if workspace.resident_agent_master_mode:
         return _build_resident_master_prompt(
             workspace, base_url, session_id, directive_block, periodic_block, agent_tree_block
@@ -101,11 +102,22 @@ def build_resident_agent_prompt(
     )
 
 
-def _build_agent_tree_block(base_url: str, workspace_id: str, root_run_id: Optional[str]) -> str:
+def _build_agent_tree_block(
+    base_url: str,
+    workspace_id: str,
+    root_run_id: Optional[str],
+    ack_sequence: int = 0,
+) -> str:
     """Build the agent tree API instructions block for the resident prompt.
 
-    Informs the resident of its root run id and how to spawn child runs,
-    wait for directed subtree events, and acknowledge them.
+    Informs the resident of its root run id, its persisted ACK cursor
+    (``ack_sequence``), and how to spawn child runs, wait for directed
+    subtree events, and acknowledge them.
+
+    ``ack_sequence`` is the resident root run's persisted ACK cursor. The
+    resident should use it as the starting ``since_sequence`` for ``wait``
+    calls so it only receives events it has not yet processed. After
+    processing events, the resident calls ``ack`` to advance the cursor.
     """
     if not root_run_id:
         return (
@@ -116,7 +128,8 @@ def _build_agent_tree_block(base_url: str, workspace_id: str, root_run_id: Optio
     return (
         "## Agent Tree (supervisor role)\n"
         f"You are the root supervisor of this workspace's agent tree. Your root run id is:\n"
-        f"  {root_run_id}\n\n"
+        f"  {root_run_id}\n"
+        f"Your persisted ACK cursor (last processed event sequence): {ack_sequence}\n\n"
         "You can delegate work to child runs (managed tasks) and receive directed "
         "events from your subtree. Use the agent tree API:\n\n"
         "1. Spawn a child run (creates a managed task and dispatches it to a worker):\n"
@@ -130,14 +143,15 @@ def _build_agent_tree_block(base_url: str, workspace_id: str, root_run_id: Optio
         "specific orchestrator worker session (use this to route work to an "
         "existing worker). When omitted, the backend picks an available worker.\n\n"
         "2. Wait for directed events from your subtree (blocks until events arrive "
-        "or timeout):\n"
+        "or timeout). Start from your persisted ACK cursor so you only get new "
+        "events:\n"
         f"   {INTERNAL_API_CURL} -X POST {base_url}/api/agent-tree/wait "
         "-H 'Content-Type: application/json' "
         f'-d \'{{"workspace_id":"{workspace_id}","recipient_id":"{root_run_id}",'
-        '"since_sequence":0,"subtree":true,"timeout_seconds":30}}\'\n'
+        f'"since_sequence":{ack_sequence},"subtree":true,"timeout_seconds":30}}\'\n'
         "   Returns events addressed to you or authored within your subtree. "
-        "Track the highest `sequence` you have seen and pass it as `since_sequence` "
-        "on the next call to get only new events.\n\n"
+        "After processing, call `ack` with the highest sequence you saw to "
+        "advance your persisted cursor.\n\n"
         "3. Acknowledge events up to a sequence cursor (persists your progress "
         "so a restarted resident resumes from where it left off):\n"
         f"   {INTERNAL_API_CURL} -X POST '{base_url}/api/agent-tree/ack?"
@@ -833,6 +847,12 @@ class _WorkspacesMixin:
             session = existing
         else:
             reused = False
+            # Create the resident's root run BEFORE the session bootstrap so
+            # the bootstrap prompt can include the root run id and the
+            # resident can act as a supervisor from its first cycle. The
+            # context_ref (session id) is set after the session is created.
+            self._ensure_resident_root_run(workspace.id, session_id=None)
+
             # reuse_existing is False on purpose: the generic reuse path only
             # matches ORCHESTRATOR sessions, so a resident session must be
             # tracked and reused via workspace.resident_agent_session_id here.
@@ -859,6 +879,9 @@ class _WorkspacesMixin:
                     remote_reconnect=workspace.resident_agent_remote_reconnect,
                 ),
             )
+            # Now that the session exists, link the root run to it via
+            # context_ref so we can find the root run by session id later.
+            self._ensure_resident_root_run(workspace.id, session_id=session.id)
 
         # Persist the session id and advance the timer BEFORE sending so that a
         # failure in send_session_message does not leave resident_agent_session_id
@@ -904,15 +927,24 @@ class _WorkspacesMixin:
             if session.remote_forward_port
             else f"http://localhost:{settings.port}"
         )
-        prompt = build_resident_agent_prompt(workspace, base_url, session.id, root_run_id)
+        prompt = build_resident_agent_prompt(
+            workspace,
+            base_url,
+            session.id,
+            root_run_id,
+            root_run.ack_sequence if root_run else 0,
+        )
 
         # Inject recent directed subtree events so the resident can observe
         # child progress/blocked/failed/completed via the unified mailbox
-        # instead of scanning global task/report APIs.
-        root_run = self.agent_tree.get_run_by_context_ref(workspace.id, session.id)
+        # instead of scanning global task/report APIs. Use the root run's
+        # ack_sequence cursor so only unprocessed events are injected.
         if root_run is not None:
             subtree_events = self.agent_tree.get_events(
-                workspace.id, root_run.id, since_sequence=0, subtree=True
+                workspace.id,
+                root_run.id,
+                since_sequence=root_run.ack_sequence,
+                subtree=True,
             )
             if subtree_events:
                 # Keep only the most recent events to avoid bloating the prompt.
@@ -934,25 +966,47 @@ class _WorkspacesMixin:
 
         await self.send_session_message(session.id, prompt)
 
-    def _ensure_resident_root_run(self, workspace_id: str, session_id: str) -> None:
+    def _ensure_resident_root_run(self, workspace_id: str, session_id: Optional[str]) -> None:
         """Ensure the resident has a root run in the agent tree.
 
         The resident acts as the root supervisor: it can spawn child runs
         (managed tasks) and receive directed events from its subtree. The
         root run's ``context_ref`` is the resident session id so we can
         locate it later.
+
+        When ``session_id`` is ``None`` (called before the resident session
+        is created), the root run is created without a context_ref. When
+        ``session_id`` is provided later, the existing root run's
+        context_ref is updated to link it to the session.
         """
         from claude_hub.models.agent_tree import ExecutorKind
 
-        existing = self.agent_tree.get_run_by_context_ref(workspace_id, session_id)
-        if existing is not None:
+        # Find the resident root run: the unique root (parent_id is None) in
+        # this workspace.
+        root_run = None
+        for run in self.agent_tree._runs.values():
+            if run.workspace_id == workspace_id and run.parent_id is None:
+                root_run = run
+                break
+
+        if root_run is None:
+            # No root run yet — create one. context_ref may be None if the
+            # session hasn't been created yet.
+            self.agent_tree.create_root_run(
+                workspace_id=workspace_id,
+                executor_kind=ExecutorKind.RESIDENT_ROOT,
+                title="Resident Agent",
+                context_ref=session_id,
+            )
             return
-        self.agent_tree.create_root_run(
-            workspace_id=workspace_id,
-            executor_kind=ExecutorKind.MANAGED_TASK,
-            title="Resident Agent",
-            context_ref=session_id,
-        )
+
+        # Root run exists. If a session_id was provided and the root run's
+        # context_ref doesn't match, update it (links the root run to the
+        # resident session).
+        if session_id is not None and root_run.context_ref != session_id:
+            root_run.context_ref = session_id
+            root_run.updated_at = _wm._now()
+            self._save_state()
 
     async def delete_workspace(self, workspace_id: str) -> None:
         """Delete a workspace and all of its in-memory and on-disk state.

@@ -115,21 +115,42 @@ class ManagedTaskAdapter(ExecutorAdapter):
         )
 
     async def followup(self, run: "AgentRun", message: str) -> None:
-        from claude_hub.models.schemas import ContinueTaskRequest
+        from claude_hub.models.schemas import ContinueTaskRequest, WorkspaceTaskStatus
 
         task_id = run.context_ref
         if not task_id:
             raise RuntimeError(f"Run {run.id} has no managed task context_ref")
         task = self._wm.tasks.get(task_id)
         if task is None:
-            raise RuntimeError(f"Managed task {task_id} not found for run {run.id}")
+            # The task was deleted (e.g. by abort). Re-create it with the
+            # same agent_run_id so the run's context_ref still points to a
+            # valid task.
+            from claude_hub.models.schemas import (
+                AgentType,
+                WorkspaceTaskCreate,
+                WorkspaceTaskMode,
+            )
 
-        # If the task is done/review, continue it back to working with the
-        # new message. If it's still queued/working, the message is already
-        # in the mailbox and will be picked up.
-        from claude_hub.models.schemas import WorkspaceTaskStatus
+            new_task = self._wm.create_task(
+                run.workspace_id,
+                WorkspaceTaskCreate(
+                    title=run.title or f"agent-run-{run.id[:8]}",
+                    prompt=message,
+                    agent_type=AgentType.CLAUDE,
+                    task_mode=WorkspaceTaskMode.REVIEWED,
+                    agent_run_id=run.id,
+                ),
+            )
+            await self._wm.start_task(new_task.id)
+            run.context_ref = str(new_task.id)
+            return
 
-        if task.status in (
+        # Resume the task based on its current status:
+        # - TODO (including after abort): start it
+        # - REVIEW / DONE: continue it back to working
+        if task.status == WorkspaceTaskStatus.TODO:
+            await self._wm.start_task(task_id)
+        elif task.status in (
             WorkspaceTaskStatus.REVIEW,
             WorkspaceTaskStatus.DONE,
         ):
@@ -137,8 +158,6 @@ class ManagedTaskAdapter(ExecutorAdapter):
                 task_id,
                 ContinueTaskRequest(message=message),
             )
-        elif task.status == WorkspaceTaskStatus.TODO:
-            await self._wm.start_task(task_id)
 
     async def interrupt(self, run: "AgentRun", reason: Optional[str] = None) -> None:
         from claude_hub.models.schemas import ManualTaskControlRequest
@@ -243,3 +262,59 @@ class ExternalJobAdapter(ExecutorAdapter):
         from claude_hub.models.agent_tree import AgentRunStatus
 
         return self._statuses.get(run.id, AgentRunStatus.PENDING)
+
+
+class ResidentRootAdapter(ExecutorAdapter):
+    """Adapter for the resident agent root run.
+
+    The resident root run represents the resident agent itself. It is not
+    spawned by the Hub (the resident session is created separately), so
+    ``spawn`` and ``followup`` are no-ops: the resident picks up mailbox
+    messages on its next periodic cycle.
+
+    ``interrupt`` aborts the resident session (if any). ``get_status``
+    returns RUNNING while the resident session exists.
+    """
+
+    def __init__(self, workspace_manager: "WorkspaceManager") -> None:
+        self._wm = workspace_manager
+
+    async def spawn(self, run: "AgentRun", initial_message: str) -> str:
+        # The resident session is created outside the agent tree. The
+        # context_ref is the resident session id, set by the workspace
+        # manager after the session is created.
+        return run.context_ref or run.id
+
+    async def send_message(self, run: "AgentRun", message: str) -> None:
+        # Messages are delivered to the resident's mailbox; the resident
+        # reads them on its next cycle. No immediate side-effect needed.
+        pass
+
+    async def followup(self, run: "AgentRun", message: str) -> None:
+        # The resident is always running; it will process the message on
+        # its next cycle. No need to wake it explicitly.
+        pass
+
+    async def interrupt(self, run: "AgentRun", reason: Optional[str] = None) -> None:
+        # Abort the resident session if it exists. The context_ref is the
+        # resident session id.
+        session_id = run.context_ref
+        if not session_id:
+            return
+        try:
+            session = self._wm.sessions.get(session_id)
+            if session is not None:
+                await self._wm.delete_session(session_id)
+        except Exception:
+            logger.exception("Failed to abort resident session %s for run %s", session_id, run.id)
+
+    def get_status(self, run: "AgentRun") -> "AgentRunStatus":
+        from claude_hub.models.agent_tree import AgentRunStatus
+
+        session_id = run.context_ref
+        if not session_id:
+            return AgentRunStatus.PENDING
+        session = self._wm.sessions.get(session_id)
+        if session is None:
+            return AgentRunStatus.FAILED
+        return AgentRunStatus.RUNNING

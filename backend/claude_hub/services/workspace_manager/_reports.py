@@ -460,7 +460,11 @@ class _ReportsMixin:
             AgentReportState.COMPLETED: AgentEventType.COMPLETED,
             AgentReportState.REVIEW_STARTED: AgentEventType.PROGRESS,
             AgentReportState.REVIEW_PASSED: AgentEventType.COMPLETED,
-            AgentReportState.REVIEW_FAILED: AgentEventType.FAILED,
+            # REVIEW_FAILED does NOT mean the run failed: the task is sent
+            # back to WORKING for revisions. Map to PROGRESS so the run
+            # status is reconciled to RUNNING (see emit_event's report_state
+            # handling).
+            AgentReportState.REVIEW_FAILED: AgentEventType.PROGRESS,
             AgentReportState.REVIEW_NEEDS_INPUT: AgentEventType.BLOCKED,
         }
         event_type = state_map.get(report.state, AgentEventType.PROGRESS)

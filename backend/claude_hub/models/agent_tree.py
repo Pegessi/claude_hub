@@ -29,11 +29,13 @@ class ExecutorKind(str, Enum):
     ``managed_task`` wraps the existing workspace task/session/report flow.
     ``native_subagent`` is a future in-process subagent (stub for now).
     ``external_job`` is a future remote/third-party job (stub for now).
+    ``resident_root`` is the resident agent itself (the root supervisor).
     """
 
     MANAGED_TASK = "managed_task"
     NATIVE_SUBAGENT = "native_subagent"
     EXTERNAL_JOB = "external_job"
+    RESIDENT_ROOT = "resident_root"
 
 
 class AgentRunStatus(str, Enum):
