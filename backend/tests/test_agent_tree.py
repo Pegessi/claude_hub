@@ -508,6 +508,189 @@ async def test_report_bridges_to_agent_event(manager: WorkspaceManager, tmp_path
 
 
 # ---------------------------------------------------------------------------
+# Resident + managed-task directed wakeup E2E
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resident_directed_wakeup_via_subtree_event(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """A managed-task child's report event wakes the resident supervisor.
+
+    End-to-end: resident root run -> managed-task child run -> child task
+    reports -> event bridged to agent tree addressed to resident ->
+    resident's ``wait(subtree=True)`` returns the event AND
+    ``_workspace_activity_since`` returns True so the resident fires.
+    """
+    from datetime import datetime, timedelta
+
+    from claude_hub.models import (
+        AgentReportCreate,
+        AgentReportState,
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+        WorkspaceTaskCreate,
+        WorkspaceTaskMode,
+    )
+
+    resident_session_id = "resident-sess-1"
+    # Mark the workspace as having a resident session so
+    # _workspace_activity_since scans the agent tree.
+    ws = manager.workspaces[ws_id]
+    manager.workspaces[ws_id] = ws.model_copy(
+        update={"resident_agent_session_id": resident_session_id}
+    )
+
+    # Resident root run: context_ref is the resident session id.
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.MANAGED_TASK,
+        title="Resident",
+        context_ref=resident_session_id,
+    )
+
+    # Managed-task child run: context_ref is the task id.
+    task = manager.create_task(
+        ws_id,
+        WorkspaceTaskCreate(
+            title="child task",
+            prompt="do work",
+            agent_type=AgentType.CLAUDE,
+            task_mode=WorkspaceTaskMode.REVIEWED,
+        ),
+    )
+    child = manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.MANAGED_TASK,
+        title="child",
+        context_ref=task.id,
+    )
+    child.parent_id = root.id
+    child.supervisor_id = root.id
+    child.path = f"{root.path}/{child.id}"
+
+    # Worker session that owns the task.
+    now = datetime.utcnow()
+    session = ManagedSession(
+        id="worker-sess-1",
+        workspace_id=ws_id,
+        role=WorkspaceSessionRole.ORCHESTRATOR,
+        agent_type=AgentType.CLAUDE,
+        target=ExecutionTarget.LOCAL,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.WORKING,
+        task_id=task.id,
+        current_task_id=task.id,
+        tab_id="tab-1",
+        title="worker",
+        workspace_path=str(ws.path),
+        tmux_session="tmux-1",
+        created_at=now,
+        updated_at=now,
+    )
+    manager.sessions[session.id] = session
+
+    last_run = now - timedelta(hours=1)
+
+    # Before the report: no activity since last_run.
+    assert manager._workspace_activity_since(ws_id, last_run) is False
+
+    # Child task reports completion -> bridges to a COMPLETED event
+    # addressed to the resident root.
+    report = await manager.create_report(
+        session.id,
+        AgentReportCreate(
+            task_id=task.id,
+            state=AgentReportState.COMPLETED,
+            message="done",
+            message_en="done",
+            message_zh="完成",
+        ),
+    )
+
+    # Directed wakeup #1: _workspace_activity_since now returns True.
+    assert manager._workspace_activity_since(ws_id, last_run) is True
+
+    # Directed wakeup #2: the resident's wait(subtree=True) returns the
+    # child's event without blocking (it already arrived).
+    events = await manager.agent_tree.wait(
+        WaitRequest(
+            workspace_id=ws_id,
+            recipient_id=root.id,
+            since_sequence=0,
+            subtree=True,
+            timeout_seconds=1.0,
+        )
+    )
+    bridged = [e for e in events if e.call_id == f"report:{report.id}"]
+    assert len(bridged) == 1
+    assert bridged[0].type == AgentEventType.COMPLETED
+    assert bridged[0].author == child.id
+    assert bridged[0].recipient == root.id
+
+
+@pytest.mark.asyncio
+async def test_resident_wait_blocks_until_child_event(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """The resident's ``wait(subtree=True)`` blocks until a child emits.
+
+    Proves the race-free directed wakeup: the resident calls wait first
+    (no events yet), then a child run emits an event, and the wait
+    returns that event.
+    """
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="spawn-1",
+        )
+    )
+
+    # Advance the cursor past the spawn's dispatched/started events so the
+    # wait blocks until the child emits its own event.
+    existing = manager.agent_tree.get_events(ws_id, root.id, since_sequence=0, subtree=True)
+    since_seq = max(e.sequence for e in existing) if existing else 0
+
+    async def _emit_later():
+        await asyncio.sleep(0.1)
+        manager.agent_tree.emit_event(
+            workspace_id=ws_id,
+            agent_run_id=child.id,
+            event_type=AgentEventType.PROGRESS,
+            author=child.id,
+            recipient=root.id,
+            call_id="prog-1",
+            payload={"message": "working"},
+        )
+
+    wait_task = asyncio.create_task(
+        manager.agent_tree.wait(
+            WaitRequest(
+                workspace_id=ws_id,
+                recipient_id=root.id,
+                since_sequence=since_seq,
+                subtree=True,
+                timeout_seconds=5.0,
+            )
+        )
+    )
+    emit_task = asyncio.create_task(_emit_later())
+    events, _ = await asyncio.gather(wait_task, emit_task)
+    assert any(e.type == AgentEventType.PROGRESS and e.author == child.id for e in events)
+
+
+# ---------------------------------------------------------------------------
 # Persistence / restart replay
 # ---------------------------------------------------------------------------
 
