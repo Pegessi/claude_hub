@@ -1929,15 +1929,16 @@ async def test_spawn_late_persist_failure_keeps_in_memory_state(
 
     monkeypatch.setattr(adapter, "spawn", _counting_spawn)
 
-    # Make _persist fail on the outcome-phase persist (the second call).
+    # Make _persist fail on the outcome-phase persist.
+    # Persist call sequence after the run+DISPATCHED merge:
+    #   1. run node + DISPATCHED intent event (atomic)
+    #   2. outcome batch (context_ref + RUNNING + STARTED)  <-- fails here
     persist_calls = {"n": 0}
     real_persist = manager.agent_tree._persist
 
     def _flaky_persist():
         persist_calls["n"] += 1
-        # The first persist (run node creation) succeeds; the second
-        # (dispatched event) succeeds; the third (outcome batch) fails.
-        if persist_calls["n"] == 3:
+        if persist_calls["n"] == 2:
             raise OSError("disk full during outcome")
         return real_persist()
 
