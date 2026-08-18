@@ -744,6 +744,14 @@ class _DispatchMixin:
         # reviewer tabs (visible in the tab bar but absent from Manage Agents)
         # do not accumulate.
         await self._prune_orphan_workspace_tabs(workspace_id)
+        # Recover sessions that claimed a QUEUED task but crashed before the
+        # assignment prompt was fully persisted as WORKING. The session's
+        # task_id was persisted before the send (see _dispatch_task_to_session),
+        # so _can_dispatch_to blocks re-dispatch to another session. Here we
+        # re-send the assignment prompt (at-least-once); the dispatch call_id
+        # ensures sender-side dedup if the worker already ACKed it via a
+        # report submission.
+        await self._recover_queued_task_ownership(workspace_id)
         for session in self._workspace_agents(workspace_id, include_stopped=True):
             if not self._can_dispatch_to(session):
                 logger.info(
@@ -863,6 +871,63 @@ class _DispatchMixin:
             return None
         return sorted(candidates, key=_sort_time)[0]
 
+    async def _recover_queued_task_ownership(self, workspace_id: str) -> None:
+        """Re-send the assignment prompt for sessions that claimed a QUEUED
+        task but crashed before the dispatch completed.
+
+        ``_dispatch_task_to_session`` persists ``session.task_id`` before
+        sending the prompt. A crash between that persist and the
+        ``task.status = WORKING`` persist leaves the session holding a
+        QUEUED task. ``_can_dispatch_to`` returns False for such sessions
+        (they own a non-DONE task), so the normal dispatch loop skips them.
+        This method re-sends the assignment prompt (at-least-once). The
+        dispatch call_id (``f"dispatch:{task.id}"``) gives sender-side
+        dedup: if the worker already submitted a report (which ACKs the
+        call_id into ``delivered_call_ids``), ``send_session_message``
+        skips the re-send.
+        """
+        for session in self._workspace_agents(workspace_id, include_stopped=True):
+            if session.status == ManagedSessionStatus.STOPPED:
+                continue
+            task_id = session.task_id or session.current_task_id
+            if not task_id:
+                continue
+            task = self.tasks.get(task_id)
+            if not task or task.status != WorkspaceTaskStatus.QUEUED:
+                continue
+            logger.info(
+                "Recovering queued task ownership: session_id=%s holds QUEUED task_id=%s; "
+                "re-sending assignment prompt",
+                session.id,
+                task_id,
+            )
+            workspace = self.workspaces.get(task.workspace_id)
+            if not workspace:
+                continue
+            lesson_context = self._lesson_context_payload(
+                workspace,
+                f"{task.title}\n{task.prompt}",
+            )
+            await self.send_session_message(
+                session.id,
+                self._build_task_assignment_prompt(
+                    workspace,
+                    task,
+                    session,
+                    lesson_context=lesson_context,
+                ),
+                call_id=f"dispatch:{task.id}",
+            )
+            now = _wm._now()
+            self.tasks[task.id] = task.model_copy(
+                update={
+                    "status": WorkspaceTaskStatus.WORKING,
+                    "started_at": task.started_at or now,
+                    "updated_at": now,
+                }
+            )
+            self._save_state()
+
     async def _dispatch_task_to_session(
         self,
         task: WorkspaceTask,
@@ -889,27 +954,23 @@ class _DispatchMixin:
             task.dispatch_reason,
         )
         now = _wm._now()
-        lesson_context = self._lesson_context_payload(
-            workspace,
-            f"{task.title}\n{task.prompt}",
-        )
-        await self.send_session_message(
-            session.id,
-            self._build_task_assignment_prompt(
-                workspace,
-                task,
-                session,
-                lesson_context=lesson_context,
-            ),
-        )
 
-        self.tasks[task.id] = task.model_copy(
-            update={
-                "status": WorkspaceTaskStatus.WORKING,
-                "started_at": now,
-                "updated_at": now,
-            }
-        )
+        # ------------------------------------------------------------------
+        # Crash-idempotent dispatch: claim the task for the session BEFORE
+        # sending the prompt.
+        #
+        # The dispatch call_id is f"dispatch:{task.id}". We persist
+        # session.task_id = task.id (and save) before the send so that a
+        # crash between the send side-effect and the WORKING persist does
+        # NOT let the monitor re-dispatch the task to a different session.
+        # On recovery, _recover_queued_task_ownership detects that the
+        # session holds a QUEUED task and re-sends the assignment prompt
+        # (at-least-once). The call_id ensures sender-side dedup: if the
+        # worker already ACKed the dispatch (by submitting a report, which
+        # moves the call_id to delivered_call_ids), send_session_message
+        # skips the re-send.
+        # ------------------------------------------------------------------
+        dispatch_call_id = f"dispatch:{task.id}"
         self.sessions[session.id] = session.model_copy(
             update={
                 "task_id": task.id,
@@ -925,6 +986,31 @@ class _DispatchMixin:
                 "prompt_retry_task_id": None,
                 "prompt_retry_attempted_at": None,
                 "last_activity_at": now,
+                "updated_at": now,
+            }
+        )
+        self._save_state()
+        session = self.sessions[session.id]
+
+        lesson_context = self._lesson_context_payload(
+            workspace,
+            f"{task.title}\n{task.prompt}",
+        )
+        await self.send_session_message(
+            session.id,
+            self._build_task_assignment_prompt(
+                workspace,
+                task,
+                session,
+                lesson_context=lesson_context,
+            ),
+            call_id=dispatch_call_id,
+        )
+
+        self.tasks[task.id] = task.model_copy(
+            update={
+                "status": WorkspaceTaskStatus.WORKING,
+                "started_at": now,
                 "updated_at": now,
             }
         )

@@ -126,6 +126,13 @@ Wraps the existing workspace task/session/report flow:
     or capture can fail), so inferring delivery from pane text is unreliable.
     This closes the post-send crash window that a task-local prompt marker
     cannot: the session-level outbox survives task deletion/recreation.
+    **Durable ACK**: when the worker submits a report for the task,
+    `create_report` calls `_ack_pending_call_ids`, which moves every
+    `pending_call_ids` entry on the task and session to `delivered_call_ids`.
+    The report submission is the durable acknowledgement that the worker
+    received and processed the assignment (and any follow-up messages). Once
+    ACKed, the sender will not re-send the call_id, closing the at-least-once
+    duplicate window.
   - `REVIEW` / `DONE`: `continue_task` to send the task back to working.
   - Task not found: re-create it with the same `agent_run_id` so the run's
     `context_ref` stays valid. **Crash safety**: `run.context_ref` is
@@ -133,14 +140,18 @@ Wraps the existing workspace task/session/report flow:
     dispatch does not leave the run pointing at the deleted task (which
     would cause a duplicate task on retry). The `call_id` is also marked
     delivered on the new task.
-  - **At-least-once delivery with receiver dedup**: for `TODO`/`QUEUED`/`REVIEW`/`DONE`,
-    `call_id` is recorded in `task.delivered_call_ids` (persisted with the
-    task) via a two-phase outbox (`pending_call_ids` → `delivered_call_ids`).
-    For `WORKING`, the session-level outbox (above) is the durable sender
-    record. A retry with the same `call_id` is a no-op on the sender side
-    (already in `delivered_call_ids`). A crash between send and
-    delivered-persist causes a re-send (at-least-once); the receiver dedupes
-    via the `[call_id:<id>]` marker.
+  - **At-least-once delivery with receiver dedup + durable ACK**: for
+    `TODO`/`QUEUED`/`REVIEW`/`DONE`, `call_id` is recorded in
+    `task.delivered_call_ids` (persisted with the task) via a two-phase
+    outbox (`pending_call_ids` → `delivered_call_ids`). For `WORKING`, the
+    session-level outbox (above) is the durable sender record. A retry
+    with the same `call_id` is a no-op on the sender side (already in
+    `delivered_call_ids`). A crash between send and delivered-persist
+    causes a re-send (at-least-once); the receiver dedupes via the
+    `[call_id:<id>]` marker. **Durable ACK**: when the worker submits a
+    report for the task, `create_report` moves all `pending_call_ids` on
+    the task and session to `delivered_call_ids`, so the sender will not
+    re-send them.
 - `interrupt` → `abort_task`.
 - `get_status` → maps `WorkspaceTaskStatus` to `AgentRunStatus`.
 
@@ -419,6 +430,32 @@ sequence order:
   and the `context_ref` persist leaves a dangling task; the retry finds it
   by `agent_run_id` and reuses it, so there is exactly one task id and one
   `start_task` side effect.
+- **Dispatch crash-idempotency (send → WORKING persist)**:
+  `_dispatch_task_to_session` persists `session.task_id = task.id` (and
+  saves) **before** sending the assignment prompt. The prompt is sent with
+  `call_id = f"dispatch:{task.id}"`. After the send, `task.status` is set
+  to `WORKING` and saved. A crash between the send and the WORKING persist
+  leaves the session holding a QUEUED task. `_can_dispatch_to` returns
+  False for such sessions (they own a non-DONE task), so the normal
+  dispatch loop will not re-assign the task to another session. On the
+  next `dispatch_workspace` pass, `_recover_queued_task_ownership` detects
+  the session holding a QUEUED task and re-sends the assignment prompt
+  with the same dispatch call_id. Sender-side dedup applies: if the
+  call_id is already in `session.delivered_call_ids` (the send completed
+  and phase-2 delivered-persist ran before the crash),
+  `send_session_message` skips the re-send — the dispatch is
+  crash-idempotent, no duplicate prompt. If the call_id is still in
+  `pending_call_ids` (crash between tmux send and delivered-persist), the
+  prompt is re-sent (at-least-once); the worker dedupes via the call_id
+  marker, and the eventual report submission ACKs the call_id into
+  `delivered_call_ids`.
+- **Durable ACK via report submission**: `create_report` calls
+  `_ack_pending_call_ids(task_id, session_id)`, which moves every entry in
+  `task.pending_call_ids` and `session.pending_call_ids` to the
+  corresponding `delivered_call_ids`. The worker's report submission is
+  the durable acknowledgement that it received and processed the
+  assignment (and any follow-up messages). Once ACKed, the sender will
+  not re-send those call_ids, closing the at-least-once duplicate window.
 - **Terminal guard relaxation**: `FAILED` is truly terminal; `INTERRUPTED`
   and `COMPLETED` may transition back to `RUNNING` via `followup` (resume).
 
