@@ -31,7 +31,7 @@ A node in the delegation tree.
 | `parent_id` | Direct parent (`None` for root). |
 | `path` | Slash-separated ancestor ids (e.g. `root/parent`). Enables subtree scoping via prefix match. |
 | `supervisor_id` | The run that spawned this one (usually `parent_id`). |
-| `executor_kind` | `managed_task`, `native_subagent`, or `external_job`. |
+| `executor_kind` | `managed_task`, `native_subagent`, `external_job`, or `resident_root`. |
 | `status` | `pending`, `running`, `waiting`, `blocked`, `completed`, `failed`, `interrupted`. |
 | `context_ref` | Executor-specific reference (for managed tasks: the workspace task id). |
 | `last_task_message` | Most recent message sent to or from this run. |
@@ -104,10 +104,21 @@ get_status(run) -> AgentRunStatus
 Wraps the existing workspace task/session/report flow:
 
 - `spawn` → `create_task` + `start_task` (returns task id as `context_ref`).
+  Idempotent: reuses any existing task with `agent_run_id == run.id`.
 - `send_message` → no-op (messages live in the event stream; the next
   `followup` surfaces them).
-- `followup` → `continue_task` if the task is in `review`/`done`, or
-  `start_task` if still `todo`.
+- `followup` → resumes the task based on its current status:
+  - `TODO`: append the followup message to the prompt, then `start_task`.
+  - `QUEUED`: append the followup message to the prompt (worker picks it up
+    when dispatched).
+  - `WORKING`: `send_session_message` to deliver the message directly to the
+    running session.
+  - `REVIEW` / `DONE`: `continue_task` to send the task back to working.
+  - Task not found: re-create it with the same `agent_run_id` so the run's
+    `context_ref` stays valid.
+  - **Exactly-once delivery**: `call_id` is recorded in
+    `task.delivered_call_ids` (persisted with the task). A retry with the
+    same `call_id` is a no-op.
 - `interrupt` → `abort_task`.
 - `get_status` → maps `WorkspaceTaskStatus` to `AgentRunStatus`.
 
@@ -169,6 +180,26 @@ This preserves idempotency and monotonic sequencing across restarts.
 | `POST` | `/api/agent-tree/interrupt` | Interrupt a run. |
 | `GET` | `/api/agent-tree/runs` | List runs (subtree/status filter). |
 | `GET` | `/api/agent-tree/runs/{run_id}/events` | Replay event stream. |
+
+### Authentication and authority
+
+Agent-tree endpoints do **not** use the global `get_current_user` dependency
+(which only accepts human `LoginSession` cookies). Instead they extract the
+session id from the request cookie via `_get_session_id` and resolve the
+principal in two ways:
+
+- **Human user**: the session id resolves to a valid `LoginSession`
+  (`auth.session.get_session`). Human users own every run in the workspace.
+- **Agent session**: the session id is a key in `workspace_manager.sessions`
+  (a `ManagedSession`). Agent sessions may only act on runs they execute
+  (`run.context_ref == session_id`, or for `managed_task` runs, the task's
+  `session_id`).
+
+Read endpoints (`list_runs`, `get_run_events`, `wait`) allow any
+authenticated principal (human or agent). Mutating endpoints (`spawn`,
+`send`, `followup`, `ack`, `interrupt`) require the caller to own the
+`author_id` run (or be a human user). Local-network requests skip authority
+enforcement.
 
 ## Key Design Decisions
 
@@ -302,15 +333,19 @@ batched in-memory-then-single-persist pattern. Every mutating action
 `persist: bool = True` parameter. Callers pass `persist=False` during the
 intent phase and call `_persist()` once at the end of the outcome phase.
 
-**Reconciliation on restart** (`recover_pending_runs`): recovery is based on
-the **latest event** (by `sequence`) for each run, not on the presence of any
-event of a given type:
+**Reconciliation on restart** (`recover_pending_runs`): recovery scans the
+full event stream for each run and replays every unmatched intent in
+sequence order:
 
 - Latest event is `INTERRUPTED` → retry `adapter.interrupt`, set status
   `INTERRUPTED`.
-- Latest event is a followup `MESSAGE` → retry `adapter.followup`, set status
-  `RUNNING` (applies to `INTERRUPTED` and `COMPLETED` runs too, since
-  followup resumes them; `FAILED` runs are excluded).
+- Every followup `MESSAGE` event (payload `followup=True`) that does NOT
+  have a matching `call_id:outcome` event → retry `adapter.followup` with
+  that `call_id` and append the outcome event. The adapter is idempotent on
+  `call_id` (via `delivered_call_ids` on the task), so a partially delivered
+  followup is a no-op. This recovers ALL unmatched followups, not just the
+  latest — a crash can leave several followup intents persisted without
+  their outcomes.
 - Run is `PENDING` with no `context_ref` → retry `adapter.spawn`.
 - Run is `PENDING` with a `context_ref` → set status `RUNNING` (spawn
   succeeded but the outcome persist was lost).
@@ -372,7 +407,7 @@ this change:
    `resident_root` executor kind existed. The migration also links the
    resident root run to the workspace's `resident_agent_session_id` if its
    `context_ref` is null. See `agent_tree.py:load_from_dict` (lines
-   1388–1428).
+   1386–1426).
 4. The resident root run is created lazily by the workspace manager /
    resident agent on the next workspace access if it does not yet exist.
 
@@ -446,7 +481,7 @@ child → the child task runs and reports → the resident receives the event.
        "recipient_id": "'"$ROOT"'",
        "since_sequence": 0,
        "subtree": true,
-       "timeout": 60
+       "timeout_seconds": 60
      }' | jq '.[] | {sequence, type, author, payload}'
    ```
    You should see a `completed` event authored by the child run.
@@ -456,7 +491,12 @@ child → the child task runs and reports → the resident receives the event.
    # Interrupt the child
    curl -s -X POST "http://localhost:8173/api/agent-tree/interrupt" \
      -H "Content-Type: application/json" \
-     -d '{"run_id": "<child_id>", "reason": "pause"}' | jq '.status'
+     -d '{
+       "workspace_id": "<ws_id>",
+       "run_id": "<child_id>",
+       "call_id": "e2e-interrupt-1",
+       "reason": "pause"
+     }' | jq '.status'
    # -> "interrupted"
 
    # Resume via followup

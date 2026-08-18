@@ -1537,22 +1537,26 @@ class AgentTreeManager:
                     logger.exception("Failed to recover interrupt for run %s", run.id)
                 continue
 
-            # Case 4: the latest event is a followup MESSAGE — the followup
-            # intent was persisted but the adapter call or outcome event was
-            # lost. Retry the adapter followup only if there is no matching
-            # outcome event (call_id:outcome). The adapter is idempotent on
-            # call_id (delivered_call_ids on the task), so a retry after a
-            # partial success is a no-op.
-            if (
-                latest_event is not None
-                and latest_event.type == AgentEventType.MESSAGE
-                and (latest_event.payload or {}).get("followup") is True
-                and run.status != AgentRunStatus.FAILED
-            ):
-                followup_call_id = latest_event.call_id
-                outcome_call_id = f"{followup_call_id}:outcome"
-                has_outcome = any(e.call_id == outcome_call_id for e in run_events)
-                if not has_outcome:
+            # Case 4: recover every followup MESSAGE event that lacks a
+            # matching outcome event (call_id:outcome). A crash can leave
+            # multiple followup intents persisted without their outcomes;
+            # we must replay ALL of them in sequence order, not just the
+            # latest. The adapter is idempotent on call_id
+            # (delivered_call_ids on the task), so replaying a partially
+            # delivered followup is a no-op.
+            if run.status != AgentRunStatus.FAILED:
+                followup_events = [
+                    e
+                    for e in run_events
+                    if e.type == AgentEventType.MESSAGE
+                    and (e.payload or {}).get("followup") is True
+                ]
+                for followup_event in followup_events:
+                    followup_call_id = followup_event.call_id
+                    outcome_call_id = f"{followup_call_id}:outcome"
+                    has_outcome = any(e.call_id == outcome_call_id for e in run_events)
+                    if has_outcome:
+                        continue
                     try:
                         last_msg = run.last_task_message or ""
                         await self._adapter(run.executor_kind).followup(
@@ -1580,8 +1584,13 @@ class AgentTreeManager:
                             run.id, AgentRunStatus.RUNNING, rollback_on_error=False
                         )
                     except Exception:
-                        logger.exception("Failed to recover followup for run %s", run.id)
-                continue
+                        logger.exception(
+                            "Failed to recover followup call_id=%s for run %s",
+                            followup_call_id,
+                            run.id,
+                        )
+                if followup_events:
+                    continue
 
             # Reconcile non-terminal, non-PENDING runs with the executor's
             # actual status. The in-memory status may be stale after a crash

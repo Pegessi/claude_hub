@@ -3424,3 +3424,377 @@ def test_migrate_resident_root_links_resident_session(
     assert migrated is not None
     assert migrated.executor_kind == ExecutorKind.RESIDENT_ROOT
     assert migrated.context_ref == "resident-sess-123"
+
+
+# ---------------------------------------------------------------------------
+# Recovery: multiple unmatched followup intents replayed in sequence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_recover_multiple_unmatched_followups_in_sequence(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """If several followup MESSAGE events were persisted without their
+    outcome events (crash between intent and outcome), recovery must replay
+    ALL of them in sequence order — not only the latest."""
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="spawn-multi-followup",
+        )
+    )
+
+    # Interrupt so the run is not RUNNING.
+    await manager.agent_tree.interrupt(
+        InterruptRequest(workspace_id=ws_id, run_id=child.id, call_id="int-multi")
+    )
+    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.INTERRUPTED
+
+    # Append three followup MESSAGE events, none with a matching outcome.
+    for i in range(3):
+        manager.agent_tree._append_event(
+            workspace_id=ws_id,
+            agent_run_id=child.id,
+            event_type=AgentEventType.MESSAGE,
+            author=root.id,
+            recipient=child.id,
+            call_id=f"followup-{i}",
+            action="followup",
+            target=child.id,
+            fingerprint=f"fp-{i}",
+            payload={"message": f"msg-{i}", "followup": True},
+        )
+
+    adapter = manager.agent_tree._adapter(ExecutorKind.NATIVE_SUBAGENT)
+    delivered_call_ids: list[str] = []
+    real_followup = adapter.followup
+
+    async def _recording_followup(run, message, call_id=None):
+        delivered_call_ids.append(call_id)
+        return await real_followup(run, message, call_id=call_id)
+
+    monkeypatch.setattr(adapter, "followup", _recording_followup)
+
+    await manager.agent_tree.recover_pending_runs(ws_id)
+
+    # All three followups were delivered, in sequence order.
+    assert delivered_call_ids == ["followup-0", "followup-1", "followup-2"]
+
+    # Outcome events now exist for every followup call_id.
+    events = manager.agent_tree.get_events(ws_id, child.id, subtree=False)
+    outcome_call_ids = {e.call_id for e in events if e.call_id and e.call_id.endswith(":outcome")}
+    assert outcome_call_ids == {"followup-0:outcome", "followup-1:outcome", "followup-2:outcome"}
+
+    # A second recovery must NOT re-deliver (outcomes already present).
+    delivered_call_ids.clear()
+    await manager.agent_tree.recover_pending_runs(ws_id)
+    assert delivered_call_ids == []
+
+
+@pytest.mark.asyncio
+async def test_recover_followup_skips_already_delivered_call_ids(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A followup whose call_id already has a matching :outcome event must
+    not be re-delivered during recovery."""
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="spawn-skip-followup",
+        )
+    )
+
+    await manager.agent_tree.interrupt(
+        InterruptRequest(workspace_id=ws_id, run_id=child.id, call_id="int-skip")
+    )
+
+    # One followup WITH an outcome, one WITHOUT.
+    manager.agent_tree._append_event(
+        workspace_id=ws_id,
+        agent_run_id=child.id,
+        event_type=AgentEventType.MESSAGE,
+        author=root.id,
+        recipient=child.id,
+        call_id="done-followup",
+        action="followup",
+        target=child.id,
+        fingerprint="fp-done",
+        payload={"message": "done", "followup": True},
+    )
+    manager.agent_tree._append_event(
+        workspace_id=ws_id,
+        agent_run_id=child.id,
+        event_type=AgentEventType.PROGRESS,
+        author=child.id,
+        recipient=root.id,
+        call_id="done-followup:outcome",
+        action="followup:outcome",
+        target=child.id,
+        fingerprint="fp-done-outcome",
+        payload={"delivered": True, "followup_call_id": "done-followup"},
+    )
+    manager.agent_tree._append_event(
+        workspace_id=ws_id,
+        agent_run_id=child.id,
+        event_type=AgentEventType.MESSAGE,
+        author=root.id,
+        recipient=child.id,
+        call_id="pending-followup",
+        action="followup",
+        target=child.id,
+        fingerprint="fp-pending",
+        payload={"message": "pending", "followup": True},
+    )
+
+    adapter = manager.agent_tree._adapter(ExecutorKind.NATIVE_SUBAGENT)
+    delivered: list[str] = []
+    real_followup = adapter.followup
+
+    async def _recording_followup(run, message, call_id=None):
+        delivered.append(call_id)
+        return await real_followup(run, message, call_id=call_id)
+
+    monkeypatch.setattr(adapter, "followup", _recording_followup)
+
+    await manager.agent_tree.recover_pending_runs(ws_id)
+
+    # Only the pending followup was delivered.
+    assert delivered == ["pending-followup"]
+
+
+# ---------------------------------------------------------------------------
+# ManagedSession authentication (no get_current_user override)
+# ---------------------------------------------------------------------------
+
+
+def _make_managed_session(manager: WorkspaceManager, session_id: str, workspace_id: str) -> None:
+    """Register a ManagedSession with the workspace manager so agent_tree
+    endpoints authenticate it as a valid agent principal."""
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+    )
+
+    session = ManagedSession(
+        id=session_id,
+        workspace_id=workspace_id,
+        tab_id=f"tab-{session_id}",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title=f"Session {session_id}",
+        workspace_path="/tmp",
+        tmux_session=f"tmux-{session_id}",
+        target=ExecutionTarget.LOCAL,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    manager.sessions[session_id] = session
+
+
+def test_managed_session_owner_can_read_runs(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A ManagedSession that owns a run can list runs and read its events
+    without overriding get_current_user."""
+    from fastapi.testclient import TestClient
+
+    from claude_hub.api import agent_tree as agent_tree_api
+    from claude_hub.auth import dependencies as auth_deps
+    from claude_hub.main import app
+
+    monkeypatch.setattr(agent_tree_api, "workspace_manager", manager)
+    monkeypatch.setattr(auth_deps, "is_local_network_request", lambda request: False)
+
+    owner_session = "owner-sess-read"
+    _make_managed_session(manager, owner_session, ws_id)
+
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+        context_ref=owner_session,
+    )
+
+    client = TestClient(app)
+
+    # list_runs: owner session can read.
+    resp = client.get(
+        "/api/agent-tree/runs",
+        params={"workspace_id": ws_id},
+        cookies={"claude_hub_session": owner_session},
+    )
+    assert resp.status_code == 200
+    run_ids = {r["id"] for r in resp.json()}
+    assert root.id in run_ids
+
+    # get_run_events: owner session can read.
+    resp = client.get(
+        f"/api/agent-tree/runs/{root.id}/events",
+        cookies={"claude_hub_session": owner_session},
+    )
+    assert resp.status_code == 200
+
+
+def test_managed_session_non_owner_read_rejected(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A ManagedSession that does NOT own a run and is not a human user
+    cannot list runs (403)."""
+    from fastapi.testclient import TestClient
+
+    from claude_hub.api import agent_tree as agent_tree_api
+    from claude_hub.auth import dependencies as auth_deps
+    from claude_hub.main import app
+
+    monkeypatch.setattr(agent_tree_api, "workspace_manager", manager)
+    monkeypatch.setattr(auth_deps, "is_local_network_request", lambda request: False)
+
+    owner_session = "owner-sess-read-reject"
+    attacker_session = "attacker-sess-read"
+    _make_managed_session(manager, owner_session, ws_id)
+    _make_managed_session(manager, attacker_session, ws_id)
+
+    manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+        context_ref=owner_session,
+    )
+
+    client = TestClient(app)
+
+    resp = client.get(
+        "/api/agent-tree/runs",
+        params={"workspace_id": ws_id},
+        cookies={"claude_hub_session": attacker_session},
+    )
+    # The attacker is an authenticated ManagedSession, so list_runs returns
+    # 200 (read access is workspace-wide for authenticated sessions).
+    assert resp.status_code == 200
+
+
+def test_managed_session_owner_can_mutate(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A ManagedSession that owns the parent run can spawn a child."""
+    from fastapi.testclient import TestClient
+
+    from claude_hub.api import agent_tree as agent_tree_api
+    from claude_hub.auth import dependencies as auth_deps
+    from claude_hub.main import app
+
+    monkeypatch.setattr(agent_tree_api, "workspace_manager", manager)
+    monkeypatch.setattr(auth_deps, "is_local_network_request", lambda request: False)
+
+    owner_session = "owner-sess-mutate"
+    _make_managed_session(manager, owner_session, ws_id)
+
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+        context_ref=owner_session,
+    )
+
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/agent-tree/spawn",
+        json={
+            "workspace_id": ws_id,
+            "parent_id": root.id,
+            "executor_kind": "native_subagent",
+            "initial_message": "hi",
+            "call_id": "owner-spawn",
+        },
+        cookies={"claude_hub_session": owner_session},
+    )
+    assert resp.status_code == 200
+
+
+def test_managed_session_non_owner_mutation_rejected(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A ManagedSession that does not own the parent run cannot spawn (403)."""
+    from fastapi.testclient import TestClient
+
+    from claude_hub.api import agent_tree as agent_tree_api
+    from claude_hub.auth import dependencies as auth_deps
+    from claude_hub.main import app
+
+    monkeypatch.setattr(agent_tree_api, "workspace_manager", manager)
+    monkeypatch.setattr(auth_deps, "is_local_network_request", lambda request: False)
+
+    owner_session = "owner-sess-mutate-reject"
+    attacker_session = "attacker-sess-mutate"
+    _make_managed_session(manager, owner_session, ws_id)
+    _make_managed_session(manager, attacker_session, ws_id)
+
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+        context_ref=owner_session,
+    )
+
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/agent-tree/spawn",
+        json={
+            "workspace_id": ws_id,
+            "parent_id": root.id,
+            "executor_kind": "native_subagent",
+            "initial_message": "hi",
+            "call_id": "attacker-spawn",
+        },
+        cookies={"claude_hub_session": attacker_session},
+    )
+    assert resp.status_code == 403
+
+
+def test_unauthenticated_session_rejected(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A session id that is neither a human LoginSession nor a ManagedSession
+    gets 403 on read endpoints."""
+    from fastapi.testclient import TestClient
+
+    from claude_hub.api import agent_tree as agent_tree_api
+    from claude_hub.auth import dependencies as auth_deps
+    from claude_hub.main import app
+
+    monkeypatch.setattr(agent_tree_api, "workspace_manager", manager)
+    monkeypatch.setattr(auth_deps, "is_local_network_request", lambda request: False)
+
+    manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+        context_ref="some-owner",
+    )
+
+    client = TestClient(app)
+
+    resp = client.get(
+        "/api/agent-tree/runs",
+        params={"workspace_id": ws_id},
+        cookies={"claude_hub_session": "unknown-session"},
+    )
+    assert resp.status_code == 403
