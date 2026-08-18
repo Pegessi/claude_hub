@@ -118,6 +118,11 @@ class AgentEvent(BaseModel):
     ``author`` and ``recipient`` are run ids; a supervisor's mailbox only
     receives events whose recipient is itself or whose author is in its
     subtree.
+
+    ``action`` and ``target`` record the user-facing action (e.g. ``spawn``,
+    ``send``, ``followup``, ``interrupt``) and the run id it targets, so the
+    call_id idempotency index can be rebuilt after a restart and reject
+    mismatched call_id reuse.
     """
 
     sequence: int
@@ -128,6 +133,12 @@ class AgentEvent(BaseModel):
     type: AgentEventType
     author: str
     recipient: Optional[str] = None
+    # The action that produced this event (e.g. "spawn", "send", "followup",
+    # "interrupt", "emit"). Used for call_id idempotency namespacing.
+    action: Optional[str] = None
+    # The target run id of the action. Used for call_id idempotency
+    # namespacing.
+    target: Optional[str] = None
     payload: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 

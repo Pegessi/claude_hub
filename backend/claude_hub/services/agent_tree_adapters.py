@@ -71,7 +71,25 @@ class ManagedTaskAdapter(ExecutorAdapter):
             AgentType,
             WorkspaceTaskCreate,
             WorkspaceTaskMode,
+            WorkspaceTaskStatus,
         )
+
+        # Recoverability: if a previous spawn call already created a task for
+        # this run (e.g. the process crashed after task creation but before
+        # the run's context_ref was persisted), reuse it instead of creating
+        # a duplicate.
+        existing_task = next(
+            (
+                t
+                for t in self._wm.tasks.values()
+                if t.workspace_id == run.workspace_id and t.agent_run_id == run.id
+            ),
+            None,
+        )
+        if existing_task is not None:
+            if existing_task.status == WorkspaceTaskStatus.TODO:
+                await self._wm.start_task(existing_task.id)
+            return str(existing_task.id)
 
         task = self._wm.create_task(
             run.workspace_id,
@@ -80,6 +98,7 @@ class ManagedTaskAdapter(ExecutorAdapter):
                 prompt=initial_message,
                 agent_type=AgentType.CLAUDE,
                 task_mode=WorkspaceTaskMode.REVIEWED,
+                agent_run_id=run.id,
             ),
         )
         # Start the task so it gets dispatched to a worker session.

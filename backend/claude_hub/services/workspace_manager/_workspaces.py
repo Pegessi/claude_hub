@@ -24,7 +24,12 @@ def _render_periodic_tasks_block(workspace: "Workspace") -> str:
     )
 
 
-def build_resident_agent_prompt(workspace: "Workspace", base_url: str, session_id: str) -> str:
+def build_resident_agent_prompt(
+    workspace: "Workspace",
+    base_url: str,
+    session_id: str,
+    root_run_id: Optional[str] = None,
+) -> str:
     """Build the self-drive prompt for a workspace's resident agent.
 
     The resident agent is a standing, self-driven Claude session that wakes on a
@@ -41,6 +46,10 @@ def build_resident_agent_prompt(workspace: "Workspace", base_url: str, session_i
     has passed (PATCH ``status=done``) or sends the work back via ``continue``.
     It NEVER writes code and NEVER creates or deletes orchestrator worker
     sessions (the backend may still spin up an ephemeral reviewer on its own).
+
+    The resident is also the root supervisor of the workspace's agent tree. It
+    can spawn child runs (managed tasks) via the agent tree API and receive
+    directed events from its subtree.
     """
     directive = (workspace.resident_agent_directive or "").strip()
     directive_block = (
@@ -50,9 +59,10 @@ def build_resident_agent_prompt(workspace: "Workspace", base_url: str, session_i
     )
     periodic_block = _render_periodic_tasks_block(workspace)
     ws = workspace.id
+    agent_tree_block = _build_agent_tree_block(base_url, ws, root_run_id)
     if workspace.resident_agent_master_mode:
         return _build_resident_master_prompt(
-            workspace, base_url, session_id, directive_block, periodic_block
+            workspace, base_url, session_id, directive_block, periodic_block, agent_tree_block
         )
     return (
         "You are this workspace's RESIDENT self-driven maintenance agent. You wake up "
@@ -60,6 +70,7 @@ def build_resident_agent_prompt(workspace: "Workspace", base_url: str, session_i
         "do not wait for a dispatch. Work autonomously this cycle, then stop.\n\n"
         f"Workspace id: {ws}\n"
         f"API base URL: {base_url}\n\n"
+        f"{agent_tree_block}\n\n"
         f"{directive_block}\n\n"
         f"{periodic_block}"
         "Each cycle, do the following, in order:\n"
@@ -90,12 +101,59 @@ def build_resident_agent_prompt(workspace: "Workspace", base_url: str, session_i
     )
 
 
+def _build_agent_tree_block(base_url: str, workspace_id: str, root_run_id: Optional[str]) -> str:
+    """Build the agent tree API instructions block for the resident prompt.
+
+    Informs the resident of its root run id and how to spawn child runs,
+    wait for directed subtree events, and acknowledge them.
+    """
+    if not root_run_id:
+        return (
+            "## Agent Tree\n"
+            "Your agent tree root run is not yet available. It will be created "
+            "on the next cycle."
+        )
+    return (
+        "## Agent Tree (supervisor role)\n"
+        f"You are the root supervisor of this workspace's agent tree. Your root run id is:\n"
+        f"  {root_run_id}\n\n"
+        "You can delegate work to child runs (managed tasks) and receive directed "
+        "events from your subtree. Use the agent tree API:\n\n"
+        "1. Spawn a child run (creates a managed task and dispatches it to a worker):\n"
+        f"   {INTERNAL_API_CURL} -X POST {base_url}/api/agent-tree/spawn "
+        "-H 'Content-Type: application/json' "
+        f'-d \'{{"workspace_id":"{workspace_id}","parent_id":"{root_run_id}",'
+        '"executor_kind":"managed_task","title":"...","initial_message":"...",'
+        '"call_id":"<unique-call-id>"}\'\n'
+        "   The response is the child run. Save its `id` for tracking.\n\n"
+        "2. Wait for directed events from your subtree (blocks until events arrive "
+        "or timeout):\n"
+        f"   {INTERNAL_API_CURL} -X POST {base_url}/api/agent-tree/wait "
+        "-H 'Content-Type: application/json' "
+        f'-d \'{{"workspace_id":"{workspace_id}","recipient_id":"{root_run_id}",'
+        '"since_sequence":0,"subtree":true,"timeout_seconds":30}}\'\n'
+        "   Returns events addressed to you or authored within your subtree.\n\n"
+        "3. Acknowledge events up to a sequence cursor (persists your progress):\n"
+        f"   {INTERNAL_API_CURL} -X POST '{base_url}/api/agent-tree/ack?"
+        f"workspace_id={workspace_id}&run_id={root_run_id}&sequence=<max_seq>'\n\n"
+        "4. Interrupt a child run (preserves context for later resume):\n"
+        f"   {INTERNAL_API_CURL} -X POST {base_url}/api/agent-tree/interrupt "
+        "-H 'Content-Type: application/json' "
+        f'-d \'{{"workspace_id":"{workspace_id}","run_id":"<child_run_id>",'
+        '"call_id":"<unique-call-id>"}\'\n\n'
+        "Child runs emit events (progress, blocked, completed, failed) that are "
+        "delivered to your mailbox. Use `wait` to observe them and `ack` to mark "
+        "them processed."
+    )
+
+
 def _build_resident_master_prompt(
     workspace: "Workspace",
     base_url: str,
     session_id: str,
     directive_block: str,
     periodic_block: str = "",
+    agent_tree_block: str = "",
 ) -> str:
     """Master-mode resident prompt: an autonomous ORCHESTRATOR / product-owner.
 
@@ -118,6 +176,7 @@ def _build_resident_master_prompt(
         f"Workspace id: {ws}\n"
         f"API base URL: {base_url}\n"
         f"This resident session id: {session_id}\n\n"
+        f"{agent_tree_block}\n\n"
         f"{directive_block}\n\n"
         f"{periodic_block}"
         "## Each cycle, in order\n\n"
@@ -799,6 +858,8 @@ class _WorkspacesMixin:
         # a supervisor that spawns child runs and receives directed events from
         # its subtree. The root run's context_ref is the resident session id.
         self._ensure_resident_root_run(workspace.id, session.id)
+        root_run = self.agent_tree.get_run_by_context_ref(workspace.id, session.id)
+        root_run_id = root_run.id if root_run else None
 
         # A TERMINAL resident has no LLM agent to drive: advance the timer (done
         # above) and keep the tab, but never send the self-drive prompt.
@@ -814,7 +875,7 @@ class _WorkspacesMixin:
             if session.remote_forward_port
             else f"http://localhost:{settings.port}"
         )
-        prompt = build_resident_agent_prompt(workspace, base_url, session.id)
+        prompt = build_resident_agent_prompt(workspace, base_url, session.id, root_run_id)
 
         # Inject recent directed subtree events so the resident can observe
         # child progress/blocked/failed/completed via the unified mailbox

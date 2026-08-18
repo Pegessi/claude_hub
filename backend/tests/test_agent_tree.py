@@ -995,3 +995,405 @@ async def test_concurrent_waits_wake_on_event(manager: WorkspaceManager, ws_id: 
     results = await asyncio.gather(*waiters, sender)
     for events in results[:3]:
         assert any(e.type == AgentEventType.MESSAGE for e in events)
+
+
+# ---------------------------------------------------------------------------
+# Idempotency namespacing: call_id scoped by workspace + action + target
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_call_id_reused_with_different_action_raises(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """Reusing a call_id for a different action must raise ValueError.
+
+    call_id idempotency is namespaced by (workspace, action, target), not
+    just workspace. The same call_id cannot be reused for a different
+    action even within the same workspace.
+    """
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    # First use of call_id "c1" as a spawn.
+    await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="c1",
+        )
+    )
+    # Reusing "c1" for a followup (different action) must fail.
+    child = manager.agent_tree.list_runs(ListRunsRequest(workspace_id=ws_id, root_id=root.id))[-1]
+    with pytest.raises(ValueError, match="already used"):
+        await manager.agent_tree.followup(
+            FollowupRequest(
+                workspace_id=ws_id,
+                recipient_id=child.id,
+                author_id=root.id,
+                message="again",
+                call_id="c1",
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_call_id_reused_with_different_target_raises(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """Reusing a call_id for a different target run must raise ValueError.
+
+    Even for the same action (spawn), reusing the call_id against a
+    different parent/target is rejected.
+    """
+    root_a = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    root_b = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root_a.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="c1",
+        )
+    )
+    with pytest.raises(ValueError, match="already used"):
+        await manager.agent_tree.spawn(
+            SpawnRequest(
+                workspace_id=ws_id,
+                parent_id=root_b.id,
+                executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+                initial_message="hi",
+                call_id="c1",
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_call_id_same_action_and_target_is_idempotent(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """Reusing a call_id for the same action+target returns the existing run."""
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child1 = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="c1",
+        )
+    )
+    child2 = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="c1",
+        )
+    )
+    assert child1.id == child2.id
+
+
+# ---------------------------------------------------------------------------
+# ACK cursor validation
+# ---------------------------------------------------------------------------
+
+
+def test_ack_sequence_exceeds_max_raises(manager: WorkspaceManager, ws_id: str) -> None:
+    """ACKing a sequence beyond the workspace's max sequence must raise."""
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    # No events yet -> max sequence is 0.
+    with pytest.raises(ValueError, match="exceeds workspace max sequence"):
+        manager.agent_tree.ack(ws_id, root.id, sequence=1)
+
+
+def test_ack_advances_cursor(manager: WorkspaceManager, ws_id: str) -> None:
+    """A valid ACK advances the run's ack_sequence cursor."""
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    manager.agent_tree.emit_event(
+        workspace_id=ws_id,
+        agent_run_id=root.id,
+        event_type=AgentEventType.PROGRESS,
+        author=root.id,
+        recipient=root.id,
+        call_id="e1",
+        payload={"message": "step"},
+    )
+    events = manager.agent_tree.get_events(ws_id, root.id, since_sequence=0, subtree=False)
+    max_seq = max(e.sequence for e in events)
+    run = manager.agent_tree.ack(ws_id, root.id, sequence=max_seq)
+    assert run.ack_sequence == max_seq
+
+
+# ---------------------------------------------------------------------------
+# Atomic persistence
+# ---------------------------------------------------------------------------
+
+
+def test_state_written_atomically_via_temp_file(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """State writes go through a temp file + os.replace, never a direct write.
+
+    We verify the atomic-write contract by patching ``os.replace`` to
+    confirm it is invoked (i.e. the write path uses the temp-file
+    rename pattern rather than truncating the target in place).
+    """
+    import os
+
+    real_replace = os.replace
+    calls: list[tuple] = []
+
+    def _spy_replace(src, dst):
+        calls.append((src, dst))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", _spy_replace)
+
+    manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+        title="root",
+    )
+    # _persist -> _save_state -> _atomic_write_text -> os.replace
+    assert len(calls) > 0
+    for src, dst in calls:
+        # The source is a temp file in the same directory as the target.
+        assert os.path.dirname(src) == os.path.dirname(str(dst))
+
+
+def test_persist_failure_fails_closed(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """If persistence fails, the action raises (fail closed)."""
+    import os
+
+    def _boom_replace(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", _boom_replace)
+
+    with pytest.raises(OSError, match="disk full"):
+        manager.agent_tree.create_root_run(
+            workspace_id=ws_id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            title="root",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Resident -> spawn -> report -> directed wake -> ACK E2E
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resident_spawn_report_wake_ack_e2e(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """Full vertical slice: resident spawns a managed-task child, the child
+    reports ready_for_review, the resident's wait returns the directed
+    event, and the resident ACKs the cursor.
+
+    This exercises:
+    - ManagedTaskAdapter.spawn creates a task with agent_run_id = run.id
+    - A report on that task bridges to an agent event addressed to the
+      resident (the run's supervisor)
+    - The resident's wait(subtree=True) returns only directed subtree events
+    - The resident's ack advances its persisted cursor
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentReportCreate,
+        AgentReportState,
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+        WorkspaceTaskCreate,
+        WorkspaceTaskMode,
+        WorkspaceTaskStatus,
+    )
+
+    ws_id = _make_workspace(manager, tmp_path)
+    resident_session_id = "resident-sess-e2e"
+    ws = manager.workspaces[ws_id]
+    manager.workspaces[ws_id] = ws.model_copy(
+        update={"resident_agent_session_id": resident_session_id}
+    )
+
+    # Resident root run.
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.MANAGED_TASK,
+        title="Resident",
+        context_ref=resident_session_id,
+    )
+
+    # Spawn a managed-task child. The adapter creates a workspace task
+    # tagged with agent_run_id = child.id and starts it.
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.MANAGED_TASK,
+            title="child",
+            initial_message="do the work",
+            call_id="spawn-child",
+        )
+    )
+    assert child.context_ref is not None
+    task = manager.tasks.get(child.context_ref)
+    assert task is not None
+    assert task.agent_run_id == child.id
+    assert task.status == WorkspaceTaskStatus.WORKING
+
+    # Worker session that owns the task.
+    now = datetime.utcnow()
+    session = ManagedSession(
+        id="worker-sess-e2e",
+        workspace_id=ws_id,
+        role=WorkspaceSessionRole.ORCHESTRATOR,
+        agent_type=AgentType.CLAUDE,
+        target=ExecutionTarget.LOCAL,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.WORKING,
+        task_id=task.id,
+        current_task_id=task.id,
+        tab_id="tab-e2e",
+        title="worker",
+        workspace_path=str(ws.path),
+        tmux_session="tmux-e2e",
+        created_at=now,
+        updated_at=now,
+    )
+    manager.sessions[session.id] = session
+
+    # Child reports ready_for_review -> bridges to a PROGRESS event with
+    # report_state=ready_for_review, addressed to the resident.
+    report = await manager.create_report(
+        session.id,
+        AgentReportCreate(
+            task_id=task.id,
+            state=AgentReportState.READY_FOR_REVIEW,
+            message="ready for review",
+            message_en="ready for review",
+            message_zh="待审核",
+        ),
+    )
+
+    # The run's status should be WAITING (review gate).
+    assert child.status == AgentRunStatus.WAITING
+
+    # Resident's wait(subtree=True) returns the directed event.
+    events = await manager.agent_tree.wait(
+        WaitRequest(
+            workspace_id=ws_id,
+            recipient_id=root.id,
+            since_sequence=0,
+            subtree=True,
+            timeout_seconds=1.0,
+        )
+    )
+    bridged = [e for e in events if e.call_id == f"report:{report.id}"]
+    assert len(bridged) == 1
+    assert bridged[0].recipient == root.id
+    assert bridged[0].author == child.id
+    assert bridged[0].payload.get("report_state") == "ready_for_review"
+
+    # Resident ACKs up to the event's sequence.
+    max_seq = max(e.sequence for e in events)
+    acked = manager.agent_tree.ack(ws_id, root.id, sequence=max_seq)
+    assert acked.ack_sequence == max_seq
+
+    # A second wait from the same cursor returns nothing new.
+    after = await manager.agent_tree.wait(
+        WaitRequest(
+            workspace_id=ws_id,
+            recipient_id=root.id,
+            since_sequence=max_seq,
+            subtree=True,
+            timeout_seconds=0.5,
+        )
+    )
+    assert after == []
+
+
+# ---------------------------------------------------------------------------
+# Adapter crash recovery: spawn reuses existing task by agent_run_id
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_spawn_recovers_existing_task_by_agent_run_id(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """If a previous spawn created a task (agent_run_id tagged) but the
+    run's context_ref was never persisted (crash), a retry reuses the
+    existing task instead of creating a duplicate.
+    """
+    from claude_hub.models import WorkspaceTaskStatus
+
+    ws_id = _make_workspace(manager, tmp_path)
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
+    )
+
+    # First spawn: creates the run and a task tagged with agent_run_id.
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.MANAGED_TASK,
+            title="child",
+            initial_message="do work",
+            call_id="recover-spawn",
+        )
+    )
+    task_id = child.context_ref
+    assert task_id is not None
+    task = manager.tasks.get(task_id)
+    assert task is not None
+    assert task.agent_run_id == child.id
+
+    # Simulate a crash: the task was created and started, but the run's
+    # context_ref was not persisted (cleared). The call_id record survives
+    # in the event stream.
+    child.context_ref = None
+
+    # Retry spawn with the same call_id. The idempotency path returns the
+    # existing run, and _recover_context_ref links it back to the task
+    # via agent_run_id.
+    child2 = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.MANAGED_TASK,
+            title="child",
+            initial_message="do work",
+            call_id="recover-spawn",
+        )
+    )
+    assert child2.id == child.id
+    assert child2.context_ref == task_id
+    # No duplicate task was created.
+    tasks_with_run_id = [
+        t for t in manager.tasks.values() if getattr(t, "agent_run_id", None) == child.id
+    ]
+    assert len(tasks_with_run_id) == 1

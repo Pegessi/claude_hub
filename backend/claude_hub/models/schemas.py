@@ -595,6 +595,10 @@ class WorkspaceTaskCreate(BaseModel):
     autonomy_policy: Optional[AutonomyPolicy] = None
     session_id: Optional[str] = None
     clear_context: Optional[bool] = None
+    # Agent tree run id that owns this task. Used by ManagedTaskAdapter to
+    # recover from crashes: a retry can find the existing task instead of
+    # creating a duplicate.
+    agent_run_id: Optional[str] = None
 
 
 class WorkspaceAttachmentCreate(BaseModel):
@@ -655,6 +659,8 @@ class WorkspaceTask(BaseModel):
     session_id: Optional[str] = None
     related_task_id: Optional[str] = None
     clear_context: Optional[bool] = None
+    # Agent tree run id that owns this task (set by ManagedTaskAdapter.spawn).
+    agent_run_id: Optional[str] = None
     dispatch_reason: Optional[str] = None
     dispatch_pending: bool = False
     system_internal: bool = False
