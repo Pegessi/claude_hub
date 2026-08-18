@@ -13,27 +13,28 @@ class _MessagingMixin:
         attachments: list[WorkspaceAttachmentCreate] | None = None,
         call_id: str | None = None,
     ) -> None:
-        """Send a message to a managed session's terminal with exactly-once
+        """Send a message to a managed session's terminal with at-least-once
         delivery semantics at the executor boundary.
 
-        Exactly-once is achieved by a combination of:
-        1. A durable outbox (``session.pending_call_ids``) persisted before
+        Delivery guarantees:
+        1. A durable outbox (``session.pending_call_ids``) is persisted before
            the send, so a crash before the send does not lose the message.
-        2. A ``[call_id:<id>]`` marker embedded in the message text, which
-           lets us verify delivery by inspecting the tmux pane output.
-        3. A post-send delivery check: after sending, we capture tmux output
-           and confirm the marker is present before moving the call_id to
-           ``session.delivered_call_ids``.
-        4. Crash recovery: if a call_id is left in ``pending_call_ids`` by a
-           crash between send and the delivered-persist, we re-check tmux
-           output. If the marker is present the message already reached the
-           executor, so we mark it delivered **without re-sending** —
-           guaranteeing delivery_count == 1. If the marker is absent (the
-           send never completed), we re-send.
+        2. After the send completes, the call_id is moved to
+           ``session.delivered_call_ids`` and persisted. A call_id already in
+           ``delivered_call_ids`` is skipped (sender-side dedup).
+        3. Crash recovery: if a call_id is left in ``pending_call_ids`` by a
+           crash between the send and the delivered-persist, the message is
+           **re-sent**. This is at-least-once: the same message may be
+           delivered more than once.
+        4. The ``[call_id:<id>]`` marker embedded in the message text lets the
+           receiving executor (the agent) dedupe: if it receives the same
+           call_id twice it can skip the duplicate.
 
-        The call_id marker also lets the receiving executor (the agent)
-        dedupe: if it ever receives the same call_id twice it can skip the
-        duplicate.
+        We do NOT claim exactly-once from the sender side. tmux pane output is
+        not a durable delivery record (it can be cleared, rolled off, or
+        capture can fail), so inferring delivery from pane text is unreliable.
+        The sender guarantees at-least-once; the receiver is responsible for
+        dedup via the call_id marker.
         """
         session = self.sessions.get(session_id)
         if not session:
@@ -48,20 +49,9 @@ class _MessagingMixin:
                 )
                 return
 
-            # --- Crash recovery: exactly-once check ---
-            # If this call_id is pending from a previous crashed send, the
-            # message may or may not have reached the executor. Inspect the
-            # tmux pane output for the call_id marker. If the marker is
-            # present, the message was already delivered: mark it delivered
-            # and return without re-sending. If absent, the send never
-            # completed: fall through and re-send.
-            if call_id in session.pending_call_ids:
-                if await self._tmux_output_contains_call_id(session.tmux_session, call_id):
-                    self._mark_session_call_id_delivered(session_id, call_id)
-                    return
-
             # Phase 1: persist call_id as pending at the executor boundary
-            # before sending. This is the durable outbox entry.
+            # before sending. This is the durable outbox entry. If we crash
+            # after this point, recovery will re-send (at-least-once).
             if call_id not in session.pending_call_ids:
                 self.sessions[session_id] = session.model_copy(
                     update={"pending_call_ids": session.pending_call_ids + [call_id]}
@@ -70,9 +60,9 @@ class _MessagingMixin:
                 session = self.sessions[session_id]
 
         # Build the outbound message. When a call_id is present, prefix the
-        # message with a [call_id:<id>] marker. This marker is the durable
-        # proof of delivery: we can grep the tmux pane output for it to
-        # decide whether a crashed send actually reached the executor.
+        # message with a [call_id:<id>] marker. This marker lets the receiving
+        # executor dedupe any duplicate delivery caused by the at-least-once
+        # crash-recovery re-send.
         full_message = message
         if call_id:
             full_message = f"[call_id:{call_id}]\n{message}"
@@ -89,27 +79,11 @@ class _MessagingMixin:
         )
 
         if call_id:
-            # Phase 2: mark the call_id as delivered. The send completed;
-            # the call_id marker in the message lets the executor dedupe any
-            # duplicate that might slip through (e.g. if we crash right
-            # here, recovery will find the marker in tmux output and skip
-            # the re-send).
+            # Phase 2: mark the call_id as delivered. The send completed.
+            # If we crash right here, the call_id stays in pending_call_ids
+            # and recovery will re-send (at-least-once). The receiver dedupes
+            # via the call_id marker.
             self._mark_session_call_id_delivered(session_id, call_id)
-
-    async def _tmux_output_contains_call_id(self, tmux_session: str, call_id: str) -> bool:
-        """Return True if the tmux pane output contains the call_id marker.
-
-        Used during crash recovery to decide whether a pending call_id was
-        actually delivered. If the marker is present, the message reached
-        the executor and we must not re-send (exactly-once). If we cannot
-        capture output (tmux unavailable), return False conservatively so
-        the caller re-sends (at-least-once fallback).
-        """
-        try:
-            output = await self._capture_tmux_output(tmux_session)
-        except RuntimeError:
-            return False
-        return f"[call_id:{call_id}]" in output
 
     def _mark_session_call_id_delivered(self, session_id: str, call_id: str) -> None:
         """Move ``call_id`` from pending to delivered on the session and persist."""

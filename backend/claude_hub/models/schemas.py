@@ -662,16 +662,16 @@ class WorkspaceTask(BaseModel):
     # Agent tree run id that owns this task (set by ManagedTaskAdapter.spawn).
     agent_run_id: Optional[str] = None
     # Call ids of followup messages already delivered to this task. Used for
-    # exactly-once delivery: a followup with a call_id already in this list
-    # is a no-op. Persisted with the task so delivery survives restarts.
+    # sender-side dedup: a followup with a call_id already in this list is a
+    # no-op. Persisted with the task so delivery survives restarts.
     delivered_call_ids: List[str] = Field(default_factory=list)
     # Call ids of followup messages that have been persisted to the outbox
     # but whose delivery may not have completed. On restart, any call_id in
-    # this list is re-delivered (idempotently) and then moved to
+    # this list is re-delivered (at-least-once) and then moved to
     # delivered_call_ids. This implements a crash-safe two-phase outbox:
-    # the receipt is persisted before delivery, so a crash between delivery
-    # and receipt-persist cannot cause a duplicate; a crash before delivery
-    # completion causes an idempotent retry, not a loss.
+    # the receipt is persisted before delivery, so a crash before delivery
+    # completion causes a re-send (at-least-once), not a loss. The receiving
+    # executor dedupes any duplicate via the [call_id:<id>] marker.
     pending_call_ids: List[str] = Field(default_factory=list)
     dispatch_reason: Optional[str] = None
     dispatch_pending: bool = False
@@ -743,13 +743,15 @@ class ManagedSession(BaseModel):
     # a review prompt for. Drives the cross-task /clear decision independently of
     # any task's mutable review_session_id (which abort/skip/stale-release null).
     last_review_task_id: Optional[str] = None
-    # Executor-boundary call_id tracking for exactly-once followup delivery.
+    # Executor-boundary call_id tracking for at-least-once followup delivery.
     # pending_call_ids: call_ids persisted to the outbox before send; a crash
     #   after send but before the delivered persist leaves the call_id here so
-    #   recovery re-delivers (the send must be idempotent at the executor).
-    # delivered_call_ids: call_ids the executor has acknowledged; send_session_message
-    #   skips any call_id already in this list. This is the durable ACK record
-    #   at the executor boundary and survives task deletion/recreation.
+    #   recovery re-sends (at-least-once). The receiving executor dedupes via
+    #   the [call_id:<id>] marker.
+    # delivered_call_ids: call_ids the sender has marked delivered;
+    #   send_session_message skips any call_id already in this list. This is
+    #   the sender-side dedup record at the executor boundary and survives
+    #   task deletion/recreation.
     pending_call_ids: List[str] = Field(default_factory=list)
     delivered_call_ids: List[str] = Field(default_factory=list)
     created_at: datetime

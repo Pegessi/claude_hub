@@ -112,13 +112,20 @@ Wraps the existing workspace task/session/report flow:
   - `QUEUED`: append the followup message to the prompt (worker picks it up
     when dispatched).
   - `WORKING`: `send_session_message` to deliver the message directly to the
-    running session. **Executor-boundary idempotency**: `send_session_message`
-    maintains a two-phase outbox on the `ManagedSession`
+    running session. **Executor-boundary at-least-once delivery**:
+    `send_session_message` maintains a two-phase outbox on the `ManagedSession`
     (`pending_call_ids` → `delivered_call_ids`). A `call_id` already in
     `session.delivered_call_ids` is skipped; otherwise it is persisted to
     `pending_call_ids` before send, then moved to `delivered_call_ids` after.
+    If the process crashes between the send and the delivered-persist, the
+    call_id stays in `pending_call_ids` and the message is **re-sent** on
+    recovery (at-least-once). The `[call_id:<id>]` marker embedded in the
+    message text lets the receiving executor (the agent) dedupe any duplicate
+    delivery. We do NOT claim exactly-once from the sender side: tmux pane
+    output is not a durable delivery record (it can be cleared, rolled off,
+    or capture can fail), so inferring delivery from pane text is unreliable.
     This closes the post-send crash window that a task-local prompt marker
-    cannot: the session-level ACK record survives task deletion/recreation.
+    cannot: the session-level outbox survives task deletion/recreation.
   - `REVIEW` / `DONE`: `continue_task` to send the task back to working.
   - Task not found: re-create it with the same `agent_run_id` so the run's
     `context_ref` stays valid. **Crash safety**: `run.context_ref` is
@@ -126,11 +133,14 @@ Wraps the existing workspace task/session/report flow:
     dispatch does not leave the run pointing at the deleted task (which
     would cause a duplicate task on retry). The `call_id` is also marked
     delivered on the new task.
-  - **Exactly-once delivery**: for `TODO`/`QUEUED`/`REVIEW`/`DONE`, `call_id`
-    is recorded in `task.delivered_call_ids` (persisted with the task) via a
-    two-phase outbox (`pending_call_ids` → `delivered_call_ids`). For
-    `WORKING`, the session-level outbox (above) is the durable ACK. A retry
-    with the same `call_id` is a no-op in both cases.
+  - **At-least-once delivery with receiver dedup**: for `TODO`/`QUEUED`/`REVIEW`/`DONE`,
+    `call_id` is recorded in `task.delivered_call_ids` (persisted with the
+    task) via a two-phase outbox (`pending_call_ids` → `delivered_call_ids`).
+    For `WORKING`, the session-level outbox (above) is the durable sender
+    record. A retry with the same `call_id` is a no-op on the sender side
+    (already in `delivered_call_ids`). A crash between send and
+    delivered-persist causes a re-send (at-least-once); the receiver dedupes
+    via the `[call_id:<id>]` marker.
 - `interrupt` → `abort_task`.
 - `get_status` → maps `WorkspaceTaskStatus` to `AgentRunStatus`.
 
@@ -358,14 +368,14 @@ sequence order:
   `delivered_call_ids` receipt atomically with delivery (via
   `_save_state()`), so a crash between delivery and outcome-event persist
   does not cause re-delivery on restart. For `WORKING` tasks, delivery is
-  **exactly-once** at the executor boundary: `send_session_message` embeds
-  a `[call_id:<id>]` marker in the message text and, on crash recovery
-  (call_id left in `session.pending_call_ids`), inspects the tmux pane
-  output for that marker. If the marker is present the message already
-  reached the executor, so it is marked delivered **without re-sending**
-  (`delivery_count == 1`). If the marker is absent the send never
-  completed, so it is re-sent. The marker also lets the receiving executor
-  (the agent) dedupe any duplicate that slips through. This recovers ALL
+  **at-least-once** at the executor boundary: `send_session_message` embeds
+  a `[call_id:<id>]` marker in the message text. On crash recovery (call_id
+  left in `session.pending_call_ids`), the message is **re-sent**. The
+  receiving executor (the agent) dedupes any duplicate by the call_id
+  marker. We do NOT inspect tmux pane output to infer delivery — pane text
+  can be cleared, rolled off, or capture can fail, so it is not a durable
+  delivery record. The sender guarantees at-least-once; the receiver is
+  responsible for dedup via the call_id marker. This recovers ALL
   unmatched followups in sequence order, not just the latest. After
   replaying followups, recovery still reconciles the run's status via the
   adapter's `get_status()` (the followup replay does not skip
@@ -424,15 +434,19 @@ sequence order:
   - `test_working_followup_session_outbox_survives_hard_exit_and_reload`:
     simulates a crash after `send_session_message` sends but before the
     session-level `delivered_call_ids` persist; reloads the manager; verifies
-    the `call_id` is in `pending_call_ids`. On reload, the tmux pane output
-    contains the `[call_id:<id>]` marker (the message already reached the
-    executor), so recovery marks it delivered **without re-sending**
-    (`delivery_count == 1`). A third call is skipped. This proves exactly-once
-    delivery across hard-exit + cold reload.
+    the `call_id` is in `pending_call_ids`. On reload, the message is
+    **re-sent** (at-least-once). The `[call_id:<id>]` marker in the message
+    lets the receiving executor dedupe the duplicate. A third call with the
+    same call_id is skipped (sender-side dedup via `delivered_call_ids`).
+    This proves at-least-once delivery across hard-exit + cold reload, with
+    receiver-side dedup responsibility.
   - `test_deleted_task_recreation_persists_context_ref_before_start_task`:
-    mocks `start_task` to raise after the context_ref persist; verifies
-    `run.context_ref` was already updated and persisted; reloads and confirms
-    no duplicate task is created on retry.
+    mocks `dispatch_workspace` to raise after `start_task` persists the
+    task's `QUEUED` status; verifies `run.context_ref` was already updated
+    and persisted; reloads and confirms no duplicate task is created on
+    retry AND `start_task` is not re-invoked (the task is already `QUEUED`,
+    so `followup` skips `start_task`). Exactly one task id and one total
+    start side effect.
   - `test_stopped_session_rejected_for_all_actions`: sets a session's status
     to `STOPPED` and verifies every action (spawn, send, followup, wait, ack,
     interrupt, list_runs, get_events) returns 403.
