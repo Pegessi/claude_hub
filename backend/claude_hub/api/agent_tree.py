@@ -204,7 +204,7 @@ async def interrupt(
         # The caller may interrupt any run in its subtree. For simplicity,
         # we check that the caller owns the run or its supervisor.
         run = _manager().get_run(req.run_id)
-        if run is not None:
+        if run is not None and session_id is not None:
             if run.context_ref != session_id and run.supervisor_id:
                 _assert_authority(_manager(), run.supervisor_id, session_id)
             elif run.context_ref != session_id:

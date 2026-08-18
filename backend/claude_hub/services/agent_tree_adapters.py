@@ -165,13 +165,14 @@ class ManagedTaskAdapter(ExecutorAdapter):
         task_id = run.context_ref
         if not task_id:
             return
-        try:
-            await self._wm.abort_task(
-                task_id,
-                ManualTaskControlRequest(reason=reason or "interrupted by supervisor"),
-            )
-        except Exception:
-            logger.exception("Failed to abort managed task %s for run %s", task_id, run.id)
+        # Do NOT swallow exceptions: the caller (AgentTreeManager.interrupt)
+        # relies on the exception to know the interrupt did not complete.
+        # The INTERRUPTED intent event is already persisted, so recovery
+        # will retry the adapter call on restart.
+        await self._wm.abort_task(
+            task_id,
+            ManualTaskControlRequest(reason=reason or "interrupted by supervisor"),
+        )
 
     def get_status(self, run: "AgentRun") -> "AgentRunStatus":
         from claude_hub.models.agent_tree import AgentRunStatus
@@ -291,22 +292,33 @@ class ResidentRootAdapter(ExecutorAdapter):
         pass
 
     async def followup(self, run: "AgentRun", message: str) -> None:
-        # The resident is always running; it will process the message on
-        # its next cycle. No need to wake it explicitly.
-        pass
+        # The resident runs on a periodic cycle, but a followup should wake
+        # it immediately so it processes the message without waiting for the
+        # next tick. request_resident_run stamps a flag that the monitor
+        # loop consumes on the next tick (bypassing the interval gate).
+        try:
+            self._wm.request_resident_run(run.workspace_id)
+        except ValueError:
+            # Resident not enabled for this workspace; the message stays in
+            # the mailbox and will be picked up if/when the resident is
+            # enabled. No error to the caller.
+            logger.debug(
+                "followup to resident run %s but resident not enabled in "
+                "workspace %s; message stays in mailbox",
+                run.id,
+                run.workspace_id,
+            )
 
     async def interrupt(self, run: "AgentRun", reason: Optional[str] = None) -> None:
         # Abort the resident session if it exists. The context_ref is the
-        # resident session id.
+        # resident session id. Do NOT swallow exceptions: the caller relies
+        # on them to know the interrupt did not complete.
         session_id = run.context_ref
         if not session_id:
             return
-        try:
-            session = self._wm.sessions.get(session_id)
-            if session is not None:
-                await self._wm.delete_session(session_id)
-        except Exception:
-            logger.exception("Failed to abort resident session %s for run %s", session_id, run.id)
+        session = self._wm.sessions.get(session_id)
+        if session is not None:
+            await self._wm.delete_session(session_id)
 
     def get_status(self, run: "AgentRun") -> "AgentRunStatus":
         from claude_hub.models.agent_tree import AgentRunStatus

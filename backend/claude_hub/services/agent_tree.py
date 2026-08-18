@@ -543,17 +543,16 @@ class AgentTreeManager:
             last_task_message=req.initial_message,
         )
         self._runs[run.id] = run
-        try:
-            self._persist()
-        except Exception:
-            # Rollback: remove the run so in-memory state matches disk.
-            del self._runs[run.id]
-            raise
-
         # Emit a dispatched event addressed to the child. This is the
         # durable "intent" record: if the process crashes after this point
         # but before the adapter returns, recovery will retry the spawn.
-        self._append_event(
+        #
+        # The run node and the DISPATCHED event (which carries the call_id)
+        # are persisted as a SINGLE atomic unit. If they were persisted in
+        # two separate steps, a crash between them would leave a run on disk
+        # with no call_id record, so a retried spawn with the same call_id
+        # would create a duplicate child.
+        dispatched_event, _ = self._append_event(
             workspace_id=req.workspace_id,
             agent_run_id=run.id,
             event_type=AgentEventType.DISPATCHED,
@@ -564,7 +563,20 @@ class AgentTreeManager:
             target=parent.id,
             fingerprint=fingerprint,
             payload={"message": req.initial_message},
+            persist=False,
         )
+        try:
+            self._persist()
+        except Exception:
+            # Rollback: remove the run and the intent event so in-memory
+            # state matches disk (no partial durable state).
+            del self._runs[run.id]
+            ws_events = self._events.get(req.workspace_id, [])
+            if ws_events and ws_events[-1] is dispatched_event:
+                ws_events.pop()
+            self._call_index.get(req.workspace_id, {}).pop(req.call_id, None)
+            self._next_seq[req.workspace_id] = dispatched_event.sequence
+            raise
 
         # Start the executor. The adapter call is in its own try/except so
         # that an adapter failure is distinguished from a late persist
@@ -760,17 +772,23 @@ class AgentTreeManager:
         if is_new:
             # Batch the MESSAGE event with last_task_message update and
             # persist as a single atomic unit. If persist fails, both are
-            # rolled back.
+            # rolled back to their previous values.
+            old_last_message = recipient.last_task_message
+            old_updated_at = recipient.updated_at
             self._set_last_message(recipient.id, req.message, persist=False)
             try:
                 self._persist()
             except Exception:
+                # Rollback: remove the event and restore last_task_message
+                # to its previous value (NOT None — the old message must
+                # survive a failed persist).
                 ws_events = self._events.get(req.workspace_id, [])
                 if ws_events and ws_events[-1] is event:
                     ws_events.pop()
                 self._call_index.get(req.workspace_id, {}).pop(req.call_id, None)
                 self._next_seq[req.workspace_id] = event.sequence
-                recipient.last_task_message = None
+                recipient.last_task_message = old_last_message
+                recipient.updated_at = old_updated_at
                 raise
             # Wake the recipient (and its ancestors) after the batched
             # persist succeeds so supervisors observing the mailbox see
@@ -834,18 +852,24 @@ class AgentTreeManager:
 
         # Intent phase: the MESSAGE event is the durable intent record.
         # Batch it with last_task_message update and persist as a single
-        # atomic unit. If persist fails, both are rolled back.
+        # atomic unit. If persist fails, both are rolled back to their
+        # previous values.
+        old_last_message = recipient.last_task_message
+        old_updated_at = recipient.updated_at
         self._set_last_message(recipient.id, req.message, persist=False)
         try:
             self._persist()
         except Exception:
-            # Rollback: remove the event and restore last_message.
+            # Rollback: remove the event and restore last_task_message to
+            # its previous value (NOT None — the old message must survive
+            # a failed persist).
             ws_events = self._events.get(req.workspace_id, [])
             if ws_events and ws_events[-1] is event:
                 ws_events.pop()
             self._call_index.get(req.workspace_id, {}).pop(req.call_id, None)
             self._next_seq[req.workspace_id] = event.sequence
-            recipient.last_task_message = None
+            recipient.last_task_message = old_last_message
+            recipient.updated_at = old_updated_at
             raise
 
         # Delivery: resume the executor's turn. The adapter call is in its
@@ -1168,6 +1192,20 @@ class AgentTreeManager:
             persist=False,
         )
         if not is_new:
+            # Duplicate call_id: the event already exists in memory. It may
+            # not have been persisted yet (a previous _persist() failed).
+            # Try to persist it now so the event survives a restart. If
+            # persist fails again, the in-memory event is kept and the
+            # caller can retry.
+            try:
+                self._persist()
+            except Exception:
+                logger.exception(
+                    "emit_event: failed to persist duplicate event seq=%s "
+                    "call_id=%s; keeping in-memory event for retry",
+                    event.sequence,
+                    call_id,
+                )
             return event
 
         run = self._runs.get(agent_run_id)
@@ -1201,8 +1239,21 @@ class AgentTreeManager:
             if msg:
                 self._set_last_message(agent_run_id, str(msg), persist=False)
 
-        # Single atomic persist for the event + status + last_message.
-        self._persist()
+        # Single atomic persist for the event + status + last_message. The
+        # event represents the executor's actual state, so on persist failure
+        # we keep the in-memory state (rollback_on_error=False semantics)
+        # and re-raise so the caller can retry. The next successful persist
+        # will reconcile the durable state.
+        try:
+            self._persist()
+        except Exception:
+            logger.exception(
+                "emit_event: persist failed for event seq=%s call_id=%s; "
+                "keeping in-memory event/status/message for retry",
+                event.sequence,
+                call_id,
+            )
+            raise
 
         # Wake the recipient (and its ancestors) after the batched persist
         # so supervisors observing the mailbox see the new event.
@@ -1311,6 +1362,33 @@ class AgentTreeManager:
         self._call_index[workspace_id] = ws_calls
         self._next_seq[workspace_id] = max_seq + 1
 
+        # Migration: old resident root runs may have been persisted without a
+        # context_ref (the resident session id). Link them to the workspace's
+        # resident session so authority checks (run.context_ref == session_id)
+        # work for pre-existing roots.
+        from claude_hub.models.agent_tree import ExecutorKind
+
+        workspace = self._wm.workspaces.get(workspace_id)
+        resident_session_id = (
+            getattr(workspace, "resident_agent_session_id", None) if workspace else None
+        )
+        for run in self._runs.values():
+            if run.workspace_id != workspace_id:
+                continue
+            if (
+                run.parent_id is None
+                and run.executor_kind == ExecutorKind.RESIDENT_ROOT
+                and run.context_ref is None
+                and resident_session_id is not None
+            ):
+                run.context_ref = resident_session_id
+                run.updated_at = datetime.utcnow()
+                logger.info(
+                    "Migrated resident root run %s: set context_ref=%s",
+                    run.id,
+                    resident_session_id,
+                )
+
     async def recover_pending_runs(self, workspace_id: str) -> None:
         """Recover runs that were persisted but never reached a consistent state.
 
@@ -1371,14 +1449,16 @@ class AgentTreeManager:
             # intent was persisted but the adapter call or status update was
             # lost. Retry the adapter followup (idempotent) and set status to
             # RUNNING only after the adapter call succeeds. This applies even
-            # to INTERRUPTED/COMPLETED runs because followup resumes them.
+            # to RUNNING/INTERRUPTED/COMPLETED runs because:
+            # - A RUNNING run may have a pending followup that was never
+            #   delivered (crash between intent persist and adapter call).
+            # - INTERRUPTED/COMPLETED runs are resumed by followup.
             # FAILED runs cannot be resumed.
             if (
                 latest_event is not None
                 and latest_event.type == AgentEventType.MESSAGE
                 and (latest_event.payload or {}).get("followup") is True
                 and run.status != AgentRunStatus.FAILED
-                and run.status != AgentRunStatus.RUNNING
             ):
                 try:
                     last_msg = run.last_task_message or ""
