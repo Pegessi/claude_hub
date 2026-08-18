@@ -129,12 +129,20 @@ def _assert_authority(
 
     Ownership rules:
     - Local network (session_id is None): authority not enforced.
+    - Session must be a live authenticated ManagedSession or human
+      LoginSession; forged/stale cookies get 403 before any ownership check.
     - Agent session that executes the run: allowed.
     - Human user (valid LoginSession): owns every run in the workspace.
     - Otherwise: 403.
     """
     if session_id is None:
         return
+    # Reject forged or stale session cookies before checking ownership.
+    if not _is_authenticated_session(manager, session_id):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Session {session_id} is not authenticated",
+        )
     run = manager.get_run(author_id)
     if run is None:
         raise HTTPException(status_code=404, detail=f"Author run {author_id} not found")
@@ -206,6 +214,12 @@ async def wait(
         # may wait on events in their workspace. For agent sessions, the
         # recipient must be a run the session owns or supervises.
         if session_id is not None:
+            # Reject forged or stale session cookies first.
+            if not _is_authenticated_session(_manager(), session_id):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Session {session_id} is not authenticated",
+                )
             run = _manager().get_run(req.recipient_id)
             if run is not None:
                 if not _session_owns_run(_manager(), run, session_id):
@@ -216,11 +230,6 @@ async def wait(
                             status_code=403,
                             detail=f"Session {session_id} may not wait on run {req.recipient_id}",
                         )
-            elif not _is_human_session(session_id):
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Session {session_id} is not authenticated",
-                )
         return await _manager().wait(req)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -256,6 +265,12 @@ async def interrupt(
         # we check that the caller owns the run or its supervisor.
         run = _manager().get_run(req.run_id)
         if run is not None and session_id is not None:
+            # Reject forged or stale session cookies first.
+            if not _is_authenticated_session(_manager(), session_id):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Session {session_id} is not authenticated",
+                )
             if not _session_owns_run(_manager(), run, session_id):
                 if run.supervisor_id:
                     _assert_authority(_manager(), run.supervisor_id, session_id)

@@ -129,7 +129,7 @@ class ManagedTaskAdapter(ExecutorAdapter):
         if task is None:
             # The task was deleted (e.g. by abort). Re-create it with the
             # same agent_run_id so the run's context_ref still points to a
-            # valid task.
+            # valid task. The followup message becomes the new task's prompt.
             from claude_hub.models.schemas import (
                 AgentType,
                 WorkspaceTaskCreate,
@@ -148,7 +148,14 @@ class ManagedTaskAdapter(ExecutorAdapter):
             )
             await self._wm.start_task(new_task.id)
             run.context_ref = str(new_task.id)
-            # Persist the new task so a crash does not lose it.
+            # Mark the call_id as delivered on the new task so a retry does
+            # not re-deliver. Persist atomically with the task creation.
+            if call_id:
+                recreated = self._wm.tasks.get(new_task.id)
+                if recreated is not None and call_id not in recreated.delivered_call_ids:
+                    self._wm.tasks[new_task.id] = recreated.model_copy(
+                        update={"delivered_call_ids": recreated.delivered_call_ids + [call_id]}
+                    )
             self._wm._save_state()
             return
 
@@ -163,10 +170,24 @@ class ManagedTaskAdapter(ExecutorAdapter):
             )
             return
 
+        # --- Crash-safe two-phase outbox ---
+        # Phase 1: persist the call_id as pending BEFORE delivery. This is
+        # the durable receipt: if we crash after this point, recovery will
+        # see the call_id in pending_call_ids and re-deliver (idempotently).
+        # If we crash before this point, the call_id is not tracked and
+        # recovery will replay the followup event from scratch.
+        if call_id:
+            current = self._wm.tasks.get(task_id)
+            if current is not None and call_id not in current.pending_call_ids:
+                self._wm.tasks[task_id] = current.model_copy(
+                    update={"pending_call_ids": current.pending_call_ids + [call_id]}
+                )
+                self._wm._save_state()
+
         # Re-fetch the task in case it changed (e.g. dispatched to a worker
         # between the top check and now). Each branch is idempotent: it
         # checks the current status before acting, so a re-delivery after a
-        # crash (receipt not yet persisted) is a no-op or safe repeat.
+        # crash (receipt persisted as pending) is a no-op or safe repeat.
         task = self._wm.tasks.get(task_id)
         if task is None:
             return
@@ -194,8 +215,16 @@ class ManagedTaskAdapter(ExecutorAdapter):
         elif task.status == WorkspaceTaskStatus.WORKING:
             # The agent is actively running. Send the followup message
             # directly to its session so it processes it immediately.
-            if task.session_id:
-                await self._wm.send_session_message(task.session_id, message)
+            # Idempotency: the [followup] marker in the prompt records that
+            # the message was sent; a re-delivery after a crash skips the
+            # send if the marker is already present.
+            if f"[followup] {message}" not in task.prompt:
+                if task.session_id:
+                    await self._wm.send_session_message(task.session_id, message)
+                updated = task.model_copy(
+                    update={"prompt": f"{task.prompt}\n\n[followup] {message}"}
+                )
+                self._wm.tasks[task_id] = updated
         elif task.status in (
             WorkspaceTaskStatus.REVIEW,
             WorkspaceTaskStatus.DONE,
@@ -205,18 +234,22 @@ class ManagedTaskAdapter(ExecutorAdapter):
                 ContinueTaskRequest(message=message),
             )
 
-        # Record the call_id as delivered so a retry (e.g. after a crash
-        # between adapter success and outcome persist) does not re-deliver.
-        # Persist immediately so the receipt is durable before the adapter
-        # returns; the agent tree's outcome-event persist is a secondary
-        # guarantee.
+        # Phase 2: move the call_id from pending to delivered. This marks
+        # the outbox entry as complete. Persist immediately so a crash
+        # after this point does not cause a re-delivery.
         if call_id:
             current = self._wm.tasks.get(task_id)
-            if current is not None and call_id not in current.delivered_call_ids:
-                updated = current.model_copy(
-                    update={"delivered_call_ids": current.delivered_call_ids + [call_id]}
+            if current is not None:
+                pending = [c for c in current.pending_call_ids if c != call_id]
+                delivered = current.delivered_call_ids
+                if call_id not in delivered:
+                    delivered = delivered + [call_id]
+                self._wm.tasks[task_id] = current.model_copy(
+                    update={
+                        "pending_call_ids": pending,
+                        "delivered_call_ids": delivered,
+                    }
                 )
-                self._wm.tasks[task_id] = updated
                 self._wm._save_state()
 
     async def interrupt(self, run: "AgentRun", reason: Optional[str] = None) -> None:
