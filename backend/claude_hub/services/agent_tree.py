@@ -69,11 +69,13 @@ class AgentTreeManager:
         self._events: Dict[str, List[AgentEvent]] = {}
         # Per-workspace next sequence number.
         self._next_seq: Dict[str, int] = {}
-        # call_id idempotency index, scoped by workspace:
-        #   _call_index[workspace_id][call_id] = event
-        # This prevents a call_id from one workspace colliding with the same
-        # call_id in another workspace.
-        self._call_index: Dict[str, Dict[str, AgentEvent]] = {}
+        # call_id idempotency index, scoped by workspace + action + target:
+        #   _call_index[workspace_id][call_id] = {
+        #       "action": str, "target": str, "event": AgentEvent
+        #   }
+        # Reusing the same call_id for a different action or target is a
+        # caller bug and is rejected (ValueError).
+        self._call_index: Dict[str, Dict[str, dict]] = {}
         # Per-run asyncio.Event for wait() wakeups.
         self._run_events: Dict[str, asyncio.Event] = {}
         # Per-run asyncio.Lock to make wait() race-free (no lost wakeups).
@@ -101,26 +103,58 @@ class AgentTreeManager:
         """Persist the agent tree (and full workspace state) to disk.
 
         Called after every run/event/status mutation so the durable mailbox
-        survives a process crash. Failures are logged but not raised so a
-        persistence error cannot break the in-memory coordination path.
+        survives a process crash. Failures are re-raised so a persistence
+        error fails the action closed (the in-memory state is not left
+        uncommitted).
         """
-        try:
-            self._wm._save_state()
-        except Exception:
-            logger.exception("Failed to persist agent tree state")
+        self._wm._save_state()
 
     def _validate_workspace(self, workspace_id: str) -> None:
         """Raise ValueError if the workspace does not exist."""
         if workspace_id not in self._wm.workspaces:
             raise ValueError(f"Workspace {workspace_id} not found")
 
-    def _call_key(self, workspace_id: str, call_id: str) -> Optional[AgentEvent]:
-        """Look up an existing event by (workspace_id, call_id)."""
+    def _call_record(self, workspace_id: str, call_id: str) -> Optional[dict]:
+        """Look up an existing call record by (workspace_id, call_id).
+
+        Returns the full record dict (``{"action", "target", "event"}``) or
+        ``None``.
+        """
         return self._call_index.get(workspace_id, {}).get(call_id)
 
-    def _record_call(self, workspace_id: str, call_id: str, event: AgentEvent) -> None:
-        """Record a call_id -> event mapping scoped to the workspace."""
-        self._call_index.setdefault(workspace_id, {})[call_id] = event
+    def _call_key(self, workspace_id: str, call_id: str) -> Optional[AgentEvent]:
+        """Look up an existing event by (workspace_id, call_id)."""
+        record = self._call_record(workspace_id, call_id)
+        return record["event"] if record is not None else None
+
+    def _record_call(
+        self,
+        workspace_id: str,
+        call_id: str,
+        action: str,
+        target: str,
+        event: AgentEvent,
+    ) -> None:
+        """Record a call_id -> {action, target, event} mapping.
+
+        Scoped to the workspace. If the call_id was already used for a
+        different action or target, raises ValueError.
+        """
+        existing = self._call_index.get(workspace_id, {}).get(call_id)
+        if existing is not None:
+            if existing["action"] != action or existing["target"] != target:
+                raise ValueError(
+                    f"call_id {call_id!r} already used for action="
+                    f"{existing['action']!r} target={existing['target']!r} "
+                    f"in workspace {workspace_id}; cannot reuse for "
+                    f"action={action!r} target={target!r}"
+                )
+            return
+        self._call_index.setdefault(workspace_id, {})[call_id] = {
+            "action": action,
+            "target": target,
+            "event": event,
+        }
 
     def _append_event(
         self,
@@ -131,21 +165,32 @@ class AgentTreeManager:
         author: str,
         recipient: Optional[str],
         call_id: str,
+        action: str,
+        target: str,
         correlation_id: Optional[str] = None,
         payload: Optional[dict] = None,
     ) -> Tuple[AgentEvent, bool]:
         """Append an event to the workspace stream.
 
         Idempotent on ``(workspace_id, call_id)``: if a call with the same
-        id was already recorded in this workspace, return the existing event
-        and ``is_new=False``.
+        id was already recorded in this workspace for the same ``action``
+        and ``target``, return the existing event and ``is_new=False``.
+        Reusing the same call_id for a different action or target raises
+        ``ValueError``.
 
         Returns ``(event, is_new)`` so callers can skip adapter side effects
         on duplicate calls.
         """
-        existing = self._call_key(workspace_id, call_id)
+        existing = self._call_record(workspace_id, call_id)
         if existing is not None:
-            return existing, False
+            if existing["action"] != action or existing["target"] != target:
+                raise ValueError(
+                    f"call_id {call_id!r} already used for action="
+                    f"{existing['action']!r} target={existing['target']!r} "
+                    f"in workspace {workspace_id}; cannot reuse for "
+                    f"action={action!r} target={target!r}"
+                )
+            return existing["event"], False
 
         seq = self._next_sequence(workspace_id)
         event = AgentEvent(
@@ -156,11 +201,13 @@ class AgentTreeManager:
             type=event_type,
             author=author,
             recipient=recipient,
+            action=action,
+            target=target,
             payload=payload or {},
             created_at=datetime.utcnow(),
         )
         self._events.setdefault(workspace_id, []).append(event)
-        self._record_call(workspace_id, call_id, event)
+        self._record_call(workspace_id, call_id, action, target, event)
 
         # Wake any waiters on the recipient run (and its ancestors, since
         # supervisors listen to their subtree).
@@ -211,6 +258,27 @@ class AgentTreeManager:
             r for r in self._runs.values() if r.parent_id == parent_id and r.status not in terminal
         ]
 
+    def _recover_context_ref(self, run: AgentRun) -> None:
+        """Recover a run's context_ref from its executor's side effects.
+
+        If the process crashed after the adapter created the executor
+        context (e.g. a workspace task) but before the run's context_ref
+        was persisted, this method finds the existing context and links it
+        back to the run.
+        """
+        if run.context_ref is not None:
+            return
+        if run.executor_kind == ExecutorKind.MANAGED_TASK:
+            for task in self._wm.tasks.values():
+                if (
+                    task.workspace_id == run.workspace_id
+                    and getattr(task, "agent_run_id", None) == run.id
+                ):
+                    run.context_ref = str(task.id)
+                    run.updated_at = datetime.utcnow()
+                    self._persist()
+                    return
+
     # ------------------------------------------------------------------
     # Public actions
     # ------------------------------------------------------------------
@@ -231,11 +299,24 @@ class AgentTreeManager:
             raise ValueError("Parent run belongs to a different workspace")
 
         # Idempotency: if this call_id already produced a run in this
-        # workspace, return it.
-        existing_event = self._call_key(req.workspace_id, req.call_id)
-        if existing_event is not None:
-            existing_run = self._runs.get(existing_event.agent_run_id)
+        # workspace, return it. If the run has no context_ref (e.g. the
+        # process crashed after the adapter created the task but before
+        # context_ref was persisted), recover it from the task that carries
+        # this run's id as agent_run_id.
+        existing_record = self._call_record(req.workspace_id, req.call_id)
+        if existing_record is not None:
+            # Reject call_id reuse for a different action or target.
+            if existing_record["action"] != "spawn" or existing_record["target"] != parent.id:
+                raise ValueError(
+                    f"call_id {req.call_id!r} already used for action="
+                    f"{existing_record['action']!r} target={existing_record['target']!r} "
+                    f"in workspace {req.workspace_id}; cannot reuse for "
+                    f"action='spawn' target={parent.id!r}"
+                )
+            existing_run = self._runs.get(existing_record["event"].agent_run_id)
             if existing_run is not None:
+                if existing_run.context_ref is None:
+                    self._recover_context_ref(existing_run)
                 return existing_run
 
         # Parent/child concurrency limit: a supervisor may not have more
@@ -272,6 +353,8 @@ class AgentTreeManager:
             author=parent.id,
             recipient=run.id,
             call_id=req.call_id,
+            action="spawn",
+            target=parent.id,
             payload={"message": req.initial_message},
         )
 
@@ -287,6 +370,8 @@ class AgentTreeManager:
                 author=run.id,
                 recipient=parent.id,
                 call_id=f"{req.call_id}:started",
+                action="spawn:started",
+                target=run.id,
                 payload={"context_ref": context_ref},
             )
         except Exception as exc:
@@ -299,6 +384,8 @@ class AgentTreeManager:
                 author=run.id,
                 recipient=parent.id,
                 call_id=f"{req.call_id}:failed",
+                action="spawn:failed",
+                target=run.id,
                 payload={"error": str(exc)},
             )
             raise
@@ -328,6 +415,8 @@ class AgentTreeManager:
             author=req.author_id,
             recipient=recipient.id,
             call_id=req.call_id,
+            action="send",
+            target=recipient.id,
             correlation_id=req.correlation_id,
             payload={"message": req.message},
         )
@@ -363,6 +452,8 @@ class AgentTreeManager:
             author=req.author_id,
             recipient=recipient.id,
             call_id=req.call_id,
+            action="followup",
+            target=recipient.id,
             correlation_id=req.correlation_id,
             payload={"message": req.message, "followup": True},
         )
@@ -385,6 +476,8 @@ class AgentTreeManager:
                 author=recipient.id,
                 recipient=req.author_id,
                 call_id=f"{req.call_id}:failed",
+                action="followup:failed",
+                target=recipient.id,
                 payload={"error": str(exc)},
             )
             raise
@@ -433,7 +526,8 @@ class AgentTreeManager:
         """Advance a run's acknowledged sequence cursor.
 
         The cursor is persisted so a restarted supervisor can resume from
-        where it left off. The cursor only moves forward.
+        where it left off. The cursor only moves forward and may not exceed
+        the current maximum sequence number in the workspace.
         """
         self._validate_workspace(workspace_id)
         run = self._runs.get(run_id)
@@ -441,6 +535,10 @@ class AgentTreeManager:
             raise KeyError(f"Run {run_id} not found")
         if run.workspace_id != workspace_id:
             raise ValueError("Run belongs to a different workspace")
+
+        max_seq = self._next_seq.get(workspace_id, 1) - 1
+        if sequence > max_seq:
+            raise ValueError(f"ACK sequence {sequence} exceeds workspace max sequence {max_seq}")
         if sequence > run.ack_sequence:
             run.ack_sequence = sequence
             run.updated_at = datetime.utcnow()
@@ -462,9 +560,16 @@ class AgentTreeManager:
             raise ValueError("Run belongs to a different workspace")
 
         # Idempotency: if this call_id already interrupted in this workspace,
-        # return the run.
-        existing_event = self._call_key(req.workspace_id, req.call_id)
-        if existing_event is not None:
+        # return the run. Reject call_id reuse for a different action or target.
+        existing_record = self._call_record(req.workspace_id, req.call_id)
+        if existing_record is not None:
+            if existing_record["action"] != "interrupt" or existing_record["target"] != run.id:
+                raise ValueError(
+                    f"call_id {req.call_id!r} already used for action="
+                    f"{existing_record['action']!r} target={existing_record['target']!r} "
+                    f"in workspace {req.workspace_id}; cannot reuse for "
+                    f"action='interrupt' target={run.id!r}"
+                )
             return run
 
         try:
@@ -480,6 +585,8 @@ class AgentTreeManager:
             author=run.id,
             recipient=run.supervisor_id,
             call_id=req.call_id,
+            action="interrupt",
+            target=run.id,
             payload={"reason": req.reason},
         )
         return run
@@ -524,18 +631,16 @@ class AgentTreeManager:
             return []
         all_events = self._events.get(workspace_id, [])
         if subtree:
-            # Events authored by any run in the subtree, or addressed to
-            # this run.
+            # Events addressed to this run, or authored by any run in its
+            # subtree. We do NOT include events merely because their
+            # agent_run_id is in the subtree — that would leak events
+            # directed at a sibling's mailbox to this supervisor.
             subtree_ids = self._subtree_run_ids(run)
             return [
                 e
                 for e in all_events
                 if e.sequence > since_sequence
-                and (
-                    e.recipient == run_id
-                    or e.author in subtree_ids
-                    or e.agent_run_id in subtree_ids
-                )
+                and (e.recipient == run_id or e.author in subtree_ids)
             ]
         return [
             e
@@ -583,6 +688,8 @@ class AgentTreeManager:
             author=author,
             recipient=recipient,
             call_id=call_id,
+            action="emit",
+            target=agent_run_id,
             payload=payload,
         )
         if not is_new:
@@ -603,6 +710,13 @@ class AgentTreeManager:
                 self._update_run_status(agent_run_id, AgentRunStatus.WAITING)
             elif event_type == AgentEventType.TOOL_WAIT:
                 self._update_run_status(agent_run_id, AgentRunStatus.WAITING)
+            else:
+                # For non-terminal events, check the report_state in the
+                # payload. READY_FOR_REVIEW and REVIEW_STARTED mean the run
+                # is waiting for review to complete.
+                report_state = (payload or {}).get("report_state")
+                if report_state in {"ready_for_review", "review_started"}:
+                    self._update_run_status(agent_run_id, AgentRunStatus.WAITING)
 
             msg = (payload or {}).get("message")
             if msg:
@@ -674,9 +788,15 @@ class AgentTreeManager:
         self._events[workspace_id] = events
 
         max_seq = 0
-        ws_calls: Dict[str, AgentEvent] = {}
+        ws_calls: Dict[str, dict] = {}
         for event in events:
-            ws_calls[event.call_id] = event
+            action = event.action or "emit"
+            target = event.target or event.agent_run_id
+            ws_calls[event.call_id] = {
+                "action": action,
+                "target": target,
+                "event": event,
+            }
             if event.sequence > max_seq:
                 max_seq = event.sequence
         self._call_index[workspace_id] = ws_calls

@@ -65,6 +65,7 @@ class _TasksMixin:
             related_task_id=payload.related_task_id,
             session_id=payload.session_id or None,
             clear_context=payload.clear_context,
+            agent_run_id=payload.agent_run_id,
             system_internal=system_internal,
             internal_kind=internal_kind,
             created_at=now,
