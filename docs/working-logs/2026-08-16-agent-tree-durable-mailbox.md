@@ -366,8 +366,15 @@ this change:
 1. `_load_nested_state` calls `agent_tree.load_from_dict(workspace_id, data)`.
 2. If `agent_runs` / `agent_events` are absent (old state), `load_from_dict`
    initializes empty collections.
-3. `_ensure_resident_root_run` creates the resident root run lazily on the
-   next workspace access.
+3. **Historical managed_task root → resident_root migration**: any root run
+   (`parent_id is None`) persisted as `executor_kind=managed_task` is
+   converted to `resident_root`. This covers runs created before the
+   `resident_root` executor kind existed. The migration also links the
+   resident root run to the workspace's `resident_agent_session_id` if its
+   `context_ref` is null. See `agent_tree.py:load_from_dict` (lines
+   1388–1428).
+4. The resident root run is created lazily by the workspace manager /
+   resident agent on the next workspace access if it does not yet exist.
 
 Existing workspace tasks, sessions, and reports are unaffected. The agent
 tree is a new layer on top of the existing task flow.

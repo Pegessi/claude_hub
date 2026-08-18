@@ -63,54 +63,60 @@ def _get_session_id(
     return session_id
 
 
+def _session_owns_run(manager: "AgentTreeManager", run: "AgentRun", session_id: str) -> bool:
+    """Return True if ``session_id`` owns ``run`` as its executor.
+
+    - ``managed_task`` runs: the referenced task's ``session_id`` matches.
+    - ``resident_root`` / ``native_subagent`` / ``external_job``:
+      ``run.context_ref`` matches.
+    """
+    from ..models.agent_tree import ExecutorKind
+
+    if run.executor_kind == ExecutorKind.MANAGED_TASK:
+        wm = manager._wm
+        task = wm.tasks.get(run.context_ref) if run.context_ref else None
+        return task is not None and task.session_id == session_id
+    return run.context_ref == session_id
+
+
+def _is_human_session(session_id: str) -> bool:
+    """Return True if ``session_id`` resolves to a valid human LoginSession."""
+    from ..auth.session import get_session
+
+    return get_session(session_id) is not None
+
+
+def _is_authenticated_session(manager: "AgentTreeManager", session_id: str) -> bool:
+    """Return True if ``session_id`` is a human LoginSession or a ManagedSession."""
+    if session_id in manager._wm.sessions:
+        return True
+    return _is_human_session(session_id)
+
+
 def _assert_authority(
     manager: "AgentTreeManager", author_id: str, session_id: Optional[str]
 ) -> None:
     """Verify the caller's session owns the author run.
 
-    A run is owned by a session if:
-    - For ``resident_root`` runs: ``run.context_ref == session_id`` (the
-      context_ref is the resident session id).
-    - For ``managed_task`` runs: the workspace task referenced by
-      ``run.context_ref`` has ``task.session_id == session_id``.
-    - For other executor kinds: ``run.context_ref == session_id``.
-
-    For local network requests (auth disabled), authority is not enforced.
+    Ownership rules:
+    - Local network (session_id is None): authority not enforced.
+    - Agent session that executes the run: allowed.
+    - Human user (valid LoginSession): owns every run in the workspace.
+    - Otherwise: 403.
     """
     if session_id is None:
-        # Auth disabled or local network: skip authority check.
         return
     run = manager.get_run(author_id)
     if run is None:
         raise HTTPException(status_code=404, detail=f"Author run {author_id} not found")
-
-    from ..models.agent_tree import ExecutorKind
-
-    if run.executor_kind == ExecutorKind.MANAGED_TASK:
-        # For managed tasks, context_ref is the task id. Look up the task
-        # via the manager's workspace manager and check that its
-        # session_id matches the caller's session.
-        wm = manager._wm
-        task = wm.tasks.get(run.context_ref) if run.context_ref else None
-        if task is None:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Run {author_id} references task {run.context_ref!r} "
-                f"which does not exist",
-            )
-        if task.session_id != session_id:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Session {session_id} does not own run {author_id} "
-                f"(task owned by session {task.session_id!r})",
-            )
-    else:
-        if run.context_ref != session_id:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Session {session_id} does not own run {author_id} "
-                f"(owned by {run.context_ref!r})",
-            )
+    if _session_owns_run(manager, run, session_id):
+        return
+    if _is_human_session(session_id):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=f"Session {session_id} does not own run {author_id}",
+    )
 
 
 @router.post("/spawn", response_model=AgentRun)
@@ -165,9 +171,31 @@ async def followup(
 
 @router.post("/wait", response_model=List[AgentEvent])
 async def wait(
-    req: WaitRequest, current_user: User = Depends(get_current_user)
+    req: WaitRequest,
+    request: Request,
+    session_id: Optional[str] = Depends(_get_session_id),
+    current_user: User = Depends(get_current_user),
 ) -> List[AgentEvent]:
     try:
+        # Read permission: any authenticated caller (human or agent session)
+        # may wait on events in their workspace. For agent sessions, the
+        # recipient must be a run the session owns or supervises.
+        if session_id is not None:
+            run = _manager().get_run(req.recipient_id)
+            if run is not None:
+                if not _session_owns_run(_manager(), run, session_id):
+                    if run.supervisor_id:
+                        _assert_authority(_manager(), run.supervisor_id, session_id)
+                    elif not _is_human_session(session_id):
+                        raise HTTPException(
+                            status_code=403,
+                            detail=f"Session {session_id} may not wait on run {req.recipient_id}",
+                        )
+            elif not _is_human_session(session_id):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Session {session_id} is not authenticated",
+                )
         return await _manager().wait(req)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -205,13 +233,14 @@ async def interrupt(
         # we check that the caller owns the run or its supervisor.
         run = _manager().get_run(req.run_id)
         if run is not None and session_id is not None:
-            if run.context_ref != session_id and run.supervisor_id:
-                _assert_authority(_manager(), run.supervisor_id, session_id)
-            elif run.context_ref != session_id:
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Session {session_id} may not interrupt run {req.run_id}",
-                )
+            if not _session_owns_run(_manager(), run, session_id):
+                if run.supervisor_id:
+                    _assert_authority(_manager(), run.supervisor_id, session_id)
+                elif not _is_human_session(session_id):
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Session {session_id} may not interrupt run {req.run_id}",
+                    )
         return await _manager().interrupt(req)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -224,9 +253,17 @@ def list_runs(
     workspace_id: str = Query(...),
     root_id: Optional[str] = Query(None),
     status: Optional[AgentRunStatus] = Query(None),
+    session_id: Optional[str] = Depends(_get_session_id),
     current_user: User = Depends(get_current_user),
 ) -> List[AgentRun]:
     try:
+        # Read permission: any authenticated caller (human or agent session)
+        # may list runs in their workspace.
+        if session_id is not None and not _is_authenticated_session(_manager(), session_id):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Session {session_id} is not authenticated",
+            )
         return _manager().list_runs(
             ListRunsRequest(workspace_id=workspace_id, root_id=root_id, status=status)
         )
@@ -239,11 +276,18 @@ def get_run_events(
     run_id: str,
     since_sequence: int = Query(0),
     subtree: bool = Query(True),
+    session_id: Optional[str] = Depends(_get_session_id),
     current_user: User = Depends(get_current_user),
 ) -> List[AgentEvent]:
     run = _manager().get_run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    # Read permission: any authenticated caller may replay events.
+    if session_id is not None and not _is_authenticated_session(_manager(), session_id):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Session {session_id} is not authenticated",
+        )
     return _manager().get_events(
         run.workspace_id, run_id, since_sequence=since_sequence, subtree=subtree
     )

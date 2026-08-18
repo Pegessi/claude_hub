@@ -661,6 +661,10 @@ class WorkspaceTask(BaseModel):
     clear_context: Optional[bool] = None
     # Agent tree run id that owns this task (set by ManagedTaskAdapter.spawn).
     agent_run_id: Optional[str] = None
+    # Call ids of followup messages already delivered to this task. Used for
+    # exactly-once delivery: a followup with a call_id already in this list
+    # is a no-op. Persisted with the task so delivery survives restarts.
+    delivered_call_ids: List[str] = Field(default_factory=list)
     dispatch_reason: Optional[str] = None
     dispatch_pending: bool = False
     system_internal: bool = False
