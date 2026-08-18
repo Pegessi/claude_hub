@@ -112,13 +112,25 @@ Wraps the existing workspace task/session/report flow:
   - `QUEUED`: append the followup message to the prompt (worker picks it up
     when dispatched).
   - `WORKING`: `send_session_message` to deliver the message directly to the
-    running session.
+    running session. **Executor-boundary idempotency**: `send_session_message`
+    maintains a two-phase outbox on the `ManagedSession`
+    (`pending_call_ids` → `delivered_call_ids`). A `call_id` already in
+    `session.delivered_call_ids` is skipped; otherwise it is persisted to
+    `pending_call_ids` before send, then moved to `delivered_call_ids` after.
+    This closes the post-send crash window that a task-local prompt marker
+    cannot: the session-level ACK record survives task deletion/recreation.
   - `REVIEW` / `DONE`: `continue_task` to send the task back to working.
   - Task not found: re-create it with the same `agent_run_id` so the run's
-    `context_ref` stays valid.
-  - **Exactly-once delivery**: `call_id` is recorded in
-    `task.delivered_call_ids` (persisted with the task). A retry with the
-    same `call_id` is a no-op.
+    `context_ref` stays valid. **Crash safety**: `run.context_ref` is
+    persisted to disk **before** `start_task` is called, so a crash during
+    dispatch does not leave the run pointing at the deleted task (which
+    would cause a duplicate task on retry). The `call_id` is also marked
+    delivered on the new task.
+  - **Exactly-once delivery**: for `TODO`/`QUEUED`/`REVIEW`/`DONE`, `call_id`
+    is recorded in `task.delivered_call_ids` (persisted with the task) via a
+    two-phase outbox (`pending_call_ids` → `delivered_call_ids`). For
+    `WORKING`, the session-level outbox (above) is the durable ACK. A retry
+    with the same `call_id` is a no-op in both cases.
 - `interrupt` → `abort_task`.
 - `get_status` → maps `WorkspaceTaskStatus` to `AgentRunStatus`.
 
@@ -345,7 +357,13 @@ sequence order:
   `last_task_message`). The managed-task adapter persists the
   `delivered_call_ids` receipt atomically with delivery (via
   `_save_state()`), so a crash between delivery and outcome-event persist
-  does not cause re-delivery on restart. This recovers ALL unmatched
+  does not cause re-delivery on restart. For `WORKING` tasks, the
+  executor-boundary outbox on the `ManagedSession`
+  (`session.pending_call_ids` / `session.delivered_call_ids`) is the
+  durable ACK record: a crash after `send_session_message` sends but
+  before it persists `delivered_call_ids` leaves the `call_id` in
+  `pending_call_ids`, so recovery re-delivers (at-least-once) and the
+  executor tolerates the duplicate. This recovers ALL unmatched
   followups in sequence order, not just the latest. After replaying
   followups, recovery still reconciles the run's status via the adapter's
   `get_status()` (the followup replay does not skip reconciliation).
@@ -366,7 +384,11 @@ sequence order:
   session owns the `author_id` run (`run.context_ref == session_id`). Local
   network requests (auth disabled) skip the check. **Non-local requests
   without a session cookie fail closed with 403** (they do not fall through
-  to the local-network no-auth path).
+  to the local-network no-auth path). **STOPPED or deleted `ManagedSession`s
+  are treated as unauthenticated**: `_is_authenticated_session` returns
+  `False` for any session whose `status == STOPPED`, so a stale cookie that
+  resolves to a stopped session gets 403 on every action and read (spawn,
+  send, followup, wait, ack, interrupt, list_runs, get_events).
 - **ManagedSession read scoping**: `list_runs` and `get_run_events` scope
   reads for ManagedSessions to the session's own workspace and the runs it
   owns or supervises (its subtree). Cross-workspace reads return 403;
@@ -387,6 +409,19 @@ sequence order:
   resume (`INTERRUPTED`→`RUNNING`, `COMPLETED`→`RUNNING`, `FAILED` cannot
   resume), API authority (non-owner 403, owner 200), and
   `ManagedTaskAdapter.followup` (starts TODO task, recreates deleted task).
+- Round 17 hard-exit + stale-session adversarial tests:
+  - `test_working_followup_session_outbox_survives_hard_exit_and_reload`:
+    simulates a crash after `send_session_message` sends but before the
+    session-level `delivered_call_ids` persist; reloads the manager; verifies
+    the `call_id` is in `pending_call_ids`, re-delivery succeeds and moves it
+    to `delivered_call_ids`, and a third call is skipped.
+  - `test_deleted_task_recreation_persists_context_ref_before_start_task`:
+    mocks `start_task` to raise after the context_ref persist; verifies
+    `run.context_ref` was already updated and persisted; reloads and confirms
+    no duplicate task is created on retry.
+  - `test_stopped_session_rejected_for_all_actions`: sets a session's status
+    to `STOPPED` and verifies every action (spawn, send, followup, wait, ack,
+    interrupt, list_runs, get_events) returns 403.
 
 ## Migration / Rollback Guide
 

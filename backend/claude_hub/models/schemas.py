@@ -743,6 +743,15 @@ class ManagedSession(BaseModel):
     # a review prompt for. Drives the cross-task /clear decision independently of
     # any task's mutable review_session_id (which abort/skip/stale-release null).
     last_review_task_id: Optional[str] = None
+    # Executor-boundary call_id tracking for exactly-once followup delivery.
+    # pending_call_ids: call_ids persisted to the outbox before send; a crash
+    #   after send but before the delivered persist leaves the call_id here so
+    #   recovery re-delivers (the send must be idempotent at the executor).
+    # delivered_call_ids: call_ids the executor has acknowledged; send_session_message
+    #   skips any call_id already in this list. This is the durable ACK record
+    #   at the executor boundary and survives task deletion/recreation.
+    pending_call_ids: List[str] = Field(default_factory=list)
+    delivered_call_ids: List[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
     last_activity_at: Optional[datetime] = None

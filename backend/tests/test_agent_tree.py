@@ -3343,7 +3343,7 @@ async def test_managed_task_followup_working_sends_session_message(
 
     sent_messages: list[str] = []
 
-    async def _fake_send(session_id: str, message: str) -> None:
+    async def _fake_send(session_id: str, message: str, call_id: str | None = None) -> None:
         sent_messages.append(message)
 
     monkeypatch.setattr(manager, "send_session_message", _fake_send)
@@ -4328,5 +4328,263 @@ def test_forged_session_cookie_rejected_for_all_actions(
             "call_id": "forged-interrupt",
         },
         cookies={"claude_hub_session": forged_cookie},
+    )
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """A hard exit after send_session_message delivers but before the
+    session-level delivered_call_ids persist must leave the call_id in
+    pending_call_ids. On reload, re-delivery must succeed (call_id not in
+    delivered) and then move to delivered; a subsequent call with the same
+    call_id must be skipped (executor-boundary idempotency)."""
+    session_id = "outbox-session"
+    _make_managed_session(manager, session_id, ws_id)
+
+    call_id = "working-followup-outbox"
+    message = "please continue"
+
+    sent: list[str] = []
+
+    async def _fake_send_tmux(tmux_session: str, text: str) -> None:
+        sent.append(text)
+
+    manager._send_tmux_message = _fake_send_tmux  # type: ignore[assignment]
+
+    # First delivery: phase 1 (pending), send, phase 2 (delivered).
+    await manager.send_session_message(session_id, message, call_id=call_id)
+    session = manager.sessions[session_id]
+    assert call_id in session.delivered_call_ids
+    assert call_id not in session.pending_call_ids
+    assert len(sent) == 1
+
+    # Simulate a hard exit between send and phase-2 persist: the call_id is
+    # still in pending_call_ids and not in delivered_call_ids. We manually
+    # reconstruct this crashed state and persist it.
+    session = manager.sessions[session_id]
+    manager.sessions[session_id] = session.model_copy(
+        update={
+            "pending_call_ids": [call_id],
+            "delivered_call_ids": [c for c in session.delivered_call_ids if c != call_id],
+        }
+    )
+    manager._save_state()
+
+    # Reload the manager from disk (simulating process restart).
+    reloaded = WorkspaceManager()
+    reloaded_session = reloaded.sessions[session_id]
+    assert call_id in reloaded_session.pending_call_ids
+    assert call_id not in reloaded_session.delivered_call_ids
+
+    # Re-delivery: the call_id is not in delivered, so send_session_message
+    # must deliver it again (at-least-once) and then move it to delivered.
+    reloaded._send_tmux_message = _fake_send_tmux  # type: ignore[assignment]
+    sent.clear()
+    await reloaded.send_session_message(session_id, message, call_id=call_id)
+    assert len(sent) == 1
+    reloaded_session = reloaded.sessions[session_id]
+    assert call_id in reloaded_session.delivered_call_ids
+    assert call_id not in reloaded_session.pending_call_ids
+
+    # A third call with the same call_id must be skipped: the executor has
+    # already acknowledged it (delivered_call_ids is the durable ACK record).
+    sent.clear()
+    await reloaded.send_session_message(session_id, message, call_id=call_id)
+    assert len(sent) == 0
+
+
+@pytest.mark.asyncio
+async def test_deleted_task_recreation_persists_context_ref_before_start_task(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """When a followup recreates a deleted task, run.context_ref must be
+    persisted BEFORE start_task is called. If start_task crashes the process,
+    a retry must find the already-persisted context_ref and reuse the task
+    instead of creating a duplicate."""
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.MANAGED_TASK,
+            title="child",
+            initial_message="do work",
+            call_id="spawn-recreate",
+        )
+    )
+    task_id = child.context_ref
+    assert task_id is not None
+
+    # Delete the task (simulating abort cleanup).
+    del manager.tasks[task_id]
+    manager._save_state()
+
+    call_id = "followup-recreate-crash"
+    message = "recreate me"
+
+    # Make start_task raise after the context_ref persist, simulating a
+    # hard exit during dispatch.
+    async def _crash_after_persist(task_id_arg: str):
+        # Verify context_ref was already persisted before start_task runs.
+        run = manager.agent_tree.get_run(child.id)
+        assert run.context_ref is not None
+        assert run.context_ref != task_id
+        # Persist again to make sure the new context_ref is on disk.
+        manager._save_state()
+        raise RuntimeError("simulated hard exit during start_task")
+
+    monkeypatch.setattr(manager, "start_task", _crash_after_persist)
+
+    run = manager.agent_tree.get_run(child.id)
+    adapter = manager.agent_tree._adapter(run.executor_kind)
+
+    with pytest.raises(RuntimeError, match="simulated hard exit"):
+        await adapter.followup(run, message, call_id=call_id)
+
+    # The new task must exist and run.context_ref must point to it.
+    new_task_id = run.context_ref
+    assert new_task_id is not None
+    assert new_task_id != task_id
+    assert new_task_id in manager.tasks
+
+    # Reload the manager from disk and verify the task is still there and
+    # context_ref still points to it (no duplicate created on retry).
+    manager._save_state()
+    reloaded = WorkspaceManager()
+    reloaded_run = reloaded.agent_tree.get_run(child.id)
+    assert reloaded_run.context_ref == new_task_id
+    assert new_task_id in reloaded.tasks
+
+    # A retry of followup must NOT create another task: the existing task
+    # (with agent_run_id == run.id) is reused.
+    task_count_before = len(reloaded.tasks)
+    reloaded_run = reloaded.agent_tree.get_run(child.id)
+    reloaded_adapter = reloaded.agent_tree._adapter(reloaded_run.executor_kind)
+    await reloaded_adapter.followup(reloaded_run, message, call_id=call_id)
+    assert len(reloaded.tasks) == task_count_before
+
+
+def test_stopped_session_rejected_for_all_actions(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A ManagedSession with status STOPPED must be treated as unauthenticated
+    across every action and read: spawn, send, followup, wait, ack, interrupt,
+    list_runs, get_events. A stale cookie that resolves to a STOPPED session
+    must get 403, not pass authority checks."""
+    from fastapi.testclient import TestClient
+
+    from claude_hub.api import agent_tree as agent_tree_api
+    from claude_hub.auth import dependencies as auth_deps
+    from claude_hub.main import app
+    from claude_hub.models.schemas import ManagedSessionStatus
+
+    monkeypatch.setattr(agent_tree_api, "workspace_manager", manager)
+    monkeypatch.setattr(auth_deps, "is_local_network_request", lambda request: False)
+
+    # Create a session that owns a root run, then mark it STOPPED.
+    stopped_session = "stopped-sess"
+    _make_managed_session(manager, stopped_session, ws_id)
+    manager.sessions[stopped_session] = manager.sessions[stopped_session].model_copy(
+        update={"status": ManagedSessionStatus.STOPPED}
+    )
+    manager._save_state()
+
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+        context_ref=stopped_session,
+    )
+
+    client = TestClient(app)
+    cookie = {"claude_hub_session": stopped_session}
+
+    # spawn: STOPPED session -> 403
+    resp = client.post(
+        "/api/agent-tree/spawn",
+        json={
+            "workspace_id": ws_id,
+            "parent_id": root.id,
+            "executor_kind": "native_subagent",
+            "initial_message": "hi",
+            "call_id": "stopped-spawn",
+        },
+        cookies=cookie,
+    )
+    assert resp.status_code == 403
+
+    # send: STOPPED session -> 403
+    resp = client.post(
+        "/api/agent-tree/send",
+        json={
+            "workspace_id": ws_id,
+            "author_id": root.id,
+            "recipient_id": root.id,
+            "message": "hi",
+            "call_id": "stopped-send",
+        },
+        cookies=cookie,
+    )
+    assert resp.status_code == 403
+
+    # followup: STOPPED session -> 403
+    resp = client.post(
+        "/api/agent-tree/followup",
+        json={
+            "workspace_id": ws_id,
+            "author_id": root.id,
+            "recipient_id": root.id,
+            "message": "continue",
+            "call_id": "stopped-followup",
+        },
+        cookies=cookie,
+    )
+    assert resp.status_code == 403
+
+    # wait: STOPPED session -> 403
+    resp = client.post(
+        "/api/agent-tree/wait",
+        json={
+            "workspace_id": ws_id,
+            "recipient_id": root.id,
+            "since_sequence": 0,
+            "timeout_seconds": 0.1,
+        },
+        cookies=cookie,
+    )
+    assert resp.status_code == 403
+
+    # ack: STOPPED session -> 403
+    resp = client.post(
+        "/api/agent-tree/ack",
+        params={"workspace_id": ws_id, "run_id": root.id, "sequence": 0},
+        cookies=cookie,
+    )
+    assert resp.status_code == 403
+
+    # interrupt: STOPPED session -> 403
+    resp = client.post(
+        "/api/agent-tree/interrupt",
+        json={"workspace_id": ws_id, "run_id": root.id, "call_id": "stopped-interrupt"},
+        cookies=cookie,
+    )
+    assert resp.status_code == 403
+
+    # list_runs: STOPPED session -> 403
+    resp = client.get(
+        "/api/agent-tree/runs",
+        params={"workspace_id": ws_id},
+        cookies=cookie,
+    )
+    assert resp.status_code == 403
+
+    # get_run_events: STOPPED session -> 403
+    resp = client.get(
+        f"/api/agent-tree/runs/{root.id}/events",
+        cookies=cookie,
     )
     assert resp.status_code == 403

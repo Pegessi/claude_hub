@@ -146,8 +146,14 @@ class ManagedTaskAdapter(ExecutorAdapter):
                     agent_run_id=run.id,
                 ),
             )
-            await self._wm.start_task(new_task.id)
+            # Persist the new context_ref BEFORE dispatching. If we crash
+            # after start_task but before persisting context_ref, the run
+            # would still point at the deleted task and a retry would
+            # create a duplicate. Persisting first makes the new task the
+            # durable context; start_task is idempotent on the task id.
             run.context_ref = str(new_task.id)
+            self._wm._save_state()
+            await self._wm.start_task(new_task.id)
             # Mark the call_id as delivered on the new task so a retry does
             # not re-deliver. Persist atomically with the task creation.
             if call_id:
@@ -215,16 +221,13 @@ class ManagedTaskAdapter(ExecutorAdapter):
         elif task.status == WorkspaceTaskStatus.WORKING:
             # The agent is actively running. Send the followup message
             # directly to its session so it processes it immediately.
-            # Idempotency: the [followup] marker in the prompt records that
-            # the message was sent; a re-delivery after a crash skips the
-            # send if the marker is already present.
-            if f"[followup] {message}" not in task.prompt:
-                if task.session_id:
-                    await self._wm.send_session_message(task.session_id, message)
-                updated = task.model_copy(
-                    update={"prompt": f"{task.prompt}\n\n[followup] {message}"}
-                )
-                self._wm.tasks[task_id] = updated
+            # Executor-boundary idempotency: send_session_message checks
+            # session.delivered_call_ids and skips if the call_id was
+            # already acknowledged. The two-phase outbox at the session
+            # level (pending -> delivered) closes the post-send crash
+            # window that a local prompt marker cannot.
+            if task.session_id:
+                await self._wm.send_session_message(task.session_id, message, call_id=call_id)
         elif task.status in (
             WorkspaceTaskStatus.REVIEW,
             WorkspaceTaskStatus.DONE,
