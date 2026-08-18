@@ -67,6 +67,16 @@ def manager(state_root: Path) -> WorkspaceManager:
     return WorkspaceManager()
 
 
+@pytest.fixture()
+def ws_id(manager: WorkspaceManager, tmp_path: Path) -> str:
+    """Create a real workspace and return its id.
+
+    Agent tree actions validate that the workspace exists, so tests must
+    operate against a workspace registered with the manager.
+    """
+    return _make_workspace(manager, tmp_path)
+
+
 def _make_workspace(manager: WorkspaceManager, tmp_path: Path) -> str:
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)
@@ -87,8 +97,7 @@ def _make_workspace(manager: WorkspaceManager, tmp_path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_create_root_run(manager: WorkspaceManager) -> None:
-    ws_id = "ws-1"
+def test_create_root_run(manager: WorkspaceManager, ws_id: str) -> None:
     run = manager.agent_tree.create_root_run(
         workspace_id=ws_id,
         executor_kind=ExecutorKind.MANAGED_TASK,
@@ -103,8 +112,7 @@ def test_create_root_run(manager: WorkspaceManager) -> None:
 
 
 @pytest.mark.asyncio
-async def test_spawn_creates_child_run(manager: WorkspaceManager) -> None:
-    ws_id = "ws-1"
+async def test_spawn_creates_child_run(manager: WorkspaceManager, ws_id: str) -> None:
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id,
         executor_kind=ExecutorKind.NATIVE_SUBAGENT,
@@ -134,8 +142,7 @@ async def test_spawn_creates_child_run(manager: WorkspaceManager) -> None:
 
 
 @pytest.mark.asyncio
-async def test_spawn_call_id_idempotent(manager: WorkspaceManager) -> None:
-    ws_id = "ws-1"
+async def test_spawn_call_id_idempotent(manager: WorkspaceManager, ws_id: str) -> None:
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
     )
@@ -168,8 +175,7 @@ async def test_spawn_call_id_idempotent(manager: WorkspaceManager) -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_appends_message_event(manager: WorkspaceManager) -> None:
-    ws_id = "ws-1"
+async def test_send_appends_message_event(manager: WorkspaceManager, ws_id: str) -> None:
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
     )
@@ -199,8 +205,7 @@ async def test_send_appends_message_event(manager: WorkspaceManager) -> None:
 
 
 @pytest.mark.asyncio
-async def test_followup_resumes_turn(manager: WorkspaceManager) -> None:
-    ws_id = "ws-1"
+async def test_followup_resumes_turn(manager: WorkspaceManager, ws_id: str) -> None:
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
     )
@@ -234,8 +239,7 @@ async def test_followup_resumes_turn(manager: WorkspaceManager) -> None:
 
 
 @pytest.mark.asyncio
-async def test_wait_returns_existing_events(manager: WorkspaceManager) -> None:
-    ws_id = "ws-1"
+async def test_wait_returns_existing_events(manager: WorkspaceManager, ws_id: str) -> None:
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
     )
@@ -263,8 +267,7 @@ async def test_wait_returns_existing_events(manager: WorkspaceManager) -> None:
 
 
 @pytest.mark.asyncio
-async def test_wait_blocks_until_event_arrives(manager: WorkspaceManager) -> None:
-    ws_id = "ws-1"
+async def test_wait_blocks_until_event_arrives(manager: WorkspaceManager, ws_id: str) -> None:
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
     )
@@ -298,8 +301,7 @@ async def test_wait_blocks_until_event_arrives(manager: WorkspaceManager) -> Non
 
 
 @pytest.mark.asyncio
-async def test_wait_times_out_with_empty_list(manager: WorkspaceManager) -> None:
-    ws_id = "ws-1"
+async def test_wait_times_out_with_empty_list(manager: WorkspaceManager, ws_id: str) -> None:
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
     )
@@ -321,8 +323,7 @@ async def test_wait_times_out_with_empty_list(manager: WorkspaceManager) -> None
 
 
 @pytest.mark.asyncio
-async def test_interrupt_sets_status(manager: WorkspaceManager) -> None:
-    ws_id = "ws-1"
+async def test_interrupt_sets_status(manager: WorkspaceManager, ws_id: str) -> None:
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
     )
@@ -353,8 +354,7 @@ async def test_interrupt_sets_status(manager: WorkspaceManager) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_list_runs_scoped_to_subtree(manager: WorkspaceManager) -> None:
-    ws_id = "ws-1"
+def test_list_runs_scoped_to_subtree(manager: WorkspaceManager, ws_id: str) -> None:
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
     )
@@ -372,8 +372,7 @@ def test_list_runs_scoped_to_subtree(manager: WorkspaceManager) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_emit_event_updates_run_status(manager: WorkspaceManager) -> None:
-    ws_id = "ws-1"
+def test_emit_event_updates_run_status(manager: WorkspaceManager, ws_id: str) -> None:
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
     )
@@ -391,8 +390,7 @@ def test_emit_event_updates_run_status(manager: WorkspaceManager) -> None:
     assert run.last_task_message == "finished"
 
 
-def test_emit_event_idempotent_on_call_id(manager: WorkspaceManager) -> None:
-    ws_id = "ws-1"
+def test_emit_event_idempotent_on_call_id(manager: WorkspaceManager, ws_id: str) -> None:
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
     )
@@ -514,8 +512,7 @@ async def test_report_bridges_to_agent_event(manager: WorkspaceManager, tmp_path
 # ---------------------------------------------------------------------------
 
 
-def test_runs_and_events_survive_save_load(manager: WorkspaceManager) -> None:
-    ws_id = "ws-1"
+def test_runs_and_events_survive_save_load(manager: WorkspaceManager, ws_id: str) -> None:
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
     )
@@ -656,8 +653,7 @@ def test_restart_replay_from_disk(manager: WorkspaceManager, tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_followup_call_id_idempotent(manager: WorkspaceManager) -> None:
-    ws_id = "ws-1"
+async def test_followup_call_id_idempotent(manager: WorkspaceManager, ws_id: str) -> None:
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
     )
@@ -687,8 +683,7 @@ async def test_followup_call_id_idempotent(manager: WorkspaceManager) -> None:
 
 
 @pytest.mark.asyncio
-async def test_interrupt_call_id_idempotent(manager: WorkspaceManager) -> None:
-    ws_id = "ws-1"
+async def test_interrupt_call_id_idempotent(manager: WorkspaceManager, ws_id: str) -> None:
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
     )
@@ -723,8 +718,7 @@ async def test_interrupt_call_id_idempotent(manager: WorkspaceManager) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_sibling_paths_do_not_overlap(manager: WorkspaceManager) -> None:
-    ws_id = "ws-1"
+def test_sibling_paths_do_not_overlap(manager: WorkspaceManager, ws_id: str) -> None:
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
     )
@@ -761,8 +755,7 @@ def test_sibling_paths_do_not_overlap(manager: WorkspaceManager) -> None:
 
 
 @pytest.mark.asyncio
-async def test_concurrent_spawns_get_distinct_ids(manager: WorkspaceManager) -> None:
-    ws_id = "ws-1"
+async def test_concurrent_spawns_get_distinct_ids(manager: WorkspaceManager, ws_id: str) -> None:
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
     )
@@ -786,8 +779,7 @@ async def test_concurrent_spawns_get_distinct_ids(manager: WorkspaceManager) -> 
 
 
 @pytest.mark.asyncio
-async def test_concurrent_waits_wake_on_event(manager: WorkspaceManager) -> None:
-    ws_id = "ws-1"
+async def test_concurrent_waits_wake_on_event(manager: WorkspaceManager, ws_id: str) -> None:
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
     )

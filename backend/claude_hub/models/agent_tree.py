@@ -100,6 +100,9 @@ class AgentRun(BaseModel):
     # Opaque reference to the executor's context (e.g. workspace task id,
     # native subagent handle, external job id).
     context_ref: Optional[str] = None
+    # Last event sequence acknowledged by this run's supervisor. Persisted
+    # so a restarted supervisor can resume from where it left off.
+    ack_sequence: int = 0
     # Human-readable last task message surfaced to the tree UI.
     last_task_message: Optional[str] = None
     title: Optional[str] = None

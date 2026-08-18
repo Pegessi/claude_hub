@@ -5,13 +5,14 @@ The ``AgentTreeManager`` owns:
 - The append-only event stream (per workspace, monotonic ``sequence``).
 - Per-run mailboxes (events addressed to a run, or authored within its
   subtree).
-- call_id / correlation_id idempotency for all actions.
+- call_id / correlation_id idempotency for all actions, scoped by workspace.
 
 Actions:
 - ``spawn``: create a child run, dispatch its initial task.
 - ``send``: append a message to the recipient's mailbox (no turn wake).
 - ``followup``: append a message AND resume the recipient's turn.
 - ``wait``: block until directed events arrive (cursor-based).
+- ``ack``: advance a run's acknowledged sequence cursor.
 - ``interrupt``: stop a run, preserving context.
 - ``list_runs``: return the tree with status and last_task_message.
 
@@ -54,6 +55,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Maximum number of concurrent (non-terminal) child runs a parent may have.
+MAX_CONCURRENT_CHILDREN = 32
+
 
 class AgentTreeManager:
     """Coordinates the agent tree, mailbox, and event stream."""
@@ -65,10 +69,15 @@ class AgentTreeManager:
         self._events: Dict[str, List[AgentEvent]] = {}
         # Per-workspace next sequence number.
         self._next_seq: Dict[str, int] = {}
-        # call_id -> event, for idempotency (dedupe repeated calls).
-        self._call_index: Dict[str, AgentEvent] = {}
+        # call_id idempotency index, scoped by workspace:
+        #   _call_index[workspace_id][call_id] = event
+        # This prevents a call_id from one workspace colliding with the same
+        # call_id in another workspace.
+        self._call_index: Dict[str, Dict[str, AgentEvent]] = {}
         # Per-run asyncio.Event for wait() wakeups.
         self._run_events: Dict[str, asyncio.Event] = {}
+        # Per-run asyncio.Lock to make wait() race-free (no lost wakeups).
+        self._run_locks: Dict[str, asyncio.Lock] = {}
         # Executor adapters keyed by ExecutorKind.
         self._adapters: Dict[ExecutorKind, ExecutorAdapter] = {
             ExecutorKind.MANAGED_TASK: ManagedTaskAdapter(workspace_manager),
@@ -100,6 +109,19 @@ class AgentTreeManager:
         except Exception:
             logger.exception("Failed to persist agent tree state")
 
+    def _validate_workspace(self, workspace_id: str) -> None:
+        """Raise ValueError if the workspace does not exist."""
+        if workspace_id not in self._wm.workspaces:
+            raise ValueError(f"Workspace {workspace_id} not found")
+
+    def _call_key(self, workspace_id: str, call_id: str) -> Optional[AgentEvent]:
+        """Look up an existing event by (workspace_id, call_id)."""
+        return self._call_index.get(workspace_id, {}).get(call_id)
+
+    def _record_call(self, workspace_id: str, call_id: str, event: AgentEvent) -> None:
+        """Record a call_id -> event mapping scoped to the workspace."""
+        self._call_index.setdefault(workspace_id, {})[call_id] = event
+
     def _append_event(
         self,
         *,
@@ -114,13 +136,14 @@ class AgentTreeManager:
     ) -> Tuple[AgentEvent, bool]:
         """Append an event to the workspace stream.
 
-        Idempotent on ``call_id``: if a call with the same id was already
-        recorded, return the existing event and ``is_new=False``.
+        Idempotent on ``(workspace_id, call_id)``: if a call with the same
+        id was already recorded in this workspace, return the existing event
+        and ``is_new=False``.
 
         Returns ``(event, is_new)`` so callers can skip adapter side effects
         on duplicate calls.
         """
-        existing = self._call_index.get(call_id)
+        existing = self._call_key(workspace_id, call_id)
         if existing is not None:
             return existing, False
 
@@ -137,7 +160,7 @@ class AgentTreeManager:
             created_at=datetime.utcnow(),
         )
         self._events.setdefault(workspace_id, []).append(event)
-        self._call_index[call_id] = event
+        self._record_call(workspace_id, call_id, event)
 
         # Wake any waiters on the recipient run (and its ancestors, since
         # supervisors listen to their subtree).
@@ -177,6 +200,17 @@ class AgentTreeManager:
         run.updated_at = datetime.utcnow()
         self._persist()
 
+    def _active_children(self, parent_id: str) -> List[AgentRun]:
+        """Return non-terminal child runs of the given parent."""
+        terminal = {
+            AgentRunStatus.COMPLETED,
+            AgentRunStatus.FAILED,
+            AgentRunStatus.INTERRUPTED,
+        }
+        return [
+            r for r in self._runs.values() if r.parent_id == parent_id and r.status not in terminal
+        ]
+
     # ------------------------------------------------------------------
     # Public actions
     # ------------------------------------------------------------------
@@ -184,21 +218,35 @@ class AgentTreeManager:
     async def spawn(self, req: SpawnRequest) -> AgentRun:
         """Create a child run and dispatch its initial task.
 
-        Idempotent on ``call_id``: a duplicate call returns the existing
-        run without re-creating it or re-triggering the executor adapter.
+        Idempotent on ``(workspace_id, call_id)``: a duplicate call returns
+        the existing run without re-creating it or re-triggering the
+        executor adapter.
         """
+        self._validate_workspace(req.workspace_id)
+
         parent = self._runs.get(req.parent_id)
         if parent is None:
             raise KeyError(f"Parent run {req.parent_id} not found")
         if parent.workspace_id != req.workspace_id:
             raise ValueError("Parent run belongs to a different workspace")
 
-        # Idempotency: if this call_id already produced a run, return it.
-        existing_event = self._call_index.get(req.call_id)
+        # Idempotency: if this call_id already produced a run in this
+        # workspace, return it.
+        existing_event = self._call_key(req.workspace_id, req.call_id)
         if existing_event is not None:
             existing_run = self._runs.get(existing_event.agent_run_id)
             if existing_run is not None:
                 return existing_run
+
+        # Parent/child concurrency limit: a supervisor may not have more
+        # than MAX_CONCURRENT_CHILDREN active (non-terminal) children.
+        active = self._active_children(parent.id)
+        if len(active) >= MAX_CONCURRENT_CHILDREN:
+            raise RuntimeError(
+                f"Parent run {parent.id} has {len(active)} active children "
+                f"(limit {MAX_CONCURRENT_CHILDREN}); interrupt or wait for "
+                "completion before spawning more."
+            )
 
         run_id = str(uuid.uuid4())
         run = AgentRun(
@@ -259,9 +307,19 @@ class AgentTreeManager:
 
     async def send(self, req: SendRequest) -> AgentEvent:
         """Append a message to the recipient's mailbox without waking it."""
+        self._validate_workspace(req.workspace_id)
+
         recipient = self._runs.get(req.recipient_id)
         if recipient is None:
             raise KeyError(f"Recipient run {req.recipient_id} not found")
+        if recipient.workspace_id != req.workspace_id:
+            raise ValueError("Recipient run belongs to a different workspace")
+
+        author = self._runs.get(req.author_id)
+        if author is None:
+            raise KeyError(f"Author run {req.author_id} not found")
+        if author.workspace_id != req.workspace_id:
+            raise ValueError("Author run belongs to a different workspace")
 
         event, is_new = self._append_event(
             workspace_id=req.workspace_id,
@@ -280,12 +338,23 @@ class AgentTreeManager:
     async def followup(self, req: FollowupRequest) -> AgentEvent:
         """Append a message and resume the recipient's turn.
 
-        Idempotent on ``call_id``: a duplicate call returns the existing
-        message event without re-triggering the executor adapter.
+        Idempotent on ``(workspace_id, call_id)``: a duplicate call returns
+        the existing message event without re-triggering the executor
+        adapter.
         """
+        self._validate_workspace(req.workspace_id)
+
         recipient = self._runs.get(req.recipient_id)
         if recipient is None:
             raise KeyError(f"Recipient run {req.recipient_id} not found")
+        if recipient.workspace_id != req.workspace_id:
+            raise ValueError("Recipient run belongs to a different workspace")
+
+        author = self._runs.get(req.author_id)
+        if author is None:
+            raise KeyError(f"Author run {req.author_id} not found")
+        if author.workspace_id != req.workspace_id:
+            raise ValueError("Author run belongs to a different workspace")
 
         event, is_new = self._append_event(
             workspace_id=req.workspace_id,
@@ -327,21 +396,32 @@ class AgentTreeManager:
 
         Returns events for ``recipient_id`` (or its subtree when
         ``subtree=True``) with sequence > ``since_sequence``.
+
+        Race-free: a per-run lock guards the check-then-clear sequence so
+        an event arriving between the check and the ``ev.clear()`` is not
+        lost.
         """
+        self._validate_workspace(req.workspace_id)
+
         recipient = self._runs.get(req.recipient_id)
         if recipient is None:
             raise KeyError(f"Recipient run {req.recipient_id} not found")
+        if recipient.workspace_id != req.workspace_id:
+            raise ValueError("Recipient run belongs to a different workspace")
 
-        # Fast path: return immediately if there are already new events.
-        events = self._events_for(
-            req.workspace_id, req.recipient_id, req.since_sequence, req.subtree
-        )
-        if events:
-            return events
-
-        # Wait for new events.
+        lock = self._run_locks.setdefault(req.recipient_id, asyncio.Lock())
         ev = self._run_events.setdefault(req.recipient_id, asyncio.Event())
-        ev.clear()
+
+        async with lock:
+            events = self._events_for(
+                req.workspace_id, req.recipient_id, req.since_sequence, req.subtree
+            )
+            if events:
+                return events
+            # Clear while holding the lock so an append_event that arrives
+            # after this point will set the event after we've cleared it.
+            ev.clear()
+
         try:
             await asyncio.wait_for(ev.wait(), timeout=req.timeout_seconds)
         except asyncio.TimeoutError:
@@ -349,18 +429,41 @@ class AgentTreeManager:
 
         return self._events_for(req.workspace_id, req.recipient_id, req.since_sequence, req.subtree)
 
+    def ack(self, workspace_id: str, run_id: str, sequence: int) -> AgentRun:
+        """Advance a run's acknowledged sequence cursor.
+
+        The cursor is persisted so a restarted supervisor can resume from
+        where it left off. The cursor only moves forward.
+        """
+        self._validate_workspace(workspace_id)
+        run = self._runs.get(run_id)
+        if run is None:
+            raise KeyError(f"Run {run_id} not found")
+        if run.workspace_id != workspace_id:
+            raise ValueError("Run belongs to a different workspace")
+        if sequence > run.ack_sequence:
+            run.ack_sequence = sequence
+            run.updated_at = datetime.utcnow()
+            self._persist()
+        return run
+
     async def interrupt(self, req: InterruptRequest) -> AgentRun:
         """Interrupt a run, preserving its context.
 
-        Idempotent on ``call_id``: a duplicate call returns the existing
-        run without re-triggering the executor adapter.
+        Idempotent on ``(workspace_id, call_id)``: a duplicate call returns
+        the existing run without re-triggering the executor adapter.
         """
+        self._validate_workspace(req.workspace_id)
+
         run = self._runs.get(req.run_id)
         if run is None:
             raise KeyError(f"Run {req.run_id} not found")
+        if run.workspace_id != req.workspace_id:
+            raise ValueError("Run belongs to a different workspace")
 
-        # Idempotency: if this call_id already interrupted, return the run.
-        existing_event = self._call_index.get(req.call_id)
+        # Idempotency: if this call_id already interrupted in this workspace,
+        # return the run.
+        existing_event = self._call_key(req.workspace_id, req.call_id)
         if existing_event is not None:
             return run
 
@@ -383,6 +486,7 @@ class AgentTreeManager:
 
     def list_runs(self, req: ListRunsRequest) -> List[AgentRun]:
         """List runs, optionally scoped to a subtree or status."""
+        self._validate_workspace(req.workspace_id)
         runs = [r for r in self._runs.values() if r.workspace_id == req.workspace_id]
         if req.root_id is not None:
             root = self._runs.get(req.root_id)
@@ -525,6 +629,7 @@ class AgentTreeManager:
         context_ref: Optional[str] = None,
     ) -> AgentRun:
         """Create a root run (no parent). Used to bootstrap the resident."""
+        self._validate_workspace(workspace_id)
         run = AgentRun(
             workspace_id=workspace_id,
             parent_id=None,
@@ -556,9 +661,9 @@ class AgentTreeManager:
     def load_from_dict(self, workspace_id: str, data: dict) -> None:
         """Load runs and events for a workspace from a persisted dict.
 
-        Rebuilds the call_id index and the next sequence counter from the
-        loaded events so idempotency and monotonic sequencing survive a
-        restart.
+        Rebuilds the call_id index (scoped by workspace) and the next
+        sequence counter from the loaded events so idempotency and
+        monotonic sequencing survive a restart.
         """
         for item in data.get("agent_runs", []):
             run = AgentRun(**item)
@@ -569,8 +674,10 @@ class AgentTreeManager:
         self._events[workspace_id] = events
 
         max_seq = 0
+        ws_calls: Dict[str, AgentEvent] = {}
         for event in events:
-            self._call_index[event.call_id] = event
+            ws_calls[event.call_id] = event
             if event.sequence > max_seq:
                 max_seq = event.sequence
+        self._call_index[workspace_id] = ws_calls
         self._next_seq[workspace_id] = max_seq + 1
