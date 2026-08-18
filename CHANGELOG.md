@@ -18,30 +18,102 @@
   events. There was no durable event log for restart replay.
 - **How**:
   - `models/agent_tree.py`: `AgentRun` (id, path, parent, supervisor,
-    executor_kind, status, context_ref, last_task_message) and `AgentEvent`
-    (monotonic sequence, call_id, correlation_id, type, author, recipient,
-    payload). `ExecutorKind` covers `managed_task`, `native_subagent`,
-    `external_job`.
+    executor_kind, status, context_ref, last_task_message, ack_sequence) and
+    `AgentEvent` (monotonic sequence, call_id, correlation_id, type, author,
+    recipient, action, target, fingerprint, payload). `ExecutorKind` covers
+    `managed_task`, `native_subagent`, `external_job`. `SpawnRequest` carries
+    an optional `session_id` for routing managed tasks to a specific worker.
   - `services/agent_tree.py`: `AgentTreeManager` owns the run tree, per-workspace
     append-only event log, call_id idempotency index, and per-run asyncio.Event
     waiters. `_wake_ancestors` notifies the supervisor chain so a root can
     `wait()` on its whole subtree.
+    - **Full request fingerprints**: every action computes a SHA-256 hash of
+      the canonicalized (action + all request fields) and persists it on the
+      resulting `AgentEvent`. A call_id reused with a different payload is
+      rejected even after a process restart.
+    - **Outbox / crash recovery**: a run and its `DISPATCHED` event are
+      persisted *before* the adapter spawn is invoked. On startup,
+      `recover_pending_runs()` retries any `PENDING` run whose `context_ref`
+      is `None` (spawn lost mid-flight); the managed-task adapter reuses the
+      existing task tagged with `agent_run_id`. For interrupt, the
+      `INTERRUPTED` intent event is persisted *before* the adapter call so a
+      crash mid-interrupt leaves a durable record; recovery retries
+      `adapter.interrupt` for any run that has an `INTERRUPTED` event but is
+      not yet in `INTERRUPTED` status.
+    - **Intent / delivery / outcome protocol**: every mutating action
+      (`spawn`, `followup`, `interrupt`, `send`, `emit_event`) mutates
+      in-memory state with `persist=False` during the intent phase, calls the
+      executor adapter (delivery), then applies the outcome and calls
+      `_persist()` exactly once. An adapter failure marks the run `FAILED`
+      and persists that single outcome. A late outcome-phase persist failure
+      keeps the in-memory state that matches the executor's actual state;
+      the next successful persist (or restart reconciliation) catches up.
+      `_append_event`, `_update_run_status`, and `_set_last_message` accept
+      `persist: bool = True` to support batching.
+    - **Recovery by latest event**: `recover_pending_runs` decides the
+      intended state from each run's latest event (by `sequence`):
+      `INTERRUPTED` → retry interrupt; followup `MESSAGE` → retry followup
+      (resumes `INTERRUPTED`/`COMPLETED` runs; `FAILED` excluded); `PENDING`
+      without `context_ref` → retry spawn; `PENDING` with `context_ref` →
+      set `RUNNING`.
+    - **Subtree messaging boundary**: `_validate_messaging_boundary` restricts
+      `send`/`followup` so an author may message only its supervisor, a run in
+      its own subtree, or itself. Cross-subtree (sibling) messaging is
+      rejected with `400`.
+    - **Outbound mixing fix**: a run's subtree mailbox excludes events authored
+      by the run itself (unless addressed to itself), so a supervisor does not
+      re-read its own sent messages.
+    - **Terminal status guard**: `FAILED` is truly terminal — no transitions
+      out. `INTERRUPTED` and `COMPLETED` may transition back to `RUNNING` via
+      `followup` (resume). `interrupt` is a no-op on `FAILED` runs.
+    - **ACK cursor bounds**: `ack_sequence` only moves forward and may not
+      exceed the workspace's current max sequence.
+    - **Resident root before bootstrap**: `_ensure_resident_root_run` is called
+      before `ensure_workspace_agent` so the root run exists when the
+      bootstrap prompt is built. The root run's `context_ref` is linked to the
+      resident session id after the session is created.
+    - **ack_sequence consumption**: the resident bootstrap prompt includes the
+      root run's persisted `ack_sequence` as the starting `since_sequence` for
+      `wait`, and event injection into the prompt uses
+      `since_sequence=root_run.ack_sequence` so only unprocessed events are
+      surfaced.
+    - **Quota**: `MAX_CONCURRENT_CHILDREN = 32` active (non-terminal) children
+      per parent; the 33rd spawn raises `RuntimeError`.
   - `services/agent_tree_adapters.py`: `ManagedTaskAdapter` wraps the existing
-    task/session/report flow (spawn→create+start, followup→continue,
-    interrupt→abort). `NativeSubagentAdapter` and `ExternalJobAdapter` are
-    in-memory stubs that satisfy the contract.
-  - `api/agent_tree.py`: REST endpoints under `/api/agent-tree`.
-  - Integration: `workspace_manager.agent_tree` attribute; reports are bridged
-    into agent events via `context_ref` (task id); Resident gets a root run so
-    it can act as supervisor and receive directed subtree events.
+    task/session/report flow (spawn→create+start, followup→continue/start or
+    re-create if deleted, interrupt→abort). `ResidentRootAdapter` is a no-op
+    for spawn/send/followup (the resident picks up mailbox messages on its
+    next cycle), aborts the resident session on interrupt, and returns
+    `RUNNING` while the session exists. `NativeSubagentAdapter` and
+    `ExternalJobAdapter` are in-memory stubs that satisfy the contract.
+  - `api/agent_tree.py`: REST endpoints under `/api/agent-tree`. Every
+    mutating action (`spawn`, `send`, `followup`, `interrupt`) enforces
+    authority: the caller's session must own the `author_id` run
+    (`run.context_ref == session_id`). Local network requests (auth
+    disabled) skip the check.
+  - **Resident master mode migration**: the resident prompt now delegates work
+    via the agent tree API (`spawn` with `session_id`, `wait`, `ack`,
+    `followup`, `interrupt`) instead of scanning the task board directly.
+    `PATCH /tasks/{id} status=done` is retained for task acceptance.
   - Persistence: runs and events are serialized into each workspace's
-    `state.json`; `load_from_dict` rebuilds the call_id index and next sequence
-    counter so idempotency and monotonic ordering survive restart.
-- **Verified**: 16 backend tests (root run, spawn, call_id idempotency, send,
-  followup, wait immediate/blocking/timeout, interrupt, subtree scoping,
+    `state.json`; `load_from_dict` rebuilds the call_id index (using persisted
+    fingerprints) and next sequence counter so idempotency and monotonic
+    ordering survive restart.
+- **Verified**: 60 agent-tree tests (root run, spawn, call_id idempotency,
+  send, followup, wait immediate/blocking/timeout, interrupt, subtree scoping,
   emit_event status update, emit_event idempotency, report→event bridge,
   save/load round-trip with sequence continuity, concurrent spawns, concurrent
-  waits). Resident (60), orchestrator/sessions/state-policy (196) tests pass.
+  waits, crash recovery via `recover_pending_runs` for spawn-lost,
+  interrupt-lost, and followup-lost runs, late-persist-failure keeps in-memory
+  state, duplicate delivery does not re-trigger adapter, `ResidentRootAdapter`
+  behaviour, followup resume `INTERRUPTED`/`COMPLETED`→`RUNNING` and `FAILED`
+  cannot resume, API authority non-owner 403 / owner 200,
+  `ManagedTaskAdapter.followup` starts TODO task and recreates deleted task,
+  quota enforcement, terminal status guards, ACK cursor forward-only +
+  max-sequence bounds, subtree messaging boundary rejection, outbound-mixing
+  exclusion of self-authored events, legacy `followup`→`continue_task`, API
+  endpoint smoke test). Resident (60), workspace (133),
+  sessions/state-policy/orchestrator-contract (238 combined) tests pass.
   black, isort, mypy clean.
 
 ### fix: persist custom env presets to backend so they survive cross-origin access

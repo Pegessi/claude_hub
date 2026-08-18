@@ -1893,3 +1893,1357 @@ def test_agent_tree_api_endpoints(
         assert resp2.json()["status"] == "interrupted"
     finally:
         app.dependency_overrides.pop(get_current_user, None)
+
+
+# ---------------------------------------------------------------------------
+# Adversarial: crash injection — persist fails after adapter side-effect
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_spawn_late_persist_failure_keeps_in_memory_state(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """If ``_persist`` fails AFTER the adapter spawn side-effect succeeds,
+    the in-memory state (context_ref, RUNNING status, STARTED event) must be
+    kept — it matches the executor's actual state. The next successful
+    persist reconciles the durable state.
+
+    This is the core of the intent/delivery/outcome protocol: the outcome
+    phase batches context_ref + status + STARTED event into a single
+    ``_persist``. If that persist fails, we do NOT roll back the in-memory
+    state because the executor already ran.
+    """
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+
+    # Count how many times the adapter spawn is called.
+    adapter = manager.agent_tree._adapter(ExecutorKind.NATIVE_SUBAGENT)
+    spawn_calls = {"n": 0}
+    real_spawn = adapter.spawn
+
+    async def _counting_spawn(run, message):
+        spawn_calls["n"] += 1
+        return await real_spawn(run, message)
+
+    monkeypatch.setattr(adapter, "spawn", _counting_spawn)
+
+    # Make _persist fail on the outcome-phase persist (the second call).
+    persist_calls = {"n": 0}
+    real_persist = manager.agent_tree._persist
+
+    def _flaky_persist():
+        persist_calls["n"] += 1
+        # The first persist (run node creation) succeeds; the second
+        # (dispatched event) succeeds; the third (outcome batch) fails.
+        if persist_calls["n"] == 3:
+            raise OSError("disk full during outcome")
+        return real_persist()
+
+    monkeypatch.setattr(manager.agent_tree, "_persist", _flaky_persist)
+
+    with pytest.raises(OSError, match="disk full during outcome"):
+        await manager.agent_tree.spawn(
+            SpawnRequest(
+                workspace_id=ws_id,
+                parent_id=root.id,
+                executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+                initial_message="hi",
+                call_id="late-persist-fail",
+            )
+        )
+
+    # The adapter spawn was called exactly once (the side-effect applied).
+    assert spawn_calls["n"] == 1
+
+    # The run's in-memory state must reflect the side-effect: context_ref
+    # set, status RUNNING, STARTED event present. We do NOT roll back
+    # because the executor already ran.
+    runs = manager.agent_tree.list_runs(ListRunsRequest(workspace_id=ws_id, root_id=root.id))
+    child_runs = [r for r in runs if r.id != root.id]
+    assert len(child_runs) == 1
+    child = child_runs[0]
+    assert child.context_ref is not None
+    assert child.status == AgentRunStatus.RUNNING
+
+    events = manager.agent_tree.get_events(ws_id, child.id, subtree=False)
+    types = [e.type for e in events]
+    assert AgentEventType.STARTED in types
+
+    # Now a successful persist flushes the in-memory state to disk.
+    monkeypatch.setattr(manager.agent_tree, "_persist", real_persist)
+    manager.agent_tree._persist()
+
+    # Reload from disk and verify the state was reconciled.
+    fresh = WorkspaceManager()
+    loaded = fresh.agent_tree.get_run(child.id)
+    assert loaded is not None
+    assert loaded.context_ref == child.context_ref
+    assert loaded.status == AgentRunStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_followup_late_persist_failure_keeps_running_status(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """If ``_persist`` fails after the followup adapter side-effect, the
+    RUNNING status projection is kept in-memory (matches executor state)
+    and reconciled on the next persist.
+    """
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="spawn-1",
+        )
+    )
+
+    # Interrupt the child so it's INTERRUPTED, then followup to resume.
+    await manager.agent_tree.interrupt(
+        InterruptRequest(workspace_id=ws_id, run_id=child.id, call_id="int-1")
+    )
+    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.INTERRUPTED
+
+    # Make the outcome-phase persist (status -> RUNNING) fail.
+    real_persist = manager.agent_tree._persist
+    persist_calls = {"n": 0}
+
+    def _flaky_persist():
+        persist_calls["n"] += 1
+        # The intent-phase persist (MESSAGE event) succeeds; the outcome
+        # persist (RUNNING status) fails.
+        if persist_calls["n"] == 2:
+            raise OSError("disk full during followup outcome")
+        return real_persist()
+
+    monkeypatch.setattr(manager.agent_tree, "_persist", _flaky_persist)
+
+    with pytest.raises(OSError, match="disk full during followup outcome"):
+        await manager.agent_tree.followup(
+            FollowupRequest(
+                workspace_id=ws_id,
+                recipient_id=child.id,
+                author_id=root.id,
+                message="resume",
+                call_id="followup-late-fail",
+            )
+        )
+
+    # In-memory status must be RUNNING (matches the executor that was
+    # resumed), not rolled back to INTERRUPTED.
+    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.RUNNING
+
+
+# ---------------------------------------------------------------------------
+# Adversarial: duplicate delivery — adapter not re-triggered
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_duplicate_spawn_does_not_retrigger_adapter(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A duplicate spawn call_id must NOT call the adapter again.
+
+    The idempotency layer returns the existing run before reaching the
+    adapter. This proves duplicate delivery is safe: the executor is not
+    spawned twice.
+    """
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+
+    adapter = manager.agent_tree._adapter(ExecutorKind.NATIVE_SUBAGENT)
+    spawn_calls = {"n": 0}
+    real_spawn = adapter.spawn
+
+    async def _counting_spawn(run, message):
+        spawn_calls["n"] += 1
+        return await real_spawn(run, message)
+
+    monkeypatch.setattr(adapter, "spawn", _counting_spawn)
+
+    req = SpawnRequest(
+        workspace_id=ws_id,
+        parent_id=root.id,
+        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+        initial_message="hi",
+        call_id="dup-spawn",
+    )
+    first = await manager.agent_tree.spawn(req)
+    assert spawn_calls["n"] == 1
+
+    second = await manager.agent_tree.spawn(req)
+    # Same run returned.
+    assert second.id == first.id
+    # Adapter NOT called again.
+    assert spawn_calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_followup_does_not_retrigger_adapter(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A duplicate followup call_id must NOT call the adapter again."""
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="spawn-1",
+        )
+    )
+
+    adapter = manager.agent_tree._adapter(ExecutorKind.NATIVE_SUBAGENT)
+    followup_calls = {"n": 0}
+    real_followup = adapter.followup
+
+    async def _counting_followup(run, message):
+        followup_calls["n"] += 1
+        return await real_followup(run, message)
+
+    monkeypatch.setattr(adapter, "followup", _counting_followup)
+
+    req = FollowupRequest(
+        workspace_id=ws_id,
+        recipient_id=child.id,
+        author_id=root.id,
+        message="continue",
+        call_id="dup-followup",
+    )
+    await manager.agent_tree.followup(req)
+    assert followup_calls["n"] == 1
+
+    await manager.agent_tree.followup(req)
+    # Adapter NOT called again.
+    assert followup_calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_interrupt_does_not_retrigger_adapter(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A duplicate interrupt call_id must NOT call the adapter again."""
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="spawn-1",
+        )
+    )
+
+    adapter = manager.agent_tree._adapter(ExecutorKind.NATIVE_SUBAGENT)
+    interrupt_calls = {"n": 0}
+    real_interrupt = adapter.interrupt
+
+    async def _counting_interrupt(run, reason=None):
+        interrupt_calls["n"] += 1
+        return await real_interrupt(run, reason)
+
+    monkeypatch.setattr(adapter, "interrupt", _counting_interrupt)
+
+    req = InterruptRequest(workspace_id=ws_id, run_id=child.id, call_id="dup-int")
+    await manager.agent_tree.interrupt(req)
+    assert interrupt_calls["n"] == 1
+
+    await manager.agent_tree.interrupt(req)
+    # Adapter NOT called again.
+    assert interrupt_calls["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Adversarial: lost delivery — intent persisted, adapter never called
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_lost_spawn_delivery_recovered_by_recover_pending_runs(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """If the process crashes after the dispatched intent event is persisted
+    but before the adapter spawn is called (lost delivery),
+    ``recover_pending_runs`` retries the adapter spawn.
+
+    We simulate this by:
+    1. Creating a run in PENDING state with no context_ref (as if the
+       dispatched event was persisted but spawn never ran).
+    2. Calling recover_pending_runs.
+    3. Verifying the adapter spawn was called and the run is now RUNNING.
+    """
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+
+    # Manually create a PENDING child run (simulating the state after the
+    # dispatched event was persisted but the adapter spawn was lost).
+    import uuid
+
+    child_id = str(uuid.uuid4())
+    from claude_hub.models.agent_tree import AgentRun
+
+    child = AgentRun(
+        id=child_id,
+        workspace_id=ws_id,
+        parent_id=root.id,
+        path=f"{root.path}/{child_id}",
+        supervisor_id=root.id,
+        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+        status=AgentRunStatus.PENDING,
+        last_task_message="do work",
+    )
+    manager.agent_tree._runs[child.id] = child
+
+    # Verify the adapter spawn will be called during recovery.
+    adapter = manager.agent_tree._adapter(ExecutorKind.NATIVE_SUBAGENT)
+    spawn_calls = {"n": 0}
+    real_spawn = adapter.spawn
+
+    async def _counting_spawn(run, message):
+        spawn_calls["n"] += 1
+        return await real_spawn(run, message)
+
+    monkeypatch.setattr(adapter, "spawn", _counting_spawn)
+
+    await manager.agent_tree.recover_pending_runs(ws_id)
+
+    assert spawn_calls["n"] == 1
+    recovered = manager.agent_tree.get_run(child.id)
+    assert recovered is not None
+    assert recovered.status == AgentRunStatus.RUNNING
+    assert recovered.context_ref is not None
+
+
+@pytest.mark.asyncio
+async def test_lost_interrupt_delivery_recovered(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """If the INTERRUPTED intent event is persisted but the adapter
+    interrupt was never called (lost delivery), recovery retries it.
+
+    We simulate this by:
+    1. Creating a RUNNING run with an INTERRUPTED event in its stream.
+    2. Calling recover_pending_runs.
+    3. Verifying the adapter interrupt was called and the run is INTERRUPTED.
+    """
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="spawn-1",
+        )
+    )
+
+    # Manually append an INTERRUPTED event (simulating the intent persisted
+    # but the adapter interrupt was lost). The run is still RUNNING.
+    manager.agent_tree._append_event(
+        workspace_id=ws_id,
+        agent_run_id=child.id,
+        event_type=AgentEventType.INTERRUPTED,
+        author=child.id,
+        recipient=root.id,
+        call_id="lost-interrupt",
+        action="interrupt",
+        target=child.id,
+        fingerprint="fp",
+        payload={"reason": "stop"},
+    )
+    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.RUNNING
+
+    adapter = manager.agent_tree._adapter(ExecutorKind.NATIVE_SUBAGENT)
+    interrupt_calls = {"n": 0}
+    real_interrupt = adapter.interrupt
+
+    async def _counting_interrupt(run, reason=None):
+        interrupt_calls["n"] += 1
+        return await real_interrupt(run, reason)
+
+    monkeypatch.setattr(adapter, "interrupt", _counting_interrupt)
+
+    await manager.agent_tree.recover_pending_runs(ws_id)
+
+    assert interrupt_calls["n"] == 1
+    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.INTERRUPTED
+
+
+@pytest.mark.asyncio
+async def test_lost_followup_delivery_recovered(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """If a followup MESSAGE event (with followup=True) is persisted but the
+    adapter followup was never called, recovery retries it.
+    """
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="spawn-1",
+        )
+    )
+
+    # Interrupt the child so it's INTERRUPTED (not RUNNING).
+    await manager.agent_tree.interrupt(
+        InterruptRequest(workspace_id=ws_id, run_id=child.id, call_id="int-1")
+    )
+    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.INTERRUPTED
+
+    # Manually append a followup MESSAGE event (intent persisted but adapter
+    # followup lost).
+    manager.agent_tree._append_event(
+        workspace_id=ws_id,
+        agent_run_id=child.id,
+        event_type=AgentEventType.MESSAGE,
+        author=root.id,
+        recipient=child.id,
+        call_id="lost-followup",
+        action="followup",
+        target=child.id,
+        fingerprint="fp",
+        payload={"message": "resume", "followup": True},
+    )
+
+    adapter = manager.agent_tree._adapter(ExecutorKind.NATIVE_SUBAGENT)
+    followup_calls = {"n": 0}
+    real_followup = adapter.followup
+
+    async def _counting_followup(run, message):
+        followup_calls["n"] += 1
+        return await real_followup(run, message)
+
+    monkeypatch.setattr(adapter, "followup", _counting_followup)
+
+    await manager.agent_tree.recover_pending_runs(ws_id)
+
+    assert followup_calls["n"] == 1
+    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.RUNNING
+
+
+# ---------------------------------------------------------------------------
+# Resident root adapter
+# ---------------------------------------------------------------------------
+
+
+def test_resident_root_adapter_spawn_is_noop(manager: WorkspaceManager, ws_id: str) -> None:
+    """ResidentRootAdapter.spawn returns the run's context_ref (or id)
+    without creating any executor context."""
+    from claude_hub.services.agent_tree_adapters import ResidentRootAdapter
+
+    adapter = ResidentRootAdapter(manager)
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.RESIDENT_ROOT,
+        context_ref="resident-sess-1",
+    )
+
+    result = asyncio.run(adapter.spawn(root, "initial"))
+    # Returns the existing context_ref.
+    assert result == "resident-sess-1"
+
+
+def test_resident_root_adapter_get_status(manager: WorkspaceManager, ws_id: str) -> None:
+    """ResidentRootAdapter.get_status returns RUNNING when the resident
+    session exists, FAILED when it doesn't, PENDING when no context_ref."""
+    from claude_hub.services.agent_tree_adapters import ResidentRootAdapter
+
+    adapter = ResidentRootAdapter(manager)
+
+    # No context_ref -> PENDING.
+    root_no_ctx = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.RESIDENT_ROOT
+    )
+    assert adapter.get_status(root_no_ctx) == AgentRunStatus.PENDING
+
+    # context_ref set but session doesn't exist -> FAILED.
+    root_missing = manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.RESIDENT_ROOT,
+        context_ref="missing-session",
+    )
+    assert adapter.get_status(root_missing) == AgentRunStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_resident_root_adapter_interrupt_deletes_session(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """ResidentRootAdapter.interrupt deletes the resident session."""
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+    )
+    from claude_hub.services.agent_tree_adapters import ResidentRootAdapter
+
+    adapter = ResidentRootAdapter(manager)
+
+    # Create a resident session.
+    now = datetime.utcnow()
+    session = ManagedSession(
+        id="resident-sess-int",
+        workspace_id=ws_id,
+        role=WorkspaceSessionRole.ORCHESTRATOR,
+        agent_type=AgentType.CLAUDE,
+        target=ExecutionTarget.LOCAL,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.WORKING,
+        tab_id="tab-resident",
+        title="resident",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session="tmux-resident",
+        created_at=now,
+        updated_at=now,
+    )
+    manager.sessions[session.id] = session
+
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.RESIDENT_ROOT,
+        context_ref=session.id,
+    )
+
+    await adapter.interrupt(root, "stop")
+    # The session should be deleted.
+    assert session.id not in manager.sessions
+
+
+# ---------------------------------------------------------------------------
+# Followup resume from INTERRUPTED / COMPLETED
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_followup_resumes_interrupted_run(manager: WorkspaceManager, ws_id: str) -> None:
+    """A followup on an INTERRUPTED run transitions it back to RUNNING."""
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="spawn-1",
+        )
+    )
+
+    await manager.agent_tree.interrupt(
+        InterruptRequest(workspace_id=ws_id, run_id=child.id, call_id="int-1")
+    )
+    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.INTERRUPTED
+
+    await manager.agent_tree.followup(
+        FollowupRequest(
+            workspace_id=ws_id,
+            recipient_id=child.id,
+            author_id=root.id,
+            message="resume",
+            call_id="followup-resume",
+        )
+    )
+    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_followup_resumes_completed_run(manager: WorkspaceManager, ws_id: str) -> None:
+    """A followup on a COMPLETED run transitions it back to RUNNING."""
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="spawn-1",
+        )
+    )
+
+    # Mark the child as COMPLETED via emit_event.
+    manager.agent_tree.emit_event(
+        workspace_id=ws_id,
+        agent_run_id=child.id,
+        event_type=AgentEventType.COMPLETED,
+        author=child.id,
+        recipient=root.id,
+        call_id="complete-1",
+        payload={"message": "done"},
+    )
+    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.COMPLETED
+
+    await manager.agent_tree.followup(
+        FollowupRequest(
+            workspace_id=ws_id,
+            recipient_id=child.id,
+            author_id=root.id,
+            message="more work",
+            call_id="followup-completed",
+        )
+    )
+    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.RUNNING
+
+
+def test_failed_run_cannot_be_resumed(manager: WorkspaceManager, ws_id: str) -> None:
+    """A FAILED run is truly terminal and cannot be resumed by followup's
+    status projection."""
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = asyncio.run(
+        manager.agent_tree.spawn(
+            SpawnRequest(
+                workspace_id=ws_id,
+                parent_id=root.id,
+                executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+                initial_message="hi",
+                call_id="spawn-1",
+            )
+        )
+    )
+
+    manager.agent_tree._update_run_status(child.id, AgentRunStatus.FAILED)
+    # Attempting to move FAILED -> RUNNING is refused.
+    manager.agent_tree._update_run_status(child.id, AgentRunStatus.RUNNING)
+    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.FAILED
+
+
+# ---------------------------------------------------------------------------
+# API authority: caller must own the author run
+# ---------------------------------------------------------------------------
+
+
+def test_api_authority_rejects_non_owner(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A session that does not own the author run gets 403."""
+    from fastapi.testclient import TestClient
+
+    from claude_hub.api import agent_tree as agent_tree_api
+    from claude_hub.auth import dependencies as auth_deps
+    from claude_hub.auth.dependencies import get_current_user
+    from claude_hub.main import app
+    from claude_hub.models import User
+
+    monkeypatch.setattr(agent_tree_api, "workspace_manager", manager)
+    # Force non-local network so authority is enforced.
+    monkeypatch.setattr(auth_deps, "is_local_network_request", lambda request: False)
+
+    async def fake_current_user() -> User:
+        return User(open_id="local", name="Local", email="local@localhost", avatar_url=None)
+
+    app.dependency_overrides[get_current_user] = fake_current_user
+    try:
+        # Create a root run owned by session "owner-sess".
+        root = manager.agent_tree.create_root_run(
+            workspace_id=ws_id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            context_ref="owner-sess",
+        )
+
+        client = TestClient(app)
+
+        # Call spawn with a different session cookie -> should be 403.
+        resp = client.post(
+            "/api/agent-tree/spawn",
+            json={
+                "workspace_id": ws_id,
+                "parent_id": root.id,
+                "executor_kind": "native_subagent",
+                "initial_message": "hi",
+                "call_id": "auth-spawn",
+            },
+            cookies={"claude_hub_session": "attacker-sess"},
+        )
+        assert resp.status_code == 403
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+def test_api_authority_allows_owner(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A session that owns the author run can spawn."""
+    from fastapi.testclient import TestClient
+
+    from claude_hub.api import agent_tree as agent_tree_api
+    from claude_hub.auth import dependencies as auth_deps
+    from claude_hub.auth.dependencies import get_current_user
+    from claude_hub.main import app
+    from claude_hub.models import User
+
+    monkeypatch.setattr(agent_tree_api, "workspace_manager", manager)
+    # Force non-local network so authority is enforced.
+    monkeypatch.setattr(auth_deps, "is_local_network_request", lambda request: False)
+
+    async def fake_current_user() -> User:
+        return User(open_id="local", name="Local", email="local@localhost", avatar_url=None)
+
+    app.dependency_overrides[get_current_user] = fake_current_user
+    try:
+        root = manager.agent_tree.create_root_run(
+            workspace_id=ws_id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            context_ref="owner-sess",
+        )
+
+        client = TestClient(app)
+
+        resp = client.post(
+            "/api/agent-tree/spawn",
+            json={
+                "workspace_id": ws_id,
+                "parent_id": root.id,
+                "executor_kind": "native_subagent",
+                "initial_message": "hi",
+                "call_id": "auth-spawn-ok",
+            },
+            cookies={"claude_hub_session": "owner-sess"},
+        )
+        assert resp.status_code == 200
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+# ---------------------------------------------------------------------------
+# ManagedTaskAdapter.followup resume: TODO, REVIEW/DONE, task-not-found
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_managed_task_followup_starts_todo_task(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """For a managed-task run whose task is TODO (e.g. after abort),
+    followup calls start_task."""
+    from claude_hub.models import WorkspaceTaskStatus
+
+    ws_id = _make_workspace(manager, tmp_path)
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.MANAGED_TASK,
+            title="child",
+            initial_message="do work",
+            call_id="followup-todo",
+        )
+    )
+    task_id = child.context_ref
+    assert task_id is not None
+
+    # Abort the task -> it goes to TODO.
+    from claude_hub.models.schemas import ManualTaskControlRequest
+
+    await manager.abort_task(task_id, ManualTaskControlRequest(reason="abort"))
+    assert manager.tasks[task_id].status == WorkspaceTaskStatus.TODO
+
+    # followup should start the TODO task.
+    await manager.agent_tree.followup(
+        FollowupRequest(
+            workspace_id=ws_id,
+            recipient_id=child.id,
+            author_id=root.id,
+            message="restart",
+            call_id="followup-todo-1",
+        )
+    )
+    assert manager.tasks[task_id].status == WorkspaceTaskStatus.WORKING
+
+
+@pytest.mark.asyncio
+async def test_managed_task_followup_recreates_deleted_task(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """If the managed task was deleted, followup re-creates it with the same
+    agent_run_id and updates the run's context_ref."""
+    ws_id = _make_workspace(manager, tmp_path)
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.MANAGED_TASK,
+            title="child",
+            initial_message="do work",
+            call_id="followup-recreate",
+        )
+    )
+    old_task_id = child.context_ref
+    assert old_task_id is not None
+
+    # Delete the task (simulating cleanup).
+    del manager.tasks[old_task_id]
+
+    # followup should re-create the task.
+    await manager.agent_tree.followup(
+        FollowupRequest(
+            workspace_id=ws_id,
+            recipient_id=child.id,
+            author_id=root.id,
+            message="recreate",
+            call_id="followup-recreate-1",
+        )
+    )
+
+    # The run's context_ref should now point to a new task.
+    new_task_id = manager.agent_tree.get_run(child.id).context_ref
+    assert new_task_id is not None
+    assert new_task_id != old_task_id
+    new_task = manager.tasks[new_task_id]
+    assert new_task.agent_run_id == child.id
+
+
+# ---------------------------------------------------------------------------
+# Round 9 fixes: wake-after-commit, recovery-only-after-success, managed-task
+# authority, full fingerprints, REVIEW_FAILED -> RUNNING.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_spawn_wakes_parent_after_batched_persist(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """After spawn's batched _persist(), the parent supervisor's wait() must
+    be woken so it observes the STARTED event."""
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+
+    # Start a wait() on the parent that should be woken by the spawn.
+    wait_task = asyncio.create_task(
+        manager.agent_tree.wait(
+            WaitRequest(
+                workspace_id=ws_id,
+                recipient_id=root.id,
+                since_sequence=0,
+                timeout_seconds=5,
+            )
+        )
+    )
+    # Let the wait() reach the ev.wait() point.
+    await asyncio.sleep(0.05)
+
+    await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="spawn-wake",
+        )
+    )
+
+    events = await asyncio.wait_for(wait_task, timeout=2)
+    # The parent should see at least the DISPATCHED and STARTED events.
+    types = {e.type for e in events}
+    assert AgentEventType.STARTED in types
+
+
+@pytest.mark.asyncio
+async def test_send_wakes_recipient_after_batched_persist(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """After send's batched _persist(), the recipient's wait() must be woken."""
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="spawn-send-wake",
+        )
+    )
+
+    # Get the current max sequence so wait() only returns events after spawn.
+    max_seq = max(
+        (e.sequence for e in manager.agent_tree._events.get(ws_id, [])),
+        default=0,
+    )
+
+    wait_task = asyncio.create_task(
+        manager.agent_tree.wait(
+            WaitRequest(
+                workspace_id=ws_id,
+                recipient_id=child.id,
+                since_sequence=max_seq,
+                timeout_seconds=5,
+            )
+        )
+    )
+    await asyncio.sleep(0.05)
+
+    await manager.agent_tree.send(
+        SendRequest(
+            workspace_id=ws_id,
+            recipient_id=child.id,
+            author_id=root.id,
+            message="ping",
+            call_id="send-wake",
+        )
+    )
+
+    events = await asyncio.wait_for(wait_task, timeout=2)
+    assert any(e.type == AgentEventType.MESSAGE for e in events)
+
+
+@pytest.mark.asyncio
+async def test_followup_wakes_recipient_after_outcome(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """After followup's outcome persist, the recipient's wait() must be woken."""
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="spawn-followup-wake",
+        )
+    )
+    await manager.agent_tree.interrupt(
+        InterruptRequest(workspace_id=ws_id, run_id=child.id, call_id="int-followup-wake")
+    )
+
+    # Get the current max sequence so wait() only returns the followup event.
+    max_seq = max(
+        (e.sequence for e in manager.agent_tree._events.get(ws_id, [])),
+        default=0,
+    )
+
+    wait_task = asyncio.create_task(
+        manager.agent_tree.wait(
+            WaitRequest(
+                workspace_id=ws_id,
+                recipient_id=child.id,
+                since_sequence=max_seq,
+                timeout_seconds=5,
+            )
+        )
+    )
+    await asyncio.sleep(0.05)
+
+    await manager.agent_tree.followup(
+        FollowupRequest(
+            workspace_id=ws_id,
+            recipient_id=child.id,
+            author_id=root.id,
+            message="resume",
+            call_id="followup-wake",
+        )
+    )
+
+    events = await asyncio.wait_for(wait_task, timeout=2)
+    # The followup MESSAGE event should be delivered.
+    assert any(e.type == AgentEventType.MESSAGE for e in events)
+    # The run should be RUNNING again.
+    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_recover_interrupt_does_not_set_status_on_adapter_failure(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """If the adapter interrupt fails during recovery, the run status must
+    NOT be set to INTERRUPTED."""
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="spawn-recover-int-fail",
+        )
+    )
+
+    # Simulate a persisted INTERRUPTED intent with the run still RUNNING.
+    manager.agent_tree._append_event(
+        workspace_id=ws_id,
+        agent_run_id=child.id,
+        event_type=AgentEventType.INTERRUPTED,
+        author=child.id,
+        recipient=root.id,
+        call_id="lost-interrupt-fail",
+        action="interrupt",
+        target=child.id,
+        fingerprint="fp",
+        payload={"reason": "stop"},
+    )
+    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.RUNNING
+
+    adapter = manager.agent_tree._adapter(ExecutorKind.NATIVE_SUBAGENT)
+
+    async def _failing_interrupt(run, reason=None):
+        raise RuntimeError("adapter down")
+
+    monkeypatch.setattr(adapter, "interrupt", _failing_interrupt)
+
+    await manager.agent_tree.recover_pending_runs(ws_id)
+
+    # Status must remain RUNNING because the adapter call failed.
+    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_recover_followup_does_not_set_status_on_adapter_failure(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """If the adapter followup fails during recovery, the run status must
+    NOT be set to RUNNING."""
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="spawn-recover-fu-fail",
+        )
+    )
+    await manager.agent_tree.interrupt(
+        InterruptRequest(workspace_id=ws_id, run_id=child.id, call_id="int-recover-fu-fail")
+    )
+
+    # Simulate a persisted followup MESSAGE intent with the run still INTERRUPTED.
+    manager.agent_tree._append_event(
+        workspace_id=ws_id,
+        agent_run_id=child.id,
+        event_type=AgentEventType.MESSAGE,
+        author=root.id,
+        recipient=child.id,
+        call_id="lost-followup-fail",
+        action="followup",
+        target=child.id,
+        fingerprint="fp",
+        payload={"message": "resume", "followup": True},
+    )
+    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.INTERRUPTED
+
+    adapter = manager.agent_tree._adapter(ExecutorKind.NATIVE_SUBAGENT)
+
+    async def _failing_followup(run, message):
+        raise RuntimeError("adapter down")
+
+    monkeypatch.setattr(adapter, "followup", _failing_followup)
+
+    await manager.agent_tree.recover_pending_runs(ws_id)
+
+    # Status must remain INTERRUPTED because the adapter call failed.
+    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.INTERRUPTED
+
+
+def test_recover_reconciles_status_via_get_status(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """For non-terminal runs, recovery calls get_status() and reconciles the
+    run's status with the executor's actual status."""
+    import asyncio as _asyncio
+    import uuid as _uuid
+
+    from claude_hub.models.agent_tree import AgentRun
+
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    # Manually create a child run in RUNNING state.
+    child_id = str(_uuid.uuid4())
+    child_run = AgentRun(
+        id=child_id,
+        workspace_id=ws_id,
+        parent_id=root.id,
+        path=f"{root.path}/{child_id}",
+        supervisor_id=root.id,
+        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+        status=AgentRunStatus.RUNNING,
+    )
+    manager.agent_tree._runs[child_id] = child_run
+
+    adapter = manager.agent_tree._adapter(ExecutorKind.NATIVE_SUBAGENT)
+
+    def _get_status(run):
+        return AgentRunStatus.WAITING
+
+    monkeypatch.setattr(adapter, "get_status", _get_status)
+
+    _asyncio.run(manager.agent_tree.recover_pending_runs(ws_id))
+
+    # The run status should be reconciled to WAITING.
+    assert manager.agent_tree.get_run(child_id).status == AgentRunStatus.WAITING
+
+
+def test_managed_task_authority_uses_task_session_id(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """For managed_task runs, authority is checked against the task's
+    session_id, not the run's context_ref (which is the task id)."""
+    from fastapi.testclient import TestClient
+
+    from claude_hub.main import app
+
+    ws_id = _make_workspace(manager, tmp_path)
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
+    )
+    child = manager.tasks  # just to ensure manager is wired
+
+    # Create a managed task run.
+    child_run = manager.agent_tree._spawn_managed_task  # noqa: F841
+    # Use the public spawn path.
+    import asyncio as _asyncio
+
+    child = _asyncio.run(
+        manager.agent_tree.spawn(
+            SpawnRequest(
+                workspace_id=ws_id,
+                parent_id=root.id,
+                executor_kind=ExecutorKind.MANAGED_TASK,
+                title="child",
+                initial_message="do work",
+                call_id="auth-managed",
+            )
+        )
+    )
+    task_id = child.context_ref
+    assert task_id is not None
+    task = manager.tasks[task_id]
+
+    # The task's session_id is the worker session that picked it up.
+    worker_session_id = task.session_id
+    assert worker_session_id is not None
+
+    # A different session must be rejected.
+    other_session = "session-other"
+    from claude_hub.api.agent_tree import _assert_authority
+
+    try:
+        _assert_authority(manager.agent_tree, child.id, other_session)
+        assert False, "expected 403"
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 403
+
+    # The owning session must be allowed.
+    _assert_authority(manager.agent_tree, child.id, worker_session_id)
+
+
+def test_spawn_fingerprint_includes_context_ref(manager: WorkspaceManager, ws_id: str) -> None:
+    """The spawn fingerprint must include context_ref so a reused call_id
+    with a different context_ref is rejected."""
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+
+    # First spawn with context_ref=None.
+    import asyncio as _asyncio
+
+    _asyncio.run(
+        manager.agent_tree.spawn(
+            SpawnRequest(
+                workspace_id=ws_id,
+                parent_id=root.id,
+                executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+                initial_message="hi",
+                call_id="spawn-fp-ctx",
+                context_ref=None,
+            )
+        )
+    )
+
+    # Second spawn with the same call_id but context_ref="ctx-1" must raise.
+    try:
+        _asyncio.run(
+            manager.agent_tree.spawn(
+                SpawnRequest(
+                    workspace_id=ws_id,
+                    parent_id=root.id,
+                    executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+                    initial_message="hi",
+                    call_id="spawn-fp-ctx",
+                    context_ref="ctx-1",
+                )
+            )
+        )
+        assert False, "expected ValueError for different context_ref"
+    except ValueError:
+        pass
+
+
+def test_send_fingerprint_includes_correlation_id(manager: WorkspaceManager, ws_id: str) -> None:
+    """The send fingerprint must include correlation_id."""
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    import asyncio as _asyncio
+
+    child = _asyncio.run(
+        manager.agent_tree.spawn(
+            SpawnRequest(
+                workspace_id=ws_id,
+                parent_id=root.id,
+                executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+                initial_message="hi",
+                call_id="spawn-send-fp",
+            )
+        )
+    )
+
+    _asyncio.run(
+        manager.agent_tree.send(
+            SendRequest(
+                workspace_id=ws_id,
+                recipient_id=child.id,
+                author_id=root.id,
+                message="ping",
+                call_id="send-fp-corr",
+                correlation_id=None,
+            )
+        )
+    )
+
+    try:
+        _asyncio.run(
+            manager.agent_tree.send(
+                SendRequest(
+                    workspace_id=ws_id,
+                    recipient_id=child.id,
+                    author_id=root.id,
+                    message="ping",
+                    call_id="send-fp-corr",
+                    correlation_id="corr-1",
+                )
+            )
+        )
+        assert False, "expected ValueError for different correlation_id"
+    except ValueError:
+        pass
+
+
+def test_followup_fingerprint_includes_correlation_id(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """The followup fingerprint must include correlation_id."""
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    import asyncio as _asyncio
+
+    child = _asyncio.run(
+        manager.agent_tree.spawn(
+            SpawnRequest(
+                workspace_id=ws_id,
+                parent_id=root.id,
+                executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+                initial_message="hi",
+                call_id="spawn-fu-fp",
+            )
+        )
+    )
+
+    _asyncio.run(
+        manager.agent_tree.followup(
+            FollowupRequest(
+                workspace_id=ws_id,
+                recipient_id=child.id,
+                author_id=root.id,
+                message="resume",
+                call_id="fu-fp-corr",
+                correlation_id=None,
+            )
+        )
+    )
+
+    try:
+        _asyncio.run(
+            manager.agent_tree.followup(
+                FollowupRequest(
+                    workspace_id=ws_id,
+                    recipient_id=child.id,
+                    author_id=root.id,
+                    message="resume",
+                    call_id="fu-fp-corr",
+                    correlation_id="corr-2",
+                )
+            )
+        )
+        assert False, "expected ValueError for different correlation_id"
+    except ValueError:
+        pass
+
+
+def test_review_failed_maps_to_running_not_failed(manager: WorkspaceManager, ws_id: str) -> None:
+    """A REVIEW_FAILED report must set the run to RUNNING (task back to
+    WORKING), not FAILED."""
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    import asyncio as _asyncio
+
+    child = _asyncio.run(
+        manager.agent_tree.spawn(
+            SpawnRequest(
+                workspace_id=ws_id,
+                parent_id=root.id,
+                executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+                initial_message="hi",
+                call_id="spawn-review-failed",
+            )
+        )
+    )
+
+    # Emit a PROGRESS event with report_state=review_failed.
+    manager.agent_tree.emit_event(
+        workspace_id=ws_id,
+        agent_run_id=child.id,
+        event_type=AgentEventType.PROGRESS,
+        author=child.id,
+        recipient=root.id,
+        call_id="report-review-failed",
+        payload={"report_state": "review_failed", "message": "needs fixes"},
+    )
+
+    # The run must be RUNNING, not FAILED.
+    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.RUNNING
