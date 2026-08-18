@@ -876,7 +876,9 @@ class AgentTreeManager:
         # own try/except so that an adapter failure is distinguished from a
         # late persist failure (which must NOT mark the run FAILED).
         try:
-            await self._adapter(recipient.executor_kind).followup(recipient, req.message)
+            await self._adapter(recipient.executor_kind).followup(
+                recipient, req.message, call_id=req.call_id
+            )
         except Exception as exc:
             logger.exception("followup failed for run %s", recipient.id)
             # Adapter failed: no side-effect applied, so rollback_on_error
@@ -899,11 +901,30 @@ class AgentTreeManager:
             )
             raise
 
-        # Outcome phase: the side-effect succeeded. Set status to RUNNING.
-        # This is a single persist; if it fails, the in-memory status is
-        # kept (matches executor state) and recovery will reconcile. We do
-        # NOT mark the run FAILED here — the executor was resumed.
-        self._update_run_status(recipient.id, AgentRunStatus.RUNNING, rollback_on_error=False)
+        # Outcome phase: the side-effect succeeded. Set the in-memory status
+        # to RUNNING first (persist=False) so that even if the subsequent
+        # outcome-event persist fails, the in-memory projection matches the
+        # executor's actual state. Then append the durable outcome event so
+        # recovery can tell the followup was delivered and does not replay
+        # it. Both use rollback_on_error=False because the executor was
+        # already resumed.
+        self._update_run_status(recipient.id, AgentRunStatus.RUNNING, persist=False)
+        self._append_event(
+            workspace_id=req.workspace_id,
+            agent_run_id=recipient.id,
+            event_type=AgentEventType.PROGRESS,
+            author=recipient.id,
+            recipient=req.author_id,
+            call_id=f"{req.call_id}:outcome",
+            action="followup:outcome",
+            target=recipient.id,
+            fingerprint=_request_fingerprint(
+                "followup:outcome",
+                {"run_id": recipient.id, "followup_call_id": req.call_id},
+            ),
+            payload={"delivered": True, "followup_call_id": req.call_id},
+            rollback_on_error=False,
+        )
 
         # Wake the recipient (and its ancestors) after the outcome persist
         # so the supervisor observing the mailbox sees the run is RUNNING
@@ -1362,10 +1383,15 @@ class AgentTreeManager:
         self._call_index[workspace_id] = ws_calls
         self._next_seq[workspace_id] = max_seq + 1
 
-        # Migration: old resident root runs may have been persisted without a
-        # context_ref (the resident session id). Link them to the workspace's
-        # resident session so authority checks (run.context_ref == session_id)
-        # work for pre-existing roots.
+        # Migration: historical root runs may have been persisted as
+        # ``managed_task`` before the ``resident_root`` executor kind existed.
+        # A root run (parent_id is None) that is ``managed_task`` represents
+        # the resident agent itself; convert it to ``resident_root`` and link
+        # it to the workspace's resident session so authority checks work.
+        #
+        # Also, old resident root runs may have been persisted without a
+        # context_ref (the resident session id); link them to the workspace's
+        # resident session.
         from claude_hub.models.agent_tree import ExecutorKind
 
         workspace = self._wm.workspaces.get(workspace_id)
@@ -1375,9 +1401,19 @@ class AgentTreeManager:
         for run in self._runs.values():
             if run.workspace_id != workspace_id:
                 continue
+            if run.parent_id is not None:
+                continue
+            # Historical managed_task root -> resident_root.
+            if run.executor_kind == ExecutorKind.MANAGED_TASK:
+                run.executor_kind = ExecutorKind.RESIDENT_ROOT
+                run.updated_at = datetime.utcnow()
+                logger.info(
+                    "Migrated root run %s from managed_task to resident_root",
+                    run.id,
+                )
+            # Resident root without context_ref -> link to resident session.
             if (
-                run.parent_id is None
-                and run.executor_kind == ExecutorKind.RESIDENT_ROOT
+                run.executor_kind == ExecutorKind.RESIDENT_ROOT
                 and run.context_ref is None
                 and resident_session_id is not None
             ):
@@ -1414,6 +1450,62 @@ class AgentTreeManager:
         Runs that are already RUNNING, WAITING, BLOCKED, or consistently
         terminal are left untouched.
         """
+        # Reconcile persisted reports into agent tree events. A report may
+        # have been persisted to the workspace state while its corresponding
+        # agent tree event was not (crash between the two persists).
+        # emit_event is idempotent on call_id=f"report:{report.id}", so
+        # re-emitting is safe.
+        from ..models.agent_tree import ExecutorKind
+        from ..models.schemas import AgentReportState
+
+        report_state_map = {
+            AgentReportState.STARTED: AgentEventType.STARTED,
+            AgentReportState.WORKING: AgentEventType.PROGRESS,
+            AgentReportState.BLOCKED: AgentEventType.BLOCKED,
+            AgentReportState.NEEDS_INPUT: AgentEventType.APPROVAL_REQUIRED,
+            AgentReportState.READY_FOR_REVIEW: AgentEventType.PROGRESS,
+            AgentReportState.COMPLETED: AgentEventType.COMPLETED,
+            AgentReportState.REVIEW_STARTED: AgentEventType.PROGRESS,
+            AgentReportState.REVIEW_PASSED: AgentEventType.COMPLETED,
+            AgentReportState.REVIEW_FAILED: AgentEventType.PROGRESS,
+            AgentReportState.REVIEW_NEEDS_INPUT: AgentEventType.BLOCKED,
+        }
+        for run in list(self._runs.values()):
+            if run.workspace_id != workspace_id:
+                continue
+            if run.executor_kind != ExecutorKind.MANAGED_TASK:
+                continue
+            task_id = run.context_ref
+            if not task_id:
+                continue
+            for report in self._wm.reports.values():
+                if report.workspace_id != workspace_id:
+                    continue
+                if report.task_id != task_id:
+                    continue
+                event_type = report_state_map.get(report.state, AgentEventType.PROGRESS)
+                try:
+                    self.emit_event(
+                        workspace_id=workspace_id,
+                        agent_run_id=run.id,
+                        event_type=event_type,
+                        author=run.id,
+                        recipient=run.supervisor_id,
+                        call_id=f"report:{report.id}",
+                        payload={
+                            "message": report.message,
+                            "report_id": report.id,
+                            "report_state": report.state.value,
+                            "task_id": report.task_id,
+                        },
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to reconcile report %s to event for run %s",
+                        report.id,
+                        run.id,
+                    )
+
         for run in list(self._runs.values()):
             if run.workspace_id != workspace_id:
                 continue
@@ -1446,26 +1538,49 @@ class AgentTreeManager:
                 continue
 
             # Case 4: the latest event is a followup MESSAGE — the followup
-            # intent was persisted but the adapter call or status update was
-            # lost. Retry the adapter followup (idempotent) and set status to
-            # RUNNING only after the adapter call succeeds. This applies even
-            # to RUNNING/INTERRUPTED/COMPLETED runs because:
-            # - A RUNNING run may have a pending followup that was never
-            #   delivered (crash between intent persist and adapter call).
-            # - INTERRUPTED/COMPLETED runs are resumed by followup.
-            # FAILED runs cannot be resumed.
+            # intent was persisted but the adapter call or outcome event was
+            # lost. Retry the adapter followup only if there is no matching
+            # outcome event (call_id:outcome). The adapter is idempotent on
+            # call_id (delivered_call_ids on the task), so a retry after a
+            # partial success is a no-op.
             if (
                 latest_event is not None
                 and latest_event.type == AgentEventType.MESSAGE
                 and (latest_event.payload or {}).get("followup") is True
                 and run.status != AgentRunStatus.FAILED
             ):
-                try:
-                    last_msg = run.last_task_message or ""
-                    await self._adapter(run.executor_kind).followup(run, last_msg)
-                    self._update_run_status(run.id, AgentRunStatus.RUNNING, rollback_on_error=False)
-                except Exception:
-                    logger.exception("Failed to recover followup for run %s", run.id)
+                followup_call_id = latest_event.call_id
+                outcome_call_id = f"{followup_call_id}:outcome"
+                has_outcome = any(e.call_id == outcome_call_id for e in run_events)
+                if not has_outcome:
+                    try:
+                        last_msg = run.last_task_message or ""
+                        await self._adapter(run.executor_kind).followup(
+                            run, last_msg, call_id=followup_call_id
+                        )
+                        # Append the outcome event so a subsequent recovery
+                        # does not replay this followup.
+                        self._append_event(
+                            workspace_id=run.workspace_id,
+                            agent_run_id=run.id,
+                            event_type=AgentEventType.PROGRESS,
+                            author=run.id,
+                            recipient=run.supervisor_id,
+                            call_id=outcome_call_id,
+                            action="followup:outcome",
+                            target=run.id,
+                            fingerprint=_request_fingerprint(
+                                "followup:outcome",
+                                {"run_id": run.id, "followup_call_id": followup_call_id},
+                            ),
+                            payload={"delivered": True, "followup_call_id": followup_call_id},
+                            rollback_on_error=False,
+                        )
+                        self._update_run_status(
+                            run.id, AgentRunStatus.RUNNING, rollback_on_error=False
+                        )
+                    except Exception:
+                        logger.exception("Failed to recover followup for run %s", run.id)
                 continue
 
             # Reconcile non-terminal, non-PENDING runs with the executor's

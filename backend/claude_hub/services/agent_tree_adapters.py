@@ -40,8 +40,13 @@ class ExecutorAdapter(ABC):
         """Deliver a one-way message to the executor without waking it."""
 
     @abstractmethod
-    async def followup(self, run: "AgentRun", message: str) -> None:
-        """Deliver a message and resume the executor's turn."""
+    async def followup(self, run: "AgentRun", message: str, call_id: Optional[str] = None) -> None:
+        """Deliver a message and resume the executor's turn.
+
+        ``call_id`` is the deduplication key for exactly-once delivery.
+        Adapters that cannot make the delivery idempotent by inspecting
+        executor state should record delivered call_ids and skip duplicates.
+        """
 
     @abstractmethod
     async def interrupt(self, run: "AgentRun", reason: Optional[str] = None) -> None:
@@ -114,7 +119,7 @@ class ManagedTaskAdapter(ExecutorAdapter):
             run.context_ref,
         )
 
-    async def followup(self, run: "AgentRun", message: str) -> None:
+    async def followup(self, run: "AgentRun", message: str, call_id: Optional[str] = None) -> None:
         from claude_hub.models.schemas import ContinueTaskRequest, WorkspaceTaskStatus
 
         task_id = run.context_ref
@@ -145,11 +150,40 @@ class ManagedTaskAdapter(ExecutorAdapter):
             run.context_ref = str(new_task.id)
             return
 
+        # Exactly-once delivery: if this call_id was already delivered to
+        # this task, skip. The delivered_call_ids list is persisted with the
+        # task so a restarted adapter does not re-deliver.
+        if call_id and call_id in task.delivered_call_ids:
+            logger.debug(
+                "followup call_id=%s already delivered to task %s; skipping",
+                call_id,
+                task_id,
+            )
+            return
+
         # Resume the task based on its current status:
         # - TODO (including after abort): start it
-        # - REVIEW / DONE: continue it back to working
+        # - QUEUED: append the followup message to the task prompt so the
+        #   worker sees it when dispatched.
+        # - WORKING: deliver the message directly to the running session.
+        # - REVIEW / DONE: continue it back to working.
         if task.status == WorkspaceTaskStatus.TODO:
+            # The task hasn't started yet. Append the followup message to
+            # the prompt so the worker sees it when dispatched, then start
+            # the task.
+            updated = task.model_copy(update={"prompt": f"{task.prompt}\n\n[followup] {message}"})
+            self._wm.tasks[task_id] = updated
             await self._wm.start_task(task_id)
+        elif task.status == WorkspaceTaskStatus.QUEUED:
+            # The task is waiting for a worker. Append the followup message
+            # to the prompt so the worker picks it up when dispatched.
+            updated = task.model_copy(update={"prompt": f"{task.prompt}\n\n[followup] {message}"})
+            self._wm.tasks[task_id] = updated
+        elif task.status == WorkspaceTaskStatus.WORKING:
+            # The agent is actively running. Send the followup message
+            # directly to its session so it processes it immediately.
+            if task.session_id:
+                await self._wm.send_session_message(task.session_id, message)
         elif task.status in (
             WorkspaceTaskStatus.REVIEW,
             WorkspaceTaskStatus.DONE,
@@ -158,6 +192,16 @@ class ManagedTaskAdapter(ExecutorAdapter):
                 task_id,
                 ContinueTaskRequest(message=message),
             )
+
+        # Record the call_id as delivered so a retry (e.g. after a crash
+        # between adapter success and outcome persist) does not re-deliver.
+        if call_id:
+            current = self._wm.tasks.get(task_id)
+            if current is not None and call_id not in current.delivered_call_ids:
+                updated = current.model_copy(
+                    update={"delivered_call_ids": current.delivered_call_ids + [call_id]}
+                )
+                self._wm.tasks[task_id] = updated
 
     async def interrupt(self, run: "AgentRun", reason: Optional[str] = None) -> None:
         from claude_hub.models.schemas import ManualTaskControlRequest
@@ -215,7 +259,7 @@ class NativeSubagentAdapter(ExecutorAdapter):
     async def send_message(self, run: "AgentRun", message: str) -> None:
         pass
 
-    async def followup(self, run: "AgentRun", message: str) -> None:
+    async def followup(self, run: "AgentRun", message: str, call_id: Optional[str] = None) -> None:
         from claude_hub.models.agent_tree import AgentRunStatus
 
         self._statuses[run.id] = AgentRunStatus.RUNNING
@@ -249,7 +293,7 @@ class ExternalJobAdapter(ExecutorAdapter):
     async def send_message(self, run: "AgentRun", message: str) -> None:
         pass
 
-    async def followup(self, run: "AgentRun", message: str) -> None:
+    async def followup(self, run: "AgentRun", message: str, call_id: Optional[str] = None) -> None:
         from claude_hub.models.agent_tree import AgentRunStatus
 
         self._statuses[run.id] = AgentRunStatus.RUNNING
@@ -291,7 +335,7 @@ class ResidentRootAdapter(ExecutorAdapter):
         # reads them on its next cycle. No immediate side-effect needed.
         pass
 
-    async def followup(self, run: "AgentRun", message: str) -> None:
+    async def followup(self, run: "AgentRun", message: str, call_id: Optional[str] = None) -> None:
         # The resident runs on a periodic cycle, but a followup should wake
         # it immediately so it processes the message without waiting for the
         # next tick. request_resident_run stamps a flag that the monitor

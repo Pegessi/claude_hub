@@ -2109,9 +2109,9 @@ async def test_duplicate_followup_does_not_retrigger_adapter(
     followup_calls = {"n": 0}
     real_followup = adapter.followup
 
-    async def _counting_followup(run, message):
+    async def _counting_followup(run, message, call_id=None):
         followup_calls["n"] += 1
-        return await real_followup(run, message)
+        return await real_followup(run, message, call_id=call_id)
 
     monkeypatch.setattr(adapter, "followup", _counting_followup)
 
@@ -2331,9 +2331,9 @@ async def test_lost_followup_delivery_recovered(
     followup_calls = {"n": 0}
     real_followup = adapter.followup
 
-    async def _counting_followup(run, message):
+    async def _counting_followup(run, message, call_id=None):
         followup_calls["n"] += 1
-        return await real_followup(run, message)
+        return await real_followup(run, message, call_id=call_id)
 
     monkeypatch.setattr(adapter, "followup", _counting_followup)
 
@@ -3248,3 +3248,179 @@ def test_review_failed_maps_to_running_not_failed(manager: WorkspaceManager, ws_
 
     # The run must be RUNNING, not FAILED.
     assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.RUNNING
+
+
+# ---------------------------------------------------------------------------
+# Round 13 fixes: durable call_id receipts, TODO/QUEUED/WORKING followup
+# delivery, managed_task root -> resident_root migration.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_managed_task_followup_queued_appends_to_prompt(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """For a managed-task run whose task is QUEUED, followup appends the
+    message to the task prompt so the worker picks it up when dispatched."""
+    from claude_hub.models import WorkspaceTaskStatus
+
+    ws_id = _make_workspace(manager, tmp_path)
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.MANAGED_TASK,
+            title="child",
+            initial_message="do work",
+            call_id="followup-queued",
+        )
+    )
+    task_id = child.context_ref
+    assert task_id is not None
+
+    # Force the task back to QUEUED (e.g. dispatcher hasn't picked it up yet).
+    task = manager.tasks[task_id]
+    manager.tasks[task_id] = task.model_copy(update={"status": WorkspaceTaskStatus.QUEUED})
+
+    original_prompt = manager.tasks[task_id].prompt
+
+    await manager.agent_tree.followup(
+        FollowupRequest(
+            workspace_id=ws_id,
+            recipient_id=child.id,
+            author_id=root.id,
+            message="please also do X",
+            call_id="followup-queued-1",
+        )
+    )
+
+    updated = manager.tasks[task_id]
+    assert updated.status == WorkspaceTaskStatus.QUEUED
+    assert f"[followup] please also do X" in updated.prompt
+    assert updated.prompt.startswith(original_prompt)
+
+
+@pytest.mark.asyncio
+async def test_managed_task_followup_working_sends_session_message(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """For a managed-task run whose task is WORKING, followup delivers the
+    message directly to the running session via send_session_message."""
+    from claude_hub.models import WorkspaceTaskStatus
+
+    ws_id = _make_workspace(manager, tmp_path)
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.MANAGED_TASK,
+            title="child",
+            initial_message="do work",
+            call_id="followup-working",
+        )
+    )
+    task_id = child.context_ref
+    assert task_id is not None
+
+    task = manager.tasks[task_id]
+    assert task.status == WorkspaceTaskStatus.WORKING
+    assert task.session_id is not None
+
+    sent_messages: list[str] = []
+
+    async def _fake_send(session_id: str, message: str) -> None:
+        sent_messages.append(message)
+
+    monkeypatch.setattr(manager, "send_session_message", _fake_send)
+
+    await manager.agent_tree.followup(
+        FollowupRequest(
+            workspace_id=ws_id,
+            recipient_id=child.id,
+            author_id=root.id,
+            message="please also do Y",
+            call_id="followup-working-1",
+        )
+    )
+
+    assert sent_messages == ["please also do Y"]
+
+
+def test_migrate_managed_task_root_to_resident_root(manager: WorkspaceManager, ws_id: str) -> None:
+    """A historical root run persisted as managed_task must be migrated to
+    resident_root on load so authority checks resolve against the resident
+    session."""
+    from claude_hub.models.agent_tree import AgentRun, ExecutorKind
+
+    run_id = "historical-root-run"
+    historical_run = AgentRun(
+        id=run_id,
+        workspace_id=ws_id,
+        parent_id=None,
+        path=run_id,
+        executor_kind=ExecutorKind.MANAGED_TASK,
+        title="resident",
+        status=AgentRunStatus.RUNNING,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+
+    # Simulate loading persisted state that has a managed_task root run.
+    manager.agent_tree.load_from_dict(
+        ws_id,
+        {
+            "agent_runs": [historical_run.model_dump(mode="json")],
+            "agent_events": [],
+        },
+    )
+
+    migrated = manager.agent_tree.get_run(run_id)
+    assert migrated is not None
+    assert migrated.executor_kind == ExecutorKind.RESIDENT_ROOT
+
+
+def test_migrate_resident_root_links_resident_session(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """A resident_root run without a context_ref must be linked to the
+    workspace's resident session on load."""
+    from claude_hub.models.agent_tree import AgentRun, ExecutorKind
+
+    run_id = "resident-root-no-ctx"
+    historical_run = AgentRun(
+        id=run_id,
+        workspace_id=ws_id,
+        parent_id=None,
+        path=run_id,
+        executor_kind=ExecutorKind.RESIDENT_ROOT,
+        title="resident",
+        status=AgentRunStatus.RUNNING,
+        context_ref=None,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+
+    # Set a resident session id on the workspace.
+    workspace = manager.workspaces[ws_id]
+    manager.workspaces[ws_id] = workspace.model_copy(
+        update={"resident_agent_session_id": "resident-sess-123"}
+    )
+
+    manager.agent_tree.load_from_dict(
+        ws_id,
+        {
+            "agent_runs": [historical_run.model_dump(mode="json")],
+            "agent_events": [],
+        },
+    )
+
+    migrated = manager.agent_tree.get_run(run_id)
+    assert migrated is not None
+    assert migrated.executor_kind == ExecutorKind.RESIDENT_ROOT
+    assert migrated.context_ref == "resident-sess-123"
