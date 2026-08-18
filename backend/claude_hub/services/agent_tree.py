@@ -23,8 +23,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from claude_hub.models.agent_tree import (
     TERMINAL_EVENT_TYPES,
@@ -87,6 +88,18 @@ class AgentTreeManager:
         self._next_seq[workspace_id] = seq + 1
         return seq
 
+    def _persist(self) -> None:
+        """Persist the agent tree (and full workspace state) to disk.
+
+        Called after every run/event/status mutation so the durable mailbox
+        survives a process crash. Failures are logged but not raised so a
+        persistence error cannot break the in-memory coordination path.
+        """
+        try:
+            self._wm._save_state()
+        except Exception:
+            logger.exception("Failed to persist agent tree state")
+
     def _append_event(
         self,
         *,
@@ -98,16 +111,18 @@ class AgentTreeManager:
         call_id: str,
         correlation_id: Optional[str] = None,
         payload: Optional[dict] = None,
-    ) -> AgentEvent:
+    ) -> Tuple[AgentEvent, bool]:
         """Append an event to the workspace stream.
 
         Idempotent on ``call_id``: if a call with the same id was already
-        recorded, return the existing event instead of appending a
-        duplicate.
+        recorded, return the existing event and ``is_new=False``.
+
+        Returns ``(event, is_new)`` so callers can skip adapter side effects
+        on duplicate calls.
         """
         existing = self._call_index.get(call_id)
         if existing is not None:
-            return existing
+            return existing, False
 
         seq = self._next_sequence(workspace_id)
         event = AgentEvent(
@@ -133,7 +148,9 @@ class AgentTreeManager:
             ev = self._run_events.get(recipient)
             if ev is not None:
                 ev.set()
-        return event
+
+        self._persist()
+        return event, True
 
     def _wake_ancestors(self, run: AgentRun) -> None:
         """Wake waiters on the run and all its ancestors."""
@@ -150,6 +167,7 @@ class AgentTreeManager:
             return
         run.status = status
         run.updated_at = datetime.utcnow()
+        self._persist()
 
     def _set_last_message(self, run_id: str, message: str) -> None:
         run = self._runs.get(run_id)
@@ -157,29 +175,46 @@ class AgentTreeManager:
             return
         run.last_task_message = message
         run.updated_at = datetime.utcnow()
+        self._persist()
 
     # ------------------------------------------------------------------
     # Public actions
     # ------------------------------------------------------------------
 
     async def spawn(self, req: SpawnRequest) -> AgentRun:
-        """Create a child run and dispatch its initial task."""
+        """Create a child run and dispatch its initial task.
+
+        Idempotent on ``call_id``: a duplicate call returns the existing
+        run without re-creating it or re-triggering the executor adapter.
+        """
         parent = self._runs.get(req.parent_id)
         if parent is None:
             raise KeyError(f"Parent run {req.parent_id} not found")
         if parent.workspace_id != req.workspace_id:
             raise ValueError("Parent run belongs to a different workspace")
 
+        # Idempotency: if this call_id already produced a run, return it.
+        existing_event = self._call_index.get(req.call_id)
+        if existing_event is not None:
+            existing_run = self._runs.get(existing_event.agent_run_id)
+            if existing_run is not None:
+                return existing_run
+
+        run_id = str(uuid.uuid4())
         run = AgentRun(
+            id=run_id,
             workspace_id=req.workspace_id,
             parent_id=parent.id,
-            path=f"{parent.path}/{parent.id}",
+            # Path includes the run's own id so subtree prefix-matching
+            # never mixes in siblings.
+            path=f"{parent.path}/{run_id}",
             supervisor_id=parent.id,
             executor_kind=req.executor_kind,
             title=req.title,
             last_task_message=req.initial_message,
         )
         self._runs[run.id] = run
+        self._persist()
 
         # Emit a dispatched event addressed to the child.
         self._append_event(
@@ -228,7 +263,7 @@ class AgentTreeManager:
         if recipient is None:
             raise KeyError(f"Recipient run {req.recipient_id} not found")
 
-        event = self._append_event(
+        event, is_new = self._append_event(
             workspace_id=req.workspace_id,
             agent_run_id=recipient.id,
             event_type=AgentEventType.MESSAGE,
@@ -238,16 +273,21 @@ class AgentTreeManager:
             correlation_id=req.correlation_id,
             payload={"message": req.message},
         )
-        self._set_last_message(recipient.id, req.message)
+        if is_new:
+            self._set_last_message(recipient.id, req.message)
         return event
 
     async def followup(self, req: FollowupRequest) -> AgentEvent:
-        """Append a message and resume the recipient's turn."""
+        """Append a message and resume the recipient's turn.
+
+        Idempotent on ``call_id``: a duplicate call returns the existing
+        message event without re-triggering the executor adapter.
+        """
         recipient = self._runs.get(req.recipient_id)
         if recipient is None:
             raise KeyError(f"Recipient run {req.recipient_id} not found")
 
-        event = self._append_event(
+        event, is_new = self._append_event(
             workspace_id=req.workspace_id,
             agent_run_id=recipient.id,
             event_type=AgentEventType.MESSAGE,
@@ -257,6 +297,9 @@ class AgentTreeManager:
             correlation_id=req.correlation_id,
             payload={"message": req.message, "followup": True},
         )
+        if not is_new:
+            return event
+
         self._set_last_message(recipient.id, req.message)
 
         # Resume the executor's turn.
@@ -307,10 +350,19 @@ class AgentTreeManager:
         return self._events_for(req.workspace_id, req.recipient_id, req.since_sequence, req.subtree)
 
     async def interrupt(self, req: InterruptRequest) -> AgentRun:
-        """Interrupt a run, preserving its context."""
+        """Interrupt a run, preserving its context.
+
+        Idempotent on ``call_id``: a duplicate call returns the existing
+        run without re-triggering the executor adapter.
+        """
         run = self._runs.get(req.run_id)
         if run is None:
             raise KeyError(f"Run {req.run_id} not found")
+
+        # Idempotency: if this call_id already interrupted, return the run.
+        existing_event = self._call_index.get(req.call_id)
+        if existing_event is not None:
+            return run
 
         try:
             await self._adapter(run.executor_kind).interrupt(run, req.reason)
@@ -420,7 +472,7 @@ class AgentTreeManager:
         flow back into the tree. The Hub updates the run's status and
         last_task_message from the event.
         """
-        event = self._append_event(
+        event, is_new = self._append_event(
             workspace_id=workspace_id,
             agent_run_id=agent_run_id,
             event_type=event_type,
@@ -429,6 +481,8 @@ class AgentTreeManager:
             call_id=call_id,
             payload=payload,
         )
+        if not is_new:
+            return event
 
         run = self._runs.get(agent_run_id)
         if run is not None:
@@ -484,6 +538,7 @@ class AgentTreeManager:
         # Root path is just its own id.
         run.path = run.id
         self._runs[run.id] = run
+        self._persist()
         return run
 
     # ------------------------------------------------------------------

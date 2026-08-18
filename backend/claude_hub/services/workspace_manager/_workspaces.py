@@ -575,6 +575,10 @@ class _WorkspacesMixin:
         ``resident_agent_session_id`` in case a future prompt makes the resident
         emit them. ``system_internal`` tasks are excluded entirely. When
         ``since`` is ``None`` any existing outcome/report counts.
+
+        Agent-tree events in the resident's subtree (progress, blocked, failed,
+        completed, etc.) also count as activity: the resident's child runs
+        (managed tasks) emit directed events that the resident should react to.
         """
         workspace = self.workspaces.get(workspace_id)
         resident_session_id = workspace.resident_agent_session_id if workspace is not None else None
@@ -608,6 +612,28 @@ class _WorkspacesMixin:
                 continue
             if _after(report.created_at):
                 return True
+        # Agent-tree directed events: any event in the resident root run's
+        # subtree created after ``since`` counts as activity. This lets the
+        # resident wake on child progress/blocked/failed/completed without
+        # scanning global task/report APIs.
+        if resident_session_id is not None:
+            root_run = self.agent_tree.get_run_by_context_ref(workspace_id, resident_session_id)
+            if root_run is not None:
+                since_seq = 0
+                # Map the ``since`` timestamp to a sequence cursor: find the
+                # last event at or before ``since`` and use its sequence.
+                if since is not None:
+                    all_events = self.agent_tree.get_events(
+                        workspace_id, root_run.id, since_sequence=0, subtree=True
+                    )
+                    for ev in all_events:
+                        if ev.created_at <= since:
+                            since_seq = max(since_seq, ev.sequence)
+                new_events = self.agent_tree.get_events(
+                    workspace_id, root_run.id, since_sequence=since_seq, subtree=True
+                )
+                if new_events:
+                    return True
         return False
 
     def _resident_agent_due(self, workspace: Workspace, now: datetime) -> bool:
@@ -788,14 +814,37 @@ class _WorkspacesMixin:
             if session.remote_forward_port
             else f"http://localhost:{settings.port}"
         )
-        await self.send_session_message(
-            session.id,
-            build_resident_agent_prompt(workspace, base_url, session.id),
-        )
+        prompt = build_resident_agent_prompt(workspace, base_url, session.id)
 
-    def _ensure_resident_root_run(
-        self, workspace_id: str, session_id: str
-    ) -> None:
+        # Inject recent directed subtree events so the resident can observe
+        # child progress/blocked/failed/completed via the unified mailbox
+        # instead of scanning global task/report APIs.
+        root_run = self.agent_tree.get_run_by_context_ref(workspace.id, session.id)
+        if root_run is not None:
+            subtree_events = self.agent_tree.get_events(
+                workspace.id, root_run.id, since_sequence=0, subtree=True
+            )
+            if subtree_events:
+                # Keep only the most recent events to avoid bloating the prompt.
+                recent = subtree_events[-20:]
+                event_lines = []
+                for ev in recent:
+                    payload_msg = (ev.payload or {}).get("message", "")
+                    event_lines.append(
+                        f"  - seq={ev.sequence} type={ev.type.value} "
+                        f"author={ev.author} recipient={ev.recipient or 'broadcast'} "
+                        f"msg={payload_msg}"
+                    )
+                prompt += (
+                    "\n\n## Recent child activity (agent tree events)\n"
+                    "The following directed events from your subtree arrived since "
+                    "your last cycle. Use them to decide what to do next instead of "
+                    "scanning the board:\n" + "\n".join(event_lines) + "\n"
+                )
+
+        await self.send_session_message(session.id, prompt)
+
+    def _ensure_resident_root_run(self, workspace_id: str, session_id: str) -> None:
         """Ensure the resident has a root run in the agent tree.
 
         The resident acts as the root supervisor: it can spawn child runs

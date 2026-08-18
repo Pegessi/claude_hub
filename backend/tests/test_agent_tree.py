@@ -7,6 +7,7 @@ from datetime import datetime
 from importlib import import_module
 from pathlib import Path
 from typing import Generator
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pytest import MonkeyPatch
@@ -36,6 +37,28 @@ def state_root(monkeypatch: MonkeyPatch, tmp_path: Path) -> Generator[Path, None
     monkeypatch.setattr(_wm, "INDEX_FILE", index_file)
     monkeypatch.setattr(_wm._persistence, "INDEX_FILE", index_file)
     monkeypatch.setattr(_wm._state, "INDEX_FILE", index_file)
+
+    # Mock ttyd_manager / tmux so tests are hermetic regardless of whether
+    # tmux is installed. We never exercise real terminal sessions in these
+    # tests (managed-task runs are created directly with context_ref).
+    fake_tab = MagicMock()
+    fake_tab.id = "tab-mock"
+    fake_tab.tmux_session = "tmux-mock"
+    monkeypatch.setattr(_wm.ttyd_manager, "create_tab", AsyncMock(return_value=fake_tab))
+    monkeypatch.setattr(_wm.ttyd_manager, "delete_tab", AsyncMock())
+    monkeypatch.setattr(_wm.ttyd_manager, "update_tab", AsyncMock(return_value=fake_tab))
+    monkeypatch.setattr(_wm.ttyd_manager, "rename_tab", MagicMock(return_value=fake_tab))
+    monkeypatch.setattr(_wm.ttyd_manager, "get_tab", MagicMock(return_value=fake_tab))
+    monkeypatch.setattr(_wm.ttyd_manager, "list_tabs", MagicMock(return_value=[]))
+    monkeypatch.setattr(_wm.ttyd_manager, "list_tab_agent_statuses", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        _wm.ttyd_manager, "ensure_tab_tmux_session", AsyncMock(return_value=fake_tab)
+    )
+    monkeypatch.setattr(_wm.ttyd_manager, "set_tab_workspace_metadata", MagicMock())
+
+    # Mock the workspace manager's tmux message sender.
+    monkeypatch.setattr(_wm.WorkspaceManager, "_send_tmux_message", AsyncMock())
+
     yield root
 
 
@@ -97,7 +120,9 @@ async def test_spawn_creates_child_run(manager: WorkspaceManager) -> None:
         )
     )
     assert child.parent_id == root.id
-    assert child.path == f"{root.path}/{root.id}"
+    # Path includes the child's own id so subtree prefix-matching never
+    # mixes in siblings.
+    assert child.path == f"{root.path}/{child.id}"
     assert child.supervisor_id == root.id
     assert child.executor_kind == ExecutorKind.NATIVE_SUBAGENT
     assert child.last_task_message == "do the thing"
@@ -122,9 +147,15 @@ async def test_spawn_call_id_idempotent(manager: WorkspaceManager) -> None:
         call_id="same-call",
     )
     first = await manager.agent_tree.spawn(req)
-    # A second spawn with the same call_id should NOT create a duplicate run
-    # (the dispatched event is deduped, but the run itself is created once).
-    # We verify the event stream has only one dispatched event for this call.
+    # A second spawn with the same call_id must return the SAME run and not
+    # re-trigger the executor adapter.
+    second = await manager.agent_tree.spawn(req)
+    assert second.id == first.id
+    # Only one run exists under root.
+    runs = manager.agent_tree.list_runs(ListRunsRequest(workspace_id=ws_id, root_id=root.id))
+    child_runs = [r for r in runs if r.id != root.id]
+    assert len(child_runs) == 1
+    # Only one dispatched event for this call_id.
     events = manager.agent_tree.get_events(ws_id, first.id, subtree=False)
     dispatched = [e for e in events if e.type == AgentEventType.DISPATCHED]
     assert len(dispatched) == 1
@@ -438,7 +469,7 @@ async def test_report_bridges_to_agent_event(manager: WorkspaceManager, tmp_path
     # Wire parent/supervisor so the bridge addresses the event to root.
     child.parent_id = root.id
     child.supervisor_id = root.id
-    child.path = f"{root.path}/{root.id}"
+    child.path = f"{root.path}/{child.id}"
 
     now = datetime.utcnow()
     session = ManagedSession(
@@ -540,6 +571,188 @@ def test_runs_and_events_survive_save_load(manager: WorkspaceManager) -> None:
     )
     assert dup.sequence == loaded_events[0].sequence
     assert dup.payload["message"] == "working"
+
+
+def test_restart_replay_from_disk(manager: WorkspaceManager, tmp_path: Path) -> None:
+    """Full process-restart replay: state is written to disk via _save_state,
+    then a fresh WorkspaceManager loads it back. Runs, events, sequence
+    continuity, and call_id idempotency must all survive."""
+    from claude_hub.models import ExecutionTarget, WorkspaceCreate
+
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    ws = manager.create_workspace(
+        WorkspaceCreate(name="Restart WS", path=str(repo), target=ExecutionTarget.LOCAL)
+    )
+    ws_id = ws.id
+
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    manager.agent_tree.emit_event(
+        workspace_id=ws_id,
+        agent_run_id=root.id,
+        event_type=AgentEventType.PROGRESS,
+        author=root.id,
+        recipient=None,
+        call_id="prog-1",
+        payload={"message": "working"},
+    )
+    manager.agent_tree.emit_event(
+        workspace_id=ws_id,
+        agent_run_id=root.id,
+        event_type=AgentEventType.COMPLETED,
+        author=root.id,
+        recipient=None,
+        call_id="done-1",
+        payload={"message": "finished"},
+    )
+
+    # Persist to disk (this is what happens on every mutation).
+    manager._save_state()
+
+    # Simulate a process restart: a fresh manager loads from the same state root.
+    fresh = WorkspaceManager()
+
+    loaded_run = fresh.agent_tree.get_run(root.id)
+    assert loaded_run is not None
+    assert loaded_run.id == root.id
+    assert loaded_run.status == AgentRunStatus.COMPLETED
+
+    loaded_events = fresh.agent_tree.get_events(ws_id, root.id, subtree=False)
+    assert len(loaded_events) == 2
+    seqs = sorted(e.sequence for e in loaded_events)
+    assert seqs == [seqs[0], seqs[0] + 1]
+
+    # New events after restart continue the sequence.
+    new_event = fresh.agent_tree.emit_event(
+        workspace_id=ws_id,
+        agent_run_id=root.id,
+        event_type=AgentEventType.PROGRESS,
+        author=root.id,
+        recipient=None,
+        call_id="prog-2",
+        payload={"message": "post-restart"},
+    )
+    assert new_event.sequence == seqs[-1] + 1
+
+    # call_id idempotency survives the restart.
+    dup = fresh.agent_tree.emit_event(
+        workspace_id=ws_id,
+        agent_run_id=root.id,
+        event_type=AgentEventType.PROGRESS,
+        author=root.id,
+        recipient=None,
+        call_id="prog-1",
+        payload={"message": "duplicate"},
+    )
+    assert dup.sequence == seqs[0]
+    assert dup.payload["message"] == "working"
+
+
+# ---------------------------------------------------------------------------
+# Idempotency for followup / interrupt
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_followup_call_id_idempotent(manager: WorkspaceManager) -> None:
+    ws_id = "ws-1"
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="spawn-1",
+        )
+    )
+    req = FollowupRequest(
+        workspace_id=ws_id,
+        recipient_id=child.id,
+        author_id=root.id,
+        message="continue",
+        call_id="followup-1",
+    )
+    first = await manager.agent_tree.followup(req)
+    second = await manager.agent_tree.followup(req)
+    # Same event returned; no duplicate message appended.
+    assert second.sequence == first.sequence
+    events = manager.agent_tree.get_events(ws_id, child.id, subtree=False)
+    messages = [e for e in events if e.call_id == "followup-1"]
+    assert len(messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_interrupt_call_id_idempotent(manager: WorkspaceManager) -> None:
+    ws_id = "ws-1"
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="spawn-1",
+        )
+    )
+    req = InterruptRequest(
+        workspace_id=ws_id,
+        run_id=child.id,
+        call_id="int-1",
+        reason="stop",
+    )
+    first = await manager.agent_tree.interrupt(req)
+    assert first.status == AgentRunStatus.INTERRUPTED
+    # Second interrupt with the same call_id returns the run without
+    # re-emitting an interrupted event.
+    second = await manager.agent_tree.interrupt(req)
+    assert second.id == first.id
+    events = manager.agent_tree.get_events(ws_id, child.id, subtree=False)
+    interrupted = [e for e in events if e.call_id == "int-1"]
+    assert len(interrupted) == 1
+
+
+# ---------------------------------------------------------------------------
+# Sibling path isolation
+# ---------------------------------------------------------------------------
+
+
+def test_sibling_paths_do_not_overlap(manager: WorkspaceManager) -> None:
+    ws_id = "ws-1"
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    # Two children must have distinct paths that include their own id, so
+    # subtree queries for one never return the other.
+    child_a = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child_a.parent_id = root.id
+    child_a.supervisor_id = root.id
+    child_a.path = f"{root.path}/{child_a.id}"
+
+    child_b = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child_b.parent_id = root.id
+    child_b.supervisor_id = root.id
+    child_b.path = f"{root.path}/{child_b.id}"
+
+    assert child_a.path != child_b.path
+    assert child_a.id in child_a.path
+    assert child_b.id in child_b.path
+    # Subtree of A must not include B.
+    a_subtree = manager.agent_tree.list_runs(
+        ListRunsRequest(workspace_id=ws_id, root_id=child_a.id)
+    )
+    a_ids = {r.id for r in a_subtree}
+    assert child_b.id not in a_ids
 
 
 # ---------------------------------------------------------------------------
