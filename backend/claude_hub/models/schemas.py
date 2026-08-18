@@ -781,6 +781,11 @@ class AgentReportCreate(BaseModel):
     review_decision: ReviewDecision = ReviewDecision.AUTO
     review_reason: Optional[str] = None
     risk_level: Optional[str] = None
+    # Call-specific ACK: the call_ids this report acknowledges as processed
+    # by the worker. Only these call_ids are moved from pending_call_ids to
+    # delivered_call_ids. This prevents an unrelated report from accidentally
+    # ACKing a pending followup that the worker has not yet processed.
+    acked_call_ids: List[str] = Field(default_factory=list)
 
 
 class AgentReport(BaseModel):
@@ -807,6 +812,9 @@ class AgentReport(BaseModel):
     review_decision: ReviewDecision = ReviewDecision.AUTO
     review_reason: Optional[str] = None
     risk_level: Optional[str] = None
+    # Call-specific ACK: the call_ids this report acknowledges as processed
+    # by the worker. Mirrors AgentReportCreate.acked_call_ids.
+    acked_call_ids: List[str] = Field(default_factory=list)
     # The owning task's ``review_cycle`` at the moment this report was created.
     # Used to rank gate/verdict reports against the task's ``reviewed_cycle``.
     # Defaults to 0 so legacy on-disk reports rank below any post-migration round.

@@ -126,12 +126,15 @@ Wraps the existing workspace task/session/report flow:
     or capture can fail), so inferring delivery from pane text is unreliable.
     This closes the post-send crash window that a task-local prompt marker
     cannot: the session-level outbox survives task deletion/recreation.
-    **Durable ACK**: when the worker submits a report for the task,
-    `create_report` calls `_ack_pending_call_ids`, which moves every
-    `pending_call_ids` entry on the task and session to `delivered_call_ids`.
-    The report submission is the durable acknowledgement that the worker
-    received and processed the assignment (and any follow-up messages). Once
-    ACKed, the sender will not re-send the call_id, closing the at-least-once
+    **Durable ACK (call-specific)**: when the worker submits a report for
+    the task, `create_report` calls `_ack_call_ids(task_id, session_id,
+    payload.acked_call_ids)`, which moves **only the call_ids explicitly
+    listed by the worker** from `pending_call_ids` to `delivered_call_ids`
+    on both the task and the session. The report submission is the durable
+    acknowledgement that the worker received and processed *those specific*
+    messages. A pending followup that the worker has not yet processed is
+    never accidentally ACKed by an unrelated progress report. Once ACKed,
+    the sender will not re-send the call_id, closing the at-least-once
     duplicate window.
   - `REVIEW` / `DONE`: `continue_task` to send the task back to working.
   - Task not found: re-create it with the same `agent_run_id` so the run's
@@ -148,10 +151,14 @@ Wraps the existing workspace task/session/report flow:
     with the same `call_id` is a no-op on the sender side (already in
     `delivered_call_ids`). A crash between send and delivered-persist
     causes a re-send (at-least-once); the receiver dedupes via the
-    `[call_id:<id>]` marker. **Durable ACK**: when the worker submits a
-    report for the task, `create_report` moves all `pending_call_ids` on
-    the task and session to `delivered_call_ids`, so the sender will not
-    re-send them.
+    `[call_id:<id>]` marker. **Durable ACK (call-specific)**: when the
+    worker submits a report for the task, `create_report` calls
+    `_ack_call_ids(task_id, session_id, payload.acked_call_ids)`, which
+    moves **only the call_ids listed in the report's `acked_call_ids`**
+    from `pending_call_ids` to `delivered_call_ids` on the task and
+    session. This ensures an unrelated report does not ACK a pending
+    followup the worker has not yet processed. Once ACKed, the sender
+    will not re-send the call_id.
 - `interrupt` → `abort_task`.
 - `get_status` → maps `WorkspaceTaskStatus` to `AgentRunStatus`.
 
@@ -449,13 +456,18 @@ sequence order:
   prompt is re-sent (at-least-once); the worker dedupes via the call_id
   marker, and the eventual report submission ACKs the call_id into
   `delivered_call_ids`.
-- **Durable ACK via report submission**: `create_report` calls
-  `_ack_pending_call_ids(task_id, session_id)`, which moves every entry in
-  `task.pending_call_ids` and `session.pending_call_ids` to the
-  corresponding `delivered_call_ids`. The worker's report submission is
-  the durable acknowledgement that it received and processed the
-  assignment (and any follow-up messages). Once ACKed, the sender will
-  not re-send those call_ids, closing the at-least-once duplicate window.
+- **Durable ACK via report submission (call-specific)**: `create_report`
+  calls `_ack_call_ids(task_id, session_id, payload.acked_call_ids)`,
+  which moves **only the call_ids listed in the report's
+  `acked_call_ids`** from `task.pending_call_ids` and
+  `session.pending_call_ids` to the corresponding `delivered_call_ids`.
+  The worker's report submission is the durable acknowledgement that it
+  received and processed *those specific* messages. A pending followup
+  that the worker has not yet processed stays in `pending_call_ids` and
+  will be re-sent by the sender's at-least-once recovery. This prevents
+  an unrelated progress report from accidentally ACKing a pending
+  followup. Once ACKed, the sender will not re-send those call_ids,
+  closing the at-least-once duplicate window.
 - **Terminal guard relaxation**: `FAILED` is truly terminal; `INTERRUPTED`
   and `COMPLETED` may transition back to `RUNNING` via `followup` (resume).
 

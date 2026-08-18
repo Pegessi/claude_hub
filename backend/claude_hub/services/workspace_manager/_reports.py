@@ -133,6 +133,7 @@ class _ReportsMixin:
             review_decision=payload.review_decision,
             review_reason=payload.review_reason,
             risk_level=payload.risk_level,
+            acked_call_ids=payload.acked_call_ids,
             review_cycle=task.review_cycle if task else 0,
             created_at=now,
         )
@@ -421,17 +422,22 @@ class _ReportsMixin:
                 self._cleanup_stale_reviewer_assignments(session.workspace_id)
 
         # ------------------------------------------------------------------
-        # Durable ACK for at-least-once delivery.
+        # Call-specific durable ACK for at-least-once delivery.
         #
-        # A report submission from the worker is the durable acknowledgement
-        # that the worker received and processed the assignment (and any
-        # follow-up messages). Move all pending call_ids on the task and
-        # session to delivered_call_ids so the sender does not re-send them.
-        # This closes the at-least-once duplicate window: once the worker
-        # reports, every call_id sent to it is considered delivered.
+        # The worker explicitly lists the call_ids it has processed in
+        # ``payload.acked_call_ids``. Only those call_ids are moved from
+        # ``pending_call_ids`` to ``delivered_call_ids``. This prevents an
+        # unrelated report (e.g. a progress report submitted before a
+        # followup is processed) from accidentally ACKing a pending
+        # followup that the worker has not yet seen.
+        #
+        # The sender-side dedup (send_session_message skips call_ids in
+        # delivered_call_ids) then guarantees that an ACKed call_id is
+        # never re-sent. The remaining at-least-once window (send -> ACK)
+        # is deduped by the receiver via the [call_id:<id>] marker.
         # ------------------------------------------------------------------
         if task_id and task_id in self.tasks:
-            self._ack_pending_call_ids(task_id, session.id)
+            self._ack_call_ids(task_id, session.id, payload.acked_call_ids)
 
         self._save_state()
         if task_id and task_id in self.tasks:
@@ -444,40 +450,47 @@ class _ReportsMixin:
         self._bridge_report_to_agent_event(report, session)
         return report
 
-    def _ack_pending_call_ids(self, task_id: str, session_id: str) -> None:
-        """Move all pending call_ids on the task and session to delivered.
+    def _ack_call_ids(self, task_id: str, session_id: str, call_ids: list[str]) -> None:
+        """Move the specified ``call_ids`` from pending to delivered.
 
-        A report submission is the durable ACK: the worker received and
-        processed the assignment (and any follow-up messages). This moves
-        every call_id in ``pending_call_ids`` to ``delivered_call_ids`` on
-        both the task and the session, so the sender's at-least-once
-        recovery will not re-send them.
+        Only the call_ids explicitly listed by the worker in
+        ``acked_call_ids`` are ACKed. This ensures that a pending followup
+        the worker has not yet processed is never accidentally marked
+        delivered by an unrelated report.
+
+        A call_id that is not in ``pending_call_ids`` (e.g. already
+        delivered by the sender's post-send persist) is a no-op.
         """
+        if not call_ids:
+            return
+        acked = set(call_ids)
+
         task = self.tasks.get(task_id)
         if task is not None:
-            pending = list(task.pending_call_ids)
-            if pending:
-                delivered = list(task.delivered_call_ids)
-                for cid in pending:
-                    if cid not in delivered:
-                        delivered.append(cid)
+            pending = [c for c in task.pending_call_ids if c not in acked]
+            delivered = list(task.delivered_call_ids)
+            for cid in call_ids:
+                if cid not in delivered:
+                    delivered.append(cid)
+            if pending != task.pending_call_ids or delivered != task.delivered_call_ids:
                 self.tasks[task_id] = task.model_copy(
                     update={
-                        "pending_call_ids": [],
+                        "pending_call_ids": pending,
                         "delivered_call_ids": delivered,
                     }
                 )
+
         session = self.sessions.get(session_id)
         if session is not None:
-            pending = list(session.pending_call_ids)
-            if pending:
-                delivered = list(session.delivered_call_ids)
-                for cid in pending:
-                    if cid not in delivered:
-                        delivered.append(cid)
+            pending = [c for c in session.pending_call_ids if c not in acked]
+            delivered = list(session.delivered_call_ids)
+            for cid in call_ids:
+                if cid not in delivered:
+                    delivered.append(cid)
+            if pending != session.pending_call_ids or delivered != session.delivered_call_ids:
                 self.sessions[session_id] = session.model_copy(
                     update={
-                        "pending_call_ids": [],
+                        "pending_call_ids": pending,
                         "delivered_call_ids": delivered,
                     }
                 )
