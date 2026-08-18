@@ -4519,6 +4519,407 @@ async def test_report_acks_only_listed_call_ids_not_unrelated_pending_followup(
 
 
 @pytest.mark.asyncio
+async def test_report_auto_acks_dispatch_call_id_even_when_not_listed(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """Submitting a report for a task automatically ACKs the dispatch call_id.
+
+    The dispatch call_id is ``f"dispatch:{task_id}"``. When the worker submits
+    a report for the task, it has necessarily processed the assignment prompt,
+    so the Hub automatically ACKs that call_id — even if the worker does not
+    list it in ``acked_call_ids``.
+    """
+    from claude_hub.models import (
+        AgentReportCreate,
+        AgentReportState,
+        AgentType,
+        WorkspaceTask,
+        WorkspaceTaskStatus,
+    )
+
+    session_id = "auto-ack-dispatch-session"
+    _make_managed_session(manager, session_id, ws_id)
+
+    task = WorkspaceTask(
+        id="auto-ack-dispatch-task",
+        workspace_id=ws_id,
+        title="auto ack dispatch",
+        prompt="do the thing",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    manager.tasks[task.id] = task
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"task_id": task.id, "current_task_id": task.id}
+    )
+
+    dispatch_call_id = f"dispatch:{task.id}"
+    followup_call_id = "followup:unprocessed"
+
+    # Both dispatch and followup are pending (send happened, delivered-persist
+    # crashed).
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={
+            "pending_call_ids": [dispatch_call_id, followup_call_id],
+            "delivered_call_ids": [],
+        }
+    )
+    manager.tasks[task.id] = task.model_copy(
+        update={
+            "pending_call_ids": [dispatch_call_id, followup_call_id],
+            "delivered_call_ids": [],
+        }
+    )
+
+    # Worker submits a report with an EMPTY acked_call_ids list.
+    await manager.create_report(
+        session_id,
+        AgentReportCreate(
+            task_id=task.id,
+            state=AgentReportState.WORKING,
+            message="working on it",
+            acked_call_ids=[],
+        ),
+    )
+
+    session = manager.sessions[session_id]
+    task_after = manager.tasks[task.id]
+
+    # The dispatch call_id was automatically ACKed (moved to delivered).
+    assert dispatch_call_id in session.delivered_call_ids
+    assert dispatch_call_id not in session.pending_call_ids
+    assert dispatch_call_id in task_after.delivered_call_ids
+    assert dispatch_call_id not in task_after.pending_call_ids
+
+    # The unprocessed followup call_id must STILL be pending.
+    assert followup_call_id in session.pending_call_ids
+    assert followup_call_id not in session.delivered_call_ids
+    assert followup_call_id in task_after.pending_call_ids
+    assert followup_call_id not in task_after.delivered_call_ids
+
+
+@pytest.mark.asyncio
+async def test_report_ignores_unknown_future_call_ids_no_poisoning(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """A report ACKing an unknown/future call_id must NOT add it to delivered.
+
+    Future-ID poisoning: a malicious or buggy worker ACKs a call_id that the
+    Hub has not yet sent (not in ``pending_call_ids``). If the Hub added it
+    to ``delivered_call_ids``, the real future delivery would be suppressed
+    (sender-side dedup skips delivered call_ids). The Hub must ignore unknown
+    call_ids and only ACK those currently in ``pending_call_ids``.
+    """
+    from claude_hub.models import (
+        AgentReportCreate,
+        AgentReportState,
+        AgentType,
+        WorkspaceTask,
+        WorkspaceTaskStatus,
+    )
+
+    session_id = "future-poison-session"
+    _make_managed_session(manager, session_id, ws_id)
+
+    task = WorkspaceTask(
+        id="future-poison-task",
+        workspace_id=ws_id,
+        title="future poison",
+        prompt="do the thing",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    manager.tasks[task.id] = task
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"task_id": task.id, "current_task_id": task.id}
+    )
+
+    dispatch_call_id = f"dispatch:{task.id}"
+    future_call_id = "followup:not-yet-sent"
+
+    # Only the dispatch is pending. The future call_id has NOT been sent.
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={
+            "pending_call_ids": [dispatch_call_id],
+            "delivered_call_ids": [],
+        }
+    )
+    manager.tasks[task.id] = task.model_copy(
+        update={
+            "pending_call_ids": [dispatch_call_id],
+            "delivered_call_ids": [],
+        }
+    )
+
+    # Worker tries to poison: ACKs the not-yet-sent future call_id.
+    await manager.create_report(
+        session_id,
+        AgentReportCreate(
+            task_id=task.id,
+            state=AgentReportState.WORKING,
+            message="working",
+            acked_call_ids=[future_call_id],
+        ),
+    )
+
+    session = manager.sessions[session_id]
+    task_after = manager.tasks[task.id]
+
+    # The dispatch was auto-ACKed (it was pending).
+    assert dispatch_call_id in session.delivered_call_ids
+    assert dispatch_call_id not in session.pending_call_ids
+
+    # The future call_id must NOT be in delivered_call_ids (poisoning rejected).
+    assert future_call_id not in session.delivered_call_ids
+    assert future_call_id not in task_after.delivered_call_ids
+
+    # The future call_id is also not in pending (it was never sent).
+    assert future_call_id not in session.pending_call_ids
+    assert future_call_id not in task_after.pending_call_ids
+
+
+@pytest.mark.asyncio
+async def test_crash_after_processing_before_ack_exactly_one_side_effect(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """Crash after receiver processing but before ACK yields exactly one side effect.
+
+    At-least-once delivery means the sender may re-send a call_id if the
+    delivered-persist (phase 2) or the receiver ACK did not complete. The
+    receiver must dedupe so that the side effect (e.g. writing a file) happens
+    exactly once.
+
+    Sequence:
+      1. Sender sends call_id=X (phase 1: X in pending_call_ids, persisted).
+      2. Receiver processes X (side effect: writes file), but crashes before
+         submitting the ACK report.
+      3. Sender's phase 2 (move X to delivered) also did not complete (crash).
+      4. On recovery, X is still in pending_call_ids.
+      5. Sender re-sends X.
+      6. Receiver sees [call_id:X] marker in its history, dedupes, does NOT
+         repeat the side effect, and submits the ACK.
+      7. X moves to delivered_call_ids.
+
+    This test verifies the Hub-side guarantees:
+      - After the ACK, X is in delivered_call_ids and not in pending_call_ids.
+      - The sender-side dedup prevents a third send of X.
+    """
+    from claude_hub.models import (
+        AgentReportCreate,
+        AgentReportState,
+        AgentType,
+        WorkspaceTask,
+        WorkspaceTaskStatus,
+    )
+
+    session_id = "crash-before-ack-session"
+    _make_managed_session(manager, session_id, ws_id)
+
+    task = WorkspaceTask(
+        id="crash-before-ack-task",
+        workspace_id=ws_id,
+        title="crash before ack",
+        prompt="do the thing",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    manager.tasks[task.id] = task
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"task_id": task.id, "current_task_id": task.id}
+    )
+
+    dispatch_call_id = f"dispatch:{task.id}"
+
+    # Step 1-3: sender sent X, receiver processed X (side effect happened),
+    # but both the receiver ACK and sender phase-2 persist crashed.
+    # So X is still in pending_call_ids and NOT in delivered_call_ids.
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={
+            "pending_call_ids": [dispatch_call_id],
+            "delivered_call_ids": [],
+        }
+    )
+    manager.tasks[task.id] = task.model_copy(
+        update={
+            "pending_call_ids": [dispatch_call_id],
+            "delivered_call_ids": [],
+        }
+    )
+
+    # Track actual tmux sends (the sender's side effect). The receiver's
+    # side effect (processing the message) is deduped by the [call_id:X]
+    # marker embedded in the message text.
+    send_count = {"n": 0}
+    sent_messages: list[str] = []
+
+    real_send_tmux = manager._send_tmux_message
+
+    async def counting_send_tmux(tmux_session: str, message: str) -> None:
+        send_count["n"] += 1
+        sent_messages.append(message)
+        await real_send_tmux(tmux_session, message)
+
+    monkeypatch.setattr(manager, "_send_tmux_message", counting_send_tmux)
+
+    # Step 4-5: on recovery, the sender re-sends X because it is still pending.
+    await manager.send_session_message(session_id, "assignment prompt", call_id=dispatch_call_id)
+
+    # The message includes the [call_id:X] marker so the receiver can dedupe
+    # the duplicate delivery (the first send before the crash already caused
+    # the side effect; the re-send must not repeat it).
+    assert any(f"[call_id:{dispatch_call_id}]" in m for m in sent_messages)
+
+    # Step 6: receiver dedupes (side effect happened once before the crash,
+    # and the re-send is a no-op on the receiver side thanks to the marker).
+    # The receiver then submits the ACK.
+    await manager.create_report(
+        session_id,
+        AgentReportCreate(
+            task_id=task.id,
+            state=AgentReportState.WORKING,
+            message="processed",
+            acked_call_ids=[dispatch_call_id],
+        ),
+    )
+
+    session = manager.sessions[session_id]
+    task_after = manager.tasks[task.id]
+
+    # Step 7: X is now delivered and no longer pending.
+    assert dispatch_call_id in session.delivered_call_ids
+    assert dispatch_call_id not in session.pending_call_ids
+    assert dispatch_call_id in task_after.delivered_call_ids
+    assert dispatch_call_id not in task_after.pending_call_ids
+
+    # Step: sender-side dedup prevents further sends of X now that it is
+    # in delivered_call_ids.
+    await manager.send_session_message(session_id, "assignment prompt", call_id=dispatch_call_id)
+    # send_session_message skips call_ids already in delivered_call_ids, so
+    # the tmux send counter does NOT increment.
+    assert send_count["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_resident_root_managed_task_report_ack_cold_replay(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """ResidentRoot -> managed-task -> report/ACK -> cold-replay runtime trace.
+
+    End-to-end trace through the agent tree:
+      1. A resident_root run is the supervisor.
+      2. It spawns a managed-task child (creates a workspace task + dispatches
+         to a worker session with call_id ``f"dispatch:{task.id}"``).
+      3. The worker submits a report — the Hub automatically ACKs the dispatch
+         call_id (moves it from pending to delivered_call_ids).
+      4. The resident root observes the child's progress via the bridged event.
+      5. Cold-replay: state is persisted to disk and a fresh WorkspaceManager
+         loads it back. The delivered_call_ids state must survive so the
+         dispatch is never re-sent.
+    """
+    from claude_hub.models import (
+        AgentReportCreate,
+        AgentReportState,
+    )
+
+    ws_id = _make_workspace(manager, tmp_path)
+
+    # 1. Resident root supervisor.
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.RESIDENT_ROOT,
+        context_ref="resident-session",
+    )
+
+    # 2. Spawn a managed-task child. This creates a task and dispatches it
+    #    to a worker session with call_id f"dispatch:{task.id}".
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.MANAGED_TASK,
+            title="child task",
+            initial_message="do the work",
+            call_id="spawn-child",
+        )
+    )
+    task_id = child.context_ref
+    assert task_id is not None
+    task = manager.tasks[task_id]
+    assert task.session_id is not None
+    session_id = task.session_id
+
+    dispatch_call_id = f"dispatch:{task_id}"
+
+    # After a successful dispatch, the sender's phase 2 moves the dispatch
+    # call_id to session.delivered_call_ids.
+    session = manager.sessions[session_id]
+    assert dispatch_call_id in session.delivered_call_ids
+    assert dispatch_call_id not in session.pending_call_ids
+
+    # Simulate a crash between the send (phase 1) and the delivered-persist
+    # (phase 2): the dispatch call_id is left in session.pending_call_ids.
+    # The worker still processed the assignment (side effect happened) and
+    # now submits a report. The Hub's automatic dispatch ACK must move the
+    # call_id to delivered_call_ids so it is never re-sent.
+    manager.sessions[session_id] = session.model_copy(
+        update={
+            "pending_call_ids": [dispatch_call_id],
+            "delivered_call_ids": [c for c in session.delivered_call_ids if c != dispatch_call_id],
+        }
+    )
+
+    # 3. Worker submits a report. The Hub auto-ACKs the dispatch call_id.
+    await manager.create_report(
+        session_id,
+        AgentReportCreate(
+            task_id=task_id,
+            state=AgentReportState.WORKING,
+            message="working on it",
+        ),
+    )
+
+    task_after = manager.tasks[task_id]
+    session_after = manager.sessions[session_id]
+
+    # The dispatch call_id is delivered (ACKed) on the session.
+    assert dispatch_call_id in session_after.delivered_call_ids
+    assert dispatch_call_id not in session_after.pending_call_ids
+
+    # 4. The resident root observes the child's progress via the bridged event.
+    events = manager.agent_tree.get_events(ws_id, child.id, subtree=False)
+    progress_events = [e for e in events if e.type == AgentEventType.PROGRESS]
+    assert len(progress_events) >= 1
+
+    # 5. Cold-replay: persist state and load into a fresh manager.
+    manager._save_state()
+    fresh = WorkspaceManager()
+
+    fresh_session = fresh.sessions[session_id]
+
+    # The delivered_call_ids state survives the restart — the dispatch is
+    # never re-sent.
+    assert dispatch_call_id in fresh_session.delivered_call_ids
+    assert dispatch_call_id not in fresh_session.pending_call_ids
+
+    # Sender-side dedup: a re-send of the dispatch call_id is skipped.
+    send_count = {"n": 0}
+
+    async def _counting_send_tmux(tmux_session: str, message: str) -> None:
+        send_count["n"] += 1
+
+    monkeypatch.setattr(fresh, "_send_tmux_message", _counting_send_tmux)
+
+    await fresh.send_session_message(session_id, "assignment prompt", call_id=dispatch_call_id)
+    assert send_count["n"] == 0  # skipped because already delivered
+
+
+@pytest.mark.asyncio
 async def test_deleted_task_recreation_persists_context_ref_before_start_task(
     manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
 ) -> None:
