@@ -2566,16 +2566,21 @@ def test_api_authority_rejects_non_owner(
 
     app.dependency_overrides[get_current_user] = fake_current_user
     try:
+        owner_session = "owner-sess"
+        attacker_session = "attacker-sess"
+        _make_managed_session(manager, owner_session, ws_id)
+        _make_managed_session(manager, attacker_session, ws_id)
+
         # Create a root run owned by session "owner-sess".
         root = manager.agent_tree.create_root_run(
             workspace_id=ws_id,
             executor_kind=ExecutorKind.NATIVE_SUBAGENT,
-            context_ref="owner-sess",
+            context_ref=owner_session,
         )
 
         client = TestClient(app)
 
-        # Call spawn with a different session cookie -> should be 403.
+        # Call spawn with a different (authenticated) session cookie -> should be 403.
         resp = client.post(
             "/api/agent-tree/spawn",
             json={
@@ -2585,7 +2590,7 @@ def test_api_authority_rejects_non_owner(
                 "initial_message": "hi",
                 "call_id": "auth-spawn",
             },
-            cookies={"claude_hub_session": "attacker-sess"},
+            cookies={"claude_hub_session": attacker_session},
         )
         assert resp.status_code == 403
     finally:
@@ -2613,10 +2618,12 @@ def test_api_authority_allows_owner(
 
     app.dependency_overrides[get_current_user] = fake_current_user
     try:
+        owner_session = "owner-sess"
+        _make_managed_session(manager, owner_session, ws_id)
         root = manager.agent_tree.create_root_run(
             workspace_id=ws_id,
             executor_kind=ExecutorKind.NATIVE_SUBAGENT,
-            context_ref="owner-sess",
+            context_ref=owner_session,
         )
 
         client = TestClient(app)
@@ -2630,7 +2637,7 @@ def test_api_authority_allows_owner(
                 "initial_message": "hi",
                 "call_id": "auth-spawn-ok",
             },
-            cookies={"claude_hub_session": "owner-sess"},
+            cookies={"claude_hub_session": owner_session},
         )
         assert resp.status_code == 200
     finally:
@@ -4088,3 +4095,238 @@ def test_managed_session_sees_only_owned_subtree(
     assert owner_root.id in run_ids
     assert other_root.id not in run_ids
 
+
+# ---------------------------------------------------------------------------
+# Round 16 adversarial tests: crash-safe outbox and forged-session rejection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_followup_outbox_pending_survives_crash_and_redelivers_idempotently(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """A crash after the pending_call_ids persist (phase 1) but before
+    delivery completes must not cause a duplicate on restart. The followup
+    call_id is in pending_call_ids, so recovery re-delivers idempotently
+    (the [followup] line is not appended twice)."""
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.MANAGED_TASK,
+            title="child",
+            initial_message="do work",
+            call_id="spawn-outbox",
+        )
+    )
+    task_id = child.context_ref
+    assert task_id is not None
+
+    call_id = "followup-outbox-crash"
+    message = "please continue"
+
+    # Force the task back to TODO so followup takes the prompt-append path
+    # (the WORKING path sends to the session instead). This lets us assert
+    # idempotency by inspecting the prompt.
+    from claude_hub.models.schemas import WorkspaceTaskStatus
+
+    task = manager.tasks[task_id]
+    manager.tasks[task_id] = task.model_copy(update={"status": WorkspaceTaskStatus.TODO})
+    manager._save_state()
+
+    # Simulate a crash after phase 1 (pending persisted) but before phase 2
+    # (delivered). We do this by directly calling the adapter's followup,
+    # which will: add to pending_call_ids + persist, deliver, then move to
+    # delivered_call_ids + persist. We then verify that a second call with
+    # the same call_id is a no-op (idempotent re-delivery).
+    from claude_hub.models.agent_tree import AgentRunStatus
+
+    run = manager.agent_tree.get_run(child.id)
+    adapter = manager.agent_tree._adapter(run.executor_kind)
+
+    # First delivery: should add message to prompt and mark call_id delivered.
+    await adapter.followup(run, message, call_id=call_id)
+    task = manager.tasks[task_id]
+    assert call_id in task.delivered_call_ids
+    assert call_id not in task.pending_call_ids
+    assert f"[followup] {message}" in task.prompt
+
+    # Simulate a crash that left the call_id in pending_call_ids (phase 1
+    # succeeded, phase 2 did not). Manually move it back to pending.
+    task = manager.tasks[task_id]
+    manager.tasks[task_id] = task.model_copy(
+        update={
+            "pending_call_ids": task.pending_call_ids + [call_id],
+            "delivered_call_ids": [c for c in task.delivered_call_ids if c != call_id],
+        }
+    )
+    manager._save_state()
+
+    prompt_before = manager.tasks[task_id].prompt
+
+    # Recovery re-delivers: the adapter sees call_id in pending (not
+    # delivered), so it re-runs delivery. Delivery is idempotent: the
+    # [followup] line must NOT be appended a second time.
+    await adapter.followup(run, message, call_id=call_id)
+
+    task = manager.tasks[task_id]
+    assert manager.tasks[task_id].prompt == prompt_before
+    assert call_id in task.delivered_call_ids
+    assert call_id not in task.pending_call_ids
+
+
+@pytest.mark.asyncio
+async def test_followup_recreates_deleted_task_with_call_id_marked_delivered(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """If the managed task was deleted (e.g. by abort), followup must
+    recreate it with the followup message as the prompt and mark the
+    call_id as delivered on the new task so a retry does not re-deliver."""
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.MANAGED_TASK,
+            title="child",
+            initial_message="do work",
+            call_id="spawn-deleted",
+        )
+    )
+    task_id = child.context_ref
+    assert task_id is not None
+
+    call_id = "followup-deleted-task"
+    message = "recreate me"
+
+    # Delete the task from the manager (simulating abort cleanup).
+    del manager.tasks[task_id]
+    manager._save_state()
+
+    run = manager.agent_tree.get_run(child.id)
+    adapter = manager.agent_tree._adapter(run.executor_kind)
+
+    await adapter.followup(run, message, call_id=call_id)
+
+    # The run's context_ref should now point to a new task.
+    new_task_id = run.context_ref
+    assert new_task_id is not None
+    assert new_task_id != task_id
+    new_task = manager.tasks.get(new_task_id)
+    assert new_task is not None
+    # The followup message becomes the new task's prompt.
+    assert message in new_task.prompt
+    # The call_id is marked delivered so a retry is a no-op.
+    assert call_id in new_task.delivered_call_ids
+
+
+def test_forged_session_cookie_rejected_for_all_actions(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A forged or stale session cookie (session_id not a live
+    ManagedSession and not a human LoginSession) must get 403 for every
+    mutating action and read: spawn, send, followup, wait, ack, interrupt."""
+    from fastapi.testclient import TestClient
+
+    from claude_hub.api import agent_tree as agent_tree_api
+    from claude_hub.auth import dependencies as auth_deps
+    from claude_hub.main import app
+
+    monkeypatch.setattr(agent_tree_api, "workspace_manager", manager)
+    monkeypatch.setattr(auth_deps, "is_local_network_request", lambda request: False)
+
+    # Create a legitimate owner session and a root run.
+    owner_session = "owner-sess-forged"
+    _make_managed_session(manager, owner_session, ws_id)
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+        context_ref=owner_session,
+    )
+
+    forged_cookie = "forged-session-id-12345"
+    client = TestClient(app)
+
+    # spawn: forged cookie -> 403
+    resp = client.post(
+        "/api/agent-tree/spawn",
+        json={
+            "workspace_id": ws_id,
+            "parent_id": root.id,
+            "executor_kind": "native_subagent",
+            "initial_message": "hi",
+            "call_id": "forged-spawn",
+        },
+        cookies={"claude_hub_session": forged_cookie},
+    )
+    assert resp.status_code == 403
+
+    # send: forged cookie -> 403
+    resp = client.post(
+        "/api/agent-tree/send",
+        json={
+            "workspace_id": ws_id,
+            "author_id": root.id,
+            "recipient_id": root.id,
+            "message": "hi",
+            "call_id": "forged-send",
+        },
+        cookies={"claude_hub_session": forged_cookie},
+    )
+    assert resp.status_code == 403
+
+    # followup: forged cookie -> 403
+    resp = client.post(
+        "/api/agent-tree/followup",
+        json={
+            "workspace_id": ws_id,
+            "author_id": root.id,
+            "recipient_id": root.id,
+            "message": "continue",
+            "call_id": "forged-followup",
+        },
+        cookies={"claude_hub_session": forged_cookie},
+    )
+    assert resp.status_code == 403
+
+    # wait: forged cookie -> 403
+    resp = client.post(
+        "/api/agent-tree/wait",
+        json={
+            "workspace_id": ws_id,
+            "recipient_id": root.id,
+            "since_sequence": 0,
+            "timeout_seconds": 0.1,
+        },
+        cookies={"claude_hub_session": forged_cookie},
+    )
+    assert resp.status_code == 403
+
+    # ack: forged cookie -> 403
+    resp = client.post(
+        "/api/agent-tree/ack",
+        params={
+            "workspace_id": ws_id,
+            "run_id": root.id,
+            "sequence": 0,
+        },
+        cookies={"claude_hub_session": forged_cookie},
+    )
+    assert resp.status_code == 403
+
+    # interrupt: forged cookie -> 403
+    resp = client.post(
+        "/api/agent-tree/interrupt",
+        json={
+            "workspace_id": ws_id,
+            "run_id": root.id,
+            "call_id": "forged-interrupt",
+        },
+        cookies={"claude_hub_session": forged_cookie},
+    )
+    assert resp.status_code == 403

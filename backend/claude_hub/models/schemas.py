@@ -665,6 +665,14 @@ class WorkspaceTask(BaseModel):
     # exactly-once delivery: a followup with a call_id already in this list
     # is a no-op. Persisted with the task so delivery survives restarts.
     delivered_call_ids: List[str] = Field(default_factory=list)
+    # Call ids of followup messages that have been persisted to the outbox
+    # but whose delivery may not have completed. On restart, any call_id in
+    # this list is re-delivered (idempotently) and then moved to
+    # delivered_call_ids. This implements a crash-safe two-phase outbox:
+    # the receipt is persisted before delivery, so a crash between delivery
+    # and receipt-persist cannot cause a duplicate; a crash before delivery
+    # completion causes an idempotent retry, not a loss.
+    pending_call_ids: List[str] = Field(default_factory=list)
     dispatch_reason: Optional[str] = None
     dispatch_pending: bool = False
     system_internal: bool = False
