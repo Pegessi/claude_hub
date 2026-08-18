@@ -4336,23 +4336,35 @@ def test_forged_session_cookie_rejected_for_all_actions(
 async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
     manager: WorkspaceManager, ws_id: str
 ) -> None:
-    """A hard exit after send_session_message delivers but before the
-    session-level delivered_call_ids persist must leave the call_id in
-    pending_call_ids. On reload, re-delivery must succeed (call_id not in
-    delivered) and then move to delivered; a subsequent call with the same
-    call_id must be skipped (executor-boundary idempotency)."""
+    """Exactly-once delivery at the executor boundary.
+
+    A hard exit after send_session_message sends the message but before the
+    session-level delivered_call_ids persist leaves the call_id in
+    pending_call_ids. On reload, send_session_message must inspect the tmux
+    pane output for the [call_id:<id>] marker. If the marker is present the
+    message already reached the executor, so it is marked delivered WITHOUT
+    re-sending (delivery_count == 1). A subsequent call with the same call_id
+    is also skipped.
+    """
     session_id = "outbox-session"
     _make_managed_session(manager, session_id, ws_id)
 
     call_id = "working-followup-outbox"
     message = "please continue"
+    marker = f"[call_id:{call_id}]"
 
     sent: list[str] = []
 
     async def _fake_send_tmux(tmux_session: str, text: str) -> None:
         sent.append(text)
 
+    async def _fake_capture_tmux(tmux_session: str) -> str:
+        # The tmux pane already contains the call_id marker from the first
+        # (crashed) send. Recovery must detect this and skip the re-send.
+        return f"... previous output ...\n{marker}\n{message}\n"
+
     manager._send_tmux_message = _fake_send_tmux  # type: ignore[assignment]
+    manager._capture_tmux_output = _fake_capture_tmux  # type: ignore[assignment]
 
     # First delivery: phase 1 (pending), send, phase 2 (delivered).
     await manager.send_session_message(session_id, message, call_id=call_id)
@@ -4360,6 +4372,9 @@ async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
     assert call_id in session.delivered_call_ids
     assert call_id not in session.pending_call_ids
     assert len(sent) == 1
+    # The sent message must include the call_id marker so delivery can be
+    # verified by inspecting tmux output.
+    assert marker in sent[0]
 
     # Simulate a hard exit between send and phase-2 persist: the call_id is
     # still in pending_call_ids and not in delivered_call_ids. We manually
@@ -4379,12 +4394,15 @@ async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
     assert call_id in reloaded_session.pending_call_ids
     assert call_id not in reloaded_session.delivered_call_ids
 
-    # Re-delivery: the call_id is not in delivered, so send_session_message
-    # must deliver it again (at-least-once) and then move it to delivered.
+    # Recovery: the call_id is in pending. send_session_message checks the
+    # tmux pane output for the call_id marker. The marker is present (the
+    # message was delivered before the crash), so the message is NOT re-sent
+    # and the call_id is moved to delivered. delivery_count == 1.
     reloaded._send_tmux_message = _fake_send_tmux  # type: ignore[assignment]
+    reloaded._capture_tmux_output = _fake_capture_tmux  # type: ignore[assignment]
     sent.clear()
     await reloaded.send_session_message(session_id, message, call_id=call_id)
-    assert len(sent) == 1
+    assert len(sent) == 0  # exactly-once: no re-send
     reloaded_session = reloaded.sessions[session_id]
     assert call_id in reloaded_session.delivered_call_ids
     assert call_id not in reloaded_session.pending_call_ids
