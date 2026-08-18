@@ -445,9 +445,7 @@ class _ReportsMixin:
         """
         if not report.task_id:
             return
-        run = self.agent_tree.get_run_by_context_ref(
-            report.workspace_id, report.task_id
-        )
+        run = self.agent_tree.get_run_by_context_ref(report.workspace_id, report.task_id)
         if run is None:
             return
 
