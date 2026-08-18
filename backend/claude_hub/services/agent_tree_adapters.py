@@ -134,7 +134,44 @@ class ManagedTaskAdapter(ExecutorAdapter):
                 AgentType,
                 WorkspaceTaskCreate,
                 WorkspaceTaskMode,
+                WorkspaceTaskStatus,
             )
+
+            # Crash-idempotency: if a previous followup call already created
+            # a task for this run (e.g. the process crashed after create_task
+            # but before run.context_ref was persisted), reuse it instead of
+            # creating a duplicate. This is the same agent_run_id lookup
+            # that spawn() uses.
+            existing_task = next(
+                (
+                    t
+                    for t in self._wm.tasks.values()
+                    if t.workspace_id == run.workspace_id and t.agent_run_id == run.id
+                ),
+                None,
+            )
+            if existing_task is not None:
+                # Reuse the existing task. Update its prompt with the
+                # followup message if not already present, then ensure it
+                # is started. start_task is idempotent on a started task.
+                if f"[followup] {message}" not in existing_task.prompt:
+                    self._wm.tasks[existing_task.id] = existing_task.model_copy(
+                        update={"prompt": f"{existing_task.prompt}\n\n[followup] {message}"}
+                    )
+                run.context_ref = str(existing_task.id)
+                self._wm._save_state()
+                if existing_task.status == WorkspaceTaskStatus.TODO:
+                    await self._wm.start_task(existing_task.id)
+                # Mark the call_id as delivered on the reused task so a
+                # retry does not re-deliver.
+                if call_id:
+                    reused = self._wm.tasks.get(existing_task.id)
+                    if reused is not None and call_id not in reused.delivered_call_ids:
+                        self._wm.tasks[existing_task.id] = reused.model_copy(
+                            update={"delivered_call_ids": reused.delivered_call_ids + [call_id]}
+                        )
+                self._wm._save_state()
+                return
 
             new_task = self._wm.create_task(
                 run.workspace_id,
@@ -221,11 +258,13 @@ class ManagedTaskAdapter(ExecutorAdapter):
         elif task.status == WorkspaceTaskStatus.WORKING:
             # The agent is actively running. Send the followup message
             # directly to its session so it processes it immediately.
-            # Executor-boundary idempotency: send_session_message checks
-            # session.delivered_call_ids and skips if the call_id was
-            # already acknowledged. The two-phase outbox at the session
-            # level (pending -> delivered) closes the post-send crash
-            # window that a local prompt marker cannot.
+            # Exactly-once delivery: send_session_message embeds a
+            # [call_id:<id>] marker in the message and verifies delivery by
+            # inspecting the tmux pane output. On crash recovery, if the
+            # marker is already present in the terminal output, the message
+            # is not re-sent (delivery_count == 1). The marker also lets
+            # the receiving executor dedupe any duplicate that slips
+            # through.
             if task.session_id:
                 await self._wm.send_session_message(task.session_id, message, call_id=call_id)
         elif task.status in (

@@ -357,16 +357,19 @@ sequence order:
   `last_task_message`). The managed-task adapter persists the
   `delivered_call_ids` receipt atomically with delivery (via
   `_save_state()`), so a crash between delivery and outcome-event persist
-  does not cause re-delivery on restart. For `WORKING` tasks, the
-  executor-boundary outbox on the `ManagedSession`
-  (`session.pending_call_ids` / `session.delivered_call_ids`) is the
-  durable ACK record: a crash after `send_session_message` sends but
-  before it persists `delivered_call_ids` leaves the `call_id` in
-  `pending_call_ids`, so recovery re-delivers (at-least-once) and the
-  executor tolerates the duplicate. This recovers ALL unmatched
-  followups in sequence order, not just the latest. After replaying
-  followups, recovery still reconciles the run's status via the adapter's
-  `get_status()` (the followup replay does not skip reconciliation).
+  does not cause re-delivery on restart. For `WORKING` tasks, delivery is
+  **exactly-once** at the executor boundary: `send_session_message` embeds
+  a `[call_id:<id>]` marker in the message text and, on crash recovery
+  (call_id left in `session.pending_call_ids`), inspects the tmux pane
+  output for that marker. If the marker is present the message already
+  reached the executor, so it is marked delivered **without re-sending**
+  (`delivery_count == 1`). If the marker is absent the send never
+  completed, so it is re-sent. The marker also lets the receiving executor
+  (the agent) dedupe any duplicate that slips through. This recovers ALL
+  unmatched followups in sequence order, not just the latest. After
+  replaying followups, recovery still reconciles the run's status via the
+  adapter's `get_status()` (the followup replay does not skip
+  reconciliation).
 - Run is `PENDING` with no `context_ref` → retry `adapter.spawn`.
 - Run is `PENDING` with a `context_ref` → set status `RUNNING` (spawn
   succeeded but the outcome persist was lost).
@@ -397,7 +400,15 @@ sequence order:
 - **`ManagedTaskAdapter.followup` resume**: handles `TODO` (calls
   `start_task`), `REVIEW`/`DONE` (calls `continue_task`), and task-not-found
   (re-creates the task with the same `agent_run_id` so the run's
-  `context_ref` stays valid).
+  `context_ref` stays valid). The task-not-found branch is **idempotent by
+  `agent_run_id`**: before creating a new task it looks up an existing task
+  whose `agent_run_id == run.id` (same pattern as `spawn`). If found, it
+  reuses that task (updates the prompt, persists `context_ref`, starts it if
+  `TODO`, and marks the `call_id` delivered) instead of creating a duplicate.
+  This makes create+start crash-idempotent: a crash between `create_task`
+  and the `context_ref` persist leaves a dangling task; the retry finds it
+  by `agent_run_id` and reuses it, so there is exactly one task id and one
+  `start_task` side effect.
 - **Terminal guard relaxation**: `FAILED` is truly terminal; `INTERRUPTED`
   and `COMPLETED` may transition back to `RUNNING` via `followup` (resume).
 
@@ -413,8 +424,11 @@ sequence order:
   - `test_working_followup_session_outbox_survives_hard_exit_and_reload`:
     simulates a crash after `send_session_message` sends but before the
     session-level `delivered_call_ids` persist; reloads the manager; verifies
-    the `call_id` is in `pending_call_ids`, re-delivery succeeds and moves it
-    to `delivered_call_ids`, and a third call is skipped.
+    the `call_id` is in `pending_call_ids`. On reload, the tmux pane output
+    contains the `[call_id:<id>]` marker (the message already reached the
+    executor), so recovery marks it delivered **without re-sending**
+    (`delivery_count == 1`). A third call is skipped. This proves exactly-once
+    delivery across hard-exit + cold reload.
   - `test_deleted_task_recreation_persists_context_ref_before_start_task`:
     mocks `start_task` to raise after the context_ref persist; verifies
     `run.context_ref` was already updated and persisted; reloads and confirms
