@@ -91,9 +91,18 @@ def _is_human_session(session_id: str) -> bool:
 
 
 def _is_authenticated_session(manager: "AgentTreeManager", session_id: str) -> bool:
-    """Return True if ``session_id`` is a human LoginSession or a ManagedSession."""
-    if session_id in manager._wm.sessions:
-        return True
+    """Return True if ``session_id`` is a human LoginSession or a live
+    (non-STOPPED) ManagedSession.
+
+    A STOPPED or deleted ManagedSession is treated as unauthenticated: its
+    terminal tab is gone and it can no longer act as an executor. Forged or
+    stale cookies that resolve to a STOPPED session must be rejected.
+    """
+    from ..models.schemas import ManagedSessionStatus
+
+    session = manager._wm.sessions.get(session_id)
+    if session is not None:
+        return session.status != ManagedSessionStatus.STOPPED
     return _is_human_session(session_id)
 
 

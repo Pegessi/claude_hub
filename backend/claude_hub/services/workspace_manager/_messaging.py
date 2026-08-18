@@ -11,10 +11,40 @@ class _MessagingMixin:
         session_id: str,
         message: str,
         attachments: list[WorkspaceAttachmentCreate] | None = None,
+        call_id: str | None = None,
     ) -> None:
+        """Send a message to a managed session's terminal.
+
+        ``call_id`` enables exactly-once delivery at the executor boundary:
+        - If ``call_id`` is already in ``session.delivered_call_ids``, the
+          executor has acknowledged it; skip the send.
+        - Otherwise, persist ``call_id`` to ``session.pending_call_ids``
+          (phase 1 / outbox), send the message, then move it to
+          ``session.delivered_call_ids`` (phase 2 / ACK). A crash between
+          send and phase-2 persist leaves the call_id in pending so recovery
+          re-delivers; the executor must tolerate at-least-once delivery.
+        """
         session = self.sessions.get(session_id)
         if not session:
             raise KeyError(session_id)
+
+        if call_id:
+            if call_id in session.delivered_call_ids:
+                logger.debug(
+                    "send_session_message call_id=%s already delivered to session %s; skipping",
+                    call_id,
+                    session_id,
+                )
+                return
+            # Phase 1: persist call_id as pending at the executor boundary
+            # before sending. This is the outbox entry.
+            if call_id not in session.pending_call_ids:
+                self.sessions[session_id] = session.model_copy(
+                    update={"pending_call_ids": session.pending_call_ids + [call_id]}
+                )
+                self._save_state()
+                session = self.sessions[session_id]
+
         persisted = self._persist_attachments(
             session.workspace_id,
             f"{session.id}-message-{uuid.uuid4().hex[:8]}",
@@ -25,6 +55,24 @@ class _MessagingMixin:
             session.tmux_session,
             self._append_attachment_block(message, persisted),
         )
+
+        if call_id:
+            # Phase 2: move call_id from pending to delivered. This is the
+            # executor's ACK record. Persist immediately so a crash after
+            # this point does not cause a re-delivery.
+            current = self.sessions.get(session_id)
+            if current is not None:
+                pending = [c for c in current.pending_call_ids if c != call_id]
+                delivered = current.delivered_call_ids
+                if call_id not in delivered:
+                    delivered = delivered + [call_id]
+                self.sessions[session_id] = current.model_copy(
+                    update={
+                        "pending_call_ids": pending,
+                        "delivered_call_ids": delivered,
+                    }
+                )
+                self._save_state()
 
     async def _ensure_session_ready_for_send(self, session: ManagedSession) -> None:
         created = await ttyd_manager.ensure_tab_tmux_session(session.tab_id)
