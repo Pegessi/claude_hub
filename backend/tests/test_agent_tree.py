@@ -4414,6 +4414,111 @@ async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
 
 
 @pytest.mark.asyncio
+async def test_report_acks_only_listed_call_ids_not_unrelated_pending_followup(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """A report must only ACK the call_ids listed in ``acked_call_ids``.
+
+    A pending followup call_id that the worker has not yet processed must
+    NOT be moved to ``delivered_call_ids`` by an unrelated progress report.
+    Only when the worker explicitly includes the followup call_id in
+    ``acked_call_ids`` is it ACKed. This prevents a stale/earlier report
+    from silently dropping a later pending followup.
+    """
+    from claude_hub.models import (
+        AgentReportCreate,
+        AgentReportState,
+        AgentType,
+        WorkspaceTask,
+        WorkspaceTaskStatus,
+    )
+
+    session_id = "ack-specific-session"
+    _make_managed_session(manager, session_id, ws_id)
+
+    # Create a task so create_report can resolve task_id.
+    task = WorkspaceTask(
+        id="ack-specific-task",
+        workspace_id=ws_id,
+        title="ack specific",
+        prompt="do the thing",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    manager.tasks[task.id] = task
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"task_id": task.id, "current_task_id": task.id}
+    )
+
+    followup_call_id = "followup:unprocessed"
+    dispatch_call_id = f"dispatch:{task.id}"
+
+    # Simulate a crashed delivery: both the dispatch and a followup are in
+    # pending_call_ids (the send happened but the delivered-persist crashed).
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={
+            "pending_call_ids": [dispatch_call_id, followup_call_id],
+            "delivered_call_ids": [],
+        }
+    )
+    manager.tasks[task.id] = task.model_copy(
+        update={
+            "pending_call_ids": [dispatch_call_id, followup_call_id],
+            "delivered_call_ids": [],
+        }
+    )
+
+    # Worker submits a progress report that only ACKs the dispatch call_id
+    # (it has not yet processed the followup).
+    await manager.create_report(
+        session_id,
+        AgentReportCreate(
+            task_id=task.id,
+            state=AgentReportState.WORKING,
+            message="working on it",
+            acked_call_ids=[dispatch_call_id],
+        ),
+    )
+
+    session = manager.sessions[session_id]
+    task_after = manager.tasks[task.id]
+
+    # The dispatch call_id was ACKed (moved to delivered).
+    assert dispatch_call_id in session.delivered_call_ids
+    assert dispatch_call_id not in session.pending_call_ids
+    assert dispatch_call_id in task_after.delivered_call_ids
+    assert dispatch_call_id not in task_after.pending_call_ids
+
+    # The unprocessed followup call_id must STILL be pending — NOT ACKed.
+    assert followup_call_id in session.pending_call_ids
+    assert followup_call_id not in session.delivered_call_ids
+    assert followup_call_id in task_after.pending_call_ids
+    assert followup_call_id not in task_after.delivered_call_ids
+
+    # Now the worker processes the followup and submits a report that ACKs it.
+    await manager.create_report(
+        session_id,
+        AgentReportCreate(
+            task_id=task.id,
+            state=AgentReportState.WORKING,
+            message="processed followup",
+            acked_call_ids=[followup_call_id],
+        ),
+    )
+
+    session = manager.sessions[session_id]
+    task_after = manager.tasks[task.id]
+
+    # The followup call_id is now ACKed.
+    assert followup_call_id in session.delivered_call_ids
+    assert followup_call_id not in session.pending_call_ids
+    assert followup_call_id in task_after.delivered_call_ids
+    assert followup_call_id not in task_after.pending_call_ids
+
+
+@pytest.mark.asyncio
 async def test_deleted_task_recreation_persists_context_ref_before_start_task(
     manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
 ) -> None:
