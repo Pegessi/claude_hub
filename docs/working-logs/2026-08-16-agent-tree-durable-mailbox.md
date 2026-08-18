@@ -526,6 +526,8 @@ child → the child task runs and reports → the resident receives the event.
 
 ## UI Follow-up Task (real, scoped)
 
+**Task ID**: `487c630c-4b63-4883-8869-0e38546366c0`
+
 The backend API is complete. The following UI task is the concrete next
 increment:
 
