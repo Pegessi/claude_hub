@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING, List, Optional
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request
 
-from ..auth.dependencies import get_current_user
 from ..config import settings
 from ..models.agent_tree import (
     AgentEvent,
@@ -35,7 +34,6 @@ from ..models.agent_tree import (
     SpawnRequest,
     WaitRequest,
 )
-from ..models.schemas import User
 from ..services import workspace_manager
 
 if TYPE_CHECKING:
@@ -124,7 +122,6 @@ async def spawn(
     req: SpawnRequest,
     request: Request,
     session_id: Optional[str] = Depends(_get_session_id),
-    current_user: User = Depends(get_current_user),
 ) -> AgentRun:
     try:
         _assert_authority(_manager(), req.parent_id, session_id)
@@ -142,7 +139,6 @@ async def send(
     req: SendRequest,
     request: Request,
     session_id: Optional[str] = Depends(_get_session_id),
-    current_user: User = Depends(get_current_user),
 ) -> AgentEvent:
     try:
         _assert_authority(_manager(), req.author_id, session_id)
@@ -158,7 +154,6 @@ async def followup(
     req: FollowupRequest,
     request: Request,
     session_id: Optional[str] = Depends(_get_session_id),
-    current_user: User = Depends(get_current_user),
 ) -> AgentEvent:
     try:
         _assert_authority(_manager(), req.author_id, session_id)
@@ -174,7 +169,6 @@ async def wait(
     req: WaitRequest,
     request: Request,
     session_id: Optional[str] = Depends(_get_session_id),
-    current_user: User = Depends(get_current_user),
 ) -> List[AgentEvent]:
     try:
         # Read permission: any authenticated caller (human or agent session)
@@ -210,7 +204,6 @@ async def ack(
     sequence: int,
     request: Request,
     session_id: Optional[str] = Depends(_get_session_id),
-    current_user: User = Depends(get_current_user),
 ) -> AgentRun:
     try:
         _assert_authority(_manager(), run_id, session_id)
@@ -226,7 +219,6 @@ async def interrupt(
     req: InterruptRequest,
     request: Request,
     session_id: Optional[str] = Depends(_get_session_id),
-    current_user: User = Depends(get_current_user),
 ) -> AgentRun:
     try:
         # The caller may interrupt any run in its subtree. For simplicity,
@@ -254,7 +246,6 @@ def list_runs(
     root_id: Optional[str] = Query(None),
     status: Optional[AgentRunStatus] = Query(None),
     session_id: Optional[str] = Depends(_get_session_id),
-    current_user: User = Depends(get_current_user),
 ) -> List[AgentRun]:
     try:
         # Read permission: any authenticated caller (human or agent session)
@@ -277,7 +268,6 @@ def get_run_events(
     since_sequence: int = Query(0),
     subtree: bool = Query(True),
     session_id: Optional[str] = Depends(_get_session_id),
-    current_user: User = Depends(get_current_user),
 ) -> List[AgentEvent]:
     run = _manager().get_run(run_id)
     if run is None:
