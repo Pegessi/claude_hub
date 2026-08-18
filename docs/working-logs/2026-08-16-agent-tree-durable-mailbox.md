@@ -341,11 +341,14 @@ sequence order:
   `INTERRUPTED`.
 - Every followup `MESSAGE` event (payload `followup=True`) that does NOT
   have a matching `call_id:outcome` event → retry `adapter.followup` with
-  that `call_id` and append the outcome event. The adapter is idempotent on
-  `call_id` (via `delivered_call_ids` on the task), so a partially delivered
-  followup is a no-op. This recovers ALL unmatched followups, not just the
-  latest — a crash can leave several followup intents persisted without
-  their outcomes.
+  that `call_id` **and the event's own `payload.message`** (not the run's
+  `last_task_message`). The managed-task adapter persists the
+  `delivered_call_ids` receipt atomically with delivery (via
+  `_save_state()`), so a crash between delivery and outcome-event persist
+  does not cause re-delivery on restart. This recovers ALL unmatched
+  followups in sequence order, not just the latest. After replaying
+  followups, recovery still reconciles the run's status via the adapter's
+  `get_status()` (the followup replay does not skip reconciliation).
 - Run is `PENDING` with no `context_ref` → retry `adapter.spawn`.
 - Run is `PENDING` with a `context_ref` → set status `RUNNING` (spawn
   succeeded but the outcome persist was lost).
@@ -361,7 +364,14 @@ sequence order:
 - **API actor authority** (`_assert_authority`): every mutating API action
   (`spawn`, `send`, `followup`, `interrupt`) verifies that the caller's
   session owns the `author_id` run (`run.context_ref == session_id`). Local
-  network requests (auth disabled) skip the check.
+  network requests (auth disabled) skip the check. **Non-local requests
+  without a session cookie fail closed with 403** (they do not fall through
+  to the local-network no-auth path).
+- **ManagedSession read scoping**: `list_runs` and `get_run_events` scope
+  reads for ManagedSessions to the session's own workspace and the runs it
+  owns or supervises (its subtree). Cross-workspace reads return 403;
+  same-workspace reads for runs outside the session's subtree return an
+  empty list (for `list_runs`) or 403 (for `get_run_events`).
 - **`ManagedTaskAdapter.followup` resume**: handles `TODO` (calls
   `start_task`), `REVIEW`/`DONE` (calls `continue_task`), and task-not-found
   (re-creates the task with the same `agent_run_id` so the run's

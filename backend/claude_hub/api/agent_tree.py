@@ -52,12 +52,18 @@ def _get_session_id(
 ) -> Optional[str]:
     """Extract the session id from the request cookie.
 
-    Returns None for local network requests (auth disabled).
+    Returns None for local network requests (auth disabled). For non-local
+    requests, fails closed with 403 if no session cookie is present.
     """
     from ..auth.dependencies import is_local_network_request
 
     if is_local_network_request(request):
         return None
+    if not session_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Authentication required: no session cookie provided",
+        )
     return session_id
 
 
@@ -89,6 +95,31 @@ def _is_authenticated_session(manager: "AgentTreeManager", session_id: str) -> b
     if session_id in manager._wm.sessions:
         return True
     return _is_human_session(session_id)
+
+
+def _is_managed_session(manager: "AgentTreeManager", session_id: str) -> bool:
+    """Return True if ``session_id`` is a ManagedSession (not a human session)."""
+    return session_id in manager._wm.sessions
+
+
+def _owned_subtree_run_ids(manager: "AgentTreeManager", session_id: str) -> set[str]:
+    """Return the set of run IDs that ``session_id`` owns or supervises.
+
+    A session owns a run if ``_session_owns_run`` returns True. It supervises
+    a run if the run's path is under an owned run's path (the owned run's
+    subtree).
+    """
+    owned_paths: list[str] = []
+    for run in manager._runs.values():
+        if _session_owns_run(manager, run, session_id):
+            owned_paths.append(run.path)
+    if not owned_paths:
+        return set()
+    result: set[str] = set()
+    for run in manager._runs.values():
+        if any(run.path == p or run.path.startswith(p + "/") for p in owned_paths):
+            result.add(run.id)
+    return result
 
 
 def _assert_authority(
@@ -248,14 +279,31 @@ def list_runs(
     session_id: Optional[str] = Depends(_get_session_id),
 ) -> List[AgentRun]:
     try:
-        # Read permission: any authenticated caller (human or agent session)
-        # may list runs in their workspace.
-        if session_id is not None and not _is_authenticated_session(_manager(), session_id):
-            raise HTTPException(
-                status_code=403,
-                detail=f"Session {session_id} is not authenticated",
-            )
-        return _manager().list_runs(
+        manager = _manager()
+        # Read permission:
+        # - Local network (session_id is None): no scoping.
+        # - Human session: all runs in the workspace.
+        # - ManagedSession: only runs in its own workspace that it owns or
+        #   supervises (its subtree).
+        if session_id is not None:
+            if not _is_authenticated_session(manager, session_id):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Session {session_id} is not authenticated",
+                )
+            if _is_managed_session(manager, session_id):
+                session = manager._wm.sessions[session_id]
+                if session.workspace_id != workspace_id:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Session {session_id} may not read workspace {workspace_id}",
+                    )
+                allowed = _owned_subtree_run_ids(manager, session_id)
+                runs = manager.list_runs(
+                    ListRunsRequest(workspace_id=workspace_id, root_id=root_id, status=status)
+                )
+                return [r for r in runs if r.id in allowed]
+        return manager.list_runs(
             ListRunsRequest(workspace_id=workspace_id, root_id=root_id, status=status)
         )
     except ValueError as exc:
@@ -269,15 +317,34 @@ def get_run_events(
     subtree: bool = Query(True),
     session_id: Optional[str] = Depends(_get_session_id),
 ) -> List[AgentEvent]:
-    run = _manager().get_run(run_id)
+    manager = _manager()
+    run = manager.get_run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-    # Read permission: any authenticated caller may replay events.
-    if session_id is not None and not _is_authenticated_session(_manager(), session_id):
-        raise HTTPException(
-            status_code=403,
-            detail=f"Session {session_id} is not authenticated",
-        )
-    return _manager().get_events(
+    # Read permission:
+    # - Local network (session_id is None): no scoping.
+    # - Human session: any run in the workspace.
+    # - ManagedSession: only runs in its own workspace that it owns or
+    #   supervises (its subtree).
+    if session_id is not None:
+        if not _is_authenticated_session(manager, session_id):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Session {session_id} is not authenticated",
+            )
+        if _is_managed_session(manager, session_id):
+            session = manager._wm.sessions[session_id]
+            if session.workspace_id != run.workspace_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Session {session_id} may not read workspace {run.workspace_id}",
+                )
+            allowed = _owned_subtree_run_ids(manager, session_id)
+            if run.id not in allowed:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Session {session_id} may not read run {run_id}",
+                )
+    return manager.get_events(
         run.workspace_id, run_id, since_sequence=since_sequence, subtree=subtree
     )

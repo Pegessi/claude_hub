@@ -1558,7 +1558,12 @@ class AgentTreeManager:
                     if has_outcome:
                         continue
                     try:
-                        last_msg = run.last_task_message or ""
+                        # Replay this followup intent's OWN payload, not the
+                        # run's last_task_message. Each followup event
+                        # carries the message that was originally sent;
+                        # replaying the wrong message would corrupt the
+                        # agent's context.
+                        last_msg = (followup_event.payload or {}).get("message", "")
                         await self._adapter(run.executor_kind).followup(
                             run, last_msg, call_id=followup_call_id
                         )
@@ -1589,8 +1594,6 @@ class AgentTreeManager:
                             followup_call_id,
                             run.id,
                         )
-                if followup_events:
-                    continue
 
             # Reconcile non-terminal, non-PENDING runs with the executor's
             # actual status. The in-memory status may be stale after a crash
