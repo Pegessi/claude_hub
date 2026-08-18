@@ -420,6 +420,19 @@ class _ReportsMixin:
             }:
                 self._cleanup_stale_reviewer_assignments(session.workspace_id)
 
+        # ------------------------------------------------------------------
+        # Durable ACK for at-least-once delivery.
+        #
+        # A report submission from the worker is the durable acknowledgement
+        # that the worker received and processed the assignment (and any
+        # follow-up messages). Move all pending call_ids on the task and
+        # session to delivered_call_ids so the sender does not re-send them.
+        # This closes the at-least-once duplicate window: once the worker
+        # reports, every call_id sent to it is considered delivered.
+        # ------------------------------------------------------------------
+        if task_id and task_id in self.tasks:
+            self._ack_pending_call_ids(task_id, session.id)
+
         self._save_state()
         if task_id and task_id in self.tasks:
             await self._after_report_recorded(
@@ -430,6 +443,44 @@ class _ReportsMixin:
         # of scanning global reports.
         self._bridge_report_to_agent_event(report, session)
         return report
+
+    def _ack_pending_call_ids(self, task_id: str, session_id: str) -> None:
+        """Move all pending call_ids on the task and session to delivered.
+
+        A report submission is the durable ACK: the worker received and
+        processed the assignment (and any follow-up messages). This moves
+        every call_id in ``pending_call_ids`` to ``delivered_call_ids`` on
+        both the task and the session, so the sender's at-least-once
+        recovery will not re-send them.
+        """
+        task = self.tasks.get(task_id)
+        if task is not None:
+            pending = list(task.pending_call_ids)
+            if pending:
+                delivered = list(task.delivered_call_ids)
+                for cid in pending:
+                    if cid not in delivered:
+                        delivered.append(cid)
+                self.tasks[task_id] = task.model_copy(
+                    update={
+                        "pending_call_ids": [],
+                        "delivered_call_ids": delivered,
+                    }
+                )
+        session = self.sessions.get(session_id)
+        if session is not None:
+            pending = list(session.pending_call_ids)
+            if pending:
+                delivered = list(session.delivered_call_ids)
+                for cid in pending:
+                    if cid not in delivered:
+                        delivered.append(cid)
+                self.sessions[session_id] = session.model_copy(
+                    update={
+                        "pending_call_ids": [],
+                        "delivered_call_ids": delivered,
+                    }
+                )
 
     def _bridge_report_to_agent_event(
         self,
