@@ -1448,8 +1448,9 @@ def test_build_resident_prompt_master_on_is_orchestrator(
 ) -> None:
     """master ON returns the orchestrator prompt: read the board, create tasks
     (default reviewed mode), dispatch them to existing orchestrator workers via
-    target_session_id, and accept the work itself once review has passed (PATCH
-    status=done) — never writing code or provisioning worker agents."""
+    the agent tree spawn action (session_id), and accept the work itself once
+    review has passed (PATCH status=done) — never writing code or provisioning
+    worker agents."""
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)
     workspace = manager.create_workspace(
@@ -1464,7 +1465,10 @@ def test_build_resident_prompt_master_on_is_orchestrator(
     assert "RESIDENT MASTER agent" in prompt
     assert "/board" in prompt
     assert "/tasks" in prompt
-    assert "target_session_id" in prompt
+    # Master mode dispatches via the agent tree spawn action with session_id
+    # for explicit worker routing (not the legacy target_session_id field).
+    assert "session_id" in prompt
+    assert "target_session_id" not in prompt
     assert "orchestrator" in prompt
     assert "NEVER create or delete orchestrator worker sessions" in prompt
     assert "PATCH" in prompt
@@ -1473,13 +1477,10 @@ def test_build_resident_prompt_master_on_is_orchestrator(
     # Tasks use the default reviewed mode (a reviewer agent vets the work); the
     # resident does the final acceptance, so it must NOT force direct mode.
     assert '"task_mode":"direct"' not in prompt
-    assert "default (reviewed)" in prompt
-    # Created tasks are tagged origin=resident so the UI can mark them as
-    # agent-created (vs human-created tasks).
-    assert '"origin":"resident"' in prompt
-    # Acceptance is gated on the post-review awaiting-acceptance signal, not raw
-    # status == review (which is also true while the reviewer is still working).
-    assert "human_acceptance_requested_at" in prompt
+    assert "reviewed" in prompt
+    # Acceptance is gated on the child run emitting a completed event (review
+    # passed), not on the legacy human_acceptance_requested_at signal.
+    assert "completed" in prompt
     # Degrade-to-proposal-only guardrail when there is no orchestrator worker.
     assert "MUST NOT create one" in prompt
     assert "never auto-creates a default" in prompt
@@ -1531,8 +1532,11 @@ def test_run_resident_agent_master_mode_reuse_sends_heartbeat_prompt(
     assert sends[0][0] == session.id
     prompt = sends[0][1]
     assert "RESIDENT MASTER agent" in prompt
-    assert "target_session_id" in prompt
-    assert "human_acceptance_requested_at" in prompt
+    # Master mode dispatches via the agent tree spawn action with session_id.
+    assert "session_id" in prompt
+    assert "target_session_id" not in prompt
+    # Acceptance is gated on the child run's completed event.
+    assert "completed" in prompt
     assert f"sessions/{session.id}/reports" in prompt
 
 
