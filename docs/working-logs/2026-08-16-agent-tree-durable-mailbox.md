@@ -82,10 +82,16 @@ safe to retry.
 
 ### Wait / wakeup
 
-`_append_event` calls `_wake_ancestors(run)` which sets the `asyncio.Event` on
-the run and every ancestor up to the root. This means a supervisor that calls
-`wait(root_id, subtree=True)` wakes up whenever any descendant emits an event.
-The recipient's own event is also set so a run waiting on itself wakes up.
+`_append_event` calls `_wake_for_run(agent_run_id, recipient)` which sets the
+`asyncio.Event` **only on the named recipient** (or the author run if
+`recipient` is `None`, i.e. a self-addressed event).
+
+With recipient-directed mailbox reads, a run only sees events where
+`recipient == run_id` (or self-addressed events where `recipient is None and
+author == run_id`). Therefore only the named recipient needs to be woken;
+waking ancestors would cause spurious wakeups for runs that cannot see the
+event. The `_wake_ancestors` method is retained as dead code for potential
+future broadcast use but is no longer called.
 
 ## Executor Adapters (`services/agent_tree_adapters.py`)
 
@@ -186,9 +192,24 @@ type is derived from `AgentReportState`:
 | `BLOCKED` | `blocked` |
 | `NEEDS_INPUT` | `approval_required` |
 | `READY_FOR_REVIEW` | `progress` |
-| `COMPLETED`, `REVIEW_PASSED` | `completed` |
-| `REVIEW_FAILED` | `failed` |
+| `COMPLETED` (DIRECT task) | `completed` |
+| `COMPLETED` (REVIEWED task) | `progress` (run waits for reviewer) |
+| `REVIEW_STARTED` | `progress` |
+| `REVIEW_PASSED` | `completed` (terminal) |
+| `REVIEW_FAILED` | `progress` (task returns to WORKING; run is RUNNING) |
 | `REVIEW_NEEDS_INPUT` | `blocked` |
+
+The mapping is **reviewed-aware**: for `REVIEWED` tasks, the worker's
+`COMPLETED` report does **not** terminate the run — it maps to `progress`
+(the run waits for the reviewer). Only `REVIEW_PASSED` (from the reviewer)
+emits the terminal `completed` event. For `DIRECT` tasks, the worker's
+`COMPLETED` is the terminal event. `REVIEW_FAILED` maps to `progress` (not
+`failed`): the task is sent back to `WORKING` for revisions, so the run
+returns to `RUNNING`.
+
+This same reviewed-aware mapping is applied during `recover_pending_runs`
+when reconciling persisted reports into agent tree events (crash between
+report persist and event bridging).
 
 The event's `author` is the run id and `recipient` is the run's supervisor, so
 the supervisor's `wait()` picks it up.
@@ -256,9 +277,10 @@ enforcement.
 3. **`call_id` for idempotency.** Every action and every executor-emitted
    event carries a `call_id`. Retries are safe because duplicates return the
    existing event.
-4. **`asyncio.Event` per run for `wait()`.** No polling. `_wake_ancestors`
-   fans out to the supervisor chain so a single event can wake multiple
-   waiters at different levels.
+4. **`asyncio.Event` per run for `wait()`.** No polling. `_wake_for_run`
+   wakes **only the named recipient** (not ancestors) because mailbox reads
+   are recipient-directed: a run only sees events addressed to it. Ancestor
+   wakeup would be spurious.
 5. **`context_ref` decouples runs from executors.** A run doesn't care whether
    it's backed by a managed task, a native subagent, or an external job. The
    adapter translates. This lets the same tree mix executor kinds.
@@ -505,6 +527,67 @@ sequence order:
   - `test_stopped_session_rejected_for_all_actions`: sets a session's status
     to `STOPPED` and verifies every action (spawn, send, followup, wait, ack,
     interrupt, list_runs, get_events) returns 403.
+
+## Review Round 27 Fixes (2026-08-19)
+
+Review attempt 27 failed (3/10 AC passing). Three required fixes were
+implemented:
+
+### 1. Reviewed-aware report mapping during `recover_pending_runs`
+
+`recover_pending_runs` reconciles persisted reports into agent tree events
+(crash between report persist and event bridging). The report-state →
+event-type mapping now mirrors `_bridge_report_to_agent_event`:
+
+- For **REVIEWED** tasks, the worker's `COMPLETED` report maps to `PROGRESS`
+  (the run waits for the reviewer), **not** the terminal `COMPLETED` event.
+- Only `REVIEW_PASSED` emits the terminal `COMPLETED` event.
+- `REVIEW_FAILED` maps to `PROGRESS` (the task returns to `WORKING`; the run
+  is `RUNNING`).
+
+The mapping is computed per-run by checking
+`task.task_mode == WorkspaceTaskMode.REVIEWED`.
+
+**Test**: `test_recover_pending_runs_reviewed_completed_maps_to_progress` —
+persists a `COMPLETED` report for a REVIEWED task without bridging the event,
+runs `recover_pending_runs`, and asserts the emitted event is `PROGRESS` (not
+`COMPLETED`) and the run status is `WAITING`.
+
+### 2. Wake only the named mailbox recipient
+
+`_wake_for_run(agent_run_id, recipient)` now wakes **only** the named
+recipient (or the author run if `recipient` is `None`). It no longer calls
+`_wake_ancestors`. With recipient-directed mailbox reads, a run only sees
+events where `recipient == run_id` (or self-addressed), so waking ancestors
+would cause spurious wakeups for runs that cannot see the event.
+
+`_wake_ancestors` is retained as dead code for potential future broadcast
+use.
+
+**Test**: `test_wake_for_run_only_wakes_named_recipient` — creates a
+root→child tree, sets `asyncio.Event`s on both, calls `_wake_for_run(child,
+child)`, and asserts only the child's event is set (root's is not). Also
+verifies self-addressed (`recipient=None`) wakes the author.
+
+### 3. Durable receiver pump on cold recovery + cumulative side effects
+
+`recover_pending_runs` now re-delivers unACKed messages after a crash:
+
+1. For every session in the workspace with `pending_call_ids` or
+   `processing_call_ids`, expire stale processing leases
+   (`_expire_processing_leases(session.id, max_age_seconds=0)`) to release
+   crashed pump claims.
+2. Pump all now-pending call_ids (`_pump_session_messages(session.id)`).
+
+The receiver dedupe gate (`delivered_call_ids`) ensures a call_id the worker
+already ACKed is **not** re-delivered: the pump skips call_ids in
+`delivered_call_ids`, and `_ack_call_ids` is the only path that moves a
+call_id to `delivered`.
+
+**Test**: `test_cumulative_side_effects_before_ack_and_cold_recovery_pump` —
+sends 3 messages (each with a counted, persisted side effect), ACKs only the
+first, then cold-restarts. Asserts the 2 unACKed messages are re-delivered
+(2 side effects) and the ACKed one is not.
 
 ## Migration / Rollback Guide
 

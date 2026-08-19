@@ -5666,3 +5666,308 @@ async def test_resident_cycle_e2e_with_unacked_followup_cold_replay(
     assert ws_id not in fresh.workspaces
     # All sessions for the workspace are gone.
     assert not any(s.workspace_id == ws_id for s in fresh.sessions.values())
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: reviewed-aware report mapping during recover_pending_runs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_recover_pending_runs_reviewed_completed_maps_to_progress(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Crash after report persist but before event bridging.
+
+    For a REVIEWED task, the worker's COMPLETED report must map to a
+    PROGRESS event (the run waits for the reviewer), NOT the terminal
+    COMPLETED event. ``recover_pending_runs`` reconciles persisted reports
+    into agent tree events and must use the same reviewed-aware mapping as
+    ``_bridge_report_to_agent_event``.
+    """
+    from claude_hub.models import (
+        AgentReportCreate,
+        AgentReportState,
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+        WorkspaceTaskCreate,
+        WorkspaceTaskMode,
+        WorkspaceTaskStatus,
+    )
+
+    ws_id = _make_workspace(manager, tmp_path)
+
+    # Worker session.
+    worker_session_id = "worker-reviewed-recover"
+    _make_managed_session(manager, worker_session_id, ws_id)
+    manager.sessions[worker_session_id] = manager.sessions[worker_session_id].model_copy(
+        update={"role": WorkspaceSessionRole.ORCHESTRATOR}
+    )
+
+    # Create a REVIEWED managed task.
+    task = manager.create_task(
+        ws_id,
+        WorkspaceTaskCreate(
+            title="reviewed recover task",
+            prompt="implement the feature",
+            agent_type=AgentType.CLAUDE,
+            task_mode=WorkspaceTaskMode.REVIEWED,
+            session_id=worker_session_id,
+        ),
+    )
+
+    # Create a child run linked to the task.
+    child = manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.MANAGED_TASK,
+        title="child",
+        context_ref=task.id,
+    )
+    # Link the child to a supervisor (root) so the event has a recipient.
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.RESIDENT_ROOT,
+        context_ref="root-session",
+    )
+    child.parent_id = root.id
+    child.supervisor_id = root.id
+    child.path = f"{root.path}/{child.id}"
+
+    # Bind the task to the worker session. In a real crash-after-persist
+    # scenario, create_report has already moved the task to REVIEW status
+    # before the crash. Set it here to match.
+    manager.sessions[worker_session_id] = manager.sessions[worker_session_id].model_copy(
+        update={
+            "task_id": task.id,
+            "current_task_id": task.id,
+            "status": ManagedSessionStatus.WORKING,
+            "runtime_status": AgentRuntimeStatus.WORKING,
+        }
+    )
+    manager.tasks[task.id] = manager.tasks[task.id].model_copy(
+        update={"status": WorkspaceTaskStatus.REVIEW, "session_id": worker_session_id}
+    )
+
+    # ---- Simulate crash after report persist but before event bridging. ----
+    # We directly persist a COMPLETED report to manager.reports WITHOUT
+    # calling _bridge_report_to_agent_event. This mimics a crash between
+    # _save_state() and _bridge_report_to_agent_event() in create_report.
+    from claude_hub.models import AgentReport
+
+    report = AgentReport(
+        id="report-reviewed-completed",
+        workspace_id=ws_id,
+        task_id=task.id,
+        session_id=worker_session_id,
+        state=AgentReportState.COMPLETED,
+        message="done",
+        created_at=datetime.utcnow(),
+    )
+    manager.reports[report.id] = report
+    manager._save_state()
+
+    # Sanity: no agent tree event for this report exists yet.
+    # The event is addressed to the supervisor (root), so query from root's
+    # perspective (recipient-directed mailbox).
+    events = manager.agent_tree.get_events(ws_id, root.id, subtree=False)
+    assert not any(
+        e.call_id == f"report:{report.id}" for e in events
+    ), "event should not exist before recovery"
+
+    # ---- Run recovery. ----
+    await manager.agent_tree.recover_pending_runs(ws_id)
+
+    # The COMPLETED report for a REVIEWED task must map to PROGRESS,
+    # NOT the terminal COMPLETED event. The event is addressed to the
+    # supervisor (root), so query from root's perspective.
+    events = manager.agent_tree.get_events(ws_id, root.id, subtree=False)
+    report_events = [e for e in events if e.call_id == f"report:{report.id}"]
+    assert len(report_events) == 1
+    assert (
+        report_events[0].type == AgentEventType.PROGRESS
+    ), "REVIEWED task COMPLETED report must map to PROGRESS, not COMPLETED"
+
+    # The run must be WAITING (for the reviewer), not COMPLETED.
+    child_run = manager.agent_tree.get_run(child.id)
+    assert child_run.status == AgentRunStatus.WAITING
+
+    # No terminal COMPLETED event should have been emitted.
+    completed_events = [e for e in events if e.type == AgentEventType.COMPLETED]
+    assert completed_events == [], "COMPLETED must not fire before REVIEW_PASSED"
+
+
+# ---------------------------------------------------------------------------
+# Fix 2a: wake only the named mailbox recipient (no ancestor wakeup)
+# ---------------------------------------------------------------------------
+
+
+def test_wake_for_run_only_wakes_named_recipient(manager: WorkspaceManager, ws_id: str) -> None:
+    """``_wake_for_run`` must wake only the named recipient, not ancestors.
+
+    With recipient-directed mailbox reads, a run only sees events where
+    ``recipient == run_id`` (or self-addressed). Waking ancestors would
+    cause spurious wakeups for runs that cannot see the event.
+    """
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child.parent_id = root.id
+    child.supervisor_id = root.id
+    child.path = f"{root.path}/{child.id}"
+
+    # Create wait events for both root and child.
+    root_ev = manager.agent_tree._run_events.setdefault(root.id, asyncio.Event())
+    child_ev = manager.agent_tree._run_events.setdefault(child.id, asyncio.Event())
+    root_ev.clear()
+    child_ev.clear()
+
+    # Wake only the child (the named recipient).
+    manager.agent_tree._wake_for_run(child.id, child.id)
+
+    # The child (recipient) must be woken.
+    assert child_ev.is_set(), "named recipient must be woken"
+    # The root (ancestor) must NOT be woken.
+    assert not root_ev.is_set(), "ancestor must NOT be woken"
+
+    # Reset and test self-addressed (recipient=None) wakes the author.
+    root_ev.clear()
+    child_ev.clear()
+    manager.agent_tree._wake_for_run(child.id, None)
+    assert child_ev.is_set(), "self-addressed event must wake the author run"
+    assert not root_ev.is_set(), "ancestor must NOT be woken for self-addressed event"
+
+
+# ---------------------------------------------------------------------------
+# Fix 2b: cumulative side effects before ACK + cold recovery pump
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cumulative_side_effects_before_ack_and_cold_recovery_pump(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """Multiple messages each with a counted side effect, all applied before
+    any ACK. Then a cold restart must re-pump any unACKed (pending or
+    expired-processing) messages.
+
+    The receiver dedupe gate (``delivered_call_ids``) ensures a call_id the
+    worker already ACKed is not re-delivered.
+    """
+    from claude_hub.models import (
+        AgentReportCreate,
+        AgentReportState,
+        AgentType,
+        WorkspaceTask,
+        WorkspaceTaskStatus,
+    )
+
+    session_id = "cumulative-side-effects"
+    _make_managed_session(manager, session_id, ws_id)
+
+    task = WorkspaceTask(
+        id="cumulative-task",
+        workspace_id=ws_id,
+        title="cumulative side effects",
+        prompt="do the things",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    manager.tasks[task.id] = task
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"task_id": task.id, "current_task_id": task.id}
+    )
+
+    # The real, persisted side effect: a counter file in tmp_path.
+    effect_file = tmp_path / "effect_count.txt"
+
+    def read_effect() -> int:
+        if not effect_file.exists():
+            return 0
+        return int(effect_file.read_text().strip() or "0")
+
+    def bump_effect() -> None:
+        n = read_effect() + 1
+        effect_file.write_text(str(n))
+
+    # The "receiver" (tmux send) applies the side effect once per delivery.
+    async def recording_send(tmux_session: str, message: str) -> None:
+        bump_effect()
+
+    monkeypatch.setattr(manager, "_send_tmux_message", recording_send)
+
+    # ---- Send 3 messages, each with a distinct call_id. ----
+    call_ids = ["call:1", "call:2", "call:3"]
+    for cid in call_ids:
+        await manager.send_session_message(session_id, f"message {cid}", call_id=cid)
+
+    # All 3 side effects applied before any ACK.
+    assert read_effect() == 3
+
+    # All 3 call_ids are in processing (claimed, not yet ACKed).
+    session = manager.sessions[session_id]
+    for cid in call_ids:
+        assert cid in session.processing_call_ids
+        assert cid not in session.delivered_call_ids
+
+    # ---- ACK only the first call_id. ----
+    await manager.create_report(
+        session_id,
+        AgentReportCreate(
+            task_id=task.id,
+            state=AgentReportState.WORKING,
+            message="processed first",
+            acked_call_ids=["call:1"],
+        ),
+    )
+    session = manager.sessions[session_id]
+    assert "call:1" in session.delivered_call_ids
+    assert "call:1" not in session.processing_call_ids
+    # call:2 and call:3 are still unACKed.
+    assert "call:2" in session.processing_call_ids
+    assert "call:3" in session.processing_call_ids
+
+    # ---- Cold restart: persist and reload into a fresh manager. ----
+    manager._save_state()
+    fresh = WorkspaceManager()
+
+    fresh_session = fresh.sessions[session_id]
+    # call:1 was ACKed -> delivered, not re-deliverable.
+    assert "call:1" in fresh_session.delivered_call_ids
+    # call:2 and call:3 are still in processing (unACKed).
+    assert "call:2" in fresh_session.processing_call_ids
+    assert "call:3" in fresh_session.processing_call_ids
+
+    # The side effect counter is NOT persisted across the restart (it's a
+    # model-side effect, not Hub-managed). Reset it to 0 to simulate the
+    # model starting fresh.
+    effect_file.write_text("0")
+
+    # Patch the fresh manager's send to apply the side effect.
+    monkeypatch.setattr(fresh, "_send_tmux_message", recording_send)
+
+    # ---- Run recovery: expire stale leases and re-pump. ----
+    await fresh.agent_tree.recover_pending_runs(ws_id)
+
+    # call:2 and call:3 (unACKed) must be re-delivered -> 2 side effects.
+    # call:1 (ACKed) must NOT be re-delivered.
+    assert read_effect() == 2, "only unACKed call_ids must be re-delivered on cold recovery"
+
+    fresh_session = fresh.sessions[session_id]
+    # call:2 and call:3 are back in processing (re-claimed by the pump).
+    assert "call:2" in fresh_session.processing_call_ids
+    assert "call:3" in fresh_session.processing_call_ids
+    # call:1 stays delivered.
+    assert "call:1" in fresh_session.delivered_call_ids
+    assert "call:1" not in fresh_session.pending_call_ids
+    assert "call:1" not in fresh_session.processing_call_ids
+
+    # ---- Cleanup. ----
+    await fresh.delete_workspace(ws_id)
