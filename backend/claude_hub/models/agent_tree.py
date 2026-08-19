@@ -139,7 +139,10 @@ class AgentEvent(BaseModel):
     agent_run_id: str
     type: AgentEventType
     author: str
-    recipient: Optional[str] = None
+    # Recipient is mandatory: every event is directed to exactly one run.
+    # Root runs (supervisor_id is None) self-address their events so the
+    # directed mailbox filter (e.recipient == run_id) still delivers them.
+    recipient: str
     # The action that produced this event (e.g. "spawn", "send", "followup",
     # "interrupt", "emit"). Used for call_id idempotency namespacing.
     action: Optional[str] = None

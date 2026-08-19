@@ -460,7 +460,7 @@ class _ReportsMixin:
         self._bridge_report_to_agent_event(report, session)
         return report
 
-    def _ack_call_ids(self, task_id: str, session_id: str, call_ids: list[str]) -> None:
+    def _ack_call_ids(self, task_id: Optional[str], session_id: str, call_ids: list[str]) -> None:
         """Receiver-side commit: move call_ids from processing to delivered.
 
         This is the *commit* step of the durable receiver gate. The claim
@@ -594,7 +594,7 @@ class _ReportsMixin:
             agent_run_id=run.id,
             event_type=event_type,
             author=run.id,
-            recipient=run.supervisor_id,
+            recipient=run.supervisor_id or run.id,
             call_id=f"report:{report.id}",
             payload={
                 "message": report.message,

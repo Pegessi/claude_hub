@@ -149,9 +149,11 @@ def _build_agent_tree_block(
         "-H 'Content-Type: application/json' "
         f'-d \'{{"workspace_id":"{workspace_id}","recipient_id":"{root_run_id}",'
         f'"since_sequence":{ack_sequence},"subtree":true,"timeout_seconds":30}}\'\n'
-        "   Returns events addressed to you or authored within your subtree. "
-        "After processing, call `ack` with the highest sequence you saw to "
-        "advance your persisted cursor.\n\n"
+        "   Returns events addressed to you (recipient == your root run id). "
+        "Child runs address their reports to you (their supervisor), so you "
+        "receive their progress/completed/failed events. After processing, "
+        "call `ack` with the highest sequence you saw to advance your "
+        "persisted cursor.\n\n"
         "3. Acknowledge events up to a sequence cursor (persists your progress "
         "so a restarted resident resumes from where it left off):\n"
         f"   {INTERNAL_API_CURL} -X POST '{base_url}/api/agent-tree/ack?"
@@ -347,13 +349,30 @@ class _WorkspacesMixin:
         while True:
             try:
                 await self._refresh_session_statuses(run_auto_continue=True)
-                # Expire stale processing call_ids so crashed-claim messages
-                # are re-delivered by the receiver pump.
+                # Expire stale processing call_ids so failed-delivery messages
+                # are re-queued for retry. A call_id in processing means the
+                # pump claimed it but the tmux send may have failed; lease
+                # expiry moves it back to pending so the pump can retry.
+                # (Call_ids that were successfully sent to tmux are moved to
+                # delivered_call_ids by the pump itself, so they never sit in
+                # processing long enough to expire.)
                 for session_id in list(self.sessions):
                     try:
                         self._expire_processing_leases(session_id)
                     except Exception:
                         logger.exception("Lease expiry failed for session %s", session_id)
+                # Pump any pending call_ids that were not yet delivered to
+                # tmux (e.g. the pump failed on a previous cycle, or a new
+                # message was enqueued). This is the live counterpart to the
+                # cold-recovery pump in recover_pending_runs.
+                for session_id in list(self.sessions):
+                    sess = self.sessions.get(session_id)
+                    if sess is None or not sess.pending_call_ids:
+                        continue
+                    try:
+                        await self._pump_session_messages(session_id)
+                    except Exception:
+                        logger.exception("Live pump failed for session %s", session_id)
                 for workspace_id in list(self.workspaces):
                     await self.dispatch_workspace(workspace_id, refresh_sessions=False)
                 await self._tick_resident_agents()

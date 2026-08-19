@@ -104,27 +104,35 @@ class _MessagingMixin:
     async def _pump_session_messages(self, session_id: str) -> None:
         """Receiver pump: claim pending call_ids and deliver them to tmux.
 
-        This is the **CLAIM** step of the durable receiver gate. For each
-        call_id in ``pending_call_ids``:
+        Lifecycle of a call_id through the durable receiver gate:
 
-          1. Atomically move it from ``pending_call_ids`` to
-             ``processing_call_ids`` (claim).
-          2. Fetch the message body from ``pending_messages[call_id]``.
-          3. Send it to tmux (the Hub-managed side effect).
+          pending_call_ids  ──claim──▶  processing_call_ids  ──tmux-send──▶  delivered_call_ids
 
-        The claim happens BEFORE the tmux write, so a concurrent
-        ``send_session_message`` for the same call_id sees it in
-        ``processing_call_ids`` and skips — the tmux prompt is applied exactly
-        once.
+        1. **Claim**: atomically move the call_id from ``pending_call_ids`` to
+           ``processing_call_ids``. The claim happens BEFORE the tmux write so
+           a concurrent ``send_session_message`` for the same call_id sees it
+           in ``processing_call_ids`` and skips — the tmux prompt is applied
+           exactly once.
 
-        If the Hub crashes after the claim but before the tmux write (or before
-        the worker ACKs), the call_id remains in ``processing_call_ids``. The
-        lease-expiry step (``_expire_processing_leases``) moves it back to
-        ``pending_call_ids`` so a fresh pump cycle can re-claim and
-        re-deliver.
+        2. **Deliver**: send the message to tmux. On success, the call_id is
+           moved to ``delivered_call_ids`` — the **receiver-owned durable
+           receipt**. A call_id in ``delivered_call_ids`` is NEVER re-delivered
+           by the Hub, even across a crash. This guarantees one call_id cannot
+           produce two tmux prompts.
 
-        The commit (processing → delivered) happens in ``_ack_call_ids`` when
-        the worker submits a report that includes the call_id.
+           If the tmux send fails, the call_id stays in ``processing_call_ids``;
+           the lease-expiry step (``_expire_processing_leases``) moves it back
+           to ``pending_call_ids`` so a fresh pump cycle can retry.
+
+        3. **Worker ACK** (``_ack_call_ids``): the worker confirms it processed
+           the message. Since the call_id is already in ``delivered_call_ids``
+           (moved there on tmux send), the ACK is a no-op for the call_id's
+           lifecycle. The ACK still serves as the worker's signal that it has
+           finished processing and is ready for the next message.
+
+        The tmux session persists across Hub restarts, so a message that was
+        successfully sent to tmux remains visible to the worker even if the Hub
+        crashes before the worker ACKs. The Hub does NOT re-deliver it.
         """
         session = self.sessions.get(session_id)
         if not session:
@@ -152,7 +160,7 @@ class _MessagingMixin:
                     "marking delivered",
                     call_id,
                 )
-                self._ack_call_ids(None, session_id, [call_id])
+                self._ack_call_ids(session.task_id, session_id, [call_id])
                 continue
 
             # ---- CLAIM: pending → processing ----
@@ -211,6 +219,16 @@ class _MessagingMixin:
                 # Re-raise so callers know delivery failed, but the claim is
                 # already persisted so we don't double-send on retry.
                 raise
+
+            # ---- RECEIPT: processing → delivered ----
+            # The tmux send succeeded. Move the call_id to delivered_call_ids
+            # — the receiver-owned durable receipt. The Hub will NEVER
+            # re-deliver this call_id, even across a crash. This guarantees
+            # one call_id cannot produce two tmux prompts.
+            #
+            # Pass the session's task_id so the task's call_id lists stay in
+            # sync with the session's (the claim step updated both).
+            self._ack_call_ids(session.task_id, session_id, [call_id])
 
     def _expire_processing_leases(self, session_id: str, max_age_seconds: float = 300.0) -> int:
         """Move stale ``processing_call_ids`` back to ``pending_call_ids``.
