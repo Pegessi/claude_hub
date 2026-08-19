@@ -4368,7 +4368,7 @@ def test_forged_session_cookie_rejected_for_all_actions(
 async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
     manager: WorkspaceManager, ws_id: str
 ) -> None:
-    """At-least-once tmux delivery with receiver-verifiable durable receipt.
+    """Exactly-once tmux delivery with receiver-verifiable durable receipt.
 
     ``send_session_message`` persists the call_id in ``pending_call_ids``,
     then the receiver pump claims it (pending → processing) and sends it to
@@ -4376,12 +4376,13 @@ async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
     it — only the worker's ACK moves it to ``delivered_call_ids`` and removes
     the message from ``pending_messages``.
 
-    On a hard exit + reload, call_ids stranded in ``processing_call_ids`` are
-    moved back to ``pending_call_ids`` and re-delivered. The worker dedupes
-    by the ``[call_id:<id>]`` marker, so a duplicate tmux prompt does not
-    produce a duplicate effect. This preserves the message until the worker
-    proves receipt (ACK), covering both sides of the claim-to-tmux crash
-    window.
+    The tmux input buffer is the durable receiver: once a message is sent to
+    tmux, the worker will read it exactly once. Therefore, on a hard exit +
+    reload, call_ids stranded in ``processing_call_ids`` are NOT re-delivered
+    — re-sending would append them to the tmux buffer a second time and
+    produce a duplicate model turn. Only ``pending_call_ids`` (never sent to
+    tmux) are re-deliverable. The worker's ACK is what moves processing
+    call_ids to delivered.
     """
     session_id = "outbox-session"
     _make_managed_session(manager, session_id, ws_id)
@@ -4411,7 +4412,7 @@ async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
     assert call_id not in session.pending_call_ids
     assert len(sent) == 1
     # The sent message must include the call_id marker so the receiving
-    # executor can dedupe any duplicate delivery.
+    # executor can correlate the ACK.
     assert marker in sent[0]
 
     # Simulate a hard exit: the call_id is persisted in processing_call_ids.
@@ -4423,16 +4424,15 @@ async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
     assert call_id not in reloaded_session.delivered_call_ids
     assert call_id not in reloaded_session.pending_call_ids
 
-    # Recovery: the call_id is in processing_call_ids, so the Hub moves it
-    # back to pending_call_ids and re-delivers it. The worker dedupes by
-    # [call_id:<id>] marker.
+    # Recovery: the call_id is in processing_call_ids, meaning it was already
+    # delivered to the tmux inbox. The Hub does NOT re-deliver it — that
+    # would produce a duplicate turn. Only pending_call_ids are pumped.
     sent.clear()
     reloaded._send_tmux_message = _fake_send_tmux  # type: ignore[assignment]
     reloaded._capture_tmux_output = _fake_capture_tmux  # type: ignore[assignment]
     await reloaded.agent_tree.recover_pending_runs(ws_id)
-    # Re-delivery: the call_id was moved back to pending and re-sent.
-    assert len(sent) == 1
-    assert marker in sent[0]
+    # No re-delivery: the message was already in the tmux input buffer.
+    assert len(sent) == 0
     reloaded_session = reloaded.sessions[session_id]
     assert call_id in reloaded_session.processing_call_ids
 
@@ -5501,22 +5501,25 @@ async def test_mailbox_side_effect_probes_crash_and_replay(
     assert send_count["n"] == send_count_before
     assert read_effect() == 1
 
-    # ---- Probe 5: unACKed followup survives cold restart and is
+    # ---- Probe 5: unACKed followup survives cold restart and is NOT
     # re-delivered. ----
     # The followup call_id is sent to tmux and stays in processing_call_ids
-    # (unACKed). On cold restart, it is moved back to pending_call_ids and
-    # re-delivered. The worker dedupes by [call_id:<id>] marker.
+    # (unACKed). On cold restart, it stays in processing_call_ids — the tmux
+    # inbox is the durable receiver, so re-sending would produce a duplicate
+    # turn. The worker ACKs it after restart.
     followup_call_id = "followup:1"
+    effect_before = read_effect()
     await manager.send_session_message(session_id, "please also do X", call_id=followup_call_id)
     session = manager.sessions[session_id]
     assert followup_call_id in session.processing_call_ids
     assert followup_call_id not in session.delivered_call_ids
+    assert read_effect() == effect_before + 1  # side effect ran once
 
     # Persist state and reload into a fresh manager.
     manager._save_state()
     fresh = WorkspaceManager()
     # The fresh manager must use the same counting send so we can verify
-    # re-delivery, and a capture that returns a ready prompt to avoid the
+    # no re-delivery, and a capture that returns a ready prompt to avoid the
     # 12s _ensure_session_ready_for_send timeout.
     fresh._send_tmux_message = crashing_send  # type: ignore[assignment]
 
@@ -5530,13 +5533,30 @@ async def test_mailbox_side_effect_probes_crash_and_replay(
     assert followup_call_id in fresh_session.processing_call_ids
     assert followup_call_id not in fresh_session.delivered_call_ids
 
-    # Run cold recovery: processing -> pending, then pump re-delivers.
+    # Run cold recovery: processing call_ids are NOT re-delivered (they were
+    # already in the tmux inbox). Only pending_call_ids are pumped.
     send_count_before_fresh = send_count["n"]
+    effect_before_fresh = read_effect()
     await fresh.agent_tree.recover_pending_runs(ws_id)
-    # Re-delivery: the followup was moved back to pending and re-sent.
-    assert send_count["n"] == send_count_before_fresh + 1
+    # No re-delivery: the followup was already in the tmux input buffer.
+    assert send_count["n"] == send_count_before_fresh
+    assert read_effect() == effect_before_fresh
     fresh_session = fresh.sessions[session_id]
     assert followup_call_id in fresh_session.processing_call_ids
+
+    # The worker ACKs the followup call_id after restart.
+    await fresh.create_report(
+        session_id,
+        AgentReportCreate(
+            task_id=task.id,
+            state=AgentReportState.WORKING,
+            message="processed followup",
+            acked_call_ids=[followup_call_id],
+        ),
+    )
+    fresh_session = fresh.sessions[session_id]
+    assert followup_call_id in fresh_session.delivered_call_ids
+    assert followup_call_id not in fresh_session.processing_call_ids
 
 
 @pytest.mark.asyncio
@@ -5551,17 +5571,21 @@ async def test_resident_cycle_e2e_with_unacked_followup_cold_replay(
       - Resident creates its root run and a managed-task child (spawn).
       - The child's dispatch call_id is claimed by the pump and sent to
         tmux; it stays in ``processing_call_ids`` until the worker ACKs.
-      - The worker submits a report that ACKs the dispatch call_id
-        (directed wait/ACK); the call_id moves to ``delivered_call_ids``.
+      - The resident performs a directed ``wait`` on its subtree event
+        stream and ``ack``s the cursor (Hub-enforced receiver dedupe).
+      - The worker submits a report that ACKs the dispatch call_id; the
+        call_id moves to ``delivered_call_ids``.
       - An unACKed followup from the resident to the child is sent to tmux
         and stays in ``processing_call_ids``.
-      - Cold restart: the unACKed followup is moved back to
-        ``pending_call_ids`` and re-delivered (unACKed cold replay). The
-        worker dedupes by ``[call_id:<id>]`` marker.
-      - Cumulative effects: the side-effect counter reflects exactly the
-        number of unique call_ids processed (dedupe works).
+      - Cold restart: the unACKed followup stays in ``processing_call_ids``
+        and is NOT re-delivered — the tmux inbox is the durable receiver,
+        so re-sending would produce a duplicate turn. The worker ACKs it
+        after restart.
+      - Cumulative unique side-effect count: every call_id is sent to tmux
+        exactly once (no duplicates across cold replay or transient retry).
       - Transient followup recovery: a followup whose tmux send fails is
-        rolled back to ``pending`` and retried on the next pump cycle.
+        rolled back to ``pending`` and retried on the next pump cycle; it
+        is delivered exactly once.
       - The leftover workspace/session is cleaned up at the end.
     """
     from claude_hub.models import (
@@ -5583,16 +5607,20 @@ async def test_resident_cycle_e2e_with_unacked_followup_cold_replay(
     )
     manager.workspaces[ws_id] = workspace
 
-    # Capture tmux sends and count side effects (cumulative effects).
+    # Capture tmux sends and track unique call_ids delivered. The
+    # "side-effect" is the tmux prompt delivery; each call_id must be
+    # delivered exactly once.
     sent_messages: list[str] = []
-    effect_count = {"n": 0}
+    delivered_call_ids: set[str] = set()
 
     async def recording_send(tmux_session: str, message: str) -> None:
         sent_messages.append(message)
-        # The "worker" applies the side effect for each delivered call_id.
-        # In production the worker dedupes by [call_id:<id>]; here we
-        # simulate that by only bumping the counter for new call_ids.
-        effect_count["n"] += 1
+        # Extract the call_id marker from the message.
+        for line in message.splitlines():
+            if line.startswith("[call_id:"):
+                cid = line[len("[call_id:") : -1]
+                delivered_call_ids.add(cid)
+                break
 
     monkeypatch.setattr(manager, "_send_tmux_message", recording_send)
 
@@ -5634,7 +5662,41 @@ async def test_resident_cycle_e2e_with_unacked_followup_cold_replay(
     assert dispatch_call_id in session.processing_call_ids
     assert dispatch_call_id not in session.delivered_call_ids
 
-    # ---- Worker ACKs the dispatch call_id (directed wait/ACK). ----
+    # ---- Directed wait/cursor ACK on the resident's subtree event stream. ----
+    # The resident waits for directed events from its subtree (the spawn
+    # event) and ACKs the cursor. The Hub enforces the cursor: events with
+    # sequence <= ack_sequence are never re-delivered.
+    events = await manager.agent_tree.wait(
+        WaitRequest(
+            workspace_id=ws_id,
+            recipient_id=root_run.id,
+            since_sequence=root_run.ack_sequence,
+            subtree=True,
+            timeout_seconds=1.0,
+        )
+    )
+    # The spawn produced directed events visible to the root.
+    assert events, "expected subtree events after spawn"
+    max_seq = max(ev.sequence for ev in events)
+    # The resident ACKs up to max_seq: the Hub persists ack_sequence so a
+    # restarted resident resumes from this cursor (no replay of ACKed events).
+    manager.agent_tree.ack(ws_id, root_run.id, max_seq)
+    root_run = manager.agent_tree.get_run(root_run.id)
+    assert root_run.ack_sequence == max_seq
+
+    # A subsequent wait returns no new events (cursor advanced).
+    events_after = await manager.agent_tree.wait(
+        WaitRequest(
+            workspace_id=ws_id,
+            recipient_id=root_run.id,
+            since_sequence=root_run.ack_sequence,
+            subtree=True,
+            timeout_seconds=0.1,
+        )
+    )
+    assert not events_after
+
+    # ---- Worker ACKs the dispatch call_id (receiver-verifiable receipt). ----
     await manager.create_report(
         worker_session_id,
         AgentReportCreate(
@@ -5662,7 +5724,7 @@ async def test_resident_cycle_e2e_with_unacked_followup_cold_replay(
     )
 
     # The followup call_id was sent to tmux and stays in processing_call_ids
-    # (unACKed).
+    # (unACKed). The followup:outcome event has delivered=False until ACK.
     session = manager.sessions[worker_session_id]
     assert followup_call_id in session.processing_call_ids
     assert followup_call_id not in session.delivered_call_ids
@@ -5671,7 +5733,7 @@ async def test_resident_cycle_e2e_with_unacked_followup_cold_replay(
     manager._save_state()
     fresh = WorkspaceManager()
     # The fresh manager must also record tmux sends so we can assert
-    # re-delivery.
+    # no re-delivery.
     monkeypatch.setattr(fresh, "_send_tmux_message", recording_send)
 
     fresh_session = fresh.sessions[worker_session_id]
@@ -5679,13 +5741,28 @@ async def test_resident_cycle_e2e_with_unacked_followup_cold_replay(
     assert followup_call_id in fresh_session.processing_call_ids
     assert followup_call_id not in fresh_session.delivered_call_ids
 
-    # Cold recovery moves processing -> pending and re-delivers.
+    # Cold recovery does NOT re-deliver processing call_ids: they were
+    # already in the tmux inbox. Re-sending would produce a duplicate turn.
     sent_before = len(sent_messages)
     await fresh.agent_tree.recover_pending_runs(ws_id)
-    # The followup was re-delivered (one additional tmux send).
-    assert len(sent_messages) == sent_before + 1
+    # No re-delivery: the followup was already in the tmux input buffer.
+    assert len(sent_messages) == sent_before
     fresh_session = fresh.sessions[worker_session_id]
     assert followup_call_id in fresh_session.processing_call_ids
+
+    # The worker ACKs the followup call_id after restart.
+    await fresh.create_report(
+        worker_session_id,
+        AgentReportCreate(
+            task_id=task_id,
+            state=AgentReportState.WORKING,
+            message="processed followup",
+            acked_call_ids=[followup_call_id],
+        ),
+    )
+    fresh_session = fresh.sessions[worker_session_id]
+    assert followup_call_id in fresh_session.delivered_call_ids
+    assert followup_call_id not in fresh_session.processing_call_ids
 
     # ---- Transient followup recovery: a failed tmux send is retried. ----
     # Make the next tmux send fail, then succeed.
@@ -5696,7 +5773,11 @@ async def test_resident_cycle_e2e_with_unacked_followup_cold_replay(
         if fail_next["n"] == 1:
             raise RuntimeError("transient tmux failure")
         sent_messages.append(message)
-        effect_count["n"] += 1
+        for line in message.splitlines():
+            if line.startswith("[call_id:"):
+                cid = line[len("[call_id:") : -1]
+                delivered_call_ids.add(cid)
+                break
 
     monkeypatch.setattr(fresh, "_send_tmux_message", flaky_send)
 
@@ -5707,10 +5788,25 @@ async def test_resident_cycle_e2e_with_unacked_followup_cold_replay(
     assert transient_call_id in fresh_session.pending_call_ids
     assert transient_call_id not in fresh_session.processing_call_ids
 
-    # Re-pump: the second send succeeds.
+    # Re-pump: the second send succeeds. The call_id is delivered exactly
+    # once (the failed attempt did not reach tmux).
     await fresh._pump_session_messages(worker_session_id)
     fresh_session = fresh.sessions[worker_session_id]
     assert transient_call_id in fresh_session.processing_call_ids
+
+    # ---- Cumulative unique side-effect count. ----
+    # Every call_id that was successfully sent to tmux appears exactly once
+    # in delivered_call_ids. No duplicates across cold replay (the followup
+    # was not re-sent) or transient retry (the failed attempt did not
+    # reach tmux).
+    expected_call_ids = {dispatch_call_id, followup_call_id, transient_call_id}
+    assert delivered_call_ids == expected_call_ids
+    # Count tmux sends that carry a call_id marker: must equal the number
+    # of unique call_ids (exactly-once delivery).
+    call_id_sends = [
+        m for m in sent_messages if any(line.startswith("[call_id:") for line in m.splitlines())
+    ]
+    assert len(call_id_sends) == len(expected_call_ids)
 
     # ---- Cleanup: delete the workspace and its sessions. ----
     await fresh.delete_workspace(ws_id)
@@ -5963,20 +6059,20 @@ async def test_cumulative_side_effects_before_ack_and_cold_recovery_pump(
 
     The receiver-verifiable receipt (``delivered_call_ids`` populated ONLY on
     worker ACK) guarantees that an ACKed call_id is never re-delivered. An
-    unACKed call_id that was sent to tmux (in ``processing_call_ids``) IS
-    re-delivered on cold restart, because we cannot prove the worker received
-    it before the crash. The worker dedupes by the ``[call_id:<id>]`` marker.
+    unACKed call_id that was sent to tmux (in ``processing_call_ids``) is
+    NOT re-delivered on cold restart — the tmux input buffer is the durable
+    receiver, so re-sending would produce a duplicate model turn. Only
+    ``pending_call_ids`` (never sent to tmux) are pumped on recovery.
 
     On cold restart:
       * ``delivered_call_ids`` (worker-ACKed) are NEVER re-delivered.
-      * ``processing_call_ids`` (sent to tmux, not ACKed) are moved back to
-        ``pending_call_ids`` and re-delivered.
+      * ``processing_call_ids`` (sent to tmux, not ACKed) stay in
+        ``processing_call_ids`` — they are already in the tmux inbox.
       * ``pending_call_ids`` (never sent to tmux) ARE pumped.
 
     The cumulative side-effect counter (tmux sends) is NEVER reset across the
     cold restart: it reflects the total number of tmux sends that have ever
-    happened. UnACKed call_ids produce a second tmux send on recovery; the
-    worker's dedupe marker prevents a duplicate *effect*.
+    happened. Each call_id is sent to tmux exactly once.
     """
     from claude_hub.models import (
         AgentReportCreate,
@@ -6088,10 +6184,9 @@ async def test_cumulative_side_effects_before_ack_and_cold_recovery_pump(
     assert "call:1" in fresh_session.delivered_call_ids
     assert "call:1" not in fresh_session.pending_call_ids
     assert "call:1" not in fresh_session.processing_call_ids
-    # call:2 and call:3 were sent to tmux but NOT ACKed -> they are in
-    # processing_call_ids (loaded from disk). Cold recovery will move them
-    # back to pending and re-deliver them (we cannot prove the worker
-    # received them before the crash).
+    # call:2 and call:3 were sent to tmux but NOT ACKed -> they stay in
+    # processing_call_ids (loaded from disk). Cold recovery does NOT
+    # re-deliver them — they are already in the tmux inbox.
     for cid in ["call:2", "call:3"]:
         assert cid in fresh_session.processing_call_ids
         assert cid not in fresh_session.delivered_call_ids
@@ -6106,23 +6201,26 @@ async def test_cumulative_side_effects_before_ack_and_cold_recovery_pump(
     monkeypatch.setattr(fresh, "_send_tmux_message", recording_send)
     monkeypatch.setattr(fresh, "_capture_tmux_output", _ready_capture)
 
-    # ---- Run recovery: processing -> pending, pump pending. ----
+    # ---- Run recovery: pump pending only (processing stays put). ----
     await fresh.agent_tree.recover_pending_runs(ws_id)
 
-    # call:2, call:3 (unACKed, was processing) and call:4 (pending) are
-    # re-delivered -> 3 more side effects. Total = 3 + 3 = 6.
+    # Only call:4 (pending, never sent to tmux) is delivered -> 1 more side
+    # effect. Total = 3 + 1 = 4.
     # call:1 (delivered/ACKed) is NOT re-delivered.
-    assert read_effect() == 6, (
-        "only non-delivered call_ids must be re-delivered on cold recovery; "
-        "delivered (ACKed) call_ids must never be re-sent"
+    # call:2, call:3 (processing, already in tmux inbox) are NOT re-delivered.
+    assert read_effect() == 4, (
+        "only pending call_ids must be delivered on cold recovery; "
+        "processing call_ids are already in the tmux inbox and must not "
+        "be re-sent (no duplicate turns)"
     )
 
     fresh_session = fresh.sessions[session_id]
-    # call:2, call:3, call:4 are now in processing (sent during recovery,
-    # awaiting worker ACK).
-    for cid in ["call:2", "call:3", pending_call_id]:
+    # call:4 is now in processing (sent during recovery, awaiting worker ACK).
+    assert pending_call_id in fresh_session.processing_call_ids
+    assert pending_call_id not in fresh_session.pending_call_ids
+    # call:2, call:3 stay in processing (not re-delivered).
+    for cid in ["call:2", "call:3"]:
         assert cid in fresh_session.processing_call_ids
-        assert cid not in fresh_session.pending_call_ids
     # call:1 stays delivered.
     assert "call:1" in fresh_session.delivered_call_ids
     assert "call:1" not in fresh_session.pending_call_ids

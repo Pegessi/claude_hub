@@ -349,13 +349,15 @@ class _WorkspacesMixin:
         while True:
             try:
                 await self._refresh_session_statuses(run_auto_continue=True)
-                # Expire stale processing call_ids so failed-delivery messages
-                # are re-queued for retry. A call_id in processing means the
-                # pump claimed it but the tmux send may have failed; lease
-                # expiry moves it back to pending so the pump can retry.
-                # (Call_ids that were successfully sent to tmux are moved to
-                # delivered_call_ids by the pump itself, so they never sit in
-                # processing long enough to expire.)
+                # Expire stale processing call_ids for sessions whose tmux
+                # inbox is gone (STOPPED). A call_id in processing means the
+                # pump successfully sent it to tmux; for live sessions the
+                # message is already in the tmux input buffer and will be
+                # ACKed by the worker, so we must NOT re-deliver it (that
+                # would produce a duplicate turn). Only when the tmux session
+                # itself is destroyed is the input buffer lost, at which
+                # point expiry moves the stranded call_ids back to pending
+                # for re-delivery.
                 for session_id in list(self.sessions):
                     try:
                         self._expire_processing_leases(session_id)

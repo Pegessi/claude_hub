@@ -315,18 +315,19 @@ class _PromptsMixin:
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"started",'
             '"message":"Started","message_en":"Started","message_zh":"已开始"}}\'\n\n'
-            "Call-id ACK contract (at-least-once delivery):\n"
+            "Call-id ACK contract (exactly-once delivery to your tmux inbox):\n"
             "Messages from your supervisor may be prefixed with a `[call_id:<id>]` marker "
-            "(followups, continue prompts, etc.). The Hub delivers these at-least-once: a "
-            "crash after send but before you process the message causes a re-delivery. You "
-            "must dedupe by the call_id marker — process each call_id exactly once.\n"
+            "(followups, continue prompts, etc.). The Hub delivers each call_id exactly "
+            "once to your tmux input buffer: once a message is sent to tmux, the Hub "
+            "never re-sends it (no duplicate turns). You do not need to dedupe — each "
+            "call_id arrives exactly once.\n"
             f"- The dispatch call_id `dispatch:{task.id}` is ACKed automatically by the Hub "
             "when you submit any report; do NOT list it in acked_call_ids.\n"
             "- For every other call_id you have processed, list it in `acked_call_ids` of "
             "your report. Only call_ids currently pending for this task/session are moved to "
             "delivered; unknown or future call_ids are ignored.\n"
-            "- A call_id you do NOT list stays pending and will be re-delivered after a Hub "
-            "restart. If you already processed it, list it to avoid duplicate work.\n"
+            "- A call_id you do NOT list stays in processing and will be cleaned up only "
+            "after you ACK it. List every call_id you process so the Hub can release it.\n"
             "Example report body with ACKs:\n"
             f'{{"task_id":"{task.id}","state":"working","message":"...","message_en":"...",'
             '"message_zh":"...","acked_call_ids":["followup-abc123"]}}\n'

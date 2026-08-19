@@ -748,27 +748,33 @@ class ManagedSession(BaseModel):
     # a review prompt for. Drives the cross-task /clear decision independently of
     # any task's mutable review_session_id (which abort/skip/stale-release null).
     last_review_task_id: Optional[str] = None
-    # Executor-boundary call_id tracking for at-least-once delivery with a
-    # Hub-owned durable receiver gate (claim / processing / committed).
+    # Executor-boundary call_id tracking for exactly-once delivery to the
+    # tmux inbox with a Hub-owned durable receiver gate (claim / processing /
+    # committed).
     #
     # Lifecycle (see _messaging.py and _reports.py):
-    #   pending_call_ids  ──claim──▶  processing_call_ids  ──commit──▶  delivered_call_ids
+    #   pending_call_ids  ──claim──▶  processing_call_ids  ──ACK──▶  delivered_call_ids
     #         │                              │
-    #         │                              └── lease expiry ──┐
-    #         └─────────────────────────────────────────────────┘
+    #         │                              └── lease expiry (STOPPED only) ──┐
+    #         └────────────────────────────────────────────────────────────────┘
     #
     # pending_call_ids: call_ids persisted in the outbox (sender side) whose
     #   message sits in ``pending_messages`` awaiting delivery. The sender
     #   (``send_session_message``) only ever appends here; it never sends to
-    #   tmux directly. On restart, every call_id here is re-deliverable.
+    #   tmux directly. On restart, every call_id here is pumped (claimed +
+    #   delivered to tmux) exactly once.
     # processing_call_ids: call_ids the **receiver pump** has atomically
-    #   claimed (moved out of ``pending_call_ids``) and is in the act of
-    #   delivering to the model (tmux send). The claim happens BEFORE the
-    #   model turn starts, so a duplicate delivery while a call_id is here is
-    #   suppressed (the sender skips both ``processing`` and ``delivered``).
-    #   If the Hub crashes after claim but before the model ACKs, the lease
-    #   expiry step moves the call_id back to ``pending_call_ids`` so a fresh
-    #   pump cycle can re-claim and re-deliver.
+    #   claimed (moved out of ``pending_call_ids``) and successfully sent to
+    #   tmux. The call_id only stays here after a successful tmux send; a
+    #   failed send rolls it back to ``pending_call_ids``. These call_ids are
+    #   already in the tmux input buffer (the durable receiver) and MUST NOT
+    #   be re-delivered — re-sending would append to the buffer a second time
+    #   and produce a duplicate model turn. The worker ACKs them (moving them
+    #   to ``delivered_call_ids``) when it processes them.
+    #   Lease expiry (``_expire_processing_leases``) only moves a call_id back
+    #   to ``pending_call_ids`` for sessions whose tmux inbox is gone
+    #   (``ManagedSessionStatus.STOPPED``), because the input buffer was
+    #   destroyed with the tmux session.
     # delivered_call_ids: call_ids the worker has ACKed (processed) via
     #   ``acked_call_ids`` in a report. The commit step (``_ack_call_ids``)
     #   moves them here. ``send_session_message`` skips any call_id already
@@ -783,7 +789,8 @@ class ManagedSession(BaseModel):
     # Per-call_id claim timestamps. Keyed by call_id, value is the UTC datetime
     # when the receiver pump moved the call_id from pending to processing.
     # Used by ``_expire_processing_leases`` to decide whether a claimed but
-    # unACKed call_id should be moved back to pending for re-delivery.
+    # unACKed call_id should be moved back to pending for re-delivery (only
+    # for STOPPED sessions whose tmux inbox is gone).
     processing_call_ids_at: Dict[str, datetime] = Field(default_factory=dict)
     # Durable inbox: call_id → message body. Populated by
     # ``send_session_message``; consumed (and deleted) by the receiver pump
@@ -819,20 +826,24 @@ class AgentReportCreate(BaseModel):
     risk_level: Optional[str] = None
     # Call-specific ACK: the call_ids this report acknowledges as **processed**
     # by the worker. Only call_ids currently in the task/session
-    # pending_call_ids are moved to delivered_call_ids. Unknown or future
-    # call_ids (not in pending) are silently ignored — this prevents a
-    # malicious or buggy report from poisoning the delivered set and
-    # suppressing a real future delivery.
+    # pending_call_ids or processing_call_ids are moved to delivered_call_ids.
+    # Unknown or future call_ids (not in pending or processing) are silently
+    # ignored — this prevents a malicious or buggy report from poisoning the
+    # delivered set and suppressing a real future delivery.
     #
     # Production contract:
     # - The dispatch call_id (f"dispatch:{task_id}") is ACKed automatically by
     #   the Hub on every report submission; the worker does NOT need to list it.
     # - For any other call_id the worker has processed (e.g. a followup
     #   message carrying [call_id:<id>]), the worker MUST include it in
-    #   acked_call_ids to stop the Hub from re-delivering it on restart.
-    # - A call_id not listed in acked_call_ids stays in pending_call_ids and
-    #   will be re-delivered on Hub restart (at-least-once). The worker must
-    #   dedupe any duplicate via the [call_id:<id>] marker.
+    #   acked_call_ids so the Hub can move it to delivered_call_ids and
+    #   release it.
+    # - A call_id not listed in acked_call_ids stays in processing_call_ids
+    #   (already delivered to the tmux inbox) and is NOT re-delivered to a
+    #   live session. The Hub enforces exactly-once by never re-sending a
+    #   processing call_id to a live tmux session. Only if the session's tmux
+    #   inbox is gone (STOPPED) does the Hub move it back to pending for
+    #   re-delivery.
     acked_call_ids: List[str] = Field(default_factory=list)
 
 

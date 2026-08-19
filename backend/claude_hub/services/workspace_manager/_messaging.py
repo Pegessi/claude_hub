@@ -15,12 +15,12 @@ class _MessagingMixin:
     ) -> None:
         """Enqueue a message for a managed session's terminal.
 
-        Sender-side semantics: **at-least-once transport via a durable inbox**.
+        Sender-side semantics: **exactly-once delivery to the tmux inbox**.
 
         The sender does NOT write to tmux directly. Instead it:
           1. Skips call_ids already in ``delivered_call_ids`` (committed by the
              worker's ACK) or ``processing_call_ids`` (claimed by the receiver
-             pump — a delivery is already in flight).
+             pump — already delivered to the tmux inbox).
           2. Persists the message body in ``session.pending_messages[call_id]``
              (the durable inbox) and appends ``call_id`` to
              ``pending_call_ids``.
@@ -31,19 +31,25 @@ class _MessagingMixin:
         ``send_session_message`` for the same call_id while the pump holds the
         claim is a no-op.
 
-        A call_id stays in ``pending_call_ids`` (or ``processing_call_ids``)
-        until the worker ACKs it via ``acked_call_ids`` in a report. On Hub
-        restart, any call_id still in ``pending_call_ids`` is re-deliverable;
-        any call_id stranded in ``processing_call_ids`` is moved back to
-        ``pending_call_ids`` and re-delivered. The worker dedupes by the
-        ``[call_id:<id>]`` marker, so a duplicate tmux prompt (e.g. from a
-        crash between tmux send and ACK) does not produce a duplicate effect.
+        A call_id stays in ``processing_call_ids`` until the worker ACKs it
+        via ``acked_call_ids`` in a report. The tmux input buffer is the
+        durable receiver: once a message is sent to tmux, the worker will
+        read it exactly once. Therefore the Hub NEVER re-delivers a
+        ``processing`` call_id to a live session — that would append it to
+        the tmux buffer a second time and produce a duplicate model turn.
 
-        NOTE: This guarantees at-least-once delivery of the **Hub-managed**
-        effect (the tmux prompt) with worker-side dedupe. It does NOT
-        guarantee exactly-once of arbitrary external tool side effects the
-        model may invoke — those require the call_id to be propagated as an
-        idempotency key by the model itself.
+        On Hub restart, only ``pending_call_ids`` (never sent to tmux) are
+        re-deliverable. ``processing_call_ids`` were already written to the
+        tmux inbox and are left for the worker to ACK. The only exception is
+        a session whose tmux session itself is gone
+        (``ManagedSessionStatus.STOPPED``): the input buffer was destroyed,
+        so its processing call_ids are moved back to pending for re-delivery.
+
+        NOTE: This guarantees exactly-once delivery of the **Hub-managed**
+        effect (the tmux prompt). It does NOT guarantee exactly-once of
+        arbitrary external tool side effects the model may invoke — those
+        require the call_id to be propagated as an idempotency key by the
+        model itself.
         """
         session = self.sessions.get(session_id)
         if not session:
@@ -115,9 +121,9 @@ class _MessagingMixin:
            in ``processing_call_ids`` and skips.
 
         2. **Deliver**: send the message to tmux. On success, the call_id
-           STAYS in ``processing_call_ids`` — it is awaiting the worker's
-           ACK. The message body stays in ``pending_messages`` until the
-           worker ACKs.
+           STAYS in ``processing_call_ids`` — it is now in the tmux input
+           buffer (the durable receiver) awaiting the worker's ACK. The
+           message body stays in ``pending_messages`` until the worker ACKs.
 
            If the tmux send fails, the call_id is moved back to
            ``pending_call_ids`` immediately so the next pump cycle can
@@ -130,13 +136,14 @@ class _MessagingMixin:
            ``delivered_call_ids`` and removes the message from
            ``pending_messages``.
 
-        **Crash semantics**: on cold recovery, call_ids stranded in
-        ``processing_call_ids`` are moved back to ``pending_call_ids`` and
-        re-delivered. We cannot know whether the tmux send completed before
-        the crash, so we re-deliver and rely on the worker's
-        ``[call_id:<id>]`` dedupe to avoid duplicate effects. This preserves
-        the message until the worker proves receipt (ACK), covering both
-        sides of the claim-to-tmux crash window.
+        **Crash / lease semantics**: the tmux input buffer is the durable
+        receiver. Once a call_id reaches ``processing_call_ids`` (tmux send
+        succeeded), the Hub will NOT re-deliver it to a live session —
+        re-sending would append the message to the tmux buffer a second time
+        and produce a duplicate model turn. Only when the tmux session
+        itself is gone (``ManagedSessionStatus.STOPPED``) is the input
+        buffer destroyed, at which point ``_expire_processing_leases`` moves
+        the stranded call_ids back to ``pending_call_ids`` for re-delivery.
         """
         session = self.sessions.get(session_id)
         if not session:
@@ -236,13 +243,20 @@ class _MessagingMixin:
         """Move stale ``processing_call_ids`` back to ``pending_call_ids``.
 
         A call_id in ``processing_call_ids`` means the pump claimed it and
-        sent it to tmux, but the worker has not yet ACKed. If the Hub crashed
-        after the claim (or the worker died), the call_id would be stuck in
-        ``processing`` forever and never re-delivered.
+        successfully sent it to the worker's tmux inbox. The tmux input
+        buffer is the durable receiver: the worker will read that message
+        exactly once when it next reads stdin. Re-sending the same call_id
+        would append it to the tmux buffer a second time and produce a
+        duplicate model turn / side effect.
 
-        This method moves any call_id whose claim timestamp
-        (``processing_call_ids_at[call_id]``) is older than
-        ``max_age_seconds`` back to ``pending_call_ids`` so the pump can
+        Therefore, for **live** sessions (tmux session still exists) we
+        NEVER expire processing call_ids — they are sitting in the tmux
+        input buffer awaiting the worker. The worker's ACK
+        (``_ack_call_ids``) is what moves them to ``delivered_call_ids``.
+
+        Expiry only applies when the tmux session itself is gone
+        (``ManagedSessionStatus.STOPPED``): the input buffer has been
+        destroyed, so the message was never received and it is safe to
         re-claim and re-deliver it.
 
         Returns the number of call_ids moved back to pending.
@@ -251,6 +265,12 @@ class _MessagingMixin:
         if not session:
             return 0
         if not session.processing_call_ids:
+            return 0
+
+        # Only expire for sessions whose tmux inbox is gone. For live
+        # sessions the message is already in the tmux input buffer;
+        # re-delivering it would cause a duplicate turn.
+        if session.status != ManagedSessionStatus.STOPPED:
             return 0
 
         now = datetime.now(timezone.utc)

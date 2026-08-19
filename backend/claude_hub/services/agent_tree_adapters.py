@@ -43,8 +43,8 @@ class ExecutorAdapter(ABC):
     async def followup(self, run: "AgentRun", message: str, call_id: Optional[str] = None) -> None:
         """Deliver a message and resume the executor's turn.
 
-        ``call_id`` is the deduplication key. Delivery is **at-least-once**
-        with receiver-side dedupe:
+        ``call_id`` is the delivery key. Delivery is **exactly-once** to the
+        tmux inbox:
 
         - The sender persists the call_id in ``pending_call_ids`` before
           delivery. The receiver pump claims it (``pending → processing``)
@@ -52,13 +52,17 @@ class ExecutorAdapter(ABC):
         - The call_id stays in ``processing_call_ids`` until the worker
           ACKs it (lists it in ``acked_call_ids`` of its report). Only the
           worker's ACK moves it to ``delivered_call_ids``.
-        - A crash between the claim and the ACK leaves the call_id in
-          ``processing_call_ids``; cold recovery moves it back to
-          ``pending_call_ids`` and re-delivers it. The worker dedupes by
-          the ``[call_id:<id>]`` marker embedded in the message, so a
-          duplicate tmux prompt does not produce a duplicate effect.
+        - A crash after the tmux send leaves the call_id in
+          ``processing_call_ids``; cold recovery does NOT re-deliver it —
+          it's already in the tmux input buffer (the durable receiver), and
+          re-sending would produce a duplicate model turn. The worker ACKs
+          it when it processes the message.
+        - The only exception is a session whose tmux inbox is gone
+          (``STOPPED``): the input buffer was destroyed, so the call_id is
+          moved back to ``pending_call_ids`` for re-delivery.
         - The sender skips call_ids already in ``delivered_call_ids``
-          (worker-ACKed) or ``processing_call_ids`` (delivery in flight).
+          (worker-ACKed) or ``processing_call_ids`` (already in the tmux
+          inbox).
         """
 
     @abstractmethod
@@ -233,8 +237,9 @@ class ManagedTaskAdapter(ExecutorAdapter):
         # (i.e. it is in task.delivered_call_ids), skip. The delivered_call_ids
         # list is persisted with the task so a restarted adapter does not
         # re-deliver an already-processed followup. A call_id still in
-        # pending_call_ids (sent but not yet ACKed) WILL be re-delivered on
-        # retry — this is the at-least-once crash-recovery path.
+        # pending_call_ids (not yet sent to tmux) WILL be pumped on retry —
+        # this is the exactly-once delivery path: the pump sends it to the
+        # tmux inbox exactly once.
         if call_id and call_id in task.delivered_call_ids:
             logger.debug(
                 "followup call_id=%s already ACKed by task %s; skipping",
@@ -243,12 +248,14 @@ class ManagedTaskAdapter(ExecutorAdapter):
             )
             return
 
-        # --- Crash-safe outbox (at-least-once) ---
+        # --- Crash-safe outbox (exactly-once to tmux inbox) ---
         # Persist the call_id as pending BEFORE delivery. This is the durable
-        # receipt: if we crash after this point, a retry will see the call_id
-        # in pending_call_ids and re-deliver (the receiver dedupes via the
-        # [call_id:<id>] marker). The call_id stays in pending_call_ids until
-        # the worker ACKs it (lists it in acked_call_ids of its report).
+        # sender record: if we crash after this point, the pump will see the
+        # call_id in pending_call_ids and send it to the tmux inbox exactly
+        # once. The call_id stays in pending_call_ids until the pump claims
+        # it (pending → processing) and sends it to tmux; it stays in
+        # processing_call_ids until the worker ACKs it (lists it in
+        # acked_call_ids of its report).
         if call_id:
             current = self._wm.tasks.get(task_id)
             if current is not None and call_id not in current.pending_call_ids:
@@ -299,13 +306,16 @@ class ManagedTaskAdapter(ExecutorAdapter):
         elif task.status == WorkspaceTaskStatus.WORKING:
             # The agent is actively running. Send the followup message
             # directly to its session so it processes it immediately.
-            # Delivery is at-least-once: send_session_message persists the
-            # call_id as pending before sending. The call_id stays in
-            # pending_call_ids until the worker ACKs it (via acked_call_ids
-            # in its report). A crash after send but before ACK leaves the
-            # call_id in pending; a followup retry re-sends it. The
-            # [call_id:<id>] marker in the message lets the receiving
-            # executor dedupe any duplicate.
+            # Delivery is exactly-once to the tmux inbox:
+            # send_session_message persists the call_id as pending before
+            # sending. The pump claims it (pending → processing) and sends
+            # it to tmux. The call_id stays in processing_call_ids until
+            # the worker ACKs it (via acked_call_ids in its report). The
+            # Hub never re-sends a processing call_id to a live tmux
+            # session — the tmux input buffer is the durable receiver, and
+            # re-sending would produce a duplicate model turn. The
+            # [call_id:<id>] marker in the message lets the worker
+            # correlate its ACK to the call_id.
             if task.session_id:
                 await self._wm.send_session_message(task.session_id, message, call_id=call_id)
         elif task.status in (
@@ -325,18 +335,18 @@ class ManagedTaskAdapter(ExecutorAdapter):
         # NOTE: We intentionally do NOT move the call_id to delivered_call_ids
         # here. delivered_call_ids only contains call_ids the worker has
         # ACKed (processed). The call_id stays in task.pending_call_ids until
-        # the worker lists it in acked_call_ids of its report (the dispatch
-        # call_id is ACKed automatically). Moving it here would suppress the
-        # at-least-once re-delivery if the worker crashed after receiving but
-        # before processing.
+        # the pump claims it and sends it to tmux (processing_call_ids), and
+        # then until the worker lists it in acked_call_ids of its report (the
+        # dispatch call_id is ACKed automatically). Moving it here would
+        # suppress delivery if the worker never received the message.
         #
         # For TODO/QUEUED the followup text (with its [call_id:<id>] marker)
         # is durably stored in the task prompt, so a re-delivery is a no-op
         # (the prompt-append is idempotent). For WORKING the message goes
         # through send_session_message which tracks the call_id at the
-        # session level; a retry re-sends and the worker dedupes via the
-        # marker. For REVIEW/DONE the call_id is passed to continue_task,
-        # which embeds it in the continue prompt.
+        # session level; the pump sends it to the tmux inbox exactly once.
+        # For REVIEW/DONE the call_id is passed to continue_task, which
+        # embeds it in the continue prompt.
 
     async def interrupt(self, run: "AgentRun", reason: Optional[str] = None) -> None:
         from claude_hub.models.schemas import ManualTaskControlRequest
