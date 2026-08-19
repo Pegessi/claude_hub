@@ -538,6 +538,70 @@ class _ReportsMixin:
                     }
                 )
 
+    def _rollback_processing_to_pending(
+        self, task_id: Optional[str], session_id: str, call_ids: list[str]
+    ) -> None:
+        """Roll back call_ids from ``processing`` back to ``pending``.
+
+        This is the inverse of the pump's claim step. It is used in two
+        situations:
+
+        1. **tmux send failure**: the pump claimed the call_id but the tmux
+           send failed. Move it back to ``pending`` so the next pump cycle
+           can retry the same call_id (transient retry resumes delivery).
+
+        2. **Cold recovery**: call_ids stranded in ``processing`` after a
+           crash may or may not have reached tmux. Rather than assuming
+           success (which silently loses messages that crashed before the
+           tmux send), we move them back to ``pending`` and re-deliver.
+           The worker dedupes by the ``[call_id:<id>]`` marker, so a
+           duplicate tmux prompt does not produce a duplicate effect.
+
+        The message body stays in ``pending_messages`` (it was never
+        removed) so re-delivery has the payload.
+        """
+        if not call_ids:
+            return
+        rollback = set(call_ids)
+
+        task = self.tasks.get(task_id)
+        if task is not None:
+            to_rollback = [c for c in task.processing_call_ids if c in rollback]
+            if to_rollback:
+                processing = [c for c in task.processing_call_ids if c not in rollback]
+                pending = list(task.pending_call_ids)
+                for cid in to_rollback:
+                    if cid not in pending:
+                        pending.append(cid)
+                self.tasks[task_id] = task.model_copy(
+                    update={
+                        "pending_call_ids": pending,
+                        "processing_call_ids": processing,
+                    }
+                )
+
+        session = self.sessions.get(session_id)
+        if session is not None:
+            to_rollback = [c for c in session.processing_call_ids if c in rollback]
+            if to_rollback:
+                processing = [c for c in session.processing_call_ids if c not in rollback]
+                pending = list(session.pending_call_ids)
+                for cid in to_rollback:
+                    if cid not in pending:
+                        pending.append(cid)
+                processing_call_ids_at = {
+                    cid: ts
+                    for cid, ts in session.processing_call_ids_at.items()
+                    if cid not in rollback
+                }
+                self.sessions[session_id] = session.model_copy(
+                    update={
+                        "pending_call_ids": pending,
+                        "processing_call_ids": processing,
+                        "processing_call_ids_at": processing_call_ids_at,
+                    }
+                )
+
     def _bridge_report_to_agent_event(
         self,
         report: AgentReport,

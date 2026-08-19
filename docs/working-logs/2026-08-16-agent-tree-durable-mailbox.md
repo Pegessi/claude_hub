@@ -118,30 +118,45 @@ Wraps the existing workspace task/session/report flow:
   - `QUEUED`: append the followup message to the prompt (worker picks it up
     when dispatched).
   - `WORKING`: `send_session_message` to deliver the message directly to the
-    running session. **Executor-boundary at-least-once delivery**:
-    `send_session_message` maintains a two-phase outbox on the `ManagedSession`
-    (`pending_call_ids` → `delivered_call_ids`). A `call_id` already in
-    `session.delivered_call_ids` is skipped; otherwise it is persisted to
-    `pending_call_ids` before send, then moved to `delivered_call_ids` after.
-    If the process crashes between the send and the delivered-persist, the
-    call_id stays in `pending_call_ids` and the message is **re-sent** on
-    recovery (at-least-once). The `[call_id:<id>]` marker embedded in the
-    message text lets the receiving executor (the agent) dedupe any duplicate
-    delivery. We do NOT claim exactly-once from the sender side: tmux pane
-    output is not a durable delivery record (it can be cleared, rolled off,
-    or capture can fail), so inferring delivery from pane text is unreliable.
-    This closes the post-send crash window that a task-local prompt marker
-    cannot: the session-level outbox survives task deletion/recreation.
+    running session. **Executor-boundary at-least-once delivery with
+    receiver-verifiable receipt**: `send_session_message` maintains a
+    three-phase outbox on the `ManagedSession`:
+    `pending_call_ids → processing_call_ids → delivered_call_ids`.
+    - `pending_call_ids`: persisted but not yet sent to tmux.
+    - `processing_call_ids`: claimed by the receiver pump and sent to tmux,
+      awaiting the worker's ACK.
+    - `delivered_call_ids`: ACKed by the worker (listed in `acked_call_ids`
+      of a report). Only the worker's ACK moves a call_id here.
+
+    A `call_id` already in `processing_call_ids` or `delivered_call_ids` is
+    skipped; otherwise it is persisted to `pending_call_ids` (with the
+    message body in `pending_messages[call_id]`) before the pump claims it
+    (`pending → processing`) and sends it to tmux. On tmux send failure the
+    call_id is rolled back to `pending_call_ids` immediately so the same
+    call_id retry resumes delivery. The message body stays in
+    `pending_messages` until the worker ACKs.
+
+    If the process crashes after the claim but before the ACK, the call_id
+    is stranded in `processing_call_ids`; cold recovery moves it back to
+    `pending_call_ids` and re-delivers it. The `[call_id:<id>]` marker
+    embedded in the message text lets the receiving executor (the agent)
+    dedupe any duplicate delivery. We do NOT claim exactly-once from the
+    sender side: tmux pane output is not a durable delivery record (it can
+    be cleared, rolled off, or capture can fail), so inferring delivery
+    from pane text is unreliable. This closes the post-send crash window
+    that a task-local prompt marker cannot: the session-level outbox
+    survives task deletion/recreation.
     **Durable ACK (call-specific, Hub-enforced)**: when the worker submits
     a report for the task, `create_report` automatically includes the
     dispatch call_id (`f"dispatch:{task_id}"`) in the ACK set — submitting
     a report proves the worker processed the assignment. The worker may
     also list additional call_ids (e.g. followups it has processed) in
     `payload.acked_call_ids`. `_ack_call_ids(task_id, session_id, ack_set)`
-    moves **only the call_ids currently in `pending_call_ids`** to
-    `delivered_call_ids` on both the task and the session. Unknown or
-    future call_ids (not in pending) are silently ignored — this prevents
-    a malicious or buggy report from poisoning the delivered set and
+    moves the call_ids from `pending_call_ids`/`processing_call_ids` to
+    `delivered_call_ids` on both the task and the session, and removes the
+    message body from `pending_messages`. Unknown or future call_ids (not
+    in pending or processing) are silently ignored — this prevents a
+    malicious or buggy report from poisoning the delivered set and
     suppressing a real future delivery. Once ACKed, the sender will not
     re-send the call_id, closing the at-least-once duplicate window.
   - `REVIEW` / `DONE`: `continue_task` to send the task back to working.
@@ -153,17 +168,19 @@ Wraps the existing workspace task/session/report flow:
     delivered on the new task.
   - **At-least-once delivery with receiver dedup + durable ACK**: for
     `TODO`/`QUEUED`/`REVIEW`/`DONE`, `call_id` is recorded in
-    `task.delivered_call_ids` (persisted with the task) via a two-phase
-    outbox (`pending_call_ids` → `delivered_call_ids`). For `WORKING`, the
-    session-level outbox (above) is the durable sender record. A retry
-    with the same `call_id` is a no-op on the sender side (already in
-    `delivered_call_ids`). A crash between send and delivered-persist
-    causes a re-send (at-least-once); the receiver dedupes via the
+    `task.pending_call_ids` (persisted with the task) and embedded in the
+    prompt as a `[call_id:<id>]` marker. It stays in `pending_call_ids`
+    until the worker ACKs it (lists it in `acked_call_ids` of its report).
+    For `WORKING`, the session-level three-phase outbox (above) is the
+    durable sender record. A retry with the same `call_id` is a no-op on
+    the sender side if it is already in `delivered_call_ids` (ACKed) or
+    `processing_call_ids` (delivery in flight). A crash between send and
+    ACK causes a re-send (at-least-once); the receiver dedupes via the
     `[call_id:<id>]` marker. **Durable ACK (call-specific, Hub-enforced)**:
     when the worker submits a report for the task, `create_report`
     automatically ACKs the dispatch call_id (`f"dispatch:{task_id}"`) and
     any call_ids listed in `payload.acked_call_ids`. `_ack_call_ids` moves
-    **only the call_ids currently in `pending_call_ids`** to
+    the call_ids from `pending_call_ids`/`processing_call_ids` to
     `delivered_call_ids` on the task and session. Unknown/future call_ids
     are ignored (no poisoning). This ensures an unrelated report does not
     ACK a pending followup the worker has not yet processed, and a
@@ -408,13 +425,16 @@ sequence order:
 - Every followup `MESSAGE` event (payload `followup=True`) that does NOT
   have a matching `call_id:outcome` event → retry `adapter.followup` with
   that `call_id` **and the event's own `payload.message`** (not the run's
-  `last_task_message`). The managed-task adapter persists the
-  `delivered_call_ids` receipt atomically with delivery (via
-  `_save_state()`), so a crash between delivery and outcome-event persist
-  does not cause re-delivery on restart. For `WORKING` tasks, delivery is
+  `last_task_message`). The managed-task adapter persists the call_id in
+  `pending_call_ids` (or `processing_call_ids` for `WORKING` tasks)
+  atomically with delivery (via `_save_state()`). On crash recovery, a
+  call_id stranded in `processing_call_ids` is moved back to
+  `pending_call_ids` and re-delivered; the worker dedupes by the
+  `[call_id:<id>]` marker. For `WORKING` tasks, delivery is
   **at-least-once** at the executor boundary: `send_session_message` embeds
   a `[call_id:<id>]` marker in the message text. On crash recovery (call_id
-  left in `session.pending_call_ids`), the message is **re-sent**. The
+  left in `session.processing_call_ids` → rolled back to
+  `pending_call_ids`), the message is **re-sent**. The
   receiving executor (the agent) dedupes any duplicate by the call_id
   marker. We do NOT inspect tmux pane output to infer delivery — pane text
   can be cleared, rolled off, or capture can fail, so it is not a durable
@@ -474,11 +494,11 @@ sequence order:
   next `dispatch_workspace` pass, `_recover_queued_task_ownership` detects
   the session holding a QUEUED task and re-sends the assignment prompt
   with the same dispatch call_id. Sender-side dedup applies: if the
-  call_id is already in `session.delivered_call_ids` (the send completed
-  and phase-2 delivered-persist ran before the crash),
+  call_id is already in `session.processing_call_ids` (the send completed
+  and the pump claimed it before the crash),
   `send_session_message` skips the re-send — the dispatch is
   crash-idempotent, no duplicate prompt. If the call_id is still in
-  `pending_call_ids` (crash between tmux send and delivered-persist), the
+  `pending_call_ids` (crash before the pump claimed it), the
   prompt is re-sent (at-least-once); the worker dedupes via the call_id
   marker, and the eventual report submission ACKs the call_id into
   `delivered_call_ids`.
@@ -487,15 +507,16 @@ sequence order:
   (`f"dispatch:{task_id}"`) — submitting a report proves the worker
   processed the assignment. The worker may also list additional call_ids
   in `payload.acked_call_ids`. `_ack_call_ids(task_id, session_id, ack_set)`
-  moves **only the call_ids currently in `pending_call_ids`** to
-  `delivered_call_ids` on the task and session. Unknown or future call_ids
-  (not in pending) are silently ignored — this prevents future-ID
+  moves the call_ids from `pending_call_ids`/`processing_call_ids` to
+  `delivered_call_ids` on the task and session, and removes the message
+  body from `pending_messages`. Unknown or future call_ids
+  (not in pending or processing) are silently ignored — this prevents future-ID
   poisoning, where a malicious report could suppress a real future
   delivery by pre-ACKing a not-yet-sent call_id. A pending followup that
-  the worker has not yet processed stays in `pending_call_ids` and will
-  be re-sent by the sender's at-least-once recovery. Once ACKed, the
-  sender will not re-send those call_ids, closing the at-least-once
-  duplicate window.
+  the worker has not yet processed stays in `pending_call_ids` (or
+  `processing_call_ids`) and will be re-sent by the sender's at-least-once
+  recovery. Once ACKed, the sender will not re-send those call_ids,
+  closing the at-least-once duplicate window.
 - **Terminal guard relaxation**: `FAILED` is truly terminal; `INTERRUPTED`
   and `COMPLETED` may transition back to `RUNNING` via `followup` (resume).
 
@@ -573,20 +594,22 @@ verifies self-addressed (`recipient=root.id`) wakes the author.
 `recover_pending_runs` now re-delivers unACKed messages after a crash:
 
 1. For every session in the workspace with `pending_call_ids` or
-   `processing_call_ids`, expire stale processing leases
-   (`_expire_processing_leases(session.id, max_age_seconds=0)`) to release
-   crashed pump claims.
+   `processing_call_ids`, move all stranded `processing_call_ids` back to
+   `pending_call_ids` (`_rollback_processing_to_pending`). We cannot be
+   sure the tmux send completed before the crash, so we re-deliver and
+   rely on the worker's `[call_id:<id>]` dedupe.
 2. Pump all now-pending call_ids (`_pump_session_messages(session.id)`).
 
-The receiver dedupe gate (`delivered_call_ids`) ensures a call_id the worker
-already ACKed is **not** re-delivered: the pump skips call_ids in
-`delivered_call_ids`, and `_ack_call_ids` is the only path that moves a
-call_id to `delivered`.
+The receiver-verifiable receipt (`delivered_call_ids`) ensures a call_id
+the worker already ACKed is **not** re-delivered: only the worker's ACK
+moves a call_id to `delivered`, and the pump skips call_ids in
+`delivered_call_ids`.
 
 **Test**: `test_cumulative_side_effects_before_ack_and_cold_recovery_pump` —
 sends 3 messages (each with a counted, persisted side effect), ACKs only the
-first, then cold-restarts. Asserts the 2 unACKed messages are re-delivered
-(2 side effects) and the ACKed one is not.
+first, adds a 4th message as pending (never sent), then cold-restarts.
+Asserts the 3 non-delivered messages (2 unACKed + 1 pending) are re-delivered
+(3 side effects) and the ACKed one is not.
 
 ## Migration / Rollback Guide
 
