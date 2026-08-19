@@ -157,30 +157,43 @@ class ManagedTaskAdapter(ExecutorAdapter):
                 # Reuse the existing task. Update its prompt with the
                 # followup message if not already present, then ensure it
                 # is started. start_task is idempotent on a started task.
-                if f"[followup] {message}" not in existing_task.prompt:
+                #
+                # The call_id is embedded in the prompt as a [call_id:<id>]
+                # marker so the worker can ACK it. The call_id stays in
+                # task.pending_call_ids until ACKed.
+                followup_text = message
+                if call_id:
+                    followup_text = f"[call_id:{call_id}]\n{message}"
+                if f"[followup] {followup_text}" not in existing_task.prompt:
                     self._wm.tasks[existing_task.id] = existing_task.model_copy(
-                        update={"prompt": f"{existing_task.prompt}\n\n[followup] {message}"}
+                        update={"prompt": f"{existing_task.prompt}\n\n[followup] {followup_text}"}
                     )
                 run.context_ref = str(existing_task.id)
                 self._wm._save_state()
                 if existing_task.status == WorkspaceTaskStatus.TODO:
                     await self._wm.start_task(existing_task.id)
-                # Mark the call_id as delivered on the reused task so a
-                # retry does not re-deliver.
+                # The call_id stays in pending_call_ids until the worker ACKs
+                # it. It is embedded in the prompt so the worker can list it
+                # in acked_call_ids.
                 if call_id:
                     reused = self._wm.tasks.get(existing_task.id)
-                    if reused is not None and call_id not in reused.delivered_call_ids:
+                    if reused is not None and call_id not in reused.pending_call_ids:
                         self._wm.tasks[existing_task.id] = reused.model_copy(
-                            update={"delivered_call_ids": reused.delivered_call_ids + [call_id]}
+                            update={"pending_call_ids": reused.pending_call_ids + [call_id]}
                         )
                 self._wm._save_state()
                 return
 
+            # The followup message becomes the new task's prompt. Embed the
+            # call_id as a [call_id:<id>] marker so the worker can ACK it.
+            prompt_text = message
+            if call_id:
+                prompt_text = f"[call_id:{call_id}]\n{message}"
             new_task = self._wm.create_task(
                 run.workspace_id,
                 WorkspaceTaskCreate(
                     title=run.title or f"agent-run-{run.id[:8]}",
-                    prompt=message,
+                    prompt=prompt_text,
                     agent_type=AgentType.CLAUDE,
                     task_mode=WorkspaceTaskMode.REVIEWED,
                     agent_run_id=run.id,
@@ -194,34 +207,38 @@ class ManagedTaskAdapter(ExecutorAdapter):
             run.context_ref = str(new_task.id)
             self._wm._save_state()
             await self._wm.start_task(new_task.id)
-            # Mark the call_id as delivered on the new task so a retry does
-            # not re-deliver. Persist atomically with the task creation.
+            # The call_id stays in pending_call_ids until the worker ACKs it.
+            # It is embedded in the prompt (above) so the worker can list it
+            # in acked_call_ids of its report.
             if call_id:
                 recreated = self._wm.tasks.get(new_task.id)
-                if recreated is not None and call_id not in recreated.delivered_call_ids:
+                if recreated is not None and call_id not in recreated.pending_call_ids:
                     self._wm.tasks[new_task.id] = recreated.model_copy(
-                        update={"delivered_call_ids": recreated.delivered_call_ids + [call_id]}
+                        update={"pending_call_ids": recreated.pending_call_ids + [call_id]}
                     )
             self._wm._save_state()
             return
 
-        # Exactly-once delivery: if this call_id was already delivered to
-        # this task, skip. The delivered_call_ids list is persisted with the
-        # task so a restarted adapter does not re-deliver.
+        # Sender-side dedup: if this call_id was already ACKed by the worker
+        # (i.e. it is in task.delivered_call_ids), skip. The delivered_call_ids
+        # list is persisted with the task so a restarted adapter does not
+        # re-deliver an already-processed followup. A call_id still in
+        # pending_call_ids (sent but not yet ACKed) WILL be re-delivered on
+        # retry — this is the at-least-once crash-recovery path.
         if call_id and call_id in task.delivered_call_ids:
             logger.debug(
-                "followup call_id=%s already delivered to task %s; skipping",
+                "followup call_id=%s already ACKed by task %s; skipping",
                 call_id,
                 task_id,
             )
             return
 
-        # --- Crash-safe two-phase outbox ---
-        # Phase 1: persist the call_id as pending BEFORE delivery. This is
-        # the durable receipt: if we crash after this point, recovery will
-        # see the call_id in pending_call_ids and re-deliver (idempotently).
-        # If we crash before this point, the call_id is not tracked and
-        # recovery will replay the followup event from scratch.
+        # --- Crash-safe outbox (at-least-once) ---
+        # Persist the call_id as pending BEFORE delivery. This is the durable
+        # receipt: if we crash after this point, a retry will see the call_id
+        # in pending_call_ids and re-deliver (the receiver dedupes via the
+        # [call_id:<id>] marker). The call_id stays in pending_call_ids until
+        # the worker ACKs it (lists it in acked_call_ids of its report).
         if call_id:
             current = self._wm.tasks.get(task_id)
             if current is not None and call_id not in current.pending_call_ids:
@@ -243,9 +260,17 @@ class ManagedTaskAdapter(ExecutorAdapter):
             # the prompt so the worker sees it when dispatched, then start
             # the task. Idempotent: if the task is no longer TODO (e.g.
             # started by a concurrent dispatch), skip.
-            if f"[followup] {message}" not in task.prompt:
+            #
+            # The call_id is embedded in the prompt as a [call_id:<id>]
+            # marker so the worker can ACK it (list it in acked_call_ids of
+            # its report). Until ACKed, the call_id stays in
+            # task.pending_call_ids.
+            followup_text = message
+            if call_id:
+                followup_text = f"[call_id:{call_id}]\n{message}"
+            if f"[followup] {followup_text}" not in task.prompt:
                 updated = task.model_copy(
-                    update={"prompt": f"{task.prompt}\n\n[followup] {message}"}
+                    update={"prompt": f"{task.prompt}\n\n[followup] {followup_text}"}
                 )
                 self._wm.tasks[task_id] = updated
             await self._wm.start_task(task_id)
@@ -253,48 +278,55 @@ class ManagedTaskAdapter(ExecutorAdapter):
             # The task is waiting for a worker. Append the followup message
             # to the prompt so the worker picks it up when dispatched.
             # Idempotent: skip if the message is already in the prompt.
-            if f"[followup] {message}" not in task.prompt:
+            followup_text = message
+            if call_id:
+                followup_text = f"[call_id:{call_id}]\n{message}"
+            if f"[followup] {followup_text}" not in task.prompt:
                 updated = task.model_copy(
-                    update={"prompt": f"{task.prompt}\n\n[followup] {message}"}
+                    update={"prompt": f"{task.prompt}\n\n[followup] {followup_text}"}
                 )
                 self._wm.tasks[task_id] = updated
         elif task.status == WorkspaceTaskStatus.WORKING:
             # The agent is actively running. Send the followup message
             # directly to its session so it processes it immediately.
             # Delivery is at-least-once: send_session_message persists the
-            # call_id as pending before sending and moves it to delivered
-            # after. A crash between send and delivered-persist leaves the
-            # call_id in pending, so recovery re-sends. The [call_id:<id>]
-            # marker in the message lets the receiving executor dedupe any
-            # duplicate.
+            # call_id as pending before sending. The call_id stays in
+            # pending_call_ids until the worker ACKs it (via acked_call_ids
+            # in its report). A crash after send but before ACK leaves the
+            # call_id in pending; a followup retry re-sends it. The
+            # [call_id:<id>] marker in the message lets the receiving
+            # executor dedupe any duplicate.
             if task.session_id:
                 await self._wm.send_session_message(task.session_id, message, call_id=call_id)
         elif task.status in (
             WorkspaceTaskStatus.REVIEW,
             WorkspaceTaskStatus.DONE,
         ):
+            # The task is in review or done. Reopen it with the followup
+            # message as the continue prompt. The call_id is passed to
+            # continue_task so it is embedded in the continue prompt (via
+            # send_session_message) and the worker can ACK it.
             await self._wm.continue_task(
                 task_id,
                 ContinueTaskRequest(message=message),
+                call_id=call_id,
             )
 
-        # Phase 2: move the call_id from pending to delivered. This marks
-        # the outbox entry as complete. Persist immediately so a crash
-        # after this point does not cause a re-delivery.
-        if call_id:
-            current = self._wm.tasks.get(task_id)
-            if current is not None:
-                pending = [c for c in current.pending_call_ids if c != call_id]
-                delivered = current.delivered_call_ids
-                if call_id not in delivered:
-                    delivered = delivered + [call_id]
-                self._wm.tasks[task_id] = current.model_copy(
-                    update={
-                        "pending_call_ids": pending,
-                        "delivered_call_ids": delivered,
-                    }
-                )
-                self._wm._save_state()
+        # NOTE: We intentionally do NOT move the call_id to delivered_call_ids
+        # here. delivered_call_ids only contains call_ids the worker has
+        # ACKed (processed). The call_id stays in task.pending_call_ids until
+        # the worker lists it in acked_call_ids of its report (the dispatch
+        # call_id is ACKed automatically). Moving it here would suppress the
+        # at-least-once re-delivery if the worker crashed after receiving but
+        # before processing.
+        #
+        # For TODO/QUEUED the followup text (with its [call_id:<id>] marker)
+        # is durably stored in the task prompt, so a re-delivery is a no-op
+        # (the prompt-append is idempotent). For WORKING the message goes
+        # through send_session_message which tracks the call_id at the
+        # session level; a retry re-sends and the worker dedupes via the
+        # marker. For REVIEW/DONE the call_id is passed to continue_task,
+        # which embeds it in the continue prompt.
 
     async def interrupt(self, run: "AgentRun", reason: Optional[str] = None) -> None:
         from claude_hub.models.schemas import ManualTaskControlRequest
