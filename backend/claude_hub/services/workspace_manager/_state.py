@@ -14,6 +14,12 @@ class _StateMixin:
         self.reports: dict[str, AgentReport] = {}
         self._dispatch_locks: dict[str, asyncio.Lock] = {}
         self._feedback_summary_locks: dict[str, asyncio.Lock] = {}
+        # Per-session pump locks: serialize _pump_session_messages so two
+        # concurrent pump cycles cannot both send the same pending call_id
+        # to tmux (which would duplicate the model turn). The pane-marker
+        # check is the receiver-verifiable dedup, but the lock closes the
+        # race window between two concurrent pane checks.
+        self._pump_locks: dict[str, asyncio.Lock] = {}
         self._monitor_task: asyncio.Task[None] | None = None
         # Cache of resolved git worktree roots per workspace id: (timestamp, roots).
         # Used by artifact preview to resolve markdown produced inside a worktree.

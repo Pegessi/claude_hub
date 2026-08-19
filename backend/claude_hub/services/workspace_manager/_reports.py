@@ -2,6 +2,8 @@
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
+from ...models.agent_tree import AgentEventType
+from ..agent_tree import _request_fingerprint
 from ._constants import *  # noqa: F401,F403
 
 
@@ -463,17 +465,18 @@ class _ReportsMixin:
     def _ack_call_ids(self, task_id: Optional[str], session_id: str, call_ids: list[str]) -> None:
         """Receiver-side commit: move call_ids from processing to delivered.
 
-        This is the *commit* step of the durable receiver gate. The claim
+        This is the *commit* step of the durable receiver gate. The delivery
         (pending → processing) happens in the receiver pump
-        (``_pump_session_messages``) BEFORE the message is sent to tmux.
-        This commit runs when the worker submits a report that includes the
-        call_id in ``acked_call_ids`` — proving the worker processed the
-        message.
+        (``_pump_session_messages``) AFTER the message is confirmed to be in
+        the tmux inbox (either just sent, or found via the pane-marker
+        check). This commit runs when the worker submits a report that
+        includes the call_id in ``acked_call_ids`` — proving the worker
+        processed the message.
 
         Call_ids still in ``pending_call_ids`` (the worker ACKed before the
-        pump recorded the claim — e.g. a crash between claim and persist) are
-        also moved straight to ``delivered``: the worker's ACK is the
-        authoritative signal that it processed the message.
+        pump recorded the processing state — e.g. a crash between tmux send
+        and persist) are also moved straight to ``delivered``: the worker's
+        ACK is the authoritative signal that it processed the message.
 
         Unknown call_ids (not in pending or processing) are ignored to
         prevent future-ID poisoning.
@@ -538,24 +541,76 @@ class _ReportsMixin:
                     }
                 )
 
+        # ---- ACK-correlated followup outcome ----
+        # For each acked call_id that corresponds to a followup dispatch,
+        # emit a ``followup:delivered`` event with ``delivered: True``. This
+        # correlates the followup outcome with the worker's ACK: the
+        # ``followup:outcome`` event (emitted at dispatch time) carries
+        # ``delivered: False``; this event flips it to ``delivered: True``
+        # only after the worker proves it processed the followup message.
+        for call_id in call_ids:
+            self._emit_followup_delivered_if_followup(
+                session.workspace_id if session else task.workspace_id if task else None, call_id
+            )
+
+    def _emit_followup_delivered_if_followup(
+        self, workspace_id: Optional[str], call_id: str
+    ) -> None:
+        """If ``call_id`` is a followup call_id, emit a ``followup:delivered`` event.
+
+        The followup dispatch emits a ``followup:outcome`` event with
+        ``delivered: False``. When the worker ACKs the followup call_id, we
+        emit this event to record that the followup was actually received
+        and processed by the worker.
+        """
+        if not workspace_id:
+            return
+        record = self.agent_tree._call_record(workspace_id, call_id)
+        if record is None:
+            return
+        if record.get("action") != "followup":
+            return
+        followup_event = record["event"]
+        recipient_id = followup_event.agent_run_id
+        author_id = followup_event.author
+        # Emit the delivered event. Idempotent on call_id=f"{call_id}:delivered".
+        try:
+            self.agent_tree._append_event(
+                workspace_id=workspace_id,
+                agent_run_id=recipient_id,
+                event_type=AgentEventType.PROGRESS,
+                author=recipient_id,
+                recipient=author_id,
+                call_id=f"{call_id}:delivered",
+                action="followup:delivered",
+                target=recipient_id,
+                fingerprint=_request_fingerprint(
+                    "followup:delivered",
+                    {"followup_call_id": call_id},
+                ),
+                payload={"delivered": True, "followup_call_id": call_id},
+                rollback_on_error=False,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to emit followup:delivered event for call_id=%s",
+                call_id,
+            )
+
     def _rollback_processing_to_pending(
         self, task_id: Optional[str], session_id: str, call_ids: list[str]
     ) -> None:
         """Roll back call_ids from ``processing`` back to ``pending``.
 
-        This is the inverse of the pump's claim step. It is used in two
-        situations:
+        This is the inverse of the pump's delivery step. It is used when a
+        ``processing`` call_id needs to be re-delivered — for example, when
+        the tmux session itself is gone (``ManagedSessionStatus.STOPPED``)
+        and the input buffer was destroyed.
 
-        1. **tmux send failure**: the pump claimed the call_id but the tmux
-           send failed. Move it back to ``pending`` so the next pump cycle
-           can retry the same call_id (transient retry resumes delivery).
-
-        2. **Cold recovery**: call_ids stranded in ``processing`` after a
-           crash may or may not have reached tmux. Rather than assuming
-           success (which silently loses messages that crashed before the
-           tmux send), we move them back to ``pending`` and re-deliver.
-           The worker dedupes by the ``[call_id:<id>]`` marker, so a
-           duplicate tmux prompt does not produce a duplicate effect.
+        The pump's normal send-failure path does NOT use this: if the tmux
+        send fails, the call_id never leaves ``pending_call_ids`` (the
+        processing state is only persisted after a successful send or after
+        the pane-marker check confirms delivery).
 
         The message body stays in ``pending_messages`` (it was never
         removed) so re-delivery has the payload.
