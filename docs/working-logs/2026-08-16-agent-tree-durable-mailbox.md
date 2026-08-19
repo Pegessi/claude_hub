@@ -48,7 +48,7 @@ An append-only entry in the per-workspace event stream.
 | `correlation_id` | Optional request/response correlation. |
 | `agent_run_id` | Run this event belongs to. |
 | `type` | `dispatched`, `started`, `progress`, `heartbeat`, `message`, `tool_wait`, `approval_required`, `blocked`, `failed`, `completed`, `interrupted`. |
-| `author`, `recipient` | Run ids. `recipient` may be `None` for broadcast/status events. |
+| `author`, `recipient` | Run ids. `recipient` is **mandatory**: every event is directed to exactly one run. Root runs (no supervisor) self-address their events (`recipient = run.supervisor_id or run.id`). |
 | `payload` | Free-form dict (message text, error, context_ref, …). |
 | `created_at` | Timestamp. |
 
@@ -83,12 +83,12 @@ safe to retry.
 ### Wait / wakeup
 
 `_append_event` calls `_wake_for_run(agent_run_id, recipient)` which sets the
-`asyncio.Event` **only on the named recipient** (or the author run if
-`recipient` is `None`, i.e. a self-addressed event).
+`asyncio.Event` **only on the named recipient**. Since `recipient` is mandatory,
+root runs self-address their events (`recipient = run.supervisor_id or run.id`),
+so a root run's own reports wake itself.
 
 With recipient-directed mailbox reads, a run only sees events where
-`recipient == run_id` (or self-addressed events where `recipient is None and
-author == run_id`). Therefore only the named recipient needs to be woken;
+`recipient == run_id`. Therefore only the named recipient needs to be woken;
 waking ancestors would cause spurious wakeups for runs that cannot see the
 event. The `_wake_ancestors` method is retained as dead code for potential
 future broadcast use but is no longer called.
@@ -556,10 +556,9 @@ runs `recover_pending_runs`, and asserts the emitted event is `PROGRESS` (not
 ### 2. Wake only the named mailbox recipient
 
 `_wake_for_run(agent_run_id, recipient)` now wakes **only** the named
-recipient (or the author run if `recipient` is `None`). It no longer calls
-`_wake_ancestors`. With recipient-directed mailbox reads, a run only sees
-events where `recipient == run_id` (or self-addressed), so waking ancestors
-would cause spurious wakeups for runs that cannot see the event.
+recipient. It no longer calls `_wake_ancestors`. With recipient-directed
+mailbox reads, a run only sees events where `recipient == run_id`, so waking
+ancestors would cause spurious wakeups for runs that cannot see the event.
 
 `_wake_ancestors` is retained as dead code for potential future broadcast
 use.
@@ -567,7 +566,7 @@ use.
 **Test**: `test_wake_for_run_only_wakes_named_recipient` — creates a
 root→child tree, sets `asyncio.Event`s on both, calls `_wake_for_run(child,
 child)`, and asserts only the child's event is set (root's is not). Also
-verifies self-addressed (`recipient=None`) wakes the author.
+verifies self-addressed (`recipient=root.id`) wakes the author.
 
 ### 3. Durable receiver pump on cold recovery + cumulative side effects
 

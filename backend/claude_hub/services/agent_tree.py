@@ -197,7 +197,7 @@ class AgentTreeManager:
         agent_run_id: str,
         event_type: AgentEventType,
         author: str,
-        recipient: Optional[str],
+        recipient: str,
         call_id: str,
         action: str,
         target: str,
@@ -290,29 +290,29 @@ class AgentTreeManager:
                 )
             raise
 
-        # Wake any waiters on the recipient run (and its ancestors, since
-        # supervisors listen to their subtree).
+        # Wake only the named recipient. With recipient-directed mailbox
+        # reads, a run only sees events addressed to it, so ancestors do not
+        # need to be woken.
         self._wake_for_run(agent_run_id, recipient)
 
         return event, True
 
-    def _wake_for_run(self, agent_run_id: str, recipient: Optional[str]) -> None:
+    def _wake_for_run(self, agent_run_id: str, recipient: str) -> None:
         """Wake only the named mailbox recipient.
 
         With recipient-directed mailbox reads, a run only sees events where
-        ``recipient == run_id`` (or self-addressed events where
-        ``recipient is None and author == run_id``). Therefore only the
-        named recipient needs to be woken; waking ancestors would cause
-        spurious wakeups for runs that cannot see the event.
+        ``recipient == run_id``. Therefore only the named recipient needs to
+        be woken; waking ancestors would cause spurious wakeups for runs that
+        cannot see the event.
 
-        If ``recipient`` is None the event is self-addressed, so wake the
-        author run (``agent_run_id``).
+        ``recipient`` is always set (mandatory on every event). Root runs
+        self-address their events (``recipient = run.supervisor_id or
+        run.id``), so a root run's own reports wake itself.
         """
-        wake_target = recipient if recipient else agent_run_id
-        if wake_target:
-            ev = self._run_events.get(wake_target)
-            if ev is not None:
-                ev.set()
+        wake_target = recipient
+        ev = self._run_events.get(wake_target)
+        if ev is not None:
+            ev.set()
 
     def _wake_ancestors(self, run: AgentRun) -> None:
         """Wake waiters on the run and all its ancestors."""
@@ -1078,7 +1078,7 @@ class AgentTreeManager:
             agent_run_id=run.id,
             event_type=AgentEventType.INTERRUPTED,
             author=run.id,
-            recipient=run.supervisor_id,
+            recipient=run.supervisor_id or run.id,
             call_id=req.call_id,
             action="interrupt",
             target=run.id,
@@ -1098,7 +1098,7 @@ class AgentTreeManager:
 
         # Wake the supervisor after the outcome persist so it observes the
         # INTERRUPTED status.
-        self._wake_for_run(run.id, run.supervisor_id)
+        self._wake_for_run(run.id, run.supervisor_id or run.id)
 
         return run
 
@@ -1154,17 +1154,14 @@ class AgentTreeManager:
         # someone else (e.g. a grandchild reporting to the root) are NOT
         # visible to intermediate runs — only the named recipient sees them.
         #
-        # Events with recipient=None are treated as self-addressed: they are
-        # visible to their author. This covers root runs (which have no
-        # supervisor) and executor self-reports that do not name a recipient.
+        # ``recipient`` is mandatory on every event, so there is no fallback
+        # for recipient=None. Root runs self-address their events
+        # (recipient = run.supervisor_id or run.id) so they still receive
+        # their own reports.
+        #
         # The ``subtree`` flag is retained for API compatibility but no
         # longer changes the filter: reads are always recipient-directed.
-        return [
-            e
-            for e in all_events
-            if e.sequence > since_sequence
-            and (e.recipient == run_id or (e.recipient is None and e.author == run_id))
-        ]
+        return [e for e in all_events if e.sequence > since_sequence and e.recipient == run_id]
 
     def _subtree_run_ids(self, root: AgentRun) -> set[str]:
         prefix = f"{root.path}/"
@@ -1189,7 +1186,7 @@ class AgentTreeManager:
         agent_run_id: str,
         event_type: AgentEventType,
         author: str,
-        recipient: Optional[str],
+        recipient: str,
         call_id: str,
         payload: Optional[dict] = None,
     ) -> AgentEvent:
@@ -1521,7 +1518,7 @@ class AgentTreeManager:
                         agent_run_id=run.id,
                         event_type=event_type,
                         author=run.id,
-                        recipient=run.supervisor_id,
+                        recipient=run.supervisor_id or run.id,
                         call_id=f"report:{report.id}",
                         payload={
                             "message": report.message,
@@ -1605,7 +1602,7 @@ class AgentTreeManager:
                             agent_run_id=run.id,
                             event_type=AgentEventType.PROGRESS,
                             author=run.id,
-                            recipient=run.supervisor_id,
+                            recipient=run.supervisor_id or run.id,
                             call_id=outcome_call_id,
                             action="followup:outcome",
                             target=run.id,
@@ -1669,28 +1666,40 @@ class AgentTreeManager:
         # ------------------------------------------------------------------
         # Durable receiver pump on cold recovery.
         #
-        # After a crash, call_ids may be stranded in ``processing_call_ids``
-        # (the pump claimed them but the worker never ACKed, or the Hub
-        # crashed mid-delivery) or sitting in ``pending_call_ids`` (never
-        # pumped). Re-deliver them:
+        # After a crash, call_ids may be in three states:
         #
-        #   1. Expire stale processing leases (move processing -> pending)
-        #      so a crashed pump's claim is released.
-        #   2. Pump all pending call_ids (claim + deliver to tmux).
+        #   - ``pending_call_ids``: never sent to tmux. These MUST be pumped
+        #     (claimed + delivered) so the worker receives them.
         #
-        # The receiver dedupe gate (``delivered_call_ids``) ensures a call_id
-        # that the worker already ACKed is not re-delivered: the pump skips
-        # call_ids in ``delivered_call_ids``, and ``_ack_call_ids`` is the
-        # only path that moves a call_id to ``delivered``.
+        #   - ``processing_call_ids``: claimed by the pump but the tmux send
+        #     may or may not have completed. Since the claim happens BEFORE
+        #     the tmux send, we cannot be sure. To avoid duplicate tmux
+        #     prompts (the receiver-owned receipt guarantee), we assume the
+        #     send succeeded and move them to ``delivered_call_ids``. The
+        #     tmux session persists across Hub restarts, so the message
+        #     remains visible to the worker.
+        #
+        #   - ``delivered_call_ids``: already sent to tmux. NEVER re-deliver.
+        #
+        # This guarantees one call_id cannot produce two tmux prompts across
+        # a crash-before-ACK.
         # ------------------------------------------------------------------
         for session in list(self._wm.sessions.values()):
             if session.workspace_id != workspace_id:
                 continue
             if not session.pending_call_ids and not session.processing_call_ids:
                 continue
-            # Release any stale claims so they become re-deliverable.
-            self._wm._expire_processing_leases(session.id, max_age_seconds=0)
-            # Re-pump everything that is now pending.
+            # Move any stranded processing call_ids to delivered: assume the
+            # tmux send succeeded (the claim was persisted before the send).
+            # This prevents duplicate delivery. If the send actually failed,
+            # the worker will not have seen the message; the tmux session
+            # persists so the worker can still observe it, and the worker's
+            # ACK (or lack thereof) is the authoritative signal.
+            if session.processing_call_ids:
+                self._wm._ack_call_ids(
+                    session.task_id, session.id, list(session.processing_call_ids)
+                )
+            # Pump only pending call_ids (never sent to tmux).
             if self._wm.sessions[session.id].pending_call_ids:
                 try:
                     await self._wm._pump_session_messages(session.id)
