@@ -667,13 +667,16 @@ class WorkspaceTask(BaseModel):
     # NOTE: delivered_call_ids == "processed by the worker", not "sent by the
     # Hub". A call_id stays in pending_call_ids until the worker ACKs it.
     delivered_call_ids: List[str] = Field(default_factory=list)
-    # Call ids of followup messages that have been sent to the worker but not
-    # yet ACKed. On restart, any call_id in this list is re-delivered
-    # (at-least-once) and only moved to delivered_call_ids when the worker
-    # ACKs it (via acked_call_ids in a report). This implements a crash-safe
-    # outbox: the send is persisted before delivery, so a crash before the
-    # worker ACKs causes a re-send (at-least-once), not a loss. The receiving
-    # executor dedupes any duplicate via the [call_id:<id>] marker.
+    # Call ids the receiver pump has claimed (moved out of pending_call_ids)
+    # and is delivering to the model. The claim precedes the model turn, so a
+    # duplicate delivery while a call_id is here is suppressed. If the Hub
+    # crashes after claim but before the worker ACKs, lease expiry moves the
+    # call_id back to pending_call_ids for re-delivery.
+    processing_call_ids: List[str] = Field(default_factory=list)
+    # Call ids persisted in the outbox (sender side) whose message sits in the
+    # session's pending_messages inbox awaiting pump delivery. The sender only
+    # ever appends here; it never sends to tmux directly. On restart, every
+    # call_id here is re-deliverable.
     pending_call_ids: List[str] = Field(default_factory=list)
     dispatch_reason: Optional[str] = None
     dispatch_pending: bool = False
@@ -745,20 +748,48 @@ class ManagedSession(BaseModel):
     # a review prompt for. Drives the cross-task /clear decision independently of
     # any task's mutable review_session_id (which abort/skip/stale-release null).
     last_review_task_id: Optional[str] = None
-    # Executor-boundary call_id tracking for at-least-once delivery.
-    # pending_call_ids: call_ids sent to the session but not yet ACKed by the
-    #   worker. A crash after send but before ACK leaves the call_id here so
-    #   recovery re-sends (at-least-once). The receiving executor dedupes via
-    #   the [call_id:<id>] marker.
+    # Executor-boundary call_id tracking for at-least-once delivery with a
+    # Hub-owned durable receiver gate (claim / processing / committed).
+    #
+    # Lifecycle (see _messaging.py and _reports.py):
+    #   pending_call_ids  ──claim──▶  processing_call_ids  ──commit──▶  delivered_call_ids
+    #         │                              │
+    #         │                              └── lease expiry ──┐
+    #         └─────────────────────────────────────────────────┘
+    #
+    # pending_call_ids: call_ids persisted in the outbox (sender side) whose
+    #   message sits in ``pending_messages`` awaiting delivery. The sender
+    #   (``send_session_message``) only ever appends here; it never sends to
+    #   tmux directly. On restart, every call_id here is re-deliverable.
+    # processing_call_ids: call_ids the **receiver pump** has atomically
+    #   claimed (moved out of ``pending_call_ids``) and is in the act of
+    #   delivering to the model (tmux send). The claim happens BEFORE the
+    #   model turn starts, so a duplicate delivery while a call_id is here is
+    #   suppressed (the sender skips both ``processing`` and ``delivered``).
+    #   If the Hub crashes after claim but before the model ACKs, the lease
+    #   expiry step moves the call_id back to ``pending_call_ids`` so a fresh
+    #   pump cycle can re-claim and re-deliver.
     # delivered_call_ids: call_ids the worker has ACKed (processed) via
-    #   acked_call_ids in a report. send_session_message skips any call_id
-    #   already in this list. This is the sender-side dedup record and
-    #   survives task deletion/recreation.
+    #   ``acked_call_ids`` in a report. The commit step (``_ack_call_ids``)
+    #   moves them here. ``send_session_message`` skips any call_id already
+    #   in this list.
+    #
     # NOTE: delivered_call_ids == "processed by the worker", not "sent by the
     # Hub". The Hub never moves a call_id to delivered_call_ids on its own;
     # only an ACK from the worker does.
     pending_call_ids: List[str] = Field(default_factory=list)
+    processing_call_ids: List[str] = Field(default_factory=list)
     delivered_call_ids: List[str] = Field(default_factory=list)
+    # Per-call_id claim timestamps. Keyed by call_id, value is the UTC datetime
+    # when the receiver pump moved the call_id from pending to processing.
+    # Used by ``_expire_processing_leases`` to decide whether a claimed but
+    # unACKed call_id should be moved back to pending for re-delivery.
+    processing_call_ids_at: Dict[str, datetime] = Field(default_factory=dict)
+    # Durable inbox: call_id → message body. Populated by
+    # ``send_session_message``; consumed (and deleted) by the receiver pump
+    # after a successful claim. Persisted so a crash between outbox write and
+    # pump claim does not lose the message.
+    pending_messages: Dict[str, str] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
     last_activity_at: Optional[datetime] = None

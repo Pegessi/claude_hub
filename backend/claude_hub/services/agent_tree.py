@@ -954,9 +954,18 @@ class AgentTreeManager:
         lock = self._run_locks.setdefault(req.recipient_id, asyncio.Lock())
         ev = self._run_events.setdefault(req.recipient_id, asyncio.Event())
 
+        # Hub-enforced receiver cursor: the effective since_sequence is the
+        # max of the caller's requested cursor and the run's persisted
+        # ack_sequence. This guarantees that ACKed events are never re-delivered
+        # (dedupe) while still allowing a caller that has processed events
+        # beyond its ACK point to use its local cursor. On restart the
+        # caller's local cursor is lost, so we fall back to ack_sequence
+        # (at-least-once replay of unACKed events).
+        effective_since = max(req.since_sequence, recipient.ack_sequence)
+
         async with lock:
             events = self._events_for(
-                req.workspace_id, req.recipient_id, req.since_sequence, req.subtree
+                req.workspace_id, req.recipient_id, effective_since, req.subtree
             )
             if events:
                 return events
@@ -969,7 +978,7 @@ class AgentTreeManager:
         except asyncio.TimeoutError:
             pass
 
-        return self._events_for(req.workspace_id, req.recipient_id, req.since_sequence, req.subtree)
+        return self._events_for(req.workspace_id, req.recipient_id, effective_since, req.subtree)
 
     def ack(self, workspace_id: str, run_id: str, sequence: int) -> AgentRun:
         """Advance a run's acknowledged sequence cursor.
@@ -1115,8 +1124,14 @@ class AgentTreeManager:
         since_sequence: int = 0,
         subtree: bool = True,
     ) -> List[AgentEvent]:
-        """Return events for a run (or its subtree) after a cursor."""
-        return self._events_for(workspace_id, run_id, since_sequence, subtree)
+        """Return events for a run after a cursor.
+
+        The effective cursor is ``max(since_sequence, run.ack_sequence)`` so
+        ACKed events are never re-delivered (Hub-enforced dedupe).
+        """
+        run = self._runs.get(run_id)
+        effective_since = max(since_sequence, run.ack_sequence if run else 0)
+        return self._events_for(workspace_id, run_id, effective_since, subtree)
 
     def _events_for(
         self,
@@ -1129,26 +1144,23 @@ class AgentTreeManager:
         if run is None:
             return []
         all_events = self._events.get(workspace_id, [])
-        if subtree:
-            # A supervisor's mailbox contains:
-            # - Events addressed directly to it (recipient == run_id),
-            #   including self-messages (author == recipient == run_id).
-            # - Events authored by any run in its subtree EXCEPT itself
-            #   (child progress/reports). The run's own outbound messages
-            #   (author == run_id, recipient != run_id) are excluded to
-            #   avoid "outbound mixing" — the run already knows what it
-            #   sent.
-            subtree_ids = self._subtree_run_ids(run)
-            return [
-                e
-                for e in all_events
-                if e.sequence > since_sequence
-                and (e.recipient == run_id or (e.author in subtree_ids and e.author != run_id))
-            ]
+        # Recipient-directed mailbox: a run only sees events addressed to it
+        # (recipient == run_id). This includes self-messages (author ==
+        # recipient == run_id) and events from descendants that are directed
+        # to this run. Events authored by descendants but addressed to
+        # someone else (e.g. a grandchild reporting to the root) are NOT
+        # visible to intermediate runs — only the named recipient sees them.
+        #
+        # Events with recipient=None are treated as self-addressed: they are
+        # visible to their author. This covers root runs (which have no
+        # supervisor) and executor self-reports that do not name a recipient.
+        # The ``subtree`` flag is retained for API compatibility but no
+        # longer changes the filter: reads are always recipient-directed.
         return [
             e
             for e in all_events
-            if e.sequence > since_sequence and (e.recipient == run_id or e.agent_run_id == run_id)
+            if e.sequence > since_sequence
+            and (e.recipient == run_id or (e.recipient is None and e.author == run_id))
         ]
 
     def _subtree_run_ids(self, root: AgentRun) -> set[str]:
@@ -1251,7 +1263,10 @@ class AgentTreeManager:
                 # task was sent back to WORKING for revisions, so the run
                 # should be RUNNING again.
                 report_state = (payload or {}).get("report_state")
-                if report_state in {"ready_for_review", "review_started"}:
+                if report_state in {"ready_for_review", "review_started", "completed"}:
+                    # For REVIEWED tasks, the worker's COMPLETED report maps
+                    # to a PROGRESS event (not terminal). The run is now
+                    # waiting for the reviewer, so set status to WAITING.
                     self._update_run_status(agent_run_id, AgentRunStatus.WAITING, persist=False)
                 elif report_state == "review_failed":
                     self._update_run_status(agent_run_id, AgentRunStatus.RUNNING, persist=False)

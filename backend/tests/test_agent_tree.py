@@ -134,11 +134,17 @@ async def test_spawn_creates_child_run(manager: WorkspaceManager, ws_id: str) ->
     assert child.supervisor_id == root.id
     assert child.executor_kind == ExecutorKind.NATIVE_SUBAGENT
     assert child.last_task_message == "do the thing"
-    # spawn emits dispatched + started events.
-    events = manager.agent_tree.get_events(ws_id, child.id, subtree=False)
-    types = [e.type for e in events]
-    assert AgentEventType.DISPATCHED in types
-    assert AgentEventType.STARTED in types
+    # spawn emits a DISPATCHED event (addressed to the child) and a STARTED
+    # event (addressed to the parent). With recipient-directed reads, the
+    # child only sees DISPATCHED; the parent sees STARTED.
+    child_events = manager.agent_tree.get_events(ws_id, child.id, subtree=False)
+    child_types = [e.type for e in child_events]
+    assert AgentEventType.DISPATCHED in child_types
+    assert AgentEventType.STARTED not in child_types
+
+    parent_events = manager.agent_tree.get_events(ws_id, root.id, subtree=True)
+    parent_types = [e.type for e in parent_events]
+    assert AgentEventType.STARTED in parent_types
 
 
 @pytest.mark.asyncio
@@ -345,7 +351,10 @@ async def test_interrupt_sets_status(manager: WorkspaceManager, ws_id: str) -> N
         )
     )
     assert interrupted.status == AgentRunStatus.INTERRUPTED
-    events = manager.agent_tree.get_events(ws_id, child.id, subtree=False)
+    # The INTERRUPTED event is addressed to the child's supervisor (the root),
+    # not the child itself. Recipient-directed mailbox reads mean only the
+    # supervisor observes the child's terminal transition.
+    events = manager.agent_tree.get_events(ws_id, root.id, subtree=False)
     assert any(e.type == AgentEventType.INTERRUPTED for e in events)
 
 
@@ -519,6 +528,8 @@ async def test_report_bridges_to_agent_event(manager: WorkspaceManager, tmp_path
     manager.sessions[session.id] = session
 
     # Submit a report; it should be bridged into the agent event stream.
+    # For a REVIEWED task, the worker's COMPLETED report maps to a PROGRESS
+    # event (not terminal COMPLETED) and is addressed to the run's supervisor.
     report = await manager.create_report(
         session.id,
         AgentReportCreate(
@@ -529,10 +540,10 @@ async def test_report_bridges_to_agent_event(manager: WorkspaceManager, tmp_path
             message_zh="完成",
         ),
     )
-    events = manager.agent_tree.get_events(ws_id, child.id, subtree=False)
+    events = manager.agent_tree.get_events(ws_id, root.id, subtree=False)
     bridged = [e for e in events if e.call_id == f"report:{report.id}"]
     assert len(bridged) == 1
-    assert bridged[0].type == AgentEventType.COMPLETED
+    assert bridged[0].type == AgentEventType.PROGRESS
     assert bridged[0].recipient == root.id
 
 
@@ -629,8 +640,9 @@ async def test_resident_directed_wakeup_via_subtree_event(
     # Before the report: no activity since last_run.
     assert manager._workspace_activity_since(ws_id, last_run) is False
 
-    # Child task reports completion -> bridges to a COMPLETED event
-    # addressed to the resident root.
+    # Child task reports completion -> for a REVIEWED task this bridges to a
+    # PROGRESS event (not terminal COMPLETED) addressed to the resident root.
+    # The run waits for review; only REVIEW_PASSED emits COMPLETED.
     report = await manager.create_report(
         session.id,
         AgentReportCreate(
@@ -658,7 +670,7 @@ async def test_resident_directed_wakeup_via_subtree_event(
     )
     bridged = [e for e in events if e.call_id == f"report:{report.id}"]
     assert len(bridged) == 1
-    assert bridged[0].type == AgentEventType.COMPLETED
+    assert bridged[0].type == AgentEventType.PROGRESS
     assert bridged[0].author == child.id
     assert bridged[0].recipient == root.id
 
@@ -920,7 +932,10 @@ async def test_interrupt_call_id_idempotent(manager: WorkspaceManager, ws_id: st
     # re-emitting an interrupted event.
     second = await manager.agent_tree.interrupt(req)
     assert second.id == first.id
-    events = manager.agent_tree.get_events(ws_id, child.id, subtree=False)
+    # The INTERRUPTED event is addressed to the child's supervisor (root),
+    # not the child itself. Recipient-directed reads mean only the root
+    # observes the child's terminal transition.
+    events = manager.agent_tree.get_events(ws_id, root.id, subtree=False)
     interrupted = [e for e in events if e.call_id == "int-1"]
     assert len(interrupted) == 1
 
@@ -1970,9 +1985,16 @@ async def test_spawn_late_persist_failure_keeps_in_memory_state(
     assert child.context_ref is not None
     assert child.status == AgentRunStatus.RUNNING
 
-    events = manager.agent_tree.get_events(ws_id, child.id, subtree=False)
-    types = [e.type for e in events]
-    assert AgentEventType.STARTED in types
+    # The child sees the DISPATCHED intent event (addressed to itself).
+    # The STARTED outcome event is addressed to the parent (root) so the
+    # supervisor observes the child's transition.
+    child_events = manager.agent_tree.get_events(ws_id, child.id, subtree=False)
+    child_types = [e.type for e in child_events]
+    assert AgentEventType.DISPATCHED in child_types
+
+    parent_events = manager.agent_tree.get_events(ws_id, root.id, subtree=False)
+    parent_types = [e.type for e in parent_events]
+    assert AgentEventType.STARTED in parent_types
 
     # Now a successful persist flushes the in-memory state to disk.
     monkeypatch.setattr(manager.agent_tree, "_persist", real_persist)
@@ -3499,8 +3521,9 @@ async def test_recover_multiple_unmatched_followups_in_sequence(
     # All three followups were delivered, in sequence order.
     assert delivered_call_ids == ["followup-0", "followup-1", "followup-2"]
 
-    # Outcome events now exist for every followup call_id.
-    events = manager.agent_tree.get_events(ws_id, child.id, subtree=False)
+    # Outcome events now exist for every followup call_id. The outcome
+    # events are addressed to the followup author (root), not the child.
+    events = manager.agent_tree.get_events(ws_id, root.id, subtree=False)
     outcome_call_ids = {e.call_id for e in events if e.call_id and e.call_id.endswith(":outcome")}
     assert outcome_call_ids == {"followup-0:outcome", "followup-1:outcome", "followup-2:outcome"}
 
@@ -3623,13 +3646,16 @@ async def test_followup_persists_pending_call_ids_atomically(
         )
     )
 
-    # The call_id must be in pending_call_ids (not delivered) until the
-    # worker ACKs it.
+    # The call_id must be persisted (in pending or processing) until the
+    # worker ACKs it. The receiver pump claims it (pending → processing)
+    # immediately after the sender enqueues it, so it will be in
+    # processing_call_ids after the followup returns.
     task = manager.tasks[task_id]
-    assert call_id in task.pending_call_ids
+    assert call_id in task.pending_call_ids or call_id in task.processing_call_ids
     assert call_id not in task.delivered_call_ids
 
-    # A second followup with the same call_id re-delivers (at-least-once).
+    # A second followup with the same call_id is a no-op: the sender skips
+    # call_ids already in processing (claimed by the pump) or delivered.
     # For a WORKING task the message goes to the session, not the prompt,
     # so the prompt is unchanged.
     prompt_before = manager.tasks[task_id].prompt
@@ -4166,8 +4192,10 @@ async def test_followup_outbox_pending_survives_crash_and_redelivers_idempotentl
 
     task = manager.tasks[task_id]
     assert manager.tasks[task_id].prompt == prompt_before
-    # The call_id stays in pending_call_ids until the worker ACKs it.
-    assert call_id in task.pending_call_ids
+    # The call_id stays in pending or processing until the worker ACKs it.
+    # After the second followup (WORKING path), the receiver pump has claimed
+    # it, so it is in processing_call_ids.
+    assert call_id in task.pending_call_ids or call_id in task.processing_call_ids
     assert call_id not in task.delivered_call_ids
 
 
@@ -4360,26 +4388,35 @@ async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
     manager._send_tmux_message = _fake_send_tmux  # type: ignore[assignment]
     manager._capture_tmux_output = _fake_capture_tmux  # type: ignore[assignment]
 
-    # First delivery: call_id goes to pending_call_ids (not delivered).
+    # First delivery: the sender enqueues the call_id in pending_call_ids,
+    # then the receiver pump claims it (pending → processing) and sends to
+    # tmux. So after send_session_message returns, the call_id is in
+    # processing_call_ids.
     await manager.send_session_message(session_id, message, call_id=call_id)
     session = manager.sessions[session_id]
-    assert call_id in session.pending_call_ids
+    assert call_id in session.processing_call_ids
     assert call_id not in session.delivered_call_ids
     assert len(sent) == 1
     # The sent message must include the call_id marker so the receiving
     # executor can dedupe any duplicate delivery.
     assert marker in sent[0]
 
-    # Simulate a hard exit: the call_id is still in pending_call_ids.
+    # Simulate a hard exit: the call_id is still in processing_call_ids.
     # Reload the manager from disk (simulating process restart).
     manager._save_state()
     reloaded = WorkspaceManager()
     reloaded_session = reloaded.sessions[session_id]
-    assert call_id in reloaded_session.pending_call_ids
+    assert call_id in reloaded_session.processing_call_ids
     assert call_id not in reloaded_session.delivered_call_ids
 
-    # Recovery: the call_id is in pending. send_session_message re-sends
-    # the message (at-least-once). The receiver dedupes via the marker.
+    # Recovery: the call_id is in processing (claimed before the crash).
+    # Lease expiry moves it back to pending so the pump can re-claim and
+    # re-deliver.
+    reloaded._expire_processing_leases(session_id, max_age_seconds=0)
+    reloaded_session = reloaded.sessions[session_id]
+    assert call_id in reloaded_session.pending_call_ids
+
+    # Re-send: the pump claims and re-delivers (at-least-once).
     reloaded._send_tmux_message = _fake_send_tmux  # type: ignore[assignment]
     reloaded._capture_tmux_output = _fake_capture_tmux  # type: ignore[assignment]
     sent.clear()
@@ -4387,12 +4424,12 @@ async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
     assert len(sent) == 1  # at-least-once: re-send on crash recovery
     assert marker in sent[0]
     reloaded_session = reloaded.sessions[session_id]
-    # The call_id stays in pending until the worker ACKs it.
-    assert call_id in reloaded_session.pending_call_ids
+    # The call_id is in processing until the worker ACKs it.
+    assert call_id in reloaded_session.processing_call_ids
     assert call_id not in reloaded_session.delivered_call_ids
 
     # The worker ACKs the call_id (e.g. by listing it in acked_call_ids of
-    # its report). _ack_call_ids moves it from pending to delivered.
+    # its report). _ack_call_ids moves it from processing to delivered.
     reloaded._ack_call_ids(
         task_id="dummy-task",
         session_id=session_id,
@@ -4401,6 +4438,7 @@ async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
     reloaded_session = reloaded.sessions[session_id]
     assert call_id in reloaded_session.delivered_call_ids
     assert call_id not in reloaded_session.pending_call_ids
+    assert call_id not in reloaded_session.processing_call_ids
 
     # A subsequent send with the same call_id is skipped: it is now in
     # delivered_call_ids (sender-side dedup).
@@ -4852,17 +4890,18 @@ async def test_resident_root_managed_task_report_ack_cold_replay(
 
     dispatch_call_id = f"dispatch:{task_id}"
 
-    # After a successful dispatch, the dispatch call_id is in
-    # pending_call_ids (sent but not yet ACKed by the worker). It only moves
-    # to delivered_call_ids when the worker submits a report (automatic
-    # dispatch ACK). This is at-least-once: the Hub may re-deliver if it
-    # crashes before the worker ACKs.
+    # After a successful dispatch, the dispatch call_id has been claimed by
+    # the receiver pump (pending → processing) and sent to the worker. It
+    # only moves to delivered_call_ids when the worker submits a report
+    # (automatic dispatch ACK). This is at-least-once: if the Hub crashes
+    # before the worker ACKs, the lease-expiry step moves the call_id back
+    # to pending so the pump can re-claim and re-deliver.
     session = manager.sessions[session_id]
-    assert dispatch_call_id in session.pending_call_ids
+    assert dispatch_call_id in session.processing_call_ids
     assert dispatch_call_id not in session.delivered_call_ids
 
     # 3. Worker submits a report. The Hub auto-ACKs the dispatch call_id,
-    #    moving it from pending_call_ids to delivered_call_ids.
+    #    moving it from processing_call_ids to delivered_call_ids.
     await manager.create_report(
         session_id,
         AgentReportCreate(
@@ -4878,9 +4917,11 @@ async def test_resident_root_managed_task_report_ack_cold_replay(
     # The dispatch call_id is now delivered (ACKed by the worker).
     assert dispatch_call_id in session_after.delivered_call_ids
     assert dispatch_call_id not in session_after.pending_call_ids
+    assert dispatch_call_id not in session_after.processing_call_ids
 
     # 4. The resident root observes the child's progress via the bridged event.
-    events = manager.agent_tree.get_events(ws_id, child.id, subtree=False)
+    # The bridged report event is addressed to the child's supervisor (root).
+    events = manager.agent_tree.get_events(ws_id, root.id, subtree=False)
     progress_events = [e for e in events if e.type == AgentEventType.PROGRESS]
     assert len(progress_events) >= 1
 
