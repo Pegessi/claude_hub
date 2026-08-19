@@ -347,6 +347,13 @@ class _WorkspacesMixin:
         while True:
             try:
                 await self._refresh_session_statuses(run_auto_continue=True)
+                # Expire stale processing call_ids so crashed-claim messages
+                # are re-delivered by the receiver pump.
+                for session_id in list(self.sessions):
+                    try:
+                        self._expire_processing_leases(session_id)
+                    except Exception:
+                        logger.exception("Lease expiry failed for session %s", session_id)
                 for workspace_id in list(self.workspaces):
                     await self.dispatch_workspace(workspace_id, refresh_sessions=False)
                 await self._tick_resident_agents()

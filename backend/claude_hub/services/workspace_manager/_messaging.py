@@ -13,73 +13,83 @@ class _MessagingMixin:
         attachments: list[WorkspaceAttachmentCreate] | None = None,
         call_id: str | None = None,
     ) -> None:
-        """Send a message to a managed session's terminal with at-least-once
-        delivery semantics at the executor boundary.
+        """Enqueue a message for a managed session's terminal.
 
-        Delivery guarantees — **at-least-once, not exactly-once**:
+        Sender-side semantics: **at-least-once transport via a durable inbox**.
 
-        1. A durable outbox (``session.pending_call_ids``) is persisted before
-           the send, so a crash before the send does not lose the message.
-        2. After the send completes, the call_id **stays** in
-           ``pending_call_ids``. It is only moved to ``delivered_call_ids``
-           when the worker submits a report whose ``acked_call_ids`` includes
-           it (the dispatch call_id is ACKed automatically on any report).
-           This means ``delivered_call_ids`` == "processed by the worker",
-           not merely "sent by the Hub".
-        3. Sender-side dedup: ``send_session_message`` skips any call_id
-           already in ``delivered_call_ids`` (i.e. already ACKed). A call_id
-           still in ``pending_call_ids`` (sent but not yet ACKed) **will** be
-           re-sent if ``send_session_message`` is invoked again — this is the
-           at-least-once crash-recovery path. The receiving executor dedupes
-           any duplicate via the ``[call_id:<id>]`` marker.
-        4. Crash recovery: if a call_id is left in ``pending_call_ids`` by a
-           crash after the send but before the worker ACKs it, the message is
-           **re-sent** (e.g. by ``_recover_queued_task_ownership`` for the
-           dispatch call_id). The worker dedupes via the marker.
+        The sender does NOT write to tmux directly. Instead it:
+          1. Skips call_ids already in ``delivered_call_ids`` (committed by the
+             worker's ACK) or ``processing_call_ids`` (claimed by the receiver
+             pump — a delivery is already in flight).
+          2. Persists the message body in ``session.pending_messages[call_id]``
+             (the durable inbox) and appends ``call_id`` to
+             ``pending_call_ids``.
+          3. Triggers the receiver pump (``_pump_session_messages``).
 
-        We do NOT claim exactly-once. tmux pane output is not a durable
-        delivery record (it can be cleared, rolled off, or capture can fail),
-        so inferring delivery from pane text is unreliable. The sender
-        guarantees at-least-once; the receiver is responsible for dedup via
-        the call_id marker. The Hub's sender-side dedup only suppresses
-        re-sends of call_ids the worker has **ACKed** (processed), not merely
-        sent.
+        The pump performs the actual CLAIM (pending → processing) and the tmux
+        send. Because the claim happens before the tmux write, a duplicate
+        ``send_session_message`` for the same call_id while the pump holds the
+        claim is a no-op — the Hub-managed side effect (the tmux prompt) is
+        applied exactly once per call_id until the worker ACKs (or the lease
+        expires).
+
+        A call_id stays in ``pending_call_ids`` (or ``processing_call_ids``)
+        until the worker ACKs it via ``acked_call_ids`` in a report. On Hub
+        restart, any call_id still in ``pending_call_ids`` is re-deliverable;
+        any call_id in ``processing_call_ids`` whose lease has expired is moved
+        back to ``pending_call_ids`` for re-delivery.
+
+        NOTE: This guarantees exactly-once of the **Hub-managed** effect (the
+        tmux prompt). It does NOT guarantee exactly-once of arbitrary external
+        tool side effects the model may invoke — those require the call_id to
+        be propagated as an idempotency key by the model itself.
         """
         session = self.sessions.get(session_id)
         if not session:
             raise KeyError(session_id)
 
         if call_id:
-            # Sender-side dedup: skip call_ids the worker has already ACKed
-            # (processed). A call_id still in pending_call_ids was sent but
-            # not yet ACKed; re-sending it is the at-least-once path.
+            # Sender-side gate: skip call_ids that the receiver pump has
+            # already claimed (processing) or that the worker has committed
+            # (delivered). In both cases, delivery is already in flight or
+            # done, so the sender must NOT enqueue again.
             if call_id in session.delivered_call_ids:
                 logger.debug(
-                    "send_session_message call_id=%s already ACKed by session %s; skipping",
+                    "send_session_message call_id=%s already committed by session %s; skipping",
+                    call_id,
+                    session_id,
+                )
+                return
+            if call_id in session.processing_call_ids:
+                logger.debug(
+                    "send_session_message call_id=%s already claimed by session %s pump; skipping",
                     call_id,
                     session_id,
                 )
                 return
 
-            # Phase 1: persist call_id as pending at the executor boundary
-            # before sending. This is the durable outbox entry. If we crash
-            # after this point, recovery will re-send (at-least-once). The
-            # call_id stays in pending_call_ids until the worker ACKs it.
-            if call_id not in session.pending_call_ids:
-                self.sessions[session_id] = session.model_copy(
-                    update={"pending_call_ids": session.pending_call_ids + [call_id]}
-                )
-                self._save_state()
-                session = self.sessions[session_id]
+            # Persist the message in the durable inbox and record the call_id
+            # as pending. If already pending, do not duplicate.
+            pending_messages = dict(session.pending_messages)
+            pending_messages[call_id] = message
+            pending_call_ids = list(session.pending_call_ids)
+            if call_id not in pending_call_ids:
+                pending_call_ids.append(call_id)
+            self.sessions[session_id] = session.model_copy(
+                update={
+                    "pending_messages": pending_messages,
+                    "pending_call_ids": pending_call_ids,
+                }
+            )
+            self._save_state()
+            session = self.sessions[session_id]
 
-        # Build the outbound message. When a call_id is present, prefix the
-        # message with a [call_id:<id>] marker. This marker lets the receiving
-        # executor dedupe any duplicate delivery caused by the at-least-once
-        # crash-recovery re-send.
-        full_message = message
-        if call_id:
-            full_message = f"[call_id:{call_id}]\n{message}"
+            # Kick the receiver pump to claim and deliver the message.
+            await self._pump_session_messages(session_id)
+            return
 
+        # No call_id: fire-and-forget (no delivery guarantee). Used for
+        # one-shot prompts that don't need at-least-once semantics.
         persisted = self._persist_attachments(
             session.workspace_id,
             f"{session.id}-message-{uuid.uuid4().hex[:8]}",
@@ -88,15 +98,195 @@ class _MessagingMixin:
         await self._ensure_session_ready_for_send(session)
         await self._send_tmux_message(
             session.tmux_session,
-            self._append_attachment_block(full_message, persisted),
+            self._append_attachment_block(message, persisted),
         )
 
-        # NOTE: We intentionally do NOT move the call_id to delivered_call_ids
-        # here. delivered_call_ids only contains call_ids the worker has
-        # ACKed (processed). Moving it here would suppress the at-least-once
-        # re-send if the worker crashed after receiving but before processing.
-        # The worker ACKs by listing the call_id in acked_call_ids of its
-        # report (the dispatch call_id is ACKed automatically).
+    async def _pump_session_messages(self, session_id: str) -> None:
+        """Receiver pump: claim pending call_ids and deliver them to tmux.
+
+        This is the **CLAIM** step of the durable receiver gate. For each
+        call_id in ``pending_call_ids``:
+
+          1. Atomically move it from ``pending_call_ids`` to
+             ``processing_call_ids`` (claim).
+          2. Fetch the message body from ``pending_messages[call_id]``.
+          3. Send it to tmux (the Hub-managed side effect).
+
+        The claim happens BEFORE the tmux write, so a concurrent
+        ``send_session_message`` for the same call_id sees it in
+        ``processing_call_ids`` and skips — the tmux prompt is applied exactly
+        once.
+
+        If the Hub crashes after the claim but before the tmux write (or before
+        the worker ACKs), the call_id remains in ``processing_call_ids``. The
+        lease-expiry step (``_expire_processing_leases``) moves it back to
+        ``pending_call_ids`` so a fresh pump cycle can re-claim and
+        re-deliver.
+
+        The commit (processing → delivered) happens in ``_ack_call_ids`` when
+        the worker submits a report that includes the call_id.
+        """
+        session = self.sessions.get(session_id)
+        if not session:
+            return
+
+        # Snapshot the pending call_ids to deliver. We iterate over a copy
+        # because we mutate the session during the loop.
+        pending = list(session.pending_call_ids)
+        for call_id in pending:
+            # Re-fetch the session each iteration: a previous iteration may
+            # have mutated it.
+            session = self.sessions.get(session_id)
+            if not session:
+                return
+            if call_id not in session.pending_call_ids:
+                # Already claimed by a concurrent pump cycle.
+                continue
+
+            message = session.pending_messages.get(call_id)
+            if message is None:
+                # Inbox entry missing — should not happen, but guard against
+                # it. Move to delivered to avoid an infinite loop.
+                logger.warning(
+                    "pump: call_id=%s in pending_call_ids but missing from pending_messages; "
+                    "marking delivered",
+                    call_id,
+                )
+                self._ack_call_ids(None, session_id, [call_id])
+                continue
+
+            # ---- CLAIM: pending → processing ----
+            # Move the call_id from pending to processing on BOTH the session
+            # and its task (if any) so the two stay in sync. The claim is
+            # atomic at the session level; the task mirror follows.
+            now = datetime.now(timezone.utc)
+            pending_call_ids = [c for c in session.pending_call_ids if c != call_id]
+            processing_call_ids = list(session.processing_call_ids)
+            if call_id not in processing_call_ids:
+                processing_call_ids.append(call_id)
+            processing_call_ids_at = dict(session.processing_call_ids_at)
+            processing_call_ids_at[call_id] = now
+            session_update = {
+                "pending_call_ids": pending_call_ids,
+                "processing_call_ids": processing_call_ids,
+                "processing_call_ids_at": processing_call_ids_at,
+            }
+            task_update: dict[str, Any] = {}
+            task = self.tasks.get(session.task_id) if session.task_id else None
+            if task is not None and call_id in task.pending_call_ids:
+                task_pending = [c for c in task.pending_call_ids if c != call_id]
+                task_processing = list(task.processing_call_ids)
+                if call_id not in task_processing:
+                    task_processing.append(call_id)
+                task_update = {
+                    "pending_call_ids": task_pending,
+                    "processing_call_ids": task_processing,
+                }
+            self.sessions[session_id] = session.model_copy(update=session_update)
+            if task is not None and task_update:
+                self.tasks[task.id] = task.model_copy(update=task_update)
+            self._save_state()
+
+            # ---- DELIVER: send to tmux ----
+            try:
+                persisted = self._persist_attachments(
+                    session.workspace_id,
+                    f"{session.id}-message-{uuid.uuid4().hex[:8]}",
+                    [],
+                )
+                await self._ensure_session_ready_for_send(self.sessions[session_id])
+                full_message = f"[call_id:{call_id}]\n{message}"
+                await self._send_tmux_message(
+                    self.sessions[session_id].tmux_session,
+                    self._append_attachment_block(full_message, persisted),
+                )
+            except Exception:
+                # Delivery failed. The call_id stays in processing_call_ids;
+                # lease expiry will move it back to pending for retry.
+                logger.exception(
+                    "pump: failed to deliver call_id=%s to session %s; " "lease expiry will retry",
+                    call_id,
+                    session_id,
+                )
+                # Re-raise so callers know delivery failed, but the claim is
+                # already persisted so we don't double-send on retry.
+                raise
+
+    def _expire_processing_leases(self, session_id: str, max_age_seconds: float = 300.0) -> int:
+        """Move stale ``processing_call_ids`` back to ``pending_call_ids``.
+
+        A call_id in ``processing_call_ids`` means the pump claimed it and
+        sent it to tmux, but the worker has not yet ACKed. If the Hub crashed
+        after the claim (or the worker died), the call_id would be stuck in
+        ``processing`` forever and never re-delivered.
+
+        This method moves any call_id whose claim timestamp
+        (``processing_call_ids_at[call_id]``) is older than
+        ``max_age_seconds`` back to ``pending_call_ids`` so the pump can
+        re-claim and re-deliver it.
+
+        Returns the number of call_ids moved back to pending.
+        """
+        session = self.sessions.get(session_id)
+        if not session:
+            return 0
+        if not session.processing_call_ids:
+            return 0
+
+        now = datetime.now(timezone.utc)
+        expired: list[str] = []
+        for call_id in session.processing_call_ids:
+            claimed_at = session.processing_call_ids_at.get(call_id)
+            if claimed_at is None:
+                # No timestamp — treat as expired (conservative: re-deliver).
+                expired.append(call_id)
+                continue
+            age = (now - claimed_at).total_seconds()
+            if age >= max_age_seconds:
+                expired.append(call_id)
+
+        if not expired:
+            return 0
+
+        expired_set = set(expired)
+        pending_call_ids = list(session.pending_call_ids)
+        processing_call_ids = [c for c in session.processing_call_ids if c not in expired_set]
+        processing_call_ids_at = {
+            cid: ts for cid, ts in session.processing_call_ids_at.items() if cid not in expired_set
+        }
+        for call_id in expired:
+            if call_id not in pending_call_ids:
+                pending_call_ids.append(call_id)
+        self.sessions[session_id] = session.model_copy(
+            update={
+                "pending_call_ids": pending_call_ids,
+                "processing_call_ids": processing_call_ids,
+                "processing_call_ids_at": processing_call_ids_at,
+            }
+        )
+
+        # Mirror on the task: move expired call_ids back to pending.
+        task = self.tasks.get(session.task_id) if session.task_id else None
+        if task is not None:
+            task_pending = list(task.pending_call_ids)
+            task_processing = [c for c in task.processing_call_ids if c not in expired_set]
+            for call_id in expired:
+                if call_id in task.processing_call_ids and call_id not in task_pending:
+                    task_pending.append(call_id)
+            self.tasks[task.id] = task.model_copy(
+                update={
+                    "pending_call_ids": task_pending,
+                    "processing_call_ids": task_processing,
+                }
+            )
+
+        self._save_state()
+        logger.info(
+            "pump: expired %d processing call_ids for session %s",
+            len(expired),
+            session_id,
+        )
+        return len(expired)
 
     async def _ensure_session_ready_for_send(self, session: ManagedSession) -> None:
         created = await ttyd_manager.ensure_tab_tmux_session(session.tab_id)
