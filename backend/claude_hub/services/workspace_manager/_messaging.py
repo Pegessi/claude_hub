@@ -29,20 +29,21 @@ class _MessagingMixin:
         The pump performs the actual CLAIM (pending → processing) and the tmux
         send. Because the claim happens before the tmux write, a duplicate
         ``send_session_message`` for the same call_id while the pump holds the
-        claim is a no-op — the Hub-managed side effect (the tmux prompt) is
-        applied exactly once per call_id until the worker ACKs (or the lease
-        expires).
+        claim is a no-op.
 
         A call_id stays in ``pending_call_ids`` (or ``processing_call_ids``)
         until the worker ACKs it via ``acked_call_ids`` in a report. On Hub
         restart, any call_id still in ``pending_call_ids`` is re-deliverable;
-        any call_id in ``processing_call_ids`` whose lease has expired is moved
-        back to ``pending_call_ids`` for re-delivery.
+        any call_id stranded in ``processing_call_ids`` is moved back to
+        ``pending_call_ids`` and re-delivered. The worker dedupes by the
+        ``[call_id:<id>]`` marker, so a duplicate tmux prompt (e.g. from a
+        crash between tmux send and ACK) does not produce a duplicate effect.
 
-        NOTE: This guarantees exactly-once of the **Hub-managed** effect (the
-        tmux prompt). It does NOT guarantee exactly-once of arbitrary external
-        tool side effects the model may invoke — those require the call_id to
-        be propagated as an idempotency key by the model itself.
+        NOTE: This guarantees at-least-once delivery of the **Hub-managed**
+        effect (the tmux prompt) with worker-side dedupe. It does NOT
+        guarantee exactly-once of arbitrary external tool side effects the
+        model may invoke — those require the call_id to be propagated as an
+        idempotency key by the model itself.
         """
         session = self.sessions.get(session_id)
         if not session:
@@ -106,33 +107,36 @@ class _MessagingMixin:
 
         Lifecycle of a call_id through the durable receiver gate:
 
-          pending_call_ids  ──claim──▶  processing_call_ids  ──tmux-send──▶  delivered_call_ids
+          pending_call_ids  ──claim──▶  processing_call_ids  ──worker-ACK──▶  delivered_call_ids
 
         1. **Claim**: atomically move the call_id from ``pending_call_ids`` to
            ``processing_call_ids``. The claim happens BEFORE the tmux write so
            a concurrent ``send_session_message`` for the same call_id sees it
-           in ``processing_call_ids`` and skips — the tmux prompt is applied
-           exactly once.
+           in ``processing_call_ids`` and skips.
 
-        2. **Deliver**: send the message to tmux. On success, the call_id is
-           moved to ``delivered_call_ids`` — the **receiver-owned durable
-           receipt**. A call_id in ``delivered_call_ids`` is NEVER re-delivered
-           by the Hub, even across a crash. This guarantees one call_id cannot
-           produce two tmux prompts.
+        2. **Deliver**: send the message to tmux. On success, the call_id
+           STAYS in ``processing_call_ids`` — it is awaiting the worker's
+           ACK. The message body stays in ``pending_messages`` until the
+           worker ACKs.
 
-           If the tmux send fails, the call_id stays in ``processing_call_ids``;
-           the lease-expiry step (``_expire_processing_leases``) moves it back
-           to ``pending_call_ids`` so a fresh pump cycle can retry.
+           If the tmux send fails, the call_id is moved back to
+           ``pending_call_ids`` immediately so the next pump cycle can
+           retry the same call_id (transient retry resumes delivery).
 
-        3. **Worker ACK** (``_ack_call_ids``): the worker confirms it processed
-           the message. Since the call_id is already in ``delivered_call_ids``
-           (moved there on tmux send), the ACK is a no-op for the call_id's
-           lifecycle. The ACK still serves as the worker's signal that it has
-           finished processing and is ready for the next message.
+        3. **Worker ACK** (``_ack_call_ids``): the worker confirms it
+           processed the message by including the call_id in
+           ``acked_call_ids``. This is the **receiver-verifiable durable
+           receipt**: only the worker's ACK moves the call_id to
+           ``delivered_call_ids`` and removes the message from
+           ``pending_messages``.
 
-        The tmux session persists across Hub restarts, so a message that was
-        successfully sent to tmux remains visible to the worker even if the Hub
-        crashes before the worker ACKs. The Hub does NOT re-deliver it.
+        **Crash semantics**: on cold recovery, call_ids stranded in
+        ``processing_call_ids`` are moved back to ``pending_call_ids`` and
+        re-delivered. We cannot know whether the tmux send completed before
+        the crash, so we re-deliver and rely on the worker's
+        ``[call_id:<id>]`` dedupe to avoid duplicate effects. This preserves
+        the message until the worker proves receipt (ACK), covering both
+        sides of the claim-to-tmux crash window.
         """
         session = self.sessions.get(session_id)
         if not session:
@@ -209,26 +213,24 @@ class _MessagingMixin:
                     self._append_attachment_block(full_message, persisted),
                 )
             except Exception:
-                # Delivery failed. The call_id stays in processing_call_ids;
-                # lease expiry will move it back to pending for retry.
+                # Delivery failed. Roll the call_id back to pending
+                # immediately so the next pump cycle can retry the same
+                # call_id (transient retry resumes delivery). The message
+                # body stays in pending_messages.
                 logger.exception(
-                    "pump: failed to deliver call_id=%s to session %s; " "lease expiry will retry",
+                    "pump: failed to deliver call_id=%s to session %s; "
+                    "rolling back to pending for retry",
                     call_id,
                     session_id,
                 )
-                # Re-raise so callers know delivery failed, but the claim is
-                # already persisted so we don't double-send on retry.
-                raise
+                self._rollback_processing_to_pending(session.task_id, session_id, [call_id])
+                continue
 
-            # ---- RECEIPT: processing → delivered ----
-            # The tmux send succeeded. Move the call_id to delivered_call_ids
-            # — the receiver-owned durable receipt. The Hub will NEVER
-            # re-deliver this call_id, even across a crash. This guarantees
-            # one call_id cannot produce two tmux prompts.
-            #
-            # Pass the session's task_id so the task's call_id lists stay in
-            # sync with the session's (the claim step updated both).
-            self._ack_call_ids(session.task_id, session_id, [call_id])
+            # tmux send succeeded. The call_id stays in processing_call_ids,
+            # awaiting the worker's ACK. Only the worker's ACK
+            # (_ack_call_ids) moves it to delivered_call_ids and removes the
+            # message from pending_messages. This preserves the message
+            # until the worker proves receipt.
 
     def _expire_processing_leases(self, session_id: str, max_age_seconds: float = 300.0) -> int:
         """Move stale ``processing_call_ids`` back to ``pending_call_ids``.

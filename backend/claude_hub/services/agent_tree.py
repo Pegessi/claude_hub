@@ -1364,7 +1364,27 @@ class AgentTreeManager:
             run = AgentRun(**item)
             self._runs[run.id] = run
 
-        events = [AgentEvent(**item) for item in data.get("agent_events", [])]
+        events: list[AgentEvent] = []
+        for item in data.get("agent_events", []):
+            # Migration: events persisted before the mandatory-recipient
+            # change may have ``recipient=None``. Self-address them
+            # (``recipient = author``) so the directed mailbox filter
+            # (``e.recipient == run_id``) still delivers them. For root
+            # runs this is correct (they self-address); for child runs
+            # the author is the child run id, which is wrong, but
+            # pre-mandatory-recipient events were only ever emitted by
+            # root runs (child delegation came with the directed mailbox).
+            if item.get("recipient") is None:
+                item = dict(item)
+                migrated_recipient = item.get("author") or item.get("agent_run_id", "")
+                item["recipient"] = migrated_recipient
+                logger.info(
+                    "Migrated event sequence=%s call_id=%s: " "set recipient=%s (was null)",
+                    item.get("sequence"),
+                    item.get("call_id"),
+                    migrated_recipient,
+                )
+            events.append(AgentEvent(**item))
         events.sort(key=lambda e: e.sequence)
         self._events[workspace_id] = events
 
@@ -1673,33 +1693,33 @@ class AgentTreeManager:
         #
         #   - ``processing_call_ids``: claimed by the pump but the tmux send
         #     may or may not have completed. Since the claim happens BEFORE
-        #     the tmux send, we cannot be sure. To avoid duplicate tmux
-        #     prompts (the receiver-owned receipt guarantee), we assume the
-        #     send succeeded and move them to ``delivered_call_ids``. The
-        #     tmux session persists across Hub restarts, so the message
-        #     remains visible to the worker.
+        #     the tmux send, we cannot be sure. To avoid silently losing
+        #     messages that crashed before the tmux send, we move them back
+        #     to ``pending_call_ids`` and re-deliver. The worker dedupes by
+        #     the ``[call_id:<id>]`` marker, so a duplicate tmux prompt does
+        #     not produce a duplicate effect. The message is preserved until
+        #     the worker proves receipt (ACK).
         #
-        #   - ``delivered_call_ids``: already sent to tmux. NEVER re-deliver.
+        #   - ``delivered_call_ids``: ACKed by the worker. NEVER re-deliver.
         #
-        # This guarantees one call_id cannot produce two tmux prompts across
-        # a crash-before-ACK.
+        # This covers both sides of the claim-to-tmux crash window: a crash
+        # before the send is retried; a crash after the send is re-delivered
+        # and deduped by the worker.
         # ------------------------------------------------------------------
         for session in list(self._wm.sessions.values()):
             if session.workspace_id != workspace_id:
                 continue
             if not session.pending_call_ids and not session.processing_call_ids:
                 continue
-            # Move any stranded processing call_ids to delivered: assume the
-            # tmux send succeeded (the claim was persisted before the send).
-            # This prevents duplicate delivery. If the send actually failed,
-            # the worker will not have seen the message; the tmux session
-            # persists so the worker can still observe it, and the worker's
-            # ACK (or lack thereof) is the authoritative signal.
+            # Move any stranded processing call_ids back to pending: we
+            # cannot be sure the tmux send completed. Re-deliver them; the
+            # worker dedupes by [call_id:<id>] marker.
             if session.processing_call_ids:
-                self._wm._ack_call_ids(
+                self._wm._rollback_processing_to_pending(
                     session.task_id, session.id, list(session.processing_call_ids)
                 )
-            # Pump only pending call_ids (never sent to tmux).
+            # Pump pending call_ids (including those just rolled back from
+            # processing).
             if self._wm.sessions[session.id].pending_call_ids:
                 try:
                     await self._wm._pump_session_messages(session.id)

@@ -43,12 +43,22 @@ class ExecutorAdapter(ABC):
     async def followup(self, run: "AgentRun", message: str, call_id: Optional[str] = None) -> None:
         """Deliver a message and resume the executor's turn.
 
-        ``call_id`` is the deduplication key. The sender guarantees
-        at-least-once delivery (a crash between send and the delivered-call_id
-        persist causes a re-send). Adapters should record delivered call_ids
-        and skip duplicates on the sender side; the ``[call_id:<id>]`` marker
-        embedded in the message lets the receiving executor dedupe any
-        duplicate that slips through.
+        ``call_id`` is the deduplication key. Delivery is **at-least-once**
+        with receiver-side dedupe:
+
+        - The sender persists the call_id in ``pending_call_ids`` before
+          delivery. The receiver pump claims it (``pending → processing``)
+          and sends it to tmux.
+        - The call_id stays in ``processing_call_ids`` until the worker
+          ACKs it (lists it in ``acked_call_ids`` of its report). Only the
+          worker's ACK moves it to ``delivered_call_ids``.
+        - A crash between the claim and the ACK leaves the call_id in
+          ``processing_call_ids``; cold recovery moves it back to
+          ``pending_call_ids`` and re-delivers it. The worker dedupes by
+          the ``[call_id:<id>]`` marker embedded in the message, so a
+          duplicate tmux prompt does not produce a duplicate effect.
+        - The sender skips call_ids already in ``delivered_call_ids``
+          (worker-ACKed) or ``processing_call_ids`` (delivery in flight).
         """
 
     @abstractmethod
