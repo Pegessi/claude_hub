@@ -369,6 +369,7 @@ class _DispatchMixin:
         self,
         task_id: str,
         payload: ContinueTaskRequest | None = None,
+        call_id: str | None = None,
     ) -> WorkspaceTask:
         payload = payload or ContinueTaskRequest()
         task = self.tasks.get(task_id)
@@ -476,6 +477,7 @@ class _DispatchMixin:
             await self.send_session_message(
                 session.id,
                 self._build_continue_prompt(self.tasks[task.id], payload, session),
+                call_id=call_id,
             )
         except Exception as exc:
             logger.exception(

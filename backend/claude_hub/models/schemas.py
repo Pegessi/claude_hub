@@ -661,16 +661,18 @@ class WorkspaceTask(BaseModel):
     clear_context: Optional[bool] = None
     # Agent tree run id that owns this task (set by ManagedTaskAdapter.spawn).
     agent_run_id: Optional[str] = None
-    # Call ids of followup messages already delivered to this task. Used for
-    # sender-side dedup: a followup with a call_id already in this list is a
-    # no-op. Persisted with the task so delivery survives restarts.
+    # Call ids of followup messages already ACKed (processed) by the worker.
+    # Used for sender-side dedup: a followup with a call_id already in this
+    # list is a no-op. Persisted with the task so delivery survives restarts.
+    # NOTE: delivered_call_ids == "processed by the worker", not "sent by the
+    # Hub". A call_id stays in pending_call_ids until the worker ACKs it.
     delivered_call_ids: List[str] = Field(default_factory=list)
-    # Call ids of followup messages that have been persisted to the outbox
-    # but whose delivery may not have completed. On restart, any call_id in
-    # this list is re-delivered (at-least-once) and then moved to
-    # delivered_call_ids. This implements a crash-safe two-phase outbox:
-    # the receipt is persisted before delivery, so a crash before delivery
-    # completion causes a re-send (at-least-once), not a loss. The receiving
+    # Call ids of followup messages that have been sent to the worker but not
+    # yet ACKed. On restart, any call_id in this list is re-delivered
+    # (at-least-once) and only moved to delivered_call_ids when the worker
+    # ACKs it (via acked_call_ids in a report). This implements a crash-safe
+    # outbox: the send is persisted before delivery, so a crash before the
+    # worker ACKs causes a re-send (at-least-once), not a loss. The receiving
     # executor dedupes any duplicate via the [call_id:<id>] marker.
     pending_call_ids: List[str] = Field(default_factory=list)
     dispatch_reason: Optional[str] = None
@@ -743,15 +745,18 @@ class ManagedSession(BaseModel):
     # a review prompt for. Drives the cross-task /clear decision independently of
     # any task's mutable review_session_id (which abort/skip/stale-release null).
     last_review_task_id: Optional[str] = None
-    # Executor-boundary call_id tracking for at-least-once followup delivery.
-    # pending_call_ids: call_ids persisted to the outbox before send; a crash
-    #   after send but before the delivered persist leaves the call_id here so
+    # Executor-boundary call_id tracking for at-least-once delivery.
+    # pending_call_ids: call_ids sent to the session but not yet ACKed by the
+    #   worker. A crash after send but before ACK leaves the call_id here so
     #   recovery re-sends (at-least-once). The receiving executor dedupes via
     #   the [call_id:<id>] marker.
-    # delivered_call_ids: call_ids the sender has marked delivered;
-    #   send_session_message skips any call_id already in this list. This is
-    #   the sender-side dedup record at the executor boundary and survives
-    #   task deletion/recreation.
+    # delivered_call_ids: call_ids the worker has ACKed (processed) via
+    #   acked_call_ids in a report. send_session_message skips any call_id
+    #   already in this list. This is the sender-side dedup record and
+    #   survives task deletion/recreation.
+    # NOTE: delivered_call_ids == "processed by the worker", not "sent by the
+    # Hub". The Hub never moves a call_id to delivered_call_ids on its own;
+    # only an ACK from the worker does.
     pending_call_ids: List[str] = Field(default_factory=list)
     delivered_call_ids: List[str] = Field(default_factory=list)
     created_at: datetime
@@ -781,10 +786,22 @@ class AgentReportCreate(BaseModel):
     review_decision: ReviewDecision = ReviewDecision.AUTO
     review_reason: Optional[str] = None
     risk_level: Optional[str] = None
-    # Call-specific ACK: the call_ids this report acknowledges as processed
-    # by the worker. Only these call_ids are moved from pending_call_ids to
-    # delivered_call_ids. This prevents an unrelated report from accidentally
-    # ACKing a pending followup that the worker has not yet processed.
+    # Call-specific ACK: the call_ids this report acknowledges as **processed**
+    # by the worker. Only call_ids currently in the task/session
+    # pending_call_ids are moved to delivered_call_ids. Unknown or future
+    # call_ids (not in pending) are silently ignored — this prevents a
+    # malicious or buggy report from poisoning the delivered set and
+    # suppressing a real future delivery.
+    #
+    # Production contract:
+    # - The dispatch call_id (f"dispatch:{task_id}") is ACKed automatically by
+    #   the Hub on every report submission; the worker does NOT need to list it.
+    # - For any other call_id the worker has processed (e.g. a followup
+    #   message carrying [call_id:<id>]), the worker MUST include it in
+    #   acked_call_ids to stop the Hub from re-delivering it on restart.
+    # - A call_id not listed in acked_call_ids stays in pending_call_ids and
+    #   will be re-delivered on Hub restart (at-least-once). The worker must
+    #   dedupe any duplicate via the [call_id:<id>] marker.
     acked_call_ids: List[str] = Field(default_factory=list)
 
 

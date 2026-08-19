@@ -3308,7 +3308,10 @@ async def test_managed_task_followup_queued_appends_to_prompt(
 
     updated = manager.tasks[task_id]
     assert updated.status == WorkspaceTaskStatus.QUEUED
-    assert f"[followup] please also do X" in updated.prompt
+    # The followup text is embedded with its call_id marker so the worker
+    # can ACK it.
+    assert "please also do X" in updated.prompt
+    assert "[call_id:followup-queued-1]" in updated.prompt
     assert updated.prompt.startswith(original_prompt)
 
 
@@ -3585,13 +3588,14 @@ async def test_recover_followup_skips_already_delivered_call_ids(
 
 
 @pytest.mark.asyncio
-async def test_followup_persists_delivered_call_ids_atomically(
+async def test_followup_persists_pending_call_ids_atomically(
     manager: WorkspaceManager, ws_id: str
 ) -> None:
     """After a managed-task followup, the call_id must be recorded in the
-    task's delivered_call_ids AND persisted immediately (via _save_state),
+    task's pending_call_ids AND persisted immediately (via _save_state),
     so a crash between adapter success and outcome-event persist does not
-    cause re-delivery on restart."""
+    lose the outbox entry. The call_id stays in pending_call_ids until the
+    worker ACKs it (lists it in acked_call_ids of its report)."""
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
     )
@@ -3619,12 +3623,15 @@ async def test_followup_persists_delivered_call_ids_atomically(
         )
     )
 
-    # The receipt must be on the task immediately (before outcome persist).
+    # The call_id must be in pending_call_ids (not delivered) until the
+    # worker ACKs it.
     task = manager.tasks[task_id]
-    assert call_id in task.delivered_call_ids
+    assert call_id in task.pending_call_ids
+    assert call_id not in task.delivered_call_ids
 
-    # A second followup with the same call_id must be a no-op: the task
-    # prompt must not gain a second [followup] line.
+    # A second followup with the same call_id re-delivers (at-least-once).
+    # For a WORKING task the message goes to the session, not the prompt,
+    # so the prompt is unchanged.
     prompt_before = manager.tasks[task_id].prompt
     await manager.agent_tree.followup(
         FollowupRequest(
@@ -4105,10 +4112,9 @@ def test_managed_session_sees_only_owned_subtree(
 async def test_followup_outbox_pending_survives_crash_and_redelivers_idempotently(
     manager: WorkspaceManager, ws_id: str
 ) -> None:
-    """A crash after the pending_call_ids persist (phase 1) but before
-    delivery completes must not cause a duplicate on restart. The followup
-    call_id is in pending_call_ids, so recovery re-delivers idempotently
-    (the [followup] line is not appended twice)."""
+    """A followup call_id stays in pending_call_ids until the worker ACKs it.
+    A re-delivery (e.g. after a Hub crash) is idempotent: the [followup] line
+    is not appended twice to the prompt."""
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
     )
@@ -4137,54 +4143,42 @@ async def test_followup_outbox_pending_survives_crash_and_redelivers_idempotentl
     manager.tasks[task_id] = task.model_copy(update={"status": WorkspaceTaskStatus.TODO})
     manager._save_state()
 
-    # Simulate a crash after phase 1 (pending persisted) but before phase 2
-    # (delivered). We do this by directly calling the adapter's followup,
-    # which will: add to pending_call_ids + persist, deliver, then move to
-    # delivered_call_ids + persist. We then verify that a second call with
-    # the same call_id is a no-op (idempotent re-delivery).
     from claude_hub.models.agent_tree import AgentRunStatus
 
     run = manager.agent_tree.get_run(child.id)
     adapter = manager.agent_tree._adapter(run.executor_kind)
 
-    # First delivery: should add message to prompt and mark call_id delivered.
+    # First delivery: the call_id goes to pending_call_ids (not delivered)
+    # and the message is appended to the prompt.
     await adapter.followup(run, message, call_id=call_id)
     task = manager.tasks[task_id]
-    assert call_id in task.delivered_call_ids
-    assert call_id not in task.pending_call_ids
-    assert f"[followup] {message}" in task.prompt
-
-    # Simulate a crash that left the call_id in pending_call_ids (phase 1
-    # succeeded, phase 2 did not). Manually move it back to pending.
-    task = manager.tasks[task_id]
-    manager.tasks[task_id] = task.model_copy(
-        update={
-            "pending_call_ids": task.pending_call_ids + [call_id],
-            "delivered_call_ids": [c for c in task.delivered_call_ids if c != call_id],
-        }
-    )
-    manager._save_state()
+    assert call_id in task.pending_call_ids
+    assert call_id not in task.delivered_call_ids
+    assert message in task.prompt
+    assert f"[call_id:{call_id}]" in task.prompt
 
     prompt_before = manager.tasks[task_id].prompt
 
-    # Recovery re-delivers: the adapter sees call_id in pending (not
-    # delivered), so it re-runs delivery. Delivery is idempotent: the
-    # [followup] line must NOT be appended a second time.
+    # Simulate a Hub crash: the call_id is still in pending_call_ids. A
+    # retry re-delivers. Delivery is idempotent: the [followup] line must
+    # NOT be appended a second time.
     await adapter.followup(run, message, call_id=call_id)
 
     task = manager.tasks[task_id]
     assert manager.tasks[task_id].prompt == prompt_before
-    assert call_id in task.delivered_call_ids
-    assert call_id not in task.pending_call_ids
+    # The call_id stays in pending_call_ids until the worker ACKs it.
+    assert call_id in task.pending_call_ids
+    assert call_id not in task.delivered_call_ids
 
 
 @pytest.mark.asyncio
-async def test_followup_recreates_deleted_task_with_call_id_marked_delivered(
+async def test_followup_recreates_deleted_task_with_call_id_pending(
     manager: WorkspaceManager, ws_id: str
 ) -> None:
     """If the managed task was deleted (e.g. by abort), followup must
-    recreate it with the followup message as the prompt and mark the
-    call_id as delivered on the new task so a retry does not re-deliver."""
+    recreate it with the followup message as the prompt. The call_id
+    stays in pending_call_ids until the worker ACKs it; the call_id is
+    embedded in the prompt so the worker can ACK it."""
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
     )
@@ -4219,10 +4213,13 @@ async def test_followup_recreates_deleted_task_with_call_id_marked_delivered(
     assert new_task_id != task_id
     new_task = manager.tasks.get(new_task_id)
     assert new_task is not None
-    # The followup message becomes the new task's prompt.
+    # The followup message becomes the new task's prompt, with the call_id
+    # marker embedded so the worker can ACK it.
     assert message in new_task.prompt
-    # The call_id is marked delivered so a retry is a no-op.
-    assert call_id in new_task.delivered_call_ids
+    assert f"[call_id:{call_id}]" in new_task.prompt
+    # The call_id stays in pending_call_ids until the worker ACKs it.
+    assert call_id in new_task.pending_call_ids
+    assert call_id not in new_task.delivered_call_ids
 
 
 def test_forged_session_cookie_rejected_for_all_actions(
@@ -4338,12 +4335,12 @@ async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
 ) -> None:
     """At-least-once delivery at the executor boundary.
 
-    A hard exit after send_session_message sends the message but before the
-    session-level delivered_call_ids persist leaves the call_id in
-    pending_call_ids. On reload, send_session_message re-sends the message
-    (at-least-once). The [call_id:<id>] marker embedded in the message lets
-    the receiving executor dedupe any duplicate. A subsequent call with the
-    same call_id (now in delivered_call_ids) is skipped.
+    send_session_message persists the call_id in pending_call_ids before
+    sending and does NOT move it to delivered_call_ids. The call_id only
+    moves to delivered_call_ids when the worker ACKs it (via
+    acked_call_ids in its report). A crash after send leaves the call_id
+    in pending; a retry re-sends the message (at-least-once). The
+    [call_id:<id>] marker lets the receiver dedupe duplicates.
     """
     session_id = "outbox-session"
     _make_managed_session(manager, session_id, ws_id)
@@ -4358,44 +4355,31 @@ async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
         sent.append(text)
 
     async def _fake_capture_tmux(tmux_session: str) -> str:
-        # tmux output capture is not used for delivery inference anymore.
-        # It is still used by _ensure_session_ready_for_send to detect the
-        # agent input prompt.
         return "claude code\n? for shortcuts\n"
 
     manager._send_tmux_message = _fake_send_tmux  # type: ignore[assignment]
     manager._capture_tmux_output = _fake_capture_tmux  # type: ignore[assignment]
 
-    # First delivery: phase 1 (pending), send, phase 2 (delivered).
+    # First delivery: call_id goes to pending_call_ids (not delivered).
     await manager.send_session_message(session_id, message, call_id=call_id)
     session = manager.sessions[session_id]
-    assert call_id in session.delivered_call_ids
-    assert call_id not in session.pending_call_ids
+    assert call_id in session.pending_call_ids
+    assert call_id not in session.delivered_call_ids
     assert len(sent) == 1
     # The sent message must include the call_id marker so the receiving
     # executor can dedupe any duplicate delivery.
     assert marker in sent[0]
 
-    # Simulate a hard exit between send and phase-2 persist: the call_id is
-    # still in pending_call_ids and not in delivered_call_ids. We manually
-    # reconstruct this crashed state and persist it.
-    session = manager.sessions[session_id]
-    manager.sessions[session_id] = session.model_copy(
-        update={
-            "pending_call_ids": [call_id],
-            "delivered_call_ids": [c for c in session.delivered_call_ids if c != call_id],
-        }
-    )
-    manager._save_state()
-
+    # Simulate a hard exit: the call_id is still in pending_call_ids.
     # Reload the manager from disk (simulating process restart).
+    manager._save_state()
     reloaded = WorkspaceManager()
     reloaded_session = reloaded.sessions[session_id]
     assert call_id in reloaded_session.pending_call_ids
     assert call_id not in reloaded_session.delivered_call_ids
 
-    # Recovery: the call_id is in pending. send_session_message re-sends the
-    # message (at-least-once). The receiver dedupes via the call_id marker.
+    # Recovery: the call_id is in pending. send_session_message re-sends
+    # the message (at-least-once). The receiver dedupes via the marker.
     reloaded._send_tmux_message = _fake_send_tmux  # type: ignore[assignment]
     reloaded._capture_tmux_output = _fake_capture_tmux  # type: ignore[assignment]
     sent.clear()
@@ -4403,10 +4387,22 @@ async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
     assert len(sent) == 1  # at-least-once: re-send on crash recovery
     assert marker in sent[0]
     reloaded_session = reloaded.sessions[session_id]
+    # The call_id stays in pending until the worker ACKs it.
+    assert call_id in reloaded_session.pending_call_ids
+    assert call_id not in reloaded_session.delivered_call_ids
+
+    # The worker ACKs the call_id (e.g. by listing it in acked_call_ids of
+    # its report). _ack_call_ids moves it from pending to delivered.
+    reloaded._ack_call_ids(
+        task_id="dummy-task",
+        session_id=session_id,
+        call_ids=[call_id],
+    )
+    reloaded_session = reloaded.sessions[session_id]
     assert call_id in reloaded_session.delivered_call_ids
     assert call_id not in reloaded_session.pending_call_ids
 
-    # A third call with the same call_id must be skipped: it is now in
+    # A subsequent send with the same call_id is skipped: it is now in
     # delivered_call_ids (sender-side dedup).
     sent.clear()
     await reloaded.send_session_message(session_id, message, call_id=call_id)
@@ -4856,25 +4852,17 @@ async def test_resident_root_managed_task_report_ack_cold_replay(
 
     dispatch_call_id = f"dispatch:{task_id}"
 
-    # After a successful dispatch, the sender's phase 2 moves the dispatch
-    # call_id to session.delivered_call_ids.
+    # After a successful dispatch, the dispatch call_id is in
+    # pending_call_ids (sent but not yet ACKed by the worker). It only moves
+    # to delivered_call_ids when the worker submits a report (automatic
+    # dispatch ACK). This is at-least-once: the Hub may re-deliver if it
+    # crashes before the worker ACKs.
     session = manager.sessions[session_id]
-    assert dispatch_call_id in session.delivered_call_ids
-    assert dispatch_call_id not in session.pending_call_ids
+    assert dispatch_call_id in session.pending_call_ids
+    assert dispatch_call_id not in session.delivered_call_ids
 
-    # Simulate a crash between the send (phase 1) and the delivered-persist
-    # (phase 2): the dispatch call_id is left in session.pending_call_ids.
-    # The worker still processed the assignment (side effect happened) and
-    # now submits a report. The Hub's automatic dispatch ACK must move the
-    # call_id to delivered_call_ids so it is never re-sent.
-    manager.sessions[session_id] = session.model_copy(
-        update={
-            "pending_call_ids": [dispatch_call_id],
-            "delivered_call_ids": [c for c in session.delivered_call_ids if c != dispatch_call_id],
-        }
-    )
-
-    # 3. Worker submits a report. The Hub auto-ACKs the dispatch call_id.
+    # 3. Worker submits a report. The Hub auto-ACKs the dispatch call_id,
+    #    moving it from pending_call_ids to delivered_call_ids.
     await manager.create_report(
         session_id,
         AgentReportCreate(
@@ -4887,7 +4875,7 @@ async def test_resident_root_managed_task_report_ack_cold_replay(
     task_after = manager.tasks[task_id]
     session_after = manager.sessions[session_id]
 
-    # The dispatch call_id is delivered (ACKed) on the session.
+    # The dispatch call_id is now delivered (ACKed by the worker).
     assert dispatch_call_id in session_after.delivered_call_ids
     assert dispatch_call_id not in session_after.pending_call_ids
 
@@ -4903,7 +4891,7 @@ async def test_resident_root_managed_task_report_ack_cold_replay(
     fresh_session = fresh.sessions[session_id]
 
     # The delivered_call_ids state survives the restart — the dispatch is
-    # never re-sent.
+    # never re-sent because the worker already ACKed it.
     assert dispatch_call_id in fresh_session.delivered_call_ids
     assert dispatch_call_id not in fresh_session.pending_call_ids
 
@@ -4916,7 +4904,7 @@ async def test_resident_root_managed_task_report_ack_cold_replay(
     monkeypatch.setattr(fresh, "_send_tmux_message", _counting_send_tmux)
 
     await fresh.send_session_message(session_id, "assignment prompt", call_id=dispatch_call_id)
-    assert send_count["n"] == 0  # skipped because already delivered
+    assert send_count["n"] == 0  # skipped because already ACKed
 
 
 @pytest.mark.asyncio
