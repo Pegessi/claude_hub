@@ -5,6 +5,53 @@
 
 ## Unreleased
 
+### fix: durable receiver pump (claim-before-deliver) + REVIEWED task COMPLETED → PROGRESS
+
+- **What**: the mailbox now uses a Hub-owned **receiver pump** that claims a
+  call_id (pending → processing) *before* delivering the message to the
+  worker's tmux pane. The worker's `acked_call_ids` in its report is the
+  *commit* signal (processing → delivered). Stale claims are reverted by
+  lease expiry so a crashed pump never strands a message. REVIEWED tasks no
+  longer emit a terminal COMPLETED event on the worker's COMPLETED report —
+  only REVIEW_PASSED does.
+- **Why**: the previous design advanced `processing_call_ids` inside the
+  same `create_report` request that committed it, so there was no real
+  receiver gate between "message sent to model" and "model processed it".
+  A crash between tmux write and report submission could lose or duplicate
+  the Hub-managed side effect. REVIEWED tasks also fired COMPLETED on the
+  worker's report, before the reviewer had approved.
+- **How**:
+  - `_messaging.py::send_session_message`: for call_id-scoped messages,
+    persist the body in `session.pending_messages[call_id]`, append to
+    `pending_call_ids`, then kick `_pump_session_messages`. Sender skips
+    call_ids already in `processing_call_ids` or `delivered_call_ids`.
+  - `_messaging.py::_pump_session_messages`: atomically moves each pending
+    call_id to `processing_call_ids` (claim), records
+    `processing_call_ids_at[call_id]`, then sends to tmux. The claim is
+    persisted before the tmux write, so a concurrent send for the same
+    call_id is a no-op (exactly-once of the Hub-managed tmux prompt).
+  - `_messaging.py::_expire_processing_leases`: moves call_ids whose claim
+    timestamp is older than `max_age_seconds` back to `pending_call_ids`
+    for re-delivery.
+  - `_reports.py::_ack_call_ids`: commit only — moves call_ids from
+    `pending`/`processing` to `delivered`, removes the message body from
+    `pending_messages`. Unknown call_ids are ignored (future-ID poisoning
+    protection). No claim step in `create_report`.
+  - `_reports.py::_bridge_report_to_agent_event`: for REVIEWED tasks,
+    `COMPLETED` → `PROGRESS`; `REVIEW_PASSED` → `COMPLETED`;
+    `REVIEW_FAILED` → `PROGRESS`. `agent_tree.py::emit_event` reconciles
+    run status: `ready_for_review`/`review_started`/`completed` →
+    `WAITING`; `review_failed` → `RUNNING`.
+  - `agent_tree.py::_events_for`: recipient-directed reads — a run only
+    sees events where `recipient == run_id` or
+    `recipient is None and author == run_id`. `wait`/`get_events` use
+    `effective_since = max(since_sequence, run.ack_sequence)` so ACKed
+    events are never re-delivered.
+- **Honesty note**: this guarantees exactly-once of the **Hub-managed**
+  effect (the tmux prompt). It does NOT guarantee exactly-once of
+  arbitrary external tool side effects the model invokes — those require
+  the call_id to be propagated as an idempotency key by the model itself.
+
 ### feat: unified Agent Tree + Durable Mailbox coordination layer
 
 - **What**: a single persistent coordination layer that converges the Resident
