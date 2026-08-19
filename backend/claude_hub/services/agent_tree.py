@@ -908,9 +908,17 @@ class AgentTreeManager:
         # to RUNNING first (persist=False) so that even if the subsequent
         # outcome-event persist fails, the in-memory projection matches the
         # executor's actual state. Then append the durable outcome event so
-        # recovery can tell the followup was delivered and does not replay
+        # recovery can tell the followup was dispatched and does not replay
         # it. Both use rollback_on_error=False because the executor was
         # already resumed.
+        #
+        # NOTE: ``delivered`` is ``False`` here. The followup call_id was
+        # dispatched to the worker's tmux inbox (it now sits in
+        # ``processing_call_ids``), but the worker has not yet ACKed it.
+        # The followup is only truly "delivered" once the worker processes
+        # it and includes the call_id in ``acked_call_ids``. The
+        # ``followup:outcome`` event records that the dispatch succeeded,
+        # not that the worker received it.
         self._update_run_status(recipient.id, AgentRunStatus.RUNNING, persist=False)
         self._append_event(
             workspace_id=req.workspace_id,
@@ -925,7 +933,7 @@ class AgentTreeManager:
                 "followup:outcome",
                 {"run_id": recipient.id, "followup_call_id": req.call_id},
             ),
-            payload={"delivered": True, "followup_call_id": req.call_id},
+            payload={"delivered": False, "followup_call_id": req.call_id},
             rollback_on_error=False,
         )
 
@@ -1616,7 +1624,10 @@ class AgentTreeManager:
                             run, last_msg, call_id=followup_call_id
                         )
                         # Append the outcome event so a subsequent recovery
-                        # does not replay this followup.
+                        # does not replay this followup. ``delivered`` is
+                        # ``False``: the followup was re-dispatched to the
+                        # worker's tmux inbox but the worker has not yet
+                        # ACKed it. See the note in ``followup``.
                         self._append_event(
                             workspace_id=run.workspace_id,
                             agent_run_id=run.id,
@@ -1630,7 +1641,7 @@ class AgentTreeManager:
                                 "followup:outcome",
                                 {"run_id": run.id, "followup_call_id": followup_call_id},
                             ),
-                            payload={"delivered": True, "followup_call_id": followup_call_id},
+                            payload={"delivered": False, "followup_call_id": followup_call_id},
                             rollback_on_error=False,
                         )
                         self._update_run_status(
@@ -1691,40 +1702,38 @@ class AgentTreeManager:
         #   - ``pending_call_ids``: never sent to tmux. These MUST be pumped
         #     (claimed + delivered) so the worker receives them.
         #
-        #   - ``processing_call_ids``: claimed by the pump but the tmux send
-        #     may or may not have completed. Since the claim happens BEFORE
-        #     the tmux send, we cannot be sure. To avoid silently losing
-        #     messages that crashed before the tmux send, we move them back
-        #     to ``pending_call_ids`` and re-deliver. The worker dedupes by
-        #     the ``[call_id:<id>]`` marker, so a duplicate tmux prompt does
-        #     not produce a duplicate effect. The message is preserved until
-        #     the worker proves receipt (ACK).
+        #   - ``processing_call_ids``: the pump claimed the call_id and the
+        #     tmux send succeeded (the call_id only stays in ``processing``
+        #     after a successful send; a failed send rolls it back to
+        #     ``pending``). These were delivered to the worker's tmux inbox
+        #     and MUST NOT be re-delivered — re-sending would trigger a
+        #     second model turn/effect. The worker will ACK them (moving
+        #     them to ``delivered_call_ids``) when it processes them.
+        #
+        #     The only case where a ``processing`` call_id was NOT actually
+        #     sent is a crash between the claim (save_state) and the tmux
+        #     send. That window is microseconds; the tradeoff for
+        #     exactly-once (no duplicate effects) is accepting this rare
+        #     loss rather than risking broad duplicate delivery.
         #
         #   - ``delivered_call_ids``: ACKed by the worker. NEVER re-deliver.
         #
-        # This covers both sides of the claim-to-tmux crash window: a crash
-        # before the send is retried; a crash after the send is re-delivered
-        # and deduped by the worker.
+        # This is the durable receiver/inbox dedupe: the Hub tracks which
+        # call_ids were delivered to tmux (``processing_call_ids``) and
+        # never sends them again. The ``[call_id:<id>]`` marker in the
+        # message is a hint for the worker, not an enforcement point.
         # ------------------------------------------------------------------
         for session in list(self._wm.sessions.values()):
             if session.workspace_id != workspace_id:
                 continue
-            if not session.pending_call_ids and not session.processing_call_ids:
+            # Only pump pending call_ids. processing_call_ids were already
+            # delivered to tmux; do NOT re-deliver them (no duplicate turns).
+            if not session.pending_call_ids:
                 continue
-            # Move any stranded processing call_ids back to pending: we
-            # cannot be sure the tmux send completed. Re-deliver them; the
-            # worker dedupes by [call_id:<id>] marker.
-            if session.processing_call_ids:
-                self._wm._rollback_processing_to_pending(
-                    session.task_id, session.id, list(session.processing_call_ids)
+            try:
+                await self._wm._pump_session_messages(session.id)
+            except Exception:
+                logger.exception(
+                    "Failed to pump pending messages for session %s during recovery",
+                    session.id,
                 )
-            # Pump pending call_ids (including those just rolled back from
-            # processing).
-            if self._wm.sessions[session.id].pending_call_ids:
-                try:
-                    await self._wm._pump_session_messages(session.id)
-                except Exception:
-                    logger.exception(
-                        "Failed to pump pending messages for session %s during recovery",
-                        session.id,
-                    )

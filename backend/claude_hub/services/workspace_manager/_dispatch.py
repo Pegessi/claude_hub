@@ -750,9 +750,10 @@ class _DispatchMixin:
         # assignment prompt was fully persisted as WORKING. The session's
         # task_id was persisted before the send (see _dispatch_task_to_session),
         # so _can_dispatch_to blocks re-dispatch to another session. Here we
-        # re-send the assignment prompt (at-least-once); the dispatch call_id
-        # ensures sender-side dedup if the worker already ACKed it via a
-        # report submission.
+        # re-send the assignment prompt; the dispatch call_id ensures
+        # sender-side dedup: if the call_id is already in processing_call_ids
+        # (sent to tmux), it is not re-sent; if it is still in
+        # pending_call_ids, the pump sends it to the tmux inbox exactly once.
         await self._recover_queued_task_ownership(workspace_id)
         for session in self._workspace_agents(workspace_id, include_stopped=True):
             if not self._can_dispatch_to(session):
@@ -882,11 +883,13 @@ class _DispatchMixin:
         ``task.status = WORKING`` persist leaves the session holding a
         QUEUED task. ``_can_dispatch_to`` returns False for such sessions
         (they own a non-DONE task), so the normal dispatch loop skips them.
-        This method re-sends the assignment prompt (at-least-once). The
-        dispatch call_id (``f"dispatch:{task.id}"``) gives sender-side
-        dedup: if the worker already submitted a report (which ACKs the
-        call_id into ``delivered_call_ids``), ``send_session_message``
-        skips the re-send.
+        This method re-sends the assignment prompt. The dispatch call_id
+        (``f"dispatch:{task.id}"``) gives sender-side dedup: if the call_id
+        is already in ``processing_call_ids`` (sent to tmux) or
+        ``delivered_call_ids`` (ACKed by the worker via a report),
+        ``send_session_message`` skips the re-send. If it is still in
+        ``pending_call_ids``, the pump sends it to the tmux inbox exactly
+        once.
         """
         for session in self._workspace_agents(workspace_id, include_stopped=True):
             if session.status == ManagedSessionStatus.STOPPED:
@@ -966,11 +969,12 @@ class _DispatchMixin:
         # crash between the send side-effect and the WORKING persist does
         # NOT let the monitor re-dispatch the task to a different session.
         # On recovery, _recover_queued_task_ownership detects that the
-        # session holds a QUEUED task and re-sends the assignment prompt
-        # (at-least-once). The call_id ensures sender-side dedup: if the
-        # worker already ACKed the dispatch (by submitting a report, which
-        # moves the call_id to delivered_call_ids), send_session_message
-        # skips the re-send.
+        # session holds a QUEUED task and re-sends the assignment prompt.
+        # The call_id ensures sender-side dedup: if the call_id is already
+        # in processing_call_ids (sent to tmux) or delivered_call_ids
+        # (ACKed by the worker via a report), send_session_message skips
+        # the re-send. If it is still in pending_call_ids, the pump sends
+        # it to the tmux inbox exactly once.
         # ------------------------------------------------------------------
         dispatch_call_id = f"dispatch:{task.id}"
         self.sessions[session.id] = session.model_copy(
