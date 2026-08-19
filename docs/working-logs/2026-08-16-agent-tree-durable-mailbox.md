@@ -131,27 +131,38 @@ Wraps the existing workspace task/session/report flow:
 
     A `call_id` already in `processing_call_ids` or `delivered_call_ids` is
     skipped; otherwise it is persisted to `pending_call_ids` (with the
-    message body in `pending_messages[call_id]`) before the pump claims it
-    (`pending → processing`) and sends it to tmux. On tmux send failure the
-    call_id is rolled back to `pending_call_ids` immediately so the same
-    call_id retry resumes delivery. The message body stays in
-    `pending_messages` until the worker ACKs.
+    message body in `pending_messages[call_id]`) before the pump delivers it.
 
+    **Send-first + pane-marker dedupe (no loss, no duplicate)**: the pump
+    sends the message to tmux *before* claiming the call_id
+    (`pending → processing`). To handle the post-send/pre-persist crash
+    window (message sent to tmux but `processing` not yet persisted), the
+    pump first captures the tmux pane and checks for the `[call_id:<id>]`
+    marker:
+    - If the marker is present → the message was already sent (crash after
+      send, before persist); move to `processing` WITHOUT re-sending.
+    - If the marker is absent → send to tmux; on failure leave in
+      `pending` (no claim was made, so no rollback needed).
+    - After successful send (or marker confirmed), move the call_id from
+      `pending` to `processing` and persist.
+
+    This eliminates the pre-send crash loss window (claim before send meant
+    a crash between them stranded the call_id in `processing` but never
+    sent to tmux, and cold recovery skipped `processing` → permanent loss).
     The tmux input buffer is the durable receiver: once a message is sent
-    to tmux, the worker will read it exactly once. Therefore the Hub NEVER
-    re-delivers a `processing` call_id to a live session — re-sending would
-    append it to the tmux buffer a second time and produce a duplicate model
-    turn. On cold recovery, only `pending_call_ids` (never sent to tmux) are
-    pumped; `processing_call_ids` are left for the worker to ACK. The only
-    exception is a session whose tmux session itself is gone
+    to tmux, the worker will read it exactly once. On cold recovery,
+    `processing_call_ids` are moved back to `pending` and re-pumped; the
+    pane-marker check prevents duplicate tmux sends. The only exception is
+    a session whose tmux session itself is gone
     (`ManagedSessionStatus.STOPPED`): the input buffer was destroyed, so
     `_expire_processing_leases` moves the stranded call_ids back to
     `pending_call_ids` for re-delivery.
 
-    The `[call_id:<id>]` marker embedded in the message text lets the worker
-    correlate its ACK to the call_id; it is NOT a dedupe enforcement point —
-    the Hub enforces exactly-once by never re-sending a `processing`
-    call_id to a live tmux inbox.
+    The `[call_id:<id>]` marker embedded in the message text serves two
+    purposes: (1) the worker correlates its ACK to the call_id, and (2) the
+    pump uses it as the dedupe enforcement point on cold recovery (pane
+    capture check). The Hub enforces exactly-once by never re-sending a
+    call_id whose marker is already present in the tmux pane.
     **Durable ACK (call-specific, Hub-enforced)**: when the worker submits
     a report for the task, `create_report` automatically includes the
     dispatch call_id (`f"dispatch:{task_id}"`) in the ACK set — submitting
@@ -177,16 +188,17 @@ Wraps the existing workspace task/session/report flow:
     `task.pending_call_ids` (persisted with the task) and embedded in the
     prompt as a `[call_id:<id>]` marker. It stays in `pending_call_ids`
     until the task is dispatched to a working session, at which point
-    `send_session_message` claims it (`pending → processing`) and sends it
-    to the tmux inbox. For `WORKING`, the session-level three-phase outbox
-    (above) is the durable sender record. A retry with the same `call_id`
-    is a no-op on the sender side if it is already in `delivered_call_ids`
-    (ACKed) or `processing_call_ids` (already in the tmux input buffer).
-    The Hub enforces exactly-once by never re-sending a `processing`
-    call_id to a live tmux session — the tmux input buffer is the durable
-    receiver, and re-sending would produce a duplicate model turn. The
-    `[call_id:<id>]` marker lets the worker correlate its ACK to the
-    call_id; it is not a dedupe enforcement point.
+    `send_session_message` delivers it to the tmux inbox (send-first, with
+    pane-marker dedupe) and then claims it (`pending → processing`). For
+    `WORKING`, the session-level three-phase outbox (above) is the durable
+    sender record. A retry with the same `call_id` is a no-op on the sender
+    side if it is already in `delivered_call_ids` (ACKed) or
+    `processing_call_ids` (already in the tmux input buffer). The Hub
+    enforces exactly-once by checking the tmux pane for the `[call_id:<id>]`
+    marker before sending — if present, the call_id is moved to
+    `processing` without re-sending. The tmux input buffer is the durable
+    receiver. The `[call_id:<id>]` marker lets the worker correlate its ACK
+    to the call_id and lets the pump dedupe on cold recovery.
     **Durable ACK (call-specific, Hub-enforced)**:
     when the worker submits a report for the task, `create_report`
     automatically ACKs the dispatch call_id (`f"dispatch:{task_id}"`) and
@@ -386,6 +398,14 @@ Review attempt 7 failed (1/7 AC passing). Three required fixes were implemented:
   for `wait`. Event injection into the prompt uses
   `since_sequence=root_run.ack_sequence` so only unprocessed events are
   surfaced.
+- **Production `wait`/`ack` cycle**: `_run_resident_agent` now uses
+  `agent_tree.wait(WaitRequest(workspace_id, root_run.id,
+  since_sequence=root_run.ack_sequence, timeout_seconds=1.0))` to fetch
+  directed events since the cursor, instead of `get_events`. After
+  injecting the events into the resident's prompt, it calls
+  `agent_tree.ack(workspace.id, root_run.id, max_seq)` to advance the
+  cursor to the highest delivered sequence. This makes `wait`/`ack` used
+  in the real Resident loop, not just tests.
 
 ### Production E2E (port 8174, worktree backend)
 
@@ -439,23 +459,25 @@ sequence order:
   `last_task_message`). The managed-task adapter persists the call_id in
   `pending_call_ids` (or `processing_call_ids` for `WORKING` tasks)
   atomically with delivery (via `_save_state()`). On crash recovery, a
-  call_id stranded in `processing_call_ids` for a **live** session is
-  **not** re-delivered — it already reached the tmux input buffer, and
-  re-sending would produce a duplicate model turn. The Hub leaves it in
-  `processing_call_ids` for the worker to ACK. Only for sessions whose
-  tmux inbox is gone (`STOPPED`) does `_expire_processing_leases` move the
-  stranded call_ids back to `pending_call_ids` for re-delivery. For
-  `WORKING` tasks, delivery is **exactly-once** at the executor boundary:
+  call_id stranded in `processing_call_ids` is moved back to
+  `pending_call_ids` and re-pumped. The pump checks the tmux pane for the
+  `[call_id:<id>]` marker: if present, the message was already sent before
+  the crash → move to `processing` without re-sending; if absent, send it
+  now. This covers both the pre-send crash (no loss) and post-send crash
+  (no duplicate) windows. Only for sessions whose tmux inbox is gone
+  (`STOPPED`) does `_expire_processing_leases` move the stranded call_ids
+  back to `pending_call_ids` for re-delivery. For `WORKING` tasks,
+  delivery is **exactly-once** at the executor boundary:
   `send_session_message` embeds a `[call_id:<id>]` marker in the message
-  text (for ACK correlation, not dedupe) and the Hub never re-sends a
-  `processing` call_id to a live tmux session. We do NOT inspect tmux pane
-  output to infer delivery — pane text can be cleared, rolled off, or
-  capture can fail, so it is not a durable delivery record. The tmux input
+  text (for ACK correlation AND cold-recovery dedupe). The tmux input
   buffer itself is the durable receiver: once a message is sent to tmux,
-  the worker reads it exactly once. This recovers ALL unmatched followups
-  in sequence order, not just the latest. After replaying followups,
-  recovery still reconciles the run's status via the adapter's
-  `get_status()` (the followup replay does not skip reconciliation).
+  the worker reads it exactly once. The pane-marker check is a best-effort
+  dedupe guard (pane text can be cleared or rolled off), but the
+  `processing_call_ids` set is the durable claim record. This recovers ALL
+  unmatched followups in sequence order, not just the latest. After
+  replaying followups, recovery still reconciles the run's status via the
+  adapter's `get_status()` (the followup replay does not skip
+  reconciliation).
 - Run is `PENDING` with no `context_ref` → retry `adapter.spawn`.
 - Run is `PENDING` with a `context_ref` → set status `RUNNING` (spawn
   succeeded but the outcome persist was lost).
@@ -602,18 +624,27 @@ verifies self-addressed (`recipient=root.id`) wakes the author.
 
 ### 3. Durable receiver pump on cold recovery + cumulative side effects
 
-`recover_pending_runs` pumps only `pending_call_ids` after a crash. It does
-**not** re-deliver `processing_call_ids`:
+`recover_pending_runs` moves stranded `processing_call_ids` back to
+`pending_call_ids` and re-pumps them. The pane-marker check in the pump
+prevents duplicate tmux sends:
 
-1. For every session in the workspace, pump `pending_call_ids`
-   (`_pump_session_messages(session.id)`). These are call_ids that were
-   never sent to tmux.
-2. `processing_call_ids` are left untouched. They were already delivered
-   to the tmux inbox (the call_id only stays in `processing` after a
-   successful tmux send; a failed send rolls it back to `pending`).
-   Re-delivering them would append to the tmux input buffer a second time
-   and produce a duplicate model turn. The worker ACKs them (moving them
-   to `delivered_call_ids`) when it processes them.
+1. For every session in the workspace, move `processing_call_ids` back to
+   `pending_call_ids` (the claim may have been persisted before or after
+   the tmux send — we can't tell without checking the pane).
+2. Pump `pending_call_ids` (`_pump_session_messages(session.id)`). For each
+   call_id, the pump captures the tmux pane and checks for the
+   `[call_id:<id>]` marker:
+   - If present → the message was already sent before the crash; move to
+     `processing` WITHOUT re-sending.
+   - If absent → the message was never sent (crash before send); send it
+     to tmux, then move to `processing`.
+
+This covers both crash windows:
+- **Pre-send crash** (claim persisted, send not done): marker absent →
+  send now. No loss.
+- **Post-send/pre-persist crash** (send done, claim not persisted): the
+  call_id is in `pending` (not `processing`), marker present → skip send.
+  No duplicate.
 
 The only exception is a session whose tmux inbox is gone
 (`ManagedSessionStatus.STOPPED`): `_expire_processing_leases` moves the
@@ -628,9 +659,65 @@ moves a call_id to `delivered`, and the pump skips call_ids in
 **Test**: `test_cumulative_side_effects_before_ack_and_cold_recovery_pump` —
 sends 3 messages (each with a counted, persisted side effect), ACKs only the
 first, adds a 4th message as pending (never sent), then cold-restarts.
-Asserts only the pending (4th) message is delivered (1 side effect); the 2
-unACKed `processing` messages are not re-delivered (they're already in the
-tmux inbox), and the ACKed one is not.
+Asserts the pane-marker check prevents duplicate delivery of the 2 unACKed
+`processing` messages (they're already in the tmux inbox), the 4th pending
+message is delivered once, and the ACKed one is not.
+
+## Review Round 31 Fixes (2026-08-19)
+
+Review attempt 31 failed (3/10 AC passing). The previous fix (73aa665)
+removed duplicate cold replay by converting the pre-send crash window into
+permanent loss. Three required fixes were implemented:
+
+### 1. Receiver-verifiable durable inbox/receipt (no loss, no duplicate)
+
+**Problem**: the pump claimed (pending → processing, persist) *before*
+sending to tmux. A crash between claim and tmux send left the call_id in
+`processing_call_ids` but never sent to tmux. Cold recovery skipped
+`processing` call_ids → permanent message loss.
+
+**Fix**: send-first + pane-marker dedupe. The pump now:
+1. Captures the tmux pane and checks for the `[call_id:<id>]` marker.
+2. If marker present → message was already sent (post-send/pre-persist
+   crash); move to `processing` WITHOUT re-sending.
+3. If marker absent → send to tmux first; on failure leave in `pending`
+   (no claim made, no rollback needed).
+4. After successful send (or marker confirmed), move call_id from
+   `pending` to `processing` and persist.
+
+A per-session `asyncio.Lock` (`self._pump_locks[session_id]`) serializes
+`_pump_session_messages` to prevent concurrent sends of the same call_id.
+
+This covers both crash windows:
+- **Pre-send crash** (claim persisted, send not done): impossible — claim
+  only happens after send succeeds.
+- **Post-send/pre-persist crash** (send done, claim not persisted): call_id
+  stays in `pending`, marker present on recovery → skip send. No duplicate.
+
+### 2. Real Resident cycle using wait/ack
+
+**Problem**: `wait`/`ack` were only called from test code. The production
+Resident loop used `get_events` directly and never advanced the cursor.
+
+**Fix**: `_run_resident_agent` now uses
+`agent_tree.wait(WaitRequest(workspace_id, root_run.id,
+since_sequence=root_run.ack_sequence, timeout_seconds=1.0))` to fetch
+directed events since the cursor. After injecting events into the
+resident's prompt, it calls
+`agent_tree.ack(workspace.id, root_run.id, max_seq)` to advance the cursor
+to the highest delivered sequence.
+
+### 3. ACK-correlated followup result
+
+**Problem**: the `followup:outcome` event was published with
+`delivered: false` but nothing flipped it to `delivered: true`.
+
+**Fix**: `_ack_call_ids` now calls `_emit_followup_delivered_if_followup`
+for each ACKed call_id. This method looks up the call_id in
+`agent_tree._call_record`; if `action == "followup"`, it emits a
+`followup:delivered` event with `payload={"delivered": true,
+"followup_call_id": call_id}`. This correlates the followup delivery
+proof with the worker's ACK.
 
 ## Migration / Rollback Guide
 

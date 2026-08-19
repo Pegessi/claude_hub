@@ -19,17 +19,20 @@ class _MessagingMixin:
 
         The sender does NOT write to tmux directly. Instead it:
           1. Skips call_ids already in ``delivered_call_ids`` (committed by the
-             worker's ACK) or ``processing_call_ids`` (claimed by the receiver
-             pump — already delivered to the tmux inbox).
+             worker's ACK) or ``processing_call_ids`` (already delivered to
+             the tmux inbox by the receiver pump).
           2. Persists the message body in ``session.pending_messages[call_id]``
              (the durable inbox) and appends ``call_id`` to
              ``pending_call_ids``.
           3. Triggers the receiver pump (``_pump_session_messages``).
 
-        The pump performs the actual CLAIM (pending → processing) and the tmux
-        send. Because the claim happens before the tmux write, a duplicate
-        ``send_session_message`` for the same call_id while the pump holds the
-        claim is a no-op.
+        The pump performs the actual delivery: it checks the tmux pane for the
+        ``[call_id:<id>]`` marker (receiver-verifiable receipt), sends the
+        message if the marker is absent, and THEN moves the call_id to
+        ``processing_call_ids``. Because the call_id stays in
+        ``pending_call_ids`` until the tmux send succeeds, a duplicate
+        ``send_session_message`` for the same call_id simply overwrites the
+        pending message body (a no-op for identical payloads).
 
         A call_id stays in ``processing_call_ids`` until the worker ACKs it
         via ``acked_call_ids`` in a report. The tmux input buffer is the
@@ -38,10 +41,13 @@ class _MessagingMixin:
         ``processing`` call_id to a live session — that would append it to
         the tmux buffer a second time and produce a duplicate model turn.
 
-        On Hub restart, only ``pending_call_ids`` (never sent to tmux) are
-        re-deliverable. ``processing_call_ids`` were already written to the
-        tmux inbox and are left for the worker to ACK. The only exception is
-        a session whose tmux session itself is gone
+        On Hub restart, only ``pending_call_ids`` (never sent to tmux, or
+        sent but not yet persisted as processing) are re-deliverable. The
+        pump's pane-marker check ensures that a call_id which was sent but
+        whose processing state was not persisted is NOT re-sent (the marker
+        is already in the pane). ``processing_call_ids`` were already written
+        to the tmux inbox and are left for the worker to ACK. The only
+        exception is a session whose tmux session itself is gone
         (``ManagedSessionStatus.STOPPED``): the input buffer was destroyed,
         so its processing call_ids are moved back to pending for re-delivery.
 
@@ -109,42 +115,69 @@ class _MessagingMixin:
         )
 
     async def _pump_session_messages(self, session_id: str) -> None:
-        """Receiver pump: claim pending call_ids and deliver them to tmux.
+        """Receiver pump: deliver pending call_ids to the tmux inbox exactly once.
 
         Lifecycle of a call_id through the durable receiver gate:
 
-          pending_call_ids  ──claim──▶  processing_call_ids  ──worker-ACK──▶  delivered_call_ids
+          pending_call_ids  ──deliver──▶  processing_call_ids  ──worker-ACK──▶  delivered_call_ids
 
-        1. **Claim**: atomically move the call_id from ``pending_call_ids`` to
-           ``processing_call_ids``. The claim happens BEFORE the tmux write so
-           a concurrent ``send_session_message`` for the same call_id sees it
-           in ``processing_call_ids`` and skips.
+        The tmux input buffer IS the durable receiver: once a message is sent
+        to tmux, the worker reads it exactly once. Therefore the Hub must
+        guarantee that each call_id is written to the tmux buffer exactly
+        once — no loss, no duplicate.
 
-        2. **Deliver**: send the message to tmux. On success, the call_id
-           STAYS in ``processing_call_ids`` — it is now in the tmux input
-           buffer (the durable receiver) awaiting the worker's ACK. The
-           message body stays in ``pending_messages`` until the worker ACKs.
+        **Receiver-verifiable delivery (no loss, no duplicate):**
 
-           If the tmux send fails, the call_id is moved back to
-           ``pending_call_ids`` immediately so the next pump cycle can
-           retry the same call_id (transient retry resumes delivery).
+        For each pending call_id the pump performs the following steps:
 
-        3. **Worker ACK** (``_ack_call_ids``): the worker confirms it
-           processed the message by including the call_id in
-           ``acked_call_ids``. This is the **receiver-verifiable durable
-           receipt**: only the worker's ACK moves the call_id to
-           ``delivered_call_ids`` and removes the message from
-           ``pending_messages``.
+        1. **Pane check**: capture the tmux pane and look for the
+           ``[call_id:<id>]`` marker. If the marker is present, the message
+           was already sent to tmux (a previous pump cycle sent it but
+           crashed before persisting the ``processing`` state). In that case
+           move the call_id to ``processing_call_ids`` WITHOUT re-sending
+           (avoids duplicate).
 
-        **Crash / lease semantics**: the tmux input buffer is the durable
-        receiver. Once a call_id reaches ``processing_call_ids`` (tmux send
-        succeeded), the Hub will NOT re-deliver it to a live session —
-        re-sending would append the message to the tmux buffer a second time
-        and produce a duplicate model turn. Only when the tmux session
-        itself is gone (``ManagedSessionStatus.STOPPED``) is the input
-        buffer destroyed, at which point ``_expire_processing_leases`` moves
-        the stranded call_ids back to ``pending_call_ids`` for re-delivery.
+        2. **Send**: if the marker is NOT present, send the message to tmux.
+           The send is synchronous and verified (``_submit_tmux_message``
+           confirms the input was submitted).
+
+        3. **Persist processing**: after a successful send (or after
+           confirming the marker was already present), move the call_id from
+           ``pending_call_ids`` to ``processing_call_ids`` and persist.
+
+        **Crash windows covered:**
+
+        * Crash before send: marker not in pane → re-send on next cycle (no loss).
+        * Crash after send, before persist: marker in pane → move to
+          processing without re-sending (no duplicate).
+        * Crash after persist: call_id in ``processing_call_ids`` → never
+          re-sent to a live session (no duplicate).
+
+        **Worker ACK** (``_ack_call_ids``): the worker confirms it processed
+        the message by including the call_id in ``acked_call_ids``. Only the
+        worker's ACK moves the call_id to ``delivered_call_ids`` and removes
+        the message from ``pending_messages``.
+
+        **Lease expiry**: for live sessions the message sits in the tmux
+        input buffer awaiting the worker; we never expire processing
+        call_ids. Only when the tmux session itself is gone
+        (``ManagedSessionStatus.STOPPED``) does ``_expire_processing_leases``
+        move stranded call_ids back to ``pending_call_ids`` for re-delivery.
         """
+        session = self.sessions.get(session_id)
+        if not session:
+            return
+
+        # Serialize pump cycles per session so two concurrent calls cannot
+        # both send the same pending call_id to tmux. The pane-marker check
+        # below is the receiver-verifiable dedup; the lock closes the race
+        # window between two concurrent pane checks.
+        lock = self._pump_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            await self._pump_session_messages_locked(session_id)
+
+    async def _pump_session_messages_locked(self, session_id: str) -> None:
+        """Inner pump logic — caller must hold ``self._pump_locks[session_id]``."""
         session = self.sessions.get(session_id)
         if not session:
             return
@@ -174,10 +207,56 @@ class _MessagingMixin:
                 self._ack_call_ids(session.task_id, session_id, [call_id])
                 continue
 
-            # ---- CLAIM: pending → processing ----
-            # Move the call_id from pending to processing on BOTH the session
-            # and its task (if any) so the two stay in sync. The claim is
-            # atomic at the session level; the task mirror follows.
+            # ---- RECEIVER-VERIFIABLE DELIVERY ----
+            # First, check whether the [call_id:<id>] marker is already in
+            # the tmux pane. If it is, the message was sent by a previous
+            # pump cycle that crashed before persisting the processing
+            # state. We must NOT re-send (that would duplicate the model
+            # turn); instead we move the call_id straight to processing.
+            marker = f"[call_id:{call_id}]"
+            already_sent = False
+            try:
+                pane_output = await self._capture_tmux_output(session.tmux_session)
+                already_sent = marker in pane_output
+            except RuntimeError:
+                # Can't inspect the pane (e.g. tmux session gone). Treat as
+                # not-yet-sent and attempt delivery; if the session is dead
+                # the send will fail and we'll roll back.
+                already_sent = False
+
+            if not already_sent:
+                # ---- SEND to tmux ----
+                try:
+                    persisted = self._persist_attachments(
+                        session.workspace_id,
+                        f"{session.id}-message-{uuid.uuid4().hex[:8]}",
+                        [],
+                    )
+                    await self._ensure_session_ready_for_send(self.sessions[session_id])
+                    full_message = f"{marker}\n{message}"
+                    await self._send_tmux_message(
+                        self.sessions[session_id].tmux_session,
+                        self._append_attachment_block(full_message, persisted),
+                    )
+                except Exception:
+                    # Delivery failed. Leave the call_id in pending so the
+                    # next pump cycle can retry the same call_id (transient
+                    # retry resumes delivery). The message body stays in
+                    # pending_messages.
+                    logger.exception(
+                        "pump: failed to deliver call_id=%s to session %s; "
+                        "leaving in pending for retry",
+                        call_id,
+                        session_id,
+                    )
+                    continue
+
+            # ---- PERSIST processing ----
+            # The message is now in the tmux input buffer (either we just
+            # sent it, or we confirmed it was already there from a prior
+            # crashed cycle). Move the call_id from pending to processing
+            # on BOTH the session and its task (if any) so the two stay in
+            # sync.
             now = datetime.now(timezone.utc)
             pending_call_ids = [c for c in session.pending_call_ids if c != call_id]
             processing_call_ids = list(session.processing_call_ids)
@@ -206,38 +285,11 @@ class _MessagingMixin:
                 self.tasks[task.id] = task.model_copy(update=task_update)
             self._save_state()
 
-            # ---- DELIVER: send to tmux ----
-            try:
-                persisted = self._persist_attachments(
-                    session.workspace_id,
-                    f"{session.id}-message-{uuid.uuid4().hex[:8]}",
-                    [],
-                )
-                await self._ensure_session_ready_for_send(self.sessions[session_id])
-                full_message = f"[call_id:{call_id}]\n{message}"
-                await self._send_tmux_message(
-                    self.sessions[session_id].tmux_session,
-                    self._append_attachment_block(full_message, persisted),
-                )
-            except Exception:
-                # Delivery failed. Roll the call_id back to pending
-                # immediately so the next pump cycle can retry the same
-                # call_id (transient retry resumes delivery). The message
-                # body stays in pending_messages.
-                logger.exception(
-                    "pump: failed to deliver call_id=%s to session %s; "
-                    "rolling back to pending for retry",
-                    call_id,
-                    session_id,
-                )
-                self._rollback_processing_to_pending(session.task_id, session_id, [call_id])
-                continue
-
-            # tmux send succeeded. The call_id stays in processing_call_ids,
-            # awaiting the worker's ACK. Only the worker's ACK
-            # (_ack_call_ids) moves it to delivered_call_ids and removes the
-            # message from pending_messages. This preserves the message
-            # until the worker proves receipt.
+            # The call_id stays in processing_call_ids, awaiting the worker's
+            # ACK. Only the worker's ACK (_ack_call_ids) moves it to
+            # delivered_call_ids and removes the message from
+            # pending_messages. This preserves the message until the worker
+            # proves receipt.
 
     def _expire_processing_leases(self, session_id: str, max_age_seconds: float = 300.0) -> int:
         """Move stale ``processing_call_ids`` back to ``pending_call_ids``.

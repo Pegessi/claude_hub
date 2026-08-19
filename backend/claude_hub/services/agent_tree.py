@@ -1699,29 +1699,28 @@ class AgentTreeManager:
         #
         # After a crash, call_ids may be in three states:
         #
-        #   - ``pending_call_ids``: never sent to tmux. These MUST be pumped
-        #     (claimed + delivered) so the worker receives them.
+        #   - ``pending_call_ids``: either never sent to tmux, or sent but
+        #     the processing state was not yet persisted (crash between
+        #     tmux send and save_state). The pump's pane-marker check
+        #     distinguishes the two: if the ``[call_id:<id>]`` marker is
+        #     already in the tmux pane, the call_id was sent and is moved
+        #     to ``processing`` WITHOUT re-sending (no duplicate). If the
+        #     marker is absent, the call_id is sent to tmux (no loss).
         #
-        #   - ``processing_call_ids``: the pump claimed the call_id and the
-        #     tmux send succeeded (the call_id only stays in ``processing``
-        #     after a successful send; a failed send rolls it back to
-        #     ``pending``). These were delivered to the worker's tmux inbox
-        #     and MUST NOT be re-delivered — re-sending would trigger a
-        #     second model turn/effect. The worker will ACK them (moving
-        #     them to ``delivered_call_ids``) when it processes them.
-        #
-        #     The only case where a ``processing`` call_id was NOT actually
-        #     sent is a crash between the claim (save_state) and the tmux
-        #     send. That window is microseconds; the tradeoff for
-        #     exactly-once (no duplicate effects) is accepting this rare
-        #     loss rather than risking broad duplicate delivery.
+        #   - ``processing_call_ids``: the pump confirmed the message is in
+        #     the tmux inbox (either it just sent it, or it found the
+        #     marker from a prior crashed cycle). These were delivered to
+        #     the worker's tmux inbox and MUST NOT be re-delivered —
+        #     re-sending would trigger a second model turn/effect. The
+        #     worker will ACK them (moving them to ``delivered_call_ids``)
+        #     when it processes them.
         #
         #   - ``delivered_call_ids``: ACKed by the worker. NEVER re-deliver.
         #
-        # This is the durable receiver/inbox dedupe: the Hub tracks which
-        # call_ids were delivered to tmux (``processing_call_ids``) and
-        # never sends them again. The ``[call_id:<id>]`` marker in the
-        # message is a hint for the worker, not an enforcement point.
+        # This is the receiver-verifiable durable inbox: the tmux pane
+        # marker is the proof of delivery. The pump checks it before
+        # sending, so a call_id is written to the tmux buffer exactly once
+        # — no loss, no duplicate.
         # ------------------------------------------------------------------
         for session in list(self._wm.sessions.values()):
             if session.workspace_id != workspace_id:

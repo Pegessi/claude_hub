@@ -967,13 +967,24 @@ class _WorkspacesMixin:
         # child progress/blocked/failed/completed via the unified mailbox
         # instead of scanning global task/report APIs. Use the root run's
         # ack_sequence cursor so only unprocessed events are injected.
+        #
+        # We use ``agent_tree.wait`` (the directed cursor ACK mechanism)
+        # rather than ``get_events`` directly: ``wait`` enforces the
+        # Hub-side receiver cursor (``max(since_sequence, ack_sequence)``)
+        # so ACKed events are never re-delivered. After delivering the
+        # events to the resident's prompt, we ``ack`` up to the highest
+        # delivered sequence so the next cycle only fetches new events.
         if root_run is not None:
-            subtree_events = self.agent_tree.get_events(
-                workspace.id,
-                root_run.id,
+            from claude_hub.models.agent_tree import WaitRequest
+
+            wait_req = WaitRequest(
+                workspace_id=workspace.id,
+                recipient_id=root_run.id,
                 since_sequence=root_run.ack_sequence,
                 subtree=True,
+                timeout_seconds=1.0,
             )
+            subtree_events = await self.agent_tree.wait(wait_req)
             if subtree_events:
                 # Keep only the most recent events to avoid bloating the prompt.
                 recent = subtree_events[-20:]
@@ -991,6 +1002,21 @@ class _WorkspacesMixin:
                     "your last cycle. Use them to decide what to do next instead of "
                     "scanning the board:\n" + "\n".join(event_lines) + "\n"
                 )
+                # Advance the resident's ACK cursor to the highest sequence
+                # delivered in this prompt. This is the Hub-side commit: the
+                # events have been handed to the resident (injected into its
+                # prompt), so they are considered processed. The next cycle's
+                # ``wait`` call will only return events with sequence > this
+                # cursor.
+                max_seq = max(ev.sequence for ev in subtree_events)
+                try:
+                    self.agent_tree.ack(workspace.id, root_run.id, max_seq)
+                except Exception:
+                    logger.exception(
+                        "Failed to ack resident root run %s up to sequence %s",
+                        root_run.id,
+                        max_seq,
+                    )
 
         await self.send_session_message(session.id, prompt)
 

@@ -5,48 +5,65 @@
 
 ## Unreleased
 
-### fix: receiver-verifiable durable receipt (pending → processing → ACK → delivered) + REVIEWED task COMPLETED → PROGRESS
+### fix: receiver-verifiable durable receipt (send-first + pane-marker dedupe → processing → ACK → delivered) + Resident wait/ack + followup:delivered
 
-- **What**: the mailbox uses a Hub-owned **receiver pump** that claims a
-  call_id (pending → processing) *before* delivering the message to the
-  worker's tmux pane. The call_id stays in `processing_call_ids` until the
-  worker ACKs it via `acked_call_ids` in its report; only the worker's ACK
-  moves it to `delivered_call_ids` (the **receiver-verifiable durable
-  receipt**). On tmux send failure the call_id is rolled back to
-  `pending_call_ids` immediately so the same call_id retry resumes delivery.
-  On cold restart, call_ids stranded in `processing_call_ids` are moved back
-  to `pending_call_ids` and re-delivered; the worker dedupes by the
-  `[call_id:<id>]` marker. REVIEWED tasks no longer emit a terminal COMPLETED
-  event on the worker's COMPLETED report — only REVIEW_PASSED does.
-- **Why**: the previous design marked call_ids as `delivered` on tmux send
-  success, assuming every recovered `processing` item reached tmux. A crash
-  between the claim and the tmux write was silently lost (the call_id was
-  marked delivered without proof). The worker's ACK is the only proof of
-  receipt, so `delivered` must be gated on it.
+- **What**: the mailbox uses a Hub-owned **receiver pump** that delivers the
+  message to the worker's tmux pane *first* (or confirms it was already sent
+  via the `[call_id:<id>]` pane marker), then claims the call_id
+  (pending → processing). The call_id stays in `processing_call_ids` until
+  the worker ACKs it via `acked_call_ids` in its report; only the worker's
+  ACK moves it to `delivered_call_ids` (the **receiver-verifiable durable
+  receipt**). On tmux send failure the call_id stays in `pending_call_ids`
+  (no claim was made) so the same call_id retry resumes delivery. On cold
+  restart, call_ids stranded in `processing_call_ids` are re-delivered; the
+  pane-marker check prevents duplicate tmux sends. The Resident loop now
+  uses `wait`/`ack` (directed cursor) instead of `get_events`, and a
+  `followup:delivered` event is emitted when the worker ACKs a followup
+  call_id. REVIEWED tasks no longer emit a terminal COMPLETED event on the
+  worker's COMPLETED report — only REVIEW_PASSED does.
+- **Why**: the previous design claimed (pending → processing, persist)
+  *before* sending to tmux. A crash between claim and tmux send left the
+  call_id in `processing` but never sent to tmux, and cold recovery skipped
+  `processing` call_ids → permanent message loss. The fix sends to tmux
+  first (or confirms via pane marker), then persists `processing`. The
+  pane-marker check handles the post-send/pre-persist crash (no duplicate),
+  and the send-first approach handles the pre-send crash (no loss). The
+  worker's ACK is the only proof of receipt, so `delivered` must be gated
+  on it.
 - **How**:
   - `_messaging.py::send_session_message`: for call_id-scoped messages,
     persist the body in `session.pending_messages[call_id]`, append to
     `pending_call_ids`, then kick `_pump_session_messages`. Sender skips
     call_ids already in `processing_call_ids` or `delivered_call_ids`.
-  - `_messaging.py::_pump_session_messages`: atomically moves each pending
-    call_id to `processing_call_ids` (claim), records
-    `processing_call_ids_at[call_id]`, then sends to tmux. On success the
-    call_id stays in `processing` (awaiting ACK); on failure it is rolled
-    back to `pending` for immediate retry. The message body stays in
-    `pending_messages` until ACK.
+  - `_messaging.py::_pump_session_messages`: acquires a per-session lock,
+    then for each pending call_id: (1) capture the tmux pane and check for
+    the `[call_id:<id>]` marker; (2) if marker found → already sent
+    (post-send/pre-persist crash), move to `processing` WITHOUT re-sending;
+    (3) if marker not found → send to tmux; on failure leave in `pending`
+    (no claim made, no rollback needed); (4) after successful send (or
+    marker confirmed), move call_id from `pending` to `processing` and
+    persist. The message body stays in `pending_messages` until ACK.
   - `_messaging.py::_expire_processing_leases`: moves call_ids whose claim
     timestamp is older than `max_age_seconds` back to `pending_call_ids`
-    for re-delivery.
+    for re-delivery (the pane-marker check prevents duplicate sends).
   - `_reports.py::_ack_call_ids`: commit only — moves call_ids from
     `pending`/`processing` to `delivered`, removes the message body from
     `pending_messages`. Unknown call_ids are ignored (future-ID poisoning
     protection). The dispatch call_id (`dispatch:{task_id}`) is implicitly
-    ACKed on any report for that task.
+    ACKed on any report for that task. For each ACKed followup call_id,
+    emits a `followup:delivered` event with `delivered: true`.
+  - `_reports.py::_emit_followup_delivered_if_followup`: looks up the
+    call_id in `agent_tree._call_record`; if `action == "followup"`, emits
+    a `followup:delivered` event correlated to the original followup
+    call_id. This flips the followup outcome from `delivered: false`
+    (published at followup time) to `delivered: true` (worker ACK proof).
   - `_reports.py::_rollback_processing_to_pending`: moves call_ids from
     `processing` back to `pending` on both session and task, clearing
-    `processing_call_ids_at`. Used on tmux send failure and cold recovery.
+    `processing_call_ids_at`. Used on cold recovery (processing lease
+    expiry) — NOT on tmux send failure (call_id stays in pending).
   - `agent_tree.py::recover_pending_runs`: moves stranded `processing`
-    call_ids back to `pending` and re-pumps them (not to `delivered`).
+    call_ids back to `pending` and re-pumps them; the pane-marker check in
+    the pump prevents duplicate tmux sends.
   - `agent_tree.py::load_from_dict`: migrates persisted events with
     `recipient=None` to self-address (`recipient = author`) so the directed
     mailbox filter (`e.recipient == run_id`) still delivers them.
@@ -59,6 +76,12 @@
     sees events where `recipient == run_id`. `wait`/`get_events` use
     `effective_since = max(since_sequence, run.ack_sequence)` so ACKed
     events are never re-delivered.
+  - `_workspaces.py::_run_resident_agent`: the Resident cycle now uses
+    `agent_tree.wait(WaitRequest(...))` (timeout_seconds=1.0) to fetch
+    directed events since the cursor, then calls
+    `agent_tree.ack(workspace.id, root_run.id, max_seq)` to advance the
+    cursor to the highest delivered sequence. This makes `wait`/`ack`
+    used in production, not just tests.
 - **Honesty note**: this guarantees at-least-once delivery of the
   **Hub-managed** effect (the tmux prompt) with worker-side dedupe via the
   `[call_id:<id>]` marker. It does NOT guarantee exactly-once of arbitrary
