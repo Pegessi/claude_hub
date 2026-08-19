@@ -297,17 +297,20 @@ class AgentTreeManager:
         return event, True
 
     def _wake_for_run(self, agent_run_id: str, recipient: Optional[str]) -> None:
-        """Wake waiters on the run and its ancestors, plus the recipient.
+        """Wake only the named mailbox recipient.
 
-        Extracted from ``_append_event`` so callers that batch multiple
-        in-memory mutations with ``persist=False`` can wake waiters after
-        the single batched ``_persist()`` succeeds.
+        With recipient-directed mailbox reads, a run only sees events where
+        ``recipient == run_id`` (or self-addressed events where
+        ``recipient is None and author == run_id``). Therefore only the
+        named recipient needs to be woken; waking ancestors would cause
+        spurious wakeups for runs that cannot see the event.
+
+        If ``recipient`` is None the event is self-addressed, so wake the
+        author run (``agent_run_id``).
         """
-        run = self._runs.get(agent_run_id)
-        if run is not None:
-            self._wake_ancestors(run)
-        if recipient:
-            ev = self._run_events.get(recipient)
+        wake_target = recipient if recipient else agent_run_id
+        if wake_target:
+            ev = self._run_events.get(wake_target)
             if ev is not None:
                 ev.set()
 
@@ -1470,21 +1473,15 @@ class AgentTreeManager:
         # agent tree event was not (crash between the two persists).
         # emit_event is idempotent on call_id=f"report:{report.id}", so
         # re-emitting is safe.
+        #
+        # The mapping MUST be reviewed-aware: for REVIEWED tasks, the
+        # worker's COMPLETED report does NOT terminate the run — it maps to
+        # PROGRESS (the run waits for the reviewer). Only REVIEW_PASSED
+        # emits the terminal COMPLETED event. This mirrors
+        # _bridge_report_to_agent_event in _reports.py.
         from ..models.agent_tree import ExecutorKind
-        from ..models.schemas import AgentReportState
+        from ..models.schemas import AgentReportState, WorkspaceTaskMode
 
-        report_state_map = {
-            AgentReportState.STARTED: AgentEventType.STARTED,
-            AgentReportState.WORKING: AgentEventType.PROGRESS,
-            AgentReportState.BLOCKED: AgentEventType.BLOCKED,
-            AgentReportState.NEEDS_INPUT: AgentEventType.APPROVAL_REQUIRED,
-            AgentReportState.READY_FOR_REVIEW: AgentEventType.PROGRESS,
-            AgentReportState.COMPLETED: AgentEventType.COMPLETED,
-            AgentReportState.REVIEW_STARTED: AgentEventType.PROGRESS,
-            AgentReportState.REVIEW_PASSED: AgentEventType.COMPLETED,
-            AgentReportState.REVIEW_FAILED: AgentEventType.PROGRESS,
-            AgentReportState.REVIEW_NEEDS_INPUT: AgentEventType.BLOCKED,
-        }
         for run in list(self._runs.values()):
             if run.workspace_id != workspace_id:
                 continue
@@ -1493,6 +1490,25 @@ class AgentTreeManager:
             task_id = run.context_ref
             if not task_id:
                 continue
+            task = self._wm.tasks.get(task_id)
+            is_reviewed = task is not None and task.task_mode == WorkspaceTaskMode.REVIEWED
+
+            report_state_map = {
+                AgentReportState.STARTED: AgentEventType.STARTED,
+                AgentReportState.WORKING: AgentEventType.PROGRESS,
+                AgentReportState.BLOCKED: AgentEventType.BLOCKED,
+                AgentReportState.NEEDS_INPUT: AgentEventType.APPROVAL_REQUIRED,
+                AgentReportState.READY_FOR_REVIEW: AgentEventType.PROGRESS,
+                # REVIEWED: worker COMPLETED -> PROGRESS (wait for reviewer).
+                # DIRECT: worker COMPLETED -> COMPLETED (terminal).
+                AgentReportState.COMPLETED: (
+                    AgentEventType.PROGRESS if is_reviewed else AgentEventType.COMPLETED
+                ),
+                AgentReportState.REVIEW_STARTED: AgentEventType.PROGRESS,
+                AgentReportState.REVIEW_PASSED: AgentEventType.COMPLETED,
+                AgentReportState.REVIEW_FAILED: AgentEventType.PROGRESS,
+                AgentReportState.REVIEW_NEEDS_INPUT: AgentEventType.BLOCKED,
+            }
             for report in self._wm.reports.values():
                 if report.workspace_id != workspace_id:
                     continue
@@ -1649,3 +1665,37 @@ class AgentTreeManager:
             except Exception:
                 logger.exception("Failed to recover pending run %s", run.id)
                 self._update_run_status(run.id, AgentRunStatus.FAILED)
+
+        # ------------------------------------------------------------------
+        # Durable receiver pump on cold recovery.
+        #
+        # After a crash, call_ids may be stranded in ``processing_call_ids``
+        # (the pump claimed them but the worker never ACKed, or the Hub
+        # crashed mid-delivery) or sitting in ``pending_call_ids`` (never
+        # pumped). Re-deliver them:
+        #
+        #   1. Expire stale processing leases (move processing -> pending)
+        #      so a crashed pump's claim is released.
+        #   2. Pump all pending call_ids (claim + deliver to tmux).
+        #
+        # The receiver dedupe gate (``delivered_call_ids``) ensures a call_id
+        # that the worker already ACKed is not re-delivered: the pump skips
+        # call_ids in ``delivered_call_ids``, and ``_ack_call_ids`` is the
+        # only path that moves a call_id to ``delivered``.
+        # ------------------------------------------------------------------
+        for session in list(self._wm.sessions.values()):
+            if session.workspace_id != workspace_id:
+                continue
+            if not session.pending_call_ids and not session.processing_call_ids:
+                continue
+            # Release any stale claims so they become re-deliverable.
+            self._wm._expire_processing_leases(session.id, max_age_seconds=0)
+            # Re-pump everything that is now pending.
+            if self._wm.sessions[session.id].pending_call_ids:
+                try:
+                    await self._wm._pump_session_messages(session.id)
+                except Exception:
+                    logger.exception(
+                        "Failed to pump pending messages for session %s during recovery",
+                        session.id,
+                    )
