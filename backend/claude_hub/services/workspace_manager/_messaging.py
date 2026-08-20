@@ -12,22 +12,32 @@ four states:
 
   pending ──persist intent──▶ processing (in-flight) ──worker ACK──▶ delivered
      │                              │
-     │         send failed          │  crash / tmux session gone
-     └──────────────────────────────┤
+     │         send failed          │  STOPPED session / tmux gone
+     └──────────────────────────────┤  (receipt unqueryable)
                                     ▼
                               uncertain (fail-closed)
+
+  For LIVE (WORKING) sessions, ``processing`` call_ids are reconciled
+  against the tmux-server receipt on cold start / monitor tick:
+    * receipt present  → stay in ``processing`` (no repaste, await ACK)
+    * receipt absent   → move back to ``pending`` (one safe re-delivery)
+    * session gone     → move to ``uncertain`` (fail-closed)
 
 * ``pending_call_ids``: message persisted in ``pending_messages``, not yet
   sent to tmux. Always re-deliverable on restart.
 * ``processing_call_ids``: the intent to deliver was persisted (call_id
   moved out of pending) and the pump is sending / has sent the message to
   tmux, but the worker has not ACKed. "Maybe delivered" — we cannot prove
-  the message reached the tmux input buffer.
+  the message reached the tmux input buffer. On cold restart, LIVE sessions
+  keep the call_id here for receipt-based reconciliation; STOPPED sessions
+  move it to ``uncertain``.
 * ``uncertain_call_ids``: the call_id was in-flight when the Hub crashed or
-  the tmux session disappeared. Fail-closed: we do NOT auto-resend (could
-  duplicate) and do NOT silently mark delivered (could lose). A
-  ``delivery:uncertain`` event is emitted to the supervisor. Moves to
-  delivered on worker ACK, or back to pending on explicit operator retry.
+  the tmux session disappeared (STOPPED/gone, receipt unqueryable).
+  Fail-closed: we do NOT auto-resend (could duplicate) and do NOT silently
+  mark delivered (could lose). A ``delivery:uncertain`` event is emitted to
+  the supervisor. Moves to delivered on worker ACK, or back to pending on
+  explicit operator retry (``retry_uncertain_delivery``) only if the tmux
+  session is alive and the receipt is absent.
 * ``delivered_call_ids``: the worker ACKed the call_id (listed it in
   ``acked_call_ids`` of a report). Only the worker's ACK moves a call_id
   here.
@@ -37,6 +47,58 @@ can correlate its ACK. It is NOT used by the Hub as a receipt or dedup
 basis — tmux pane history is not durable (markers roll out of the scroll
 buffer), so relying on it for cold-recovery dedup would produce duplicate
 deliveries.
+
+**Duplicate delivery and platform-provided durable dedupe:**
+
+The Hub provides durable dedupe through three mechanisms; the worker does
+NOT need to keep a conversational or scratch-file processed-call list:
+
+1. **Sender-side state machine.** A call_id is always in exactly one of
+   ``pending``, ``processing``, ``delivered``, or ``uncertain``. The
+   sender skips call_ids already in ``processing``, ``delivered``, or
+   ``uncertain`` — they are never re-enqueued. This is durable across Hub
+   restarts because the state is persisted in ``state.json``.
+
+2. **tmux-server receipt (sender-side fence for a live session).** The
+   receipt-aware delivery primitive (``_send_tmux_message_with_receipt``)
+   records a tmux session user option atomically with the paste+submit. A
+   later replay of the same call_id on the *same* tmux session sees the
+   receipt and skips the paste — at-most-once paste per call_id per tmux
+   session lifetime. The receipt is scoped to the tmux session; it does
+   not survive a destroyed/recreated session.
+
+3. **Receipt-gated re-delivery for LIVE sessions; fail-closed for gone
+   sessions.** For a LIVE (WORKING) session, ``_recover_processing_via_receipt``
+   queries the tmux-server receipt:
+     * receipt present → stay in ``processing``, no repaste (await ACK).
+     * receipt absent → move to ``pending`` for **one** safe re-delivery.
+   If the tmux session is gone / unqueryable (or STOPPED) when a call_id
+   is in ``processing`` or ``uncertain``, the call_id moves to (or stays
+   in) ``uncertain`` and is NOT automatically re-delivered. Only the
+   explicit operator-facing ``retry_uncertain_delivery`` endpoint may
+   move it back to ``pending``, and only if the tmux session is alive
+   and the receipt is absent. If the receipt is present (the paste
+   already happened), the retry does NOT re-paste — it just ensures the
+   already-pasted input is submitted and waits for the worker's ACK.
+
+**Worker ACK is the durable commit.** A call_id only leaves
+``processing_call_ids`` (or ``uncertain_call_ids`` after a receipt-present
+retry) when the worker ACKs it by listing it in ``acked_call_ids`` of a
+report. The ACK moves the call_id to ``delivered_call_ids``, from which it
+is never re-sent. The ``[call_id:<id>]`` marker embedded in the message
+body lets the worker correlate its ACK; it is NOT used by the Hub as a
+receipt or dedup basis.
+
+Because tmux stdin is not a verifiable durable receiver, an explicit
+operator retry of an ``uncertain`` call_id MAY deliver the same message
+to the worker twice (if the first ambiguous send actually succeeded and
+the tmux session was recreated). This is an explicitly documented,
+human-authorized consequence of the fail-closed uncertainty model — we
+do NOT claim exactly-once effects. The Hub's guarantee is at-least-once
+delivery with fail-closed uncertainty and platform-provided dedupe within
+a single tmux session lifetime; exactly-once *effects* across session
+recreation require the operator to verify the worker state before
+retrying.
 """
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
@@ -68,94 +130,185 @@ class _MessagingMixin:
         The pump performs the actual delivery: it persists the intent
         (pending → processing) BEFORE sending to tmux. On send success the
         call_id stays in ``processing_call_ids`` (in-flight, awaiting the
-        worker's ACK). On send failure it rolls back to ``pending_call_ids``
-        for retry.
+        worker's ACK). On a **pre-side-effect** failure (tmux write not
+        attempted) the call_id rolls back to ``pending_call_ids`` for retry.
+        On an **ambiguous** failure (tmux write may have succeeded) the
+        call_id moves to ``uncertain_call_ids`` (fail-closed: no auto-retry,
+        no silent delivered); only ``retry_uncertain_delivery`` may move it
+        back to ``pending``.
 
         A call_id only leaves ``processing_call_ids`` when:
           * the worker ACKs it (→ ``delivered_call_ids``), or
-          * the Hub crashes / tmux session is gone (→ ``uncertain_call_ids``,
-            fail-closed).
+          * the session is STOPPED / tmux gone at cold start
+            (→ ``uncertain_call_ids``, fail-closed), or
+          * receipt-based reconciliation on a LIVE session finds the receipt
+            absent (→ ``pending_call_ids`` for one safe re-delivery).
+          (Receipt present → stays in ``processing``, no repaste.)
         """
         session = self.sessions.get(session_id)
         if not session:
             raise KeyError(session_id)
 
         if call_id:
-            # Sender-side gate: skip call_ids that are already in-flight
-            # (processing), uncertain, or committed (delivered). In all
-            # cases delivery is already in flight or done, so the sender
-            # must NOT enqueue again.
-            if call_id in session.delivered_call_ids:
-                logger.debug(
-                    "send_session_message call_id=%s already committed by session %s; skipping",
-                    call_id,
-                    session_id,
-                )
-                return
-            if call_id in session.processing_call_ids:
-                logger.debug(
-                    "send_session_message call_id=%s already in-flight for session %s; skipping",
-                    call_id,
-                    session_id,
-                )
-                return
-            if call_id in session.uncertain_call_ids:
-                # Explicit retry: the caller is re-sending a call_id that was
-                # previously marked delivery-uncertain (ambiguous tmux send
-                # failure). Move it back to pending on both the session and
-                # its bound task so the pump can re-deliver the original
-                # payload (preserved in pending_messages). This is the
-                # task-dispatch retry path; the operator-facing retry is
-                # retry_uncertain_delivery which also emits a durable audit
-                # event.
-                logger.info(
-                    "send_session_message call_id=%s was uncertain for session %s; "
-                    "explicit retry requested; moving back to pending",
-                    call_id,
-                    session_id,
-                )
-                uncertain = [c for c in session.uncertain_call_ids if c != call_id]
-                pending = list(session.pending_call_ids)
-                if call_id not in pending:
-                    pending.append(call_id)
-                session_update = {
-                    "uncertain_call_ids": uncertain,
-                    "pending_call_ids": pending,
-                }
-                task = self.tasks.get(session.task_id) if session.task_id else None
-                if task is not None and call_id in task.uncertain_call_ids:
-                    task_uncertain = [c for c in task.uncertain_call_ids if c != call_id]
-                    task_pending = list(task.pending_call_ids)
-                    if call_id not in task_pending:
-                        task_pending.append(call_id)
-                    self.tasks[task.id] = task.model_copy(
-                        update={
-                            "uncertain_call_ids": task_uncertain,
-                            "pending_call_ids": task_pending,
-                        }
+            # Compute the canonical payload fingerprint (message text +
+            # per-attachment filename, normalized mime, and sha256 of the
+            # decoded bytes). This is done BEFORE any filesystem or state
+            # mutation so a conflicting-payload send is rejected without
+            # touching disk.
+            new_fp = self._compute_payload_fingerprint(message, attachments or [])
+
+            # Fingerprint-first immutable-payload check. A call_id identifies
+            # a single durable delivery; reusing it with a different payload
+            # is rejected at EVERY state (pending / processing / delivered /
+            # uncertain). Only the identical payload is idempotent.
+            #
+            # Recovery paths that rebuild the prompt (which may drift) must
+            # NOT go through send_session_message — they use
+            # resume_existing_call, which operates on the persisted envelope
+            # without comparing fingerprints.
+            existing_fp = session.call_payload_fingerprints.get(call_id)
+
+            # ------------------------------------------------------------------
+            # Legacy backfill: a call_id may be present in a state list
+            # (pending / processing / delivered / uncertain) but have no
+            # entry in call_payload_fingerprints if it was persisted before
+            # the fingerprint field was introduced.
+            #
+            # We must NOT silently treat such a call_id as "absent" and
+            # overwrite its envelope. Instead:
+            #   * pending / processing / uncertain with a stored message +
+            #     attachments: derive the fingerprint from the STORED
+            #     envelope, backfill it, then run the normal
+            #     fingerprint-vs-new-payload comparison.
+            #   * delivered with no retained payload: the worker already
+            #     ACKed it; fail closed by treating it as delivered (no-op)
+            #     — we never re-send a delivered call_id.
+            #   * inconsistent (call_id in a non-delivered state list but no
+            #     stored envelope): fail closed — raise, never treat as new.
+            # ------------------------------------------------------------------
+            in_any_state = (
+                call_id in session.pending_call_ids
+                or call_id in session.processing_call_ids
+                or call_id in session.delivered_call_ids
+                or call_id in session.uncertain_call_ids
+            )
+            if existing_fp is None and in_any_state:
+                stored_msg = session.pending_messages.get(call_id)
+                stored_atts = session.pending_attachments.get(call_id)
+                if stored_msg is not None:
+                    # We have the stored envelope — derive its fingerprint
+                    # from the persisted attachment files (not data_url) and
+                    # backfill it so the immutable-payload invariant applies
+                    # from now on. Fail closed if any persisted file is
+                    # missing/corrupt.
+                    existing_fp = self._compute_persisted_payload_fingerprint(
+                        stored_msg, stored_atts or []
                     )
-                self.sessions[session_id] = session.model_copy(update=session_update)
-                self._save_state()
-                await self._pump_session_messages(session_id)
-                session = self.sessions[session_id]
+                    fps = dict(session.call_payload_fingerprints)
+                    fps[call_id] = existing_fp
+                    self.sessions[session_id] = session.model_copy(
+                        update={"call_payload_fingerprints": fps}
+                    )
+                    self._save_state()
+                    session = self.sessions[session_id]
+                elif call_id in session.delivered_call_ids:
+                    # Delivered but no retained payload (legacy). The worker
+                    # already ACKed it; fail closed as delivered no-op. We
+                    # cannot verify the payload matches, so we never re-send.
+                    logger.debug(
+                        "send_session_message call_id=%s delivered (legacy, "
+                        "no fingerprint/payload); no-op",
+                        call_id,
+                    )
+                    return
+                else:
+                    # Inconsistent: call_id in a non-delivered state list but
+                    # no recoverable envelope. Fail closed — never treat as
+                    # a new delivery.
+                    raise RuntimeError(
+                        f"inconsistent state: call_id={call_id} present in "
+                        f"session {session_id} state lists but has no stored "
+                        "envelope and no fingerprint"
+                    )
+
+            if existing_fp is not None:
+                if new_fp != existing_fp:
+                    raise ValueError(
+                        f"call_id {call_id} already used with a different "
+                        "payload; cannot mutate a committed delivery. Use a "
+                        "new call_id for a different message."
+                    )
+                # Identical payload: idempotent. State decides the action.
                 if call_id in session.uncertain_call_ids:
                     raise DeliveryUncertain(
-                        f"delivery of call_id={call_id} to session {session_id} "
-                        "remains uncertain after retry; operator intervention required"
+                        f"delivery of call_id={call_id} to session {session_id} is "
+                        "uncertain (ambiguous tmux send failure); explicit operator "
+                        "retry required via retry_uncertain_delivery"
                     )
-                return
+                if call_id in session.pending_call_ids:
+                    # Same payload, still pending: pump the stored envelope.
+                    await self._pump_session_messages(session_id)
+                    session = self.sessions[session_id]
+                    if call_id in session.uncertain_call_ids:
+                        raise DeliveryUncertain(
+                            f"delivery of call_id={call_id} to session {session_id} is "
+                            "uncertain (ambiguous tmux send failure); operator retry "
+                            "required"
+                        )
+                    return
+                if call_id in session.processing_call_ids:
+                    logger.debug(
+                        "send_session_message call_id=%s already in-flight for "
+                        "session %s; skipping",
+                        call_id,
+                        session_id,
+                    )
+                    return
+                if call_id in session.delivered_call_ids:
+                    # Committed delivery: identical payload is idempotent no-op.
+                    logger.debug(
+                        "send_session_message call_id=%s already committed by "
+                        "session %s; skipping",
+                        call_id,
+                        session_id,
+                    )
+                    return
+                # Inconsistent: a fingerprint exists for this call_id but it is
+                # not in any state list (pending / processing / delivered /
+                # uncertain). Fail closed rather than silently discarding the
+                # request or treating it as a new delivery.
+                raise RuntimeError(
+                    f"inconsistent state: call_id={call_id} has a stored "
+                    f"fingerprint in session {session_id} but is absent from "
+                    "all delivery state lists (pending/processing/delivered/"
+                    "uncertain)"
+                )
 
-            # Persist the message in the durable inbox and record the call_id
-            # as pending. If already pending, do not duplicate.
+            # call_id has no stored fingerprint — first send to this session.
+            # Persist attachments using a safe owner id (sha256 of the
+            # call_id) rather than the raw call_id, which may contain "/" or
+            # ".." and escape the attachments directory.
+            safe_owner = self._safe_attachment_owner_id(session.id, call_id)
+            persisted = self._persist_attachments(
+                session.workspace_id,
+                safe_owner,
+                attachments or [],
+            )
             pending_messages = dict(session.pending_messages)
             pending_messages[call_id] = message
+            pending_attachments = dict(session.pending_attachments)
+            pending_attachments[call_id] = persisted
             pending_call_ids = list(session.pending_call_ids)
             if call_id not in pending_call_ids:
                 pending_call_ids.append(call_id)
+            call_payload_fingerprints = dict(session.call_payload_fingerprints)
+            call_payload_fingerprints[call_id] = new_fp
             self.sessions[session_id] = session.model_copy(
                 update={
                     "pending_messages": pending_messages,
+                    "pending_attachments": pending_attachments,
                     "pending_call_ids": pending_call_ids,
+                    "call_payload_fingerprints": call_payload_fingerprints,
                 }
             )
             self._save_state()
@@ -190,6 +343,77 @@ class _MessagingMixin:
             self._append_attachment_block(message, persisted),
         )
 
+    async def resume_existing_call(
+        self,
+        session_id: str,
+        call_id: str,
+    ) -> bool:
+        """Resume a previously-persisted call_id using its stored envelope.
+
+        Recovery-only path. Unlike :meth:`send_session_message`, this does
+        NOT accept a new payload and does NOT compare fingerprints. It
+        operates solely on the persisted envelope so that a rebuilt prompt
+        (which may drift due to lesson context, timestamps, etc.) never
+        overwrites the original delivery.
+
+        State semantics:
+
+        * ``pending``    — pump the stored payload to tmux.
+        * ``processing`` — no-op (already in flight).
+        * ``delivered``  — no-op (already ACKed by the worker).
+        * ``uncertain``  — raise :class:`DeliveryUncertain` (operator retry
+          only; no silent auto-resend).
+        * ``absent``     — return ``False`` so the caller knows a fresh send
+          via :meth:`send_session_message` is required.
+
+        Returns ``True`` if the call_id was found and handled (pumped or
+        no-op), ``False`` if it is absent.
+        """
+        if session_id not in self.sessions:
+            raise KeyError(f"session {session_id} not found")
+        session = self.sessions[session_id]
+
+        if call_id in session.uncertain_call_ids:
+            raise DeliveryUncertain(
+                f"delivery of call_id={call_id} to session {session_id} is "
+                "uncertain (ambiguous tmux send failure); operator retry "
+                "required"
+            )
+
+        if call_id in session.pending_call_ids:
+            logger.debug(
+                "resume_existing_call call_id=%s pending; pumping stored " "envelope",
+                call_id,
+            )
+            await self._pump_session_messages(session_id)
+            session = self.sessions[session_id]
+            if call_id in session.uncertain_call_ids:
+                raise DeliveryUncertain(
+                    f"delivery of call_id={call_id} to session {session_id} is "
+                    "uncertain (ambiguous tmux send failure); operator retry "
+                    "required"
+                )
+            return True
+
+        if call_id in session.processing_call_ids:
+            logger.debug(
+                "resume_existing_call call_id=%s already in-flight for " "session %s; no-op",
+                call_id,
+                session_id,
+            )
+            return True
+
+        if call_id in session.delivered_call_ids:
+            logger.debug(
+                "resume_existing_call call_id=%s already committed by " "session %s; no-op",
+                call_id,
+                session_id,
+            )
+            return True
+
+        # call_id absent from all state lists.
+        return False
+
     async def _pump_session_messages(self, session_id: str) -> None:
         """Receiver pump: deliver pending call_ids to the tmux inbox.
 
@@ -218,8 +442,15 @@ class _MessagingMixin:
            (in-flight, awaiting the worker's ACK). We do NOT move it to
            delivered — only the worker's ACK does that.
 
-        4. **On failure**: roll the call_id back to ``pending_call_ids`` so
-           the next pump cycle can retry.
+        4. **On failure**:
+           - **Pre-side-effect** (exception before the tmux write, e.g.
+             ``_ensure_session_ready_for_send`` fails): roll the call_id back
+             to ``pending_call_ids`` so the next pump cycle can retry.
+           - **Ambiguous** (exception inside ``_send_tmux_message``): the tmux
+             write may have succeeded. Fail closed: move the call_id to
+             ``uncertain_call_ids`` (no auto-retry, no silent delivered).
+             Only ``retry_uncertain_delivery`` may move it back to
+             ``pending``.
 
         **Why no pane-marker dedup:**
 
@@ -266,14 +497,44 @@ class _MessagingMixin:
 
             message = session.pending_messages.get(call_id)
             if message is None:
-                # Inbox entry missing — should not happen, but guard against
-                # it. Move to delivered to avoid an infinite loop.
-                logger.warning(
-                    "pump: call_id=%s in pending_call_ids but missing from pending_messages; "
-                    "marking delivered",
+                # Inbox entry missing — data integrity error. We cannot
+                # deliver a message whose body we no longer have, and we
+                # MUST NOT silently mark it delivered (the worker never
+                # received it). Fail closed: move the call_id from pending
+                # to uncertain_call_ids and emit a delivery:uncertain event
+                # so an operator can investigate. The call_id is NOT
+                # re-deliverable (no body) but stays visible as uncertain.
+                logger.error(
+                    "pump: call_id=%s in pending_call_ids but missing from "
+                    "pending_messages; moving to uncertain (fail-closed, "
+                    "no silent delivered)",
                     call_id,
                 )
-                self._ack_call_ids(session.task_id, session_id, [call_id])
+                pending_call_ids = [c for c in session.pending_call_ids if c != call_id]
+                uncertain = list(session.uncertain_call_ids)
+                if call_id not in uncertain:
+                    uncertain.append(call_id)
+                self.sessions[session_id] = session.model_copy(
+                    update={
+                        "pending_call_ids": pending_call_ids,
+                        "uncertain_call_ids": uncertain,
+                    }
+                )
+                # Mirror on the task if bound.
+                task = self.tasks.get(session.task_id) if session.task_id else None
+                if task is not None and call_id in task.pending_call_ids:
+                    task_pending = [c for c in task.pending_call_ids if c != call_id]
+                    task_uncertain = list(task.uncertain_call_ids)
+                    if call_id not in task_uncertain:
+                        task_uncertain.append(call_id)
+                    self.tasks[task.id] = task.model_copy(
+                        update={
+                            "pending_call_ids": task_pending,
+                            "uncertain_call_ids": task_uncertain,
+                        }
+                    )
+                self._save_state()
+                self._emit_delivery_uncertain(session.workspace_id, session_id, call_id)
                 continue
 
             # ---- PERSIST INTENT BEFORE SIDE EFFECT ----
@@ -315,11 +576,11 @@ class _MessagingMixin:
             # It is NOT used by the Hub as a receipt or dedup basis.
             marker = f"[call_id:{call_id}]"
             try:
-                persisted = self._persist_attachments(
-                    session.workspace_id,
-                    f"{session.id}-message-{uuid.uuid4().hex[:8]}",
-                    [],
-                )
+                # Attachments were already persisted by send_session_message
+                # into session.pending_attachments[call_id]. Retrieve them
+                # here so the delivered message includes the attachment
+                # block. We do NOT re-persist (that would duplicate files).
+                persisted = session.pending_attachments.get(call_id, [])
                 await self._ensure_session_ready_for_send(self.sessions[session_id])
                 full_message = f"{marker}\n{message}"
                 full_message = self._append_attachment_block(full_message, persisted)
@@ -337,9 +598,15 @@ class _MessagingMixin:
                 continue
 
             try:
-                await self._send_tmux_message(
+                # Use the receipt-aware delivery primitive. The tmux server
+                # records a receipt (session user option) atomically with the
+                # paste+submit, so a later replay of the same call_id sees the
+                # receipt and skips the paste (at-most-once paste per call_id
+                # per tmux session lifetime).
+                await self._send_tmux_message_with_receipt(
                     self.sessions[session_id].tmux_session,
                     full_message,
+                    call_id,
                 )
             except Exception:
                 # Ambiguous failure: the tmux write MAY have succeeded before
@@ -414,6 +681,82 @@ class _MessagingMixin:
 
         self._mark_processing_as_uncertain(session_id, expired)
         return len(expired)
+
+    async def _recover_processing_via_receipt(self, session_id: str) -> int:
+        """Reconcile ``processing_call_ids`` against the tmux-server receipt.
+
+        After a Hub restart (or on each monitor tick), a call_id in
+        ``processing_call_ids`` may or may not have actually been pasted into
+        the tmux input buffer. The tmux-server receipt (a session user option
+        set atomically with the paste) lets us distinguish:
+
+        * **receipt present** — the paste happened. Keep the call_id in
+          ``processing`` and wait for the worker's ACK. Do NOT re-deliver.
+        * **receipt absent, tmux session alive** — the paste did NOT happen
+          (the Hub died before the tmux command ran, or the command failed
+          before setting the receipt). Safe to move the call_id back to
+          ``pending`` so the pump re-delivers it.
+        * **tmux session gone / unqueryable** — we cannot prove either way.
+          Fail closed: move to ``uncertain`` (no automatic resend; operator
+          retry required).
+
+        Returns the number of call_ids whose state changed.
+        """
+        session = self.sessions.get(session_id)
+        if not session or not session.processing_call_ids:
+            return 0
+
+        to_pending: list[str] = []
+        to_uncertain: list[str] = []
+
+        for call_id in list(session.processing_call_ids):
+            try:
+                receipt_set = await self._query_tmux_receipt(session.tmux_session, call_id)
+            except RuntimeError:
+                # Session gone or tmux query failed — fail closed.
+                to_uncertain.append(call_id)
+                continue
+            if receipt_set:
+                # Paste happened. The message may still be sitting in the
+                # input box if the Hub died between the atomic paste+first
+                # C-m and the submit verification loop. Nudge Enter (no
+                # re-paste) so the TUI accepts it, then keep the call_id
+                # in processing to await the worker's ACK.
+                message = session.pending_messages.get(call_id)
+                if not message:
+                    # Fail closed: without the original message body we
+                    # cannot verify whether the input is still pending,
+                    # and a blind C-m could submit an unrelated line.
+                    # Move to uncertain so an operator can decide.
+                    to_uncertain.append(call_id)
+                    continue
+                try:
+                    await self._ensure_submitted_without_repaste(session.tmux_session, message)
+                except Exception:
+                    # Cannot verify submit state (capture failed or input
+                    # still pending after retries). Fail closed: move to
+                    # uncertain so an operator can decide. The receipt
+                    # remains set so no future replay re-pastes.
+                    logger.exception(
+                        "pump: submit-nudge failed for receipt-present call_id=%s "
+                        "session %s; moving to uncertain",
+                        call_id,
+                        session_id,
+                    )
+                    to_uncertain.append(call_id)
+                continue
+            # Receipt absent on a live session: the paste never ran. Safe to
+            # return to pending for re-delivery.
+            to_pending.append(call_id)
+
+        changed = 0
+        if to_pending:
+            self._rollback_processing_to_pending(session.task_id, session_id, to_pending)
+            changed += len(to_pending)
+        if to_uncertain:
+            self._mark_processing_as_uncertain(session_id, to_uncertain)
+            changed += len(to_uncertain)
+        return changed
 
     def _mark_processing_as_uncertain(self, session_id: str, call_ids: list[str]) -> None:
         """Move call_ids from ``processing_call_ids`` to ``uncertain_call_ids``.
@@ -556,8 +899,14 @@ class _MessagingMixin:
         audit event is emitted. If the event emission fails, the state is
         compensated back to ``uncertain`` and the method raises — no tmux
         send occurs. Only after the audit event is durable does the pump run
-        through the normal delivery path. If the re-send hits another
-        ambiguous failure, the call_id returns to ``uncertain_call_ids``.
+        through the normal delivery path.
+
+        After the pump, the session state is re-checked. If the call_id
+        landed back in ``uncertain_call_ids`` (the re-send hit another
+        ambiguous tmux failure), ``DeliveryUncertain`` is raised so the
+        caller surfaces a visible failure (HTTP 400) instead of a false
+        HTTP 204 success. The uncertain state and original payload are
+        preserved for another explicit operator retry.
         """
         session = self.sessions.get(session_id)
         if session is None:
@@ -611,6 +960,176 @@ class _MessagingMixin:
                     f"{session_id} but not on bound task {task.id}; "
                     "cannot retry due to session/task state divergence"
                 )
+
+        # ---- Receipt query: decide whether a second paste is safe ----
+        # The tmux-server receipt tells us whether the original paste
+        # actually happened. This is the single source of truth for
+        # "did the message reach the tmux input buffer":
+        #
+        #   * receipt present  -> the paste ran. Do NOT paste again.
+        #                        Move call_id to processing and wait for
+        #                        the worker's ACK.
+        #   * receipt absent   -> the paste never ran (Hub died before
+        #                        the tmux command, or the command failed
+        #                        before setting the receipt). Safe to
+        #                        re-deliver: move to pending and pump.
+        #   * session gone /   -> cannot prove either way. Fail closed:
+        #     unqueryable         stay uncertain, raise DeliveryUncertain.
+        receipt_present: Optional[bool] = None
+        try:
+            receipt_present = await self._query_tmux_receipt(session.tmux_session, call_id)
+        except RuntimeError:
+            # tmux session gone or query failed — fail closed.
+            raise DeliveryUncertain(
+                f"cannot retry call_id={call_id} on session {session_id}: "
+                "tmux session is gone or unqueryable; delivery remains "
+                "uncertain. Operator must verify the worker state before "
+                "deciding whether to re-dispatch."
+            )
+
+        if receipt_present:
+            # The original paste already happened. A second paste would
+            # duplicate the model turn, so we MUST NOT re-deliver. Move
+            # the call_id from uncertain to processing and wait for the
+            # worker's ACK. Emit the retry audit event for traceability.
+            uncertain = [c for c in session.uncertain_call_ids if c != call_id]
+            processing = list(session.processing_call_ids)
+            if call_id not in processing:
+                processing.append(call_id)
+            updated_session = session.model_copy(
+                update={
+                    "uncertain_call_ids": uncertain,
+                    "processing_call_ids": processing,
+                }
+            )
+            self.sessions[session_id] = updated_session
+            updated_task = None
+            if task is not None:
+                task_uncertain = [c for c in task.uncertain_call_ids if c != call_id]
+                task_processing = list(task.processing_call_ids)
+                if call_id not in task_processing:
+                    task_processing.append(call_id)
+                updated_task = task.model_copy(
+                    update={
+                        "uncertain_call_ids": task_uncertain,
+                        "processing_call_ids": task_processing,
+                    }
+                )
+                self.tasks[task.id] = updated_task
+            self._save_state()
+
+            # Audit event is MANDATORY: no state transition may be
+            # untraceable. If emission fails, compensate the state back
+            # to uncertain and re-raise so the operator sees the failure.
+            try:
+                self._emit_delivery_retry_requested(
+                    workspace_id=session.workspace_id,
+                    session_id=session_id,
+                    call_id=call_id,
+                    actor=actor,
+                    reason=reason,
+                )
+            except Exception:
+                # Compensate: move call_id back to uncertain on both
+                # session and task. No tmux side effect has happened
+                # (we only moved state), so rollback is clean.
+                comp_session = updated_session.model_copy(
+                    update={
+                        "uncertain_call_ids": uncertain + [call_id],
+                        "processing_call_ids": [c for c in processing if c != call_id],
+                    }
+                )
+                self.sessions[session_id] = comp_session
+                if updated_task is not None:
+                    comp_task = updated_task.model_copy(
+                        update={
+                            "uncertain_call_ids": task_uncertain + [call_id],
+                            "processing_call_ids": [c for c in task_processing if c != call_id],
+                        }
+                    )
+                    self.tasks[updated_task.id] = comp_task
+                self._save_state()
+                logger.exception(
+                    "retry_uncertain_delivery: failed to emit retry audit event "
+                    "for call_id=%s (receipt present, no re-paste); compensated "
+                    "state back to uncertain",
+                    call_id,
+                )
+                raise
+
+            # The paste ran but the Hub may have died before the submit
+            # verification loop could nudge additional C-m. Ensure the
+            # already-pasted input is accepted by the TUI (no re-paste).
+            message = session.pending_messages.get(call_id)
+            if not message:
+                # Fail closed: without the original message body we cannot
+                # verify whether the input is still pending, and a blind
+                # C-m could submit an unrelated line. Move back to
+                # uncertain and surface to the operator.
+                comp_session = updated_session.model_copy(
+                    update={
+                        "uncertain_call_ids": uncertain + [call_id],
+                        "processing_call_ids": [c for c in processing if c != call_id],
+                    }
+                )
+                self.sessions[session_id] = comp_session
+                if updated_task is not None:
+                    comp_task = updated_task.model_copy(
+                        update={
+                            "uncertain_call_ids": task_uncertain + [call_id],
+                            "processing_call_ids": [c for c in task_processing if c != call_id],
+                        }
+                    )
+                    self.tasks[updated_task.id] = comp_task
+                self._save_state()
+                raise DeliveryUncertain(
+                    f"Cannot retry call_id={call_id}: message body missing; "
+                    f"moved back to uncertain"
+                )
+            try:
+                await self._ensure_submitted_without_repaste(session.tmux_session, message)
+            except Exception:
+                # Cannot verify submit state (capture failed or input still
+                # pending after retries). Fail closed: move back to uncertain
+                # and surface to the operator. The receipt remains set so no
+                # future replay re-pastes.
+                comp_session = updated_session.model_copy(
+                    update={
+                        "uncertain_call_ids": uncertain + [call_id],
+                        "processing_call_ids": [c for c in processing if c != call_id],
+                    }
+                )
+                self.sessions[session_id] = comp_session
+                if updated_task is not None:
+                    comp_task = updated_task.model_copy(
+                        update={
+                            "uncertain_call_ids": task_uncertain + [call_id],
+                            "processing_call_ids": [c for c in task_processing if c != call_id],
+                        }
+                    )
+                    self.tasks[updated_task.id] = comp_task
+                self._save_state()
+                logger.exception(
+                    "retry_uncertain_delivery: submit-nudge failed for "
+                    "receipt-present call_id=%s session %s; moved back to "
+                    "uncertain",
+                    call_id,
+                    session_id,
+                )
+                raise DeliveryUncertain(
+                    f"Cannot verify submit for call_id={call_id}; " f"moved back to uncertain"
+                )
+
+            logger.info(
+                "retry_uncertain_delivery: call_id=%s receipt present on session %s; "
+                "no re-paste, moved to processing awaiting worker ACK",
+                call_id,
+                session_id,
+            )
+            return
+
+        # Receipt absent: the paste never ran. Proceed with the normal
+        # uncertain -> pending -> pump re-delivery path.
 
         # Move uncertain -> pending on the session.
         uncertain = [c for c in session.uncertain_call_ids if c != call_id]
@@ -692,6 +1211,22 @@ class _MessagingMixin:
         # ambiguous failure, the call_id returns to uncertain_call_ids.
         await self._pump_session_messages(session_id)
 
+        # Fail-closed: re-fetch the session and verify the call_id did NOT
+        # land back in uncertain_call_ids. If it did, the retry hit another
+        # ambiguous tmux failure and the delivery is still uncertain. We
+        # must NOT return success (which the API would map to HTTP 204) —
+        # raise DeliveryUncertain so the caller surfaces a visible failure
+        # (HTTP 400) and the operator can decide whether to retry again.
+        # The uncertain state and the original payload are preserved.
+        post_session = self.sessions.get(session_id)
+        if post_session is not None and call_id in post_session.uncertain_call_ids:
+            raise DeliveryUncertain(
+                f"retry of call_id={call_id} to session {session_id} hit "
+                "another ambiguous tmux send failure; delivery remains "
+                "uncertain. Another explicit operator retry is required "
+                "via retry_uncertain_delivery."
+            )
+
     def _emit_delivery_retry_requested(
         self,
         workspace_id: str,
@@ -701,6 +1236,17 @@ class _MessagingMixin:
         reason: str,
     ) -> None:
         """Emit a durable ``delivery:retry_requested`` event.
+
+        Each retry attempt gets a *unique, monotonic* event call_id of the
+        form ``delivery:retry:{call_id}:{attempt}`` so repeated retries of
+        the same uncertain call_id are individually traceable (they do NOT
+        dedupe to the first event). The attempt number is computed by
+        counting existing ``delivery:retry:{call_id}:*`` events for this
+        workspace.
+
+        The event fingerprint includes ``call_id``, ``session_id``,
+        ``actor``, ``reason``, and ``attempt`` so two retries with different
+        actors/reasons/attempts never collide.
 
         Raises on any failure so the caller can compensate the state
         transition back to ``uncertain``. The event is the audit record that
@@ -716,10 +1262,34 @@ class _MessagingMixin:
                     root_run = run
                     break
         if root_run is None:
+            # No resident root run exists yet (e.g. the workspace's resident
+            # agent hasn't been started). Create one so the audit event has a
+            # durable home. We pass session_id=None to avoid mis-linking the
+            # root run to a non-resident session.
+            self._ensure_resident_root_run(workspace_id, session_id=None)
+            for run in self.agent_tree._runs.values():
+                if run.workspace_id == workspace_id and run.parent_id is None:
+                    root_run = run
+                    break
+        if root_run is None:
             raise RuntimeError(
                 f"no root run found for workspace {workspace_id}; "
                 "cannot emit delivery:retry_requested audit event"
             )
+
+        # Count prior retry attempts for this call_id to compute the next
+        # attempt number. We scan the workspace event stream for events
+        # whose call_id starts with the retry prefix for this call_id.
+        retry_prefix = f"delivery:retry:{call_id}:"
+        prior_attempts = len(
+            [
+                e
+                for e in self.agent_tree._events.get(workspace_id, [])
+                if e.call_id.startswith(retry_prefix)
+            ]
+        )
+        attempt = prior_attempts + 1
+        event_call_id = f"{retry_prefix}{attempt}"
 
         self.agent_tree._append_event(
             workspace_id=workspace_id,
@@ -727,7 +1297,7 @@ class _MessagingMixin:
             event_type=AgentEventType.PROGRESS,
             author=root_run.id,
             recipient=root_run.id,
-            call_id=f"delivery:retry:{call_id}",
+            call_id=event_call_id,
             action="delivery:retry_requested",
             target=session_id,
             fingerprint=_request_fingerprint(
@@ -736,6 +1306,8 @@ class _MessagingMixin:
                     "call_id": call_id,
                     "session_id": session_id,
                     "actor": actor,
+                    "reason": reason,
+                    "attempt": attempt,
                 },
             ),
             payload={
@@ -743,6 +1315,7 @@ class _MessagingMixin:
                 "session_id": session_id,
                 "actor": actor,
                 "reason": reason,
+                "attempt": attempt,
             },
             rollback_on_error=False,
         )
@@ -804,3 +1377,91 @@ class _MessagingMixin:
                 "/auto-run",
             )
         )
+
+    def _compute_payload_fingerprint(
+        self,
+        message: str,
+        attachments: list[WorkspaceAttachmentCreate],
+    ) -> str:
+        """Compute a durable canonical fingerprint of a (message, attachments) payload.
+
+        The fingerprint is sha256 over a canonical encoding of:
+          * the message text
+          * for each attachment: filename, normalized (stripped/lowercased)
+            mime_type, and sha256 of the base64-decoded bytes.
+
+        Same message + same attachment content always yields the same
+        fingerprint regardless of base64 padding or whitespace. This is the
+        source of truth for the immutable-call_id invariant: a call_id's
+        fingerprint is stored on first send and kept forever (even after
+        ACK), so a re-send with the same payload is idempotent and a re-send
+        with a different payload is rejected.
+        """
+        h = hashlib.sha256()
+        h.update(message.encode("utf-8"))
+        for att in attachments:
+            h.update(b"\x00")
+            h.update(att.filename.encode("utf-8"))
+            h.update(b"\x00")
+            h.update(att.mime_type.strip().lower().encode("utf-8"))
+            h.update(b"\x00")
+            # Decode the attachment bytes and hash their content. Same-size
+            # different bytes produce different fingerprints.
+            try:
+                raw = base64.b64decode(att.data_url.split(",", 1)[1], validate=True)
+            except (binascii.Error, ValueError, IndexError):
+                raw = b""
+            h.update(hashlib.sha256(raw).digest())
+        return h.hexdigest()
+
+    def _compute_persisted_payload_fingerprint(
+        self,
+        message: str,
+        attachments: list[WorkspaceAttachment],
+    ) -> str:
+        """Compute the canonical fingerprint of a PERSISTED (message, attachments)
+        envelope.
+
+        Unlike :meth:`_compute_payload_fingerprint`, which operates on
+        :class:`WorkspaceAttachmentCreate` (base64 ``data_url``), this reads
+        the persisted file bytes from each :class:`WorkspaceAttachment`'s
+        ``path`` and hashes them. Used for legacy backfill: a call_id present
+        in a state list but without a stored fingerprint can have its
+        fingerprint derived from the persisted envelope so the
+        immutable-payload invariant applies from then on.
+
+        Fail-closed: if any attachment file is missing or unreadable, raise
+        rather than silently producing a wrong fingerprint (which could let a
+        conflicting payload slip through).
+        """
+        h = hashlib.sha256()
+        h.update(message.encode("utf-8"))
+        for att in attachments:
+            h.update(b"\x00")
+            h.update(att.filename.encode("utf-8"))
+            h.update(b"\x00")
+            h.update(att.mime_type.strip().lower().encode("utf-8"))
+            h.update(b"\x00")
+            try:
+                raw = Path(att.path).read_bytes()
+            except (OSError, FileNotFoundError) as exc:
+                raise RuntimeError(
+                    f"cannot fingerprint persisted attachment {att.filename} "
+                    f"(id={att.id}): file at {att.path} is missing/unreadable"
+                ) from exc
+            h.update(hashlib.sha256(raw).digest())
+        return h.hexdigest()
+
+    def _safe_attachment_owner_id(self, session_id: str, call_id: str) -> str:
+        """Return a filesystem-safe owner id for a call_id's attachments.
+
+        The raw call_id is external input and may contain "/" or "..", which
+        would escape the workspace attachments directory. We derive a safe
+        owner id from sha256(session_id + call_id) so it is unique per
+        (session, call_id) and contains only hex characters.
+        """
+        h = hashlib.sha256()
+        h.update(session_id.encode("utf-8"))
+        h.update(b"\x00")
+        h.update(call_id.encode("utf-8"))
+        return h.hexdigest()
