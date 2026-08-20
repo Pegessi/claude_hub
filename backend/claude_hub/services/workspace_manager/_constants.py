@@ -239,9 +239,21 @@ def _safe_attachment_filename(value: str, suffix: str) -> str:
     return f"{slug or 'attachment'}{suffix}"
 
 
+class DeliveryUncertain(RuntimeError):
+    """Raised when a message send to tmux failed ambiguously.
+
+    The call_id has been moved to ``uncertain_call_ids`` (fail-closed): we
+    cannot prove the message was not delivered, so we do NOT auto-resend and
+    do NOT silently mark it delivered. The caller may retry explicitly by
+    re-invoking ``send_session_message`` with the same call_id (which moves
+    it back to ``pending``) or via ``retry_uncertain_delivery``.
+    """
+
+
 # Re-export everything (including single-underscore helpers like _now/_slug)
 # so ``from ._constants import *`` carries them into the mixins and package.
 __all__ = [
+    "DeliveryUncertain",
     "ARTIFACT_PREVIEW_MAX_BYTES",
     "ATTACHMENT_MAX_BYTES",
     "AUTO_CONTINUE_IDLE_GRACE_SECONDS",

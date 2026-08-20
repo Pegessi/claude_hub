@@ -719,6 +719,82 @@ for each ACKed call_id. This method looks up the call_id in
 "followup_call_id": call_id}`. This correlates the followup delivery
 proof with the worker's ACK.
 
+## Review Round 32 Fixes (2026-08-21)
+
+### Fail-closed delivery semantics (persist-intent-first + uncertain state)
+
+**Problem**: the Round 31 "send-first + pane-marker dedup" design relied on
+tmux pane history to detect already-sent messages. But tmux pane history is
+bounded and the `[call_id:<id>]` marker can roll out of the scroll buffer,
+so cold recovery would not see it and would re-send the message → duplicate
+delivery. Additionally, the design could not distinguish between a
+pre-side-effect failure (tmux write not attempted, safe to retry) and an
+ambiguous failure (tmux write may have succeeded, retrying could duplicate).
+
+**Fix**: **persist-intent-before-side-effect** with a fail-closed
+`uncertain` state. The delivery state machine is now:
+
+```
+pending ──persist intent──▶ processing (in-flight) ──worker ACK──▶ delivered
+   │                              │
+   │         pre-side-effect      │  crash / tmux session gone
+   │         failure (rollback)   │  (ambiguous)
+   └──────────────────────────────┤
+                                  ▼
+                            uncertain (fail-closed)
+```
+
+- **Persist intent before side effect**: the pump moves the call_id from
+  `pending_call_ids` to `processing_call_ids` and persists *before* writing
+  to tmux. This is the durable record of our intent to deliver.
+- **Pre-side-effect failure** (exception before `_send_tmux_message`, e.g.
+  `_ensure_session_ready_for_send` fails): the tmux write was NOT attempted,
+  so it is safe to roll the call_id back to `pending_call_ids` for retry.
+- **Ambiguous failure** (exception inside `_send_tmux_message`): the tmux
+  write MAY have succeeded before the wrapper raised. We cannot prove the
+  message was not delivered, so we fail closed: move the call_id to
+  `uncertain_call_ids`. We do NOT auto-resend (could duplicate) and do NOT
+  silently mark delivered (could lose). A `delivery:uncertain` event is
+  emitted to the supervisor.
+- **Success**: the call_id stays in `processing_call_ids` (in-flight) until
+  the worker ACKs it. Only the worker's ACK moves it to
+  `delivered_call_ids`.
+- **Cold recovery**: any call_id in `processing_call_ids` at startup is
+  moved to `uncertain_call_ids` (fail-closed). We cannot prove the message
+  reached the tmux input buffer, so we do NOT auto-resend.
+
+**`DeliveryUncertain` exception**: `send_session_message` raises
+`DeliveryUncertain(RuntimeError)` after the pump when the call_id lands in
+`uncertain_call_ids`. This propagates to the API layer, which catches
+`RuntimeError` and returns HTTP 400. The call_id and payload remain
+persisted in `uncertain_call_ids` / `pending_messages`.
+
+**Explicit retry**: re-calling `send_session_message` with the same
+`call_id` (when it is in `uncertain_call_ids`) moves it back to
+`pending_call_ids` on both the session and its bound task, saves, and
+re-pumps. If the re-pump succeeds, the call_id moves to
+`processing_call_ids` and `send_session_message` returns normally. If it
+fails ambiguously again, it raises `DeliveryUncertain`. The operator-facing
+retry is `POST /sessions/{id}/retry-uncertain` (`retry_uncertain_delivery`),
+which also emits a durable `delivery:retry_requested` audit event.
+
+**Legacy contract preserved**: the feedback-summary dispatch failure test
+(`test_feedback_summary_dispatch_failure_is_visible_retryable_and_delete_safe`)
+expects HTTP 400 with "remains visible in Todo" so the task stays retryable.
+`DeliveryUncertain` (a `RuntimeError`) propagates from `send_session_message`
+→ `_dispatch_task_to_session` → `_start_feedback_summary_task`, which catches
+`Exception`, calls `_mark_feedback_summary_retryable` (task → TODO), and
+raises `RuntimeError("... remains visible in Todo ...")`. The API returns
+400. On retry, `send_session_message` sees the call_id in
+`uncertain_call_ids`, moves it back to pending, re-pumps (succeeds), and the
+task moves to WORKING (HTTP 201).
+
+**Why no pane-marker dedup**: tmux pane history is not durable. Relying on
+the `[call_id:<id>]` marker for cold-recovery dedup would produce duplicate
+deliveries when the marker rolls out of the scroll buffer. The marker is now
+only used by the *worker* to correlate its ACK (`acked_call_ids`), not by
+the Hub as a receipt or dedup basis.
+
 ## Migration / Rollback Guide
 
 ### What changes on disk

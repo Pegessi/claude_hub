@@ -2,6 +2,7 @@
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
+from ..agent_tree import _request_fingerprint
 from ._constants import *  # noqa: F401,F403
 
 
@@ -971,11 +972,27 @@ class _WorkspacesMixin:
         # We use ``agent_tree.wait`` (the directed cursor ACK mechanism)
         # rather than ``get_events`` directly: ``wait`` enforces the
         # Hub-side receiver cursor (``max(since_sequence, ack_sequence)``)
-        # so ACKed events are never re-delivered. After delivering the
-        # events to the resident's prompt, we ``ack`` up to the highest
-        # delivered sequence so the next cycle only fetches new events.
+        # so ACKed events are never re-delivered.
+        #
+        # **Delivery-call_id binding (fail-closed cursor):**
+        #
+        # We do NOT advance the resident root run's ``ack_sequence`` cursor
+        # here. Instead we bind the delivered event batch to a persistent
+        # delivery call_id and store the batch's ``max_sequence`` in the
+        # call record. The prompt is sent to the resident's tmux inbox via
+        # ``send_session_message`` with that call_id. Only when the resident
+        # worker ACKs that call_id (lists it in ``acked_call_ids`` of a
+        # report) does ``_ack_call_ids`` → ``_advance_resident_ack_on_delivery``
+        # advance the cursor to ``max_sequence``.
+        #
+        # This closes the loss window: if ``send_session_message`` fails or
+        # the Hub crashes before the resident processes the events, the
+        # cursor is NOT advanced, so the next cycle's ``wait`` returns the
+        # same events again (at-least-once). If the resident processes them
+        # and ACKs, the cursor advances exactly once.
+        delivery_call_id: Optional[str] = None
         if root_run is not None:
-            from claude_hub.models.agent_tree import WaitRequest
+            from claude_hub.models.agent_tree import AgentEventType, WaitRequest
 
             wait_req = WaitRequest(
                 workspace_id=workspace.id,
@@ -1002,23 +1019,38 @@ class _WorkspacesMixin:
                     "your last cycle. Use them to decide what to do next instead of "
                     "scanning the board:\n" + "\n".join(event_lines) + "\n"
                 )
-                # Advance the resident's ACK cursor to the highest sequence
-                # delivered in this prompt. This is the Hub-side commit: the
-                # events have been handed to the resident (injected into its
-                # prompt), so they are considered processed. The next cycle's
-                # ``wait`` call will only return events with sequence > this
-                # cursor.
                 max_seq = max(ev.sequence for ev in subtree_events)
+                # Bind the event batch to a delivery call_id. Record the
+                # max_sequence in the call record so the ACK handler can
+                # advance the cursor. The call_id is embedded in the prompt
+                # so the resident can ACK it.
+                delivery_call_id = f"resident-delivery:{root_run.id}:{max_seq}"
                 try:
-                    self.agent_tree.ack(workspace.id, root_run.id, max_seq)
+                    self.agent_tree._append_event(
+                        workspace_id=workspace.id,
+                        agent_run_id=root_run.id,
+                        event_type=AgentEventType.PROGRESS,
+                        author=root_run.id,
+                        recipient=root_run.id,
+                        call_id=delivery_call_id,
+                        action="resident_delivery",
+                        target=root_run.id,
+                        fingerprint=_request_fingerprint(
+                            "resident_delivery",
+                            {"run_id": root_run.id, "max_sequence": max_seq},
+                        ),
+                        payload={"max_sequence": max_seq},
+                        rollback_on_error=False,
+                    )
                 except Exception:
                     logger.exception(
-                        "Failed to ack resident root run %s up to sequence %s",
-                        root_run.id,
+                        "Failed to record resident delivery call_id=%s max_sequence=%s",
+                        delivery_call_id,
                         max_seq,
                     )
+                    delivery_call_id = None
 
-        await self.send_session_message(session.id, prompt)
+        await self.send_session_message(session.id, prompt, call_id=delivery_call_id)
 
     def _ensure_resident_root_run(self, workspace_id: str, session_id: Optional[str]) -> None:
         """Ensure the resident has a root run in the agent tree.

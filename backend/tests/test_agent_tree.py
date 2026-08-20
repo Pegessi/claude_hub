@@ -24,6 +24,7 @@ from claude_hub.models.agent_tree import (
     WaitRequest,
 )
 from claude_hub.services.workspace_manager import WorkspaceManager
+from claude_hub.services.workspace_manager._constants import DeliveryUncertain
 
 _wm = import_module("claude_hub.services.workspace_manager")
 
@@ -4368,7 +4369,7 @@ def test_forged_session_cookie_rejected_for_all_actions(
 async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
     manager: WorkspaceManager, ws_id: str
 ) -> None:
-    """Exactly-once tmux delivery with receiver-verifiable durable receipt.
+    """Fail-closed tmux delivery with explicit uncertain state.
 
     ``send_session_message`` persists the call_id in ``pending_call_ids``,
     then the receiver pump claims it (pending → processing) and sends it to
@@ -4376,13 +4377,13 @@ async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
     it — only the worker's ACK moves it to ``delivered_call_ids`` and removes
     the message from ``pending_messages``.
 
-    The tmux input buffer is the durable receiver: once a message is sent to
-    tmux, the worker will read it exactly once. Therefore, on a hard exit +
-    reload, call_ids stranded in ``processing_call_ids`` are NOT re-delivered
-    — re-sending would append them to the tmux buffer a second time and
-    produce a duplicate model turn. Only ``pending_call_ids`` (never sent to
-    tmux) are re-deliverable. The worker's ACK is what moves processing
-    call_ids to delivered.
+    The Hub does NOT own a verifiable durable receiver for tmux stdin, so
+    exactly-once is impossible. On a hard exit + reload, call_ids stranded in
+    ``processing_call_ids`` move to ``uncertain_call_ids`` (fail-closed): we
+    cannot prove the message was not delivered to tmux, so we do NOT re-send
+    it (could duplicate) and do NOT silently mark it delivered (could lose).
+    Only ``pending_call_ids`` (never sent to tmux) are re-deliverable. The
+    worker's ACK is what moves processing/uncertain call_ids to delivered.
     """
     session_id = "outbox-session"
     _make_managed_session(manager, session_id, ws_id)
@@ -4420,21 +4421,25 @@ async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
     manager._save_state()
     reloaded = WorkspaceManager()
     reloaded_session = reloaded.sessions[session_id]
-    assert call_id in reloaded_session.processing_call_ids
+    # On cold restart, in-flight (processing) call_ids move to
+    # uncertain_call_ids (fail-closed).
+    assert call_id in reloaded_session.uncertain_call_ids
+    assert call_id not in reloaded_session.processing_call_ids
     assert call_id not in reloaded_session.delivered_call_ids
     assert call_id not in reloaded_session.pending_call_ids
 
-    # Recovery: the call_id is in processing_call_ids, meaning it was already
-    # delivered to the tmux inbox. The Hub does NOT re-deliver it — that
-    # would produce a duplicate turn. Only pending_call_ids are pumped.
+    # Recovery: the call_id is in uncertain_call_ids, meaning it was
+    # in-flight when the Hub crashed. The Hub does NOT re-deliver it —
+    # re-sending could produce a duplicate turn. Only pending_call_ids
+    # are pumped.
     sent.clear()
     reloaded._send_tmux_message = _fake_send_tmux  # type: ignore[assignment]
     reloaded._capture_tmux_output = _fake_capture_tmux  # type: ignore[assignment]
     await reloaded.agent_tree.recover_pending_runs(ws_id)
-    # No re-delivery: the message was already in the tmux input buffer.
+    # No re-delivery: the message is in uncertain (fail-closed).
     assert len(sent) == 0
     reloaded_session = reloaded.sessions[session_id]
-    assert call_id in reloaded_session.processing_call_ids
+    assert call_id in reloaded_session.uncertain_call_ids
 
     # The worker ACKs the call_id. This moves it to delivered_call_ids and
     # removes the message from pending_messages.
@@ -4447,6 +4452,7 @@ async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
     assert call_id in reloaded_session.delivered_call_ids
     assert call_id not in reloaded_session.pending_call_ids
     assert call_id not in reloaded_session.processing_call_ids
+    assert call_id not in reloaded_session.uncertain_call_ids
 
     # A subsequent send with the same call_id is skipped: it is in
     # delivered_call_ids (sender-side dedup).
@@ -5429,25 +5435,30 @@ async def test_mailbox_side_effect_probes_crash_and_replay(
 
     call_id = "probe:1"
 
-    # ---- Probe 1: crash after outbox persist, before tmux write. ----
+    # ---- Probe 1: pre-side-effect failure (before tmux write) => retry. ----
     # send_session_message persists to pending_messages + pending_call_ids,
     # then the pump claims (pending -> processing) and sends to tmux. We
-    # simulate a crash AFTER the claim/persist but BEFORE the tmux send by
-    # raising inside _send_tmux_message. The pump catches the exception,
-    # rolls the call_id back to pending_call_ids, and continues. A fresh
-    # pump cycle re-delivers.
+    # simulate a failure BEFORE the tmux write by raising inside
+    # _ensure_session_ready_for_send. This is a proven pre-side-effect
+    # failure (tmux write was not attempted), so the pump safely rolls the
+    # call_id back to pending_call_ids for retry.
     send_count = {"n": 0}
+    ready_fail = {"n": 0}
 
     async def crashing_send(tmux_session: str, message: str) -> None:
         send_count["n"] += 1
-        if send_count["n"] == 1:
-            raise RuntimeError("simulated crash before tmux write")
         # On the retry, the "receiver" applies the side effect.
         bump_effect()
 
-    monkeypatch.setattr(manager, "_send_tmux_message", crashing_send)
+    async def failing_ready(session) -> None:  # type: ignore[no-untyped-def]
+        ready_fail["n"] += 1
+        if ready_fail["n"] == 1:
+            raise RuntimeError("simulated pre-send failure (session not ready)")
 
-    # The first send fails (tmux write raises). The pump rolls the call_id
+    monkeypatch.setattr(manager, "_send_tmux_message", crashing_send)
+    monkeypatch.setattr(manager, "_ensure_session_ready_for_send", failing_ready)
+
+    # The first send fails before the tmux write. The pump rolls the call_id
     # back to pending_call_ids so the same call_id can be retried.
     await manager.send_session_message(session_id, "assignment", call_id=call_id)
 
@@ -5456,16 +5467,54 @@ async def test_mailbox_side_effect_probes_crash_and_replay(
     assert call_id in session.pending_call_ids
     assert call_id not in session.processing_call_ids
     assert call_id not in session.delivered_call_ids
+    assert call_id not in session.uncertain_call_ids
     assert read_effect() == 0  # side effect did not run
+    assert send_count["n"] == 0  # tmux write was not attempted
 
-    # Re-pump: the second tmux send succeeds and the side effect runs once.
-    # On success, the call_id stays in processing_call_ids, awaiting the
-    # worker's ACK.
+    # Re-pump: the second attempt passes _ensure_session_ready_for_send, the
+    # tmux send succeeds, and the side effect runs once. On success, the
+    # call_id stays in processing_call_ids, awaiting the worker's ACK.
     await manager._pump_session_messages(session_id)
     assert read_effect() == 1
     session = manager.sessions[session_id]
     assert call_id in session.processing_call_ids  # stays in processing until ACK
     assert call_id not in session.delivered_call_ids
+
+    # ---- Probe 2: post-side-effect (ambiguous) send failure => uncertain. ----
+    # A failure inside _send_tmux_message is ambiguous: the tmux write may
+    # have succeeded before the wrapper raised. We fail closed: the call_id
+    # moves to uncertain_call_ids (NOT pending, NOT delivered) and is NOT
+    # auto-retried.
+    probe2_call_id = "probe:2"
+    ambiguous_send_count = {"n": 0}
+
+    async def ambiguous_send(tmux_session: str, message: str) -> None:
+        ambiguous_send_count["n"] += 1
+        raise RuntimeError("simulated ambiguous tmux failure")
+
+    monkeypatch.setattr(manager, "_send_tmux_message", ambiguous_send)
+    # _ensure_session_ready_for_send now succeeds (ready_fail counter > 1).
+
+    # The send fails inside _send_tmux_message (ambiguous). The call_id
+    # moves to uncertain_call_ids (fail-closed), NOT pending. send_session_message
+    # raises DeliveryUncertain so the caller can surface the failure and retry
+    # explicitly; the call_id and payload remain persisted in uncertain state.
+    with pytest.raises(DeliveryUncertain):
+        await manager.send_session_message(session_id, "ambiguous", call_id=probe2_call_id)
+
+    # The send failed inside _send_tmux_message (ambiguous). The call_id
+    # moves to uncertain_call_ids (fail-closed), NOT pending.
+    session = manager.sessions[session_id]
+    assert probe2_call_id in session.uncertain_call_ids
+    assert probe2_call_id not in session.pending_call_ids
+    assert probe2_call_id not in session.processing_call_ids
+    assert probe2_call_id not in session.delivered_call_ids
+
+    # Re-pump: uncertain call_ids are NOT auto-retried (could duplicate).
+    await manager._pump_session_messages(session_id)
+    session = manager.sessions[session_id]
+    assert probe2_call_id in session.uncertain_call_ids
+    assert ambiguous_send_count["n"] == 1  # no retry
 
     # ---- Probe 3 (run here while the claim is live): duplicate delivery
     # while a call_id is in processing_call_ids must NOT repeat the side
@@ -5501,12 +5550,16 @@ async def test_mailbox_side_effect_probes_crash_and_replay(
     assert send_count["n"] == send_count_before
     assert read_effect() == 1
 
-    # ---- Probe 5: unACKed followup survives cold restart and is NOT
-    # re-delivered. ----
+    # ---- Probe 5: unACKed followup survives cold restart in uncertain
+    # state and is NOT re-delivered. ----
+    # Restore a working send (Probe 2 left _send_tmux_message as
+    # ambiguous_send which always raises).
+    monkeypatch.setattr(manager, "_send_tmux_message", crashing_send)
     # The followup call_id is sent to tmux and stays in processing_call_ids
-    # (unACKed). On cold restart, it stays in processing_call_ids — the tmux
-    # inbox is the durable receiver, so re-sending would produce a duplicate
-    # turn. The worker ACKs it after restart.
+    # (unACKed). On cold restart, it moves to uncertain_call_ids
+    # (fail-closed: we cannot prove it was not delivered to tmux, so we do
+    # NOT re-send and do NOT silently mark delivered). The worker ACKs it
+    # after restart.
     followup_call_id = "followup:1"
     effect_before = read_effect()
     await manager.send_session_message(session_id, "please also do X", call_id=followup_call_id)
@@ -5529,20 +5582,22 @@ async def test_mailbox_side_effect_probes_crash_and_replay(
     fresh._capture_tmux_output = _ready_capture  # type: ignore[assignment]
     fresh_session = fresh.sessions[session_id]
 
-    # The unACKed followup call_id is in processing_call_ids after reload.
-    assert followup_call_id in fresh_session.processing_call_ids
+    # The unACKed followup call_id moved to uncertain_call_ids after reload
+    # (fail-closed cold recovery).
+    assert followup_call_id in fresh_session.uncertain_call_ids
+    assert followup_call_id not in fresh_session.processing_call_ids
     assert followup_call_id not in fresh_session.delivered_call_ids
 
-    # Run cold recovery: processing call_ids are NOT re-delivered (they were
-    # already in the tmux inbox). Only pending_call_ids are pumped.
+    # Run cold recovery: uncertain call_ids are NOT re-delivered (re-sending
+    # could produce a duplicate turn). Only pending_call_ids are pumped.
     send_count_before_fresh = send_count["n"]
     effect_before_fresh = read_effect()
     await fresh.agent_tree.recover_pending_runs(ws_id)
-    # No re-delivery: the followup was already in the tmux input buffer.
+    # No re-delivery: the followup is in uncertain (fail-closed).
     assert send_count["n"] == send_count_before_fresh
     assert read_effect() == effect_before_fresh
     fresh_session = fresh.sessions[session_id]
-    assert followup_call_id in fresh_session.processing_call_ids
+    assert followup_call_id in fresh_session.uncertain_call_ids
 
     # The worker ACKs the followup call_id after restart.
     await fresh.create_report(
@@ -5737,18 +5792,21 @@ async def test_resident_cycle_e2e_with_unacked_followup_cold_replay(
     monkeypatch.setattr(fresh, "_send_tmux_message", recording_send)
 
     fresh_session = fresh.sessions[worker_session_id]
-    # The unACKed followup survives the restart in processing_call_ids.
-    assert followup_call_id in fresh_session.processing_call_ids
+    # The unACKed followup survives the restart in uncertain_call_ids
+    # (fail-closed: we cannot prove it was not delivered to tmux, so we
+    # do NOT re-send and do NOT silently mark delivered).
+    assert followup_call_id in fresh_session.uncertain_call_ids
+    assert followup_call_id not in fresh_session.processing_call_ids
     assert followup_call_id not in fresh_session.delivered_call_ids
 
-    # Cold recovery does NOT re-deliver processing call_ids: they were
-    # already in the tmux inbox. Re-sending would produce a duplicate turn.
+    # Cold recovery does NOT re-deliver uncertain call_ids: re-sending
+    # could produce a duplicate turn.
     sent_before = len(sent_messages)
     await fresh.agent_tree.recover_pending_runs(ws_id)
-    # No re-delivery: the followup was already in the tmux input buffer.
+    # No re-delivery: the followup is in uncertain (fail-closed).
     assert len(sent_messages) == sent_before
     fresh_session = fresh.sessions[worker_session_id]
-    assert followup_call_id in fresh_session.processing_call_ids
+    assert followup_call_id in fresh_session.uncertain_call_ids
 
     # The worker ACKs the followup call_id after restart.
     await fresh.create_report(
@@ -5764,8 +5822,12 @@ async def test_resident_cycle_e2e_with_unacked_followup_cold_replay(
     assert followup_call_id in fresh_session.delivered_call_ids
     assert followup_call_id not in fresh_session.processing_call_ids
 
-    # ---- Transient followup recovery: a failed tmux send is retried. ----
-    # Make the next tmux send fail, then succeed.
+    # ---- Ambiguous send failure: tmux write may have succeeded. ----
+    # A failure inside _send_tmux_message is ambiguous: the tmux write may
+    # have succeeded before the wrapper raised. We fail closed: the call_id
+    # moves to uncertain_call_ids (NOT pending, NOT delivered) and is NOT
+    # auto-retried. Only a proven pre-side-effect failure would roll back
+    # to pending.
     fail_next = {"n": 0}
 
     async def flaky_send(tmux_session: str, message: str) -> None:
@@ -5782,27 +5844,33 @@ async def test_resident_cycle_e2e_with_unacked_followup_cold_replay(
     monkeypatch.setattr(fresh, "_send_tmux_message", flaky_send)
 
     transient_call_id = "followup:transient"
-    await fresh.send_session_message(worker_session_id, "retry me", call_id=transient_call_id)
-    # The first send failed; the call_id was rolled back to pending.
+    # The send fails inside _send_tmux_message (ambiguous). The call_id moves
+    # to uncertain_call_ids (fail-closed), and send_session_message raises
+    # DeliveryUncertain so the caller can surface the failure.
+    with pytest.raises(DeliveryUncertain):
+        await fresh.send_session_message(worker_session_id, "retry me", call_id=transient_call_id)
+    # The send failed inside _send_tmux_message (ambiguous). The call_id
+    # moves to uncertain_call_ids (fail-closed), NOT pending.
     fresh_session = fresh.sessions[worker_session_id]
-    assert transient_call_id in fresh_session.pending_call_ids
+    assert transient_call_id in fresh_session.uncertain_call_ids
+    assert transient_call_id not in fresh_session.pending_call_ids
     assert transient_call_id not in fresh_session.processing_call_ids
 
-    # Re-pump: the second send succeeds. The call_id is delivered exactly
-    # once (the failed attempt did not reach tmux).
+    # Re-pump: uncertain call_ids are NOT auto-retried (could duplicate).
     await fresh._pump_session_messages(worker_session_id)
     fresh_session = fresh.sessions[worker_session_id]
-    assert transient_call_id in fresh_session.processing_call_ids
+    assert transient_call_id in fresh_session.uncertain_call_ids
+    # No new tmux send happened.
+    assert fail_next["n"] == 1
 
     # ---- Cumulative unique side-effect count. ----
     # Every call_id that was successfully sent to tmux appears exactly once
-    # in delivered_call_ids. No duplicates across cold replay (the followup
-    # was not re-sent) or transient retry (the failed attempt did not
-    # reach tmux).
-    expected_call_ids = {dispatch_call_id, followup_call_id, transient_call_id}
+    # in delivered_call_ids. The transient call_id was NOT successfully
+    # delivered (it's in uncertain), so it is NOT in delivered_call_ids.
+    expected_call_ids = {dispatch_call_id, followup_call_id}
     assert delivered_call_ids == expected_call_ids
     # Count tmux sends that carry a call_id marker: must equal the number
-    # of unique call_ids (exactly-once delivery).
+    # of successfully delivered unique call_ids.
     call_id_sends = [
         m for m in sent_messages if any(line.startswith("[call_id:") for line in m.splitlines())
     ]
@@ -6055,24 +6123,25 @@ def test_load_from_dict_migrates_recipient_null_events(
 async def test_cumulative_side_effects_before_ack_and_cold_recovery_pump(
     manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Cumulative side effects with the receiver-verifiable durable receipt.
+    """Cumulative side effects with fail-closed delivery semantics.
 
-    The receiver-verifiable receipt (``delivered_call_ids`` populated ONLY on
-    worker ACK) guarantees that an ACKed call_id is never re-delivered. An
-    unACKed call_id that was sent to tmux (in ``processing_call_ids``) is
-    NOT re-delivered on cold restart — the tmux input buffer is the durable
-    receiver, so re-sending would produce a duplicate model turn. Only
-    ``pending_call_ids`` (never sent to tmux) are pumped on recovery.
+    The Hub does NOT own a verifiable durable receiver for tmux stdin, so
+    exactly-once is impossible. Instead we guarantee fail-closed: an
+    unACKed call_id that was in-flight (``processing_call_ids``) at crash
+    time moves to ``uncertain_call_ids`` on cold restart — it is NOT
+    re-sent (could duplicate) and NOT silently marked delivered (could
+    lose). Only ``pending_call_ids`` (never sent to tmux) are pumped on
+    recovery.
 
     On cold restart:
       * ``delivered_call_ids`` (worker-ACKed) are NEVER re-delivered.
-      * ``processing_call_ids`` (sent to tmux, not ACKed) stay in
-        ``processing_call_ids`` — they are already in the tmux inbox.
+      * ``processing_call_ids`` (in-flight, not ACKed) move to
+        ``uncertain_call_ids`` — fail-closed, not re-sent.
       * ``pending_call_ids`` (never sent to tmux) ARE pumped.
 
     The cumulative side-effect counter (tmux sends) is NEVER reset across the
     cold restart: it reflects the total number of tmux sends that have ever
-    happened. Each call_id is sent to tmux exactly once.
+    happened. Each call_id is sent to tmux at most once (no duplicates).
     """
     from claude_hub.models import (
         AgentReportCreate,
@@ -6184,11 +6253,13 @@ async def test_cumulative_side_effects_before_ack_and_cold_recovery_pump(
     assert "call:1" in fresh_session.delivered_call_ids
     assert "call:1" not in fresh_session.pending_call_ids
     assert "call:1" not in fresh_session.processing_call_ids
-    # call:2 and call:3 were sent to tmux but NOT ACKed -> they stay in
-    # processing_call_ids (loaded from disk). Cold recovery does NOT
-    # re-deliver them — they are already in the tmux inbox.
+    assert "call:1" not in fresh_session.uncertain_call_ids
+    # call:2 and call:3 were sent to tmux but NOT ACKed -> on cold restart
+    # they move to uncertain_call_ids (fail-closed: we cannot prove they
+    # were not delivered, so we do NOT re-send and do NOT mark delivered).
     for cid in ["call:2", "call:3"]:
-        assert cid in fresh_session.processing_call_ids
+        assert cid in fresh_session.uncertain_call_ids
+        assert cid not in fresh_session.processing_call_ids
         assert cid not in fresh_session.delivered_call_ids
     # call:4 was never sent -> pending, must be pumped.
     assert pending_call_id in fresh_session.pending_call_ids
@@ -6201,30 +6272,507 @@ async def test_cumulative_side_effects_before_ack_and_cold_recovery_pump(
     monkeypatch.setattr(fresh, "_send_tmux_message", recording_send)
     monkeypatch.setattr(fresh, "_capture_tmux_output", _ready_capture)
 
-    # ---- Run recovery: pump pending only (processing stays put). ----
+    # ---- Run recovery: pump pending only (uncertain stays put). ----
     await fresh.agent_tree.recover_pending_runs(ws_id)
 
     # Only call:4 (pending, never sent to tmux) is delivered -> 1 more side
     # effect. Total = 3 + 1 = 4.
     # call:1 (delivered/ACKed) is NOT re-delivered.
-    # call:2, call:3 (processing, already in tmux inbox) are NOT re-delivered.
+    # call:2, call:3 (uncertain, maybe already in tmux inbox) are NOT
+    # re-delivered.
     assert read_effect() == 4, (
         "only pending call_ids must be delivered on cold recovery; "
-        "processing call_ids are already in the tmux inbox and must not "
-        "be re-sent (no duplicate turns)"
+        "uncertain call_ids are fail-closed and must not be re-sent "
+        "(no duplicate turns)"
     )
 
     fresh_session = fresh.sessions[session_id]
     # call:4 is now in processing (sent during recovery, awaiting worker ACK).
     assert pending_call_id in fresh_session.processing_call_ids
     assert pending_call_id not in fresh_session.pending_call_ids
-    # call:2, call:3 stay in processing (not re-delivered).
+    # call:2, call:3 stay in uncertain (not re-delivered).
     for cid in ["call:2", "call:3"]:
-        assert cid in fresh_session.processing_call_ids
+        assert cid in fresh_session.uncertain_call_ids
+        assert cid not in fresh_session.processing_call_ids
     # call:1 stays delivered.
     assert "call:1" in fresh_session.delivered_call_ids
     assert "call:1" not in fresh_session.pending_call_ids
     assert "call:1" not in fresh_session.processing_call_ids
+    assert "call:1" not in fresh_session.uncertain_call_ids
 
     # ---- Cleanup. ----
     await fresh.delete_workspace(ws_id)
+
+
+# ---------------------------------------------------------------------------
+# retry_uncertain_delivery: fail-closed gates + operator retry path
+# ---------------------------------------------------------------------------
+
+
+async def test_retry_uncertain_delivery_success_moves_to_pending_and_delivers(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """An uncertain call_id with a stored payload moves to pending, is pumped,
+    and on worker ACK reaches delivered. The original payload is preserved."""
+    from claude_hub.models import (
+        AgentReportCreate,
+        AgentReportState,
+        AgentType,
+        WorkspaceTask,
+        WorkspaceTaskStatus,
+    )
+
+    session_id = "retry-success-sess"
+    _make_managed_session(manager, session_id, ws_id)
+
+    # Create a root run so the delivery:retry_requested audit event has a
+    # recipient run to append to.
+    manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+        context_ref=session_id,
+    )
+
+    task = WorkspaceTask(
+        id="retry-success-task",
+        workspace_id=ws_id,
+        title="retry success",
+        prompt="do it",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    manager.tasks[task.id] = task
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"task_id": task.id, "current_task_id": task.id}
+    )
+    task.session_id = session_id
+    manager.tasks[task.id] = task
+
+    call_id = "retry:call:1"
+    payload_body = "the original assignment body"
+
+    # Place the call_id in uncertain on both session and task, with the
+    # original payload stored in pending_messages.
+    sess = manager.sessions[session_id]
+    manager.sessions[session_id] = sess.model_copy(
+        update={
+            "uncertain_call_ids": [call_id],
+            "pending_messages": {call_id: payload_body},
+        }
+    )
+    t = manager.tasks[task.id]
+    manager.tasks[task.id] = t.model_copy(update={"uncertain_call_ids": [call_id]})
+
+    sent_messages: list[str] = []
+
+    async def recording_send(tmux_session: str, message: str) -> None:
+        sent_messages.append(message)
+
+    monkeypatch.setattr(manager, "_send_tmux_message", recording_send)
+    monkeypatch.setattr(manager, "_ensure_session_ready_for_send", AsyncMock())
+
+    await manager.retry_uncertain_delivery(
+        session_id, call_id, reason="operator confirmed safe", actor="op-123"
+    )
+
+    # The call_id moved out of uncertain into pending, then was pumped to
+    # processing (awaiting ACK).
+    sess = manager.sessions[session_id]
+    assert call_id not in sess.uncertain_call_ids
+    assert call_id in sess.processing_call_ids
+    # The original payload was preserved and sent.
+    assert any(payload_body in m for m in sent_messages)
+
+    # Worker ACK moves it to delivered.
+    await manager.create_report(
+        session_id,
+        AgentReportCreate(
+            state=AgentReportState.WORKING,
+            message="done",
+            acked_call_ids=[call_id],
+        ),
+    )
+    sess = manager.sessions[session_id]
+    assert call_id in sess.delivered_call_ids
+    assert call_id not in sess.processing_call_ids
+    assert call_id not in sess.uncertain_call_ids
+
+
+async def test_retry_uncertain_delivery_rejects_non_uncertain_states(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """Unknown, delivered, processing, and pending call_ids are rejected."""
+    session_id = "retry-reject-sess"
+    _make_managed_session(manager, session_id, ws_id)
+
+    sess = manager.sessions[session_id]
+    manager.sessions[session_id] = sess.model_copy(
+        update={
+            "delivered_call_ids": ["delivered:1"],
+            "processing_call_ids": ["processing:1"],
+            "pending_call_ids": ["pending:1"],
+            "pending_messages": {
+                "delivered:1": "x",
+                "processing:1": "x",
+                "pending:1": "x",
+            },
+        }
+    )
+
+    # Unknown call_id.
+    with pytest.raises(ValueError):
+        await manager.retry_uncertain_delivery(session_id, "unknown:1", reason="r", actor="op")
+
+    # Delivered call_id.
+    with pytest.raises(ValueError, match="already delivered"):
+        await manager.retry_uncertain_delivery(session_id, "delivered:1", reason="r", actor="op")
+
+    # Processing call_id.
+    with pytest.raises(ValueError, match="in-flight"):
+        await manager.retry_uncertain_delivery(session_id, "processing:1", reason="r", actor="op")
+
+    # Pending call_id.
+    with pytest.raises(ValueError, match="already pending"):
+        await manager.retry_uncertain_delivery(session_id, "pending:1", reason="r", actor="op")
+
+
+async def test_retry_uncertain_delivery_requires_stored_payload(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """A call_id in uncertain but missing from pending_messages is rejected
+    fail-closed (we cannot re-deliver the original message)."""
+    session_id = "retry-no-payload-sess"
+    _make_managed_session(manager, session_id, ws_id)
+
+    call_id = "nopayload:1"
+    sess = manager.sessions[session_id]
+    manager.sessions[session_id] = sess.model_copy(
+        update={
+            "uncertain_call_ids": [call_id],
+            "pending_messages": {},  # no stored payload
+        }
+    )
+
+    with pytest.raises(ValueError, match="no stored payload"):
+        await manager.retry_uncertain_delivery(session_id, call_id, reason="r", actor="op")
+
+    # State unchanged: still uncertain.
+    sess = manager.sessions[session_id]
+    assert call_id in sess.uncertain_call_ids
+    assert call_id not in sess.pending_call_ids
+
+
+async def test_retry_uncertain_delivery_requires_task_session_mirror(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """If the session is bound to a task, the task must exist,
+    task.session_id == session_id, and the call_id must be uncertain on the
+    task. Divergence is rejected fail-closed."""
+    from claude_hub.models import (
+        AgentType,
+        WorkspaceTask,
+        WorkspaceTaskStatus,
+    )
+
+    session_id = "retry-mirror-sess"
+    _make_managed_session(manager, session_id, ws_id)
+
+    call_id = "mirror:1"
+
+    # Case A: session.task_id points to a non-existent task.
+    sess = manager.sessions[session_id]
+    manager.sessions[session_id] = sess.model_copy(
+        update={
+            "task_id": "ghost-task",
+            "uncertain_call_ids": [call_id],
+            "pending_messages": {call_id: "body"},
+        }
+    )
+    with pytest.raises(ValueError, match="does not exist"):
+        await manager.retry_uncertain_delivery(session_id, call_id, reason="r", actor="op")
+
+    # Case B: task exists but task.session_id != session_id (divergence).
+    task = WorkspaceTask(
+        id="mirror-task",
+        workspace_id=ws_id,
+        title="mirror",
+        prompt="p",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        session_id="some-other-session",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    manager.tasks[task.id] = task
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"task_id": task.id}
+    )
+    with pytest.raises(ValueError, match="divergence"):
+        await manager.retry_uncertain_delivery(session_id, call_id, reason="r", actor="op")
+
+    # Case C: task.session_id matches but call_id is NOT uncertain on the task.
+    manager.tasks[task.id] = task.model_copy(update={"session_id": session_id})
+    with pytest.raises(ValueError, match="not on bound task"):
+        await manager.retry_uncertain_delivery(session_id, call_id, reason="r", actor="op")
+
+
+async def test_retry_uncertain_delivery_event_failure_compensates_no_send(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """If the durable delivery:retry_requested event cannot be persisted, the
+    state is compensated back to uncertain and NO tmux send occurs."""
+    from claude_hub.models import (
+        AgentType,
+        WorkspaceTask,
+        WorkspaceTaskStatus,
+    )
+
+    session_id = "retry-event-fail-sess"
+    _make_managed_session(manager, session_id, ws_id)
+
+    task = WorkspaceTask(
+        id="retry-event-fail-task",
+        workspace_id=ws_id,
+        title="event fail",
+        prompt="p",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        session_id=session_id,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    manager.tasks[task.id] = task
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"task_id": task.id}
+    )
+
+    call_id = "eventfail:1"
+    sess = manager.sessions[session_id]
+    manager.sessions[session_id] = sess.model_copy(
+        update={
+            "uncertain_call_ids": [call_id],
+            "pending_messages": {call_id: "body"},
+        }
+    )
+    manager.tasks[task.id] = task.model_copy(update={"uncertain_call_ids": [call_id]})
+
+    send_called = {"n": 0}
+
+    async def fail_send(tmux_session: str, message: str) -> None:
+        send_called["n"] += 1
+
+    monkeypatch.setattr(manager, "_send_tmux_message", fail_send)
+
+    # Force the audit event emission to fail.
+    def raise_on_emit(*args, **kwargs):
+        raise RuntimeError("simulated event persistence failure")
+
+    monkeypatch.setattr(manager, "_emit_delivery_retry_requested", raise_on_emit)
+
+    with pytest.raises(RuntimeError, match="event persistence failure"):
+        await manager.retry_uncertain_delivery(session_id, call_id, reason="r", actor="op")
+
+    # No tmux send happened.
+    assert send_called["n"] == 0
+
+    # State compensated back to uncertain on both session and task.
+    sess = manager.sessions[session_id]
+    assert call_id in sess.uncertain_call_ids
+    assert call_id not in sess.pending_call_ids
+    t = manager.tasks[task.id]
+    assert call_id in t.uncertain_call_ids
+    assert call_id not in t.pending_call_ids
+
+
+async def test_retry_uncertain_delivery_second_ambiguity_returns_to_uncertain(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """After a successful retry, if the re-send hits another ambiguous
+    (post-side-effect) failure, the call_id returns to uncertain_call_ids."""
+    from claude_hub.models import (
+        AgentType,
+        WorkspaceTask,
+        WorkspaceTaskStatus,
+    )
+
+    session_id = "retry-ambig-sess"
+    _make_managed_session(manager, session_id, ws_id)
+
+    # Create a root run so the delivery:retry_requested audit event has a
+    # recipient run to append to.
+    manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+        context_ref=session_id,
+    )
+
+    task = WorkspaceTask(
+        id="retry-ambig-task",
+        workspace_id=ws_id,
+        title="ambig",
+        prompt="p",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        session_id=session_id,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    manager.tasks[task.id] = task
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"task_id": task.id}
+    )
+
+    call_id = "ambig:1"
+    sess = manager.sessions[session_id]
+    manager.sessions[session_id] = sess.model_copy(
+        update={
+            "uncertain_call_ids": [call_id],
+            "pending_messages": {call_id: "body"},
+        }
+    )
+    manager.tasks[task.id] = task.model_copy(update={"uncertain_call_ids": [call_id]})
+
+    # The tmux send raises after (possibly) writing — ambiguous failure.
+    async def ambiguous_send(tmux_session: str, message: str) -> None:
+        raise RuntimeError("simulated ambiguous tmux failure")
+
+    monkeypatch.setattr(manager, "_send_tmux_message", ambiguous_send)
+    monkeypatch.setattr(manager, "_ensure_session_ready_for_send", AsyncMock())
+
+    await manager.retry_uncertain_delivery(session_id, call_id, reason="r", actor="op")
+
+    # The second ambiguity moves the call_id back to uncertain (fail-closed),
+    # NOT pending (no auto-retry loop).
+    sess = manager.sessions[session_id]
+    assert call_id in sess.uncertain_call_ids
+    assert call_id not in sess.pending_call_ids
+    assert call_id not in sess.processing_call_ids
+
+
+async def test_retry_uncertain_delivery_session_not_found_raises_keyerror(
+    manager: WorkspaceManager,
+) -> None:
+    """A missing session raises KeyError so the API maps it to HTTP 404."""
+    with pytest.raises(KeyError):
+        await manager.retry_uncertain_delivery("no-such-session", "call:1", reason="r", actor="op")
+
+
+def test_retry_uncertain_api_derives_actor_from_current_user(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """The /retry-uncertain endpoint derives actor from the authenticated
+    current_user.open_id, ignoring any client-supplied actor field."""
+    from fastapi.testclient import TestClient
+
+    from claude_hub.api import workspaces as workspaces_api
+    from claude_hub.auth import dependencies as auth_deps
+    from claude_hub.auth.dependencies import get_current_user
+    from claude_hub.main import app
+    from claude_hub.models import User
+
+    monkeypatch.setattr(workspaces_api, "workspace_manager", manager)
+    monkeypatch.setattr(auth_deps, "is_local_network_request", lambda request: True)
+
+    captured: dict = {}
+
+    async def fake_retry(session_id, call_id, *, reason, actor):
+        captured["session_id"] = session_id
+        captured["call_id"] = call_id
+        captured["reason"] = reason
+        captured["actor"] = actor
+
+    monkeypatch.setattr(manager, "retry_uncertain_delivery", fake_retry)
+
+    async def fake_current_user() -> User:
+        return User(
+            open_id="authed-user-42",
+            name="Authed User",
+            email="u@example.com",
+            avatar_url=None,
+        )
+
+    app.dependency_overrides[get_current_user] = fake_current_user
+    try:
+        client = TestClient(app)
+        # Include a client-supplied actor field — it must be ignored.
+        resp = client.post(
+            "/api/workspaces/sessions/sess-1/retry-uncertain",
+            json={
+                "call_id": "call:1",
+                "reason": "manual retry",
+                "actor": "forged-actor",
+            },
+        )
+        assert resp.status_code == 204
+        # The actor passed to the service is the authenticated open_id,
+        # NOT the client-supplied "forged-actor".
+        assert captured["actor"] == "authed-user-42"
+        assert captured["call_id"] == "call:1"
+        assert captured["reason"] == "manual retry"
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+def test_retry_uncertain_api_404_for_unknown_session(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """Unknown session returns HTTP 404 (KeyError from service)."""
+    from fastapi.testclient import TestClient
+
+    from claude_hub.api import workspaces as workspaces_api
+    from claude_hub.auth import dependencies as auth_deps
+    from claude_hub.auth.dependencies import get_current_user
+    from claude_hub.main import app
+    from claude_hub.models import User
+
+    monkeypatch.setattr(workspaces_api, "workspace_manager", manager)
+    monkeypatch.setattr(auth_deps, "is_local_network_request", lambda request: True)
+
+    async def fake_current_user() -> User:
+        return User(open_id="u", name="U", email="u@e.com", avatar_url=None)
+
+    app.dependency_overrides[get_current_user] = fake_current_user
+    try:
+        client = TestClient(app)
+        resp = client.post(
+            "/api/workspaces/sessions/no-such-session/retry-uncertain",
+            json={"call_id": "call:1", "reason": "r"},
+        )
+        assert resp.status_code == 404
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+def test_retry_uncertain_api_400_for_invalid_call_id(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A call_id that is not uncertain returns HTTP 400 (ValueError)."""
+    from fastapi.testclient import TestClient
+
+    from claude_hub.api import workspaces as workspaces_api
+    from claude_hub.auth import dependencies as auth_deps
+    from claude_hub.auth.dependencies import get_current_user
+    from claude_hub.main import app
+    from claude_hub.models import User
+
+    session_id = "api-400-sess"
+    _make_managed_session(manager, session_id, ws_id)
+
+    monkeypatch.setattr(workspaces_api, "workspace_manager", manager)
+    monkeypatch.setattr(auth_deps, "is_local_network_request", lambda request: True)
+
+    async def fake_current_user() -> User:
+        return User(open_id="u", name="U", email="u@e.com", avatar_url=None)
+
+    app.dependency_overrides[get_current_user] = fake_current_user
+    try:
+        client = TestClient(app)
+        resp = client.post(
+            f"/api/workspaces/sessions/{session_id}/retry-uncertain",
+            json={"call_id": "never-seen-call", "reason": "r"},
+        )
+        assert resp.status_code == 400
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
