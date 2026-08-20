@@ -463,23 +463,29 @@ class _ReportsMixin:
         return report
 
     def _ack_call_ids(self, task_id: Optional[str], session_id: str, call_ids: list[str]) -> None:
-        """Receiver-side commit: move call_ids from processing to delivered.
+        """Receiver-side commit: move call_ids from pending/processing/uncertain to delivered.
 
-        This is the *commit* step of the durable receiver gate. The delivery
+        This is the *commit* step of the durable delivery gate. The delivery
         (pending → processing) happens in the receiver pump
-        (``_pump_session_messages``) AFTER the message is confirmed to be in
-        the tmux inbox (either just sent, or found via the pane-marker
-        check). This commit runs when the worker submits a report that
+        (``_pump_session_messages``) which persists the intent BEFORE sending
+        to tmux. This commit runs when the worker submits a report that
         includes the call_id in ``acked_call_ids`` — proving the worker
         processed the message.
 
-        Call_ids still in ``pending_call_ids`` (the worker ACKed before the
-        pump recorded the processing state — e.g. a crash between tmux send
-        and persist) are also moved straight to ``delivered``: the worker's
-        ACK is the authoritative signal that it processed the message.
+        **Target verification (anti-forgery):**
 
-        Unknown call_ids (not in pending or processing) are ignored to
-        prevent future-ID poisoning.
+        A call_id can only be ACKed by the session/task that it was targeted
+        at. For each call_id we look up its call record
+        (``agent_tree._call_record``) and verify that the record's target
+        run corresponds to the current ``task_id`` / ``session_id``. A
+        cross-task or cross-session ACK is rejected: the call_id is NOT
+        moved to delivered and NO ``followup:delivered`` event is emitted.
+
+        Call_ids in ``pending_call_ids``, ``processing_call_ids``, or
+        ``uncertain_call_ids`` are all eligible for ACK (the worker may have
+        processed the message even if the Hub's state machine hasn't caught
+        up, e.g. a crash between send and persist). Unknown call_ids (not in
+        any of the three) are ignored to prevent future-ID poisoning.
 
         After committing, the call_id's message body is removed from
         ``session.pending_messages`` (the durable inbox) since it is no
@@ -490,13 +496,49 @@ class _ReportsMixin:
         acked = set(call_ids)
 
         task = self.tasks.get(task_id)
+        session = self.sessions.get(session_id)
+
+        # Determine which call_ids are actually present in this session's
+        # pending/processing/uncertain lists. Only these can be committed.
+        session_call_ids: set[str] = set()
+        if session is not None:
+            session_call_ids.update(session.pending_call_ids)
+            session_call_ids.update(session.processing_call_ids)
+            session_call_ids.update(session.uncertain_call_ids)
+
+        # Target verification: for each call_id, check that its call record's
+        # target run matches the current task/session. Reject cross-session
+        # or cross-task ACKs.
+        verified_acked: list[str] = []
+        for call_id in acked:
+            if call_id not in session_call_ids:
+                # Not in this session's outbox — ignore (future-ID poisoning
+                # or cross-session forgery).
+                continue
+            if not self._verify_call_target(call_id, task_id, session_id):
+                logger.warning(
+                    "Rejecting forged ACK: call_id=%s does not target task_id=%s session_id=%s",
+                    call_id,
+                    task_id,
+                    session_id,
+                )
+                continue
+            verified_acked.append(call_id)
+
+        if not verified_acked:
+            return
+
+        verified_set = set(verified_acked)
+
         if task is not None:
-            to_ack_pending = [c for c in task.pending_call_ids if c in acked]
-            to_ack_processing = [c for c in task.processing_call_ids if c in acked]
-            to_ack = to_ack_pending + to_ack_processing
+            to_ack_pending = [c for c in task.pending_call_ids if c in verified_set]
+            to_ack_processing = [c for c in task.processing_call_ids if c in verified_set]
+            to_ack_uncertain = [c for c in task.uncertain_call_ids if c in verified_set]
+            to_ack = to_ack_pending + to_ack_processing + to_ack_uncertain
             if to_ack:
-                pending = [c for c in task.pending_call_ids if c not in acked]
-                processing = [c for c in task.processing_call_ids if c not in acked]
+                pending = [c for c in task.pending_call_ids if c not in verified_set]
+                processing = [c for c in task.processing_call_ids if c not in verified_set]
+                uncertain = [c for c in task.uncertain_call_ids if c not in verified_set]
                 delivered = list(task.delivered_call_ids)
                 for cid in to_ack:
                     if cid not in delivered:
@@ -505,18 +547,20 @@ class _ReportsMixin:
                     update={
                         "pending_call_ids": pending,
                         "processing_call_ids": processing,
+                        "uncertain_call_ids": uncertain,
                         "delivered_call_ids": delivered,
                     }
                 )
 
-        session = self.sessions.get(session_id)
         if session is not None:
-            to_ack_pending = [c for c in session.pending_call_ids if c in acked]
-            to_ack_processing = [c for c in session.processing_call_ids if c in acked]
-            to_ack = to_ack_pending + to_ack_processing
+            to_ack_pending = [c for c in session.pending_call_ids if c in verified_set]
+            to_ack_processing = [c for c in session.processing_call_ids if c in verified_set]
+            to_ack_uncertain = [c for c in session.uncertain_call_ids if c in verified_set]
+            to_ack = to_ack_pending + to_ack_processing + to_ack_uncertain
             if to_ack:
-                pending = [c for c in session.pending_call_ids if c not in acked]
-                processing = [c for c in session.processing_call_ids if c not in acked]
+                pending = [c for c in session.pending_call_ids if c not in verified_set]
+                processing = [c for c in session.processing_call_ids if c not in verified_set]
+                uncertain = [c for c in session.uncertain_call_ids if c not in verified_set]
                 delivered = list(session.delivered_call_ids)
                 for cid in to_ack:
                     if cid not in delivered:
@@ -524,17 +568,20 @@ class _ReportsMixin:
                 # Remove committed messages from the durable inbox and clear
                 # their claim timestamps.
                 pending_messages = {
-                    cid: msg for cid, msg in session.pending_messages.items() if cid not in acked
+                    cid: msg
+                    for cid, msg in session.pending_messages.items()
+                    if cid not in verified_set
                 }
                 processing_call_ids_at = {
                     cid: ts
                     for cid, ts in session.processing_call_ids_at.items()
-                    if cid not in acked
+                    if cid not in verified_set
                 }
                 self.sessions[session_id] = session.model_copy(
                     update={
                         "pending_call_ids": pending,
                         "processing_call_ids": processing,
+                        "uncertain_call_ids": uncertain,
                         "delivered_call_ids": delivered,
                         "pending_messages": pending_messages,
                         "processing_call_ids_at": processing_call_ids_at,
@@ -542,15 +589,128 @@ class _ReportsMixin:
                 )
 
         # ---- ACK-correlated followup outcome ----
-        # For each acked call_id that corresponds to a followup dispatch,
-        # emit a ``followup:delivered`` event with ``delivered: True``. This
-        # correlates the followup outcome with the worker's ACK: the
-        # ``followup:outcome`` event (emitted at dispatch time) carries
-        # ``delivered: False``; this event flips it to ``delivered: True``
-        # only after the worker proves it processed the followup message.
-        for call_id in call_ids:
+        # For each VERIFIED acked call_id that corresponds to a followup
+        # dispatch, emit a ``followup:delivered`` event with
+        # ``delivered: True``. Because we only iterate over verified_acked
+        # (call_ids that were actually in this session's outbox AND target
+        # this session/task), a forged cross-session ACK can never produce a
+        # spurious followup:delivered event.
+        for call_id in verified_acked:
             self._emit_followup_delivered_if_followup(
                 session.workspace_id if session else task.workspace_id if task else None, call_id
+            )
+            # If this is a resident event-batch delivery call_id, advance the
+            # resident root run's ack_sequence cursor.
+            self._advance_resident_ack_on_delivery(call_id)
+
+    def _verify_call_target(self, call_id: str, task_id: Optional[str], session_id: str) -> bool:
+        """Verify that ``call_id``'s call record targets ``task_id``/``session_id``.
+
+        Strict target binding: a tracked call record's target run must resolve
+        to the exact task and session that is reporting the ACK. Cross-task
+        or cross-session ACKs are rejected.
+
+        Returns True only for:
+          * Untracked call_ids (no call record) — legacy dispatch/internal
+            call_ids that are verified by being in the session's outbox
+            (the ``session_call_ids`` membership check performed by the
+            caller before invoking this method).
+
+        Returns False (fail closed) for:
+          * A tracked call record whose target run is missing or unresolvable.
+          * A tracked call record whose target task differs from ``task_id``.
+          * A tracked call record whose target task's session differs from
+            ``session_id``.
+        """
+        workspace_id = None
+        session = self.sessions.get(session_id)
+        if session is not None:
+            workspace_id = session.workspace_id
+        else:
+            task = self.tasks.get(task_id) if task_id else None
+            if task is not None:
+                workspace_id = task.workspace_id
+
+        if workspace_id is None:
+            return False
+
+        record = self.agent_tree._call_record(workspace_id, call_id)
+        if record is None:
+            # No call record — legacy untracked call (dispatch/internal).
+            # Verified by the caller's session_call_ids membership check.
+            return True
+
+        target_run_id = record.get("target")
+        if not target_run_id:
+            # Tracked call record but missing target — fail closed.
+            return False
+
+        target_run = self.agent_tree._runs.get(target_run_id)
+        if target_run is None:
+            return False
+
+        # The target run's context_ref is the task id it belongs to.
+        target_task_id = target_run.context_ref
+        if target_task_id and task_id and target_task_id != task_id:
+            return False
+
+        # For managed task runs, context_ref is the task id. Verify the
+        # task's session matches the reporting session exactly.
+        if target_task_id:
+            target_task = self.tasks.get(target_task_id)
+            if target_task is not None:
+                if target_task.session_id and target_task.session_id != session_id:
+                    # Cross-session ACK: the call was delivered to a
+                    # different session. Reject — the reporting session
+                    # cannot ACK a call it did not receive.
+                    return False
+
+        return True
+
+    def _advance_resident_ack_on_delivery(self, call_id: str) -> None:
+        """If ``call_id`` is a resident event-batch delivery, advance ack_sequence.
+
+        The resident's child-event batch is delivered with a call_id that
+        has a call record with action="resident_delivery". The record's
+        event payload stores the ``max_sequence`` of the delivered events.
+        When the resident worker ACKs that call_id, we advance the resident
+        root run's ``ack_sequence`` cursor to ``max_sequence``.
+
+        This ensures the cursor only advances AFTER the resident worker
+        proves it processed the events — not when the Hub sends the prompt.
+        """
+        # Find the workspace for this call_id by scanning call records.
+        workspace_id = None
+        for ws_id, records in self.agent_tree._call_index.items():
+            if call_id in records:
+                workspace_id = ws_id
+                break
+        if workspace_id is None:
+            return
+
+        record = self.agent_tree._call_record(workspace_id, call_id)
+        if record is None:
+            return
+        if record.get("action") != "resident_delivery":
+            return
+
+        event = record.get("event")
+        if event is None:
+            return
+        max_sequence = (event.payload or {}).get("max_sequence")
+        if max_sequence is None:
+            return
+
+        target_run_id = record.get("target")
+        if not target_run_id:
+            return
+        try:
+            self.agent_tree.ack(workspace_id, target_run_id, max_sequence)
+        except Exception:
+            logger.exception(
+                "Failed to advance resident ack_sequence for call_id=%s to sequence %s",
+                call_id,
+                max_sequence,
             )
 
     def _emit_followup_delivered_if_followup(
@@ -602,15 +762,10 @@ class _ReportsMixin:
     ) -> None:
         """Roll back call_ids from ``processing`` back to ``pending``.
 
-        This is the inverse of the pump's delivery step. It is used when a
-        ``processing`` call_id needs to be re-delivered — for example, when
-        the tmux session itself is gone (``ManagedSessionStatus.STOPPED``)
-        and the input buffer was destroyed.
-
-        The pump's normal send-failure path does NOT use this: if the tmux
-        send fails, the call_id never leaves ``pending_call_ids`` (the
-        processing state is only persisted after a successful send or after
-        the pane-marker check confirms delivery).
+        This is the inverse of the pump's intent-persist step. It is used
+        when a tmux send fails: the call_id was moved to processing
+        (in-flight) before the send, and on failure we move it back to
+        pending so the next pump cycle can retry.
 
         The message body stays in ``pending_messages`` (it was never
         removed) so re-delivery has the payload.

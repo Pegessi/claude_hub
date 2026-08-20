@@ -667,17 +667,30 @@ class WorkspaceTask(BaseModel):
     # NOTE: delivered_call_ids == "processed by the worker", not "sent by the
     # Hub". A call_id stays in pending_call_ids until the worker ACKs it.
     delivered_call_ids: List[str] = Field(default_factory=list)
-    # Call ids the receiver pump has claimed (moved out of pending_call_ids)
-    # and is delivering to the model. The claim precedes the model turn, so a
-    # duplicate delivery while a call_id is here is suppressed. If the Hub
-    # crashes after claim but before the worker ACKs, lease expiry moves the
-    # call_id back to pending_call_ids for re-delivery.
-    processing_call_ids: List[str] = Field(default_factory=list)
     # Call ids persisted in the outbox (sender side) whose message sits in the
     # session's pending_messages inbox awaiting pump delivery. The sender only
     # ever appends here; it never sends to tmux directly. On restart, every
     # call_id here is re-deliverable.
     pending_call_ids: List[str] = Field(default_factory=list)
+    # Call ids the receiver pump has moved to ``in-flight``: the intent to
+    # deliver was persisted (call_id moved out of pending_call_ids) and the
+    # pump is about to send / has sent the message to tmux, but the worker
+    # has not yet ACKed it. The Hub CANNOT prove the message reached the tmux
+    # input buffer (tmux stdin is not a durable, verifiable receiver), so a
+    # call_id here is "maybe delivered, not yet confirmed". On cold restart
+    # these move to ``uncertain_call_ids`` (fail-closed: not re-sent, not
+    # silently marked delivered).
+    processing_call_ids: List[str] = Field(default_factory=list)
+    # Call ids whose delivery state is **uncertain**: they were in
+    # ``processing_call_ids`` (in-flight) when the Hub crashed or the tmux
+    # session disappeared. We cannot prove the message was NOT delivered to
+    # the worker's tmux input buffer, so we fail closed: do NOT auto-resend
+    # (could duplicate) and do NOT silently mark delivered (could lose). The
+    # call_id stays here until either (a) the worker ACKs it (moves to
+    # delivered), or (b) an explicit human/operator retry moves it back to
+    # pending_call_ids for re-delivery. A ``delivery:uncertain`` event is
+    # emitted to the supervisor so the condition is visible.
+    uncertain_call_ids: List[str] = Field(default_factory=list)
     dispatch_reason: Optional[str] = None
     dispatch_pending: bool = False
     system_internal: bool = False
@@ -748,43 +761,57 @@ class ManagedSession(BaseModel):
     # a review prompt for. Drives the cross-task /clear decision independently of
     # any task's mutable review_session_id (which abort/skip/stale-release null).
     last_review_task_id: Optional[str] = None
-    # Executor-boundary call_id tracking for exactly-once delivery to the
-    # tmux inbox with a Hub-owned durable receiver gate (claim / processing /
-    # committed).
+    # Executor-boundary call_id tracking for at-least-once / fail-closed
+    # delivery to the tmux inbox. The Hub does NOT own a verifiable durable
+    # receiver: tmux stdin can accept bytes that are then lost if the agent
+    # process dies, and the Hub cannot read back what the model consumed.
+    # Therefore we cannot guarantee exactly-once; we guarantee fail-closed:
+    # a message is either pending, in-flight (maybe sent), uncertain (crash
+    # while in-flight), or delivered (worker ACKed).
     #
     # Lifecycle (see _messaging.py and _reports.py):
-    #   pending_call_ids  ──claim──▶  processing_call_ids  ──ACK──▶  delivered_call_ids
-    #         │                              │
-    #         │                              └── lease expiry (STOPPED only) ──┐
-    #         └────────────────────────────────────────────────────────────────┘
+    #
+    #   pending_call_ids ──persist intent──▶ processing_call_ids ──ACK──▶ delivered_call_ids
+    #         │                                      │
+    #         │         send failed                  │  crash / tmux gone
+    #         └──────────────────────────────────────┤
+    #                                                ▼
+    #                                       uncertain_call_ids
+    #                                       (fail-closed: not re-sent,
+    #                                        not silently delivered;
+    #                                        emit delivery:uncertain)
     #
     # pending_call_ids: call_ids persisted in the outbox (sender side) whose
     #   message sits in ``pending_messages`` awaiting delivery. The sender
     #   (``send_session_message``) only ever appends here; it never sends to
-    #   tmux directly. On restart, every call_id here is pumped (claimed +
-    #   delivered to tmux) exactly once.
-    # processing_call_ids: call_ids the **receiver pump** has atomically
-    #   claimed (moved out of ``pending_call_ids``) and successfully sent to
-    #   tmux. The call_id only stays here after a successful tmux send; a
-    #   failed send rolls it back to ``pending_call_ids``. These call_ids are
-    #   already in the tmux input buffer (the durable receiver) and MUST NOT
-    #   be re-delivered — re-sending would append to the buffer a second time
-    #   and produce a duplicate model turn. The worker ACKs them (moving them
-    #   to ``delivered_call_ids``) when it processes them.
-    #   Lease expiry (``_expire_processing_leases``) only moves a call_id back
-    #   to ``pending_call_ids`` for sessions whose tmux inbox is gone
-    #   (``ManagedSessionStatus.STOPPED``), because the input buffer was
-    #   destroyed with the tmux session.
+    #   tmux directly. On restart, every call_id here is pumped.
+    # processing_call_ids: call_ids the pump has moved to in-flight: the
+    #   intent was persisted (call_id moved out of pending) and the pump is
+    #   sending / has sent the message to tmux, but the worker has not ACKed.
+    #   The Hub CANNOT prove the message reached the tmux input buffer, so
+    #   this is "maybe delivered". On send failure the call_id rolls back to
+    #   pending. On crash while here, it moves to uncertain.
+    # uncertain_call_ids: call_ids whose delivery state is unknown (crash
+    #   while in-flight, or tmux session gone). Fail-closed: we do NOT
+    #   auto-resend (could duplicate) and do NOT silently mark delivered
+    #   (could lose). A ``delivery:uncertain`` event is emitted to the
+    #   supervisor. Moves to delivered on worker ACK, or back to pending on
+    #   explicit operator retry.
     # delivered_call_ids: call_ids the worker has ACKed (processed) via
-    #   ``acked_call_ids`` in a report. The commit step (``_ack_call_ids``)
-    #   moves them here. ``send_session_message`` skips any call_id already
-    #   in this list.
+    #   ``acked_call_ids`` in a report. Only the worker's ACK moves a call_id
+    #   here. ``send_session_message`` skips any call_id already here.
     #
     # NOTE: delivered_call_ids == "processed by the worker", not "sent by the
     # Hub". The Hub never moves a call_id to delivered_call_ids on its own;
     # only an ACK from the worker does.
     pending_call_ids: List[str] = Field(default_factory=list)
     processing_call_ids: List[str] = Field(default_factory=list)
+    # Call ids whose delivery state is **uncertain**: they were in
+    # ``processing_call_ids`` (in-flight) when the Hub crashed or the tmux
+    # session disappeared. Fail-closed: not auto-resent (could duplicate),
+    # not silently marked delivered (could lose). Moves to delivered on
+    # worker ACK, or back to pending on explicit retry.
+    uncertain_call_ids: List[str] = Field(default_factory=list)
     delivered_call_ids: List[str] = Field(default_factory=list)
     # Per-call_id claim timestamps. Keyed by call_id, value is the UTC datetime
     # when the receiver pump moved the call_id from pending to processing.
@@ -1162,6 +1189,21 @@ class SendSessionMessageRequest(BaseModel):
 
     message: str
     attachments: List[WorkspaceAttachmentCreate] = Field(default_factory=list)
+
+
+class RetryUncertainDeliveryRequest(BaseModel):
+    """Payload for retrying an uncertain delivery.
+
+    An operator explicitly requests that a call_id currently in
+    ``uncertain_call_ids`` be moved back to ``pending_call_ids`` so the
+    normal pump path can re-deliver it. The original payload is preserved.
+
+    The actor identity is NOT client-supplied; it is derived from the
+    authenticated ``current_user`` so the audit trail cannot be forged.
+    """
+
+    call_id: str
+    reason: str
 
 
 class User(BaseModel):

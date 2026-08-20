@@ -16,9 +16,7 @@ class _StateMixin:
         self._feedback_summary_locks: dict[str, asyncio.Lock] = {}
         # Per-session pump locks: serialize _pump_session_messages so two
         # concurrent pump cycles cannot both send the same pending call_id
-        # to tmux (which would duplicate the model turn). The pane-marker
-        # check is the receiver-verifiable dedup, but the lock closes the
-        # race window between two concurrent pane checks.
+        # to tmux (which would duplicate the model turn).
         self._pump_locks: dict[str, asyncio.Lock] = {}
         self._monitor_task: asyncio.Task[None] | None = None
         # Cache of resolved git worktree roots per workspace id: (timestamp, roots).
@@ -60,6 +58,31 @@ class _StateMixin:
                 self.sessions[session_id] = session.model_copy(
                     update={"current_task_id": session.task_id}
                 )
+
+        # Cold-start delivery recovery: any call_id that was in-flight
+        # (processing_call_ids) when the Hub crashed is now in an uncertain
+        # state. We cannot prove the message was NOT delivered to the tmux
+        # input buffer, so we fail closed: move them to uncertain_call_ids
+        # (do NOT auto-resend, do NOT silently mark delivered) and emit a
+        # delivery:uncertain event to the supervisor.
+        self._recover_uncertain_deliveries()
+
+    def _recover_uncertain_deliveries(self) -> None:
+        """Move all in-flight (processing) call_ids to uncertain on cold start.
+
+        Fail-closed: a call_id in processing_call_ids at startup means the
+        Hub crashed while the message was in-flight. We cannot prove the
+        message was not delivered to tmux, so we do NOT re-send it (could
+        duplicate) and do NOT mark it delivered (could lose). Instead we
+        move it to uncertain_call_ids and emit a delivery:uncertain event.
+        """
+        for session_id in list(self.sessions.keys()):
+            session = self.sessions.get(session_id)
+            if session is None:
+                continue
+            if not session.processing_call_ids:
+                continue
+            self._mark_processing_as_uncertain(session_id, list(session.processing_call_ids))
 
     def _load_nested_state(self) -> None:
         try:

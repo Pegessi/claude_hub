@@ -508,7 +508,9 @@ def test_run_resident_agent_skips_when_busy(
 
     sends: list[tuple[str, str]] = []
 
-    async def fake_send(session_id: str, message: str) -> None:
+    async def fake_send(
+        session_id: str, message: str, attachments: list | None = None, call_id: str | None = None
+    ) -> None:
         sends.append((session_id, message))
 
     async def fail_ensure(*args: object, **kwargs: object) -> ManagedSession:
@@ -535,7 +537,9 @@ def test_run_resident_agent_new_session_no_double_send(
     created = _resident_session(workspace)
     sends: list[tuple[str, str]] = []
 
-    async def fake_send(session_id: str, message: str) -> None:
+    async def fake_send(
+        session_id: str, message: str, attachments: list | None = None, call_id: str | None = None
+    ) -> None:
         sends.append((session_id, message))
 
     ensure_calls: list[object] = []
@@ -575,7 +579,9 @@ def test_run_resident_agent_reuse_sends_one_prompt(
 
     sends: list[tuple[str, str]] = []
 
-    async def fake_send(session_id: str, message: str) -> None:
+    async def fake_send(
+        session_id: str, message: str, attachments: list | None = None, call_id: str | None = None
+    ) -> None:
         sends.append((session_id, message))
 
     async def fail_ensure(*args: object, **kwargs: object) -> ManagedSession:
@@ -605,7 +611,9 @@ def test_run_resident_agent_persists_session_before_send_failure(
     workspace = workspace.model_copy(update={"resident_agent_session_id": session.id})
     manager.workspaces[workspace.id] = workspace
 
-    async def boom(session_id: str, message: str) -> None:
+    async def boom(
+        session_id: str, message: str, attachments: list | None = None, call_id: str | None = None
+    ) -> None:
         raise RuntimeError("paste failed")
 
     monkeypatch.setattr(manager, "send_session_message", boom)
@@ -906,7 +914,9 @@ def test_run_resident_agent_carries_placement_to_ensure_request(
         manager.sessions[created.id] = created
         return created
 
-    async def fake_send(session_id: str, message: str) -> None:
+    async def fake_send(
+        session_id: str, message: str, attachments: list | None = None, call_id: str | None = None
+    ) -> None:
         return None
 
     monkeypatch.setattr(manager, "ensure_workspace_agent", fake_ensure)
@@ -951,7 +961,9 @@ def test_run_resident_agent_default_title_when_unset(
         manager.sessions[created.id] = created
         return created
 
-    async def fake_send(session_id: str, message: str) -> None:
+    async def fake_send(
+        session_id: str, message: str, attachments: list | None = None, call_id: str | None = None
+    ) -> None:
         return None
 
     monkeypatch.setattr(manager, "ensure_workspace_agent", fake_ensure)
@@ -997,7 +1009,9 @@ def test_run_resident_agent_uses_workspace_agent_config(
 
     sends: list[tuple[str, str]] = []
 
-    async def fake_send(session_id: str, message: str) -> None:
+    async def fake_send(
+        session_id: str, message: str, attachments: list | None = None, call_id: str | None = None
+    ) -> None:
         sends.append((session_id, message))
 
     monkeypatch.setattr(manager, "ensure_workspace_agent", fake_ensure)
@@ -1040,7 +1054,9 @@ def test_run_resident_agent_terminal_skips_self_drive_prompt(
 
     sends: list[tuple[str, str]] = []
 
-    async def fake_send(session_id: str, message: str) -> None:
+    async def fake_send(
+        session_id: str, message: str, attachments: list | None = None, call_id: str | None = None
+    ) -> None:
         sends.append((session_id, message))
 
     monkeypatch.setattr(manager, "send_session_message", fake_send)
@@ -1517,7 +1533,9 @@ def test_run_resident_agent_master_mode_reuse_sends_heartbeat_prompt(
 
     sends: list[tuple[str, str]] = []
 
-    async def fake_send(session_id: str, message: str) -> None:
+    async def fake_send(
+        session_id: str, message: str, attachments: list | None = None, call_id: str | None = None
+    ) -> None:
         sends.append((session_id, message))
 
     async def fail_ensure(*args: object, **kwargs: object) -> ManagedSession:
@@ -1808,7 +1826,9 @@ def test_run_resident_agent_consumes_run_request_flag(
     )
     manager.workspaces[workspace.id] = workspace
 
-    async def fake_send(session_id: str, message: str) -> None:
+    async def fake_send(
+        session_id: str, message: str, attachments: list | None = None, call_id: str | None = None
+    ) -> None:
         return None
 
     monkeypatch.setattr(manager, "send_session_message", fake_send)
@@ -1840,7 +1860,9 @@ def test_run_resident_agent_busy_keeps_run_request_flag(
     )
     manager.workspaces[workspace.id] = workspace
 
-    async def fail_send(session_id: str, message: str) -> None:
+    async def fail_send(
+        session_id: str, message: str, attachments: list | None = None, call_id: str | None = None
+    ) -> None:
         raise AssertionError("busy resident must not be sent a prompt")
 
     monkeypatch.setattr(manager, "send_session_message", fail_send)

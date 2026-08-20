@@ -21,6 +21,7 @@ from ..models import (
     ManagedSession,
     ManualTaskControlRequest,
     RequestTaskReviewRequest,
+    RetryUncertainDeliveryRequest,
     SendSessionMessageRequest,
     SpawnWorkerRequest,
     StartTaskRequest,
@@ -517,6 +518,35 @@ async def send_session_message(
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Session not found") from e
     except (RuntimeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/sessions/{managed_session_id}/retry-uncertain", status_code=204)
+async def retry_uncertain_delivery(
+    managed_session_id: str,
+    payload: RetryUncertainDeliveryRequest,
+    current_user: User = Depends(get_current_user),
+) -> None:
+    """Operator retry of an uncertain delivery.
+
+    Moves ``call_id`` from ``uncertain_call_ids`` back to
+    ``pending_call_ids`` so the normal pump path can re-deliver it. The
+    original payload is preserved. Rejects unknown, delivered, processing,
+    and cross-session call_ids.
+
+    The actor identity is derived from the authenticated ``current_user``
+    (``open_id``) so the audit trail cannot be forged by the client.
+    """
+    try:
+        await workspace_manager.retry_uncertain_delivery(
+            managed_session_id,
+            payload.call_id,
+            reason=payload.reason,
+            actor=current_user.open_id,
+        )
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 

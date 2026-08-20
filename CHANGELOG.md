@@ -5,65 +5,91 @@
 
 ## Unreleased
 
-### fix: receiver-verifiable durable receipt (send-first + pane-marker dedupe → processing → ACK → delivered) + Resident wait/ack + followup:delivered
+### fix: fail-closed durable mailbox (persist-intent-first → processing → ACK → delivered; ambiguous → uncertain) + Resident wait/ack + followup:delivered
 
-- **What**: the mailbox uses a Hub-owned **receiver pump** that delivers the
-  message to the worker's tmux pane *first* (or confirms it was already sent
-  via the `[call_id:<id>]` pane marker), then claims the call_id
-  (pending → processing). The call_id stays in `processing_call_ids` until
-  the worker ACKs it via `acked_call_ids` in its report; only the worker's
-  ACK moves it to `delivered_call_ids` (the **receiver-verifiable durable
-  receipt**). On tmux send failure the call_id stays in `pending_call_ids`
-  (no claim was made) so the same call_id retry resumes delivery. On cold
-  restart, call_ids stranded in `processing_call_ids` are re-delivered; the
-  pane-marker check prevents duplicate tmux sends. The Resident loop now
-  uses `wait`/`ack` (directed cursor) instead of `get_events`, and a
-  `followup:delivered` event is emitted when the worker ACKs a followup
-  call_id. REVIEWED tasks no longer emit a terminal COMPLETED event on the
-  worker's COMPLETED report — only REVIEW_PASSED does.
-- **Why**: the previous design claimed (pending → processing, persist)
-  *before* sending to tmux. A crash between claim and tmux send left the
-  call_id in `processing` but never sent to tmux, and cold recovery skipped
-  `processing` call_ids → permanent message loss. The fix sends to tmux
-  first (or confirms via pane marker), then persists `processing`. The
-  pane-marker check handles the post-send/pre-persist crash (no duplicate),
-  and the send-first approach handles the pre-send crash (no loss). The
-  worker's ACK is the only proof of receipt, so `delivered` must be gated
-  on it.
+- **What**: the mailbox uses a Hub-owned **receiver pump** with
+  **persist-intent-before-side-effect** semantics. For each pending call_id
+  the pump: (1) persists the intent to deliver by moving the call_id from
+  `pending_call_ids` to `processing_call_ids`; (2) sends the message to
+  tmux. On a **pre-side-effect** failure (tmux write not attempted) the
+  call_id rolls back to `pending_call_ids` for retry. On an **ambiguous**
+  failure (tmux write may have succeeded) the call_id moves to
+  `uncertain_call_ids` — fail-closed: we do NOT auto-resend (could
+  duplicate) and do NOT silently mark delivered (could lose). On success
+  the call_id stays in `processing_call_ids` until the worker ACKs it via
+  `acked_call_ids`; only the worker's ACK moves it to `delivered_call_ids`
+  (the **receiver-verifiable durable receipt**). On cold restart, call_ids
+  stranded in `processing_call_ids` are moved to `uncertain_call_ids`
+  (fail-closed). `send_session_message` raises `DeliveryUncertain`
+  (a `RuntimeError`) when a call_id lands in `uncertain_call_ids`, so the
+  API surfaces HTTP 400 and the caller can retry explicitly (re-calling
+  `send_session_message` with the same call_id moves it back to `pending`
+  and re-pumps). The Resident loop uses `wait`/`ack` (directed cursor),
+  and a `followup:delivered` event is emitted when the worker ACKs a
+  followup call_id. REVIEWED tasks no longer emit a terminal COMPLETED
+  event on the worker's COMPLETED report — only REVIEW_PASSED does.
+- **Why**: tmux stdin is NOT a verifiable durable receiver — bytes written
+  to tmux may be consumed by the agent and then lost if the agent crashes,
+  and the Hub cannot read back what the model actually processed. The
+  previous send-first + pane-marker dedup approach relied on tmux pane
+  history to detect already-sent messages, but pane history is bounded and
+  the `[call_id:<id>]` marker can roll out of the scroll buffer, so cold
+  recovery would not see it and would re-send (duplicate delivery). The
+  fail-closed design instead treats any in-flight call_id whose outcome is
+  unknown as `uncertain`: the operator must explicitly retry, which
+  prevents both silent loss and silent duplication. The worker's ACK is
+  the only proof of receipt, so `delivered` must be gated on it.
 - **How**:
   - `_messaging.py::send_session_message`: for call_id-scoped messages,
     persist the body in `session.pending_messages[call_id]`, append to
     `pending_call_ids`, then kick `_pump_session_messages`. Sender skips
-    call_ids already in `processing_call_ids` or `delivered_call_ids`.
+    call_ids already in `processing_call_ids`, `uncertain_call_ids`, or
+    `delivered_call_ids`. If the call_id is in `uncertain_call_ids`
+    (explicit retry), move it back to `pending_call_ids` on both session
+    and task, save, re-pump, and raise `DeliveryUncertain` if it is still
+    uncertain. After the pump, if the call_id is in `uncertain_call_ids`,
+    raise `DeliveryUncertain` so the caller surfaces the failure.
   - `_messaging.py::_pump_session_messages`: acquires a per-session lock,
-    then for each pending call_id: (1) capture the tmux pane and check for
-    the `[call_id:<id>]` marker; (2) if marker found → already sent
-    (post-send/pre-persist crash), move to `processing` WITHOUT re-sending;
-    (3) if marker not found → send to tmux; on failure leave in `pending`
-    (no claim made, no rollback needed); (4) after successful send (or
-    marker confirmed), move call_id from `pending` to `processing` and
-    persist. The message body stays in `pending_messages` until ACK.
-  - `_messaging.py::_expire_processing_leases`: moves call_ids whose claim
-    timestamp is older than `max_age_seconds` back to `pending_call_ids`
-    for re-delivery (the pane-marker check prevents duplicate sends).
+    then for each pending call_id: (1) **persist intent**: move call_id
+    from `pending` to `processing` and save BEFORE the tmux write; (2)
+    **send**: write the message (with `[call_id:<id>]` marker) to tmux;
+    (3) **pre-side-effect failure** (exception before `_send_tmux_message`):
+    roll back to `pending`; (4) **ambiguous failure** (exception inside
+    `_send_tmux_message`): move to `uncertain_call_ids` (fail-closed, no
+    auto-retry); (5) **success**: stay in `processing` until worker ACK.
+    The message body stays in `pending_messages` until ACK.
+  - `_messaging.py::_expire_processing_leases`: for sessions whose tmux
+    inbox is gone (`STOPPED`), move `processing_call_ids` to
+    `uncertain_call_ids` (fail-closed). For live sessions, processing
+    call_ids stay in-flight (the message may already be in the tmux input
+    buffer; re-delivering would risk a duplicate turn).
+  - `_messaging.py::_mark_processing_as_uncertain`: moves call_ids from
+    `processing` to `uncertain` on both session and task, clears
+    `processing_call_ids_at`, and emits a `delivery:uncertain` event.
+    Used on ambiguous tmux send failure and cold recovery.
+  - `_messaging.py::_rollback_processing_to_pending`: moves call_ids from
+    `processing` back to `pending` on both session and task, clearing
+    `processing_call_ids_at`. Used only for proven pre-side-effect
+    failures (tmux write not attempted).
+  - `_state.py::_recover_uncertain_deliveries`: on cold start, moves all
+    `processing_call_ids` to `uncertain_call_ids` (fail-closed) and emits
+    `delivery:uncertain` events. We cannot prove the message reached the
+    tmux input buffer, so we do NOT auto-resend.
+  - `_constants.py::DeliveryUncertain`: `RuntimeError` subclass raised by
+    `send_session_message` when a call_id lands in `uncertain_call_ids`.
+    Caught by API endpoints (`/tasks/{id}/start`,
+    `/sessions/{id}/send`, `/lessons/summarize`) which return HTTP 400.
   - `_reports.py::_ack_call_ids`: commit only — moves call_ids from
-    `pending`/`processing` to `delivered`, removes the message body from
-    `pending_messages`. Unknown call_ids are ignored (future-ID poisoning
-    protection). The dispatch call_id (`dispatch:{task_id}`) is implicitly
-    ACKed on any report for that task. For each ACKed followup call_id,
-    emits a `followup:delivered` event with `delivered: true`.
+    `pending`/`processing`/`uncertain` to `delivered`, removes the message
+    body from `pending_messages`. Unknown call_ids are ignored (future-ID
+    poisoning protection). The dispatch call_id (`dispatch:{task_id}`) is
+    implicitly ACKed on any report for that task. For each ACKed followup
+    call_id, emits a `followup:delivered` event with `delivered: true`.
   - `_reports.py::_emit_followup_delivered_if_followup`: looks up the
     call_id in `agent_tree._call_record`; if `action == "followup"`, emits
     a `followup:delivered` event correlated to the original followup
     call_id. This flips the followup outcome from `delivered: false`
     (published at followup time) to `delivered: true` (worker ACK proof).
-  - `_reports.py::_rollback_processing_to_pending`: moves call_ids from
-    `processing` back to `pending` on both session and task, clearing
-    `processing_call_ids_at`. Used on cold recovery (processing lease
-    expiry) — NOT on tmux send failure (call_id stays in pending).
-  - `agent_tree.py::recover_pending_runs`: moves stranded `processing`
-    call_ids back to `pending` and re-pumps them; the pane-marker check in
-    the pump prevents duplicate tmux sends.
   - `agent_tree.py::load_from_dict`: migrates persisted events with
     `recipient=None` to self-address (`recipient = author`) so the directed
     mailbox filter (`e.recipient == run_id`) still delivers them.
@@ -83,10 +109,11 @@
     cursor to the highest delivered sequence. This makes `wait`/`ack`
     used in production, not just tests.
 - **Honesty note**: this guarantees at-least-once delivery of the
-  **Hub-managed** effect (the tmux prompt) with worker-side dedupe via the
-  `[call_id:<id>]` marker. It does NOT guarantee exactly-once of arbitrary
-  external tool side effects the model invokes — those require the call_id
-  to be propagated as an idempotency key by the model itself.
+  **Hub-managed** effect (the tmux prompt) with fail-closed uncertainty:
+  an ambiguous failure leaves the call_id in `uncertain_call_ids` and the
+  operator must explicitly retry. It does NOT guarantee exactly-once of
+  arbitrary external tool side effects the model invokes — those require
+  the call_id to be propagated as an idempotency key by the model itself.
 
 ### feat: unified Agent Tree + Durable Mailbox coordination layer
 
