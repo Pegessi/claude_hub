@@ -364,6 +364,24 @@ class _WorkspacesMixin:
                         self._expire_processing_leases(session_id)
                     except Exception:
                         logger.exception("Lease expiry failed for session %s", session_id)
+                # Receipt-based cold recovery for live sessions: query the
+                # tmux-server receipt for each processing call_id. If the
+                # receipt is absent, the paste never ran and we can safely
+                # return the call_id to pending. If the session is gone,
+                # move to uncertain.
+                for session_id in list(self.sessions):
+                    sess = self.sessions.get(session_id)
+                    if sess is None or sess.status == ManagedSessionStatus.STOPPED:
+                        continue
+                    if not sess.processing_call_ids:
+                        continue
+                    try:
+                        await self._recover_processing_via_receipt(session_id)
+                    except Exception:
+                        logger.exception(
+                            "Receipt-based processing recovery failed for session %s",
+                            session_id,
+                        )
                 # Pump any pending call_ids that were not yet delivered to
                 # tmux (e.g. the pump failed on a previous cycle, or a new
                 # message was enqueued). This is the live counterpart to the
@@ -1003,10 +1021,15 @@ class _WorkspacesMixin:
             )
             subtree_events = await self.agent_tree.wait(wait_req)
             if subtree_events:
-                # Keep only the most recent events to avoid bloating the prompt.
-                recent = subtree_events[-20:]
+                # Deliver the OLDEST unprocessed page (first 20 events), not
+                # the most recent 20. Using the tail would silently drop the
+                # older events the resident never saw. max_sequence binds
+                # ONLY to the delivered page so the ACK cursor advances
+                # exactly as far as the resident processed; the remaining
+                # events are delivered in subsequent cycles.
+                page = subtree_events[:20]
                 event_lines = []
-                for ev in recent:
+                for ev in page:
                     payload_msg = (ev.payload or {}).get("message", "")
                     event_lines.append(
                         f"  - seq={ev.sequence} type={ev.type.value} "
@@ -1019,7 +1042,7 @@ class _WorkspacesMixin:
                     "your last cycle. Use them to decide what to do next instead of "
                     "scanning the board:\n" + "\n".join(event_lines) + "\n"
                 )
-                max_seq = max(ev.sequence for ev in subtree_events)
+                max_seq = max(ev.sequence for ev in page)
                 # Bind the event batch to a delivery call_id. Record the
                 # max_sequence in the call record so the ACK handler can
                 # advance the cursor. The call_id is embedded in the prompt
@@ -1048,9 +1071,31 @@ class _WorkspacesMixin:
                         delivery_call_id,
                         max_seq,
                     )
-                    delivery_call_id = None
+                    # Fail closed: do NOT send the event-bearing prompt
+                    # without a call_id. Without a call_id the resident
+                    # cannot ACK the batch, so the cursor would never
+                    # advance and the events would be silently lost after
+                    # the resident processes them. Leave the cursor and
+                    # events in place for the next cycle to retry.
+                    return
 
-        await self.send_session_message(session.id, prompt, call_id=delivery_call_id)
+        # Recovery contract: the prompt above is rebuilt each cycle (event
+        # lines, lesson context, etc. may drift). The delivery call_id is
+        # stable until ACK (resident-delivery:{root_run.id}:{max_seq}), so a
+        # repeated cycle before ACK must NOT overwrite the persisted envelope
+        # with a drifted prompt. Use resume_existing_call to pump the stored
+        # payload (pending) or no-op (processing/delivered); only if the
+        # call_id is absent do we commit the freshly built prompt.
+        #
+        # When there are no new events, delivery_call_id is None — this is an
+        # ordinary self-drive prompt with no durable delivery contract, so we
+        # send it directly without a call_id.
+        if delivery_call_id is None:
+            await self.send_session_message(session.id, prompt)
+        else:
+            resumed = await self.resume_existing_call(session.id, delivery_call_id)
+            if not resumed:
+                await self.send_session_message(session.id, prompt, call_id=delivery_call_id)
 
     def _ensure_resident_root_run(self, workspace_id: str, session_id: Optional[str]) -> None:
         """Ensure the resident has a root run in the agent tree.

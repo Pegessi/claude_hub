@@ -58,7 +58,19 @@ def state_root(monkeypatch: MonkeyPatch, tmp_path: Path) -> Generator[Path, None
     monkeypatch.setattr(_wm.ttyd_manager, "set_tab_workspace_metadata", MagicMock())
 
     # Mock the workspace manager's tmux message sender.
+    # _send_tmux_message_with_receipt delegates to _send_tmux_message so tests
+    # that override _send_tmux_message (recording side effects) still work.
     monkeypatch.setattr(_wm.WorkspaceManager, "_send_tmux_message", AsyncMock())
+
+    async def _fake_send_with_receipt(self, tmux_session, message, call_id, **kwargs):
+        return await self._send_tmux_message(tmux_session, message, **kwargs)
+
+    monkeypatch.setattr(
+        _wm.WorkspaceManager, "_send_tmux_message_with_receipt", _fake_send_with_receipt
+    )
+    # Default: receipt is absent (the paste never ran). Tests that need the
+    # receipt-present path override this per-test.
+    monkeypatch.setattr(_wm.WorkspaceManager, "_query_tmux_receipt", AsyncMock(return_value=False))
 
     yield root
 
@@ -208,7 +220,9 @@ async def test_send_appends_message_event(manager: WorkspaceManager, ws_id: str)
     assert event.payload["message"] == "a message"
     assert event.recipient == child.id
     # last_task_message updated.
-    assert manager.agent_tree.get_run(child.id).last_task_message == "a message"
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    assert _run.last_task_message == "a message"
 
 
 @pytest.mark.asyncio
@@ -237,7 +251,9 @@ async def test_followup_resumes_turn(manager: WorkspaceManager, ws_id: str) -> N
     assert event.type == AgentEventType.MESSAGE
     assert event.payload["followup"] is True
     # The native subagent adapter sets status to RUNNING on followup.
-    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.RUNNING
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    assert _run.status == AgentRunStatus.RUNNING
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +412,7 @@ def test_emit_event_updates_run_status(manager: WorkspaceManager, ws_id: str) ->
         payload={"message": "finished"},
     )
     run = manager.agent_tree.get_run(root.id)
+    assert run is not None
     assert run.status == AgentRunStatus.COMPLETED
     assert run.last_task_message == "finished"
 
@@ -1687,7 +1704,9 @@ def test_no_transition_out_of_terminal_status(manager: WorkspaceManager, ws_id: 
     manager.agent_tree._update_run_status(child.id, AgentRunStatus.FAILED)
     # Attempting to move FAILED -> RUNNING is refused.
     manager.agent_tree._update_run_status(child.id, AgentRunStatus.RUNNING)
-    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.FAILED
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    assert _run.status == AgentRunStatus.FAILED
 
 
 # ---------------------------------------------------------------------------
@@ -2034,7 +2053,9 @@ async def test_followup_late_persist_failure_keeps_running_status(
     await manager.agent_tree.interrupt(
         InterruptRequest(workspace_id=ws_id, run_id=child.id, call_id="int-1")
     )
-    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.INTERRUPTED
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    assert _run.status == AgentRunStatus.INTERRUPTED
 
     # Make the outcome-phase persist (status -> RUNNING) fail.
     real_persist = manager.agent_tree._persist
@@ -2063,7 +2084,9 @@ async def test_followup_late_persist_failure_keeps_running_status(
 
     # In-memory status must be RUNNING (matches the executor that was
     # resumed), not rolled back to INTERRUPTED.
-    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.RUNNING
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    assert _run.status == AgentRunStatus.RUNNING
 
 
 # ---------------------------------------------------------------------------
@@ -2293,7 +2316,9 @@ async def test_lost_interrupt_delivery_recovered(
         fingerprint="fp",
         payload={"reason": "stop"},
     )
-    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.RUNNING
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    assert _run.status == AgentRunStatus.RUNNING
 
     adapter = manager.agent_tree._adapter(ExecutorKind.NATIVE_SUBAGENT)
     interrupt_calls = {"n": 0}
@@ -2308,7 +2333,9 @@ async def test_lost_interrupt_delivery_recovered(
     await manager.agent_tree.recover_pending_runs(ws_id)
 
     assert interrupt_calls["n"] == 1
-    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.INTERRUPTED
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    assert _run.status == AgentRunStatus.INTERRUPTED
 
 
 @pytest.mark.asyncio
@@ -2335,7 +2362,9 @@ async def test_lost_followup_delivery_recovered(
     await manager.agent_tree.interrupt(
         InterruptRequest(workspace_id=ws_id, run_id=child.id, call_id="int-1")
     )
-    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.INTERRUPTED
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    assert _run.status == AgentRunStatus.INTERRUPTED
 
     # Manually append a followup MESSAGE event (intent persisted but adapter
     # followup lost).
@@ -2365,7 +2394,9 @@ async def test_lost_followup_delivery_recovered(
     await manager.agent_tree.recover_pending_runs(ws_id)
 
     assert followup_calls["n"] == 1
-    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.RUNNING
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    assert _run.status == AgentRunStatus.RUNNING
 
 
 # ---------------------------------------------------------------------------
@@ -2485,7 +2516,9 @@ async def test_followup_resumes_interrupted_run(manager: WorkspaceManager, ws_id
     await manager.agent_tree.interrupt(
         InterruptRequest(workspace_id=ws_id, run_id=child.id, call_id="int-1")
     )
-    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.INTERRUPTED
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    assert _run.status == AgentRunStatus.INTERRUPTED
 
     await manager.agent_tree.followup(
         FollowupRequest(
@@ -2496,7 +2529,9 @@ async def test_followup_resumes_interrupted_run(manager: WorkspaceManager, ws_id
             call_id="followup-resume",
         )
     )
-    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.RUNNING
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    assert _run.status == AgentRunStatus.RUNNING
 
 
 @pytest.mark.asyncio
@@ -2525,7 +2560,9 @@ async def test_followup_resumes_completed_run(manager: WorkspaceManager, ws_id: 
         call_id="complete-1",
         payload={"message": "done"},
     )
-    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.COMPLETED
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    assert _run.status == AgentRunStatus.COMPLETED
 
     await manager.agent_tree.followup(
         FollowupRequest(
@@ -2536,7 +2573,9 @@ async def test_followup_resumes_completed_run(manager: WorkspaceManager, ws_id: 
             call_id="followup-completed",
         )
     )
-    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.RUNNING
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    assert _run.status == AgentRunStatus.RUNNING
 
 
 def test_failed_run_cannot_be_resumed(manager: WorkspaceManager, ws_id: str) -> None:
@@ -2560,7 +2599,9 @@ def test_failed_run_cannot_be_resumed(manager: WorkspaceManager, ws_id: str) -> 
     manager.agent_tree._update_run_status(child.id, AgentRunStatus.FAILED)
     # Attempting to move FAILED -> RUNNING is refused.
     manager.agent_tree._update_run_status(child.id, AgentRunStatus.RUNNING)
-    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.FAILED
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    assert _run.status == AgentRunStatus.FAILED
 
 
 # ---------------------------------------------------------------------------
@@ -2754,7 +2795,9 @@ async def test_managed_task_followup_recreates_deleted_task(
     )
 
     # The run's context_ref should now point to a new task.
-    new_task_id = manager.agent_tree.get_run(child.id).context_ref
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    new_task_id = _run.context_ref
     assert new_task_id is not None
     assert new_task_id != old_task_id
     new_task = manager.tasks[new_task_id]
@@ -2910,7 +2953,9 @@ async def test_followup_wakes_recipient_after_outcome(
     # The followup MESSAGE event should be delivered.
     assert any(e.type == AgentEventType.MESSAGE for e in events)
     # The run should be RUNNING again.
-    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.RUNNING
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    assert _run.status == AgentRunStatus.RUNNING
 
 
 @pytest.mark.asyncio
@@ -2945,7 +2990,9 @@ async def test_recover_interrupt_does_not_set_status_on_adapter_failure(
         fingerprint="fp",
         payload={"reason": "stop"},
     )
-    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.RUNNING
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    assert _run.status == AgentRunStatus.RUNNING
 
     adapter = manager.agent_tree._adapter(ExecutorKind.NATIVE_SUBAGENT)
 
@@ -2957,7 +3004,9 @@ async def test_recover_interrupt_does_not_set_status_on_adapter_failure(
     await manager.agent_tree.recover_pending_runs(ws_id)
 
     # Status must remain RUNNING because the adapter call failed.
-    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.RUNNING
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    assert _run.status == AgentRunStatus.RUNNING
 
 
 @pytest.mark.asyncio
@@ -2995,7 +3044,9 @@ async def test_recover_followup_does_not_set_status_on_adapter_failure(
         fingerprint="fp",
         payload={"message": "resume", "followup": True},
     )
-    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.INTERRUPTED
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    assert _run.status == AgentRunStatus.INTERRUPTED
 
     adapter = manager.agent_tree._adapter(ExecutorKind.NATIVE_SUBAGENT)
 
@@ -3007,7 +3058,9 @@ async def test_recover_followup_does_not_set_status_on_adapter_failure(
     await manager.agent_tree.recover_pending_runs(ws_id)
 
     # Status must remain INTERRUPTED because the adapter call failed.
-    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.INTERRUPTED
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    assert _run.status == AgentRunStatus.INTERRUPTED
 
 
 def test_recover_reconciles_status_via_get_status(
@@ -3046,7 +3099,9 @@ def test_recover_reconciles_status_via_get_status(
     _asyncio.run(manager.agent_tree.recover_pending_runs(ws_id))
 
     # The run status should be reconciled to WAITING.
-    assert manager.agent_tree.get_run(child_id).status == AgentRunStatus.WAITING
+    _run = manager.agent_tree.get_run(child_id)
+    assert _run is not None
+    assert _run.status == AgentRunStatus.WAITING
 
 
 def test_managed_task_authority_uses_task_session_id(
@@ -3062,11 +3117,7 @@ def test_managed_task_authority_uses_task_session_id(
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
     )
-    child = manager.tasks  # just to ensure manager is wired
-
-    # Create a managed task run.
-    child_run = manager.agent_tree._spawn_managed_task  # noqa: F841
-    # Use the public spawn path.
+    # Create a managed task run via the public spawn path.
     import asyncio as _asyncio
 
     child = _asyncio.run(
@@ -3279,7 +3330,9 @@ def test_review_failed_maps_to_running_not_failed(manager: WorkspaceManager, ws_
     )
 
     # The run must be RUNNING, not FAILED.
-    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.RUNNING
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    assert _run.status == AgentRunStatus.RUNNING
 
 
 # ---------------------------------------------------------------------------
@@ -3490,7 +3543,9 @@ async def test_recover_multiple_unmatched_followups_in_sequence(
     await manager.agent_tree.interrupt(
         InterruptRequest(workspace_id=ws_id, run_id=child.id, call_id="int-multi")
     )
-    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.INTERRUPTED
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    assert _run.status == AgentRunStatus.INTERRUPTED
 
     # Append three followup MESSAGE events, none with a matching outcome.
     for i in range(3):
@@ -3703,6 +3758,7 @@ async def test_recover_followup_uses_event_own_payload_message(
 
     # Set last_task_message to something different from the followup message.
     run = manager.agent_tree.get_run(child.id)
+    assert run is not None
     run.last_task_message = "stale-last-message"
 
     # Append a followup event with its own message.
@@ -3785,7 +3841,9 @@ async def test_recover_followup_does_not_skip_status_reconciliation(
     await manager.agent_tree.recover_pending_runs(ws_id)
 
     # Status reconciliation must have run: the run is WAITING, not RUNNING.
-    assert manager.agent_tree.get_run(child.id).status == AgentRunStatus.WAITING
+    _run = manager.agent_tree.get_run(child.id)
+    assert _run is not None
+    assert _run.status == AgentRunStatus.WAITING
 
 
 # ---------------------------------------------------------------------------
@@ -4178,6 +4236,7 @@ async def test_followup_outbox_pending_survives_crash_and_redelivers_idempotentl
     from claude_hub.models.agent_tree import AgentRunStatus
 
     run = manager.agent_tree.get_run(child.id)
+    assert run is not None
     adapter = manager.agent_tree._adapter(run.executor_kind)
 
     # First delivery: the call_id goes to pending_call_ids (not delivered)
@@ -4239,6 +4298,7 @@ async def test_followup_recreates_deleted_task_with_call_id_pending(
     manager._save_state()
 
     run = manager.agent_tree.get_run(child.id)
+    assert run is not None
     adapter = manager.agent_tree._adapter(run.executor_kind)
 
     await adapter.followup(run, message, call_id=call_id)
@@ -4379,11 +4439,15 @@ async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
 
     The Hub does NOT own a verifiable durable receiver for tmux stdin, so
     exactly-once is impossible. On a hard exit + reload, call_ids stranded in
-    ``processing_call_ids`` move to ``uncertain_call_ids`` (fail-closed): we
-    cannot prove the message was not delivered to tmux, so we do NOT re-send
-    it (could duplicate) and do NOT silently mark it delivered (could lose).
-    Only ``pending_call_ids`` (never sent to tmux) are re-deliverable. The
-    worker's ACK is what moves processing/uncertain call_ids to delivered.
+    ``processing_call_ids`` for a LIVE (WORKING) session STAY in
+    ``processing_call_ids`` — the monitor's receipt-based reconciliation
+    (``_recover_processing_via_receipt``) decides: receipt present → keep
+    processing (no repaste), receipt absent → move to pending for one safe
+    re-delivery, session gone → uncertain. Only STOPPED sessions (tmux inbox
+    gone, receipt unqueryable) move processing → uncertain immediately.
+    Only ``pending_call_ids`` (never sent to tmux) are re-deliverable by the
+    pump. The worker's ACK is what moves processing/uncertain call_ids to
+    delivered.
     """
     session_id = "outbox-session"
     _make_managed_session(manager, session_id, ws_id)
@@ -4421,25 +4485,28 @@ async def test_working_followup_session_outbox_survives_hard_exit_and_reload(
     manager._save_state()
     reloaded = WorkspaceManager()
     reloaded_session = reloaded.sessions[session_id]
-    # On cold restart, in-flight (processing) call_ids move to
-    # uncertain_call_ids (fail-closed).
-    assert call_id in reloaded_session.uncertain_call_ids
-    assert call_id not in reloaded_session.processing_call_ids
+    # On cold restart, for a LIVE (WORKING) session the in-flight (processing)
+    # call_id STAYS in processing_call_ids — the monitor's receipt-based
+    # reconciliation decides whether to keep it processing, move it to
+    # pending, or fail it closed to uncertain. It does NOT move to uncertain
+    # immediately (that only happens for STOPPED sessions).
+    assert call_id in reloaded_session.processing_call_ids
+    assert call_id not in reloaded_session.uncertain_call_ids
     assert call_id not in reloaded_session.delivered_call_ids
     assert call_id not in reloaded_session.pending_call_ids
 
-    # Recovery: the call_id is in uncertain_call_ids, meaning it was
-    # in-flight when the Hub crashed. The Hub does NOT re-deliver it —
+    # Recovery: the call_id is in processing_call_ids, meaning it was
+    # in-flight when the Hub crashed. The pump does NOT re-deliver it —
     # re-sending could produce a duplicate turn. Only pending_call_ids
     # are pumped.
     sent.clear()
     reloaded._send_tmux_message = _fake_send_tmux  # type: ignore[assignment]
     reloaded._capture_tmux_output = _fake_capture_tmux  # type: ignore[assignment]
     await reloaded.agent_tree.recover_pending_runs(ws_id)
-    # No re-delivery: the message is in uncertain (fail-closed).
+    # No re-delivery: the message is in processing (not pending).
     assert len(sent) == 0
     reloaded_session = reloaded.sessions[session_id]
-    assert call_id in reloaded_session.uncertain_call_ids
+    assert call_id in reloaded_session.processing_call_ids
 
     # The worker ACKs the call_id. This moves it to delivered_call_ids and
     # removes the message from pending_messages.
@@ -4501,7 +4568,7 @@ async def test_report_acks_only_listed_call_ids_not_unrelated_pending_followup(
     )
 
     followup_call_id = "followup:unprocessed"
-    dispatch_call_id = f"dispatch:{task.id}"
+    dispatch_call_id = f"dispatch:{task.id}:{task.dispatch_attempt}"
 
     # Simulate a crashed delivery: both the dispatch and a followup are in
     # pending_call_ids (the send happened but the delivered-persist crashed).
@@ -4572,10 +4639,12 @@ async def test_report_auto_acks_dispatch_call_id_even_when_not_listed(
 ) -> None:
     """Submitting a report for a task automatically ACKs the dispatch call_id.
 
-    The dispatch call_id is ``f"dispatch:{task_id}"``. When the worker submits
-    a report for the task, it has necessarily processed the assignment prompt,
-    so the Hub automatically ACKs that call_id — even if the worker does not
-    list it in ``acked_call_ids``.
+    The dispatch call_id is ``f"dispatch:{task_id}:{dispatch_attempt}"``
+    (attempt-scoped). When the worker submits a report for the task, it has
+    necessarily processed the assignment prompt, so the Hub automatically
+    ACKs that call_id — even if the worker does not list it in
+    ``acked_call_ids``. Legacy reports that ACK ``f"dispatch:{task_id}"``
+    (no attempt suffix) are still accepted for backward compatibility.
     """
     from claude_hub.models import (
         AgentReportCreate,
@@ -4603,7 +4672,7 @@ async def test_report_auto_acks_dispatch_call_id_even_when_not_listed(
         update={"task_id": task.id, "current_task_id": task.id}
     )
 
-    dispatch_call_id = f"dispatch:{task.id}"
+    dispatch_call_id = f"dispatch:{task.id}:{task.dispatch_attempt}"
     followup_call_id = "followup:unprocessed"
 
     # Both dispatch and followup are pending (send happened, delivered-persist
@@ -4686,7 +4755,7 @@ async def test_report_ignores_unknown_future_call_ids_no_poisoning(
         update={"task_id": task.id, "current_task_id": task.id}
     )
 
-    dispatch_call_id = f"dispatch:{task.id}"
+    dispatch_call_id = f"dispatch:{task.id}:{task.dispatch_attempt}"
     future_call_id = "followup:not-yet-sent"
 
     # Only the dispatch is pending. The future call_id has NOT been sent.
@@ -4782,14 +4851,18 @@ async def test_crash_after_processing_before_ack_exactly_one_side_effect(
         update={"task_id": task.id, "current_task_id": task.id}
     )
 
-    dispatch_call_id = f"dispatch:{task.id}"
+    dispatch_call_id = f"dispatch:{task.id}:{task.dispatch_attempt}"
 
     # Step 1-3: sender sent X, receiver processed X (side effect happened),
     # but both the receiver ACK and sender phase-2 persist crashed.
     # So X is still in pending_call_ids and NOT in delivered_call_ids.
+    # The persisted envelope (pending_messages) must survive the crash so
+    # the legacy fingerprint backfill can derive the call_id's fingerprint
+    # from the stored payload.
     manager.sessions[session_id] = manager.sessions[session_id].model_copy(
         update={
             "pending_call_ids": [dispatch_call_id],
+            "pending_messages": {dispatch_call_id: "assignment prompt"},
             "delivered_call_ids": [],
         }
     )
@@ -4806,14 +4879,11 @@ async def test_crash_after_processing_before_ack_exactly_one_side_effect(
     send_count = {"n": 0}
     sent_messages: list[str] = []
 
-    real_send_tmux = manager._send_tmux_message
-
-    async def counting_send_tmux(tmux_session: str, message: str) -> None:
+    async def counting_send_tmux(tmux_session: str, message: str, call_id: str) -> None:
         send_count["n"] += 1
         sent_messages.append(message)
-        await real_send_tmux(tmux_session, message)
 
-    monkeypatch.setattr(manager, "_send_tmux_message", counting_send_tmux)
+    monkeypatch.setattr(manager, "_send_tmux_message_with_receipt", counting_send_tmux)
 
     # Step 4-5: on recovery, the sender re-sends X because it is still pending.
     await manager.send_session_message(session_id, "assignment prompt", call_id=dispatch_call_id)
@@ -4902,7 +4972,7 @@ async def test_resident_root_managed_task_report_ack_cold_replay(
     assert task.session_id is not None
     session_id = task.session_id
 
-    dispatch_call_id = f"dispatch:{task_id}"
+    dispatch_call_id = f"dispatch:{task.id}:{task.dispatch_attempt}"
 
     # After a successful dispatch, the dispatch call_id has been claimed by
     # the receiver pump (pending → processing) and sent to the worker. It
@@ -4911,6 +4981,11 @@ async def test_resident_root_managed_task_report_ack_cold_replay(
     assert dispatch_call_id in session.processing_call_ids
     assert dispatch_call_id not in session.delivered_call_ids
     assert dispatch_call_id not in session.pending_call_ids
+
+    # Capture the original dispatch payload. The fingerprint-first invariant
+    # requires that any re-send of the same call_id carries the identical
+    # payload; a different payload is rejected.
+    original_dispatch_message = session.pending_messages[dispatch_call_id]
 
     # 3. Worker submits a report. The Hub auto-ACKs the dispatch call_id,
     #    moving it from processing to delivered_call_ids.
@@ -4948,15 +5023,19 @@ async def test_resident_root_managed_task_report_ack_cold_replay(
     assert dispatch_call_id in fresh_session.delivered_call_ids
     assert dispatch_call_id not in fresh_session.pending_call_ids
 
-    # Sender-side dedup: a re-send of the dispatch call_id is skipped.
+    # Sender-side dedup: a re-send of the dispatch call_id (with the identical
+    # payload, as required by the fingerprint-first invariant) is skipped
+    # because the call_id is already in delivered_call_ids.
     send_count = {"n": 0}
 
-    async def _counting_send_tmux(tmux_session: str, message: str) -> None:
+    async def _counting_send_tmux(tmux_session: str, message: str, call_id: str) -> None:
         send_count["n"] += 1
 
-    monkeypatch.setattr(fresh, "_send_tmux_message", _counting_send_tmux)
+    monkeypatch.setattr(fresh, "_send_tmux_message_with_receipt", _counting_send_tmux)
 
-    await fresh.send_session_message(session_id, "assignment prompt", call_id=dispatch_call_id)
+    await fresh.send_session_message(
+        session_id, original_dispatch_message, call_id=dispatch_call_id
+    )
     assert send_count["n"] == 0  # skipped because already ACKed
 
 
@@ -5020,6 +5099,7 @@ async def test_deleted_task_recreation_persists_context_ref_before_start_task(
     monkeypatch.setattr(manager, "dispatch_workspace", _crashing_dispatch)
 
     run = manager.agent_tree.get_run(child.id)
+    assert run is not None
     adapter = manager.agent_tree._adapter(run.executor_kind)
 
     with pytest.raises(RuntimeError, match="simulated hard exit during dispatch"):
@@ -5041,6 +5121,7 @@ async def test_deleted_task_recreation_persists_context_ref_before_start_task(
     manager._save_state()
     reloaded = WorkspaceManager()
     reloaded_run = reloaded.agent_tree.get_run(child.id)
+    assert reloaded_run is not None
     assert reloaded_run.context_ref == new_task_id
     assert new_task_id in reloaded.tasks
 
@@ -5065,6 +5146,7 @@ async def test_deleted_task_recreation_persists_context_ref_before_start_task(
 
     task_count_before = len(reloaded.tasks)
     reloaded_run = reloaded.agent_tree.get_run(child.id)
+    assert reloaded_run is not None
     reloaded_adapter = reloaded.agent_tree._adapter(reloaded_run.executor_kind)
     await reloaded_adapter.followup(reloaded_run, message, call_id=call_id)
 
@@ -5304,6 +5386,7 @@ async def test_reviewed_task_full_lifecycle_through_resident(
     # The worker's COMPLETED report bridges to PROGRESS (not COMPLETED)
     # because the task is REVIEWED. The run waits for the reviewer.
     child_run = manager.agent_tree.get_run(child.id)
+    assert child_run is not None
     assert child_run.status == AgentRunStatus.WAITING
 
     events = manager.agent_tree.get_events(ws_id, root.id, subtree=False)
@@ -5326,6 +5409,7 @@ async def test_reviewed_task_full_lifecycle_through_resident(
 
     # The run is RUNNING again (not FAILED).
     child_run = manager.agent_tree.get_run(child.id)
+    assert child_run is not None
     assert child_run.status == AgentRunStatus.RUNNING
 
     # Still no terminal COMPLETED event.
@@ -5347,6 +5431,7 @@ async def test_reviewed_task_full_lifecycle_through_resident(
     assert task.status == WorkspaceTaskStatus.REVIEW
 
     child_run = manager.agent_tree.get_run(child.id)
+    assert child_run is not None
     assert child_run.status == AgentRunStatus.WAITING
 
     # ---- Step 4: reviewer submits REVIEW_PASSED. ----
@@ -5369,6 +5454,7 @@ async def test_reviewed_task_full_lifecycle_through_resident(
 
     # NOW the terminal COMPLETED event fires (on REVIEW_PASSED, not before).
     child_run = manager.agent_tree.get_run(child.id)
+    assert child_run is not None
     assert child_run.status == AgentRunStatus.COMPLETED
 
     events = manager.agent_tree.get_events(ws_id, root.id, subtree=False)
@@ -5382,7 +5468,7 @@ async def test_reviewed_task_full_lifecycle_through_resident(
 async def test_mailbox_side_effect_probes_crash_and_replay(
     manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Adversarial probes for the durable receiver pump.
+    """Adversarial probes for the fail-closed delivery pump.
 
     A real, counted, persisted side effect (a file whose content is the
     number of times the effect ran) stands in for the model's external tool
@@ -5393,7 +5479,8 @@ async def test_mailbox_side_effect_probes_crash_and_replay(
       3. Duplicate delivery while a claim/commit exists => exactly one effect.
       4. Crash after the effect but before the outer ACK => replay does NOT
          repeat the committed effect.
-      5. An unACKed followup survives a cold restart and is re-delivered.
+      5. An unACKed followup survives a cold restart in processing state
+         and is NOT re-delivered (the worker ACKs it after restart).
     """
     from claude_hub.models import (
         AgentReportCreate,
@@ -5550,16 +5637,17 @@ async def test_mailbox_side_effect_probes_crash_and_replay(
     assert send_count["n"] == send_count_before
     assert read_effect() == 1
 
-    # ---- Probe 5: unACKed followup survives cold restart in uncertain
+    # ---- Probe 5: unACKed followup survives cold restart in processing
     # state and is NOT re-delivered. ----
     # Restore a working send (Probe 2 left _send_tmux_message as
     # ambiguous_send which always raises).
     monkeypatch.setattr(manager, "_send_tmux_message", crashing_send)
     # The followup call_id is sent to tmux and stays in processing_call_ids
-    # (unACKed). On cold restart, it moves to uncertain_call_ids
-    # (fail-closed: we cannot prove it was not delivered to tmux, so we do
-    # NOT re-send and do NOT silently mark delivered). The worker ACKs it
-    # after restart.
+    # (unACKed). On cold restart, for a LIVE (WORKING) session it STAYS in
+    # processing_call_ids — the monitor's receipt-based reconciliation
+    # decides whether to keep it processing, move it to pending, or fail it
+    # closed to uncertain. The pump does NOT re-deliver it (re-sending could
+    # produce a duplicate turn). The worker ACKs it after restart.
     followup_call_id = "followup:1"
     effect_before = read_effect()
     await manager.send_session_message(session_id, "please also do X", call_id=followup_call_id)
@@ -5582,22 +5670,22 @@ async def test_mailbox_side_effect_probes_crash_and_replay(
     fresh._capture_tmux_output = _ready_capture  # type: ignore[assignment]
     fresh_session = fresh.sessions[session_id]
 
-    # The unACKed followup call_id moved to uncertain_call_ids after reload
-    # (fail-closed cold recovery).
-    assert followup_call_id in fresh_session.uncertain_call_ids
-    assert followup_call_id not in fresh_session.processing_call_ids
+    # The unACKed followup call_id stays in processing_call_ids after reload
+    # (LIVE session: receipt-based reconciliation decides the next state).
+    assert followup_call_id in fresh_session.processing_call_ids
+    assert followup_call_id not in fresh_session.uncertain_call_ids
     assert followup_call_id not in fresh_session.delivered_call_ids
 
-    # Run cold recovery: uncertain call_ids are NOT re-delivered (re-sending
+    # Run cold recovery: processing call_ids are NOT re-delivered (re-sending
     # could produce a duplicate turn). Only pending_call_ids are pumped.
     send_count_before_fresh = send_count["n"]
     effect_before_fresh = read_effect()
     await fresh.agent_tree.recover_pending_runs(ws_id)
-    # No re-delivery: the followup is in uncertain (fail-closed).
+    # No re-delivery: the followup is in processing (not pending).
     assert send_count["n"] == send_count_before_fresh
     assert read_effect() == effect_before_fresh
     fresh_session = fresh.sessions[session_id]
-    assert followup_call_id in fresh_session.uncertain_call_ids
+    assert followup_call_id in fresh_session.processing_call_ids
 
     # The worker ACKs the followup call_id after restart.
     await fresh.create_report(
@@ -5633,8 +5721,9 @@ async def test_resident_cycle_e2e_with_unacked_followup_cold_replay(
       - An unACKed followup from the resident to the child is sent to tmux
         and stays in ``processing_call_ids``.
       - Cold restart: the unACKed followup stays in ``processing_call_ids``
-        and is NOT re-delivered — the tmux inbox is the durable receiver,
-        so re-sending would produce a duplicate turn. The worker ACKs it
+        and is NOT re-delivered to a LIVE session — the tmux receipt
+        (``@receipt_<sha16(call_id)>``) proves the paste ran, so
+        re-sending would produce a duplicate turn. The worker ACKs it
         after restart.
       - Cumulative unique side-effect count: every call_id is sent to tmux
         exactly once (no duplicates across cold replay or transient retry).
@@ -5668,16 +5757,17 @@ async def test_resident_cycle_e2e_with_unacked_followup_cold_replay(
     sent_messages: list[str] = []
     delivered_call_ids: set[str] = set()
 
-    async def recording_send(tmux_session: str, message: str) -> None:
+    async def recording_send(tmux_session: str, message: str, call_id: str) -> None:
         sent_messages.append(message)
-        # Extract the call_id marker from the message.
-        for line in message.splitlines():
-            if line.startswith("[call_id:"):
-                cid = line[len("[call_id:") : -1]
-                delivered_call_ids.add(cid)
-                break
+        delivered_call_ids.add(call_id)
 
-    monkeypatch.setattr(manager, "_send_tmux_message", recording_send)
+    async def recording_send_no_call_id(tmux_session: str, message: str) -> None:
+        # Fire-and-forget path (no call_id): record the message but do not
+        # add to delivered_call_ids (no at-least-once tracking).
+        sent_messages.append(message)
+
+    monkeypatch.setattr(manager, "_send_tmux_message_with_receipt", recording_send)
+    monkeypatch.setattr(manager, "_send_tmux_message", recording_send_no_call_id)
 
     # ---- Run the resident cycle (creates the resident session + root run). ----
     await manager._run_resident_agent(workspace)
@@ -5710,7 +5800,7 @@ async def test_resident_cycle_e2e_with_unacked_followup_cold_replay(
     worker_session_id = task.session_id
     assert worker_session_id is not None
 
-    dispatch_call_id = f"dispatch:{task_id}"
+    dispatch_call_id = f"dispatch:{task.id}:{task.dispatch_attempt}"
     session = manager.sessions[worker_session_id]
     # The dispatch call_id was sent to tmux and stays in processing_call_ids
     # until the worker ACKs.
@@ -5737,6 +5827,7 @@ async def test_resident_cycle_e2e_with_unacked_followup_cold_replay(
     # restarted resident resumes from this cursor (no replay of ACKed events).
     manager.agent_tree.ack(ws_id, root_run.id, max_seq)
     root_run = manager.agent_tree.get_run(root_run.id)
+    assert root_run is not None
     assert root_run.ack_sequence == max_seq
 
     # A subsequent wait returns no new events (cursor advanced).
@@ -5789,24 +5880,28 @@ async def test_resident_cycle_e2e_with_unacked_followup_cold_replay(
     fresh = WorkspaceManager()
     # The fresh manager must also record tmux sends so we can assert
     # no re-delivery.
-    monkeypatch.setattr(fresh, "_send_tmux_message", recording_send)
+    monkeypatch.setattr(fresh, "_send_tmux_message_with_receipt", recording_send)
+    monkeypatch.setattr(fresh, "_send_tmux_message", recording_send_no_call_id)
 
     fresh_session = fresh.sessions[worker_session_id]
-    # The unACKed followup survives the restart in uncertain_call_ids
-    # (fail-closed: we cannot prove it was not delivered to tmux, so we
-    # do NOT re-send and do NOT silently mark delivered).
-    assert followup_call_id in fresh_session.uncertain_call_ids
-    assert followup_call_id not in fresh_session.processing_call_ids
+    # The unACKed followup survives the restart in processing_call_ids.
+    # For a LIVE (WORKING) session the tmux inbox still exists, so the
+    # monitor's receipt-based reconciliation (_recover_processing_via_receipt)
+    # decides whether to keep it in processing (receipt present), move it
+    # back to pending (receipt absent), or fail closed to uncertain (session
+    # gone). We do NOT immediately move it to uncertain on cold restart.
+    assert followup_call_id in fresh_session.processing_call_ids
     assert followup_call_id not in fresh_session.delivered_call_ids
 
-    # Cold recovery does NOT re-deliver uncertain call_ids: re-sending
+    # Cold recovery does NOT re-deliver processing call_ids: re-sending
     # could produce a duplicate turn.
     sent_before = len(sent_messages)
     await fresh.agent_tree.recover_pending_runs(ws_id)
-    # No re-delivery: the followup is in uncertain (fail-closed).
+    # No re-delivery: the followup is in processing (not pending), so the
+    # recovery pump leaves it alone.
     assert len(sent_messages) == sent_before
     fresh_session = fresh.sessions[worker_session_id]
-    assert followup_call_id in fresh_session.uncertain_call_ids
+    assert followup_call_id in fresh_session.processing_call_ids
 
     # The worker ACKs the followup call_id after restart.
     await fresh.create_report(
@@ -5830,18 +5925,14 @@ async def test_resident_cycle_e2e_with_unacked_followup_cold_replay(
     # to pending.
     fail_next = {"n": 0}
 
-    async def flaky_send(tmux_session: str, message: str) -> None:
+    async def flaky_send(tmux_session: str, message: str, call_id: str) -> None:
         fail_next["n"] += 1
         if fail_next["n"] == 1:
             raise RuntimeError("transient tmux failure")
         sent_messages.append(message)
-        for line in message.splitlines():
-            if line.startswith("[call_id:"):
-                cid = line[len("[call_id:") : -1]
-                delivered_call_ids.add(cid)
-                break
+        delivered_call_ids.add(call_id)
 
-    monkeypatch.setattr(fresh, "_send_tmux_message", flaky_send)
+    monkeypatch.setattr(fresh, "_send_tmux_message_with_receipt", flaky_send)
 
     transient_call_id = "followup:transient"
     # The send fails inside _send_tmux_message (ambiguous). The call_id moves
@@ -6007,6 +6098,7 @@ async def test_recover_pending_runs_reviewed_completed_maps_to_progress(
 
     # The run must be WAITING (for the reviewer), not COMPLETED.
     child_run = manager.agent_tree.get_run(child.id)
+    assert child_run is not None
     assert child_run.status == AgentRunStatus.WAITING
 
     # No terminal COMPLETED event should have been emitted.
@@ -6184,13 +6276,13 @@ async def test_cumulative_side_effects_before_ack_and_cold_recovery_pump(
         effect_file.write_text(str(n))
 
     # The "receiver" (tmux send) applies the side effect once per delivery.
-    async def recording_send(tmux_session: str, message: str) -> None:
+    async def recording_send(tmux_session: str, message: str, call_id: str) -> None:
         bump_effect()
 
     async def _ready_capture(tmux_session: str) -> str:
         return "claude code\n? for shortcuts\n"
 
-    monkeypatch.setattr(manager, "_send_tmux_message", recording_send)
+    monkeypatch.setattr(manager, "_send_tmux_message_with_receipt", recording_send)
     monkeypatch.setattr(manager, "_capture_tmux_output", _ready_capture)
 
     # ---- Send 3 messages, each with a distinct call_id. ----
@@ -6246,6 +6338,17 @@ async def test_cumulative_side_effects_before_ack_and_cold_recovery_pump(
     manager._save_state()
 
     # ---- Cold restart: persist and reload into a fresh manager. ----
+    # Simulate the receiver session being STOPPED (tmux inbox gone) so the
+    # cold-recovery fail-closed path moves in-flight (processing) call_ids
+    # to uncertain_call_ids. For LIVE sessions the monitor reconciles via
+    # the tmux receipt instead; here we exercise the STOPPED-session path.
+    from claude_hub.models import ManagedSessionStatus
+
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"status": ManagedSessionStatus.STOPPED}
+    )
+    manager._save_state()
+
     fresh = WorkspaceManager()
 
     fresh_session = fresh.sessions[session_id]
@@ -6269,7 +6372,7 @@ async def test_cumulative_side_effects_before_ack_and_cold_recovery_pump(
     assert read_effect() == 3
 
     # Patch the fresh manager's send to apply the side effect.
-    monkeypatch.setattr(fresh, "_send_tmux_message", recording_send)
+    monkeypatch.setattr(fresh, "_send_tmux_message_with_receipt", recording_send)
     monkeypatch.setattr(fresh, "_capture_tmux_output", _ready_capture)
 
     # ---- Run recovery: pump pending only (uncertain stays put). ----
@@ -6590,12 +6693,15 @@ async def test_retry_uncertain_delivery_second_ambiguity_returns_to_uncertain(
     manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
 ) -> None:
     """After a successful retry, if the re-send hits another ambiguous
-    (post-side-effect) failure, the call_id returns to uncertain_call_ids."""
+    (post-side-effect) failure, the call_id returns to uncertain_call_ids
+    AND retry_uncertain_delivery raises DeliveryUncertain (fail-closed: no
+    false HTTP 204 success)."""
     from claude_hub.models import (
         AgentType,
         WorkspaceTask,
         WorkspaceTaskStatus,
     )
+    from claude_hub.services.workspace_manager._constants import DeliveryUncertain
 
     session_id = "retry-ambig-sess"
     _make_managed_session(manager, session_id, ws_id)
@@ -6641,14 +6747,16 @@ async def test_retry_uncertain_delivery_second_ambiguity_returns_to_uncertain(
     monkeypatch.setattr(manager, "_send_tmux_message", ambiguous_send)
     monkeypatch.setattr(manager, "_ensure_session_ready_for_send", AsyncMock())
 
-    await manager.retry_uncertain_delivery(session_id, call_id, reason="r", actor="op")
+    with pytest.raises(DeliveryUncertain):
+        await manager.retry_uncertain_delivery(session_id, call_id, reason="r", actor="op")
 
     # The second ambiguity moves the call_id back to uncertain (fail-closed),
-    # NOT pending (no auto-retry loop).
+    # NOT pending (no auto-retry loop). State and payload are preserved.
     sess = manager.sessions[session_id]
     assert call_id in sess.uncertain_call_ids
     assert call_id not in sess.pending_call_ids
     assert call_id not in sess.processing_call_ids
+    assert sess.pending_messages.get(call_id) == "body"
 
 
 async def test_retry_uncertain_delivery_session_not_found_raises_keyerror(
@@ -6776,3 +6884,1777 @@ def test_retry_uncertain_api_400_for_invalid_call_id(
         assert resp.status_code == 400
     finally:
         app.dependency_overrides.pop(get_current_user, None)
+
+
+# ---------------------------------------------------------------------------
+# Focused receipt / fail-closed delivery tests (round 2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_query_tmux_receipt_absent_returns_false(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    """``show-options -qv`` on a missing user option returns rc=0 with empty
+    stdout, so ``_query_tmux_receipt`` returns False (receipt absent)."""
+    import types
+
+    from claude_hub.services.workspace_manager._tmux_queries import _TmuxQueriesMixin
+
+    # state_root mocks _query_tmux_receipt on the class; restore the real
+    # implementation on this instance so we can test its logic.
+    monkeypatch.setattr(
+        manager,
+        "_query_tmux_receipt",
+        types.MethodType(_TmuxQueriesMixin._query_tmux_receipt, manager),
+    )
+
+    async def fake_capture(*args: str) -> str:
+        assert args[0] == "show-options"
+        assert "-qv" in args
+        return ""  # empty stdout = option absent
+
+    manager._run_tmux_capture = fake_capture  # type: ignore[assignment]
+    result = await manager._query_tmux_receipt("sess", "call-1")
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_query_tmux_receipt_missing_session_raises(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    """A nonexistent tmux session makes ``show-options`` return rc=1, which
+    ``_run_tmux_capture`` surfaces as RuntimeError. The caller treats this as
+    "session gone / unqueryable" → fail closed to uncertain."""
+    import types
+
+    from claude_hub.services.workspace_manager._tmux_queries import _TmuxQueriesMixin
+
+    monkeypatch.setattr(
+        manager,
+        "_query_tmux_receipt",
+        types.MethodType(_TmuxQueriesMixin._query_tmux_receipt, manager),
+    )
+
+    async def fake_capture(*args: str) -> str:
+        raise RuntimeError("can't find session: sess")
+
+    manager._run_tmux_capture = fake_capture  # type: ignore[assignment]
+    with pytest.raises(RuntimeError):
+        await manager._query_tmux_receipt("sess", "call-1")
+
+
+def test_buffer_name_includes_tmux_session(manager: WorkspaceManager) -> None:
+    """Named buffers are server-global, so the same call_id delivered to two
+    sessions must get distinct buffer names (otherwise one payload overwrites
+    the other)."""
+    call_id = "call-1"
+    buf_a = manager._buffer_name(call_id, "session-a")
+    buf_b = manager._buffer_name(call_id, "session-b")
+    assert buf_a != buf_b
+    # Same (call_id, session) is stable.
+    assert manager._buffer_name(call_id, "session-a") == buf_a
+
+
+@pytest.mark.asyncio
+async def test_ensure_submitted_no_cm_when_already_accepted(
+    manager: WorkspaceManager,
+) -> None:
+    """If the message is no longer in the input box (the TUI already accepted
+    it), ``_ensure_submitted_without_repaste`` must NOT send any C-m — sending
+    one would submit an unrelated/blank prompt line."""
+    message = "please do the thing"
+    cm_sent = {"n": 0}
+
+    async def fake_capture(tmux_session: str) -> str:
+        # Pane shows the prompt but NOT the message → already accepted.
+        return "$ "
+
+    async def fake_run_tmux(*args: str) -> None:
+        if args and args[0] == "send-keys" and "C-m" in args:
+            cm_sent["n"] += 1
+
+    manager._capture_tmux_output = fake_capture  # type: ignore[assignment]
+    manager._run_tmux = fake_run_tmux  # type: ignore[assignment]
+
+    await manager._ensure_submitted_without_repaste("sess", message)
+    assert cm_sent["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_ensure_submitted_sends_cm_only_while_pending(
+    manager: WorkspaceManager,
+) -> None:
+    """While the message is verifiably still in the input box, send C-m and
+    re-check. Stop as soon as the message is no longer pending."""
+    message = "please do the thing"
+    cm_sent = {"n": 0}
+    captures = {"n": 0}
+
+    async def fake_capture(tmux_session: str) -> str:
+        captures["n"] += 1
+        # First two captures show the message pending on a prompt line;
+        # the third shows it gone (already accepted).
+        if captures["n"] <= 2:
+            return f"❯ {message}"
+        return "❯ "
+
+    async def fake_run_tmux(*args: str) -> None:
+        if args and args[0] == "send-keys" and "C-m" in args:
+            cm_sent["n"] += 1
+
+    manager._capture_tmux_output = fake_capture  # type: ignore[assignment]
+    manager._run_tmux = fake_run_tmux  # type: ignore[assignment]
+
+    await manager._ensure_submitted_without_repaste("sess", message)
+    # One C-m per pending capture (2), then the next capture shows accepted.
+    assert cm_sent["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_ensure_submitted_capture_failure_raises(
+    manager: WorkspaceManager,
+) -> None:
+    """If pane capture fails, we cannot verify submit state. Fail closed:
+    raise RuntimeError so the caller moves the call_id to uncertain."""
+
+    async def fake_capture(tmux_session: str) -> str:
+        raise RuntimeError("pane capture failed")
+
+    manager._capture_tmux_output = fake_capture  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError):
+        await manager._ensure_submitted_without_repaste("sess", "msg")
+
+
+@pytest.mark.asyncio
+async def test_ensure_submitted_empty_message_raises(
+    manager: WorkspaceManager,
+) -> None:
+    """An empty message body means we cannot verify the input. Fail closed:
+    raise RuntimeError rather than sending a blind C-m."""
+    with pytest.raises(RuntimeError):
+        await manager._ensure_submitted_without_repaste("sess", "")
+
+
+@pytest.mark.asyncio
+async def test_retry_uncertain_receipt_present_submit_nudge_fails_back_to_uncertain(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """When the receipt is present (paste already happened) but the submit
+    nudge cannot be verified, ``retry_uncertain_delivery`` must move the
+    call_id back to ``uncertain`` and raise ``DeliveryUncertain`` — never
+    silently leave it in ``processing``."""
+    session_id = "retry-uncertain-sess"
+    _make_managed_session(manager, session_id, ws_id)
+    session = manager.sessions[session_id]
+    call_id = "call-retry-fail"
+
+    # Put the call_id in uncertain with a persisted message body.
+    session.uncertain_call_ids = [call_id]
+    session.pending_messages[call_id] = "the message"
+    manager._save_state()
+
+    # Receipt is present (paste already ran).
+    async def fake_query_receipt(tmux_session: str, cid: str) -> bool:
+        return True
+
+    monkeypatch.setattr(manager, "_query_tmux_receipt", fake_query_receipt)
+
+    # Submit nudge fails (capture failure).
+    async def fake_ensure_submitted(tmux_session: str, message: str) -> None:
+        raise RuntimeError("capture failed")
+
+    monkeypatch.setattr(manager, "_ensure_submitted_without_repaste", fake_ensure_submitted)
+
+    # Audit event emission succeeds (so we reach the submit-nudge step).
+    monkeypatch.setattr(manager, "_emit_delivery_retry_requested", lambda **kw: None)
+
+    with pytest.raises(DeliveryUncertain):
+        await manager.retry_uncertain_delivery(session_id, call_id, actor="t", reason="r")
+
+    # Fail closed: call_id moved BACK to uncertain, NOT processing.
+    refreshed = manager.sessions[session_id]
+    assert call_id in refreshed.uncertain_call_ids
+    assert call_id not in refreshed.processing_call_ids
+
+
+@pytest.mark.asyncio
+async def test_retry_uncertain_receipt_present_empty_body_back_to_uncertain(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """If the receipt is present but the stored message body is empty, we
+    cannot verify submit state (a blind C-m could submit an unrelated line).
+    Fail closed: move back to uncertain and raise ``DeliveryUncertain``."""
+    session_id = "retry-uncertain-emptybody"
+    _make_managed_session(manager, session_id, ws_id)
+    session = manager.sessions[session_id]
+    call_id = "call-retry-emptybody"
+
+    session.uncertain_call_ids = [call_id]
+    # Body exists but is empty — passes the early "in pending_messages" check
+    # but fails the receipt-present submit-verification gate.
+    session.pending_messages[call_id] = ""
+    manager._save_state()
+
+    async def fake_query_receipt(tmux_session: str, cid: str) -> bool:
+        return True
+
+    monkeypatch.setattr(manager, "_query_tmux_receipt", fake_query_receipt)
+    monkeypatch.setattr(manager, "_emit_delivery_retry_requested", lambda **kw: None)
+
+    with pytest.raises(DeliveryUncertain):
+        await manager.retry_uncertain_delivery(session_id, call_id, actor="t", reason="r")
+
+    refreshed = manager.sessions[session_id]
+    assert call_id in refreshed.uncertain_call_ids
+    assert call_id not in refreshed.processing_call_ids
+
+
+@pytest.mark.asyncio
+async def test_resident_task_id_none_report_ack_commits_delivery(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """Resident sessions run with ``task_id=None``. A resident worker report
+    that lists a delivery call_id in ``acked_call_ids`` (and ``task_id=None``)
+    must commit that call_id to ``delivered_call_ids`` — the receiver-verifiable
+    ACK is the only thing that moves a call_id out of processing.
+
+    Regression: an earlier implementation short-circuited ACK processing when
+    ``task_id`` was None, leaving resident delivery call_ids stuck in
+    ``processing_call_ids`` forever.
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentReportState,
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+    )
+    from claude_hub.models.schemas import AgentReportCreate
+
+    session_id = "resident-ack-sess"
+    session = ManagedSession(
+        id=session_id,
+        workspace_id=ws_id,
+        tab_id=f"tab-{session_id}",
+        role=WorkspaceSessionRole.RESIDENT,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="Resident",
+        workspace_path="/tmp",
+        tmux_session=f"tmux-{session_id}",
+        target=ExecutionTarget.LOCAL,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+        # Resident sessions are not bound to a task.
+        task_id=None,
+        current_task_id=None,
+    )
+    manager.sessions[session_id] = session
+
+    # Deliver a message to the resident with a call_id. The pump claims it
+    # into processing_call_ids (the tmux send is mocked to succeed).
+    call_id = "resident-delivery:root:42"
+    await manager.send_session_message(session_id, "do resident things", call_id=call_id)
+
+    delivered_session = manager.sessions[session_id]
+    assert call_id in delivered_session.processing_call_ids
+    assert call_id not in delivered_session.delivered_call_ids
+
+    # The resident worker processes the message and ACKs the call_id.
+    # task_id is None (resident has no task).
+    await manager.create_report(
+        session_id,
+        AgentReportCreate(
+            task_id=None,
+            state=AgentReportState.WORKING,
+            message="processed",
+            acked_call_ids=[call_id],
+        ),
+    )
+
+    committed = manager.sessions[session_id]
+    assert call_id in committed.delivered_call_ids
+    assert call_id not in committed.processing_call_ids
+    assert call_id not in committed.pending_call_ids
+    assert call_id not in committed.uncertain_call_ids
+    # The message body is cleared from the durable inbox after ACK.
+    assert call_id not in committed.pending_messages
+
+
+# ---------------------------------------------------------------------------
+# Blocker D: immutable call_id payload (same call_id + different payload rejected)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_same_call_id_conflicting_payload_rejected(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A call_id already DELIVERED with a different payload MUST be rejected.
+
+    The call_id identifies a single durable delivery. After ACK (delivered),
+    reusing it with a different payload would corrupt at-least-once /
+    fail-closed semantics. The existing delivered entry must NOT be mutated.
+
+    (For PENDING call_ids the recovery rule applies: the stored envelope is
+    pumped and the rebuilt payload is ignored — see
+    test_pending_call_id_recovery_pumps_stored_payload.)
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+    )
+
+    session_id = "payload-conflict-sess"
+    now = datetime.utcnow()
+    session = ManagedSession(
+        id=session_id,
+        workspace_id=ws_id,
+        tab_id=f"tab-{session_id}",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="worker",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session=f"tmux-{session_id}",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+    )
+    manager.sessions[session_id] = session
+
+    call_id = "call-payload-conflict"
+    await manager.send_session_message(session_id, "first message", call_id=call_id)
+
+    # ACK the call_id so it moves to delivered_call_ids.
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={
+            "delivered_call_ids": [*manager.sessions[session_id].delivered_call_ids, call_id],
+            "pending_call_ids": [
+                c for c in manager.sessions[session_id].pending_call_ids if c != call_id
+            ],
+            "processing_call_ids": [
+                c for c in manager.sessions[session_id].processing_call_ids if c != call_id
+            ],
+        }
+    )
+    manager._save_state()
+
+    # Re-sending the same call_id with a DIFFERENT message must raise and must
+    # NOT mutate the existing delivered entry.
+    with pytest.raises(ValueError):
+        await manager.send_session_message(session_id, "second message", call_id=call_id)
+
+    refreshed = manager.sessions[session_id]
+    assert call_id in refreshed.delivered_call_ids
+    assert call_id not in refreshed.pending_call_ids
+
+
+@pytest.mark.asyncio
+async def test_pending_call_id_recovery_pumps_stored_payload(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A pending call_id resumed via resume_existing_call pumps the STORED
+    envelope — it does NOT overwrite or raise.
+
+    Recovery paths (_recover_queued_task_ownership, resident re-runs) rebuild
+    the prompt from current state, which may drift (lesson context,
+    timestamps). The original persisted payload is the source of truth until
+    ACK; the rebuilt payload is ignored. Recovery MUST go through
+    resume_existing_call, NOT send_session_message (which would reject the
+    drifted payload as a conflicting mutation).
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+    )
+
+    session_id = "pending-recovery-sess"
+    now = datetime.utcnow()
+    session = ManagedSession(
+        id=session_id,
+        workspace_id=ws_id,
+        tab_id=f"tab-{session_id}",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="worker",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session=f"tmux-{session_id}",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+    )
+    manager.sessions[session_id] = session
+
+    call_id = "call-pending-recovery"
+    sent_messages: list[str] = []
+
+    async def fake_send_to_tmux(tmux_session: str, message: str, call_id: str):
+        sent_messages.append(message)
+
+    monkeypatch.setattr(manager, "_send_tmux_message_with_receipt", fake_send_to_tmux)
+
+    await manager.send_session_message(session_id, "original stored prompt", call_id=call_id)
+
+    # Recovery: resume the existing call_id. The rebuilt prompt is NOT passed
+    # — resume_existing_call uses only the persisted envelope.
+    resumed = await manager.resume_existing_call(session_id, call_id)
+    assert resumed is True
+
+    refreshed = manager.sessions[session_id]
+    # The stored envelope is unchanged.
+    assert refreshed.pending_messages[call_id] == "original stored prompt"
+    # The tmux send delivered the original stored prompt.
+    assert any("original stored prompt" in m for m in sent_messages)
+
+
+@pytest.mark.asyncio
+async def test_same_call_id_same_payload_is_idempotent(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """Re-sending the same call_id with the identical payload is a no-op.
+
+    No duplicate pending entry, no re-pump. The call_id stays pending once.
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+    )
+
+    session_id = "payload-idempotent-sess"
+    now = datetime.utcnow()
+    session = ManagedSession(
+        id=session_id,
+        workspace_id=ws_id,
+        tab_id=f"tab-{session_id}",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="worker",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session=f"tmux-{session_id}",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+    )
+    manager.sessions[session_id] = session
+
+    call_id = "call-payload-idempotent"
+    send_count = 0
+
+    real_send = manager._send_tmux_message_with_receipt
+
+    async def counting_send(*args, **kwargs):
+        nonlocal send_count
+        send_count += 1
+        return await real_send(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_send_tmux_message_with_receipt", counting_send)
+
+    await manager.send_session_message(session_id, "same message", call_id=call_id)
+    first_send_count = send_count
+
+    # Re-send identical payload: must be idempotent (no second send).
+    await manager.send_session_message(session_id, "same message", call_id=call_id)
+
+    assert send_count == first_send_count
+    refreshed = manager.sessions[session_id]
+    # After the first send the pump moved the call_id to processing; the
+    # identical-payload re-send is a no-op so it stays there (not re-queued
+    # to pending, not duplicated).
+    assert refreshed.processing_call_ids.count(call_id) == 1
+    assert refreshed.pending_call_ids.count(call_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_pending_call_id_different_payload_rejected(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A PENDING call_id re-sent via send_session_message with a DIFFERENT
+    payload MUST raise ValueError — the public API enforces the immutable-
+    payload invariant at every state. Recovery must use resume_existing_call.
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+    )
+
+    session_id = "pending-diff-payload-sess"
+    now = datetime.utcnow()
+    session = ManagedSession(
+        id=session_id,
+        workspace_id=ws_id,
+        tab_id=f"tab-{session_id}",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="worker",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session=f"tmux-{session_id}",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+    )
+    manager.sessions[session_id] = session
+
+    call_id = "call-pending-diff"
+
+    async def fake_send_to_tmux(tmux_session: str, message: str, call_id: str):
+        pass
+
+    monkeypatch.setattr(manager, "_send_tmux_message_with_receipt", fake_send_to_tmux)
+
+    await manager.send_session_message(session_id, "original", call_id=call_id)
+
+    # Force the call_id back to pending (simulate a pre-side-effect failure
+    # rollback) so we can test the pending-state rejection.
+    s = manager.sessions[session_id]
+    manager.sessions[session_id] = s.model_copy(
+        update={
+            "pending_call_ids": [call_id],
+            "processing_call_ids": [c for c in s.processing_call_ids if c != call_id],
+        }
+    )
+
+    with pytest.raises(ValueError):
+        await manager.send_session_message(session_id, "different", call_id=call_id)
+
+    # Stored envelope unchanged.
+    assert manager.sessions[session_id].pending_messages[call_id] == "original"
+
+
+@pytest.mark.asyncio
+async def test_processing_call_id_different_payload_rejected(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A PROCESSING call_id re-sent with a different payload raises ValueError."""
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+    )
+
+    session_id = "processing-diff-payload-sess"
+    now = datetime.utcnow()
+    session = ManagedSession(
+        id=session_id,
+        workspace_id=ws_id,
+        tab_id=f"tab-{session_id}",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="worker",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session=f"tmux-{session_id}",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+    )
+    manager.sessions[session_id] = session
+
+    call_id = "call-processing-diff"
+
+    async def fake_send_to_tmux(tmux_session: str, message: str, call_id: str):
+        pass
+
+    monkeypatch.setattr(manager, "_send_tmux_message_with_receipt", fake_send_to_tmux)
+
+    await manager.send_session_message(session_id, "original", call_id=call_id)
+    # call_id is now in processing_call_ids.
+
+    with pytest.raises(ValueError):
+        await manager.send_session_message(session_id, "different", call_id=call_id)
+
+
+@pytest.mark.asyncio
+async def test_uncertain_call_id_different_payload_rejected(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """An UNCERTAIN call_id re-sent with a different payload raises ValueError
+    (immutable payload), NOT DeliveryUncertain — the payload conflict is the
+    first failure surfaced.
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+    )
+
+    session_id = "uncertain-diff-payload-sess"
+    now = datetime.utcnow()
+    session = ManagedSession(
+        id=session_id,
+        workspace_id=ws_id,
+        tab_id=f"tab-{session_id}",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="worker",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session=f"tmux-{session_id}",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+    )
+    manager.sessions[session_id] = session
+
+    call_id = "call-uncertain-diff"
+
+    async def fake_send_to_tmux(tmux_session: str, message: str, call_id: str):
+        pass
+
+    monkeypatch.setattr(manager, "_send_tmux_message_with_receipt", fake_send_to_tmux)
+
+    await manager.send_session_message(session_id, "original", call_id=call_id)
+
+    # Move the call_id to uncertain (simulate ambiguous tmux failure).
+    s = manager.sessions[session_id]
+    manager.sessions[session_id] = s.model_copy(
+        update={
+            "uncertain_call_ids": [*s.uncertain_call_ids, call_id],
+            "processing_call_ids": [c for c in s.processing_call_ids if c != call_id],
+            "pending_call_ids": [c for c in s.pending_call_ids if c != call_id],
+        }
+    )
+
+    with pytest.raises(ValueError):
+        await manager.send_session_message(session_id, "different", call_id=call_id)
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_without_state_membership_fails_closed(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A call_id that has a stored fingerprint but is absent from ALL state
+    lists (pending/processing/delivered/uncertain) is inconsistent state and
+    MUST fail closed (raise), not silently no-op or be treated as new.
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+    )
+
+    session_id = "fp-no-state-sess"
+    now = datetime.utcnow()
+    call_id = "call-fp-no-state"
+    message = "anything"
+    # Pre-compute the fingerprint of the message we will send, and store it
+    # as the existing fingerprint. This makes the fingerprints match so the
+    # code proceeds past the payload-conflict check and reaches the
+    # state-membership checks — where it must fail closed because the call_id
+    # is absent from all state lists.
+    existing_fp = manager._compute_payload_fingerprint(message, [])
+    session = ManagedSession(
+        id=session_id,
+        workspace_id=ws_id,
+        tab_id=f"tab-{session_id}",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="worker",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session=f"tmux-{session_id}",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+        # call_id has a fingerprint but is NOT in any state list.
+        call_payload_fingerprints={call_id: existing_fp},
+    )
+    manager.sessions[session_id] = session
+
+    # Fingerprint matches, but the call_id is not in any state list —
+    # inconsistent state must raise RuntimeError, not silently no-op.
+    with pytest.raises(RuntimeError):
+        await manager.send_session_message(session_id, message, call_id=call_id)
+
+
+@pytest.mark.asyncio
+async def test_legacy_pending_call_id_backfills_fingerprint(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A legacy pending call_id (in pending_call_ids + pending_messages but no
+    call_payload_fingerprints entry) has its fingerprint derived from the
+    stored envelope and backfilled. Same payload is idempotent; a different
+    payload is rejected.
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+    )
+
+    session_id = "legacy-pending-backfill-sess"
+    now = datetime.utcnow()
+    call_id = "call-legacy-pending"
+    stored_msg = "legacy stored prompt"
+    session = ManagedSession(
+        id=session_id,
+        workspace_id=ws_id,
+        tab_id=f"tab-{session_id}",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="worker",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session=f"tmux-{session_id}",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+        # Legacy: call_id in pending + pending_messages but NO fingerprint.
+        pending_call_ids=[call_id],
+        pending_messages={call_id: stored_msg},
+        pending_attachments={call_id: []},
+        call_payload_fingerprints={},
+    )
+    manager.sessions[session_id] = session
+
+    async def fake_send_to_tmux(tmux_session: str, message: str, call_id: str):
+        pass
+
+    monkeypatch.setattr(manager, "_send_tmux_message_with_receipt", fake_send_to_tmux)
+
+    # Re-send the SAME payload: should backfill fingerprint and be idempotent.
+    await manager.send_session_message(session_id, stored_msg, call_id=call_id)
+
+    refreshed = manager.sessions[session_id]
+    # Fingerprint was backfilled.
+    assert call_id in refreshed.call_payload_fingerprints
+    # Stored envelope unchanged.
+    assert refreshed.pending_messages[call_id] == stored_msg
+
+    # Now a DIFFERENT payload must be rejected (immutable invariant now holds).
+    with pytest.raises(ValueError):
+        await manager.send_session_message(session_id, "different", call_id=call_id)
+
+
+@pytest.mark.asyncio
+async def test_legacy_delivered_call_id_no_fingerprint_no_ops(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A legacy DELIVERED call_id (in delivered_call_ids but no fingerprint
+    and no retained payload) is treated as already committed: no-op, never
+    re-sent. We cannot verify the payload, so we fail closed by not sending.
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+    )
+
+    session_id = "legacy-delivered-noop-sess"
+    now = datetime.utcnow()
+    call_id = "call-legacy-delivered"
+    session = ManagedSession(
+        id=session_id,
+        workspace_id=ws_id,
+        tab_id=f"tab-{session_id}",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="worker",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session=f"tmux-{session_id}",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+        # Legacy: delivered but no fingerprint, no stored message.
+        delivered_call_ids=[call_id],
+        pending_messages={},
+        pending_attachments={},
+        call_payload_fingerprints={},
+    )
+    manager.sessions[session_id] = session
+
+    send_count = 0
+
+    async def fake_send_to_tmux(tmux_session: str, message: str, call_id: str):
+        nonlocal send_count
+        send_count += 1
+
+    monkeypatch.setattr(manager, "_send_tmux_message_with_receipt", fake_send_to_tmux)
+
+    # Re-sending must no-op (never reach tmux).
+    await manager.send_session_message(session_id, "anything", call_id=call_id)
+    assert send_count == 0
+
+
+@pytest.mark.asyncio
+async def test_legacy_pending_attachment_backfill_from_file(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """A legacy pending call_id with a persisted attachment has its fingerprint
+    derived from the file bytes on disk. Same payload (matching file content)
+    is idempotent.
+    """
+    import base64
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceAttachment,
+        WorkspaceSessionRole,
+    )
+
+    session_id = "legacy-att-backfill-sess"
+    now = datetime.utcnow()
+    call_id = "call-legacy-att"
+    stored_msg = "prompt with attachment"
+
+    # Create a real persisted attachment file.
+    att_bytes = b"fake-png-bytes"
+    att_path = tmp_path / "att.png"
+    att_path.write_bytes(att_bytes)
+    att = WorkspaceAttachment(
+        id="att-1",
+        filename="image.png",
+        mime_type="image/png",
+        path=str(att_path),
+        size_bytes=len(att_bytes),
+    )
+
+    session = ManagedSession(
+        id=session_id,
+        workspace_id=ws_id,
+        tab_id=f"tab-{session_id}",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="worker",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session=f"tmux-{session_id}",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+        pending_call_ids=[call_id],
+        pending_messages={call_id: stored_msg},
+        pending_attachments={call_id: [att]},
+        call_payload_fingerprints={},
+    )
+    manager.sessions[session_id] = session
+
+    async def fake_send_to_tmux(tmux_session: str, message: str, call_id: str):
+        pass
+
+    monkeypatch.setattr(manager, "_send_tmux_message_with_receipt", fake_send_to_tmux)
+
+    # Build the matching WorkspaceAttachmentCreate (same bytes) to send the
+    # identical payload.
+    data_url = f"data:image/png;base64,{base64.b64encode(att_bytes).decode()}"
+    from claude_hub.models import WorkspaceAttachmentCreate
+
+    matching_att = WorkspaceAttachmentCreate(
+        filename="image.png", mime_type="image/png", data_url=data_url
+    )
+
+    # Same payload: backfill fingerprint, idempotent.
+    await manager.send_session_message(
+        session_id, stored_msg, attachments=[matching_att], call_id=call_id
+    )
+
+    refreshed = manager.sessions[session_id]
+    assert call_id in refreshed.call_payload_fingerprints
+
+
+@pytest.mark.asyncio
+async def test_legacy_pending_attachment_missing_file_fails_closed(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A legacy pending call_id whose persisted attachment file is missing
+    fails closed (RuntimeError) during fingerprint backfill — we must not
+    silently produce a wrong fingerprint that would let a conflicting payload
+    slip through.
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceAttachment,
+        WorkspaceSessionRole,
+    )
+
+    session_id = "legacy-att-missing-sess"
+    now = datetime.utcnow()
+    call_id = "call-legacy-att-missing"
+    stored_msg = "prompt with missing attachment"
+
+    # Attachment points to a non-existent file.
+    att = WorkspaceAttachment(
+        id="att-missing",
+        filename="image.png",
+        mime_type="image/png",
+        path="/nonexistent/path/to/image.png",
+        size_bytes=12,
+    )
+
+    session = ManagedSession(
+        id=session_id,
+        workspace_id=ws_id,
+        tab_id=f"tab-{session_id}",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="worker",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session=f"tmux-{session_id}",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+        pending_call_ids=[call_id],
+        pending_messages={call_id: stored_msg},
+        pending_attachments={call_id: [att]},
+        call_payload_fingerprints={},
+    )
+    manager.sessions[session_id] = session
+
+    async def fake_send_to_tmux(tmux_session: str, message: str, call_id: str):
+        pass
+
+    monkeypatch.setattr(manager, "_send_tmux_message_with_receipt", fake_send_to_tmux)
+
+    # Backfill must fail closed because the attachment file is missing.
+    with pytest.raises(RuntimeError):
+        await manager.send_session_message(session_id, stored_msg, call_id=call_id)
+
+
+# ---------------------------------------------------------------------------
+# Blocker B: pending call_id with missing body moves to uncertain (not delivered)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pending_call_id_missing_body_moves_to_uncertain(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A pending call_id whose message body is missing from pending_messages
+    MUST NOT be silently marked delivered. It moves to uncertain_call_ids
+    (fail-closed) so an operator can investigate the data integrity issue.
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+    )
+
+    session_id = "missing-body-sess"
+    now = datetime.utcnow()
+    session = ManagedSession(
+        id=session_id,
+        workspace_id=ws_id,
+        tab_id=f"tab-{session_id}",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="worker",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session=f"tmux-{session_id}",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+    )
+    manager.sessions[session_id] = session
+
+    call_id = "call-missing-body"
+    # Manually corrupt the state: call_id in pending_call_ids but no body.
+    session.pending_call_ids = [call_id]
+    session.pending_messages = {}
+    manager._save_state()
+
+    uncertain_events: list[str] = []
+    monkeypatch.setattr(
+        manager,
+        "_emit_delivery_uncertain",
+        lambda ws, sid, cid: uncertain_events.append(cid),
+    )
+
+    await manager._pump_session_messages(session_id)
+
+    refreshed = manager.sessions[session_id]
+    # Must NOT be delivered (silent loss).
+    assert call_id not in refreshed.delivered_call_ids
+    # Must be in uncertain (fail-closed).
+    assert call_id in refreshed.uncertain_call_ids
+    assert call_id not in refreshed.pending_call_ids
+    assert call_id in uncertain_events
+
+
+# ---------------------------------------------------------------------------
+# Blocker A: cold-start processing remains durable; receipt recovery decides
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cold_start_live_session_processing_stays_for_receipt_recovery(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """On cold start, processing call_ids for LIVE sessions must NOT be
+    immediately moved to uncertain. They stay in processing so
+    ``_recover_processing_via_receipt`` can distinguish receipt-present
+    (keep processing, no repaste) from receipt-absent (move to pending).
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+    )
+
+    session_id = "cold-start-live-sess"
+    now = datetime.utcnow()
+    session = ManagedSession(
+        id=session_id,
+        workspace_id=ws_id,
+        tab_id=f"tab-{session_id}",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,  # LIVE
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="worker",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session=f"tmux-{session_id}",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+        processing_call_ids=["call-live-processing"],
+        pending_messages={"call-live-processing": "hello"},
+    )
+    manager.sessions[session_id] = session
+    manager._save_state()
+
+    # Simulate cold start: reload state from disk.
+    manager2 = WorkspaceManager()
+
+    reloaded = manager2.sessions[session_id]
+    # Live session: processing call_id stays in processing (NOT moved to
+    # uncertain) so receipt recovery can run.
+    assert "call-live-processing" in reloaded.processing_call_ids
+    assert "call-live-processing" not in reloaded.uncertain_call_ids
+
+
+@pytest.mark.asyncio
+async def test_cold_start_stopped_session_processing_moves_to_uncertain(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """On cold start, processing call_ids for STOPPED sessions (tmux inbox
+    gone, receipt unqueryable) move to uncertain (fail-closed).
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+    )
+
+    session_id = "cold-start-stopped-sess"
+    now = datetime.utcnow()
+    session = ManagedSession(
+        id=session_id,
+        workspace_id=ws_id,
+        tab_id=f"tab-{session_id}",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.STOPPED,  # tmux inbox gone
+        runtime_status=AgentRuntimeStatus.OFFLINE,
+        title="worker",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session=f"tmux-{session_id}",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+        processing_call_ids=["call-stopped-processing"],
+        pending_messages={"call-stopped-processing": "hello"},
+    )
+    manager.sessions[session_id] = session
+    manager._save_state()
+
+    manager2 = WorkspaceManager()
+
+    reloaded = manager2.sessions[session_id]
+    assert "call-stopped-processing" in reloaded.uncertain_call_ids
+    assert "call-stopped-processing" not in reloaded.processing_call_ids
+
+
+@pytest.mark.asyncio
+async def test_receipt_absent_moves_processing_to_pending(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """_recover_processing_via_receipt: receipt absent on a live session means
+    the paste never ran. Move the call_id back to pending for one safe
+    re-delivery.
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+    )
+
+    session_id = "receipt-absent-sess"
+    now = datetime.utcnow()
+    session = ManagedSession(
+        id=session_id,
+        workspace_id=ws_id,
+        tab_id=f"tab-{session_id}",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="worker",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session=f"tmux-{session_id}",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+        processing_call_ids=["call-receipt-absent"],
+        pending_messages={"call-receipt-absent": "hello"},
+    )
+    manager.sessions[session_id] = session
+
+    # Receipt is absent (default mock returns False).
+    changed = await manager._recover_processing_via_receipt(session_id)
+
+    assert changed == 1
+    refreshed = manager.sessions[session_id]
+    assert "call-receipt-absent" in refreshed.pending_call_ids
+    assert "call-receipt-absent" not in refreshed.processing_call_ids
+
+
+@pytest.mark.asyncio
+async def test_receipt_present_keeps_processing_no_repaste(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """_recover_processing_via_receipt: receipt present means the paste
+    already happened. Keep the call_id in processing (await worker ACK) and
+    do NOT re-paste. The submit-nudge helper is invoked to ensure the
+    already-pasted input is accepted.
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+    )
+
+    session_id = "receipt-present-sess"
+    now = datetime.utcnow()
+    session = ManagedSession(
+        id=session_id,
+        workspace_id=ws_id,
+        tab_id=f"tab-{session_id}",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="worker",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session=f"tmux-{session_id}",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+        processing_call_ids=["call-receipt-present"],
+        pending_messages={"call-receipt-present": "hello"},
+    )
+    manager.sessions[session_id] = session
+
+    async def fake_query_receipt(tmux_session: str, cid: str) -> bool:
+        return True
+
+    nudge_called = False
+
+    async def fake_ensure_submitted(tmux_session: str, message: str) -> None:
+        nonlocal nudge_called
+        nudge_called = True
+
+    monkeypatch.setattr(manager, "_query_tmux_receipt", fake_query_receipt)
+    monkeypatch.setattr(manager, "_ensure_submitted_without_repaste", fake_ensure_submitted)
+
+    changed = await manager._recover_processing_via_receipt(session_id)
+
+    # Receipt present: no state change (stays in processing).
+    assert changed == 0
+    refreshed = manager.sessions[session_id]
+    assert "call-receipt-present" in refreshed.processing_call_ids
+    assert "call-receipt-present" not in refreshed.pending_call_ids
+    assert "call-receipt-present" not in refreshed.uncertain_call_ids
+    # Submit-nudge was invoked (no re-paste).
+    assert nudge_called
+
+
+# ---------------------------------------------------------------------------
+# Blocker E: redispatch / monitor does NOT auto-retry an uncertain dispatch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_redispatch_uncertain_dispatch_does_not_auto_retry(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """If a dispatch call_id is in uncertain_call_ids, _send_dispatch_message
+    must raise DeliveryUncertain (not call retry_uncertain_delivery). The
+    system must NOT silently re-drive an ambiguous delivery.
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+    )
+
+    session_id = "redispatch-uncertain-sess"
+    now = datetime.utcnow()
+    session = ManagedSession(
+        id=session_id,
+        workspace_id=ws_id,
+        tab_id=f"tab-{session_id}",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="worker",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session=f"tmux-{session_id}",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+        uncertain_call_ids=["dispatch:task-123"],
+        pending_messages={"dispatch:task-123": "do the task"},
+    )
+    manager.sessions[session_id] = session
+
+    retry_called = False
+
+    async def fake_retry(*args, **kwargs):
+        nonlocal retry_called
+        retry_called = True
+
+    monkeypatch.setattr(manager, "retry_uncertain_delivery", fake_retry)
+
+    with pytest.raises(DeliveryUncertain):
+        await manager._send_dispatch_message(session_id, "dispatch:task-123", "do the task")
+
+    # retry_uncertain_delivery must NOT have been called.
+    assert not retry_called
+    # The call_id stays uncertain.
+    assert "dispatch:task-123" in manager.sessions[session_id].uncertain_call_ids
+
+
+# ---------------------------------------------------------------------------
+# Blocker C: call_id sends preserve attachments across reload / retry
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_call_id_attachments_persisted_and_reloaded(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """Attachments on a call_id send are persisted in pending_attachments and
+    survive a state reload. The pump delivers the attachment block.
+    """
+    import base64
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceAttachmentCreate,
+        WorkspaceSessionRole,
+    )
+
+    session_id = "attachments-sess"
+    now = datetime.utcnow()
+    session = ManagedSession(
+        id=session_id,
+        workspace_id=ws_id,
+        tab_id=f"tab-{session_id}",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="worker",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session=f"tmux-{session_id}",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+    )
+    manager.sessions[session_id] = session
+
+    png_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+    )
+    data_url = "data:image/png;base64," + base64.b64encode(png_bytes).decode()
+    att = WorkspaceAttachmentCreate(filename="img.png", mime_type="image/png", data_url=data_url)
+
+    call_id = "call-with-attachments"
+    sent_messages: list[str] = []
+
+    async def recording_send(tmux_session, message, **kwargs):
+        sent_messages.append(message)
+
+    monkeypatch.setattr(manager, "_send_tmux_message", recording_send)
+
+    await manager.send_session_message(
+        session_id, "see attached", call_id=call_id, attachments=[att]
+    )
+
+    # Attachments are persisted in pending_attachments.
+    assert call_id in manager.sessions[session_id].pending_attachments
+    atts = manager.sessions[session_id].pending_attachments[call_id]
+    assert len(atts) == 1
+    assert atts[0].filename == "img.png"
+
+    # The delivered message includes the attachment block.
+    assert any("img.png" in m for m in sent_messages)
+
+    # Reload state from disk and verify attachments survive.
+    manager._save_state()
+    manager2 = WorkspaceManager()
+    reloaded = manager2.sessions[session_id]
+    assert call_id in reloaded.pending_attachments
+    assert reloaded.pending_attachments[call_id][0].filename == "img.png"
+
+
+# ---------------------------------------------------------------------------
+# Resident E2E: event delivery -> call_id -> report ACK -> ack_sequence advances
+# -> no duplicate; forged ACK from another session rejected
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resident_run_agent_e2e_pagination_ack_forgery(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """Real _run_resident_agent E2E covering:
+
+    * >20 event pagination (first page of 20 delivered, ack advances, next
+      page delivered on the following cycle).
+    * repeated pre-ACK cycle: a second _run_resident_agent call before the
+      resident ACKs uses resume_existing_call — no duplicate tmux send.
+    * forged ACK from another session is rejected; the resident's delivery
+      call_id stays in processing and ack_sequence does not advance.
+    * call-record failure (resident_delivery _append_event raises) means the
+      prompt is NOT sent to the resident (fail-closed: no call_id → no ACK
+      possible → cursor never advances silently).
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentReportState,
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+    )
+    from claude_hub.models.agent_tree import AgentEventType
+    from claude_hub.models.schemas import AgentReportCreate
+
+    # --- Set up resident session + root run -------------------------------
+    resident_id = "resident-e2e-sess"
+    now = datetime.utcnow()
+    resident = ManagedSession(
+        id=resident_id,
+        workspace_id=ws_id,
+        tab_id=f"tab-{resident_id}",
+        role=WorkspaceSessionRole.RESIDENT,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="resident",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session=f"tmux-{resident_id}",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+    )
+    manager.sessions[resident_id] = resident
+
+    ws = manager.workspaces[ws_id]
+    manager.workspaces[ws_id] = ws.model_copy(
+        update={
+            "resident_agent_session_id": resident_id,
+            "resident_agent_type": AgentType.CLAUDE,
+        }
+    )
+
+    root_run = manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.RESIDENT_ROOT,
+        context_ref=resident_id,
+    )
+
+    # Mock session-readiness so the pump doesn't block on a real agent prompt.
+    monkeypatch.setattr(manager, "_ensure_session_ready_for_send", AsyncMock())
+
+    sent_messages: list[tuple[str, str]] = []  # (tmux_session, message)
+
+    async def capturing_send(tmux_session, message, call_id, **kwargs):
+        sent_messages.append((tmux_session, message))
+
+    monkeypatch.setattr(manager, "_send_tmux_message_with_receipt", capturing_send)
+
+    # --- Emit 25 child events (> page size 20) ----------------------------
+    for i in range(25):
+        manager.agent_tree._append_event(
+            workspace_id=ws_id,
+            agent_run_id=root_run.id,
+            event_type=AgentEventType.PROGRESS,
+            author=root_run.id,
+            recipient=root_run.id,
+            call_id=f"child-event-{i}",
+            action="child_progress",
+            target=root_run.id,
+            fingerprint=f"child-fp-{i}",
+            payload={"message": f"child did work {i}"},
+        )
+
+    # --- Cycle 1: deliver first page (20 events) --------------------------
+    sent_messages.clear()
+    await manager._run_resident_agent(manager.workspaces[ws_id])
+
+    # Exactly one prompt sent (the first page).
+    assert len(sent_messages) == 1
+    first_prompt = sent_messages[0][1]
+    # The first page covers events 0..19; max_seq is the sequence of event 19.
+    events_page1 = await manager.agent_tree.wait(
+        WaitRequest(
+            workspace_id=ws_id,
+            recipient_id=root_run.id,
+            since_sequence=0,
+            subtree=True,
+            timeout_seconds=0.5,
+        )
+    )
+    max_seq_page1 = max(ev.sequence for ev in events_page1[:20])
+    delivery_call_id_1 = f"resident-delivery:{root_run.id}:{max_seq_page1}"
+    assert delivery_call_id_1 in first_prompt
+    # call_id is in processing (not yet ACKed).
+    assert delivery_call_id_1 in manager.sessions[resident_id].processing_call_ids
+    # ack_sequence NOT advanced yet.
+    _rr = manager.agent_tree.get_run(root_run.id)
+    assert _rr is not None
+    assert _rr.ack_sequence == 0
+
+    # --- Repeated pre-ACK cycle: no duplicate send ------------------------
+    sent_messages.clear()
+    await manager._run_resident_agent(manager.workspaces[ws_id])
+    # resume_existing_call found the pending/processing call_id and no-op'd
+    # (or pumped the stored envelope without a fresh tmux send).
+    assert len(sent_messages) == 0
+
+    # --- Forged ACK from another session is rejected ----------------------
+    forger_id = "forger-sess"
+    forger = ManagedSession(
+        id=forger_id,
+        workspace_id=ws_id,
+        tab_id="tab-forger",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="forger",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session="tmux-forger",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+    )
+    manager.sessions[forger_id] = forger
+
+    await manager.create_report(
+        forger_id,
+        AgentReportCreate(
+            task_id=None,
+            state=AgentReportState.WORKING,
+            message="forged",
+            acked_call_ids=[delivery_call_id_1],
+        ),
+    )
+    # Forged ACK rejected: call_id stays in processing, ack_sequence stays 0.
+    assert delivery_call_id_1 in manager.sessions[resident_id].processing_call_ids
+    assert delivery_call_id_1 not in manager.sessions[resident_id].delivered_call_ids
+    _rr = manager.agent_tree.get_run(root_run.id)
+    assert _rr is not None
+    assert _rr.ack_sequence == 0
+
+    # --- Legitimate ACK from the resident advances the cursor -------------
+    # Use READY_FOR_REVIEW so the resident's runtime_status maps back to IDLE
+    # (the resident finished processing the event batch and is ready for the
+    # next cycle). A WORKING report would set runtime_status=WORKING and the
+    # next _run_resident_agent would skip (busy).
+    await manager.create_report(
+        resident_id,
+        AgentReportCreate(
+            task_id=None,
+            state=AgentReportState.READY_FOR_REVIEW,
+            message="processed page 1",
+            acked_call_ids=[delivery_call_id_1],
+        ),
+    )
+    assert delivery_call_id_1 in manager.sessions[resident_id].delivered_call_ids
+    _rr = manager.agent_tree.get_run(root_run.id)
+    assert _rr is not None
+    assert _rr.ack_sequence == max_seq_page1
+
+    # --- Cycle 2: deliver the remaining 5 events (page 2) -----------------
+    sent_messages.clear()
+    await manager._run_resident_agent(manager.workspaces[ws_id])
+    assert len(sent_messages) == 1
+    second_prompt = sent_messages[0][1]
+    # The delivery call_id is embedded in the prompt as
+    # [call_id:resident-delivery:{root.id}:{max_seq}]. Extract it rather than
+    # recomputing max_seq (which would include the just-appended
+    # resident_delivery event and be off-by-one).
+    import re
+
+    m = re.search(r"\[call_id:(resident-delivery:[^\]]+)\]", second_prompt)
+    assert m is not None
+    delivery_call_id_2 = m.group(1)
+    assert delivery_call_id_2 != delivery_call_id_1
+    # Page 2 must cover events beyond page 1's max_seq.
+    assert (
+        delivery_call_id_2.endswith(f":{max_seq_page1}")
+        or int(delivery_call_id_2.rsplit(":", 1)[1]) > max_seq_page1
+    )
+
+    # --- Call-record failure: prompt NOT sent -----------------------------
+    # Force the resident_delivery _append_event to raise. The cursor must NOT
+    # advance and no prompt is sent (fail-closed: without a call_id the
+    # resident cannot ACK, so events would be silently lost otherwise).
+    real_append = manager.agent_tree._append_event
+
+    def failing_append(**kwargs):
+        if kwargs.get("action") == "resident_delivery":
+            raise RuntimeError("simulated call-record failure")
+        return real_append(**kwargs)
+
+    monkeypatch.setattr(manager.agent_tree, "_append_event", failing_append)
+
+    # ACK page 2 first so the cursor advances past it.
+    await manager.create_report(
+        resident_id,
+        AgentReportCreate(
+            task_id=None,
+            state=AgentReportState.READY_FOR_REVIEW,
+            message="processed page 2",
+            acked_call_ids=[delivery_call_id_2],
+        ),
+    )
+    _rr = manager.agent_tree.get_run(root_run.id)
+    assert _rr is not None
+    ack_before = _rr.ack_sequence
+
+    # Emit a fresh event so there is something to deliver.
+    monkeypatch.setattr(manager.agent_tree, "_append_event", real_append)
+    manager.agent_tree._append_event(
+        workspace_id=ws_id,
+        agent_run_id=root_run.id,
+        event_type=AgentEventType.PROGRESS,
+        author=root_run.id,
+        recipient=root_run.id,
+        call_id="child-event-after-failure",
+        action="child_progress",
+        target=root_run.id,
+        fingerprint="child-fp-after",
+        payload={"message": "after failure"},
+    )
+    monkeypatch.setattr(manager.agent_tree, "_append_event", failing_append)
+
+    sent_messages.clear()
+    await manager._run_resident_agent(manager.workspaces[ws_id])
+    # No prompt sent because the call-record append failed.
+    assert len(sent_messages) == 0
+    # Cursor did not advance.
+    _rr = manager.agent_tree.get_run(root_run.id)
+    assert _rr is not None
+    assert _rr.ack_sequence == ack_before
+
+
+@pytest.mark.asyncio
+async def test_forged_ack_from_another_session_rejected(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A call_id delivered to session A must NOT be ACKable by session B.
+    Cross-session ACKs are forged and must be rejected: the call_id stays in
+    session A's processing_call_ids and is NOT moved to delivered.
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentReportState,
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+    )
+    from claude_hub.models.schemas import AgentReportCreate
+
+    now = datetime.utcnow()
+
+    # Session A: the intended recipient.
+    sess_a = ManagedSession(
+        id="forged-ack-sess-a",
+        workspace_id=ws_id,
+        tab_id="tab-a",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="A",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session="tmux-a",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+    )
+    # Session B: the forger.
+    sess_b = ManagedSession(
+        id="forged-ack-sess-b",
+        workspace_id=ws_id,
+        tab_id="tab-b",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="B",
+        workspace_path=str(manager.workspaces[ws_id].path),
+        tmux_session="tmux-b",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+    )
+    manager.sessions[sess_a.id] = sess_a
+    manager.sessions[sess_b.id] = sess_b
+
+    call_id = "call-forged-ack"
+    await manager.send_session_message(sess_a.id, "intended for A", call_id=call_id)
+
+    # The call_id is in A's processing, NOT in B's outbox.
+    assert call_id in manager.sessions[sess_a.id].processing_call_ids
+    assert call_id not in manager.sessions[sess_b.id].processing_call_ids
+    assert call_id not in manager.sessions[sess_b.id].pending_call_ids
+    assert call_id not in manager.sessions[sess_b.id].uncertain_call_ids
+
+    # Session B tries to ACK the call_id (forgery).
+    await manager.create_report(
+        sess_b.id,
+        AgentReportCreate(
+            task_id=None,
+            state=AgentReportState.WORKING,
+            message="forged",
+            acked_call_ids=[call_id],
+        ),
+    )
+
+    # The call_id must NOT be delivered (forged ACK rejected).
+    a_refreshed = manager.sessions[sess_a.id]
+    assert call_id not in a_refreshed.delivered_call_ids
+    assert call_id in a_refreshed.processing_call_ids

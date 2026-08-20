@@ -36,6 +36,7 @@ from ..models import (
     WorkspaceUpdate,
 )
 from ..services import workspace_manager
+from ..services.workspace_manager._constants import DeliveryUncertain
 
 router = APIRouter(prefix="/api/workspaces", tags=["workspaces"])
 
@@ -547,6 +548,11 @@ async def retry_uncertain_delivery(
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except DeliveryUncertain as e:
+        # The retry hit another ambiguous tmux failure; the delivery is
+        # still uncertain. Surface a visible 400 (not a false 204) so the
+        # operator can decide whether to retry again.
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 

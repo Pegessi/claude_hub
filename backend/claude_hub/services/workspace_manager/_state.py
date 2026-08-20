@@ -59,28 +59,42 @@ class _StateMixin:
                     update={"current_task_id": session.task_id}
                 )
 
-        # Cold-start delivery recovery: any call_id that was in-flight
-        # (processing_call_ids) when the Hub crashed is now in an uncertain
-        # state. We cannot prove the message was NOT delivered to the tmux
-        # input buffer, so we fail closed: move them to uncertain_call_ids
-        # (do NOT auto-resend, do NOT silently mark delivered) and emit a
-        # delivery:uncertain event to the supervisor.
+        # Cold-start delivery recovery: a call_id in processing_call_ids at
+        # startup means the Hub crashed while the message was in-flight.
+        #
+        # For LIVE sessions we do NOT immediately move processing call_ids to
+        # uncertain. Instead we leave them in processing so the monitor's
+        # receipt-based reconciliation (_recover_processing_via_receipt) can
+        # distinguish:
+        #   * receipt present  -> keep processing, no repaste (await worker ACK)
+        #   * receipt absent   -> move to pending for one safe re-delivery
+        #   * session gone     -> move to uncertain (fail-closed)
+        #
+        # For STOPPED sessions the tmux inbox is gone and we cannot query the
+        # receipt, so we fail closed: move processing call_ids to uncertain.
         self._recover_uncertain_deliveries()
 
     def _recover_uncertain_deliveries(self) -> None:
-        """Move all in-flight (processing) call_ids to uncertain on cold start.
+        """Cold-start delivery recovery.
 
-        Fail-closed: a call_id in processing_call_ids at startup means the
-        Hub crashed while the message was in-flight. We cannot prove the
-        message was not delivered to tmux, so we do NOT re-send it (could
-        duplicate) and do NOT mark it delivered (could lose). Instead we
-        move it to uncertain_call_ids and emit a delivery:uncertain event.
+        For STOPPED sessions (tmux inbox gone, receipt unqueryable) move all
+        in-flight (processing) call_ids to uncertain (fail-closed: no
+        auto-resend, no silent delivered).
+
+        For LIVE sessions leave processing call_ids in place so the monitor's
+        ``_recover_processing_via_receipt`` can reconcile against the
+        tmux-server receipt (present -> keep processing; absent -> pending).
         """
         for session_id in list(self.sessions.keys()):
             session = self.sessions.get(session_id)
             if session is None:
                 continue
             if not session.processing_call_ids:
+                continue
+            # Only fail-closed immediately for sessions whose tmux inbox is
+            # gone. Live sessions get receipt-based reconciliation in the
+            # monitor tick.
+            if session.status != ManagedSessionStatus.STOPPED:
                 continue
             self._mark_processing_as_uncertain(session_id, list(session.processing_call_ids))
 

@@ -118,55 +118,64 @@ Wraps the existing workspace task/session/report flow:
   - `QUEUED`: append the followup message to the prompt (worker picks it up
     when dispatched).
   - `WORKING`: `send_session_message` to deliver the message directly to the
-    running session. **Executor-boundary exactly-once delivery to the tmux
-    inbox with receiver-verifiable receipt**: `send_session_message` maintains
-    a three-phase outbox on the `ManagedSession`:
-    `pending_call_ids → processing_call_ids → delivered_call_ids`.
+    running session. **Fail-closed delivery with at-most-once paste per
+    call_id per tmux session lifetime**: `send_session_message` maintains
+    a four-phase outbox on the `ManagedSession`:
+    `pending_call_ids → processing_call_ids → delivered_call_ids` (plus
+    `uncertain_call_ids` for ambiguous failures).
     - `pending_call_ids`: persisted but not yet sent to tmux.
-    - `processing_call_ids`: claimed by the receiver pump and successfully
-      sent to tmux. The message now sits in the tmux input buffer (the
-      durable receiver) awaiting the worker's ACK.
+    - `processing_call_ids`: claimed by the receiver pump
+      (`pending → processing`) **before** the tmux send
+      (persist-intent-before-side-effect). The message has been sent to
+      the tmux input buffer and awaits the worker's ACK.
     - `delivered_call_ids`: ACKed by the worker (listed in `acked_call_ids`
-      of a report). Only the worker's ACK moves a call_id here.
+      of a report). Only the worker's ACK moves a call_id here — the ACK
+      is the durable commit.
+    - `uncertain_call_ids`: the tmux send failed ambiguously (we cannot
+      tell whether the paste ran). Fail-closed: the Hub does NOT
+      auto-resend (could duplicate) and does NOT silently mark delivered
+      (could lose). An explicit operator retry via
+      `retry_uncertain_delivery` is required.
 
-    A `call_id` already in `processing_call_ids` or `delivered_call_ids` is
-    skipped; otherwise it is persisted to `pending_call_ids` (with the
-    message body in `pending_messages[call_id]`) before the pump delivers it.
+    A `call_id` already in `processing_call_ids` or `delivered_call_ids`
+    is skipped; otherwise it is persisted to `pending_call_ids` (with the
+    message body in `pending_messages[call_id]`) before the pump delivers
+    it.
 
-    **Send-first + pane-marker dedupe (no loss, no duplicate)**: the pump
-    sends the message to tmux *before* claiming the call_id
-    (`pending → processing`). To handle the post-send/pre-persist crash
-    window (message sent to tmux but `processing` not yet persisted), the
-    pump first captures the tmux pane and checks for the `[call_id:<id>]`
-    marker:
-    - If the marker is present → the message was already sent (crash after
-      send, before persist); move to `processing` WITHOUT re-sending.
-    - If the marker is absent → send to tmux; on failure leave in
-      `pending` (no claim was made, so no rollback needed).
-    - After successful send (or marker confirmed), move the call_id from
-      `pending` to `processing` and persist.
+    **Persist-intent-before-side-effect + tmux receipt**: the pump moves
+    the call_id from `pending` to `processing` **before** sending to
+    tmux. The tmux send is gated by a tmux-server-side receipt
+    (`@receipt_<sha256(call_id)[:16]>` session option, set atomically
+    with the paste): a second same-call_id paste to the same tmux
+    session is a no-op once the receipt is set. This gives at-most-once
+    paste per call_id per tmux session lifetime.
 
-    This eliminates the pre-send crash loss window (claim before send meant
-    a crash between them stranded the call_id in `processing` but never
-    sent to tmux, and cold recovery skipped `processing` → permanent loss).
-    The tmux input buffer is the durable receiver: once a message is sent
-    to tmux, the worker will read it exactly once. On cold recovery,
-    `processing_call_ids` are moved back to `pending` and re-pumped; the
-    pane-marker check prevents duplicate tmux sends. The only exception is
-    a session whose tmux session itself is gone
-    (`ManagedSessionStatus.STOPPED`): the input buffer was destroyed, so
-    `_expire_processing_leases` moves the stranded call_ids back to
-    `pending_call_ids` for re-delivery.
+    On a **pre-side-effect** failure (tmux write not attempted) the
+    call_id rolls back to `pending_call_ids` for retry. On an
+    **ambiguous** failure (tmux write may have succeeded) the call_id
+    moves to `uncertain_call_ids` — fail-closed.
 
-    The `[call_id:<id>]` marker embedded in the message text serves two
-    purposes: (1) the worker correlates its ACK to the call_id, and (2) the
-    pump uses it as the dedupe enforcement point on cold recovery (pane
-    capture check). The Hub enforces exactly-once by never re-sending a
-    call_id whose marker is already present in the tmux pane.
+    On cold restart, `processing_call_ids` are reconciled against the
+    tmux receipt:
+    - receipt present on a LIVE session → keep `processing` (the paste
+      definitely ran; no repaste).
+    - receipt absent on a LIVE session → move back to `pending` for one
+      re-delivery (the paste definitely did not run).
+    - session gone / unqueryable / STOPPED → move to `uncertain` (fail
+      closed; operator retry required).
+
+    The `[call_id:<id>]` marker embedded in the message text lets the
+    worker correlate its ACK to the call_id. The Hub does NOT guarantee
+    exactly-once: the tmux receipt is per-session-lifetime, and a
+    destroyed-and-recreated session (same name) loses the receipt, so
+    cold recovery may re-deliver once (receipt absent on the new LIVE
+    session).
     **Durable ACK (call-specific, Hub-enforced)**: when the worker submits
     a report for the task, `create_report` automatically includes the
-    dispatch call_id (`f"dispatch:{task_id}"`) in the ACK set — submitting
-    a report proves the worker processed the assignment. The worker may
+    dispatch call_id (`f"dispatch:{task_id}:{dispatch_attempt}"`) in the
+    ACK set — submitting a report proves the worker processed the
+    assignment. The legacy no-suffix form (`f"dispatch:{task_id}"`) is
+    also accepted for backward compatibility. The worker may
     also list additional call_ids (e.g. followups it has processed) in
     `payload.acked_call_ids`. `_ack_call_ids(task_id, session_id, ack_set)`
     moves the call_ids from `pending_call_ids`/`processing_call_ids` to
@@ -183,26 +192,25 @@ Wraps the existing workspace task/session/report flow:
     dispatch does not leave the run pointing at the deleted task (which
     would cause a duplicate task on retry). The `call_id` is also marked
     delivered on the new task.
-  - **Exactly-once delivery to the tmux inbox + durable ACK**: for
+  - **Fail-closed delivery + durable ACK**: for
     `TODO`/`QUEUED`/`REVIEW`/`DONE`, `call_id` is recorded in
     `task.pending_call_ids` (persisted with the task) and embedded in the
     prompt as a `[call_id:<id>]` marker. It stays in `pending_call_ids`
     until the task is dispatched to a working session, at which point
-    `send_session_message` delivers it to the tmux inbox (send-first, with
-    pane-marker dedupe) and then claims it (`pending → processing`). For
-    `WORKING`, the session-level three-phase outbox (above) is the durable
-    sender record. A retry with the same `call_id` is a no-op on the sender
-    side if it is already in `delivered_call_ids` (ACKed) or
-    `processing_call_ids` (already in the tmux input buffer). The Hub
-    enforces exactly-once by checking the tmux pane for the `[call_id:<id>]`
-    marker before sending — if present, the call_id is moved to
-    `processing` without re-sending. The tmux input buffer is the durable
-    receiver. The `[call_id:<id>]` marker lets the worker correlate its ACK
-    to the call_id and lets the pump dedupe on cold recovery.
+    `send_session_message` delivers it (persist-intent-before-side-effect,
+    tmux-receipt-gated at-most-once paste) and claims it
+    (`pending → processing`). For `WORKING`, the session-level four-phase
+    outbox (above) is the durable sender record. A retry with the same
+    `call_id` is a no-op on the sender side if it is already in
+    `delivered_call_ids` (ACKed) or `processing_call_ids` (in-flight).
+    The `[call_id:<id>]` marker lets the worker correlate its ACK to the
+    call_id.
     **Durable ACK (call-specific, Hub-enforced)**:
     when the worker submits a report for the task, `create_report`
-    automatically ACKs the dispatch call_id (`f"dispatch:{task_id}"`) and
-    any call_ids listed in `payload.acked_call_ids`. `_ack_call_ids` moves
+    automatically ACKs the dispatch call_id
+    (`f"dispatch:{task_id}:{dispatch_attempt}"`; the legacy no-suffix
+    `f"dispatch:{task_id}"` is also accepted) and any call_ids listed in
+    `payload.acked_call_ids`. `_ack_call_ids` moves
     the call_ids from `pending_call_ids`/`processing_call_ids` to
     `delivered_call_ids` on the task and session. Unknown/future call_ids
     are ignored (no poisoning). This ensures an unrelated report does not
@@ -351,6 +359,17 @@ enforcement.
 
 ## Review Round 7 Fixes (2026-08-18)
 
+> **Historical note (superseded delivery semantics):** Rounds 7–31 below
+> describe earlier delivery designs (send-first + pane-marker dedupe,
+> "exactly-once to the tmux inbox", `STOPPED → pending` re-delivery).
+> These have been **superseded** by the fail-closed + tmux-receipt design
+> in **Review Round 32** (persist-intent-before-side-effect,
+> `pending → processing → delivered` with `uncertain` fail-closed state,
+> at-most-once paste per call_id per tmux session lifetime via
+> `@receipt_<sha16(call_id)>`, cold-recovery receipt reconciliation).
+> The current contract is documented in the **ManagedTaskAdapter** and
+> **Integration** sections above and in Round 32 below.
+
 Review attempt 7 failed (1/7 AC passing). Three required fixes were implemented:
 
 ### 1. Atomic / recoverable persistence
@@ -459,25 +478,24 @@ sequence order:
   `last_task_message`). The managed-task adapter persists the call_id in
   `pending_call_ids` (or `processing_call_ids` for `WORKING` tasks)
   atomically with delivery (via `_save_state()`). On crash recovery, a
-  call_id stranded in `processing_call_ids` is moved back to
-  `pending_call_ids` and re-pumped. The pump checks the tmux pane for the
-  `[call_id:<id>]` marker: if present, the message was already sent before
-  the crash → move to `processing` without re-sending; if absent, send it
-  now. This covers both the pre-send crash (no loss) and post-send crash
-  (no duplicate) windows. Only for sessions whose tmux inbox is gone
-  (`STOPPED`) does `_expire_processing_leases` move the stranded call_ids
-  back to `pending_call_ids` for re-delivery. For `WORKING` tasks,
-  delivery is **exactly-once** at the executor boundary:
-  `send_session_message` embeds a `[call_id:<id>]` marker in the message
-  text (for ACK correlation AND cold-recovery dedupe). The tmux input
-  buffer itself is the durable receiver: once a message is sent to tmux,
-  the worker reads it exactly once. The pane-marker check is a best-effort
-  dedupe guard (pane text can be cleared or rolled off), but the
-  `processing_call_ids` set is the durable claim record. This recovers ALL
-  unmatched followups in sequence order, not just the latest. After
-  replaying followups, recovery still reconciles the run's status via the
-  adapter's `get_status()` (the followup replay does not skip
-  reconciliation).
+  call_id stranded in `processing_call_ids` is reconciled against the
+  tmux receipt (`@receipt_<sha16(call_id)>`):
+  - receipt present on a LIVE session → keep `processing` (the paste
+    ran; no repaste).
+  - receipt absent on a LIVE session → move back to `pending` for one
+    re-delivery.
+  - session gone / STOPPED / unqueryable → move to `uncertain` (fail
+    closed; operator retry required).
+  For `WORKING` tasks, delivery is **fail-closed with at-most-once paste
+  per call_id per tmux session lifetime**: `send_session_message` embeds
+  a `[call_id:<id>]` marker in the message text (for ACK correlation).
+  The tmux receipt (not pane capture) is the dedupe enforcement point.
+  The `processing_call_ids` set is the durable claim record; the worker
+  ACK (`acked_call_ids`) is the durable commit to `delivered_call_ids`.
+  This recovers ALL unmatched followups in sequence order, not just the
+  latest. After replaying followups, recovery still reconciles the run's
+  status via the adapter's `get_status()` (the followup replay does not
+  skip reconciliation).
 - Run is `PENDING` with no `context_ref` → retry `adapter.spawn`.
 - Run is `PENDING` with a `context_ref` → set status `RUNNING` (spawn
   succeeded but the outcome persist was lost).
@@ -520,7 +538,8 @@ sequence order:
 - **Dispatch crash-idempotency (send → WORKING persist)**:
   `_dispatch_task_to_session` persists `session.task_id = task.id` (and
   saves) **before** sending the assignment prompt. The prompt is sent with
-  `call_id = f"dispatch:{task.id}"`. After the send, `task.status` is set
+  `call_id = f"dispatch:{task.id}:{task.dispatch_attempt}"`. After the
+  send, `task.status` is set
   to `WORKING` and saved. A crash between the send and the WORKING persist
   leaves the session holding a QUEUED task. `_can_dispatch_to` returns
   False for such sessions (they own a non-DONE task), so the normal
@@ -537,7 +556,9 @@ sequence order:
   submission ACKs the call_id into `delivered_call_ids`.
 - **Durable ACK via report submission (call-specific, Hub-enforced)**:
   `create_report` automatically ACKs the dispatch call_id
-  (`f"dispatch:{task_id}"`) — submitting a report proves the worker
+  (`f"dispatch:{task_id}:{dispatch_attempt}"`; legacy no-suffix
+  `f"dispatch:{task_id}"` also accepted) — submitting a report proves the
+  worker
   processed the assignment. The worker may also list additional call_ids
   in `payload.acked_call_ids`. `_ack_call_ids(task_id, session_id, ack_set)`
   moves the call_ids from `pending_call_ids`/`processing_call_ids` to
@@ -547,8 +568,9 @@ sequence order:
   poisoning, where a malicious report could suppress a real future
   delivery by pre-ACKing a not-yet-sent call_id. A pending followup that
   the worker has not yet processed stays in `pending_call_ids` (or
-  `processing_call_ids` for a live session) and is delivered exactly once
-  by the pump. Once ACKed, the sender will not re-send those call_ids.
+  `processing_call_ids` for a live session) and is delivered by the pump
+  with at-most-once paste per call_id per tmux session lifetime (tmux
+  receipt-gated). Once ACKed, the sender will not re-send those call_ids.
 - **Terminal guard relaxation**: `FAILED` is truly terminal; `INTERRUPTED`
   and `COMPLETED` may transition back to `RUNNING` via `followup` (resume).
 
@@ -564,13 +586,16 @@ sequence order:
   - `test_working_followup_session_outbox_survives_hard_exit_and_reload`:
     simulates a crash after `send_session_message` sends but before the
     session-level `delivered_call_ids` persist; reloads the manager; verifies
-    the `call_id` is in `processing_call_ids` (already in the tmux inbox).
-    On reload, the message is **not** re-delivered — the Hub enforces
-    exactly-once by never re-sending a `processing` call_id to a live
-    tmux session. A third call with the same call_id is also skipped
-    (sender-side dedup via `processing_call_ids`). This proves exactly-once
-    delivery across hard-exit + cold reload: the tmux input buffer is the
-    durable receiver, and the Hub does not duplicate it.
+    the `call_id` is in `processing_call_ids`. On reload, the message is
+    **not** re-delivered to a LIVE session — the Hub enforces at-most-once
+    paste per call_id per tmux session lifetime via the tmux receipt
+    (`@receipt_<sha16(call_id)>`), and cold recovery keeps `processing`
+    call_ids whose receipt is present. A third call with the same call_id
+    is also skipped (sender-side dedup via `processing_call_ids`). This
+    proves at-most-once delivery across hard-exit + cold reload for a
+    live tmux session: the tmux receipt proves the paste ran, so the Hub
+    does not duplicate it. (If the session were gone, the call_id would
+    move to `uncertain` — fail-closed.)
   - `test_deleted_task_recreation_persists_context_ref_before_start_task`:
     mocks `dispatch_workspace` to raise after `start_task` persists the
     task's `QUEUED` status; verifies `run.context_ref` was already updated
@@ -764,19 +789,25 @@ pending ──persist intent──▶ processing (in-flight) ──worker ACK─
   reached the tmux input buffer, so we do NOT auto-resend.
 
 **`DeliveryUncertain` exception**: `send_session_message` raises
-`DeliveryUncertain(RuntimeError)` after the pump when the call_id lands in
-`uncertain_call_ids`. This propagates to the API layer, which catches
-`RuntimeError` and returns HTTP 400. The call_id and payload remain
-persisted in `uncertain_call_ids` / `pending_messages`.
+`DeliveryUncertain(RuntimeError)` when the call_id is in
+`uncertain_call_ids` — fail-closed, no silent auto-resume. This propagates
+to the API layer, which catches `RuntimeError` and returns HTTP 400. The
+call_id and payload remain persisted in `uncertain_call_ids` /
+`pending_messages`.
 
-**Explicit retry**: re-calling `send_session_message` with the same
-`call_id` (when it is in `uncertain_call_ids`) moves it back to
-`pending_call_ids` on both the session and its bound task, saves, and
-re-pumps. If the re-pump succeeds, the call_id moves to
-`processing_call_ids` and `send_session_message` returns normally. If it
-fails ambiguously again, it raises `DeliveryUncertain`. The operator-facing
-retry is `POST /sessions/{id}/retry-uncertain` (`retry_uncertain_delivery`),
-which also emits a durable `delivery:retry_requested` audit event.
+**Explicit retry (operator-only)**: `send_session_message` does NOT move
+an uncertain call_id back to pending. The only path out of `uncertain` is
+the explicit `retry_uncertain_delivery` method (exposed as
+`POST /sessions/{id}/retry-uncertain`), which queries the tmux receipt:
+
+- **receipt present** → the paste already happened; move the call_id back
+  to `processing_call_ids` (no repaste) and nudge Enter via
+  `_ensure_submitted_without_repaste` so the TUI accepts the pending input.
+- **receipt absent, session alive** → the paste did not run; move the
+  call_id back to `pending_call_ids` so the pump re-delivers it once.
+- **session gone / unqueryable** → stays `uncertain` (fail-closed).
+
+The retry also emits a durable `delivery:retry_requested` audit event.
 
 **Legacy contract preserved**: the feedback-summary dispatch failure test
 (`test_feedback_summary_dispatch_failure_is_visible_retryable_and_delete_safe`)
@@ -785,15 +816,109 @@ expects HTTP 400 with "remains visible in Todo" so the task stays retryable.
 → `_dispatch_task_to_session` → `_start_feedback_summary_task`, which catches
 `Exception`, calls `_mark_feedback_summary_retryable` (task → TODO), and
 raises `RuntimeError("... remains visible in Todo ...")`. The API returns
-400. On retry, `send_session_message` sees the call_id in
-`uncertain_call_ids`, moves it back to pending, re-pumps (succeeds), and the
-task moves to WORKING (HTTP 201).
+400. On retry, the operator calls `retry_uncertain_delivery`, which (receipt
+absent) moves the call_id back to pending, the pump re-delivers (succeeds),
+and the task moves to WORKING (HTTP 201).
 
 **Why no pane-marker dedup**: tmux pane history is not durable. Relying on
 the `[call_id:<id>]` marker for cold-recovery dedup would produce duplicate
 deliveries when the marker rolls out of the scroll buffer. The marker is now
 only used by the *worker* to correlate its ACK (`acked_call_ids`), not by
 the Hub as a receipt or dedup basis.
+
+### Receipt-based at-most-once paste per (call_id, tmux session)
+
+**Problem**: the fail-closed `uncertain` state prevents silent loss and
+silent duplication, but it pushes every ambiguous failure to an operator
+retry. For the common case — the Hub crashed *after* the tmux paste
+succeeded but *before* the Hub recorded success — we can do better: the
+tmux server itself can witness the paste and leave a durable (for the
+session's lifetime) receipt that cold recovery can query. This lets us
+distinguish "paste definitely happened" from "paste definitely did not
+happen" from "cannot tell", and only fail closed in the last case.
+
+**Fix**: a tmux-server-side **receipt** — a session user option
+`@receipt_<sha256(call_id)[:16]>` — set atomically with the paste. The
+send primitive `_send_tmux_message_with_receipt` does:
+
+1. `load-buffer` the message into a named buffer
+   `buf_<sha256(call_id + \x00 + tmux_session)[:16]>`.
+2. An atomic `if-shell -F` check-and-paste: if the receipt option is
+   already set, do nothing; otherwise `paste-buffer` + `send-keys C-m`
+   (submit) + `set-option @receipt_<hash> 1`. This is a single tmux
+   command, so the receipt is set iff the paste ran.
+3. `_ensure_submitted_without_repaste` verifies the input was submitted
+   (captures the pane, checks the input box is empty) and nudges `C-m`
+   only if needed — never re-pastes the message body.
+4. `delete-buffer` the named buffer.
+
+`_query_tmux_receipt(session, call_id)` runs
+`show-options -qv @receipt_<hash>`: returns `True` if set, `False` if
+absent (rc=0, empty stdout), raises `RuntimeError` if the session is gone.
+
+**Cold recovery with receipts** (`_recover_processing_via_receipt`, called
+by the monitor tick and on demand):
+
+- **receipt present** → the paste happened. Keep the call_id in
+  `processing` (await worker ACK). Nudge `C-m` via
+  `_ensure_submitted_without_repaste` in case the Hub died between the
+  atomic paste and the submit verification. Do NOT re-paste.
+- **receipt absent, session alive** → the paste did NOT run (Hub died
+  before the tmux command, or the command failed before setting the
+  receipt). Safe to move the call_id back to `pending` for one
+  re-delivery.
+- **session gone / unqueryable** → cannot prove either way. Fail closed:
+  move to `uncertain`.
+
+`_recover_uncertain_deliveries` (cold start) now only moves
+`processing_call_ids` → `uncertain` for **STOPPED** sessions (tmux inbox
+gone, receipt unqueryable). **LIVE** (`WORKING`) sessions keep their
+processing call_ids so the monitor's receipt reconciliation can decide.
+
+**Real boundary (honesty)**: this guarantees **at-most-once paste per
+call_id per live tmux session lifetime**, plus Hub-side durable
+envelope/ACK (`pending_messages` + `call_payload_fingerprints` +
+`delivered_call_ids`). It does NOT guarantee exactly-once across a
+destroyed-and-recreated receiver tmux session: if the session is killed
+and a new one starts with the same name, the receipt is gone. If the new
+same-name LIVE session is up before the monitor reconciles,
+`_recover_processing_via_receipt` sees **receipt absent, session alive**
+and moves the call_id back to `pending` for **one safe re-delivery** —
+so the message may be pasted twice across the two session lifetimes.
+Only when the session is **gone / unqueryable / STOPPED** (tmux inbox
+gone, receipt unqueryable) does cold recovery fail-closed to `uncertain`
+(operator must retry explicitly via `retry_uncertain_delivery`). The
+worker's ACK (`acked_call_ids` → `delivered_call_ids`) is the only
+proof the model actually processed the message; the tmux receipt only
+proves the bytes reached the tmux input buffer.
+
+**Immutable call_id payload**: `call_payload_fingerprints[call_id]` is a
+sha256 over the message text + per-attachment (filename, normalized mime,
+sha256(bytes)). Computed on first send and kept forever. A re-send with
+the same payload is idempotent at any state; a re-send with a different
+payload raises `ValueError` (call_id identifies a single durable
+delivery). Legacy state (call_id in a state list without a stored
+fingerprint) has its fingerprint backfilled from the persisted envelope;
+inconsistent state (non-delivered, no envelope, no fingerprint) raises
+`RuntimeError` (fail closed).
+
+**Tests** (`tests/test_tmux_receipt_integration.py`, real tmux server,
+UUID-unique session, `cat >> effect_file` records pasted bytes):
+
+- `test_sequential_duplicate_same_call_id_pastes_once`: two sequential
+  sends, effect count = 1, receipt = true.
+- `test_ten_concurrent_same_call_id_pastes_once`: 10 concurrent sends
+  via `asyncio.gather`, effect count = 1, receipt = true.
+- `test_pre_send_failure_sets_no_receipt_and_no_paste`: Hub raises before
+  the tmux command; receipt = false, effect count = 0.
+- `test_post_send_failure_receipt_present_no_repaste_on_recovery`: Hub
+  raises after the real send (paste + receipt set). A LIVE
+  `ManagedSession` is persisted with the call_id in `processing_call_ids`
+  + stored envelope + fingerprint. A fresh `WorkspaceManager` reloads
+  state; `_recover_processing_via_receipt` (production receipt query, no
+  mock) keeps the call_id in `processing` (not pending, not uncertain)
+  and effect count stays 1. `resume_existing_call` and `_pump_session_messages`
+  also do not repaste.
 
 ## Migration / Rollback Guide
 
@@ -981,3 +1106,55 @@ increment:
 - Spawn creates a child run visible in the tree without a full page reload.
 - Interrupt changes the run's status badge to `interrupted`.
 - The resident root run's ACK button advances `ack_sequence`.
+
+## Validation Results (2026-08-21 freeze)
+
+### Tests (unmasked exit codes)
+
+| Suite | Result | Exit |
+| --- | --- | --- |
+| `tests/test_workspaces.py` | 133 passed | 0 |
+| `tests/test_agent_tree.py` | 146 passed | 0 |
+| `tests/test_tmux_receipt_integration.py` | 4 passed | 0 |
+
+### mypy (clean cache, `uv run mypy .`)
+
+| Scope | Errors |
+| --- | --- |
+| Total | 106 (baseline a562ae9: 159) |
+| `claude_hub/` (production) | 0 |
+| `tests/test_agent_tree.py` | 0 (new this branch) |
+| `tests/test_workspaces.py` | 39 (historical baseline) |
+
+All 106 remaining errors are pre-existing in other test files
+(`test_recovery_integration_v4v6.py` 47, `test_env_presets.py` 7,
+`test_feedback_lessons.py` 7, `test_tabs.py` 2, `test_recovery_real_ttyd.py` 2,
+`test_orphan_tab_reconcile.py` 1, `test_ttyd_manager.py` 1). No new errors
+introduced by this branch.
+
+### Contract checks (rg)
+
+- `retry_uncertain_delivery`: only defined in `_messaging.py`, exposed via
+  `api/workspaces.py`, and exercised in `tests/test_agent_tree.py`. **No
+  internal/resident/loop auto-invocation** — fail-closed uncertain state
+  requires an explicit operator retry.
+- Dispatch producer call_id: `dispatch:{task.id}:{dispatch_attempt}`
+  (attempt-scoped) in `_dispatch.py`.
+- Dispatch consumer ACK (`_reports.py`): accepts both
+  `dispatch:{task_id}:{dispatch_attempt}` (new) and `dispatch:{task_id}`
+  (legacy, no attempt suffix) for backward compatibility.
+- `send_session_message` fingerprint invariant: always checks
+  `call_payload_fingerprints` first; different payload → `ValueError`.
+  Recovery paths use the separate `resume_existing_call` (no fingerprint
+  comparison, operates on persisted envelope).
+- Legacy backfill: call_id in a state list without a fingerprint → derive
+  fingerprint from persisted envelope (`list[WorkspaceAttachment]`, read
+  from `att.path`); delivered-without-payload → no-op; inconsistent
+  (non-delivered state, no envelope) → `RuntimeError`. Fingerprint present
+  but call_id absent from all state lists → `RuntimeError` (fail closed).
+
+### Formatting / whitespace
+
+- `black`: 12 files left unchanged.
+- `isort`: clean.
+- `git diff --check`: clean (no whitespace errors).

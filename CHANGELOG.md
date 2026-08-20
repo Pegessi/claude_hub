@@ -5,7 +5,7 @@
 
 ## Unreleased
 
-### fix: fail-closed durable mailbox (persist-intent-first → processing → ACK → delivered; ambiguous → uncertain) + Resident wait/ack + followup:delivered
+### fix: fail-closed durable mailbox (persist-intent-first → processing → ACK → delivered; ambiguous → uncertain) + tmux receipt at-most-once + Resident wait/ack + followup:delivered
 
 - **What**: the mailbox uses a Hub-owned **receiver pump** with
   **persist-intent-before-side-effect** semantics. For each pending call_id
@@ -18,16 +18,29 @@
   duplicate) and do NOT silently mark delivered (could lose). On success
   the call_id stays in `processing_call_ids` until the worker ACKs it via
   `acked_call_ids`; only the worker's ACK moves it to `delivered_call_ids`
-  (the **receiver-verifiable durable receipt**). On cold restart, call_ids
-  stranded in `processing_call_ids` are moved to `uncertain_call_ids`
-  (fail-closed). `send_session_message` raises `DeliveryUncertain`
-  (a `RuntimeError`) when a call_id lands in `uncertain_call_ids`, so the
-  API surfaces HTTP 400 and the caller can retry explicitly (re-calling
-  `send_session_message` with the same call_id moves it back to `pending`
-  and re-pumps). The Resident loop uses `wait`/`ack` (directed cursor),
-  and a `followup:delivered` event is emitted when the worker ACKs a
-  followup call_id. REVIEWED tasks no longer emit a terminal COMPLETED
-  event on the worker's COMPLETED report — only REVIEW_PASSED does.
+  (the **receiver-verifiable durable receipt**). A tmux-server-side
+  **receipt** (`@receipt_<sha256(call_id)[:16]>` session option, set
+  atomically with the paste) gives cold recovery a way to distinguish
+  "paste definitely happened" (receipt present → keep processing, no
+  repaste) from "paste definitely did not happen" (receipt absent on a
+  live session → move back to pending for one re-delivery) from "cannot
+  tell" (session gone → uncertain). On cold restart, call_ids stranded in
+  `processing_call_ids` for **STOPPED** sessions (tmux inbox gone) are
+  moved to `uncertain_call_ids`; **LIVE** sessions keep their processing
+  call_ids so the monitor's receipt reconciliation can decide.
+  `send_session_message` raises `DeliveryUncertain` (a `RuntimeError`)
+  when a call_id is in `uncertain_call_ids` — fail-closed, no silent
+  auto-resume. The operator retries via the explicit
+  `retry_uncertain_delivery` endpoint, which queries the tmux receipt:
+  receipt present → move back to `processing` (no repaste, nudge Enter);
+  receipt absent on a live session → move back to `pending` for one
+  re-delivery; session gone → stays `uncertain`. The API surfaces HTTP
+  400 on `DeliveryUncertain` so the caller knows an explicit retry is
+  required. The
+  Resident loop uses `wait`/`ack` (directed cursor), and a
+  `followup:delivered` event is emitted when the worker ACKs a followup
+  call_id. REVIEWED tasks no longer emit a terminal COMPLETED event on
+  the worker's COMPLETED report — only REVIEW_PASSED does.
 - **Why**: tmux stdin is NOT a verifiable durable receiver — bytes written
   to tmux may be consumed by the agent and then lost if the agent crashes,
   and the Hub cannot read back what the model actually processed. The
@@ -71,10 +84,13 @@
     `processing` back to `pending` on both session and task, clearing
     `processing_call_ids_at`. Used only for proven pre-side-effect
     failures (tmux write not attempted).
-  - `_state.py::_recover_uncertain_deliveries`: on cold start, moves all
-    `processing_call_ids` to `uncertain_call_ids` (fail-closed) and emits
-    `delivery:uncertain` events. We cannot prove the message reached the
-    tmux input buffer, so we do NOT auto-resend.
+  - `_state.py::_recover_uncertain_deliveries`: on cold start, moves
+    `processing_call_ids` to `uncertain_call_ids` **only for STOPPED
+    sessions** (tmux inbox gone, receipt unqueryable — fail-closed). LIVE
+    (`WORKING`) sessions keep their processing call_ids so the monitor's
+    `_recover_processing_via_receipt` can reconcile against the
+    tmux-server receipt (present → keep processing; absent → pending;
+    session gone → uncertain).
   - `_constants.py::DeliveryUncertain`: `RuntimeError` subclass raised by
     `send_session_message` when a call_id lands in `uncertain_call_ids`.
     Caught by API endpoints (`/tasks/{id}/start`,
@@ -82,8 +98,10 @@
   - `_reports.py::_ack_call_ids`: commit only — moves call_ids from
     `pending`/`processing`/`uncertain` to `delivered`, removes the message
     body from `pending_messages`. Unknown call_ids are ignored (future-ID
-    poisoning protection). The dispatch call_id (`dispatch:{task_id}`) is
-    implicitly ACKed on any report for that task. For each ACKed followup
+    poisoning protection). The dispatch call_id
+    (`dispatch:{task_id}:{dispatch_attempt}`) is implicitly ACKed on any
+    report for that task; the legacy no-suffix form (`dispatch:{task_id}`)
+    is also accepted for backward compatibility. For each ACKed followup
     call_id, emits a `followup:delivered` event with `delivered: true`.
   - `_reports.py::_emit_followup_delivered_if_followup`: looks up the
     call_id in `agent_tree._call_record`; if `action == "followup"`, emits
@@ -108,12 +126,23 @@
     `agent_tree.ack(workspace.id, root_run.id, max_seq)` to advance the
     cursor to the highest delivered sequence. This makes `wait`/`ack`
     used in production, not just tests.
-- **Honesty note**: this guarantees at-least-once delivery of the
-  **Hub-managed** effect (the tmux prompt) with fail-closed uncertainty:
-  an ambiguous failure leaves the call_id in `uncertain_call_ids` and the
-  operator must explicitly retry. It does NOT guarantee exactly-once of
-  arbitrary external tool side effects the model invokes — those require
-  the call_id to be propagated as an idempotency key by the model itself.
+- **Honesty note**: this guarantees **at-most-once paste per call_id per
+  live tmux session lifetime** (via the tmux-server receipt) plus
+  Hub-side durable envelope/ACK (`pending_messages` +
+  `call_payload_fingerprints` + `delivered_call_ids`). It does NOT
+  guarantee exactly-once across a destroyed-and-recreated receiver tmux
+  session: if the session is killed and a new one starts with the same
+  name, the receipt is gone. Cold recovery then sees a LIVE session with
+  the receipt absent and moves the call_id back to `pending` for **one**
+  re-delivery (the paste definitely did not run in the new session).
+  Only if the session is gone / unqueryable / STOPPED does cold recovery
+  move the call_id to `uncertain` (fail-closed, operator retry). The
+  worker's ACK (`acked_call_ids` → `delivered_call_ids`) is the only
+  proof the model actually processed the message; the tmux receipt only
+  proves the bytes reached the tmux input buffer. It also does NOT
+  guarantee exactly-once of arbitrary external tool side effects the
+  model invokes — those require the call_id to be propagated as an
+  idempotency key by the model itself.
 
 ### feat: unified Agent Tree + Durable Mailbox coordination layer
 

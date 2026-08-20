@@ -698,6 +698,13 @@ class WorkspaceTask(BaseModel):
     feedback_lesson_ids: List[str] = Field(default_factory=list)
     review_session_id: Optional[str] = None
     review_attempts: int = 0
+    # Monotonic counter incremented each time the task is (re-)dispatched to a
+    # worker via start_task. Used to build a per-attempt dispatch call_id
+    # (``dispatch:{task.id}:{dispatch_attempt}``) so that followups — which
+    # may carry a different assignment prompt — do not collide with the
+    # immutable-call_id payload invariant. Crash recovery reuses the stored
+    # attempt, so the same call_id no-ops correctly.
+    dispatch_attempt: int = 0
     # Review-cycle ordinals. ``review_cycle`` is the current work round (a task is
     # born in round 1; each reopen-to-worker opens the next round).
     # ``reviewed_cycle`` is the round number of the most recently applied reviewer
@@ -824,6 +831,25 @@ class ManagedSession(BaseModel):
     # after a successful claim. Persisted so a crash between outbox write and
     # pump claim does not lose the message.
     pending_messages: Dict[str, str] = Field(default_factory=dict)
+    # Durable inbox attachments: call_id → list of persisted attachments.
+    # Populated by ``send_session_message`` when a call_id send carries
+    # attachments; consumed (and deleted) by the receiver pump alongside the
+    # message body. Kept in lockstep with ``pending_messages`` so a reload
+    # preserves both the message and its attachments.
+    pending_attachments: Dict[str, list[WorkspaceAttachment]] = Field(default_factory=dict)
+    # Durable call payload fingerprints: call_id → sha256 hex digest of the
+    # canonical (message, attachments) payload. Computed on send and kept
+    # forever (even after ACK) so that:
+    #   * same call_id + same payload is idempotent (no-op) at any state
+    #     (pending / processing / delivered / uncertain).
+    #   * same call_id + different payload is rejected (ValueError) without
+    #     mutation — a call_id identifies a single durable delivery.
+    # The fingerprint covers the message text and, for each attachment, the
+    # filename, normalized mime type, and sha256 digest of the decoded
+    # bytes. Same-size-but-different-content attachments are therefore
+    # detected as conflicting. Raw bytes are NOT stored in the fingerprint
+    # (only the digest), so the JSON state stays small.
+    call_payload_fingerprints: Dict[str, str] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
     last_activity_at: Optional[datetime] = None
@@ -859,18 +885,26 @@ class AgentReportCreate(BaseModel):
     # delivered set and suppressing a real future delivery.
     #
     # Production contract:
-    # - The dispatch call_id (f"dispatch:{task_id}") is ACKed automatically by
-    #   the Hub on every report submission; the worker does NOT need to list it.
+    # - The dispatch call_id (f"dispatch:{task_id}:{dispatch_attempt}") is
+    #   ACKed automatically by the Hub on every report submission; the worker
+    #   does NOT need to list it. (Legacy dispatch:{task_id} ACKs are still
+    #   accepted for backward compatibility.)
     # - For any other call_id the worker has processed (e.g. a followup
     #   message carrying [call_id:<id>]), the worker MUST include it in
     #   acked_call_ids so the Hub can move it to delivered_call_ids and
-    #   release it.
-    # - A call_id not listed in acked_call_ids stays in processing_call_ids
-    #   (already delivered to the tmux inbox) and is NOT re-delivered to a
-    #   live session. The Hub enforces exactly-once by never re-sending a
-    #   processing call_id to a live tmux session. Only if the session's tmux
-    #   inbox is gone (STOPPED) does the Hub move it back to pending for
-    #   re-delivery.
+    #   release it. The worker ACK is the durable commit to delivered.
+    # - A call_id not listed in acked_call_ids stays in processing_call_ids.
+    #   The Hub does NOT guarantee exactly-once delivery: a processing
+    #   call_id is not re-sent to a LIVE tmux session (at-most-once paste
+    #   per call_id per tmux session lifetime, enforced by the tmux
+    #   @receipt_<sha16(call_id)> session option). On cold restart the
+    #   monitor reconciles processing call_ids against the tmux receipt:
+    #     * receipt present on a LIVE session -> keep processing (no repaste).
+    #     * receipt absent on a LIVE session -> move back to pending for one
+    #       re-delivery (the paste definitely did not happen).
+    #     * session STOPPED/gone/unqueryable -> move to uncertain (fail
+    #       closed; explicit operator retry required via
+    #       retry_uncertain_delivery).
     acked_call_ids: List[str] = Field(default_factory=list)
 
 

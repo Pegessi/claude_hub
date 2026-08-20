@@ -43,26 +43,30 @@ class ExecutorAdapter(ABC):
     async def followup(self, run: "AgentRun", message: str, call_id: Optional[str] = None) -> None:
         """Deliver a message and resume the executor's turn.
 
-        ``call_id`` is the delivery key. Delivery is **exactly-once** to the
-        tmux inbox:
+        ``call_id`` is the delivery key. Delivery is **fail-closed** with
+        at-most-once paste per call_id per tmux session lifetime:
 
         - The sender persists the call_id in ``pending_call_ids`` before
           delivery. The receiver pump claims it (``pending → processing``)
           and sends it to tmux.
         - The call_id stays in ``processing_call_ids`` until the worker
           ACKs it (lists it in ``acked_call_ids`` of its report). Only the
-          worker's ACK moves it to ``delivered_call_ids``.
+          worker's ACK moves it to ``delivered_call_ids`` — the ACK is the
+          durable commit.
         - A crash after the tmux send leaves the call_id in
-          ``processing_call_ids``; cold recovery does NOT re-deliver it —
-          it's already in the tmux input buffer (the durable receiver), and
-          re-sending would produce a duplicate model turn. The worker ACKs
-          it when it processes the message.
-        - The only exception is a session whose tmux inbox is gone
-          (``STOPPED``): the input buffer was destroyed, so the call_id is
-          moved back to ``pending_call_ids`` for re-delivery.
+          ``processing_call_ids``. Cold recovery does NOT blindly
+          re-deliver: the monitor reconciles against the tmux
+          ``@receipt_<sha16(call_id)>`` session option (set atomically with
+          the paste):
+            * receipt present on a LIVE session → keep processing (the
+              paste definitely happened; no repaste).
+            * receipt absent on a LIVE session → move back to pending for
+              one re-delivery (the paste definitely did not happen).
+            * session STOPPED/gone/unqueryable → move to ``uncertain``
+              (fail closed; explicit operator retry required via
+              ``retry_uncertain_delivery``).
         - The sender skips call_ids already in ``delivered_call_ids``
-          (worker-ACKed) or ``processing_call_ids`` (already in the tmux
-          inbox).
+          (worker-ACKed) or ``processing_call_ids`` (in-flight).
         """
 
     @abstractmethod
@@ -238,8 +242,10 @@ class ManagedTaskAdapter(ExecutorAdapter):
         # list is persisted with the task so a restarted adapter does not
         # re-deliver an already-processed followup. A call_id still in
         # pending_call_ids (not yet sent to tmux) WILL be pumped on retry —
-        # this is the exactly-once delivery path: the pump sends it to the
-        # tmux inbox exactly once.
+        # the pump sends it to tmux with at-most-once paste per call_id per
+        # tmux session lifetime (enforced by the tmux @receipt_<sha16>
+        # session option), and cold recovery reconciles processing call_ids
+        # against that receipt.
         if call_id and call_id in task.delivered_call_ids:
             logger.debug(
                 "followup call_id=%s already ACKed by task %s; skipping",
@@ -248,14 +254,14 @@ class ManagedTaskAdapter(ExecutorAdapter):
             )
             return
 
-        # --- Crash-safe outbox (exactly-once to tmux inbox) ---
+        # --- Crash-safe outbox (persist-intent-before-side-effect) ---
         # Persist the call_id as pending BEFORE delivery. This is the durable
         # sender record: if we crash after this point, the pump will see the
-        # call_id in pending_call_ids and send it to the tmux inbox exactly
-        # once. The call_id stays in pending_call_ids until the pump claims
-        # it (pending → processing) and sends it to tmux; it stays in
-        # processing_call_ids until the worker ACKs it (lists it in
-        # acked_call_ids of its report).
+        # call_id in pending_call_ids and send it to tmux. The call_id stays
+        # in pending_call_ids until the pump claims it (pending → processing)
+        # and sends it to tmux; it stays in processing_call_ids until the
+        # worker ACKs it (lists it in acked_call_ids of its report). The
+        # worker ACK is the durable commit to delivered_call_ids.
         if call_id:
             current = self._wm.tasks.get(task_id)
             if current is not None and call_id not in current.pending_call_ids:
@@ -306,16 +312,20 @@ class ManagedTaskAdapter(ExecutorAdapter):
         elif task.status == WorkspaceTaskStatus.WORKING:
             # The agent is actively running. Send the followup message
             # directly to its session so it processes it immediately.
-            # Delivery is exactly-once to the tmux inbox:
             # send_session_message persists the call_id as pending before
             # sending. The pump claims it (pending → processing) and sends
             # it to tmux. The call_id stays in processing_call_ids until
             # the worker ACKs it (via acked_call_ids in its report). The
-            # Hub never re-sends a processing call_id to a live tmux
-            # session — the tmux input buffer is the durable receiver, and
-            # re-sending would produce a duplicate model turn. The
-            # [call_id:<id>] marker in the message lets the worker
-            # correlate its ACK to the call_id.
+            # Hub does NOT re-send a processing call_id to a LIVE tmux
+            # session (at-most-once paste per call_id per tmux session
+            # lifetime, enforced by the tmux @receipt_<sha16(call_id)>
+            # session option). On cold restart the monitor reconciles
+            # processing call_ids against the receipt: receipt present →
+            # keep processing; receipt absent on a LIVE session → move
+            # back to pending for one re-delivery; session gone/STOPPED →
+            # move to uncertain (fail closed). The [call_id:<id>] marker
+            # in the message lets the worker correlate its ACK to the
+            # call_id.
             if task.session_id:
                 await self._wm.send_session_message(task.session_id, message, call_id=call_id)
         elif task.status in (

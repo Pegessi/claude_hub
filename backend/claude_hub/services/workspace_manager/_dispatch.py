@@ -76,6 +76,13 @@ class _DispatchMixin:
             "dispatch_pending": False,
             "manual_aborted_at": None,
             "manual_abort_reason": None,
+            # Each (re-)dispatch gets a fresh attempt ordinal so the dispatch
+            # call_id (dispatch:{task.id}:{dispatch_attempt}) is unique per
+            # attempt. Followups may carry a different assignment prompt; a
+            # new call_id keeps them compatible with the immutable-call_id
+            # payload invariant. Crash recovery reuses the stored attempt, so
+            # the same call_id no-ops correctly.
+            "dispatch_attempt": task.dispatch_attempt + 1,
         }
         if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
             run = task.autonomous_run or self._default_autonomous_run(
@@ -884,12 +891,12 @@ class _DispatchMixin:
         QUEUED task. ``_can_dispatch_to`` returns False for such sessions
         (they own a non-DONE task), so the normal dispatch loop skips them.
         This method re-sends the assignment prompt. The dispatch call_id
-        (``f"dispatch:{task.id}"``) gives sender-side dedup: if the call_id
-        is already in ``processing_call_ids`` (sent to tmux) or
-        ``delivered_call_ids`` (ACKed by the worker via a report),
-        ``send_session_message`` skips the re-send. If it is still in
-        ``pending_call_ids``, the pump sends it to the tmux inbox exactly
-        once.
+        (``f"dispatch:{task.id}:{task.dispatch_attempt}"``) gives
+        sender-side dedup: if the call_id is already in
+        ``processing_call_ids`` (sent to tmux) or ``delivered_call_ids``
+        (ACKed by the worker via a report), ``send_session_message`` skips
+        the re-send. If it is still in ``pending_call_ids``, the pump sends
+        it to the tmux inbox exactly once.
         """
         for session in self._workspace_agents(workspace_id, include_stopped=True):
             if session.status == ManagedSessionStatus.STOPPED:
@@ -913,16 +920,34 @@ class _DispatchMixin:
                 workspace,
                 f"{task.title}\n{task.prompt}",
             )
-            await self.send_session_message(
-                session.id,
-                self._build_task_assignment_prompt(
-                    workspace,
-                    task,
-                    session,
-                    lesson_context=lesson_context,
-                ),
-                call_id=f"dispatch:{task.id}",
-            )
+            dispatch_call_id = f"dispatch:{task.id}:{task.dispatch_attempt}"
+            try:
+                await self._send_dispatch_message(
+                    session.id,
+                    dispatch_call_id,
+                    self._build_task_assignment_prompt(
+                        workspace,
+                        task,
+                        session,
+                        lesson_context=lesson_context,
+                    ),
+                )
+            except DeliveryUncertain:
+                # The previous dispatch attempt ended in an ambiguous tmux
+                # failure (call_id in uncertain_call_ids). Per the fail-closed
+                # contract, the system MUST NOT auto-retry an uncertain
+                # dispatch — only the explicit operator retry endpoint may
+                # move it back to pending. Leave the task QUEUED and the
+                # call_id uncertain; the operator must retry explicitly.
+                logger.warning(
+                    "Recovering queued task ownership: dispatch call_id=%s for "
+                    "session_id=%s task_id=%s is uncertain; system will NOT "
+                    "auto-retry. Operator retry required.",
+                    dispatch_call_id,
+                    session.id,
+                    task_id,
+                )
+                continue
             now = _wm._now()
             self.tasks[task.id] = task.model_copy(
                 update={
@@ -932,6 +957,41 @@ class _DispatchMixin:
                 }
             )
             self._save_state()
+
+    async def _send_dispatch_message(
+        self,
+        session_id: str,
+        dispatch_call_id: str,
+        prompt: str,
+    ) -> None:
+        """Send a task dispatch prompt.
+
+        The dispatch call_id is ``f"dispatch:{task.id}:{dispatch_attempt}"``.
+
+        Recovery contract: the assignment prompt passed here may be rebuilt
+        from current state (lesson context can drift across cycles). We MUST
+        NOT overwrite or re-fingerprint a persisted envelope — the original
+        stored payload is the source of truth until the worker ACKs it.
+
+        Therefore we first call :meth:`resume_existing_call`, which operates
+        on the persisted envelope only:
+
+        * ``pending``    — pump the stored payload to tmux.
+        * ``processing`` — no-op (already in flight).
+        * ``delivered``  — no-op (already ACKed).
+        * ``uncertain``  — raise :class:`DeliveryUncertain` (fail-closed;
+          system never auto-retries an ambiguous delivery).
+        * ``absent``     — return ``False``; we then persist the newly built
+          prompt via :meth:`send_session_message`.
+
+        Only when the call_id is absent do we commit the rebuilt prompt as a
+        fresh delivery.
+        """
+        resumed = await self.resume_existing_call(session_id, dispatch_call_id)
+        if resumed:
+            return
+        # call_id absent: persist the newly built prompt as a fresh delivery.
+        await self.send_session_message(session_id, prompt, call_id=dispatch_call_id)
 
     async def _dispatch_task_to_session(
         self,
@@ -964,19 +1024,19 @@ class _DispatchMixin:
         # Crash-idempotent dispatch: claim the task for the session BEFORE
         # sending the prompt.
         #
-        # The dispatch call_id is f"dispatch:{task.id}". We persist
-        # session.task_id = task.id (and save) before the send so that a
-        # crash between the send side-effect and the WORKING persist does
-        # NOT let the monitor re-dispatch the task to a different session.
-        # On recovery, _recover_queued_task_ownership detects that the
-        # session holds a QUEUED task and re-sends the assignment prompt.
+        # The dispatch call_id is f"dispatch:{task.id}:{task.dispatch_attempt}".
+        # We persist session.task_id = task.id (and save) before the send so
+        # that a crash between the send side-effect and the WORKING persist
+        # does NOT let the monitor re-dispatch the task to a different
+        # session. On recovery, _recover_queued_task_ownership detects that
+        # the session holds a QUEUED task and re-sends the assignment prompt.
         # The call_id ensures sender-side dedup: if the call_id is already
         # in processing_call_ids (sent to tmux) or delivered_call_ids
         # (ACKed by the worker via a report), send_session_message skips
         # the re-send. If it is still in pending_call_ids, the pump sends
         # it to the tmux inbox exactly once.
         # ------------------------------------------------------------------
-        dispatch_call_id = f"dispatch:{task.id}"
+        dispatch_call_id = f"dispatch:{task.id}:{task.dispatch_attempt}"
         self.sessions[session.id] = session.model_copy(
             update={
                 "task_id": task.id,
@@ -1002,15 +1062,16 @@ class _DispatchMixin:
             workspace,
             f"{task.title}\n{task.prompt}",
         )
-        await self.send_session_message(
+        dispatch_call_id = f"dispatch:{task.id}:{task.dispatch_attempt}"
+        await self._send_dispatch_message(
             session.id,
+            dispatch_call_id,
             self._build_task_assignment_prompt(
                 workspace,
                 task,
                 session,
                 lesson_context=lesson_context,
             ),
-            call_id=dispatch_call_id,
         )
 
         self.tasks[task.id] = task.model_copy(

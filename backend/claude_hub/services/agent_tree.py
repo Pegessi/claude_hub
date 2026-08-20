@@ -1697,36 +1697,40 @@ class AgentTreeManager:
         # ------------------------------------------------------------------
         # Durable receiver pump on cold recovery.
         #
-        # After a crash, call_ids may be in three states:
+        # After a crash, call_ids may be in four states:
         #
-        #   - ``pending_call_ids``: either never sent to tmux, or sent but
-        #     the processing state was not yet persisted (crash between
-        #     tmux send and save_state). The pump's pane-marker check
-        #     distinguishes the two: if the ``[call_id:<id>]`` marker is
-        #     already in the tmux pane, the call_id was sent and is moved
-        #     to ``processing`` WITHOUT re-sending (no duplicate). If the
-        #     marker is absent, the call_id is sent to tmux (no loss).
+        #   - ``pending_call_ids``: persisted but not yet sent to tmux.
+        #     The pump claims them (``pending → processing``) BEFORE the
+        #     tmux send (persist-intent-before-side-effect) and sends them
+        #     to tmux, gated by the tmux receipt
+        #     (``@receipt_<sha16(call_id)>``) for at-most-once paste per
+        #     call_id per tmux session lifetime.
         #
-        #   - ``processing_call_ids``: the pump confirmed the message is in
-        #     the tmux inbox (either it just sent it, or it found the
-        #     marker from a prior crashed cycle). These were delivered to
-        #     the worker's tmux inbox and MUST NOT be re-delivered —
-        #     re-sending would trigger a second model turn/effect. The
-        #     worker will ACK them (moving them to ``delivered_call_ids``)
-        #     when it processes them.
+        #   - ``processing_call_ids``: sent to tmux, awaiting the worker's
+        #     ACK. On cold recovery the monitor reconciles these against
+        #     the tmux receipt: receipt present on a LIVE session → keep
+        #     ``processing`` (no repaste); receipt absent on a LIVE
+        #     session → move back to ``pending`` for one re-delivery;
+        #     session gone/STOPPED/unqueryable → move to ``uncertain``
+        #     (fail closed).
+        #
+        #   - ``uncertain_call_ids``: ambiguous tmux send failure. The Hub
+        #     does NOT auto-resend; an explicit operator retry via
+        #     ``retry_uncertain_delivery`` is required.
         #
         #   - ``delivered_call_ids``: ACKed by the worker. NEVER re-deliver.
         #
-        # This is the receiver-verifiable durable inbox: the tmux pane
-        # marker is the proof of delivery. The pump checks it before
-        # sending, so a call_id is written to the tmux buffer exactly once
-        # — no loss, no duplicate.
+        # The worker ACK (``acked_call_ids`` → ``delivered_call_ids``) is
+        # the durable commit. The tmux receipt proves the paste ran in the
+        # current tmux session lifetime; it does NOT guarantee exactly-once
+        # across session recreation.
         # ------------------------------------------------------------------
         for session in list(self._wm.sessions.values()):
             if session.workspace_id != workspace_id:
                 continue
-            # Only pump pending call_ids. processing_call_ids were already
-            # delivered to tmux; do NOT re-deliver them (no duplicate turns).
+            # Only pump pending call_ids. processing_call_ids are
+            # reconciled by the monitor against the tmux receipt; do NOT
+            # blindly re-deliver them.
             if not session.pending_call_ids:
                 continue
             try:

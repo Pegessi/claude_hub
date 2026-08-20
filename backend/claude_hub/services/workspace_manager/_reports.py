@@ -427,7 +427,8 @@ class _ReportsMixin:
         # Durable receiver gate: commit.
         #
         # The receiver (worker) signals completion by including call_ids in
-        # ``payload.acked_call_ids`` (plus the implicit dispatch call_id).
+        # ``payload.acked_call_ids`` (plus the implicit dispatch call_id for
+        # task-bound sessions).
         # This is the *commit* step: the call-id-scoped effect (the model's
         # turn) has been applied, so the Hub moves the call_id from
         # ``processing_call_ids`` to ``delivered_call_ids``.
@@ -444,11 +445,30 @@ class _ReportsMixin:
         #
         # Unknown call_ids (not in pending or processing) are ignored to
         # prevent future-ID poisoning.
+        #
+        # For Resident sessions (task_id is None) we still process
+        # ``acked_call_ids``: the resident's event-batch delivery call_id
+        # must be ACKed so the root run's ack_sequence cursor advances.
+        # The implicit ``dispatch:{task_id}`` ACK only applies to task-bound
+        # sessions.
         # ------------------------------------------------------------------
+        ack_set: set[str] = set(payload.acked_call_ids)
         if task_id and task_id in self.tasks:
-            dispatch_call_id = f"dispatch:{task_id}"
-            ack_set = {dispatch_call_id}
-            ack_set.update(payload.acked_call_ids)
+            # The implicit dispatch ACK covers the call_id of the *current*
+            # dispatch attempt: ``dispatch:{task_id}:{dispatch_attempt}``.
+            # Each (re-)dispatch increments dispatch_attempt, so the call_id
+            # is unique per attempt and matches what _dispatch_task_to_session
+            # actually sent.
+            task = self.tasks[task_id]
+            ack_set.add(f"dispatch:{task_id}:{task.dispatch_attempt}")
+            # Legacy compatibility: states persisted before the attempt-scoped
+            # call_id change carry ``dispatch:{task_id}`` (no attempt suffix)
+            # in pending/processing. ACK it too so a legacy in-flight dispatch
+            # is not stranded when the worker reports. The ack path ignores
+            # call_ids not present in pending/processing, so adding the legacy
+            # form is harmless on new state.
+            ack_set.add(f"dispatch:{task_id}")
+        if ack_set:
             self._ack_call_ids(task_id, session.id, list(ack_set))
 
         self._save_state()
@@ -530,78 +550,103 @@ class _ReportsMixin:
 
         verified_set = set(verified_acked)
 
-        if task is not None:
-            to_ack_pending = [c for c in task.pending_call_ids if c in verified_set]
-            to_ack_processing = [c for c in task.processing_call_ids if c in verified_set]
-            to_ack_uncertain = [c for c in task.uncertain_call_ids if c in verified_set]
-            to_ack = to_ack_pending + to_ack_processing + to_ack_uncertain
-            if to_ack:
-                pending = [c for c in task.pending_call_ids if c not in verified_set]
-                processing = [c for c in task.processing_call_ids if c not in verified_set]
-                uncertain = [c for c in task.uncertain_call_ids if c not in verified_set]
-                delivered = list(task.delivered_call_ids)
-                for cid in to_ack:
-                    if cid not in delivered:
-                        delivered.append(cid)
-                self.tasks[task_id] = task.model_copy(
-                    update={
-                        "pending_call_ids": pending,
-                        "processing_call_ids": processing,
-                        "uncertain_call_ids": uncertain,
-                        "delivered_call_ids": delivered,
-                    }
-                )
+        # Snapshot the original session/task state so we can roll back if the
+        # resident ack_sequence advancement fails. The delivered-state
+        # mutation and the ack_sequence cursor advance must be atomic: if
+        # either fails, neither is committed.
+        original_session = session
+        original_task = task
 
-        if session is not None:
-            to_ack_pending = [c for c in session.pending_call_ids if c in verified_set]
-            to_ack_processing = [c for c in session.processing_call_ids if c in verified_set]
-            to_ack_uncertain = [c for c in session.uncertain_call_ids if c in verified_set]
-            to_ack = to_ack_pending + to_ack_processing + to_ack_uncertain
-            if to_ack:
-                pending = [c for c in session.pending_call_ids if c not in verified_set]
-                processing = [c for c in session.processing_call_ids if c not in verified_set]
-                uncertain = [c for c in session.uncertain_call_ids if c not in verified_set]
-                delivered = list(session.delivered_call_ids)
-                for cid in to_ack:
-                    if cid not in delivered:
-                        delivered.append(cid)
-                # Remove committed messages from the durable inbox and clear
-                # their claim timestamps.
-                pending_messages = {
-                    cid: msg
-                    for cid, msg in session.pending_messages.items()
-                    if cid not in verified_set
-                }
-                processing_call_ids_at = {
-                    cid: ts
-                    for cid, ts in session.processing_call_ids_at.items()
-                    if cid not in verified_set
-                }
-                self.sessions[session_id] = session.model_copy(
-                    update={
-                        "pending_call_ids": pending,
-                        "processing_call_ids": processing,
-                        "uncertain_call_ids": uncertain,
-                        "delivered_call_ids": delivered,
-                        "pending_messages": pending_messages,
-                        "processing_call_ids_at": processing_call_ids_at,
-                    }
-                )
+        try:
+            if task is not None:
+                to_ack_pending = [c for c in task.pending_call_ids if c in verified_set]
+                to_ack_processing = [c for c in task.processing_call_ids if c in verified_set]
+                to_ack_uncertain = [c for c in task.uncertain_call_ids if c in verified_set]
+                to_ack = to_ack_pending + to_ack_processing + to_ack_uncertain
+                if to_ack:
+                    pending = [c for c in task.pending_call_ids if c not in verified_set]
+                    processing = [c for c in task.processing_call_ids if c not in verified_set]
+                    uncertain = [c for c in task.uncertain_call_ids if c not in verified_set]
+                    delivered = list(task.delivered_call_ids)
+                    for cid in to_ack:
+                        if cid not in delivered:
+                            delivered.append(cid)
+                    self.tasks[task_id] = task.model_copy(
+                        update={
+                            "pending_call_ids": pending,
+                            "processing_call_ids": processing,
+                            "uncertain_call_ids": uncertain,
+                            "delivered_call_ids": delivered,
+                        }
+                    )
 
-        # ---- ACK-correlated followup outcome ----
-        # For each VERIFIED acked call_id that corresponds to a followup
-        # dispatch, emit a ``followup:delivered`` event with
-        # ``delivered: True``. Because we only iterate over verified_acked
-        # (call_ids that were actually in this session's outbox AND target
-        # this session/task), a forged cross-session ACK can never produce a
-        # spurious followup:delivered event.
-        for call_id in verified_acked:
-            self._emit_followup_delivered_if_followup(
-                session.workspace_id if session else task.workspace_id if task else None, call_id
-            )
-            # If this is a resident event-batch delivery call_id, advance the
-            # resident root run's ack_sequence cursor.
-            self._advance_resident_ack_on_delivery(call_id)
+            if session is not None:
+                to_ack_pending = [c for c in session.pending_call_ids if c in verified_set]
+                to_ack_processing = [c for c in session.processing_call_ids if c in verified_set]
+                to_ack_uncertain = [c for c in session.uncertain_call_ids if c in verified_set]
+                to_ack = to_ack_pending + to_ack_processing + to_ack_uncertain
+                if to_ack:
+                    pending = [c for c in session.pending_call_ids if c not in verified_set]
+                    processing = [c for c in session.processing_call_ids if c not in verified_set]
+                    uncertain = [c for c in session.uncertain_call_ids if c not in verified_set]
+                    delivered = list(session.delivered_call_ids)
+                    for cid in to_ack:
+                        if cid not in delivered:
+                            delivered.append(cid)
+                    # Remove committed messages from the durable inbox and clear
+                    # their claim timestamps.
+                    pending_messages = {
+                        cid: msg
+                        for cid, msg in session.pending_messages.items()
+                        if cid not in verified_set
+                    }
+                    pending_attachments = {
+                        cid: atts
+                        for cid, atts in session.pending_attachments.items()
+                        if cid not in verified_set
+                    }
+                    processing_call_ids_at = {
+                        cid: ts
+                        for cid, ts in session.processing_call_ids_at.items()
+                        if cid not in verified_set
+                    }
+                    self.sessions[session_id] = session.model_copy(
+                        update={
+                            "pending_call_ids": pending,
+                            "processing_call_ids": processing,
+                            "uncertain_call_ids": uncertain,
+                            "delivered_call_ids": delivered,
+                            "pending_messages": pending_messages,
+                            "pending_attachments": pending_attachments,
+                            "processing_call_ids_at": processing_call_ids_at,
+                        }
+                    )
+
+            # ---- ACK-correlated followup outcome ----
+            # For each VERIFIED acked call_id that corresponds to a followup
+            # dispatch, emit a ``followup:delivered`` event with
+            # ``delivered: True``. Because we only iterate over verified_acked
+            # (call_ids that were actually in this session's outbox AND target
+            # this session/task), a forged cross-session ACK can never produce a
+            # spurious followup:delivered event.
+            for call_id in verified_acked:
+                self._emit_followup_delivered_if_followup(
+                    session.workspace_id if session else task.workspace_id if task else None,
+                    call_id,
+                )
+                # If this is a resident event-batch delivery call_id, advance the
+                # resident root run's ack_sequence cursor.
+                self._advance_resident_ack_on_delivery(call_id)
+        except Exception:
+            # Roll back the session/task delivered-state mutation so the
+            # call_id and cursor stay retryable. The agent_tree state is
+            # already consistent (agent_tree.ack rolls back its own
+            # ack_sequence on persistence failure).
+            if original_session is not None:
+                self.sessions[session_id] = original_session
+            if original_task is not None:
+                self.tasks[task_id] = original_task
+            raise
 
     def _verify_call_target(self, call_id: str, task_id: Optional[str], session_id: str) -> bool:
         """Verify that ``call_id``'s call record targets ``task_id``/``session_id``.
@@ -649,14 +694,15 @@ class _ReportsMixin:
         if target_run is None:
             return False
 
-        # The target run's context_ref is the task id it belongs to.
-        target_task_id = target_run.context_ref
-        if target_task_id and task_id and target_task_id != task_id:
-            return False
+        # The target run's context_ref is either a task id (for managed task
+        # runs) or a session id (for the resident root run).
+        target_context_ref = target_run.context_ref
 
-        # For managed task runs, context_ref is the task id. Verify the
-        # task's session matches the reporting session exactly.
-        if target_task_id:
+        # Case 1: managed task run — context_ref is the task id.
+        if target_context_ref and target_context_ref in self.tasks:
+            target_task_id = target_context_ref
+            if task_id and target_task_id != task_id:
+                return False
             target_task = self.tasks.get(target_task_id)
             if target_task is not None:
                 if target_task.session_id and target_task.session_id != session_id:
@@ -664,8 +710,17 @@ class _ReportsMixin:
                     # different session. Reject — the reporting session
                     # cannot ACK a call it did not receive.
                     return False
+            return True
 
-        return True
+        # Case 2: resident root run — context_ref is the resident session id.
+        # Bind the ACK to the exact resident session: the reporting session
+        # must be the one the resident run is linked to.
+        if target_context_ref and target_context_ref == session_id:
+            return True
+
+        # Case 3: context_ref is neither a known task nor the reporting
+        # session — fail closed.
+        return False
 
     def _advance_resident_ack_on_delivery(self, call_id: str) -> None:
         """If ``call_id`` is a resident event-batch delivery, advance ack_sequence.
@@ -678,6 +733,11 @@ class _ReportsMixin:
 
         This ensures the cursor only advances AFTER the resident worker
         proves it processed the events — not when the Hub sends the prompt.
+
+        Fail-closed: any exception (including ``agent_tree.ack`` persistence
+        failures) propagates to the caller so ``_ack_call_ids`` can roll
+        back the session/task delivered-state mutation. The call_id and
+        cursor stay uncommitted and retryable.
         """
         # Find the workspace for this call_id by scanning call records.
         workspace_id = None
@@ -704,14 +764,12 @@ class _ReportsMixin:
         target_run_id = record.get("target")
         if not target_run_id:
             return
-        try:
-            self.agent_tree.ack(workspace_id, target_run_id, max_sequence)
-        except Exception:
-            logger.exception(
-                "Failed to advance resident ack_sequence for call_id=%s to sequence %s",
-                call_id,
-                max_sequence,
-            )
+        # Do NOT catch exceptions here. If agent_tree.ack fails (e.g.
+        # persistence error), the caller (_ack_call_ids) must roll back the
+        # session/task delivered-state mutation so the call_id and cursor
+        # stay retryable. Swallowing the exception would commit delivered
+        # without advancing ack_sequence, stranding the events.
+        self.agent_tree.ack(workspace_id, target_run_id, max_sequence)
 
     def _emit_followup_delivered_if_followup(
         self, workspace_id: Optional[str], call_id: str
