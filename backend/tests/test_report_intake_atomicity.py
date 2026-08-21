@@ -307,12 +307,13 @@ async def test_precommit_failure_rolls_back_both_acks_and_cold_retry_converges(
 async def test_report_rollback_preserves_concurrent_agent_tree_write(
     manager_and_workspace: tuple[WorkspaceManager, str], monkeypatch: MonkeyPatch
 ) -> None:
-    """Reproduce: Agent Tree persist during rename await must survive rollback.
+    """Reproduce: emit_event persist during rename await must survive rollback.
 
     create_report used to snapshot the workspace, then await tab rename, then
     commit. A concurrent emit_event+_persist in that await window was durable
     until rollback restored the stale snapshot and erased it. Snapshot now
-    happens after rename, so the concurrent write is kept.
+    happens after rename. Public Agent Tree APIs are also serialized; this
+    test keeps the raw persist path so the original race stays covered.
     """
 
     manager, workspace_id = manager_and_workspace
@@ -379,6 +380,93 @@ async def test_report_rollback_preserves_concurrent_agent_tree_write(
 
     fresh = WorkspaceManager()
     assert fresh.agent_tree._call_record(workspace_id, concurrent_call_id) is not None
+    assert payload.call_id not in fresh.sessions[session.id].report_call_ids
+
+
+@pytest.mark.asyncio
+async def test_report_rollback_serializes_agent_tree_spawn(
+    manager_and_workspace: tuple[WorkspaceManager, str], monkeypatch: MonkeyPatch
+) -> None:
+    """Public Agent Tree writes wait on the report workspace lock.
+
+    spawn/send/followup/interrupt share workspace_mutation_lock with
+    create_report. A concurrent spawn started during the rename await must
+    not persist until report rollback releases the lock; after restore the
+    spawn lands and survives.
+    """
+
+    manager, workspace_id = manager_and_workspace
+    task, session = _task_session(manager, workspace_id)
+    manager.sessions[session.id] = session.model_copy(update={"title": "stale title"})
+    root = manager.agent_tree.create_root_run(
+        workspace_id=workspace_id,
+        executor_kind=ExecutorKind.RESIDENT_ROOT,
+    )
+    spawn_call_id = "serialized-spawn-during-report-rollback"
+    rename_started = asyncio.Event()
+    rename_calls = 0
+    fake_tab = MagicMock(id=session.tab_id, tmux_session=session.tmux_session)
+
+    async def slow_update_tab(tab_id: str, name: str | None = None, **_kwargs: object):
+        nonlocal rename_calls
+        rename_calls += 1
+        if rename_calls == 1:
+            rename_started.set()
+            await asyncio.sleep(0.05)
+            assert manager.agent_tree._call_record(workspace_id, spawn_call_id) is None
+            assert not any(
+                run.parent_id == root.id
+                for run in manager.agent_tree._runs.values()
+                if run.workspace_id == workspace_id
+            )
+        return fake_tab
+
+    monkeypatch.setattr(_wm.ttyd_manager, "update_tab", slow_update_tab)
+
+    original_write = manager._atomic_write_text
+    failed = False
+    state_file = manager._workspace_state_file(workspace_id)
+
+    def fail_report_commit_once(path: Path, text: str) -> None:
+        nonlocal failed
+        if path == state_file and rename_started.is_set() and not failed:
+            failed = True
+            raise OSError("pre-commit fail while spawn waits on workspace lock")
+        original_write(path, text)
+
+    monkeypatch.setattr(manager, "_atomic_write_text", fail_report_commit_once)
+
+    async def concurrent_spawn() -> object:
+        await rename_started.wait()
+        return await manager.agent_tree.spawn(
+            SpawnRequest(
+                workspace_id=workspace_id,
+                parent_id=root.id,
+                executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+                title="serialized child",
+                initial_message="must wait for report rollback",
+                call_id=spawn_call_id,
+            )
+        )
+
+    payload = AgentReportCreate(
+        task_id=task.id,
+        state=AgentReportState.WORKING,
+        message="rollback must serialize tree spawn",
+        call_id=f"{task.id}-working-progress-cycle-1-1",
+    )
+    writer = asyncio.create_task(concurrent_spawn())
+    with pytest.raises(OSError, match="pre-commit fail while spawn waits on workspace lock"):
+        await manager.create_report(session.id, payload)
+    child = await writer
+
+    assert child.parent_id == root.id
+    assert manager.agent_tree._call_record(workspace_id, spawn_call_id) is not None
+    assert payload.call_id not in manager.sessions[session.id].report_call_ids
+    assert not any(report.call_id == payload.call_id for report in manager.reports.values())
+
+    fresh = WorkspaceManager()
+    assert fresh.agent_tree._call_record(workspace_id, spawn_call_id) is not None
     assert payload.call_id not in fresh.sessions[session.id].report_call_ids
 
 

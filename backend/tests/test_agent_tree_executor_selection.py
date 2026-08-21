@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -55,6 +57,10 @@ class _FakeWorkspaceManager:
 
     def _save_state(self) -> None:
         self.save_calls += 1
+
+    @asynccontextmanager
+    async def workspace_mutation_lock(self, workspace_id: str) -> AsyncIterator[None]:
+        yield
 
     async def ensure_workspace_agent(self, workspace_id, payload):
         self.ensure_payloads.append(payload)

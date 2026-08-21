@@ -28,7 +28,19 @@ import json
 import logging
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, cast
+from functools import wraps
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    TypeVar,
+    cast,
+)
 
 from claude_hub.models.agent_tree import (
     TERMINAL_EVENT_TYPES,
@@ -83,6 +95,27 @@ def _request_fingerprint(action: str, payload: Dict[str, Any]) -> str:
     """
     canonical = json.dumps({"action": action, **payload}, sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+_R = TypeVar("_R")
+
+
+def _serialized_workspace_mutation(
+    func: Callable[..., Awaitable[_R]],
+) -> Callable[..., Awaitable[_R]]:
+    """Hold the shared workspace mutation lock around Agent Tree writes.
+
+    Report intake snapshots then may restore the same workspace state.json.
+    spawn / send / followup / interrupt wait here so they cannot persist
+    between that snapshot and restore.
+    """
+
+    @wraps(func)
+    async def wrapper(self: "AgentTreeManager", req: Any, *args: Any, **kwargs: Any) -> _R:
+        async with self._wm.workspace_mutation_lock(req.workspace_id):
+            return await func(self, req, *args, **kwargs)
+
+    return wrapper
 
 
 class AgentTreeManager:
@@ -466,6 +499,7 @@ class AgentTreeManager:
     # Public actions
     # ------------------------------------------------------------------
 
+    @_serialized_workspace_mutation
     async def spawn(self, req: SpawnRequest) -> AgentRun:
         """Create a child run and dispatch its initial task.
 
@@ -782,6 +816,7 @@ class AgentTreeManager:
             "subtree, or the author itself"
         )
 
+    @_serialized_workspace_mutation
     async def send(self, req: SendRequest) -> AgentEvent:
         """Append a message to the recipient's mailbox without waking it."""
         self._validate_workspace(req.workspace_id)
@@ -854,6 +889,7 @@ class AgentTreeManager:
             self._wake_for_run(recipient.id, recipient.id)
         return event
 
+    @_serialized_workspace_mutation
     async def followup(self, req: FollowupRequest) -> AgentEvent:
         """Append a message and resume the recipient's turn.
 
@@ -1125,6 +1161,7 @@ class AgentTreeManager:
                     raise
         return run
 
+    @_serialized_workspace_mutation
     async def interrupt(self, req: InterruptRequest) -> AgentRun:
         """Interrupt a run, preserving its context.
 
