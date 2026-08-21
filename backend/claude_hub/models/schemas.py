@@ -850,6 +850,14 @@ class ManagedSession(BaseModel):
     # detected as conflicting. Raw bytes are NOT stored in the fingerprint
     # (only the digest), so the JSON state stays small.
     call_payload_fingerprints: Dict[str, str] = Field(default_factory=dict)
+    # Report intake idempotency: call_id → report_id. Populated by
+    # ``create_report`` when the payload carries a call_id. Lets a retry
+    # after an error-response (report was durably committed but the
+    # response failed) return the existing report instead of duplicating.
+    # Kept forever (like call_payload_fingerprints) so same call_id + same
+    # fingerprint is always idempotent; same call_id + different fingerprint
+    # raises ValueError.
+    report_call_ids: Dict[str, str] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
     last_activity_at: Optional[datetime] = None
@@ -863,6 +871,15 @@ class AgentReportCreate(BaseModel):
     message_en: Optional[str] = None
     message_zh: Optional[str] = None
     task_id: Optional[str] = None
+    # Idempotency key for report intake. When provided, a second report with
+    # the same call_id (and identical payload fingerprint) returns the
+    # previously-persisted report instead of creating a duplicate. This makes
+    # report/result intake safe under error-after-commit retries: if the Hub
+    # durably persists the report but fails before returning the response
+    # (e.g. a late exception in _after_report_recorded or the agent-tree
+    # bridge), the client's retry with the same call_id is a no-op that
+    # returns the existing report, task transition, and bridged event.
+    call_id: Optional[str] = None
     changed_files: List[str] = Field(default_factory=list)
     validation: Optional[str] = None
     risks: Optional[str] = None
@@ -915,6 +932,10 @@ class AgentReport(BaseModel):
     workspace_id: str
     task_id: Optional[str] = None
     session_id: str
+    # Idempotency key for report intake. Mirrors AgentReportCreate.call_id.
+    # When set, a retry with the same call_id returns this report instead of
+    # creating a duplicate. See AgentReportCreate.call_id for the contract.
+    call_id: Optional[str] = None
     state: AgentReportState
     message: str
     message_en: Optional[str] = None

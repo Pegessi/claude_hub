@@ -5,6 +5,45 @@
 
 ## Unreleased
 
+### fix: report/result intake idempotency (call_id + payload fingerprint) — no duplicate report/task-transition/bridged-event on error-after-commit retry
+
+- **What**: `create_report` now accepts an optional client-supplied `call_id`.
+  When set, the Hub stores a `call_id → report_id` mapping on the session
+  (`ManagedSession.report_call_ids`). A retry with the **same** `call_id`
+  and an identical payload fingerprint returns the previously-persisted
+  report (re-running the idempotent post-commit side effects
+  `_after_report_recorded` and `_bridge_report_to_agent_event` against the
+  existing report). A retry with the **same** `call_id` but a **different**
+  payload raises `ValueError` (a call_id identifies a single durable
+  report; reusing it with different content is rejected). This makes
+  report/result intake safe under error-after-commit retries: if the Hub
+  durably persists the report (and the ACKed call_id's
+  processing→delivered transition) via `_save_state` but then raises in
+  `_after_report_recorded` or the agent-tree bridge, the client's retry
+  with the same `call_id` is a no-op that returns the existing report,
+  task transition, and bridged event — exactly one of each.
+- **Why**: `create_report` persists the report via `_save_state` **before**
+  running post-commit side effects. If those side effects fail, the report
+  is durably committed but the client receives an error; a naive retry
+  creates a second report, a second task transition, and a second bridged
+  agent-tree event. The fix mirrors the existing message-delivery
+  idempotency pattern (`call_payload_fingerprints`).
+- **How**:
+  - `schemas.py`: added `call_id: Optional[str]` to `AgentReportCreate`
+    and `AgentReport`; added `report_call_ids: Dict[str, str]` to
+    `ManagedSession`.
+  - `_reports.py`: added `_compute_report_fingerprint` (sha256 over
+    canonical JSON of content fields, excluding bookkeeping fields). At
+    the start of `create_report`, if `payload.call_id` is set, look up
+    the existing report by `session.report_call_ids[call_id]`; if found
+    and fingerprint matches, re-run side effects and return it; if found
+    and fingerprint differs, raise `ValueError`. Store the
+    `call_id → report_id` mapping in `session_update` so it is persisted
+    in the same `_save_state` as the report.
+- **Migration/rollback**: `report_call_ids` defaults to `{}` on existing
+  sessions; no migration needed. Rollback is safe — the field is simply
+  ignored by older code.
+
 ### fix: fail-closed durable mailbox (persist-intent-first → processing → ACK → delivered; ambiguous → uncertain) + tmux receipt at-most-once + Resident wait/ack + followup:delivered
 
 - **What**: the mailbox uses a Hub-owned **receiver pump** with

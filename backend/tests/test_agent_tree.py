@@ -9323,3 +9323,215 @@ async def test_ack_vs_retry_race_delivered_not_downgraded(
     assert call_id in sess.delivered_call_ids
     assert call_id not in sess.uncertain_call_ids
     assert call_id not in sess.processing_call_ids
+
+
+# ---------------------------------------------------------------------------
+# Report intake idempotency (call_id + fingerprint)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_report_intake_idempotent_after_error_then_retry(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """A report that fails AFTER durable commit must not duplicate on retry.
+
+    Scenario: the worker submits a report with a call_id. The Hub durably
+    persists the report (and the ACKed call_id's processing→delivered
+    transition) via _save_state, but then raises in _after_report_recorded
+    (e.g. reviewer dispatch failed). The client receives an error and
+    retries with the SAME call_id. The retry must:
+      * return the EXISTING report (no second report row),
+      * produce exactly one bridged agent-tree event,
+      * leave the ACKed call_id in delivered_call_ids (not re-processed),
+      * not double the task's review_attempts / review_requested_at.
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentReportCreate,
+        AgentReportState,
+        AgentType,
+        WorkspaceTask,
+        WorkspaceTaskMode,
+        WorkspaceTaskStatus,
+    )
+
+    session_id = "idem-report-session"
+    _make_managed_session(manager, session_id, ws_id)
+
+    task = WorkspaceTask(
+        id="idem-report-task",
+        workspace_id=ws_id,
+        title="idem report",
+        prompt="do it",
+        agent_type=AgentType.CLAUDE,
+        task_mode=WorkspaceTaskMode.REVIEWED,
+        status=WorkspaceTaskStatus.WORKING,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    manager.tasks[task.id] = task
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"task_id": task.id, "current_task_id": task.id}
+    )
+
+    from claude_hub.models.agent_tree import ExecutorKind
+
+    # Bind an agent run to the task so the report bridges to an event.
+    # _bridge_report_to_agent_event looks up the run by context_ref == task_id.
+    run = manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.MANAGED_TASK,
+        context_ref=task.id,
+    )
+
+    dispatch_call_id = f"dispatch:{task.id}:{task.dispatch_attempt}"
+    # The dispatch call_id is in-flight (processing) when the worker reports.
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={
+            "processing_call_ids": [dispatch_call_id],
+            "delivered_call_ids": [],
+        }
+    )
+    manager.tasks[task.id] = task.model_copy(
+        update={
+            "processing_call_ids": [dispatch_call_id],
+            "delivered_call_ids": [],
+        }
+    )
+
+    report_call_id = "report:idem-1"
+    payload = AgentReportCreate(
+        task_id=task.id,
+        call_id=report_call_id,
+        state=AgentReportState.READY_FOR_REVIEW,
+        message="ready for review",
+        changed_files=["a.py"],
+        validation="pytest",
+        risks="none",
+        review_decision="request",
+        acked_call_ids=[dispatch_call_id],
+    )
+
+    # First attempt: persist succeeds, then _after_report_recorded raises.
+    real_after = manager._after_report_recorded
+
+    async def _boom_after_recorded(task_, session_, report_):
+        # Let the real side effect run once (so review_attempts increments
+        # and the bridged event is emitted), then raise to simulate a
+        # post-commit response failure.
+        await real_after(task_, session_, report_)
+        raise RuntimeError("simulated post-commit failure")
+
+    monkeypatch.setattr(manager, "_after_report_recorded", _boom_after_recorded)
+
+    with pytest.raises(RuntimeError, match="simulated post-commit failure"):
+        await manager.create_report(session_id, payload)
+
+    # The report WAS durably committed despite the raised error.
+    assert len(manager.reports) == 1
+    committed_report = next(iter(manager.reports.values()))
+    assert committed_report.call_id == report_call_id
+    assert committed_report.state == AgentReportState.READY_FOR_REVIEW
+
+    # The dispatch call_id was moved processing → delivered BEFORE the
+    # post-commit failure (it's part of the same _save_state).
+    sess = manager.sessions[session_id]
+    assert dispatch_call_id in sess.delivered_call_ids
+    assert dispatch_call_id not in sess.processing_call_ids
+
+    # The bridged agent-tree event was NOT emitted: _bridge_report_to_agent_event
+    # runs AFTER _after_report_recorded, which raised. This is the exact
+    # error-after-commit gap the idempotency fix closes — the report is
+    # durably committed but the side effects are partial.
+    events = manager.agent_tree.get_events(ws_id, run.id, subtree=True)
+    bridged = [e for e in events if e.call_id == f"report:{committed_report.id}"]
+    assert len(bridged) == 0
+
+    review_attempts_before = manager.tasks[task.id].review_attempts
+
+    # Second attempt: retry with the SAME call_id and payload.
+    monkeypatch.setattr(manager, "_after_report_recorded", real_after)
+    retry_report = await manager.create_report(session_id, payload)
+
+    # The retry returns the EXISTING report — no duplicate.
+    assert retry_report.id == committed_report.id
+    assert len(manager.reports) == 1
+
+    # The idempotent retry path re-runs _bridge_report_to_agent_event, which
+    # now emits the single bridged event (call_id = report:<report.id>).
+    events = manager.agent_tree.get_events(ws_id, run.id, subtree=True)
+    bridged = [e for e in events if e.call_id == f"report:{committed_report.id}"]
+    assert len(bridged) == 1
+
+    # The dispatch call_id stays delivered (not re-processed, not duplicated).
+    sess = manager.sessions[session_id]
+    assert dispatch_call_id in sess.delivered_call_ids
+    assert dispatch_call_id not in sess.processing_call_ids
+    assert sess.delivered_call_ids.count(dispatch_call_id) == 1
+
+    # review_attempts must NOT double — _after_report_recorded's guards
+    # skip re-dispatch when a review is already in flight.
+    assert manager.tasks[task.id].review_attempts == review_attempts_before
+
+
+@pytest.mark.asyncio
+async def test_report_call_id_reuse_with_different_payload_raises(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """Reusing a call_id with a different payload must raise ValueError.
+
+    A call_id identifies a single durable report. Reusing it with different
+    content is a client bug (or an attempt to overwrite history) and must
+    be rejected without mutating state.
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentReportCreate,
+        AgentReportState,
+        AgentType,
+        WorkspaceTask,
+        WorkspaceTaskStatus,
+    )
+
+    session_id = "callid-conflict-session"
+    _make_managed_session(manager, session_id, ws_id)
+
+    task = WorkspaceTask(
+        id="callid-conflict-task",
+        workspace_id=ws_id,
+        title="callid conflict",
+        prompt="do it",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    manager.tasks[task.id] = task
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"task_id": task.id, "current_task_id": task.id}
+    )
+
+    call_id = "report:conflict-1"
+    first = AgentReportCreate(
+        task_id=task.id,
+        call_id=call_id,
+        state=AgentReportState.WORKING,
+        message="first version",
+    )
+    await manager.create_report(session_id, first)
+    assert len(manager.reports) == 1
+
+    second = AgentReportCreate(
+        task_id=task.id,
+        call_id=call_id,
+        state=AgentReportState.WORKING,
+        message="second version — different payload",
+    )
+    with pytest.raises(ValueError, match="already used for a different"):
+        await manager.create_report(session_id, second)
+
+    # No duplicate report was created.
+    assert len(manager.reports) == 1

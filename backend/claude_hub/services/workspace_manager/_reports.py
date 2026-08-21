@@ -1,5 +1,8 @@
 """Report intake, autonomous run, and review-request handling."""
 
+import hashlib
+import json
+
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
 from ...models.agent_tree import AgentEventType
@@ -78,10 +81,113 @@ class _ReportsMixin:
             task.review_completed_at,
         )
 
+    def _compute_report_fingerprint(
+        self,
+        report: AgentReportCreate | AgentReport,
+    ) -> str:
+        """Compute a durable canonical fingerprint of a report's content.
+
+        Covers the fields that define the report's semantic content (state,
+        message, changed files, validation, risks, acceptance checks, ACKed
+        call_ids, review decision, etc.). Excludes bookkeeping fields
+        (id, workspace_id, session_id, created_at, review_cycle, call_id)
+        so that an incoming ``AgentReportCreate`` and the persisted
+        ``AgentReport`` it produces yield the same fingerprint.
+
+        Same content → same fingerprint regardless of field order. This is
+        the source of truth for the report-intake idempotency invariant:
+        a call_id's fingerprint is stored on first report and a retry with
+        the same call_id + same fingerprint returns the existing report;
+        same call_id + different fingerprint raises ValueError.
+        """
+        # Fields that carry report content. Both AgentReportCreate and
+        # AgentReport share these; AgentReport adds bookkeeping fields
+        # which we exclude.
+        content_fields = (
+            "state",
+            "message",
+            "message_en",
+            "message_zh",
+            "task_id",
+            "changed_files",
+            "validation",
+            "risks",
+            "acceptance_check",
+            "evaluation_report",
+            "review_profiles",
+            "profile_results",
+            "artifact_refs",
+            "confidence",
+            "requires_human_judgment",
+            "review_decision",
+            "review_reason",
+            "risk_level",
+            "acked_call_ids",
+        )
+        data = report.model_dump(mode="json")
+        content = {k: data.get(k) for k in content_fields}
+        canonical = json.dumps(content, sort_keys=True, default=str)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
     async def create_report(self, session_id: str, payload: AgentReportCreate) -> AgentReport:
         session = self.sessions.get(session_id)
         if not session:
             raise KeyError(session_id)
+
+        # ------------------------------------------------------------------
+        # Report intake idempotency (call_id + payload fingerprint).
+        #
+        # create_report durably persists the report (via _save_state) BEFORE
+        # running post-commit side effects (_after_report_recorded, the
+        # agent-tree bridge). If any of those side effects raises AFTER the
+        # durable commit, the client receives an error and retries. Without
+        # an idempotency key the retry creates a SECOND report, a second
+        # task transition, and a second bridged event.
+        #
+        # When the client supplies a call_id, we look up the previously
+        # persisted report by call_id (stored on the session). If the
+        # payload fingerprint matches, we return the existing report
+        # verbatim — no duplicate, no double transition, no double event.
+        # If the call_id is reused with a DIFFERENT payload, we raise
+        # ValueError (a call_id identifies a single durable report).
+        # ------------------------------------------------------------------
+        if payload.call_id:
+            existing_report_id = session.report_call_ids.get(payload.call_id)
+            if existing_report_id is not None:
+                existing = self.reports.get(existing_report_id)
+                if existing is not None:
+                    new_fp = self._compute_report_fingerprint(payload)
+                    existing_fp = self._compute_report_fingerprint(existing)
+                    if new_fp == existing_fp:
+                        # Idempotent retry: the report was durably committed
+                        # in a previous attempt, but the response may have
+                        # failed (e.g. a late exception in
+                        # _after_report_recorded or the agent-tree bridge).
+                        # Re-run the post-commit side effects against the
+                        # EXISTING report. Both are idempotent:
+                        #   * _after_report_recorded skips when a review is
+                        #     already in flight or a verdict is already
+                        #     recorded for this round.
+                        #   * _bridge_report_to_agent_event uses
+                        #     call_id=f"report:{existing.id}", so emit_event
+                        #     deduplicates the bridged event.
+                        # This guarantees exactly one report, one task
+                        # transition, and one bridged event across retries.
+                        existing_task = (
+                            self.tasks.get(existing.task_id) if existing.task_id else None
+                        )
+                        existing_session = self.sessions.get(existing.session_id)
+                        if existing_task is not None and existing_session is not None:
+                            await self._after_report_recorded(
+                                existing_task, existing_session, existing
+                            )
+                        if existing_session is not None:
+                            self._bridge_report_to_agent_event(existing, existing_session)
+                        return existing
+                    raise ValueError(
+                        f"call_id {payload.call_id!r} already used for a different "
+                        f"report payload; refusing to overwrite."
+                    )
 
         now = _wm._now()
         task: WorkspaceTask | None = None
@@ -118,6 +224,7 @@ class _ReportsMixin:
             workspace_id=session.workspace_id,
             task_id=task_id,
             session_id=session.id,
+            call_id=payload.call_id,
             state=payload.state,
             message=payload.message,
             message_en=payload.message_en,
@@ -153,6 +260,12 @@ class _ReportsMixin:
             session_update["current_task_id"] = task_id
         if task:
             session_update["title"] = session.title
+        # Persist the call_id → report_id mapping so a retry with the same
+        # call_id returns this report (idempotent intake).
+        if payload.call_id:
+            report_call_ids = dict(session.report_call_ids)
+            report_call_ids[payload.call_id] = report.id
+            session_update["report_call_ids"] = report_call_ids
         self.sessions[session.id] = session.model_copy(update=session_update)
 
         if task_id and task_id in self.tasks:

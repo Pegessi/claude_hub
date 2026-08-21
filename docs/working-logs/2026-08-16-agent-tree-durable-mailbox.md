@@ -1234,3 +1234,113 @@ introduced by this branch.
 - `black`: 12 files left unchanged.
 - `isort`: clean.
 - `git diff --check`: clean (no whitespace errors).
+
+## Report intake idempotency (call_id + fingerprint) — 2026-08-21
+
+### Problem
+
+`create_report` persists the report (and the ACKed call_id's
+processing→delivered transition) via `_save_state` **before** running
+post-commit side effects:
+
+1. `_save_state()` — durable commit (report, task transition, call_id ACK)
+2. `_after_report_recorded(...)` — review dispatch (can fail)
+3. `_bridge_report_to_agent_event(report, session)` — agent-tree event (can fail)
+
+If step 2 or 3 raises **after** step 1 succeeds, the client receives an
+error and retries. Without an idempotency key the retry creates a
+**second** report, a **second** task transition, and a **second** bridged
+agent-tree event.
+
+### Fix
+
+Mirror the existing message-delivery idempotency pattern
+(`call_payload_fingerprints`):
+
+- `AgentReportCreate.call_id` / `AgentReport.call_id`: optional
+  client-supplied idempotency key.
+- `ManagedSession.report_call_ids: Dict[str, str]`: maps `call_id → report_id`,
+  persisted in the same `_save_state` as the report.
+- `_compute_report_fingerprint`: sha256 over canonical JSON (sorted keys)
+  of the report's **content** fields (state, message, changed_files,
+  validation, risks, acked_call_ids, …). Excludes bookkeeping fields
+  (`id`, `workspace_id`, `session_id`, `created_at`, `review_cycle`,
+  `call_id`).
+
+`create_report` flow with `call_id`:
+
+1. Look up `session.report_call_ids[call_id]`.
+2. If found:
+   - fingerprint matches → re-run `_after_report_recorded` and
+     `_bridge_report_to_agent_event` against the **existing** report,
+     then return it. Both side effects are individually idempotent:
+     `_after_report_recorded` skips when a review is already in flight
+     or a verdict is already recorded for this round;
+     `_bridge_report_to_agent_event` uses `call_id=f"report:{report.id}"`
+     so `emit_event` deduplicates.
+   - fingerprint differs → `ValueError` (a call_id identifies a single
+     durable report; reusing it with different content is rejected).
+3. If not found: create the report, store `report_call_ids[call_id] = report.id`
+   in `session_update`, persist via `_save_state`, then run side effects.
+
+### Invariant
+
+Same `call_id` + same fingerprint → existing report (no duplicate).
+Same `call_id` + different fingerprint → `ValueError`.
+
+### Regression test
+
+`test_report_intake_idempotent_after_error_then_retry`:
+
+1. Set up workspace, task, managed session, agent run (context_ref = task_id).
+2. Put the dispatch call_id in `processing_call_ids`.
+3. Submit a `READY_FOR_REVIEW` report with `call_id` that ACKs the dispatch
+   call_id. Monkeypatch `_after_report_recorded` to run the real logic
+   then raise `RuntimeError` (simulating error-after-commit).
+4. Assert: report persisted (1 report), dispatch call_id moved to
+   `delivered_call_ids`, **0** bridged events (bridge never ran because
+   `_after_report_recorded` raised first).
+5. Retry the **same** report with the **same** `call_id`.
+6. Assert: still exactly 1 report, retry returns the existing report's id,
+   exactly 1 bridged event (emitted by the idempotent retry path),
+   dispatch call_id stays in `delivered_call_ids` (not re-processed, not
+   duplicated), `review_attempts` did not double.
+
+`test_report_call_id_reuse_with_different_payload_raises`:
+
+- Submit a report with `call_id`, then submit a second report with the
+  **same** `call_id` but a different `message`. Assert `ValueError` and
+  no duplicate report.
+
+### Validation (2026-08-21)
+
+| Suite | Result | Exit |
+| --- | --- | --- |
+| `tests/test_agent_tree.py` | 158 passed | 0 |
+| `tests/test_workspaces.py` | 133 passed | 0 |
+| `tests/test_tmux_receipt_integration.py` + `test_workspace_resident_agent.py` | 64 passed | 0 |
+
+- `black`: reformatted `_reports.py` (1 file).
+- `isort`: clean.
+- `mypy claude_hub/models/schemas.py claude_hub/services/workspace_manager/_reports.py`: Success, no issues.
+
+### Migration / rollback
+
+- `report_call_ids` defaults to `{}` on existing sessions; no migration
+  needed.
+- `call_id` on `AgentReportCreate`/`AgentReport` defaults to `None`;
+  existing callers are unaffected.
+- Rollback is safe: the new fields are ignored by older code.
+
+### Residual risks
+
+- The fingerprint covers the content fields listed in
+  `_compute_report_fingerprint`. If a future field is added to
+  `AgentReportCreate`/`AgentReport` and not included in the fingerprint,
+  two reports that differ only in that field would be treated as
+  identical. Mitigation: keep the fingerprint field list in sync with the
+  model (the test `test_report_call_id_reuse_with_different_payload_raises`
+  exercises the message field; new fields should get similar coverage).
+- The idempotency key is client-supplied. A buggy client that reuses a
+  `call_id` across genuinely different reports gets a `ValueError` rather
+  than silent corruption — fail-closed.
