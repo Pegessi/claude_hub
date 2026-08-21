@@ -48,11 +48,12 @@
 - Isolated E2E keeps Claude launch credentials in the backend process
   environment; ttyd writes mode-0600 launch scripts and unlinks them on
   every exit (`remaining_credential_artifacts=[]`).
-- **Validation**: listed suites 545 passed in 829.31s
+- **Validation**: listed suites 546 passed in 828.91s
   (`test_agent_tree.py`, `test_workspaces.py`, resident/session,
   report-atomicity including
-  `test_reused_session_known_call_id_has_zero_side_effects` and
-  `test_padded_call_id_retry_has_zero_side_effects_after_reassignment`, subtree
+  `test_reused_session_known_call_id_has_zero_side_effects`,
+  `test_padded_call_id_retry_has_zero_side_effects_after_reassignment`, and
+  `test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges`, subtree
   reliability, executor selection, `test_ttyd_manager.py`, hard-recovery,
   orchestrator-contract); `mypy claude_hub` checked 67 source files with
   no issues; Black, isort, compileall, and `git diff --check` clean.
