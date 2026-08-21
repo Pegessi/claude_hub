@@ -35,6 +35,7 @@ from claude_hub.models.agent_tree import (
     SpawnRequest,
 )
 from claude_hub.services.workspace_manager import WorkspaceManager
+from claude_hub.services.workspace_manager._reports import ReportCallIdConflict
 
 _wm = import_module("claude_hub.services.workspace_manager")
 
@@ -468,6 +469,64 @@ async def test_report_rollback_serializes_agent_tree_spawn(
     fresh = WorkspaceManager()
     assert fresh.agent_tree._call_record(workspace_id, spawn_call_id) is not None
     assert payload.call_id not in fresh.sessions[session.id].report_call_ids
+
+
+@pytest.mark.asyncio
+async def test_known_call_id_does_not_rename_reassigned_session(
+    manager_and_workspace: tuple[WorkspaceManager, str],
+) -> None:
+    """Late retry/conflict after reassignment must not restore the old title."""
+
+    manager, workspace_id = manager_and_workspace
+    task, session = _task_session(manager, workspace_id)
+    payload = AgentReportCreate(
+        task_id=task.id,
+        state=AgentReportState.WORKING,
+        message="original report",
+        call_id=f"{task.id}-working-progress-cycle-1-1",
+    )
+    first = await manager.create_report(session.id, payload)
+    now = datetime.utcnow()
+    new_task = WorkspaceTask(
+        id="task-reassigned",
+        workspace_id=workspace_id,
+        title="reassigned task title",
+        prompt="next assignment",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        session_id=session.id,
+        created_at=now,
+        updated_at=now,
+    )
+    manager.tasks[new_task.id] = new_task
+    manager.sessions[session.id] = manager.sessions[session.id].model_copy(
+        update={
+            "task_id": new_task.id,
+            "current_task_id": new_task.id,
+            "title": new_task.title,
+        }
+    )
+    manager._save_state()
+
+    with pytest.raises(ReportCallIdConflict, match="already used"):
+        await manager.create_report(
+            session.id,
+            payload.model_copy(update={"message": "different payload"}),
+        )
+    assert manager.sessions[session.id].title == new_task.title
+    assert manager.sessions[session.id].current_task_id == new_task.id
+
+    retry = await manager.create_report(session.id, payload)
+    assert retry.id == first.id
+    assert manager.sessions[session.id].title == new_task.title
+    assert manager.sessions[session.id].current_task_id == new_task.id
+    assert manager.sessions[session.id].task_id == new_task.id
+
+    fresh = WorkspaceManager()
+    assert fresh.reports[first.id].id == first.id
+    assert fresh.sessions[session.id].title == new_task.title
+    assert fresh.sessions[session.id].current_task_id == new_task.id
+    assert fresh.sessions[session.id].task_id == new_task.id
 
 
 @pytest.mark.asyncio

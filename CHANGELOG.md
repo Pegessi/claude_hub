@@ -37,18 +37,22 @@
   per-workspace mutation lock, so a public tree write cannot persist
   between report snapshot and rollback restore
   (`test_report_rollback_serializes_agent_tree_spawn`).
-- **Validation**: listed suites 543 passed in 828.64s
+- Resolve existing or conflicting report call_ids before the tab rename so
+  a late idempotent retry cannot restore a reassigned session title
+  (`test_known_call_id_does_not_rename_reassigned_session`).
+- Isolated E2E passes Claude launch env through process environment only
+  and unlinks any leftover credential overlay in `finally`.
+- **Validation**: listed suites 544 passed in 838.23s
   (`test_agent_tree.py`, `test_workspaces.py`, resident/session,
   report-atomicity including
-  `test_report_rollback_serializes_agent_tree_spawn`, subtree reliability,
-  executor selection, `test_ttyd_manager.py`, hard-recovery,
+  `test_known_call_id_does_not_rename_reassigned_session`, subtree
+  reliability, executor selection, `test_ttyd_manager.py`, hard-recovery,
   orchestrator-contract); `mypy claude_hub` checked 67 source files with
   no issues; Black, isort, compileall, and `git diff --check` clean.
-  Isolated real-CLI E2E in `scripts/agent-tree-e2e/` observes only: managed
-  Claude CLI POSTed `E2E_CHILD_REPORT` (`47701ec4-...`, bridged
-  `report:47701ec4-...` seq=3, backend `POST /reports` 201); wait/ACK/reload
-  kept `ack_sequence=3`. Harness refuses `POST /reports`, session send, and
-  followup. Round 4 harness injection is stale.
+  Isolated real-CLI E2E observes only: managed Claude POSTed
+  `E2E_CHILD_REPORT` (`60bd07cf-...`, `POST /reports` 201, bridge seq=3);
+  wait/ACK/reload kept `ack_sequence=3`. Credential overlay was never
+  written and was absent after cleanup. Round 4 harness injection is stale.
 - **Migration/rollback**: new fields are additive on forward load. Before
   rollback, back up workspace `state.json` and drain writers: the first
   old-version save drops Agent Tree and report fingerprint metadata it does
