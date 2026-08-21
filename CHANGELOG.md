@@ -5,13 +5,47 @@
 
 ## Unreleased
 
+### feat: make Agent Tree a reliable multi-CLI subagent control plane
+
+- Make report intake and mailbox ACK advancement one workspace-scoped atomic
+  commit: report/session/task state and Agent Tree run/event/cursor state roll
+  back together on a pre-commit failure, while wakeups and other side effects
+  run only after the durable `state.json` replace succeeds.
+- Authorize and replay arbitrary-depth owned subtrees. A root can wait on and
+  interrupt grandchildren, `subtree=true` includes descendant-authored events,
+  and active subtree waiters are awakened without polling.
+- Persist managed executor selection on each run: Claude, Codex, and Cursor
+  children carry their concrete CLI, optional model, target, and capability
+  contract across restart. Explicit sessions are validated against that
+  contract; Codex/Claude models reach the real CLI environment/arguments.
+- Expose native-subagent and external-job capability metadata as unavailable
+  until a real runtime exists; public spawn rejects those simulator-only
+  executors with HTTP 422 instead of advertising a fake successful dispatch.
+- Use cycle- and purpose-scoped report call IDs for worker, reviewer,
+  recovery, reminder, and Goal Packet prompts so retries stay idempotent
+  without colliding across review cycles.
+- **Validation**: Agent Tree 165 passed; workspaces 133 passed; resident/session
+  69 passed; new executor/subtree/report-atomicity + API integration 21 passed;
+  `mypy claude_hub` checked 67 source files with no issues; Black, isort,
+  compileall, and `git diff --check` clean.
+- **Migration/rollback**: new fields are additive on forward load. Before
+  rollback, back up workspace `state.json` and drain writers: the first
+  old-version save drops Agent Tree and report fingerprint metadata it does
+  not know, so tree replay and retry deduplication cannot be recovered without
+  the backup.
+- **Files**: `models/agent_tree.py`, `services/agent_tree.py`,
+  `services/agent_tree_adapters.py`, `services/ttyd_manager.py`,
+  `services/workspace_manager/`, `api/agent_tree.py`, Agent Tree/report
+  reliability tests, and the Agent Tree working log.
+
 ### fix: report/result intake idempotency (call_id + payload fingerprint) — no duplicate report/task-transition/bridged-event on error-after-commit retry
 
 - **What**: `create_report` now requires a stable non-empty `call_id` on every
   report (legacy clients that omit it get a deterministic adapter call_id
   derived from the payload fingerprint). The Hub stores a
-  `call_id → report_id` mapping on the session
-  (`ManagedSession.report_call_ids`). A retry with the **same** `call_id`
+  `call_id → report_id` mapping and canonical fingerprint mapping on the
+  session (`ManagedSession.report_call_ids` and
+  `ManagedSession.report_call_fingerprints`). A retry with the **same** `call_id`
   and an identical payload fingerprint returns the previously-persisted
   report (re-running the idempotent post-commit side effects
   `_after_report_recorded` and `_bridge_report_to_agent_event` against the
@@ -41,7 +75,8 @@
   (`call_payload_fingerprints`).
 - **How**:
   - `schemas.py`: `call_id: Optional[str]` on `AgentReportCreate` /
-    `AgentReport`; `report_call_ids: Dict[str, str]` on `ManagedSession`.
+    `AgentReport`; `report_call_ids: Dict[str, str]` and
+    `report_call_fingerprints: Dict[str, str]` on `ManagedSession`.
   - `_reports.py`:
     - `_compute_report_fingerprint` now includes `goal_packet` in the
       canonical content fields.
@@ -59,10 +94,11 @@
   - `_prompts.py`: every report curl example (worker, reviewer, resident,
     continue, recovery) includes a `call_id` field and instructs the agent
     to reuse the same call_id on retry.
-- **Migration/rollback**: `report_call_ids` defaults to `{}` on existing
-  sessions; no migration needed. Rollback is safe — the field is simply
-  ignored by older code. Legacy clients without `call_id` still work via
-  the deterministic adapter.
+- **Migration/rollback**: `report_call_ids` and
+  `report_call_fingerprints` default to `{}` on existing sessions; no forward
+  migration is needed. Older code ignores them on load but removes them on its
+  next state rewrite, so back up state and drain writers before rollback.
+  Legacy clients without `call_id` still work via the deterministic adapter.
 
 ### fix: fail-closed durable mailbox (persist-intent-first → processing → ACK → delivered; ambiguous → uncertain) + tmux receipt at-most-once + Resident wait/ack + followup:delivered
 

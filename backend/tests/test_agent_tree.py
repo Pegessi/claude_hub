@@ -1856,6 +1856,25 @@ def test_agent_tree_api_endpoints(
             workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
         )
 
+        # Stub executors are visible for capability discovery but cannot be
+        # advertised as real public runtimes.
+        resp = client.post(
+            "/api/agent-tree/spawn",
+            json={
+                "workspace_id": ws_id,
+                "parent_id": root.id,
+                "executor_kind": "native_subagent",
+                "initial_message": "hi",
+                "call_id": "api-unavailable",
+            },
+        )
+        assert resp.status_code == 422
+        assert "runtime" in resp.json()["detail"].lower()
+
+        # The remainder of this legacy endpoint smoke test uses the in-memory
+        # simulator intentionally; production API calls keep the guard above.
+        monkeypatch.setattr(manager.agent_tree, "require_executor_available", lambda kind: None)
+
         # POST /agent-tree/spawn
         resp = client.post(
             "/api/agent-tree/spawn",
@@ -2689,6 +2708,7 @@ def test_api_authority_allows_owner(
             executor_kind=ExecutorKind.NATIVE_SUBAGENT,
             context_ref=owner_session,
         )
+        monkeypatch.setattr(manager.agent_tree, "require_executor_available", lambda kind: None)
 
         client = TestClient(app)
 
@@ -3905,7 +3925,6 @@ def test_managed_session_owner_can_read_runs(
         executor_kind=ExecutorKind.NATIVE_SUBAGENT,
         context_ref=owner_session,
     )
-
     client = TestClient(app)
 
     # list_runs: owner session can read.
@@ -3984,6 +4003,7 @@ def test_managed_session_owner_can_mutate(
         executor_kind=ExecutorKind.NATIVE_SUBAGENT,
         context_ref=owner_session,
     )
+    monkeypatch.setattr(manager.agent_tree, "require_executor_available", lambda kind: None)
 
     client = TestClient(app)
 

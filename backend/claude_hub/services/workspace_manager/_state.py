@@ -1,5 +1,7 @@
 """Construction, path helpers, and state loading."""
 
+from contextvars import ContextVar
+
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
 from ..agent_tree import AgentTreeManager
@@ -18,11 +20,28 @@ class _StateMixin:
         # concurrent pump cycles cannot both send the same pending call_id
         # to tmux (which would duplicate the model turn).
         self._pump_locks: dict[str, asyncio.Lock] = {}
-        # Per-(session_id, call_id) locks: serialize report intake so two
-        # concurrent requests with the same call_id cannot both create a
-        # report. The first creates it; the second sees the existing report
-        # and either returns it (fingerprint match) or raises 409.
-        self._report_call_locks: dict[str, asyncio.Lock] = {}
+        # Per-workspace report-intake locks.  A report mutates more than its
+        # own call-id index: it replaces the owning ManagedSession, may mutate
+        # the shared task (worker and reviewer use different sessions), ACKs
+        # durable mailbox state, and can append Agent Tree events/cursors.
+        # Consequently a per-(session, call_id) lock is too narrow: two
+        # different call_ids can derive replacements from the same stale
+        # session/task snapshot and lose one report_call_ids entry.  The state
+        # file is also written per workspace, so workspace scope is the
+        # smallest simple lock that covers every object in the transaction.
+        self._report_intake_locks: dict[str, asyncio.Lock] = {}
+        # Ephemeral commit markers used only to distinguish a pre-commit
+        # exception (restore the full report-intake snapshot) from a
+        # post-commit side-effect exception (leave durable state intact so an
+        # idempotent retry can finish the side effects).
+        self._report_intake_committed: set[str] = set()
+        # Keep report-intake persistence routing task-local. Reports for two
+        # different workspaces may run concurrently; a plain manager attribute
+        # could make one coroutine persist the other's workspace.
+        self._report_intake_workspace: ContextVar[str | None] = ContextVar(
+            f"report_intake_workspace_{id(self)}",
+            default=None,
+        )
         self._monitor_task: asyncio.Task[None] | None = None
         # Cache of resolved git worktree roots per workspace id: (timestamp, roots).
         # Used by artifact preview to resolve markdown produced inside a worktree.

@@ -28,7 +28,7 @@ import json
 import logging
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, cast
 
 from claude_hub.models.agent_tree import (
     TERMINAL_EVENT_TYPES,
@@ -40,6 +40,7 @@ from claude_hub.models.agent_tree import (
     FollowupRequest,
     InterruptRequest,
     ListRunsRequest,
+    ManagedExecutorConfig,
     SendRequest,
     SpawnRequest,
     WaitRequest,
@@ -108,6 +109,9 @@ class AgentTreeManager:
         self._run_events: Dict[str, asyncio.Event] = {}
         # Per-run asyncio.Lock to make wait() race-free (no lost wakeups).
         self._run_locks: Dict[str, asyncio.Lock] = {}
+        # Active subtree waiters. Ancestors are woken only when they opted
+        # into subtree replay, preserving directed-wakeup behavior otherwise.
+        self._subtree_waiters: Dict[str, int] = {}
         # Executor adapters keyed by ExecutorKind.
         self._adapters: Dict[ExecutorKind, ExecutorAdapter] = {
             ExecutorKind.MANAGED_TASK: ManagedTaskAdapter(workspace_manager),
@@ -122,6 +126,11 @@ class AgentTreeManager:
 
     def _adapter(self, kind: ExecutorKind) -> ExecutorAdapter:
         return self._adapters[kind]
+
+    def require_executor_available(self, kind: ExecutorKind) -> None:
+        """Reject executor kinds that do not have a real production runtime."""
+
+        self._adapter(kind).require_available()
 
     def _next_sequence(self, workspace_id: str) -> int:
         seq = self._next_seq.get(workspace_id, 1)
@@ -291,29 +300,25 @@ class AgentTreeManager:
                 )
             raise
 
-        # Wake only the named recipient. With recipient-directed mailbox
-        # reads, a run only sees events addressed to it, so ancestors do not
-        # need to be woken.
-        self._wake_for_run(agent_run_id, recipient)
+        # Wake the named recipient and any active subtree waiters above it.
+        self._wake_for_run(author, recipient)
 
         return event, True
 
-    def _wake_for_run(self, agent_run_id: str, recipient: str) -> None:
-        """Wake only the named mailbox recipient.
-
-        With recipient-directed mailbox reads, a run only sees events where
-        ``recipient == run_id``. Therefore only the named recipient needs to
-        be woken; waking ancestors would cause spurious wakeups for runs that
-        cannot see the event.
-
-        ``recipient`` is always set (mandatory on every event). Root runs
-        self-address their events (``recipient = run.supervisor_id or
-        run.id``), so a root run's own reports wake itself.
-        """
-        wake_target = recipient
-        ev = self._run_events.get(wake_target)
+    def _wake_for_run(self, author_run_id: str, recipient: str) -> None:
+        """Wake the directed recipient and active ancestor subtree waiters."""
+        ev = self._run_events.get(recipient)
         if ev is not None:
             ev.set()
+        node = self._runs.get(author_run_id)
+        while node is not None and node.parent_id is not None:
+            node = self._runs.get(node.parent_id)
+            if node is None:
+                break
+            if self._subtree_waiters.get(node.id, 0) > 0:
+                ancestor_event = self._run_events.get(node.id)
+                if ancestor_event is not None:
+                    ancestor_event.set()
 
     def _wake_ancestors(self, run: AgentRun) -> None:
         """Wake waiters on the run and all its ancestors."""
@@ -496,6 +501,11 @@ class AgentTreeManager:
                 "initial_message": req.initial_message,
                 "session_id": req.session_id,
                 "context_ref": req.context_ref,
+                "executor_config": (
+                    req.executor_config.model_dump(mode="json")
+                    if req.executor_config is not None
+                    else None
+                ),
             },
         )
 
@@ -534,6 +544,7 @@ class AgentTreeManager:
             )
 
         run_id = str(uuid.uuid4())
+        adapter = self._adapter(req.executor_kind)
         run = AgentRun(
             id=run_id,
             workspace_id=req.workspace_id,
@@ -543,9 +554,32 @@ class AgentTreeManager:
             path=f"{parent.path}/{run_id}",
             supervisor_id=parent.id,
             executor_kind=req.executor_kind,
+            executor_config=req.executor_config,
             title=req.title,
             last_task_message=req.initial_message,
         )
+
+        # Legacy resident-master calls identify an existing worker session
+        # without repeating its CLI/model/target configuration. Recover the
+        # exact persisted launch contract from that session before the run's
+        # intent is committed. Explicit configs are validated later by the
+        # managed adapter against the selected session.
+        if (
+            req.executor_kind == ExecutorKind.MANAGED_TASK
+            and req.session_id
+            and run.executor_config is None
+        ):
+            selected_session = self._wm.sessions.get(req.session_id)
+            if selected_session is None:
+                raise KeyError(f"Session {req.session_id} not found")
+            run.executor_config = cast(ManagedTaskAdapter, adapter).config_from_session(
+                selected_session
+            )
+
+        # Resolve defaults (including workspace target), validate the CLI/model
+        # contract, and attach a durable capability snapshot before the first
+        # persistence boundary.
+        adapter.prepare_run(run)
         self._runs[run.id] = run
         # Emit a dispatched event addressed to the child. This is the
         # durable "intent" record: if the process crashes after this point
@@ -586,7 +620,6 @@ class AgentTreeManager:
         # that an adapter failure is distinguished from a late persist
         # failure (which must NOT mark the run FAILED — the side-effect
         # already applied).
-        adapter = self._adapter(req.executor_kind)
         try:
             if req.executor_kind == ExecutorKind.MANAGED_TASK and req.session_id:
                 context_ref = await self._spawn_managed_task(
@@ -672,7 +705,7 @@ class AgentTreeManager:
         master mode).
         """
         from claude_hub.models.schemas import (
-            AgentType,
+            StartTaskRequest,
             WorkspaceTaskCreate,
             WorkspaceTaskMode,
             WorkspaceTaskStatus,
@@ -688,21 +721,42 @@ class AgentTreeManager:
         )
         if existing_task is not None:
             if existing_task.status == WorkspaceTaskStatus.TODO:
-                await self._wm.start_task(existing_task.id)
+                await self._wm.start_task(
+                    existing_task.id,
+                    StartTaskRequest(
+                        agent_type=existing_task.agent_type,
+                        target_session_id=existing_task.session_id,
+                    ),
+                )
             return str(existing_task.id)
+
+        session = self._wm.sessions.get(session_id)
+        if session is None:
+            raise KeyError(f"Session {session_id} not found")
+        adapter = cast(ManagedTaskAdapter, self._adapter(ExecutorKind.MANAGED_TASK))
+        adapter.validate_session(run, session)
+        config = run.executor_config
+        if config is None:
+            raise RuntimeError("Managed executor config was not prepared")
 
         task = self._wm.create_task(
             run.workspace_id,
             WorkspaceTaskCreate(
                 title=run.title or f"agent-run-{run.id[:8]}",
                 prompt=initial_message,
-                agent_type=AgentType.CLAUDE,
+                agent_type=config.agent_type,
                 task_mode=WorkspaceTaskMode.REVIEWED,
                 agent_run_id=run.id,
                 session_id=session_id,
             ),
         )
-        await self._wm.start_task(task.id)
+        await self._wm.start_task(
+            task.id,
+            StartTaskRequest(
+                agent_type=config.agent_type,
+                target_session_id=session_id,
+            ),
+        )
         return str(task.id)
 
     def _validate_messaging_boundary(self, author: AgentRun, recipient: AgentRun) -> None:
@@ -994,24 +1048,44 @@ class AgentTreeManager:
         # (at-least-once replay of unACKed events).
         effective_since = max(req.since_sequence, recipient.ack_sequence)
 
-        async with lock:
-            events = self._events_for(
-                req.workspace_id, req.recipient_id, effective_since, req.subtree
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + req.timeout_seconds
+        if req.subtree:
+            self._subtree_waiters[req.recipient_id] = (
+                self._subtree_waiters.get(req.recipient_id, 0) + 1
             )
-            if events:
-                return events
-            # Clear while holding the lock so an append_event that arrives
-            # after this point will set the event after we've cleared it.
-            ev.clear()
-
         try:
-            await asyncio.wait_for(ev.wait(), timeout=req.timeout_seconds)
-        except asyncio.TimeoutError:
-            pass
+            while True:
+                async with lock:
+                    events = self._events_for(
+                        req.workspace_id, req.recipient_id, effective_since, req.subtree
+                    )
+                    if events:
+                        return events
+                    ev.clear()
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return []
+                try:
+                    await asyncio.wait_for(ev.wait(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    return []
+        finally:
+            if req.subtree:
+                remaining_waiters = self._subtree_waiters.get(req.recipient_id, 1) - 1
+                if remaining_waiters > 0:
+                    self._subtree_waiters[req.recipient_id] = remaining_waiters
+                else:
+                    self._subtree_waiters.pop(req.recipient_id, None)
 
-        return self._events_for(req.workspace_id, req.recipient_id, effective_since, req.subtree)
-
-    def ack(self, workspace_id: str, run_id: str, sequence: int) -> AgentRun:
+    def ack(
+        self,
+        workspace_id: str,
+        run_id: str,
+        sequence: int,
+        *,
+        persist: bool = True,
+    ) -> AgentRun:
         """Advance a run's acknowledged sequence cursor.
 
         The cursor is persisted so a restarted supervisor can resume from
@@ -1042,12 +1116,13 @@ class AgentTreeManager:
             old_updated_at = run.updated_at
             run.ack_sequence = sequence
             run.updated_at = datetime.utcnow()
-            try:
-                self._persist()
-            except Exception:
-                run.ack_sequence = old_ack
-                run.updated_at = old_updated_at
-                raise
+            if persist:
+                try:
+                    self._persist()
+                except Exception:
+                    run.ack_sequence = old_ack
+                    run.updated_at = old_updated_at
+                    raise
         return run
 
     async def interrupt(self, req: InterruptRequest) -> AgentRun:
@@ -1175,21 +1250,12 @@ class AgentTreeManager:
         if run is None:
             return []
         all_events = self._events.get(workspace_id, [])
-        # Recipient-directed mailbox: a run only sees events addressed to it
-        # (recipient == run_id). This includes self-messages (author ==
-        # recipient == run_id) and events from descendants that are directed
-        # to this run. Events authored by descendants but addressed to
-        # someone else (e.g. a grandchild reporting to the root) are NOT
-        # visible to intermediate runs — only the named recipient sees them.
-        #
-        # ``recipient`` is mandatory on every event, so there is no fallback
-        # for recipient=None. Root runs self-address their events
-        # (recipient = run.supervisor_id or run.id) so they still receive
-        # their own reports.
-        #
-        # The ``subtree`` flag is retained for API compatibility but no
-        # longer changes the filter: reads are always recipient-directed.
-        return [e for e in all_events if e.sequence > since_sequence and e.recipient == run_id]
+        descendant_ids = self._subtree_run_ids(run) - {run.id} if subtree else set()
+        return [
+            e
+            for e in all_events
+            if e.sequence > since_sequence and (e.recipient == run_id or e.author in descendant_ids)
+        ]
 
     def _subtree_run_ids(self, root: AgentRun) -> set[str]:
         prefix = f"{root.path}/"
@@ -1212,6 +1278,8 @@ class AgentTreeManager:
         *,
         workspace_id: str,
         call_id: str,
+        persist: bool = True,
+        wake: bool = True,
     ) -> None:
         """Reconcile a followup's outcome event after its delivery settles.
 
@@ -1285,10 +1353,13 @@ class AgentTreeManager:
         # RUNNING status. On failure the in-memory state is kept so the
         # same call_id can retry; re-raise so the caller does not see a
         # false success.
-        self._persist()
+        if persist:
+            self._persist()
 
-        # Wake only after the durable commit succeeds.
-        self._wake_for_run(recipient_id, author_id)
+        # Wake only after the durable commit succeeds, or when the caller
+        # explicitly owns the outer persistence transaction.
+        if persist and wake:
+            self._wake_for_run(recipient_id, author_id)
 
     def emit_event(
         self,
@@ -1435,6 +1506,10 @@ class AgentTreeManager:
         )
         # Root path is just its own id.
         run.path = run.id
+        # Root runs are returned by the same discovery APIs as children; attach
+        # the durable capability contract immediately instead of waiting for a
+        # cold-reload backfill.
+        self._adapter(executor_kind).prepare_run(run)
         self._runs[run.id] = run
         try:
             self._persist()
@@ -1566,6 +1641,33 @@ class AgentTreeManager:
                     resident_session_id,
                 )
 
+        # Backfill the durable executor contract for runs written before
+        # executor_config/capability snapshots existed. Managed runs recover
+        # the real task session when possible, so a historical Codex/Cursor or
+        # remote child is never silently relabelled as local Claude. Stub
+        # native/external runs receive an explicit unavailable capability
+        # snapshot rather than being advertised as executable.
+        for run in self._runs.values():
+            if run.workspace_id != workspace_id:
+                continue
+            adapter = self._adapter(run.executor_kind)
+            needs_prepare = run.executor_capabilities is None or (
+                run.executor_kind == ExecutorKind.MANAGED_TASK and run.executor_config is None
+            )
+            if run.executor_kind == ExecutorKind.MANAGED_TASK and run.executor_config is None:
+                task = self._wm.tasks.get(run.context_ref or "")
+                session = (
+                    self._wm.sessions.get(task.session_id) if task and task.session_id else None
+                )
+                if session is not None:
+                    run.executor_config = cast(ManagedTaskAdapter, adapter).config_from_session(
+                        session
+                    )
+                elif task is not None:
+                    run.executor_config = ManagedExecutorConfig(agent_type=task.agent_type)
+            if needs_prepare:
+                adapter.prepare_run(run)
+
     async def recover_pending_runs(self, workspace_id: str) -> None:
         """Recover runs that were persisted but never reached a consistent state.
 
@@ -1591,6 +1693,15 @@ class AgentTreeManager:
         Runs that are already RUNNING, WAITING, BLOCKED, or consistently
         terminal are left untouched.
         """
+        # Reconcile fail-closed delivery states first. The session/task state
+        # may have persisted while the supervisor event append failed; the
+        # deterministic call_id makes this cold-start compensation idempotent.
+        for session in list(self._wm.sessions.values()):
+            if session.workspace_id != workspace_id:
+                continue
+            for call_id in session.uncertain_call_ids:
+                self._wm._emit_delivery_uncertain(workspace_id, session.id, call_id)
+
         # Reconcile persisted reports into agent tree events. A report may
         # have been persisted to the workspace state while its corresponding
         # agent tree event was not (crash between the two persists).

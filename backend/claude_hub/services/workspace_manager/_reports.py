@@ -1,5 +1,6 @@
 """Report intake, autonomous run, and review-request handling."""
 
+import copy
 import hashlib
 import json
 
@@ -23,6 +24,80 @@ class ReportCallIdConflict(ValueError):
 
 
 class _ReportsMixin:
+    def _snapshot_report_intake_workspace(self, workspace_id: str) -> dict[str, Any]:
+        """Deep snapshot every durable domain mutated by report intake.
+
+        Report intake is a single-workspace transaction.  Besides the new
+        report and the reporting session/task it can update reviewer bindings,
+        mailbox ACK state, Agent Tree run status/events, and a resident ACK
+        cursor.  A shallow snapshot is insufficient because AgentRun cursor
+        fields are mutated in-place.
+        """
+
+        tree = self.agent_tree
+        return {
+            "sessions": {
+                key: value.model_copy(deep=True)
+                for key, value in self.sessions.items()
+                if value.workspace_id == workspace_id
+            },
+            "tasks": {
+                key: value.model_copy(deep=True)
+                for key, value in self.tasks.items()
+                if value.workspace_id == workspace_id
+            },
+            "reports": {
+                key: value.model_copy(deep=True)
+                for key, value in self.reports.items()
+                if value.workspace_id == workspace_id
+            },
+            "runs": {
+                key: value.model_copy(deep=True)
+                for key, value in tree._runs.items()
+                if value.workspace_id == workspace_id
+            },
+            "events_present": workspace_id in tree._events,
+            "events": copy.deepcopy(tree._events.get(workspace_id, [])),
+            "call_index_present": workspace_id in tree._call_index,
+            "call_index": copy.deepcopy(tree._call_index.get(workspace_id, {})),
+            "next_seq_present": workspace_id in tree._next_seq,
+            "next_seq": tree._next_seq.get(workspace_id),
+        }
+
+    def _restore_report_intake_workspace(self, workspace_id: str, snapshot: dict[str, Any]) -> None:
+        """Restore a snapshot made by :meth:`_snapshot_report_intake_workspace`."""
+
+        for collection_name in ("sessions", "tasks", "reports"):
+            collection = getattr(self, collection_name)
+            for key, value in list(collection.items()):
+                if value.workspace_id == workspace_id:
+                    collection.pop(key, None)
+            collection.update(snapshot[collection_name])
+
+        tree = self.agent_tree
+        for key, value in list(tree._runs.items()):
+            if value.workspace_id == workspace_id:
+                tree._runs.pop(key, None)
+        tree._runs.update(snapshot["runs"])
+        if snapshot["events_present"]:
+            tree._events[workspace_id] = snapshot["events"]
+        else:
+            tree._events.pop(workspace_id, None)
+        if snapshot["call_index_present"]:
+            tree._call_index[workspace_id] = snapshot["call_index"]
+        else:
+            tree._call_index.pop(workspace_id, None)
+        if snapshot["next_seq_present"]:
+            tree._next_seq[workspace_id] = snapshot["next_seq"]
+        else:
+            tree._next_seq.pop(workspace_id, None)
+
+    def _wake_report_intake_runs(self, wake_targets: set[tuple[str, str]]) -> None:
+        """Wake Agent Tree recipients only after the outer commit succeeds."""
+
+        for recipient_id, author_id in wake_targets:
+            self.agent_tree._wake_for_run(recipient_id, author_id)
+
     def _should_route_goal_packet_for_approval(
         self,
         task: WorkspaceTask | None,
@@ -165,22 +240,53 @@ class _ReportsMixin:
             payload = payload.model_copy(update={"call_id": call_id})
 
         # ------------------------------------------------------------------
-        # Atomic claim of (session_id, call_id).
+        # Atomic full-workspace report transaction.
         #
         # Two concurrent requests with the same call_id must not both pass
         # the "existing_report_id is None" check and create two reports.
-        # A per-(session, call_id) asyncio lock serializes the claim so only
-        # one request creates the report; the other sees the existing report
-        # and either returns it (fingerprint match) or raises 409 (mismatch).
+        # Report intake replaces whole session/task models and may ACK mailbox
+        # state shared with Agent Tree.  Serialize every report for this
+        # workspace so different call_ids (and worker/reviewer sessions for the
+        # same task) cannot overwrite each other's derived state.
         # ------------------------------------------------------------------
-        lock_key = f"{session_id}:{call_id}"
-        lock = self._report_call_locks.get(lock_key)
+        lock_key = session.workspace_id
+        lock = self._report_intake_locks.get(lock_key)
         if lock is None:
             lock = asyncio.Lock()
-            self._report_call_locks[lock_key] = lock
+            self._report_intake_locks[lock_key] = lock
 
         async with lock:
-            return await self._create_report_under_lock(session_id, payload)
+            # The mailbox pump also replaces the full ManagedSession while it
+            # moves pending -> processing.  Hold the same per-session pump lock
+            # across the only pre-commit await (_rename_session_for_task) and
+            # the transaction so neither side derives from a stale session.
+            pump_lock = self._pump_locks.setdefault(session_id, asyncio.Lock())
+            async with pump_lock:
+                snapshot = self._snapshot_report_intake_workspace(session.workspace_id)
+                commit_token = f"{session.workspace_id}\0{session_id}\0{call_id}"
+                self._report_intake_committed.discard(commit_token)
+                persistence_token = self._report_intake_workspace.set(session.workspace_id)
+                try:
+                    report = await self._create_report_under_lock(session_id, payload)
+                except Exception:
+                    if commit_token not in self._report_intake_committed:
+                        self._restore_report_intake_workspace(session.workspace_id, snapshot)
+                    raise
+                finally:
+                    self._report_intake_workspace.reset(persistence_token)
+                    self._report_intake_committed.discard(commit_token)
+
+        # Post-commit effects deliberately run after both locks are released.
+        # They can send/pump messages and therefore must not execute while the
+        # reporting session's pump lock is held.  A failure here is retried via
+        # the durable call_id -> existing report path.
+        committed_session = self.sessions.get(report.session_id)
+        committed_task = self.tasks.get(report.task_id) if report.task_id else None
+        if committed_task is not None and committed_session is not None:
+            await self._after_report_recorded(committed_task, committed_session, report)
+        if committed_session is not None:
+            self._bridge_report_to_agent_event(report, committed_session)
+        return report
 
     async def _create_report_under_lock(
         self, session_id: str, payload: AgentReportCreate
@@ -228,7 +334,11 @@ class _ReportsMixin:
                     # failed (e.g. a late exception in
                     # _after_report_recorded or the agent-tree bridge).
                     # Re-run the post-commit side effects against the
-                    # EXISTING report. Both are idempotent:
+                    # EXISTING report. All are idempotent:
+                    #   * _ack_call_ids moves call_ids to delivered only
+                    #     if not already delivered; lifecycle
+                    #     reconciliation (followup delivered event,
+                    #     resident ack cursor) is call-id-deduplicated.
                     #   * _after_report_recorded skips when a review is
                     #     already in flight or a verdict is already
                     #     recorded for this round.
@@ -236,40 +346,42 @@ class _ReportsMixin:
                     #     call_id=f"report:{existing.id}", so emit_event
                     #     deduplicates the bridged event.
                     # This guarantees exactly one report, one task
-                    # transition, and one bridged event across retries.
+                    # transition, one ACK commit, and one bridged event
+                    # across retries — including after a cold reload where
+                    # the report was persisted but the delivered-mutation
+                    # save failed (call_id stranded in processing).
                     existing_task = self.tasks.get(existing.task_id) if existing.task_id else None
                     existing_session = self.sessions.get(existing.session_id)
-                    if existing_task is not None and existing_session is not None:
-                        await self._after_report_recorded(existing_task, existing_session, existing)
+                    retry_wake_targets: set[tuple[str, str]] = set()
+                    # Re-run ACK reconciliation in case the previous request
+                    # committed the report but failed during a later response
+                    # side effect.  All mutations are idempotent and are
+                    # committed together by the one save below.
                     if existing_session is not None:
-                        self._bridge_report_to_agent_event(existing, existing_session)
+                        retry_ack_set: set[str] = set(existing.acked_call_ids)
+                        if existing_task is not None:
+                            retry_ack_set.add(
+                                f"dispatch:{existing_task.id}:{existing_task.dispatch_attempt}"
+                            )
+                            retry_ack_set.add(f"dispatch:{existing_task.id}")
+                        if retry_ack_set:
+                            retry_wake_targets = self._ack_call_ids(
+                                existing_task.id if existing_task else None,
+                                existing_session.id,
+                                list(retry_ack_set),
+                            )
+                    self._save_state()
+                    self._report_intake_committed.add(
+                        f"{session.workspace_id}\0{session_id}\0{call_id}"
+                    )
+                    self._wake_report_intake_runs(retry_wake_targets)
                     return existing
                 raise ReportCallIdConflict(
                     f"call_id {call_id!r} already used for a different "
                     f"report payload; refusing to overwrite."
                 )
 
-        # ------------------------------------------------------------------
-        # Pre-commit rollback snapshots.
-        #
-        # ``_save_state`` is the durable commit point. If it fails (disk
-        # full, permission error, fsync failure, etc.), the in-memory
-        # mutations below must be rolled back so that a client retry with
-        # the same call_id sees a clean state and can succeed. Without
-        # rollback, a failed save would leave the report/session/task
-        # mutated in memory but not on disk; the next call_id lookup would
-        # find the in-memory report and return it, but a cold restart
-        # would lose it — violating durability.
-        #
-        # We snapshot the session and task (if any) BEFORE any mutation
-        # (including _rename_session_for_task) and remove the report from
-        # self.reports on rollback. The snapshot is a reference to the
-        # original object; since all mutations below replace the dict
-        # entry with a new object (model_copy), the original is preserved.
-        # ------------------------------------------------------------------
-        _orig_session = self.sessions.get(session.id)
         task_id = payload.task_id or session.task_id or session.current_task_id
-        _orig_task = self.tasks.get(task_id) if task_id else None
 
         now = _wm._now()
         task: WorkspaceTask | None = None
@@ -327,10 +439,6 @@ class _ReportsMixin:
             review_cycle=task.review_cycle if task else 0,
             created_at=now,
         )
-
-        # ``_report_is_new`` tracks whether the report was just added to
-        # ``self.reports`` so the rollback handler knows whether to pop it.
-        _report_is_new = report.id not in self.reports
 
         self.reports[report.id] = report
 
@@ -672,49 +780,23 @@ class _ReportsMixin:
             # call_ids not present in pending/processing, so adding the legacy
             # form is harmless on new state.
             ack_set.add(f"dispatch:{task_id}")
+        wake_targets: set[tuple[str, str]] = set()
         if ack_set:
-            self._ack_call_ids(task_id, session.id, list(ack_set))
+            wake_targets = self._ack_call_ids(task_id, session.id, list(ack_set))
 
-        # ------------------------------------------------------------------
-        # Durable commit with rollback.
-        #
-        # ``_save_state`` writes the full workspace state to disk atomically.
-        # If it fails, we roll back every in-memory mutation we made (report,
-        # session, task) so the state is consistent with what's on disk. The
-        # client can then retry with the same call_id; since the report was
-        # never persisted, the retry creates it fresh.
-        # ------------------------------------------------------------------
-        try:
-            self._save_state()
-        except Exception:
-            logger.exception(
-                "create_report: _save_state failed; rolling back in-memory mutations "
-                "workspace_id=%s task_id=%s session_id=%s report_id=%s call_id=%s",
-                session.workspace_id,
-                task_id,
-                session.id,
-                report.id,
-                call_id,
-            )
-            if _report_is_new:
-                self.reports.pop(report.id, None)
-            if _orig_session is not None:
-                self.sessions[session.id] = _orig_session
-            if _orig_task is not None:
-                self.tasks[task_id] = _orig_task
-            raise
+        # Single durable commit for report/session/task plus mailbox ACK and
+        # Agent Tree lifecycle/cursor reconciliation.  The ACK helpers above
+        # only mutate in-memory state (persist=False); if this save fails the
+        # workspace snapshot owned by create_report restores every domain.
+        self._save_state()
+        self._report_intake_committed.add(f"{session.workspace_id}\0{session_id}\0{call_id}")
+        self._wake_report_intake_runs(wake_targets)
 
-        if task_id and task_id in self.tasks:
-            await self._after_report_recorded(
-                self.tasks[task_id], self.sessions[session.id], report
-            )
-        # Bridge the report into the agent tree event stream so supervisors
-        # can observe managed-task progress via the unified mailbox instead
-        # of scanning global reports.
-        self._bridge_report_to_agent_event(report, session)
         return report
 
-    def _ack_call_ids(self, task_id: Optional[str], session_id: str, call_ids: list[str]) -> None:
+    def _ack_call_ids(
+        self, task_id: Optional[str], session_id: str, call_ids: list[str]
+    ) -> set[tuple[str, str]]:
         """Receiver-side commit: move call_ids from pending/processing/uncertain to delivered.
 
         This is the *commit* step of the durable delivery gate. The delivery
@@ -743,8 +825,9 @@ class _ReportsMixin:
         ``session.pending_messages`` (the durable inbox) since it is no
         longer needed for re-delivery.
         """
+        wake_targets: set[tuple[str, str]] = set()
         if not call_ids:
-            return
+            return wake_targets
         acked = set(call_ids)
 
         task = self.tasks.get(task_id)
@@ -778,7 +861,7 @@ class _ReportsMixin:
             verified_acked.append(call_id)
 
         if not verified_acked:
-            return
+            return wake_targets
 
         verified_set = set(verified_acked)
         workspace_id = (
@@ -804,7 +887,9 @@ class _ReportsMixin:
         # and the ACK can be retried.
         for call_id in verified_acked:
             # followup: reconcile outcome + emit delivered event.
-            self._emit_followup_delivered_if_followup(workspace_id, call_id)
+            wake_target = self._emit_followup_delivered_if_followup(workspace_id, call_id)
+            if wake_target is not None:
+                wake_targets.add(wake_target)
             # resident event-batch delivery: advance ack_sequence cursor.
             self._advance_resident_ack_on_delivery(call_id)
 
@@ -877,6 +962,7 @@ class _ReportsMixin:
                         "processing_call_ids_at": processing_call_ids_at,
                     }
                 )
+        return wake_targets
 
     def _verify_call_target(self, call_id: str, task_id: Optional[str], session_id: str) -> bool:
         """Verify that ``call_id``'s call record targets ``task_id``/``session_id``.
@@ -995,15 +1081,14 @@ class _ReportsMixin:
         target_run_id = record.get("target")
         if not target_run_id:
             return
-        # Do NOT catch exceptions here. If agent_tree.ack fails (e.g.
-        # persistence error), the exception propagates before the
-        # session/task delivered-state mutation, so the call_id stays in
-        # processing (payload intact) and the ACK can be retried.
-        self.agent_tree.ack(workspace_id, target_run_id, max_sequence)
+        # Defer persistence to create_report's single outer commit so the
+        # cursor, report, delivery transition, and lifecycle events cannot
+        # become partially durable.
+        self.agent_tree.ack(workspace_id, target_run_id, max_sequence, persist=False)
 
     def _emit_followup_delivered_if_followup(
         self, workspace_id: Optional[str], call_id: str
-    ) -> None:
+    ) -> tuple[str, str] | None:
         """If ``call_id`` is a followup call_id, reconcile lifecycle + emit delivered.
 
         This runs BEFORE the session/task delivered-state mutation in
@@ -1032,12 +1117,12 @@ class _ReportsMixin:
         set, so no re-paste occurs.
         """
         if not workspace_id:
-            return
+            return None
         record = self.agent_tree._call_record(workspace_id, call_id)
         if record is None:
-            return
+            return None
         if record.get("action") != "followup":
-            return
+            return None
         followup_event = record["event"]
         recipient_id = followup_event.agent_run_id
         author_id = followup_event.author
@@ -1046,7 +1131,12 @@ class _ReportsMixin:
         # Must run before the delivered event so the run reflects the
         # settled delivery state. Idempotent — no-op if the outcome
         # event already exists.
-        self.agent_tree.reconcile_followup_outcome(workspace_id=workspace_id, call_id=call_id)
+        self.agent_tree.reconcile_followup_outcome(
+            workspace_id=workspace_id,
+            call_id=call_id,
+            persist=False,
+            wake=False,
+        )
 
         # 2. Emit the delivered event. Idempotent on call_id=f"{call_id}:delivered".
         # Do NOT swallow exceptions: let _ack_call_ids roll back the
@@ -1066,7 +1156,9 @@ class _ReportsMixin:
             ),
             payload={"delivered": True, "followup_call_id": call_id},
             rollback_on_error=False,
+            persist=False,
         )
+        return recipient_id, author_id
 
     def _rollback_processing_to_pending(
         self, task_id: Optional[str], session_id: str, call_ids: list[str]
@@ -1670,6 +1762,7 @@ class _ReportsMixin:
             }
         )
         self._save_state()
+        supplement_call_id = self._report_prompt_call_id(task.id, "goal-packet-supplement")
         message = (
             "Your latest completion-style workspace report is missing required Goal Packet "
             f"audit evidence: {gap_text}.\n\n"
@@ -1686,7 +1779,7 @@ class _ReportsMixin:
             '"message":"Supplemented Goal Packet evidence.",'
             '"message_en":"Supplemented Goal Packet evidence.",'
             '"message_zh":"已补充目标包验收证据。",'
-            f'"call_id":"{task.id}-gp-supplement-1",'
+            f'"call_id":"{supplement_call_id}",'
             '"goal_packet":{"objective":"Concrete task objective.",'
             '"acceptance_criteria":["Reviewer-checkable criterion."],'
             '"validation_plan":["Command or manual check."],'

@@ -826,46 +826,42 @@ class _MessagingMixin:
         This makes the fail-closed condition visible to the supervisor so an
         operator can decide whether to retry the delivery.
         """
-        try:
-            from claude_hub.models.agent_tree import AgentEventType
+        from claude_hub.models.agent_tree import AgentEventType
 
-            root_run = self.agent_tree.get_run_by_context_ref(workspace_id, session_id)
-            if root_run is None:
-                # Fall back to the workspace's root run (the resident root).
-                for run in self.agent_tree._runs.values():
-                    if run.workspace_id == workspace_id and run.parent_id is None:
-                        root_run = run
-                        break
-            if root_run is None:
-                return
+        root_run = self.agent_tree.get_run_by_context_ref(workspace_id, session_id)
+        if root_run is None:
+            # Fall back to the workspace's root run (the resident root).
+            for run in self.agent_tree._runs.values():
+                if run.workspace_id == workspace_id and run.parent_id is None:
+                    root_run = run
+                    break
+        if root_run is None:
+            # Legacy/non-Agent-Tree sessions have no supervisor mailbox.
+            # Their fail-closed state remains durable on the session/task,
+            # but there is no applicable event recipient.
+            return
 
-            self.agent_tree._append_event(
-                workspace_id=workspace_id,
-                agent_run_id=root_run.id,
-                event_type=AgentEventType.PROGRESS,
-                author=root_run.id,
-                recipient=root_run.id,
-                call_id=f"delivery:uncertain:{call_id}",
-                action="delivery:uncertain",
-                target=session_id,
-                fingerprint=_request_fingerprint(
-                    "delivery:uncertain",
-                    {"call_id": call_id, "session_id": session_id},
-                ),
-                payload={
-                    "call_id": call_id,
-                    "session_id": session_id,
-                    "reason": "in-flight call_id lost on session stop / crash; "
-                    "cannot prove delivery. Operator retry required.",
-                },
-                rollback_on_error=False,
-            )
-        except Exception:
-            logger.exception(
-                "Failed to emit delivery:uncertain event for call_id=%s session=%s",
-                call_id,
-                session_id,
-            )
+        self.agent_tree._append_event(
+            workspace_id=workspace_id,
+            agent_run_id=root_run.id,
+            event_type=AgentEventType.PROGRESS,
+            author=root_run.id,
+            recipient=root_run.id,
+            call_id=f"delivery:uncertain:{call_id}",
+            action="delivery:uncertain",
+            target=session_id,
+            fingerprint=_request_fingerprint(
+                "delivery:uncertain",
+                {"call_id": call_id, "session_id": session_id},
+            ),
+            payload={
+                "call_id": call_id,
+                "session_id": session_id,
+                "reason": "in-flight call_id lost on session stop / crash; "
+                "cannot prove delivery. Operator retry required.",
+            },
+            rollback_on_error=False,
+        )
 
     async def retry_uncertain_delivery(
         self,
@@ -960,6 +956,10 @@ class _MessagingMixin:
                     f"{session_id} but not on bound task {task.id}; "
                     "cannot retry due to session/task state divergence"
                 )
+
+        # Ensure the fail-closed state is durably observable before an
+        # operator retry can remove it from the uncertain queue.
+        self._emit_delivery_uncertain(session.workspace_id, session_id, call_id)
 
         # ---- Receipt query: decide whether a second paste is safe ----
         # The tmux-server receipt tells us whether the original paste

@@ -1023,8 +1023,9 @@ this change:
    converted to `resident_root`. This covers runs created before the
    `resident_root` executor kind existed. The migration also links the
    resident root run to the workspace's `resident_agent_session_id` if its
-   `context_ref` is null. See `agent_tree.py:load_from_dict` (lines
-   1386–1426).
+   `context_ref` is null. See `AgentTreeManager.load_from_dict`; use the
+   symbol name rather than a line range because the recovery logic moves as
+   new executor metadata is added.
 4. The resident root run is created lazily by the workspace manager /
    resident agent on the next workspace access if it does not yet exist.
 
@@ -1033,27 +1034,35 @@ tree is a new layer on top of the existing task flow.
 
 ### Rollback (backward)
 
-Rolling back to a version without the agent tree is safe:
+Rolling back to a version without the agent tree preserves the legacy
+workspace task/session/report flow, but it does **not** preserve Agent Tree
+history indefinitely:
 
 1. Stop the backend.
-2. Deploy the previous version.
-3. The previous version's `_load_nested_state` ignores the unknown
+2. Back up every workspace `state.json` if Agent Tree history or report retry
+   metadata may be needed after rolling forward again.
+3. Deploy the previous version.
+4. The previous version's `_load_nested_state` ignores the unknown
    `agent_runs` / `agent_events` keys (they are simply not read).
-4. No data loss: workspace tasks, sessions, and reports are intact.
+5. On its first `_save_state`, the previous version rewrites `state.json`
+   using only the fields it knows. That removes `agent_runs`, `agent_events`,
+   `report_call_ids`, and `report_call_fingerprints` from the live state file.
 
-The only functional regression is that the resident agent reverts to its
-pre-tree behaviour (scanning global reports instead of using the directed
-mailbox). The `agent_runs` / `agent_events` keys remain in `state.json` but
-are harmless.
+Workspace tasks, sessions, and reports remain usable, and the resident agent
+reverts to its pre-tree behaviour (scanning global reports). Agent Tree replay
+history is lost after the first old-version save, and retries made after that
+point no longer have the new report call-id/fingerprint deduplication metadata.
+Drain report writers before rollback so an ambiguous client retry cannot create
+a duplicate report under the old version.
 
 ### Data safety notes
 
 - `agent_runs` and `agent_events` are append-only / immutable after creation
-  (except for status and `last_task_message` updates). A rollback does not
-  corrupt them.
-- If you want to fully purge agent-tree state after rollback, delete the
-  `agent_runs` and `agent_events` keys from each workspace's `state.json`.
-  This is optional and not required for correctness.
+  (except for status, cursor, executor metadata, and `last_task_message`
+  updates). Keep the pre-rollback backup if this history must survive.
+- A manual purge is normally unnecessary: the first old-version save drops
+  unknown keys. If no old-version save occurs, deleting the Agent Tree keys is
+  optional because the old loader ignores them.
 
 ## Reproducible Resident-Managed-Task E2E
 
@@ -1160,7 +1169,10 @@ increment:
    /api/agent-tree/runs/{run_id}/events` and render the event stream
    (sequence, type, author→recipient, payload).
 3. **Actions**: for the selected run, expose buttons:
-   - **Spawn child** (form: executor_kind, initial_message) → `POST /spawn`.
+   - **Spawn child** → `POST /spawn`. For `managed_task`, the form includes
+     `executor_config.agent_type` (`claude`, `codex`, or `cursor`), optional
+     model, execution target, and the initial message. The run detail shows
+     persisted executor capabilities and an unavailable reason when present.
    - **Send message** → `POST /send`.
    - **Follow up** → `POST /followup`.
    - **Interrupt** → `POST /interrupt`.
@@ -1170,8 +1182,9 @@ increment:
 **Non-goals** (deferred):
 
 - Real-time WebSocket push for new events (poll every 5s for now).
-- Native subagent / external job executor kinds in the UI (only
-  `managed_task` is selectable).
+- Native subagent / external job execution. They may be displayed as
+  unavailable capabilities, but are not selectable until backed by a real
+  runtime rather than a simulator.
 - Editing run metadata.
 
 **Acceptance criteria**:
@@ -1326,11 +1339,14 @@ Same `call_id` + different fingerprint → `ValueError`.
 
 ### Migration / rollback
 
-- `report_call_ids` defaults to `{}` on existing sessions; no migration
-  needed.
+- `report_call_ids` and `report_call_fingerprints` default to `{}` on existing
+  sessions; no forward migration is needed.
 - `call_id` on `AgentReportCreate`/`AgentReport` defaults to `None`;
   existing callers are unaffected.
-- Rollback is safe: the new fields are ignored by older code.
+- Older code ignores the new fields while loading, but its next state save
+  rewrites the session without them. Back up `state.json` before rollback and
+  drain report writers; after the metadata is dropped, an ambiguous retry no
+  longer has durable call-id/fingerprint deduplication.
 
 ### Residual risks
 
@@ -1488,3 +1504,69 @@ collides across repeated progress/review rounds.
 - `black`: clean (4 files).
 - `isort`: clean.
 - `mypy` on modified files: Success, no issues.
+
+## Codex takeover integration (2026-08-21)
+
+The previous implementation at
+`ddc3eef283e48876db3f786e210d5889d784880a` failed independent review because
+Resident report ACK/cursor mutations could persist Agent Tree state before the
+outer report transaction. A failure at that earlier persistence point left
+same-process memory ahead of disk and made same-call retry skip the ACK, while a
+cold reload had neither the report mapping nor the cursor advance.
+
+The takeover closes that blocker and the remaining platform gaps:
+
+1. **One report-intake commit.** Report/session/task changes and Agent Tree
+   ACK, run, event, call-index, and sequence changes are staged under a
+   workspace-scoped lock, persisted by one target-workspace `state.json`
+   replace, and fully restored on pre-commit failure. Wakeups happen only
+   after commit; the derived snapshot is best-effort and cannot turn a
+   committed report into a client-visible failure.
+2. **Deep supervision and replay.** Ownership covers arbitrary-depth
+   descendants for wait/interrupt. `subtree=true` includes descendant-authored
+   events, active subtree waiters are awakened, and uncertain followup outcome
+   recovery is idempotent across restart.
+3. **Real managed executor contract.** `managed_task` runs persist a
+   `ManagedExecutorConfig` and `ExecutorCapabilities`. Claude, Codex, and
+   Cursor select their existing Hub session/CLI integration; Claude and Codex
+   model overrides reach the actual launch environment/arguments. Explicit
+   sessions must match the persisted config. Native/external adapters remain
+   deterministic test simulators and public spawn returns HTTP 422 until a
+   real runtime is connected.
+4. **Cycle-safe callbacks.** Assignment, continue/recovery, reminder, review,
+   and Goal Packet prompts use cycle- and purpose-scoped report call IDs.
+
+### Root → child → event → wait/replay evidence
+
+`test_manager_spawn_persists_and_reloads_real_executor_contract` exercises the
+complete control-plane path in a deterministic test workspace:
+
+1. create a resident root;
+2. spawn a Codex `managed_task` child with model `gpt-5.6-codex` through
+   `AgentTreeManager` and `ManagedTaskAdapter`;
+3. verify the concrete Codex session/task plus `STARTED` event;
+4. emit child progress, wait from the root cursor with `subtree=true`, and
+   receive exactly that event;
+5. serialize the workspace, cold-load a new manager, and replay the same
+   child progress event with the executor config/capabilities intact.
+
+This is an in-process control-plane E2E with a deterministic workspace runtime,
+not a live external model invocation. The separate ttyd regression verifies
+that the persisted Codex model becomes the real CLI `--model` argument.
+
+### Final validation (unmasked exit codes)
+
+| Suite / check | Result | Exit |
+| --- | --- | --- |
+| `tests/test_agent_tree.py` | 165 passed in 801.89s | 0 |
+| `tests/test_workspaces.py` | 133 passed | 0 |
+| `tests/test_workspace_resident_agent.py tests/test_workspace_sessions.py` | 69 passed | 0 |
+| new executor/subtree/report-atomicity tests + API integration | 21 passed | 0 |
+| executor selection + root→child→event→wait/replay E2E | 9 passed | 0 |
+| `mypy claude_hub` | 67 source files, no issues | 0 |
+| Black / isort / compileall / `git diff --check` | clean | 0 |
+
+The backend implementation and tests are in scope for this branch. The UI
+panel remains the persisted follow-up task
+`487c630c-4b63-4883-8869-0e38546366c0`; no merge, deployment, or live model
+acceptance is claimed here.

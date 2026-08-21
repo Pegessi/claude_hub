@@ -1137,9 +1137,27 @@ asyncio.run(_main())
             return ""
         return f" --model {shlex.quote(model)}"
 
+    def _codex_model_arg(self) -> str:
+        """Return the explicit model selected by an Agent Tree executor.
+
+        ``CODEX_MODEL`` is an internal launch-contract variable, not a Codex
+        authentication/config variable.  Keeping the value in the persisted
+        tab environment lets a cold restart rebuild the same CLI command.
+        """
+
+        if self.agent_type != AgentType.CODEX:
+            return ""
+        model = self.env.get("CODEX_MODEL")
+        if not model:
+            return ""
+        return f" --model {shlex.quote(model)}"
+
     def _solo_command(self) -> Optional[str]:
         if self.agent_type == AgentType.CODEX:
-            return "codex --ask-for-approval never --sandbox danger-full-access"
+            return (
+                "codex --ask-for-approval never --sandbox danger-full-access"
+                f"{self._codex_model_arg()}"
+            )
         if self.agent_type == AgentType.CLAUDE:
             return (
                 "IS_SANDBOX=1 claude --dangerously-skip-permissions"
@@ -1534,7 +1552,8 @@ asyncio.run(_main())
         drops solo mode whenever the resume succeeds.
         """
         flags = " --ask-for-approval never --sandbox danger-full-access" if self.solo_mode else ""
-        fresh = f"codex{flags}"
+        model_arg = self._codex_model_arg()
+        fresh = f"codex{flags}{model_arg}"
         if (
             recover
             and not self.resume_quarantined
@@ -1545,7 +1564,7 @@ asyncio.run(_main())
             and _codex_id_exists(self.agent_session_id, self.cwd)
         ):
             quoted_sid = shlex.quote(self.agent_session_id)
-            return f"codex resume {quoted_sid}{flags} || {fresh}"
+            return f"codex resume {quoted_sid}{flags}{model_arg} || {fresh}"
         # Quarantined / unverified: start fresh; Phase 1C will pin the new sid.
         # DO NOT fall back to `codex resume --last` — that was BUG-3 (cwd-scoped
         # cross-wiring across same-cwd tabs).
