@@ -437,12 +437,67 @@ def test_auto_continue_messages_carry_endpoint_when_sent(monkeypatch):
     workspace_manager.tasks.pop(task.id, None)
 
     assert len(sent) == 2, "both auto-continue branches should send a nudge"
+    reminder_call_id = "task-7-monitor-reminder-cycle-1-attempt-1"
     for message in sent:
         assert endpoint in message, "auto-continue nudge must restate report endpoint"
         assert f"{INTERNAL_API_CURL} -X POST" in message
         assert '"task_id":"task-7"' in message
+        assert reminder_call_id in message
+        assert "working-progress" not in message
     assert monitor_module.AUTO_CONTINUE_MESSAGE.split("\n")[0] in sent[0]
     assert monitor_module.AUTO_REPORT_MISSING_MESSAGE.split("\n")[0] in sent[1]
+
+
+def test_auto_continue_reminder_call_id_stable_per_attempt_then_advances(monkeypatch):
+    """Same durable reminder attempt keeps its call_id; the next attempt gets a new one."""
+    import asyncio
+    from datetime import timedelta
+
+    session = _make_session()
+    task = _make_task(
+        mode=WorkspaceTaskMode.REVIEWED,
+        complexity=WorkspaceTaskExecutionComplexity.AUTO,
+    )
+    task = task.model_copy(update={"id": "task-reminder", "session_id": session.id})
+    workspace_manager.tasks[task.id] = task
+
+    sent: list[str] = []
+
+    async def fake_capture(_tmux_session: str) -> str:
+        return "idle output"
+
+    async def fake_send(_tmux_session: str, message: str) -> None:
+        sent.append(message)
+
+    monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture)
+    monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send)
+    monkeypatch.setattr(workspace_manager, "_auto_continue_output_looks_busy", lambda _o: False)
+    monkeypatch.setattr(workspace_manager, "_latest_report_state", lambda _t: None)
+    monkeypatch.setattr(workspace_manager, "_save_state", lambda: None)
+    monkeypatch.setattr(
+        workspace_manager, "_auto_continue_interruption_reason", lambda _o: "interrupted"
+    )
+
+    sampled = datetime.utcnow()
+    first = asyncio.run(workspace_manager._auto_continue_stopped_task(session, task, sampled))
+    retry = asyncio.run(workspace_manager._auto_continue_stopped_task(session, task, sampled))
+    assert first is not None and retry is not None
+    assert "task-reminder-monitor-reminder-cycle-1-attempt-1" in sent[0]
+    assert "task-reminder-monitor-reminder-cycle-1-attempt-1" in sent[1]
+
+    next_session = session.model_copy(
+        update={
+            "auto_continue_task_id": task.id,
+            "auto_continue_attempts": first["auto_continue_attempts"],
+            "last_auto_continue_at": sampled,
+        }
+    )
+    later = sampled + timedelta(seconds=30)
+    asyncio.run(workspace_manager._auto_continue_stopped_task(next_session, task, later))
+    workspace_manager.tasks.pop(task.id, None)
+
+    assert "task-reminder-monitor-reminder-cycle-1-attempt-2" in sent[2]
+    assert sent[0] != sent[2]
 
 
 # ---------------------------------------------------------------------------

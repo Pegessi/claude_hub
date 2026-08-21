@@ -383,6 +383,67 @@ def test_codex_tab_uses_codex_command() -> None:
     assert process._build_ttyd_command(session_exists=False)[-1] == "codex"
 
 
+def test_non_solo_codex_initial_launch_translates_model_and_keeps_env_wrapper(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(ttyd_manager_module, "LAUNCH_ENV_DIR", tmp_path)
+    process = TTYDProcess(
+        tab_id="tab-codex-model-fresh",
+        port=12344,
+        name="Codex Model Fresh",
+        agent_type=AgentType.CODEX,
+        solo_mode=False,
+        env={"CODEX_MODEL": "gpt-5.6-codex", "FEATURE_FLAG": "1"},
+    )
+
+    launch = process._build_ttyd_command(session_exists=False)[-1]
+    parts = shlex.split(launch)
+
+    assert parts[:2] == ["/bin/sh", str(tmp_path / "tab-codex-model-fresh.sh")]
+    assert parts[2] == "codex --model gpt-5.6-codex"
+    wrapper = _wrapper_script(launch)
+    assert "export CODEX_MODEL=gpt-5.6-codex" in wrapper
+    assert "export FEATURE_FLAG=1" in wrapper
+    assert "--ask-for-approval" not in parts[2]
+    assert "--sandbox" not in parts[2]
+
+
+def test_non_solo_codex_recover_translates_model_and_keeps_env_wrapper(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    pinned = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    monkeypatch.setattr(ttyd_manager_module, "LAUNCH_ENV_DIR", tmp_path)
+    monkeypatch.setattr(
+        ttyd_manager_module,
+        "_codex_id_exists",
+        lambda sid, cwd=None: sid == pinned and cwd == "/workspace",
+    )
+    process = TTYDProcess(
+        tab_id="tab-codex-model-recover",
+        port=12343,
+        name="Codex Model Recover",
+        agent_type=AgentType.CODEX,
+        solo_mode=False,
+        cwd="/workspace",
+        from_persisted_state=True,
+        agent_session_id=pinned,
+        env={"CODEX_MODEL": "gpt-5.6-codex", "FEATURE_FLAG": "1"},
+    )
+
+    launch = process._build_ttyd_command(session_exists=False)[-1]
+    parts = shlex.split(launch)
+
+    assert parts[:2] == ["/bin/sh", str(tmp_path / "tab-codex-model-recover.sh")]
+    assert parts[2] == (
+        f"codex resume {pinned} --model gpt-5.6-codex " "|| codex --model gpt-5.6-codex"
+    )
+    wrapper = _wrapper_script(launch)
+    assert "export CODEX_MODEL=gpt-5.6-codex" in wrapper
+    assert "export FEATURE_FLAG=1" in wrapper
+    assert "--ask-for-approval" not in parts[2]
+    assert "--sandbox" not in parts[2]
+
+
 def test_codex_solo_mode_command(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv("SHELL", "/bin/zsh")
     process = TTYDProcess(

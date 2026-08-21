@@ -18,6 +18,7 @@ from claude_hub.models import (
     AgentReportState,
     AgentRuntimeStatus,
     AgentType,
+    ContinueTaskRequest,
     ExecutionTarget,
     ManagedSession,
     ManagedSessionStatus,
@@ -26,7 +27,12 @@ from claude_hub.models import (
     WorkspaceTask,
     WorkspaceTaskStatus,
 )
-from claude_hub.models.agent_tree import ExecutorKind, FollowupRequest, SpawnRequest
+from claude_hub.models.agent_tree import (
+    AgentRunStatus,
+    ExecutorKind,
+    FollowupRequest,
+    SpawnRequest,
+)
 from claude_hub.services.workspace_manager import WorkspaceManager
 
 _wm = import_module("claude_hub.services.workspace_manager")
@@ -136,7 +142,7 @@ async def _install_two_processing_followups(
     workspace_id: str,
     task: WorkspaceTask,
     session: ManagedSession,
-) -> list[str]:
+) -> tuple[list[str], str]:
     root = manager.agent_tree.create_root_run(
         workspace_id=workspace_id,
         executor_kind=ExecutorKind.NATIVE_SUBAGENT,
@@ -177,7 +183,7 @@ async def _install_two_processing_followups(
         update={"processing_call_ids": call_ids}
     )
     manager._save_state()
-    return call_ids
+    return call_ids, child.id
 
 
 @pytest.mark.asyncio
@@ -186,7 +192,10 @@ async def test_precommit_failure_rolls_back_both_acks_and_cold_retry_converges(
 ) -> None:
     manager, workspace_id = manager_and_workspace
     task, session = _task_session(manager, workspace_id)
-    call_ids = await _install_two_processing_followups(manager, workspace_id, task, session)
+    call_ids, child_run_id = await _install_two_processing_followups(
+        manager, workspace_id, task, session
+    )
+    baseline_run_status = manager.agent_tree.get_run(child_run_id).status
     state_file = manager._workspace_state_file(workspace_id)
     payload = AgentReportCreate(
         task_id=task.id,
@@ -198,11 +207,21 @@ async def test_precommit_failure_rolls_back_both_acks_and_cold_retry_converges(
 
     original_write = manager._atomic_write_text
     failed = False
+    staged_report_id: str | None = None
 
     def fail_target_state_once(path: Path, text: str) -> None:
-        nonlocal failed
+        nonlocal failed, staged_report_id
         if path == state_file and not failed:
             failed = True
+            staged_reports = [
+                report for report in manager.reports.values() if report.call_id == payload.call_id
+            ]
+            assert len(staged_reports) == 1
+            staged_report_id = staged_reports[0].id
+            assert (
+                manager.agent_tree._call_record(workspace_id, f"report:{staged_report_id}")
+                is not None
+            )
             raise OSError("pre-state atomic replace failed")
         original_write(path, text)
 
@@ -214,6 +233,10 @@ async def test_precommit_failure_rolls_back_both_acks_and_cold_retry_converges(
     assert set(rolled_back.processing_call_ids) == set(call_ids)
     assert not (set(rolled_back.delivered_call_ids) & set(call_ids))
     assert payload.call_id not in rolled_back.report_call_ids
+    assert staged_report_id is not None
+    assert staged_report_id not in manager.reports
+    assert manager.agent_tree._call_record(workspace_id, f"report:{staged_report_id}") is None
+    assert manager.agent_tree.get_run(child_run_id).status == baseline_run_status
     for call_id in call_ids:
         # The followup API already committed its dispatch outcome. Report ACK
         # failure must preserve that baseline event and roll back only the new
@@ -234,12 +257,14 @@ async def test_precommit_failure_rolls_back_both_acks_and_cold_retry_converges(
     monkeypatch.setattr(manager.agent_tree, "_persist", reject_nested_persist)
     committed = await manager.create_report(session.id, payload)
     assert set(call_ids) <= set(manager.sessions[session.id].delivered_call_ids)
+    assert manager.agent_tree.get_run(child_run_id).status == AgentRunStatus.RUNNING
 
     # Cold reload + retry of the identical call_id/payload converges to the
     # same report and does not duplicate outcome/delivered events.
     fresh = WorkspaceManager()
     retry = await fresh.create_report(session.id, payload)
     assert retry.id == committed.id
+    assert fresh.agent_tree.get_run(child_run_id).status == AgentRunStatus.RUNNING
     assert (
         len([report for report in fresh.reports.values() if report.call_id == payload.call_id]) == 1
     )
@@ -264,6 +289,17 @@ async def test_precommit_failure_rolls_back_both_acks_and_cold_retry_converges(
             )
             == 1
         )
+    report_bridge_call_id = f"report:{committed.id}"
+    assert (
+        len(
+            [
+                event
+                for event in fresh.agent_tree._events[workspace_id]
+                if event.call_id == report_bridge_call_id
+            ]
+        )
+        == 1
+    )
 
 
 @pytest.mark.asyncio
@@ -302,21 +338,32 @@ def test_task_prompts_render_stable_distinct_call_ids_for_two_real_cycles(
     cycle_one_assignment = manager._build_task_assignment_prompt(
         workspace, task, session, lesson_context=[]
     )
-    cycle_one_continue = manager._report_endpoint_curl(session, task.id)
-    assert f"{task.id}-goal-packet-cycle-1-1" in cycle_one_assignment
-    assert f"{task.id}-started-cycle-1-1" in cycle_one_assignment
-    assert f"{task.id}-working-progress-cycle-1-1" in cycle_one_continue
-    assert cycle_one_continue == manager._report_endpoint_curl(session, task.id)
+    cycle_one_continue = manager._build_continue_prompt(task, ContinueTaskRequest(), session)
+    assert f"{task.id}-goal-packet-cycle-1-attempt-1" in cycle_one_assignment
+    assert f"{task.id}-started-cycle-1-attempt-1" in cycle_one_assignment
+    assert f"{task.id}-assignment-progress-cycle-1-attempt-1" in cycle_one_assignment
+    assert f"{task.id}-continue-progress-cycle-1-attempt-1" in cycle_one_continue
+    assert cycle_one_continue == manager._build_continue_prompt(
+        task, ContinueTaskRequest(), session
+    )
+
+    redispatched = task.model_copy(update={"dispatch_attempt": 2})
+    manager.tasks[task.id] = redispatched
+    cycle_one_redispatch = manager._build_task_assignment_prompt(
+        workspace, redispatched, session, lesson_context=[]
+    )
+    assert f"{task.id}-assignment-progress-cycle-1-attempt-2" in cycle_one_redispatch
+    assert cycle_one_redispatch != cycle_one_assignment
 
     task = task.model_copy(update={"review_cycle": 2})
     manager.tasks[task.id] = task
     cycle_two_assignment = manager._build_task_assignment_prompt(
         workspace, task, session, lesson_context=[]
     )
-    cycle_two_continue = manager._report_endpoint_curl(session, task.id)
-    assert f"{task.id}-goal-packet-cycle-2-1" in cycle_two_assignment
-    assert f"{task.id}-started-cycle-2-1" in cycle_two_assignment
-    assert f"{task.id}-working-progress-cycle-2-1" in cycle_two_continue
+    cycle_two_continue = manager._build_continue_prompt(task, ContinueTaskRequest(), session)
+    assert f"{task.id}-goal-packet-cycle-2-attempt-1" in cycle_two_assignment
+    assert f"{task.id}-started-cycle-2-attempt-1" in cycle_two_assignment
+    assert f"{task.id}-continue-progress-cycle-2-attempt-2" in cycle_two_continue
     assert "cycle-1" not in cycle_two_continue
 
     trigger = AgentReport(
@@ -333,5 +380,135 @@ def test_task_prompts_render_stable_distinct_call_ids_for_two_real_cycles(
     review_prompt = manager._build_review_prompt(
         workspace, task, session, trigger, lesson_context=[]
     )
-    assert f"{task.id}-review-started-cycle-2-1" in review_prompt
-    assert f"{task.id}-review-passed-cycle-2-1" in review_prompt
+    assert f"{task.id}-review-started-cycle-2-attempt-1" in review_prompt
+    assert f"{task.id}-review-passed-cycle-2-attempt-1" in review_prompt
+
+    monitor_one = manager._report_endpoint_curl(
+        session,
+        task.id,
+        purpose="monitor-reminder",
+        attempt=1,
+    )
+    monitor_one_retry = manager._report_endpoint_curl(
+        session,
+        task.id,
+        purpose="monitor-reminder",
+        attempt=1,
+    )
+    monitor_two = manager._report_endpoint_curl(
+        session,
+        task.id,
+        purpose="monitor-reminder",
+        attempt=2,
+    )
+    assert monitor_one == monitor_one_retry
+    assert monitor_one != monitor_two
+    assert f"{task.id}-monitor-reminder-cycle-2-attempt-1" in monitor_one
+    assert f"{task.id}-monitor-reminder-cycle-2-attempt-2" in monitor_two
+
+    recovering_worker = session.model_copy(
+        update={
+            "hard_recovery_task_id": task.id,
+            "hard_recovery_attempts": 1,
+        }
+    )
+    worker_recovery = manager._build_hard_recovery_worker_prompt(
+        workspace,
+        task,
+        recovering_worker,
+        "api error",
+    )
+    worker_recovery_retry = manager._build_hard_recovery_worker_prompt(
+        workspace,
+        task,
+        recovering_worker,
+        "api error",
+    )
+    assert worker_recovery == worker_recovery_retry
+    assert f"{task.id}-worker-recovery-progress-cycle-2-attempt-2" in worker_recovery
+
+    recovering_reviewer = session.model_copy(
+        update={
+            "role": WorkspaceSessionRole.REVIEWER,
+            "hard_recovery_task_id": task.id,
+            "hard_recovery_attempts": 2,
+        }
+    )
+    recovery_prompt = manager._build_hard_recovery_reviewer_prompt(
+        workspace,
+        task,
+        recovering_reviewer,
+        trigger,
+        "api error",
+    )
+    for verdict in (
+        "review-passed",
+        "review-failed",
+        "review-needs-input",
+    ):
+        assert f"{task.id}-{verdict}-recovery-cycle-2-attempt-3" in recovery_prompt
+
+    supplement_report = trigger.model_copy(update={"review_cycle": 2})
+    supplement_id = manager._report_prompt_call_id(
+        task.id,
+        "goal-packet-supplement",
+        cycle=supplement_report.review_cycle + 1,
+        attempt=supplement_report.id,
+    )
+    supplement_retry_id = manager._report_prompt_call_id(
+        task.id,
+        "goal-packet-supplement",
+        cycle=supplement_report.review_cycle + 1,
+        attempt=supplement_report.id,
+    )
+    later_report = supplement_report.model_copy(update={"id": "report-next-cycle"})
+    later_supplement_id = manager._report_prompt_call_id(
+        task.id,
+        "goal-packet-supplement",
+        cycle=later_report.review_cycle + 1,
+        attempt=later_report.id,
+    )
+    assert supplement_id == supplement_retry_id
+    assert supplement_id != later_supplement_id
+
+
+@pytest.mark.asyncio
+async def test_goal_packet_supplement_retry_reuses_cycle_and_call_id(
+    manager_and_workspace: tuple[WorkspaceManager, str], monkeypatch: MonkeyPatch
+) -> None:
+    manager, workspace_id = manager_and_workspace
+    task, session = _task_session(manager, workspace_id)
+    task = task.model_copy(update={"review_cycle": 2})
+    manager.tasks[task.id] = task
+    report = AgentReport(
+        id="supplement-source-report",
+        workspace_id=workspace_id,
+        task_id=task.id,
+        session_id=session.id,
+        state=AgentReportState.COMPLETED,
+        message="missing packet evidence",
+        review_cycle=2,
+        created_at=datetime.utcnow(),
+    )
+    send = AsyncMock()
+    monkeypatch.setattr(manager, "send_session_message", send)
+
+    await manager._request_goal_packet_supplement(
+        manager.tasks[task.id],
+        manager.sessions[session.id],
+        report,
+        ["acceptance_check"],
+    )
+    first_message = send.await_args.args[1]
+    assert manager.tasks[task.id].review_cycle == 3
+    assert f"{task.id}-goal-packet-supplement-cycle-3-attempt-{report.id}" in first_message
+
+    await manager._request_goal_packet_supplement(
+        manager.tasks[task.id],
+        manager.sessions[session.id],
+        report,
+        ["acceptance_check"],
+    )
+    second_message = send.await_args.args[1]
+    assert manager.tasks[task.id].review_cycle == 3
+    assert second_message == first_message

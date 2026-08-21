@@ -1371,6 +1371,8 @@ class AgentTreeManager:
         recipient: str,
         call_id: str,
         payload: Optional[dict] = None,
+        persist: bool = True,
+        wake: bool = True,
     ) -> AgentEvent:
         """Ingest an event from an executor into the Hub stream.
 
@@ -1380,7 +1382,9 @@ class AgentTreeManager:
 
         All in-memory mutations (event append, status projection,
         last_task_message) are batched into a single ``_persist()`` call
-        so the durable state is consistent.
+        so the durable state is consistent.  An outer transaction may pass
+        ``persist=False, wake=False`` to stage the same projection alongside
+        other workspace state, then persist once and wake after that commit.
         """
         fingerprint = _request_fingerprint(
             "emit",
@@ -1414,8 +1418,10 @@ class AgentTreeManager:
             # and can retry — we must NOT return success for a non-durable
             # event. Only after a successful durable commit do we wake the
             # recipient so supervisors observe the event.
-            self._persist()
-            self._wake_for_run(agent_run_id, recipient)
+            if persist:
+                self._persist()
+            if persist and wake:
+                self._wake_for_run(agent_run_id, recipient)
             return event
 
         run = self._runs.get(agent_run_id)
@@ -1457,20 +1463,22 @@ class AgentTreeManager:
         # we keep the in-memory state (rollback_on_error=False semantics)
         # and re-raise so the caller can retry. The next successful persist
         # will reconcile the durable state.
-        try:
-            self._persist()
-        except Exception:
-            logger.exception(
-                "emit_event: persist failed for event seq=%s call_id=%s; "
-                "keeping in-memory event/status/message for retry",
-                event.sequence,
-                call_id,
-            )
-            raise
+        if persist:
+            try:
+                self._persist()
+            except Exception:
+                logger.exception(
+                    "emit_event: persist failed for event seq=%s call_id=%s; "
+                    "keeping in-memory event/status/message for retry",
+                    event.sequence,
+                    call_id,
+                )
+                raise
 
         # Wake the recipient (and its ancestors) after the batched persist
         # so supervisors observing the mailbox see the new event.
-        self._wake_for_run(agent_run_id, recipient)
+        if persist and wake:
+            self._wake_for_run(agent_run_id, recipient)
 
         return event
 

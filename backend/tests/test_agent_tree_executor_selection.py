@@ -209,6 +209,65 @@ async def test_compatible_session_is_reused_but_different_model_gets_new_session
     assert wm.tasks["task-3"].session_id != wm.tasks["task-1"].session_id
 
 
+@pytest.mark.asyncio
+async def test_remote_reconnect_mismatch_is_rejected_and_not_reused(tmp_path: Path) -> None:
+    wm = _FakeWorkspaceManager(tmp_path)
+    wm.workspaces["workspace-1"].target = ExecutionTarget.REMOTE
+    wm.workspaces["workspace-1"].remote_profile_id = "remote-profile"
+    wm.workspaces["workspace-1"].remote_cwd = "/remote/repo"
+    wm.workspaces["workspace-1"].remote_reconnect = True
+    now = datetime.utcnow()
+    incompatible = ManagedSession(
+        id="remote-no-reconnect",
+        workspace_id="workspace-1",
+        task_id=None,
+        tab_id="tab-remote-no-reconnect",
+        role=WorkspaceSessionRole.ORCHESTRATOR,
+        agent_type=AgentType.CODEX,
+        status=ManagedSessionStatus.IDLE,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        current_task_id=None,
+        title="Remote Codex without reconnect",
+        workspace_path=str(tmp_path),
+        tmux_session="tmux-remote-no-reconnect",
+        target=ExecutionTarget.REMOTE,
+        remote_profile_id="remote-profile",
+        remote_cwd="/remote/repo",
+        remote_reconnect=False,
+        solo_mode=False,
+        env={"CODEX_MODEL": "gpt-5.6-codex"},
+        created_at=now,
+        updated_at=now,
+    )
+    wm.sessions[incompatible.id] = incompatible
+    run = _run(
+        "remote-reconnect-required",
+        ManagedExecutorConfig(
+            agent_type=AgentType.CODEX,
+            model="gpt-5.6-codex",
+            solo_mode=False,
+            target=ExecutionTarget.REMOTE,
+            remote_profile_id="remote-profile",
+            remote_cwd="/remote/repo",
+            remote_reconnect=True,
+        ),
+    )
+    adapter = ManagedTaskAdapter(wm)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="remote_reconnect"):
+        adapter.validate_session(run, incompatible)
+
+    task_id = await adapter.spawn(run, "must use reconnecting remote session")
+
+    assert len(wm.ensure_payloads) == 1
+    assert wm.ensure_payloads[0].remote_reconnect is True
+    replacement_id = wm.tasks[task_id].session_id
+    assert replacement_id is not None
+    assert replacement_id != incompatible.id
+    replacement = wm.sessions[replacement_id]
+    assert replacement.remote_reconnect is True
+
+
 def test_legacy_spawn_and_run_remain_implicit_until_adapter_resolution() -> None:
     request = SpawnRequest(
         workspace_id="workspace-1",

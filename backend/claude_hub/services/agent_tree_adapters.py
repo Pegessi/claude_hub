@@ -256,13 +256,13 @@ class ManagedTaskAdapter(ExecutorAdapter):
             mismatches.append("env/model")
         if config.cwd is not None and session.workspace_path != config.cwd:
             mismatches.append("cwd")
-        if (
-            config.remote_profile_id is not None
-            and session.remote_profile_id != config.remote_profile_id
-        ):
-            mismatches.append("remote_profile_id")
-        if config.remote_cwd is not None and session.remote_cwd != config.remote_cwd:
-            mismatches.append("remote_cwd")
+        if config.target == ExecutionTarget.REMOTE:
+            if session.remote_profile_id != config.remote_profile_id:
+                mismatches.append("remote_profile_id")
+            if session.remote_cwd != config.remote_cwd:
+                mismatches.append("remote_cwd")
+            if session.remote_reconnect != config.remote_reconnect:
+                mismatches.append("remote_reconnect")
         if mismatches:
             raise ValueError(
                 f"Session {session.id} does not match executor_config: " + ", ".join(mismatches)
@@ -298,10 +298,13 @@ class ManagedTaskAdapter(ExecutorAdapter):
                 )
             )
             and (
-                config.remote_profile_id is None
-                or session.remote_profile_id == config.remote_profile_id
+                config.target != ExecutionTarget.REMOTE
+                or (
+                    session.remote_profile_id == config.remote_profile_id
+                    and session.remote_cwd == config.remote_cwd
+                    and session.remote_reconnect == config.remote_reconnect
+                )
             )
-            and (config.remote_cwd is None or session.remote_cwd == config.remote_cwd)
         ]
         if not candidates:
             return None

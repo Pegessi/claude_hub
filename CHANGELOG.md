@@ -23,11 +23,22 @@
   executors with HTTP 422 instead of advertising a fake successful dispatch.
 - Use cycle- and purpose-scoped report call IDs for worker, reviewer,
   recovery, reminder, and Goal Packet prompts so retries stay idempotent
-  without colliding across review cycles.
-- **Validation**: Agent Tree 165 passed; workspaces 133 passed; resident/session
-  69 passed; new executor/subtree/report-atomicity + API integration 21 passed;
+  without colliding across review cycles. Monitor soft reminders now emit
+  `monitor-reminder` IDs with durable `attempts+1` before increment;
+  reviewer fallback/recovery uses verdict-specific recovery IDs.
+- Atomic report intake now leaves the `report:<id>` bridge event durable on
+  the first commit, so a post-commit side-effect failure still has exactly
+  one report and one bridged event.
+- **Validation**: listed suites 541 passed in 830.54s
+  (`test_agent_tree.py`, `test_workspaces.py`, resident/session,
+  report-atomicity, subtree reliability, executor selection,
+  `test_ttyd_manager.py`, hard-recovery, orchestrator-contract);
   `mypy claude_hub` checked 67 source files with no issues; Black, isort,
-  compileall, and `git diff --check` clean.
+  compileall, and `git diff --check` clean. Isolated real-CLI E2E on port
+  19173 (home redirected off `~/.claude_hub`) spawned a live Claude
+  `managed_task` child, bridged `report:4b8136a0-7cea-4abb-9803-f8a2636208ab`
+  through session report intake, waited, ACKed to sequence 3, and replayed
+  the durable log plus cursor after process restart.
 - **Migration/rollback**: new fields are additive on forward load. Before
   rollback, back up workspace `state.json` and drain writers: the first
   old-version save drops Agent Tree and report fingerprint metadata it does

@@ -428,6 +428,10 @@ Review attempt 7 failed (1/7 AC passing). Three required fixes were implemented:
 
 ### Production E2E (port 8174, worktree backend)
 
+> **Stale / simulator-only.** This early pass spawned `native_subagent`,
+> which is now an unavailable placeholder (HTTP 422 on public spawn). Keep
+> the notes for history; do not treat them as current live-CLI evidence.
+
 - Terminal-resident workspace creates root run before session bootstrap.
 - Spawn child via `native_subagent` succeeds; `dispatched` + `started`
   events persisted.
@@ -1066,6 +1070,15 @@ a duplicate report under the old version.
 
 ## Reproducible Resident-Managed-Task E2E
 
+> **Live-Hub operator recipe, not isolated validation.** These curls target a
+> running Hub (historically port 8173/8174) and can mutate live workspace
+> state. They are kept as a manual playbook. Isolated control-plane validation
+> for this branch is the throwaway backend + real managed CLI run described in
+> Round 4 below. In-process tests such as
+> `test_manager_spawn_persists_and_reloads_real_executor_contract` remain
+> **simulator-only**: they use a fake workspace manager and
+> `emit_event`, not a live CLI process.
+
 This E2E exercises the full path: resident root run → spawn a managed-task
 child → the child task runs and reports → the resident receives the event.
 
@@ -1550,9 +1563,11 @@ complete control-plane path in a deterministic test workspace:
 5. serialize the workspace, cold-load a new manager, and replay the same
    child progress event with the executor config/capabilities intact.
 
-This is an in-process control-plane E2E with a deterministic workspace runtime,
-not a live external model invocation. The separate ttyd regression verifies
-that the persisted Codex model becomes the real CLI `--model` argument.
+**Simulator-only / in-process.** This path uses `_FakeWorkspaceManager` and
+`emit_event`; it is not a live managed CLI invocation and must not be cited
+as the isolated real-executor E2E. The separate ttyd regression verifies
+that the persisted Codex model becomes the real CLI `--model` argument. The
+live isolated E2E is recorded in Round 4.
 
 ### Final validation (unmasked exit codes)
 
@@ -1570,3 +1585,63 @@ The backend implementation and tests are in scope for this branch. The UI
 panel remains the persisted follow-up task
 `487c630c-4b63-4883-8869-0e38546366c0`; no merge, deployment, or live model
 acceptance is claimed here.
+
+## Round 4: monitor call_ids + isolated real-CLI E2E (2026-08-21)
+
+Remaining control-plane gaps after the reviewed uncommitted repairs:
+
+1. **`_monitor.py` callers.** Soft reminders now restate the report endpoint
+   with `purpose=monitor-reminder` and durable attempt `attempts+1` *before*
+   incrementing `auto_continue_attempts`. Reviewer fallback (no trigger
+   report) and named recovery prompts share verdict-specific recovery IDs
+   (`review-started-recovery`, `review-passed-recovery`,
+   `review-failed-recovery`, `review-needs-input-recovery`) keyed by the
+   durable hard-recovery attempt. Same retry keeps the ID; a new attempt
+   gets a new ID.
+2. **Atomic post-commit assertion.** `test_report_intake_idempotent_after_error_then_retry`
+   now expects the `report:<id>` bridge event to be durable on the first
+   commit (count == 1) and to stay exactly one after the same-call retry.
+3. **Bounded extra coverage.** Monitor reminder attempt stability, reviewer
+   fallback IDs, spawn 403-then-422 before availability, plus the existing
+   rollback / remote reconnect / cold-reload tests.
+4. **Isolated real-CLI E2E.** A throwaway backend with `Path.home()` redirected
+   off `~/.claude_hub` launched a real resident root and a real Claude
+   `managed_task` child (ttyd + tmux + `claude --dangerously-skip-permissions`).
+   The report event was created through session `create_report` (not
+   `emit_event`). Directed wait, ACK, process restart, durable-log replay, and
+   cursor suppression were recorded, then the workspace/tabs/tmux sessions
+   were deleted.
+
+### Isolated real-CLI E2E evidence (2026-08-21, port 19173)
+
+| Item | Value |
+| --- | --- |
+| Data root | `/tmp/claude_hub_e2e_f6bf8165/home` (not `~/.claude_hub`) |
+| Workspace | `eed30bad-67c7-4667-82a0-f1c892cffb66` |
+| Root run | `7722e531-bb5c-4777-9c41-46da0ba28853` |
+| Child run | `d1597085-2a90-4620-92e8-d9e04a0d65de` |
+| Child session / task | `e2e-agent-1` / `1734a33b-b3ba-4537-a0b6-8e5cc1b003b7` |
+| Child tmux | `claude-hub-939e0449` |
+| Report | `4b8136a0-7cea-4abb-9803-f8a2636208ab` via `POST /sessions/{id}/reports` |
+| Bridged event | `report:4b8136a0-7cea-4abb-9803-f8a2636208ab` seq=3 author=child recipient=root |
+| Wait | returned that call_id; ACK advanced `ack_sequence` 0→3; wait after ACK empty |
+| Persisted log | `e2e-spawn-child-1`, `e2e-spawn-child-1:started`, `report:4b8136a0-...` |
+| After reload | root `ack_sequence` still 3; child `executor_kind=managed_task` / Claude; GET events empty (ACK cursor); wait from 3 empty |
+| Cleanup | workspace deleted; e2e tmux/CLI processes gone |
+
+The report was posted through the production session report API against a live
+managed Claude executor. `emit_event` and `_FakeWorkspaceManager` were not used.
+`get_events` after ACK is empty by design: the Hub cursor is
+`max(since_sequence, ack_sequence)`.
+
+### Round 4 validation
+
+| Suite / check | Result | Exit |
+| --- | --- | --- |
+| listed pytest suites (agent_tree, workspaces, resident/session, report-atomicity, subtree, executor, ttyd, hard-recovery, orchestrator-contract) | 541 passed in 830.54s | 0 |
+| isolated real-CLI E2E | ok | 0 |
+| `mypy claude_hub` | 67 source files, no issues | 0 |
+| Black / isort / compileall / `git diff --check` | clean | 0 |
+
+UI remains follow-up `487c630c-4b63-4883-8869-0e38546366c0`. No push, merge,
+or main mutation.

@@ -9461,13 +9461,12 @@ async def test_report_intake_idempotent_after_error_then_retry(
     assert dispatch_call_id in sess.delivered_call_ids
     assert dispatch_call_id not in sess.processing_call_ids
 
-    # The bridged agent-tree event was NOT emitted: _bridge_report_to_agent_event
-    # runs AFTER _after_report_recorded, which raised. This is the exact
-    # error-after-commit gap the idempotency fix closes — the report is
-    # durably committed but the side effects are partial.
+    # The bridged agent-tree event is part of the same durable commit as the
+    # report. _after_report_recorded raising after that commit must not drop
+    # or duplicate the report:<id> bridge event.
     events = manager.agent_tree.get_events(ws_id, run.id, subtree=True)
     bridged = [e for e in events if e.call_id == f"report:{committed_report.id}"]
-    assert len(bridged) == 0
+    assert len(bridged) == 1
 
     review_attempts_before = manager.tasks[task.id].review_attempts
 
@@ -9479,8 +9478,9 @@ async def test_report_intake_idempotent_after_error_then_retry(
     assert retry_report.id == committed_report.id
     assert len(manager.reports) == 1
 
-    # The idempotent retry path re-runs _bridge_report_to_agent_event, which
-    # now emits the single bridged event (call_id = report:<report.id>).
+    # The idempotent retry path re-stages _bridge_report_to_agent_event, which
+    # is call_id-deduplicated (call_id = report:<report.id>), so the bridge
+    # count stays exactly one.
     events = manager.agent_tree.get_events(ws_id, run.id, subtree=True)
     bridged = [e for e in events if e.call_id == f"report:{committed_report.id}"]
     assert len(bridged) == 1

@@ -61,14 +61,38 @@ class _PromptsMixin:
             return f"http://127.0.0.1:{session.remote_forward_port}"
         return f"http://localhost:{settings.port}"
 
-    def _report_prompt_call_id(self, task_id: str, purpose: str, ordinal: int = 1) -> str:
-        """Return a stable backend-owned report call_id for one task cycle."""
+    def _report_prompt_call_id(
+        self,
+        task_id: str,
+        purpose: str,
+        *,
+        attempt: int | str | None = None,
+        cycle: int | str | None = None,
+    ) -> str:
+        """Return a stable backend-owned ID for one logical report prompt.
+
+        ``cycle`` separates work/review rounds. ``purpose`` separates the
+        different reports requested by one prompt. ``attempt`` must come from
+        durable task/session state so replaying the same logical prompt keeps
+        its ID while a later prompt gets a new one.
+        """
 
         task = self.tasks.get(task_id)
-        cycle = max(task.review_cycle, 1) if task is not None else "REVIEW_CYCLE"
-        return f"{task_id}-{purpose}-cycle-{cycle}-{ordinal}"
+        if cycle is None:
+            cycle = max(task.review_cycle, 1) if task is not None else "REVIEW_CYCLE"
+        if attempt is None:
+            attempt = cycle if task is not None else "DURABLE_ATTEMPT"
+        return f"{task_id}-{purpose}-cycle-{cycle}-attempt-{attempt}"
 
-    def _report_endpoint_curl(self, session: ManagedSession, task_id: str | None = None) -> str:
+    def _report_endpoint_curl(
+        self,
+        session: ManagedSession,
+        task_id: str | None = None,
+        *,
+        purpose: str = "working-progress",
+        attempt: int | str | None = None,
+        state: str = "working",
+    ) -> str:
         """Render the report-endpoint curl example for a session.
 
         The report endpoint otherwise only appears in the bootstrap/assignment/
@@ -77,7 +101,7 @@ class _PromptsMixin:
         cleared agent has no curl target to POST to.
         """
         task_field = task_id if task_id is not None else "TASK_ID"
-        call_id = self._report_prompt_call_id(task_field, "working-progress")
+        call_id = self._report_prompt_call_id(task_field, purpose, attempt=attempt)
         return (
             "Report endpoint (include a stable call_id; reuse the SAME call_id "
             "when resubmitting the same report after a failure or context "
@@ -87,7 +111,7 @@ class _PromptsMixin:
             f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}"
             f"/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
-            f'-d \'{{"task_id":"{task_field}","state":"working",'
+            f'-d \'{{"task_id":"{task_field}","state":"{state}",'
             f'"call_id":"{call_id}",'
             '"message":"Progress update",'
             '"message_en":"Progress update","message_zh":"进度更新"}\''
@@ -151,7 +175,7 @@ class _PromptsMixin:
             f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             '-d \'{"task_id":"TASK_ID","state":"working",'
-            '"call_id":"TASK_ID-working-progress-cycle-REVIEW_CYCLE-1",'
+            '"call_id":"TASK_ID-working-progress-cycle-REVIEW_CYCLE-attempt-DURABLE_ATTEMPT",'
             '"message":"Progress update",'
             '"message_en":"Progress update","message_zh":"进度更新"}\''
         )
@@ -212,7 +236,7 @@ class _PromptsMixin:
             f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             '-d \'{"task_id":"TASK_ID","state":"review_started",'
-            '"call_id":"TASK_ID-review-started-cycle-REVIEW_CYCLE-1",'
+            '"call_id":"TASK_ID-review-started-cycle-REVIEW_CYCLE-attempt-DURABLE_ATTEMPT",'
             '"message":"Started review","message_en":"Started review","message_zh":"开始评审"}\''
         )
 
@@ -291,9 +315,16 @@ class _PromptsMixin:
             ),
             workspace_id=workspace.id,
         )
-        goal_packet_call_id = self._report_prompt_call_id(task.id, "goal-packet")
-        started_call_id = self._report_prompt_call_id(task.id, "started")
-        progress_call_id = self._report_prompt_call_id(task.id, "working-progress")
+        assignment_attempt = max(task.dispatch_attempt, 1)
+        goal_packet_call_id = self._report_prompt_call_id(
+            task.id, "goal-packet", attempt=assignment_attempt
+        )
+        started_call_id = self._report_prompt_call_id(
+            task.id, "started", attempt=assignment_attempt
+        )
+        progress_call_id = self._report_prompt_call_id(
+            task.id, "assignment-progress", attempt=assignment_attempt
+        )
         return (
             "New workspace task assigned.\n\n"
             f"Workspace: {workspace.name}\n"
@@ -893,8 +924,13 @@ class _PromptsMixin:
             ),
             workspace_id=workspace.id,
         )
-        review_started_call_id = self._report_prompt_call_id(task.id, "review-started")
-        review_passed_call_id = self._report_prompt_call_id(task.id, "review-passed")
+        review_attempt = max(task.review_attempts, 1)
+        review_started_call_id = self._report_prompt_call_id(
+            task.id, "review-started", attempt=review_attempt
+        )
+        review_passed_call_id = self._report_prompt_call_id(
+            task.id, "review-passed", attempt=review_attempt
+        )
         return (
             "Review workspace task.\n\n"
             f"Workspace: {workspace.name}; Task ID: {task.id}\n"
@@ -1102,7 +1138,7 @@ class _PromptsMixin:
             f"Follow-up instructions:\n{follow_up}\n\n"
             f"{self._autonomous_continue_orchestrator_reminder(task)}"
             "The task is back in working state. Report progress with the same task_id.\n\n"
-            f"{self._report_endpoint_curl(session, task.id)}"
+            f"{self._report_endpoint_curl(session, task.id, purpose='continue-progress', attempt=task.review_cycle)}"
         )
 
     def _autonomous_continue_orchestrator_reminder(self, task: WorkspaceTask) -> str:
@@ -1157,6 +1193,7 @@ class _PromptsMixin:
         session: ManagedSession,
         *,
         interruption_reason: str,
+        recovery_attempt: int,
     ) -> str:
         """Compact briefing for an autonomous worker whose context was cleared mid-task.
 
@@ -1226,7 +1263,7 @@ class _PromptsMixin:
             "3. If the task was already ready_for_review/completed before the error, repost that "
             "report immediately instead of redoing work.\n"
             "4. Report working/progress/blocked/completed with the same task_id.\n\n"
-            f"{self._report_endpoint_curl(session, task.id)}"
+            f"{self._report_endpoint_curl(session, task.id, purpose='worker-recovery-progress', attempt=recovery_attempt)}"
         )
 
     def _build_hard_recovery_worker_prompt(
@@ -1235,6 +1272,7 @@ class _PromptsMixin:
         task: WorkspaceTask,
         session: ManagedSession,
         interruption_reason: str,
+        recovery_attempt: int | None = None,
     ) -> str:
         """Prompt sent after hard recovery (interrupt + /clear) for a worker agent.
 
@@ -1245,6 +1283,11 @@ class _PromptsMixin:
         the compact revision-resume briefing instead of replaying the full assignment prompt,
         to avoid repiling prompt text on a cleared context.
         """
+        if recovery_attempt is None:
+            prior_attempts = (
+                session.hard_recovery_attempts if session.hard_recovery_task_id == task.id else 0
+            )
+            recovery_attempt = prior_attempts + 1
         run = task.autonomous_run
         iteration = run.iteration if run else 0
         use_resume = task.task_mode == WorkspaceTaskMode.AUTONOMOUS and (
@@ -1252,7 +1295,11 @@ class _PromptsMixin:
         )
         if use_resume:
             return self._build_revision_resume_prompt(
-                workspace, task, session, interruption_reason=interruption_reason
+                workspace,
+                task,
+                session,
+                interruption_reason=interruption_reason,
+                recovery_attempt=recovery_attempt,
             )
         # Cold-start-style hard recovery (first iteration, or non-autonomous task)
         agent_session_id = self._agent_session_id_for_session(session)
@@ -1277,7 +1324,67 @@ class _PromptsMixin:
             "Resume work now. Start by reading the state snapshot and checking the current state "
             "of any files you were editing. If the task was already complete (e.g., you already "
             "posted a ready_for_review report before the error), post a completed report immediately.\n\n"
-            f"{self._report_endpoint_curl(session, task.id)}"
+            f"{self._report_endpoint_curl(session, task.id, purpose='worker-recovery-progress', attempt=recovery_attempt)}"
+        )
+
+    def _reviewer_recovery_call_ids(
+        self,
+        task: WorkspaceTask,
+        session: ManagedSession,
+        *,
+        recovery_attempt: int | None = None,
+    ) -> tuple[int, str, dict[str, str]]:
+        """Return the durable recovery attempt and verdict-specific report IDs.
+
+        ``recovery_attempt`` must come from durable session state so a retried
+        paste of the same hard-recovery prompt keeps its IDs, while a later
+        recovery gets a new attempt.
+        """
+        if recovery_attempt is None:
+            prior_attempts = (
+                session.hard_recovery_attempts if session.hard_recovery_task_id == task.id else 0
+            )
+            recovery_attempt = prior_attempts + 1
+        review_started_call_id = self._report_prompt_call_id(
+            task.id, "review-started-recovery", attempt=recovery_attempt
+        )
+        verdict_call_ids = {
+            verdict: self._report_prompt_call_id(
+                task.id, f"{verdict.replace('_', '-')}-recovery", attempt=recovery_attempt
+            )
+            for verdict in (
+                "review_passed",
+                "review_failed",
+                "review_needs_input",
+            )
+        }
+        return recovery_attempt, review_started_call_id, verdict_call_ids
+
+    def _build_hard_recovery_reviewer_fallback_prompt(
+        self,
+        task: WorkspaceTask,
+        session: ManagedSession,
+        interruption_reason: str,
+        recovery_attempt: int | None = None,
+    ) -> str:
+        """Compact reviewer recovery prompt when no trigger report exists."""
+        recovery_attempt, review_started_call_id, verdict_call_ids = (
+            self._reviewer_recovery_call_ids(task, session, recovery_attempt=recovery_attempt)
+        )
+        verdict_call_id_block = "\n".join(
+            f"- {verdict}: `{call_id}`" for verdict, call_id in verdict_call_ids.items()
+        )
+        return (
+            f"{HARD_RECOVERY_REVIEWER_MESSAGE}\n\n"
+            f"Error detected: {interruption_reason}\n\n"
+            f"Task ID: {task.id}\nTask title: {task.title}\n\n"
+            "No trigger report is available. Resume the review and issue "
+            "review_passed, review_failed, or review_needs_input. "
+            "Reuse the exact ID when retrying the same report. Use the matching "
+            "verdict-specific ID for the one final verdict:\n"
+            f"- review_started: `{review_started_call_id}`\n"
+            f"{verdict_call_id_block}\n\n"
+            f"{self._report_endpoint_curl(session, task.id, purpose='review-started-recovery', attempt=recovery_attempt, state='review_started')}"
         )
 
     def _build_hard_recovery_reviewer_prompt(
@@ -1287,11 +1394,18 @@ class _PromptsMixin:
         session: ManagedSession,
         trigger_report: AgentReport,
         interruption_reason: str,
+        recovery_attempt: int | None = None,
     ) -> str:
         """Prompt sent after hard recovery (interrupt + /clear) for a reviewer agent."""
+        recovery_attempt, review_started_call_id, verdict_call_ids = (
+            self._reviewer_recovery_call_ids(task, session, recovery_attempt=recovery_attempt)
+        )
         report_payload = self._serialize_task_reports_for_review(task, trigger_report)
         agent_session_id = self._agent_session_id_for_session(session)
         session_line = f"Conversation ID: {agent_session_id}\n" if agent_session_id else ""
+        verdict_call_id_block = "\n".join(
+            f"- {verdict}: `{call_id}`" for verdict, call_id in verdict_call_ids.items()
+        )
         return (
             f"{HARD_RECOVERY_REVIEWER_MESSAGE}\n\n"
             f"Error detected: {interruption_reason}\n\n"
@@ -1310,8 +1424,12 @@ class _PromptsMixin:
             f"earlier summarized; trigger report is above):\n"
             f"{json.dumps(report_payload, indent=2)}\n\n"
             "Resume the review now. Read the worker's latest report, check changed files for "
-            "evidence, and issue review_passed, review_failed, or review_needs_input.\n\n"
-            f"{self._report_endpoint_curl(session, task.id)}"
+            "evidence, and issue review_passed, review_failed, or review_needs_input. "
+            "Reuse the exact ID when retrying the same report. Use the matching "
+            "verdict-specific ID for the one final verdict:\n"
+            f"- review_started: `{review_started_call_id}`\n"
+            f"{verdict_call_id_block}\n\n"
+            f"{self._report_endpoint_curl(session, task.id, purpose='review-started-recovery', attempt=recovery_attempt, state='review_started')}"
         )
 
     def _agent_session_id_for_session(self, session: ManagedSession) -> str | None:

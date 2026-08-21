@@ -695,7 +695,13 @@ class _MonitorMixin:
         # The agent's context may have been cleared since it learned the report
         # endpoint from its bootstrap/assignment prompt. Restate the endpoint so
         # a cleared agent always has a curl target to POST its report to.
-        message = f"{message}\n\n{self._report_endpoint_curl(session, task.id)}"
+        # Durable attempt is the reminder being sent (attempts+1) so a retry of
+        # this paste keeps the same call_id; a later reminder gets a new one.
+        reminder_attempt = attempts + 1
+        message = (
+            f"{message}\n\n"
+            f"{self._report_endpoint_curl(session, task.id, purpose='monitor-reminder', attempt=reminder_attempt)}"
+        )
         await self._send_tmux_message(session.tmux_session, message)
         attempts += 1
         logger.info(
@@ -789,20 +795,30 @@ class _MonitorMixin:
             trigger_report = self._latest_report_for_task(task.id)
             if trigger_report:
                 prompt = self._build_hard_recovery_reviewer_prompt(
-                    workspace, task, session, trigger_report, interruption_reason
+                    workspace,
+                    task,
+                    session,
+                    trigger_report,
+                    interruption_reason,
+                    recovery_attempt=new_hard_attempts,
                 )
             else:
                 # Should not happen (reviewer only exists when there is a trigger report),
-                # but fall back to a simpler message.
-                prompt = (
-                    f"{HARD_RECOVERY_REVIEWER_MESSAGE}\n\n"
-                    f"Error detected: {interruption_reason}\n\n"
-                    f"Task ID: {task.id}\nTask title: {task.title}\n\n"
-                    f"{self._report_endpoint_curl(session, task.id)}"
+                # but fall back to a simpler message that still uses the same
+                # verdict-specific durable recovery call_ids.
+                prompt = self._build_hard_recovery_reviewer_fallback_prompt(
+                    task,
+                    session,
+                    interruption_reason,
+                    recovery_attempt=new_hard_attempts,
                 )
         else:
             prompt = self._build_hard_recovery_worker_prompt(
-                workspace, task, session, interruption_reason
+                workspace,
+                task,
+                session,
+                interruption_reason,
+                recovery_attempt=new_hard_attempts,
             )
 
         await self.send_session_message(session.id, prompt)
