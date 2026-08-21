@@ -9762,3 +9762,230 @@ def _next_nonempty_line(src: str, current: str) -> str:
         if line == current and i + 1 < len(lines):
             return lines[i + 1]
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Round-3 regression: durable fingerprint + save-failure rollback + cold reload
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_report_call_id_fingerprint_includes_goal_packet(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """The persisted call_id fingerprint must cover the exact Goal Packet.
+
+    Same call_id + identical Goal Packet -> returns the existing report
+    (idempotent). Same call_id + different Goal Packet -> ReportCallIdConflict.
+    This guards against a fingerprint that omitted goal_packet, which would
+    let a retry with a changed GP silently overwrite the approved plan.
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentReportCreate,
+        AgentReportState,
+        AgentType,
+        GoalPacket,
+        WorkspaceTask,
+        WorkspaceTaskStatus,
+    )
+    from claude_hub.services.workspace_manager._reports import ReportCallIdConflict
+
+    session_id = "gp-fp-session"
+    _make_managed_session(manager, session_id, ws_id)
+
+    task = WorkspaceTask(
+        id="gp-fp-task",
+        workspace_id=ws_id,
+        title="gp fingerprint",
+        prompt="do it",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    manager.tasks[task.id] = task
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"task_id": task.id, "current_task_id": task.id}
+    )
+
+    gp = GoalPacket(
+        objective="build X",
+        acceptance_criteria=["X works"],
+        validation_plan=["pytest"],
+        assumptions=[],
+        out_of_scope=[],
+        handoff_requirements=[],
+    )
+
+    payload = AgentReportCreate(
+        task_id=task.id,
+        state=AgentReportState.WORKING,
+        message="goal packet",
+        message_en="goal packet",
+        message_zh="目标包",
+        call_id=f"{task.id}-working-1",
+        goal_packet=gp,
+    )
+
+    first = await manager.create_report(session_id, payload)
+
+    # Same call_id + identical Goal Packet -> same report (idempotent).
+    second = await manager.create_report(session_id, payload)
+    assert second.id == first.id
+    assert len(manager.reports) == 1
+
+    # Same call_id + different Goal Packet -> conflict.
+    gp_changed = gp.model_copy(update={"objective": "build X and Y"})
+    payload_changed = payload.model_copy(update={"goal_packet": gp_changed})
+    with pytest.raises(ReportCallIdConflict):
+        await manager.create_report(session_id, payload_changed)
+
+
+@pytest.mark.asyncio
+async def test_report_save_failure_rolls_back_in_memory_state(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """If _save_state fails, in-memory mutations must be rolled back.
+
+    After a failed save, the report, session call_id mapping, and task state
+    must be restored to their pre-mutation values so a retry with the same
+    call_id can succeed (instead of hitting a phantom conflict or a stale
+    in-memory report that was never persisted).
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentReportCreate,
+        AgentReportState,
+        AgentType,
+        WorkspaceTask,
+        WorkspaceTaskStatus,
+    )
+
+    session_id = "rollback-session"
+    _make_managed_session(manager, session_id, ws_id)
+
+    task = WorkspaceTask(
+        id="rollback-task",
+        workspace_id=ws_id,
+        title="rollback",
+        prompt="do it",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    manager.tasks[task.id] = task
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"task_id": task.id, "current_task_id": task.id}
+    )
+
+    payload = AgentReportCreate(
+        task_id=task.id,
+        state=AgentReportState.WORKING,
+        message="will fail to save",
+        message_en="will fail to save",
+        message_zh="保存失败",
+        call_id=f"{task.id}-working-1",
+    )
+
+    # Snapshot pre-mutation state.
+    pre_session = manager.sessions[session_id].model_copy(deep=True)
+    pre_task = manager.tasks[task.id].model_copy(deep=True)
+    pre_report_count = len(manager.reports)
+
+    # Make _save_state fail on the first call, then succeed.
+    calls = {"n": 0}
+    original_save = manager._save_state
+
+    def flaky_save() -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("simulated disk failure")
+        # Fall back to the real implementation.
+        return original_save()
+
+    monkeypatch.setattr(manager, "_save_state", flaky_save)
+
+    # First attempt: save fails, exception propagates.
+    with pytest.raises(OSError):
+        await manager.create_report(session_id, payload)
+
+    # In-memory state must be rolled back: no new report, session/task
+    # unchanged, and the call_id mapping must not be persisted in memory.
+    assert len(manager.reports) == pre_report_count
+    assert manager.sessions[session_id].model_dump() == pre_session.model_dump()
+    assert manager.tasks[task.id].model_dump() == pre_task.model_dump()
+    assert payload.call_id not in manager.sessions[session_id].report_call_ids
+
+    # Second attempt: save succeeds, report is created.
+    retry = await manager.create_report(session_id, payload)
+    assert retry.id in manager.reports
+    assert manager.sessions[session_id].report_call_ids.get(payload.call_id) == retry.id
+
+
+@pytest.mark.asyncio
+async def test_report_call_id_idempotent_across_cold_reload(
+    manager: WorkspaceManager, ws_id: str, state_root: Path
+) -> None:
+    """A report's call_id fingerprint must survive a cold state reload.
+
+    After persisting a report with call_id C, a fresh WorkspaceManager loaded
+    from the same state root must recognize a retry with the same call_id +
+    same content and return the existing report (not create a duplicate).
+    This proves the fingerprint is persisted to disk, not just held in memory.
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentReportCreate,
+        AgentReportState,
+        AgentType,
+        WorkspaceTask,
+        WorkspaceTaskStatus,
+    )
+
+    session_id = "cold-reload-session"
+    _make_managed_session(manager, session_id, ws_id)
+
+    task = WorkspaceTask(
+        id="cold-reload-task",
+        workspace_id=ws_id,
+        title="cold reload",
+        prompt="do it",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    manager.tasks[task.id] = task
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"task_id": task.id, "current_task_id": task.id}
+    )
+
+    payload = AgentReportCreate(
+        task_id=task.id,
+        state=AgentReportState.WORKING,
+        message="cold reload check",
+        message_en="cold reload check",
+        message_zh="冷重载检查",
+        call_id=f"{task.id}-working-1",
+    )
+
+    first = await manager.create_report(session_id, payload)
+    assert first.call_id == payload.call_id
+
+    # The fingerprint must be persisted on the session.
+    assert payload.call_id in manager.sessions[session_id].report_call_fingerprints
+
+    # Cold reload: a brand-new manager loads state from disk.
+    fresh = WorkspaceManager()
+    assert fresh.sessions.get(session_id) is not None
+    assert payload.call_id in fresh.sessions[session_id].report_call_fingerprints
+
+    # Retry with the same call_id + same content returns the existing report.
+    retry = await fresh.create_report(session_id, payload)
+    assert retry.id == first.id
+    assert len(fresh.reports) == 1

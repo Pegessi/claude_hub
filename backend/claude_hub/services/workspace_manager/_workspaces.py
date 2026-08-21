@@ -300,9 +300,12 @@ def _build_resident_master_prompt(
         "-H 'Content-Type: application/json' "
         '-d \'{"state":"working","message":"Resident orchestrator cycle: <summary>",'
         '"message_en":"Resident orchestrator cycle: <summary>",'
-        '"message_zh":"常驻编排周期：<摘要>"}\'\n'
+        '"message_zh":"常驻编排周期：<摘要>",'
+        '"call_id":"resident-heartbeat-<cycle_count>"}\'\n'
         "Replace <summary> with: requirements identified, tasks created, tasks dispatched (and to "
         "which agents), and tasks accepted this cycle (or 'no actionable work this cycle'). "
+        "Replace <cycle_count> with a monotonically increasing integer for this resident session "
+        "(e.g. 1, 2, 3, ...) so each heartbeat has a unique call_id. "
         "Always include message_en (concise English) and message_zh (concise 中文).\n\n"
         "When this cycle's bounded orchestration pass is done and the heartbeat is posted, STOP "
         "and wait for the next wake-up."

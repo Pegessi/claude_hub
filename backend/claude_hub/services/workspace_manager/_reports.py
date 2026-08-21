@@ -209,12 +209,19 @@ class _ReportsMixin:
         # ------------------------------------------------------------------
         call_id = payload.call_id
         assert call_id  # guaranteed non-empty by create_report's adapter
+        new_fp = self._compute_report_fingerprint(payload)
         existing_report_id = session.report_call_ids.get(call_id)
         if existing_report_id is not None:
             existing = self.reports.get(existing_report_id)
             if existing is not None:
-                new_fp = self._compute_report_fingerprint(payload)
-                existing_fp = self._compute_report_fingerprint(existing)
+                # Prefer the persisted canonical fingerprint (stored at first
+                # creation) over recomputing from the existing report. The
+                # persisted fingerprint is the source of truth for the
+                # call_id's content; recomputing from the report could drift
+                # if the model's serialization changes. We still compute the
+                # existing report's fingerprint as a cross-check.
+                persisted_fp = session.report_call_fingerprints.get(call_id)
+                existing_fp = persisted_fp or self._compute_report_fingerprint(existing)
                 if new_fp == existing_fp:
                     # Idempotent retry: the report was durably committed
                     # in a previous attempt, but the response may have
@@ -242,9 +249,30 @@ class _ReportsMixin:
                     f"report payload; refusing to overwrite."
                 )
 
+        # ------------------------------------------------------------------
+        # Pre-commit rollback snapshots.
+        #
+        # ``_save_state`` is the durable commit point. If it fails (disk
+        # full, permission error, fsync failure, etc.), the in-memory
+        # mutations below must be rolled back so that a client retry with
+        # the same call_id sees a clean state and can succeed. Without
+        # rollback, a failed save would leave the report/session/task
+        # mutated in memory but not on disk; the next call_id lookup would
+        # find the in-memory report and return it, but a cold restart
+        # would lose it — violating durability.
+        #
+        # We snapshot the session and task (if any) BEFORE any mutation
+        # (including _rename_session_for_task) and remove the report from
+        # self.reports on rollback. The snapshot is a reference to the
+        # original object; since all mutations below replace the dict
+        # entry with a new object (model_copy), the original is preserved.
+        # ------------------------------------------------------------------
+        _orig_session = self.sessions.get(session.id)
+        task_id = payload.task_id or session.task_id or session.current_task_id
+        _orig_task = self.tasks.get(task_id) if task_id else None
+
         now = _wm._now()
         task: WorkspaceTask | None = None
-        task_id = payload.task_id or session.task_id or session.current_task_id
         if task_id:
             task = self.tasks.get(task_id)
             if not task or task.workspace_id != session.workspace_id:
@@ -299,6 +327,11 @@ class _ReportsMixin:
             review_cycle=task.review_cycle if task else 0,
             created_at=now,
         )
+
+        # ``_report_is_new`` tracks whether the report was just added to
+        # ``self.reports`` so the rollback handler knows whether to pop it.
+        _report_is_new = report.id not in self.reports
+
         self.reports[report.id] = report
 
         session_status = self._status_from_report(payload.state, session)
@@ -314,11 +347,16 @@ class _ReportsMixin:
         if task:
             session_update["title"] = session.title
         # Persist the call_id → report_id mapping so a retry with the same
-        # call_id returns this report (idempotent intake).
+        # call_id returns this report (idempotent intake). Also persist the
+        # canonical fingerprint so a retry compares against the stored
+        # fingerprint directly (no reliance on recomputing from the report).
         if payload.call_id:
             report_call_ids = dict(session.report_call_ids)
             report_call_ids[payload.call_id] = report.id
             session_update["report_call_ids"] = report_call_ids
+            report_call_fingerprints = dict(session.report_call_fingerprints)
+            report_call_fingerprints[payload.call_id] = new_fp
+            session_update["report_call_fingerprints"] = report_call_fingerprints
         self.sessions[session.id] = session.model_copy(update=session_update)
 
         if task_id and task_id in self.tasks:
@@ -637,7 +675,35 @@ class _ReportsMixin:
         if ack_set:
             self._ack_call_ids(task_id, session.id, list(ack_set))
 
-        self._save_state()
+        # ------------------------------------------------------------------
+        # Durable commit with rollback.
+        #
+        # ``_save_state`` writes the full workspace state to disk atomically.
+        # If it fails, we roll back every in-memory mutation we made (report,
+        # session, task) so the state is consistent with what's on disk. The
+        # client can then retry with the same call_id; since the report was
+        # never persisted, the retry creates it fresh.
+        # ------------------------------------------------------------------
+        try:
+            self._save_state()
+        except Exception:
+            logger.exception(
+                "create_report: _save_state failed; rolling back in-memory mutations "
+                "workspace_id=%s task_id=%s session_id=%s report_id=%s call_id=%s",
+                session.workspace_id,
+                task_id,
+                session.id,
+                report.id,
+                call_id,
+            )
+            if _report_is_new:
+                self.reports.pop(report.id, None)
+            if _orig_session is not None:
+                self.sessions[session.id] = _orig_session
+            if _orig_task is not None:
+                self.tasks[task_id] = _orig_task
+            raise
+
         if task_id and task_id in self.tasks:
             await self._after_report_recorded(
                 self.tasks[task_id], self.sessions[session.id], report
@@ -1620,6 +1686,7 @@ class _ReportsMixin:
             '"message":"Supplemented Goal Packet evidence.",'
             '"message_en":"Supplemented Goal Packet evidence.",'
             '"message_zh":"已补充目标包验收证据。",'
+            f'"call_id":"{task.id}-gp-supplement-1",'
             '"goal_packet":{"objective":"Concrete task objective.",'
             '"acceptance_criteria":["Reviewer-checkable criterion."],'
             '"validation_plan":["Command or manual check."],'
