@@ -43,6 +43,8 @@
 - Canonicalize leading/trailing `call_id` whitespace before preflight and
   persistence so a padded retry cannot rename a reused session
   (`test_padded_call_id_retry_has_zero_side_effects_after_reassignment`).
+- Bound-session matching-call replay runs under the same snapshot/restore
+  as new reports (`test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges`).
 - Isolated E2E keeps Claude launch credentials in the backend process
   environment; ttyd writes mode-0600 launch scripts and unlinks them on
   every exit (`remaining_credential_artifacts=[]`).
