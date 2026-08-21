@@ -920,6 +920,81 @@ UUID-unique session, `cat >> effect_file` records pasted bytes):
   and effect count stays 1. `resume_existing_call` and `_pump_session_messages`
   also do not repaste.
 
+## Review Round 33 Fixes (2026-08-21)
+
+### Delivery state-machine correctness
+
+Five correctness fixes so ambiguous/partial failures never leave the
+lifecycle terminal or silently lost.
+
+#### 1. `followup` on `DeliveryUncertain` stays non-terminal
+
+`followup` persists the `MESSAGE` intent (run event) **before** the tmux
+send. If the send raises `DeliveryUncertain`, the run must NOT be marked
+`FAILED` — the intent is durable and the operator retries via
+`retry_uncertain_delivery`. The `except DeliveryUncertain` block now logs
+a warning and re-raises without `_update_run_status(FAILED)` or a
+`FAILED` event.
+
+#### 2. `emit_event` duplicate branch: persist-fail re-raises, wake after commit
+
+The duplicate-`call_id` branch of `emit_event` previously returned
+success even if `_persist` failed. Now it calls `self._persist()`
+directly and only `_wake_for_run(...)` after the durable commit succeeds;
+any persist exception propagates.
+
+#### 3. ACK-vs-retry race: reconcile before delivered event, no swallow, no downgrade
+
+`_emit_followup_delivered_if_followup` now calls
+`reconcile_followup_outcome` (which appends `followup:outcome`) **before**
+appending the `followup:delivered` event, and does not swallow
+persistence exceptions. After the pump, a `call_id` already in
+`delivered_call_ids` is never downgraded to `uncertain` (the
+receipt-present compensation path checks `cur_session.delivered_call_ids`
+first).
+
+#### 4. `_ack_call_ids` transaction ordering: reconcile before delivered mutation
+
+Because `agent_tree._persist` → `_wm._save_state()` saves the **full**
+workspace state, the lifecycle reconciliation (outcome event + delivered
+event + resident ack) must run **before** the session/task `delivered`
+mutation. That way a persist failure leaves disk at `processing` with
+the payload intact. The session/task `delivered` mutation is in-memory
+only; `create_report`'s final `_save_state` commits it.
+
+#### 5. `reconcile_followup_outcome` delegates terminal semantics to `_update_run_status`
+
+Removed the `run.status not in _TERMINAL_STATUSES` guard. Reconcile now
+always calls `_update_run_status(RUNNING, persist=False)`. The existing
+transition validator allows `COMPLETED`/`INTERRUPTED` → `RUNNING`
+(resume) and refuses `FAILED` → `RUNNING` (truly terminal). A
+`DeliveryUncertain` on a completed/interrupted run is therefore
+recoverable by operator retry.
+
+### Regression tests (10, `tests/test_agent_tree.py`)
+
+- `test_followup_delivery_uncertain_keeps_run_non_terminal`
+- `test_reconcile_resumes_non_failed_terminal_runs` (parametrized:
+  WAITING/COMPLETED/INTERRUPTED→RUNNING, FAILED stays FAILED)
+- `test_reconcile_persist_fail_in_memory_retained_then_durable`
+- `test_retry_uncertain_reconcile_fail_compensates_then_succeeds`
+- `test_emit_event_duplicate_persist_fail_reraises_no_wake`
+- `test_ack_delivered_event_persist_fail_reload_keeps_processing_and_payload`
+- `test_ack_vs_retry_race_delivered_not_downgraded`
+- plus three supporting cases.
+
+### Validation (unmasked exit codes)
+
+| Suite | Result | Exit |
+| --- | --- | --- |
+| `tests/test_agent_tree.py` | 156 passed | 0 |
+| `tests/test_workspaces.py` | 133 passed | 0 |
+| `tests/test_tmux_receipt_integration.py` | 4 passed | 0 |
+| `tests/test_workspace_resident_agent.py` | 60 passed | 0 |
+
+mypy clean on `claude_hub/`; black/isort clean on touched files;
+`git diff --check` clean.
+
 ## Migration / Rollback Guide
 
 ### What changes on disk
@@ -1114,8 +1189,9 @@ increment:
 | Suite | Result | Exit |
 | --- | --- | --- |
 | `tests/test_workspaces.py` | 133 passed | 0 |
-| `tests/test_agent_tree.py` | 146 passed | 0 |
+| `tests/test_agent_tree.py` | 156 passed | 0 |
 | `tests/test_tmux_receipt_integration.py` | 4 passed | 0 |
+| `tests/test_workspace_resident_agent.py` | 60 passed | 0 |
 
 ### mypy (clean cache, `uv run mypy .`)
 

@@ -52,6 +52,7 @@ from .agent_tree_adapters import (
     NativeSubagentAdapter,
     ResidentRootAdapter,
 )
+from .workspace_manager._constants import DeliveryUncertain
 
 if TYPE_CHECKING:
     from claude_hub.services.workspace_manager import WorkspaceManager
@@ -882,6 +883,25 @@ class AgentTreeManager:
             await self._adapter(recipient.executor_kind).followup(
                 recipient, req.message, call_id=req.call_id
             )
+        except DeliveryUncertain:
+            # The delivery is ambiguous (tmux send failed in a way that
+            # leaves the paste state unknown). This is NOT a terminal
+            # failure: the operator can retry via retry_uncertain_delivery.
+            # We MUST NOT mark the run FAILED or emit a FAILED event — that
+            # would strand the run in a terminal state even though the
+            # message may still reach the worker (or already has). The
+            # MESSAGE intent event is already persisted, so the run's
+            # lifecycle stays non-terminal and the outcome event will be
+            # reconciled once the delivery settles (operator retry or
+            # recovery replay). Re-raise so the caller surfaces the
+            # uncertain state instead of a false success.
+            logger.warning(
+                "followup delivery uncertain for run %s call_id=%s; "
+                "run stays non-terminal, operator retry required",
+                recipient.id,
+                req.call_id,
+            )
+            raise
         except Exception as exc:
             logger.exception("followup failed for run %s", recipient.id)
             # Adapter failed: no side-effect applied, so rollback_on_error
@@ -1187,6 +1207,89 @@ class AgentTreeManager:
     # Executor -> Hub event ingestion
     # ------------------------------------------------------------------
 
+    def reconcile_followup_outcome(
+        self,
+        *,
+        workspace_id: str,
+        call_id: str,
+    ) -> None:
+        """Reconcile a followup's outcome event after its delivery settles.
+
+        When :meth:`followup` raises :class:`DeliveryUncertain`, the
+        ``followup:outcome`` event is intentionally NOT emitted (the
+        dispatch outcome is unknown). Once the operator retries the
+        uncertain delivery and the call_id lands in ``processing`` (or
+        ``delivered``), the dispatch has effectively succeeded, so we
+        emit the durable ``followup:outcome`` event and move the run to
+        ``RUNNING``.
+
+        Atomic + idempotent:
+
+        * The run status is always (re)set to ``RUNNING`` in-memory
+          (``persist=False``), even if the outcome event already exists.
+          This closes the half-commit window where the outcome was
+          persisted but the status update was lost.
+        * If the outcome event (call_id ``f"{call_id}:outcome"``) does
+          not yet exist, it is appended in-memory (``persist=False``).
+          If it already exists, ``_append_event`` returns it unchanged
+          (``is_new=False``) — no duplicate sequence/call_id.
+        * A single ``_persist()`` atomically commits the outcome event
+          (if new) and the RUNNING status together. On failure the
+          in-memory state is retained so the same call_id can retry the
+          persist; we re-raise so the caller sees the failure.
+        * Only after the durable commit succeeds do we wake the
+          recipient so supervisors observe the reconciled state.
+        """
+        record = self._call_record(workspace_id, call_id)
+        if record is None:
+            return
+        if record.get("action") != "followup":
+            return
+        followup_event = record["event"]
+        recipient_id = followup_event.agent_run_id
+        author_id = followup_event.author
+        outcome_call_id = f"{call_id}:outcome"
+
+        run = self._runs.get(recipient_id)
+        if run is not None:
+            # Always reset to RUNNING in-memory, even if the outcome
+            # event already exists. This recovers from the half-commit
+            # window (outcome persisted, status lost) and resumes
+            # COMPLETED/INTERRUPTED runs after a successful followup
+            # delivery. _update_run_status's transition validator
+            # refuses FAILED -> RUNNING (truly terminal) and allows
+            # COMPLETED/INTERRUPTED -> RUNNING (resume).
+            self._update_run_status(recipient_id, AgentRunStatus.RUNNING, persist=False)
+
+        # Append the outcome event if it doesn't exist yet. If it does,
+        # _append_event returns the existing event (is_new=False) and
+        # does not advance the sequence or create a duplicate call_id.
+        self._append_event(
+            workspace_id=workspace_id,
+            agent_run_id=recipient_id,
+            event_type=AgentEventType.PROGRESS,
+            author=recipient_id,
+            recipient=author_id,
+            call_id=outcome_call_id,
+            action="followup:outcome",
+            target=recipient_id,
+            fingerprint=_request_fingerprint(
+                "followup:outcome",
+                {"run_id": recipient_id, "followup_call_id": call_id},
+            ),
+            payload={"delivered": False, "followup_call_id": call_id},
+            persist=False,
+        )
+
+        # Single atomic persist for the outcome event (if new) and the
+        # RUNNING status. On failure the in-memory state is kept so the
+        # same call_id can retry; re-raise so the caller does not see a
+        # false success.
+        self._persist()
+
+        # Wake only after the durable commit succeeds.
+        self._wake_for_run(recipient_id, author_id)
+
     def emit_event(
         self,
         *,
@@ -1235,18 +1338,13 @@ class AgentTreeManager:
         if not is_new:
             # Duplicate call_id: the event already exists in memory. It may
             # not have been persisted yet (a previous _persist() failed).
-            # Try to persist it now so the event survives a restart. If
-            # persist fails again, the in-memory event is kept and the
-            # caller can retry.
-            try:
-                self._persist()
-            except Exception:
-                logger.exception(
-                    "emit_event: failed to persist duplicate event seq=%s "
-                    "call_id=%s; keeping in-memory event for retry",
-                    event.sequence,
-                    call_id,
-                )
+            # Persist it now so the event survives a restart. If persist
+            # fails, re-raise so the caller knows the event is NOT durable
+            # and can retry — we must NOT return success for a non-durable
+            # event. Only after a successful durable commit do we wake the
+            # recipient so supervisors observe the event.
+            self._persist()
+            self._wake_for_run(agent_run_id, recipient)
             return event
 
         run = self._runs.get(agent_run_id)
