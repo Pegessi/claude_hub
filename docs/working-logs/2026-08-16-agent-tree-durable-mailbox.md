@@ -1,5 +1,12 @@
 # Agent Tree + Durable Mailbox — Unified Agent-to-Agent Coordination
 
+> **Current public boundary (2026-08-22).** Agent-facing recipes live in
+> [`docs/AGENT_TREE.md`](../AGENT_TREE.md). Public spawn is `managed_task`
+> only (Claude / Codex / Cursor). `native_subagent` and `external_job` are
+> unavailable placeholders: public spawn returns HTTP 422. This file is
+> historical evidence. Early sections that mention those kinds as live
+> executors are design notes, not a public API.
+
 ## Overview
 
 This change introduces a single persistent coordination layer that converges
@@ -17,6 +24,11 @@ child runs, sends them messages, follows up to resume their turn, waits on
 directed subtree events, and interrupts them. The Hub owns all lifecycle state;
 executors (managed tasks, native subagents, external jobs) only report progress
 by emitting events.
+
+> **Stale if read as a public spawn contract.** `native_subagent` /
+> `external_job` do not report live progress on the public API; spawn is
+> HTTP 422 until a real runtime exists. Keep the sentence above as the
+> original design intent.
 
 ## Data Model (`models/agent_tree.py`)
 
@@ -2005,3 +2017,9 @@ new-report persist, and `finally` discards that same token. Regression:
 | `test_predecessor_padded_call_id_post_save_failure_converges` | passed | 0 |
 | isolated real-CLI E2E | accepted in attempt 7/8 | 0 |
 | `mypy` / Black / isort / compileall / `git diff --check` | clean | 0 |
+
+## Round 12: agent-facing guide (2026-08-22)
+
+Merge-prep docs only. Canonical recipes: `docs/AGENT_TREE.md`. Top-of-log
+banner marks `native_subagent` / `external_job` as HTTP 422 placeholders.
+No runtime or UI change.
