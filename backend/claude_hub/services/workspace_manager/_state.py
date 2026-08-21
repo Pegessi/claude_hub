@@ -18,6 +18,11 @@ class _StateMixin:
         # concurrent pump cycles cannot both send the same pending call_id
         # to tmux (which would duplicate the model turn).
         self._pump_locks: dict[str, asyncio.Lock] = {}
+        # Per-(session_id, call_id) locks: serialize report intake so two
+        # concurrent requests with the same call_id cannot both create a
+        # report. The first creates it; the second sees the existing report
+        # and either returns it (fingerprint match) or raises 409.
+        self._report_call_locks: dict[str, asyncio.Lock] = {}
         self._monitor_task: asyncio.Task[None] | None = None
         # Cache of resolved git worktree roots per workspace id: (timestamp, roots).
         # Used by artifact preview to resolve markdown produced inside a worktree.

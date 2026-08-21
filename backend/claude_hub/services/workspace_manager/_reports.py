@@ -10,6 +10,18 @@ from ..agent_tree import _request_fingerprint
 from ._constants import *  # noqa: F401,F403
 
 
+class ReportCallIdConflict(ValueError):
+    """Raised when a call_id is reused with a different payload fingerprint.
+
+    Maps to HTTP 409 Conflict at the API layer. A call_id identifies a single
+    durable report; reusing it with different content is a client error.
+
+    Inherits from ValueError so existing tests that assert ``pytest.raises(
+    ValueError)`` continue to pass; the API layer catches this specific
+    subclass and returns 409 rather than 400.
+    """
+
+
 class _ReportsMixin:
     def _should_route_goal_packet_for_approval(
         self,
@@ -113,6 +125,7 @@ class _ReportsMixin:
             "validation",
             "risks",
             "acceptance_check",
+            "goal_packet",
             "evaluation_report",
             "review_profiles",
             "profile_results",
@@ -135,6 +148,48 @@ class _ReportsMixin:
             raise KeyError(session_id)
 
         # ------------------------------------------------------------------
+        # call_id requirement + legacy compatibility adapter.
+        #
+        # Every report must carry a stable non-empty call_id so that retries
+        # (error-after-commit, context reload, network blip) are idempotent.
+        # New clients (worker/reviewer/resident prompts) always emit one.
+        # Legacy callers that omit call_id get a deterministic adapter call_id
+        # derived from the payload fingerprint: same content → same call_id
+        # → same report. This preserves idempotency for legacy paths without
+        # requiring them to track a call_id.
+        # ------------------------------------------------------------------
+        call_id = (payload.call_id or "").strip()
+        if not call_id:
+            content_fp = self._compute_report_fingerprint(payload)
+            call_id = f"legacy:{content_fp[:32]}"
+            payload = payload.model_copy(update={"call_id": call_id})
+
+        # ------------------------------------------------------------------
+        # Atomic claim of (session_id, call_id).
+        #
+        # Two concurrent requests with the same call_id must not both pass
+        # the "existing_report_id is None" check and create two reports.
+        # A per-(session, call_id) asyncio lock serializes the claim so only
+        # one request creates the report; the other sees the existing report
+        # and either returns it (fingerprint match) or raises 409 (mismatch).
+        # ------------------------------------------------------------------
+        lock_key = f"{session_id}:{call_id}"
+        lock = self._report_call_locks.get(lock_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._report_call_locks[lock_key] = lock
+
+        async with lock:
+            return await self._create_report_under_lock(session_id, payload)
+
+    async def _create_report_under_lock(
+        self, session_id: str, payload: AgentReportCreate
+    ) -> AgentReport:
+        session = self.sessions.get(session_id)
+        if not session:
+            raise KeyError(session_id)
+
+        # ------------------------------------------------------------------
         # Report intake idempotency (call_id + payload fingerprint).
         #
         # create_report durably persists the report (via _save_state) BEFORE
@@ -149,45 +204,43 @@ class _ReportsMixin:
         # payload fingerprint matches, we return the existing report
         # verbatim — no duplicate, no double transition, no double event.
         # If the call_id is reused with a DIFFERENT payload, we raise
-        # ValueError (a call_id identifies a single durable report).
+        # ReportCallIdConflict (HTTP 409): a call_id identifies a single
+        # durable report.
         # ------------------------------------------------------------------
-        if payload.call_id:
-            existing_report_id = session.report_call_ids.get(payload.call_id)
-            if existing_report_id is not None:
-                existing = self.reports.get(existing_report_id)
-                if existing is not None:
-                    new_fp = self._compute_report_fingerprint(payload)
-                    existing_fp = self._compute_report_fingerprint(existing)
-                    if new_fp == existing_fp:
-                        # Idempotent retry: the report was durably committed
-                        # in a previous attempt, but the response may have
-                        # failed (e.g. a late exception in
-                        # _after_report_recorded or the agent-tree bridge).
-                        # Re-run the post-commit side effects against the
-                        # EXISTING report. Both are idempotent:
-                        #   * _after_report_recorded skips when a review is
-                        #     already in flight or a verdict is already
-                        #     recorded for this round.
-                        #   * _bridge_report_to_agent_event uses
-                        #     call_id=f"report:{existing.id}", so emit_event
-                        #     deduplicates the bridged event.
-                        # This guarantees exactly one report, one task
-                        # transition, and one bridged event across retries.
-                        existing_task = (
-                            self.tasks.get(existing.task_id) if existing.task_id else None
-                        )
-                        existing_session = self.sessions.get(existing.session_id)
-                        if existing_task is not None and existing_session is not None:
-                            await self._after_report_recorded(
-                                existing_task, existing_session, existing
-                            )
-                        if existing_session is not None:
-                            self._bridge_report_to_agent_event(existing, existing_session)
-                        return existing
-                    raise ValueError(
-                        f"call_id {payload.call_id!r} already used for a different "
-                        f"report payload; refusing to overwrite."
-                    )
+        call_id = payload.call_id
+        assert call_id  # guaranteed non-empty by create_report's adapter
+        existing_report_id = session.report_call_ids.get(call_id)
+        if existing_report_id is not None:
+            existing = self.reports.get(existing_report_id)
+            if existing is not None:
+                new_fp = self._compute_report_fingerprint(payload)
+                existing_fp = self._compute_report_fingerprint(existing)
+                if new_fp == existing_fp:
+                    # Idempotent retry: the report was durably committed
+                    # in a previous attempt, but the response may have
+                    # failed (e.g. a late exception in
+                    # _after_report_recorded or the agent-tree bridge).
+                    # Re-run the post-commit side effects against the
+                    # EXISTING report. Both are idempotent:
+                    #   * _after_report_recorded skips when a review is
+                    #     already in flight or a verdict is already
+                    #     recorded for this round.
+                    #   * _bridge_report_to_agent_event uses
+                    #     call_id=f"report:{existing.id}", so emit_event
+                    #     deduplicates the bridged event.
+                    # This guarantees exactly one report, one task
+                    # transition, and one bridged event across retries.
+                    existing_task = self.tasks.get(existing.task_id) if existing.task_id else None
+                    existing_session = self.sessions.get(existing.session_id)
+                    if existing_task is not None and existing_session is not None:
+                        await self._after_report_recorded(existing_task, existing_session, existing)
+                    if existing_session is not None:
+                        self._bridge_report_to_agent_event(existing, existing_session)
+                    return existing
+                raise ReportCallIdConflict(
+                    f"call_id {call_id!r} already used for a different "
+                    f"report payload; refusing to overwrite."
+                )
 
         now = _wm._now()
         task: WorkspaceTask | None = None

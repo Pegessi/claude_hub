@@ -37,6 +37,7 @@ from ..models import (
 )
 from ..services import workspace_manager
 from ..services.workspace_manager._constants import DeliveryUncertain
+from ..services.workspace_manager._reports import ReportCallIdConflict
 
 router = APIRouter(prefix="/api/workspaces", tags=["workspaces"])
 
@@ -567,5 +568,7 @@ async def create_session_report(
         return await workspace_manager.create_report(managed_session_id, payload)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Session not found") from e
+    except ReportCallIdConflict as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

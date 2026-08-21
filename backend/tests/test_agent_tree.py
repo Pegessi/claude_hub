@@ -9535,3 +9535,230 @@ async def test_report_call_id_reuse_with_different_payload_raises(
 
     # No duplicate report was created.
     assert len(manager.reports) == 1
+
+
+@pytest.mark.asyncio
+async def test_report_concurrent_same_call_id_creates_one_report(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """Two concurrent reports with the same call_id must create exactly one report.
+
+    Without a per-(session, call_id) lock, both requests pass the
+    ``existing_report_id is None`` check and create two reports. The lock
+    serializes the claim so the second request sees the first's report and
+    returns it (fingerprint match) instead of creating a duplicate.
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentReportCreate,
+        AgentReportState,
+        AgentType,
+        WorkspaceTask,
+        WorkspaceTaskStatus,
+    )
+
+    session_id = "concurrent-callid-session"
+    _make_managed_session(manager, session_id, ws_id)
+
+    task = WorkspaceTask(
+        id="concurrent-callid-task",
+        workspace_id=ws_id,
+        title="concurrent callid",
+        prompt="do it",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    manager.tasks[task.id] = task
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"task_id": task.id, "current_task_id": task.id}
+    )
+
+    call_id = "report:concurrent-1"
+    payload = AgentReportCreate(
+        task_id=task.id,
+        call_id=call_id,
+        state=AgentReportState.WORKING,
+        message="concurrent report",
+    )
+
+    # Fire both requests concurrently.
+    results = await asyncio.gather(
+        manager.create_report(session_id, payload),
+        manager.create_report(session_id, payload),
+        return_exceptions=True,
+    )
+
+    # Both must succeed (no exception) and return the SAME report.
+    assert not isinstance(results[0], Exception), results[0]
+    assert not isinstance(results[1], Exception), results[1]
+    assert results[0].id == results[1].id
+    assert len(manager.reports) == 1
+
+    # The call_id mapping points to the single report.
+    assert manager.sessions[session_id].report_call_ids[call_id] == results[0].id
+
+
+@pytest.mark.asyncio
+async def test_report_goal_packet_included_in_fingerprint(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """Two reports differing only in goal_packet must have different fingerprints.
+
+    Regression: goal_packet was omitted from the canonical fingerprint, so a
+    Goal Packet revision submitted with the same call_id would be wrongly
+    treated as an idempotent retry (same fingerprint) and silently dropped.
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentReportCreate,
+        AgentReportState,
+        AgentType,
+        GoalPacket,
+        WorkspaceTask,
+        WorkspaceTaskStatus,
+    )
+
+    session_id = "gp-fingerprint-session"
+    _make_managed_session(manager, session_id, ws_id)
+
+    task = WorkspaceTask(
+        id="gp-fingerprint-task",
+        workspace_id=ws_id,
+        title="gp fingerprint",
+        prompt="do it",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    manager.tasks[task.id] = task
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"task_id": task.id, "current_task_id": task.id}
+    )
+
+    gp_v1 = GoalPacket(
+        objective="build X",
+        acceptance_criteria=["X works"],
+        validation_plan=["pytest"],
+        assumptions=[],
+        out_of_scope=[],
+        handoff_requirements=[],
+    )
+    gp_v2 = GoalPacket(
+        objective="build X and Y",
+        acceptance_criteria=["X works", "Y works"],
+        validation_plan=["pytest"],
+        assumptions=[],
+        out_of_scope=[],
+        handoff_requirements=[],
+    )
+
+    base = dict(
+        task_id=task.id,
+        state=AgentReportState.WORKING,
+        message="goal packet",
+    )
+    r1 = AgentReportCreate(**base, goal_packet=gp_v1)
+    r2 = AgentReportCreate(**base, goal_packet=gp_v2)
+
+    fp1 = manager._compute_report_fingerprint(r1)
+    fp2 = manager._compute_report_fingerprint(r2)
+    assert fp1 != fp2, "goal_packet must be part of the canonical fingerprint"
+
+
+@pytest.mark.asyncio
+async def test_report_legacy_call_id_adapter_is_deterministic(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """Reports without a call_id get a deterministic adapter call_id from content.
+
+    Legacy clients that omit call_id still get idempotency: the backend
+    derives a call_id from the payload fingerprint, so the same content
+    submitted twice returns the same report.
+    """
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentReportCreate,
+        AgentReportState,
+        AgentType,
+        WorkspaceTask,
+        WorkspaceTaskStatus,
+    )
+
+    session_id = "legacy-callid-session"
+    _make_managed_session(manager, session_id, ws_id)
+
+    task = WorkspaceTask(
+        id="legacy-callid-task",
+        workspace_id=ws_id,
+        title="legacy callid",
+        prompt="do it",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    manager.tasks[task.id] = task
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"task_id": task.id, "current_task_id": task.id}
+    )
+
+    # No call_id provided.
+    payload = AgentReportCreate(
+        task_id=task.id,
+        state=AgentReportState.WORKING,
+        message="legacy report",
+    )
+
+    first = await manager.create_report(session_id, payload)
+    # The adapter call_id is persisted on the report.
+    assert first.call_id and first.call_id.startswith("legacy:")
+
+    # Submitting the same content again (still no call_id) returns the
+    # existing report — the adapter call_id is deterministic.
+    second = await manager.create_report(session_id, payload)
+    assert second.id == first.id
+    assert len(manager.reports) == 1
+
+
+def test_production_prompts_include_call_id_in_report_examples() -> None:
+    """Every report curl example in the production prompts must include call_id.
+
+    Regression: prompts emitted no call_id, so report intake was non-idempotent
+    in production. This test greps the rendered report examples for a call_id
+    field.
+    """
+    from pathlib import Path
+
+    prompts_path = (
+        Path(__file__).resolve().parent.parent
+        / "claude_hub"
+        / "services"
+        / "workspace_manager"
+        / "_prompts.py"
+    )
+    src = prompts_path.read_text()
+    # Find every line that starts a report POST body (the -d '{...').
+    report_lines = [line for line in src.splitlines() if '"state":"' in line and "-d" in line]
+    assert report_lines, "expected at least one report curl example in _prompts.py"
+    for line in report_lines:
+        # The call_id field may be on the same line or the next line; check
+        # that "call_id" appears within the -d block. We approximate by
+        # checking the line itself — all current examples put call_id on the
+        # same line as state or the immediately following line.
+        assert "call_id" in line or "call_id" in _next_nonempty_line(
+            src, line
+        ), f"report example missing call_id: {line.strip()}"
+
+
+def _next_nonempty_line(src: str, current: str) -> str:
+    lines = src.splitlines()
+    for i, line in enumerate(lines):
+        if line == current and i + 1 < len(lines):
+            return lines[i + 1]
+    return ""
