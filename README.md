@@ -16,6 +16,9 @@ resident agents, sending follow-up instructions, and reviewing progress reports.
 - Keep resident Claude or Codex agents running in persistent terminal tabs.
 - Add tasks with optional pasted image attachments.
 - Dispatch tasks to a specific agent or let the workspace choose the available agent.
+- Use the backend Agent Tree (`docs/AGENT_TREE.md`) so a Resident or worker
+  can spawn managed Claude/Codex/Cursor children, wait/ACK the durable
+  mailbox, and retry with stable `call_id`s. There is no tree UI yet.
 - Track task state across Todo, Queued, Working, Review, and Done columns.
 - Send follow-up messages from the task detail panel without leaving the board.
 - Record agent reports with changed files, validation, risks, and review status.
@@ -261,6 +264,8 @@ rules). **No change — even a small one — should be made directly on `main`.*
 
 ## Reference Docs
 
+- [docs/AGENT_TREE.md](docs/AGENT_TREE.md): agent-facing Agent Tree / durable
+  mailbox recipes (backend-only; no UI yet)
 - [CLAUDE.md](CLAUDE.md): project conventions and development workflow
 - [CHANGELOG.md](CHANGELOG.md): merge-level change history
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): auth and public deployment setup

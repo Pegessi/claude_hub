@@ -5,6 +5,19 @@
 
 ## Unreleased
 
+### docs: make Agent Tree discoverable for agents
+
+- Add `docs/AGENT_TREE.md` as the canonical backend-only agent guide (mental
+  model, 422 stubs, copy-paste REST, `executor_config`, `call_id` / 400 / 409 /
+  422 / uncertain recovery, migration/rollback).
+- Link it from root `README.md`, `backend/README.md`, and the agent entry
+  guides. Expand the Resident injected Agent Tree block with the same
+  contract. Label stale working-log claims that simulator stubs are public.
+  Cursor MUST omit `executor_config.model` (`ManagedTaskAdapter` rejects it).
+  Pinned-session spawn omits `executor_config` (Hub derives) or must match
+  the selected session; adapter-rejected managed config is HTTP 400, and
+  HTTP 422 is only unavailable executors.
+
 ### feat: make Agent Tree a reliable multi-CLI subagent control plane
 
 - Make report intake and mailbox ACK advancement one workspace-scoped atomic

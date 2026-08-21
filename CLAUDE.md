@@ -110,6 +110,7 @@ task.
 
 | Task shape | Read first |
 | --- | --- |
+| Agent Tree / durable mailbox (agent use) | `docs/AGENT_TREE.md` |
 | Architecture / data flow | `ARCHITECTURE.md` |
 | Recent shipped behavior | `CHANGELOG.md` |
 | Bug symptom history | `WORKLOG.md` |
