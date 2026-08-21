@@ -270,7 +270,8 @@ async def ack(
 ) -> AgentRun:
     try:
         _assert_authority(_manager(), run_id, session_id)
-        return _manager().ack(workspace_id, run_id, sequence)
+        async with _manager()._wm.workspace_mutation_lock(workspace_id):
+            return _manager().ack(workspace_id, run_id, sequence)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:

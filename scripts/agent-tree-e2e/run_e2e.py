@@ -32,11 +32,10 @@ NOPROXY = {
     "ALL_PROXY": "",
 }
 
-# Observing GETs plus tree spawn/wait/ack. POST /reports is forbidden.
+# Setup/observe only. The managed CLI is the only report writer.
 _ALLOWED_POST_PREFIXES = (
     "/api/workspaces",
     "/api/agent-tree/spawn",
-    "/api/agent-tree/followup",
     "/api/agent-tree/wait",
     "/api/agent-tree/ack",
     "/api/agent-tree/interrupt",
@@ -46,6 +45,10 @@ _ALLOWED_POST_PREFIXES = (
 def http(method: str, path: str, body: dict | None = None, query: dict | None = None, timeout: int = 60):
     if method == "POST" and "/reports" in path:
         raise RuntimeError(f"harness must not POST reports: {path}")
+    if method == "POST" and path.rstrip("/").endswith("/send"):
+        raise RuntimeError(f"harness must not session-send: {path}")
+    if method == "POST" and path.startswith("/api/agent-tree/followup"):
+        raise RuntimeError(f"harness must not followup: {path}")
     if method == "POST" and not path.startswith(_ALLOWED_POST_PREFIXES):
         raise RuntimeError(f"unexpected harness POST {path}")
     url = BASE + path
@@ -408,60 +411,17 @@ def main() -> int:
             owned = [r for r in reports if _is_cli_report(r)]
             return owned[0] if owned else None
 
-        report_curl = (
-            "curl --noproxy 'localhost,127.0.0.1,::1' --fail-with-body -sS "
-            f"-X POST http://localhost:{PORT}/api/workspaces/sessions/{session['id']}/reports "
-            "-H 'Content-Type: application/json' "
-            f'-d \'{{"task_id":"{task["id"]}","state":"working",'
-            f'"call_id":"{task["id"]}-working-progress-cycle-1-attempt-1",'
-            '"message":"E2E_CHILD_REPORT","message_en":"E2E_CHILD_REPORT",'
-            '"message_zh":"E2E_CHILD_REPORT"}\''
-        )
-        nudge = (
-            "Stop other work. Run this exact report curl now, then stop:\n"
-            f"{report_curl}"
-        )
         created = None
         started_wait = time.time()
         captured_early = False
-        nudged_followup = False
-        nudged_send = False
         while time.time() - started_wait < REPORT_WAIT_SECONDS:
             created = _cli_report()
             if created:
                 break
             elapsed = time.time() - started_wait
             if not captured_early and elapsed >= 20:
-                evidence["tmux_before_nudge"] = capture_tmux(session.get("tmux_session"))
+                evidence["tmux_while_waiting"] = capture_tmux(session.get("tmux_session"))
                 captured_early = True
-            if not nudged_followup and elapsed >= 45:
-                try:
-                    http(
-                        "POST",
-                        "/api/agent-tree/followup",
-                        {
-                            "workspace_id": workspace_id,
-                            "recipient_id": child["id"],
-                            "author_id": root["id"],
-                            "message": nudge,
-                            "call_id": "e2e-nudge-followup-1",
-                        },
-                    )
-                    evidence["nudged_followup"] = True
-                except Exception as exc:  # noqa: BLE001
-                    evidence["nudge_followup_error"] = str(exc)
-                nudged_followup = True
-            if not nudged_send and elapsed >= 90:
-                try:
-                    http(
-                        "POST",
-                        f"/api/workspaces/sessions/{session['id']}/send",
-                        {"message": nudge},
-                    )
-                    evidence["nudged_session_send"] = True
-                except Exception as exc:  # noqa: BLE001
-                    evidence["nudge_send_error"] = str(exc)
-                nudged_send = True
             time.sleep(2.0)
         if not created:
             evidence["tmux_on_timeout"] = capture_tmux(session.get("tmux_session"))
@@ -473,6 +433,18 @@ def main() -> int:
         evidence["cli_report_message"] = created.get("message")
         evidence["cli_report_session_id"] = created.get("session_id")
         assert created["session_id"] == session["id"]
+        log_hits = []
+        log_path = E2E_ROOT / "backend.stdout.log"
+        if log_path.exists():
+            for line in log_path.read_text(errors="replace").splitlines():
+                if "/reports" in line and "POST" in line:
+                    log_hits.append(line[-240:])
+        evidence["backend_report_access_log"] = log_hits[-8:]
+        evidence["backend_report_201"] = any("201" in line for line in log_hits)
+        if not evidence["backend_report_201"]:
+            raise RuntimeError(
+                "CLI report observed via GET, but backend log has no POST /reports 201"
+            )
 
         def _report_event():
             _, events = http(

@@ -1713,3 +1713,94 @@ authenticate; Hub workspace state stays under the temp home.
 
 Forward load remains additive. Rolling back without a `state.json` backup
 drops Agent Tree / fingerprint metadata on the next old-version save.
+
+## Round 6: report/Agent Tree serialization (2026-08-21)
+
+Delivery review attempt 4 inspected the earlier SHA
+`a67ba6cd0efe1651c627cae5a8f77dc7af386c07` (same artifact as the harness-
+injected Round 4 E2E) and required three fixes on a **new** SHA:
+
+1. **Serialize** report rollback with Agent Tree workspace mutations, plus
+   the deterministic race regression.
+2. Executor-originated CLI E2E; harness only observes the report.
+3. Correct docs/handoff and resubmit the new exact SHA.
+
+Round 5 (`80e5b10217da46d2bd0c24d41b4c68d471c9d826`) already moved the
+snapshot after rename and observed a CLI POST. This successor adds the
+requested serialization:
+
+- `WorkspaceManager.workspace_mutation_lock` is the same per-workspace
+  asyncio lock used by `create_report`.
+- `AgentTreeManager.spawn` / `send` / `followup` / `interrupt` wait on
+  that lock. The `/ack` API does too.
+- `test_report_rollback_serializes_agent_tree_spawn` starts spawn during
+  the rename await and asserts the child `call_id` is absent until report
+  rollback releases the lock; after restore the spawn persists and cold-
+  reloads.
+- `test_report_rollback_preserves_concurrent_agent_tree_write` still
+  covers the raw `emit_event` persist path (snapshot-after-rename).
+
+### Isolated real-CLI E2E (observe only)
+
+`scripts/agent-tree-e2e/run_e2e.py` no longer followup-nudges or
+session-sends. Allowed harness POSTs: workspace setup, spawn, wait, ack,
+interrupt-after-observe. It refuses `POST /reports`, `/send`, and
+`/agent-tree/followup`. The script waits on GET reports and requires a
+backend access-log `POST /reports` 201.
+
+Round 4 (`4b8136a0-...` via harness `create_report`) and any
+`/tmp/claude_hub_e2e_f6bf8165/run_e2e.py` that POSTs `/reports` are stale.
+
+### Isolated real-CLI E2E evidence (2026-08-21, observe-only)
+
+| Item | Value |
+| --- | --- |
+| Data root | `/tmp/claude_hub_e2e_f6bf8165/home` (not `~/.claude_hub`) |
+| Workspace | `a22e4d85-c2b1-4b18-9619-b6f4d85e8145` |
+| Root run | `b9c19549-47a1-4322-aa45-c490075ee901` |
+| Child run | `bfd00704-ab8b-4d44-bb43-06947c9cd96c` |
+| Child session / task | `e2e-agent-1` / `7a35dc78-13b0-42c6-b4f3-fdcbe1ce610e` |
+| Child tmux | `claude-hub-2eaa9196` |
+| Report | `47701ec4-eb1a-416e-8734-9eb411380bdf` POSTed by managed Claude CLI (`E2E_CHILD_REPORT`, call_id `7a35dc78-...-working-1`); harness never called `POST /reports`, followup, or session send |
+| Backend log | `POST /api/workspaces/sessions/e2e-agent-1/reports` 422 then **201 Created** |
+| Bridged event | `report:47701ec4-eb1a-416e-8734-9eb411380bdf` seq=3 author=child recipient=root |
+| Wait / ACK | wait returned that call_id; ACK `ack_sequence=3`; wait after ACK empty |
+| After reload | root `ack_sequence` still 3; child `managed_task` / Claude; original `report:47701ec4-...` not re-delivered |
+| Cleanup | workspace deleted; e2e tmux/CLI processes gone |
+
+### Exact rerun commands (successor SHA)
+
+```bash
+cd /Users/bytedance/claude_hub-agent-tree
+git rev-parse HEAD
+cd backend
+uv run pytest tests/test_report_intake_atomicity.py tests/test_agent_tree.py \
+  tests/test_workspaces.py tests/test_workspace_resident_agent.py \
+  tests/test_workspace_sessions.py tests/test_agent_tree_subtree_reliability.py \
+  tests/test_agent_tree_executor_selection.py tests/test_ttyd_manager.py \
+  tests/test_hard_recovery.py tests/test_workspace_orchestrator_contract.py
+uv run mypy claude_hub
+uv run black --check claude_hub tests
+uv run isort --check-only claude_hub tests
+python3 -m compileall -q claude_hub tests
+git -C /Users/bytedance/claude_hub-agent-tree diff --check
+bash /Users/bytedance/claude_hub-agent-tree/scripts/agent-tree-e2e/run.sh
+# evidence: /tmp/claude_hub_e2e_f6bf8165/home/evidence.json
+```
+
+### Round 6 validation
+
+| Suite / check | Result | Exit |
+| --- | --- | --- |
+| listed pytest suites | 543 passed in 828.64s | 0 |
+| `test_report_rollback_serializes_agent_tree_spawn` | passed | 0 |
+| `test_report_rollback_preserves_concurrent_agent_tree_write` | passed | 0 |
+| isolated real-CLI E2E (`scripts/agent-tree-e2e/run.sh`) | ok, CLI POST 201 observed | 0 |
+| `mypy claude_hub` | 67 source files, no issues | 0 |
+| Black / isort / compileall / `git diff --check` | clean | 0 |
+
+### Simulator-only / UI
+
+In-process `test_manager_spawn_persists_and_reloads_real_executor_contract`
+and historical port-8174 `native_subagent` notes remain simulator-labeled.
+UI stay follow-up `487c630c-4b63-4883-8869-0e38546366c0`.

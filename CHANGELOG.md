@@ -33,16 +33,22 @@
   await, so a concurrent Agent Tree persist during rename is kept when the
   report rolls back
   (`test_report_rollback_preserves_concurrent_agent_tree_write`).
-- **Validation**: listed suites 542 passed in 829.09s
+- Report intake and Agent Tree spawn/send/followup/interrupt/ack share one
+  per-workspace mutation lock, so a public tree write cannot persist
+  between report snapshot and rollback restore
+  (`test_report_rollback_serializes_agent_tree_spawn`).
+- **Validation**: listed suites 543 passed in 828.64s
   (`test_agent_tree.py`, `test_workspaces.py`, resident/session,
-  report-atomicity, subtree reliability, executor selection,
-  `test_ttyd_manager.py`, hard-recovery, orchestrator-contract);
-  `mypy claude_hub` checked 67 source files with no issues; Black, isort,
-  compileall, and `git diff --check` clean. Isolated real-CLI E2E lives in
-  `scripts/agent-tree-e2e/`; the harness only observes. The managed Claude
-  CLI POSTed `E2E_CHILD_REPORT` (`d7aa2f49-...`, bridged
-  `report:d7aa2f49-...` seq=3); wait/ACK/reload kept `ack_sequence=3`.
-  Round 4 harness injection is stale.
+  report-atomicity including
+  `test_report_rollback_serializes_agent_tree_spawn`, subtree reliability,
+  executor selection, `test_ttyd_manager.py`, hard-recovery,
+  orchestrator-contract); `mypy claude_hub` checked 67 source files with
+  no issues; Black, isort, compileall, and `git diff --check` clean.
+  Isolated real-CLI E2E in `scripts/agent-tree-e2e/` observes only: managed
+  Claude CLI POSTed `E2E_CHILD_REPORT` (`47701ec4-...`, bridged
+  `report:47701ec4-...` seq=3, backend `POST /reports` 201); wait/ACK/reload
+  kept `ack_sequence=3`. Harness refuses `POST /reports`, session send, and
+  followup. Round 4 harness injection is stale.
 - **Migration/rollback**: new fields are additive on forward load. Before
   rollback, back up workspace `state.json` and drain writers: the first
   old-version save drops Agent Tree and report fingerprint metadata it does

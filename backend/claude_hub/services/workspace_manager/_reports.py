@@ -245,17 +245,13 @@ class _ReportsMixin:
         # Two concurrent requests with the same call_id must not both pass
         # the "existing_report_id is None" check and create two reports.
         # Report intake replaces whole session/task models and may ACK mailbox
-        # state shared with Agent Tree.  Serialize every report for this
-        # workspace so different call_ids (and worker/reviewer sessions for the
-        # same task) cannot overwrite each other's derived state.
+        # state shared with Agent Tree.  Hold the workspace mutation lock so
+        # Agent Tree spawn/send/followup/interrupt/ack cannot persist between
+        # snapshot and rollback restore.  Different call_ids (and
+        # worker/reviewer sessions for the same task) also cannot overwrite
+        # each other's derived state.
         # ------------------------------------------------------------------
-        lock_key = session.workspace_id
-        lock = self._report_intake_locks.get(lock_key)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._report_intake_locks[lock_key] = lock
-
-        async with lock:
+        async with self.workspace_mutation_lock(session.workspace_id):
             # The mailbox pump also replaces the full ManagedSession while it
             # moves pending -> processing.  Hold the same per-session pump lock
             # across the only pre-commit await (_rename_session_for_task) and
@@ -266,9 +262,11 @@ class _ReportsMixin:
                 if not live:
                     raise KeyError(session_id)
                 # Rename is the only pre-commit await.  Do it BEFORE the
-                # rollback snapshot so a concurrent Agent Tree persist that
-                # interleaves during update_tab is part of the snapshot and
-                # cannot be erased if this report later rolls back.
+                # rollback snapshot so a concurrent emit_event+_persist that
+                # still interleaves during update_tab is part of the snapshot
+                # and cannot be erased if this report later rolls back.
+                # Public Agent Tree APIs wait on workspace_mutation_lock and
+                # cannot enter that window.
                 rename_task_id = payload.task_id or live.task_id or live.current_task_id
                 if rename_task_id:
                     rename_task = self.tasks.get(rename_task_id)

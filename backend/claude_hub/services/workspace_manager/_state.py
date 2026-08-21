@@ -1,5 +1,7 @@
 """Construction, path helpers, and state loading."""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
@@ -20,15 +22,12 @@ class _StateMixin:
         # concurrent pump cycles cannot both send the same pending call_id
         # to tmux (which would duplicate the model turn).
         self._pump_locks: dict[str, asyncio.Lock] = {}
-        # Per-workspace report-intake locks.  A report mutates more than its
-        # own call-id index: it replaces the owning ManagedSession, may mutate
-        # the shared task (worker and reviewer use different sessions), ACKs
-        # durable mailbox state, and can append Agent Tree events/cursors.
-        # Consequently a per-(session, call_id) lock is too narrow: two
-        # different call_ids can derive replacements from the same stale
-        # session/task snapshot and lose one report_call_ids entry.  The state
-        # file is also written per workspace, so workspace scope is the
-        # smallest simple lock that covers every object in the transaction.
+        # Per-workspace mutation lock shared by report intake and Agent Tree
+        # writes (spawn/send/followup/interrupt/ack). A report may snapshot
+        # then restore the whole workspace; a concurrent tree persist in that
+        # window would be durable until restore erased it. Workspace scope is
+        # also the smallest simple lock that covers session/task/report and
+        # Agent Tree event/cursor state written to the same state.json.
         self._report_intake_locks: dict[str, asyncio.Lock] = {}
         # Ephemeral commit markers used only to distinguish a pre-commit
         # exception (restore the full report-intake snapshot) from a
@@ -40,6 +39,13 @@ class _StateMixin:
         # could make one coroutine persist the other's workspace.
         self._report_intake_workspace: ContextVar[str | None] = ContextVar(
             f"report_intake_workspace_{id(self)}",
+            default=None,
+        )
+        # Re-entrancy for workspace_mutation_lock: create_report already holds
+        # the lock when it ACKs mailbox state, and Agent Tree adapters may
+        # nest start_task / persist under spawn/followup.
+        self._workspace_mutation_held: ContextVar[str | None] = ContextVar(
+            f"workspace_mutation_held_{id(self)}",
             default=None,
         )
         self._monitor_task: asyncio.Task[None] | None = None
@@ -58,6 +64,32 @@ class _StateMixin:
 
     def _workspace_state_file(self, workspace_id: str) -> Path:
         return self._workspace_dir(workspace_id) / "state.json"
+
+    def _workspace_mutation_lock(self, workspace_id: str) -> asyncio.Lock:
+        lock = self._report_intake_locks.get(workspace_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._report_intake_locks[workspace_id] = lock
+        return lock
+
+    @asynccontextmanager
+    async def workspace_mutation_lock(self, workspace_id: str) -> AsyncIterator[None]:
+        """Serialize report intake with Agent Tree workspace mutations.
+
+        Report rollback restores a workspace snapshot. spawn / send /
+        followup / interrupt / ack persist the same state.json; they wait
+        on this lock so a concurrent tree write cannot land between
+        snapshot and restore. Re-entrant for the owning coroutine.
+        """
+        if self._workspace_mutation_held.get() == workspace_id:
+            yield
+            return
+        async with self._workspace_mutation_lock(workspace_id):
+            token = self._workspace_mutation_held.set(workspace_id)
+            try:
+                yield
+            finally:
+                self._workspace_mutation_held.reset(token)
 
     def _workspace_task_records_dir(self, workspace_id: str) -> Path:
         return self._workspace_dir(workspace_id) / "task_records"
