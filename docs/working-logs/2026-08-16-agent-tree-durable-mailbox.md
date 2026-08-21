@@ -1344,3 +1344,72 @@ Same `call_id` + different fingerprint → `ValueError`.
 - The idempotency key is client-supplied. A buggy client that reuses a
   `call_id` across genuinely different reports gets a `ValueError` rather
   than silent corruption — fail-closed.
+
+## Report intake idempotency hardening (2026-08-21)
+
+Reviewer feedback on the initial call_id + fingerprint implementation
+identified three gaps: (1) production prompts emitted no `call_id`, so
+intake was non-idempotent in practice; (2) `goal_packet` was omitted from
+the fingerprint, so a GP revision with the same call_id was silently
+dropped; (3) concurrent same-call_id requests could both pass the
+existence check and create two reports. This round closes all three.
+
+### Changes
+
+1. **Required `call_id` + legacy compatibility adapter.**
+   `create_report` now requires a non-empty `call_id`. If the client
+   omits it (legacy), the backend generates a deterministic
+   `legacy:<fingerprint[:32]>` call_id from the payload content. Same
+   content → same adapter call_id → same report, so legacy paths still
+   get idempotency without tracking a call_id.
+
+2. **`goal_packet` in the canonical fingerprint.**
+   `_compute_report_fingerprint`'s `content_fields` tuple now includes
+   `goal_packet`. Two reports that differ only in their Goal Packet no
+   longer collide on fingerprint; reusing a call_id with a revised GP
+   correctly raises `ReportCallIdConflict` (HTTP 409).
+
+3. **Atomic claim via per-`(session_id, call_id)` lock.**
+   Added `_report_call_locks: dict[str, asyncio.Lock]` to
+   `WorkspaceManager.__init__`. `create_report` acquires the lock for
+   `f"{session_id}:{call_id}"` before the existence check + report
+   creation. Two concurrent same-call_id requests are serialized: the
+   first creates the report; the second sees it and either returns it
+   (fingerprint match) or raises 409 (mismatch).
+
+4. **HTTP 409 Conflict on call_id reuse.**
+   Added `ReportCallIdConflict(ValueError)` exception. The API layer
+   catches it and returns HTTP 409 (previously `ValueError` bubbled up
+   as HTTP 500). Inheriting from `ValueError` keeps existing
+   `pytest.raises(ValueError)` tests passing.
+
+5. **`call_id` in every production report prompt.**
+   All report curl examples (worker assignment, reviewer bootstrap,
+   reviewer verdict, resident agent, `_report_endpoint_curl` used by
+   continue/recovery prompts) now include a `call_id` field and instruct
+   the agent to reuse the same call_id when resubmitting the same report
+   after a failure or context reload.
+
+### New regression tests
+
+- `test_report_concurrent_same_call_id_creates_one_report`: two
+  concurrent `create_report` calls with the same call_id return the
+  same report id; exactly one report row exists.
+- `test_report_goal_packet_included_in_fingerprint`: two reports
+  differing only in `goal_packet` have different fingerprints.
+- `test_report_legacy_call_id_adapter_is_deterministic`: a report
+  without `call_id` gets a `legacy:` call_id; resubmitting the same
+  content returns the existing report.
+- `test_production_prompts_include_call_id_in_report_examples`: every
+  report curl example in `_prompts.py` contains a `call_id` field.
+
+### Validation (2026-08-21 hardening)
+
+| Suite | Result | Exit |
+| --- | --- | --- |
+| `tests/test_agent_tree.py` | 162 passed | 0 |
+| `tests/test_workspaces.py` | 133 passed | 0 |
+
+- `black`: clean (5 files).
+- `isort`: clean.
+- `mypy` on modified files: Success, no issues.

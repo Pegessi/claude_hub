@@ -7,42 +7,62 @@
 
 ### fix: report/result intake idempotency (call_id + payload fingerprint) — no duplicate report/task-transition/bridged-event on error-after-commit retry
 
-- **What**: `create_report` now accepts an optional client-supplied `call_id`.
-  When set, the Hub stores a `call_id → report_id` mapping on the session
+- **What**: `create_report` now requires a stable non-empty `call_id` on every
+  report (legacy clients that omit it get a deterministic adapter call_id
+  derived from the payload fingerprint). The Hub stores a
+  `call_id → report_id` mapping on the session
   (`ManagedSession.report_call_ids`). A retry with the **same** `call_id`
   and an identical payload fingerprint returns the previously-persisted
   report (re-running the idempotent post-commit side effects
   `_after_report_recorded` and `_bridge_report_to_agent_event` against the
   existing report). A retry with the **same** `call_id` but a **different**
-  payload raises `ValueError` (a call_id identifies a single durable
-  report; reusing it with different content is rejected). This makes
-  report/result intake safe under error-after-commit retries: if the Hub
-  durably persists the report (and the ACKed call_id's
-  processing→delivered transition) via `_save_state` but then raises in
-  `_after_report_recorded` or the agent-tree bridge, the client's retry
-  with the same `call_id` is a no-op that returns the existing report,
-  task transition, and bridged event — exactly one of each.
+  payload raises `ReportCallIdConflict` (a `ValueError` subclass) which the
+  API surfaces as **HTTP 409 Conflict**. Concurrent requests with the same
+  `call_id` are serialized via a per-`(session_id, call_id)` asyncio lock so
+  only one report is created. The canonical fingerprint now includes
+  `goal_packet`, so a Goal Packet revision submitted with the same call_id
+  is correctly treated as a different payload (409) rather than silently
+  dropped as an idempotent retry. This makes report/result intake safe under
+  error-after-commit retries: if the Hub durably persists the report (and
+  the ACKed call_id's processing→delivered transition) via `_save_state`
+  but then raises in `_after_report_recorded` or the agent-tree bridge, the
+  client's retry with the same `call_id` is a no-op that returns the
+  existing report, task transition, and bridged event — exactly one of each.
 - **Why**: `create_report` persists the report via `_save_state` **before**
   running post-commit side effects. If those side effects fail, the report
   is durably committed but the client receives an error; a naive retry
   creates a second report, a second task transition, and a second bridged
-  agent-tree event. The fix mirrors the existing message-delivery
-  idempotency pattern (`call_payload_fingerprints`).
+  agent-tree event. Without a required `call_id`, production prompts
+  emitted no idempotency key, so retries always duplicated. Without
+  `goal_packet` in the fingerprint, a GP revision with the same call_id
+  was wrongly dropped. Without a lock, two concurrent same-call_id requests
+  both passed the existence check and created two reports. The fix mirrors
+  the existing message-delivery idempotency pattern
+  (`call_payload_fingerprints`).
 - **How**:
-  - `schemas.py`: added `call_id: Optional[str]` to `AgentReportCreate`
-    and `AgentReport`; added `report_call_ids: Dict[str, str]` to
-    `ManagedSession`.
-  - `_reports.py`: added `_compute_report_fingerprint` (sha256 over
-    canonical JSON of content fields, excluding bookkeeping fields). At
-    the start of `create_report`, if `payload.call_id` is set, look up
-    the existing report by `session.report_call_ids[call_id]`; if found
-    and fingerprint matches, re-run side effects and return it; if found
-    and fingerprint differs, raise `ValueError`. Store the
-    `call_id → report_id` mapping in `session_update` so it is persisted
-    in the same `_save_state` as the report.
+  - `schemas.py`: `call_id: Optional[str]` on `AgentReportCreate` /
+    `AgentReport`; `report_call_ids: Dict[str, str]` on `ManagedSession`.
+  - `_reports.py`:
+    - `_compute_report_fingerprint` now includes `goal_packet` in the
+      canonical content fields.
+    - `create_report` requires a non-empty `call_id`; if the client omits
+      it, a deterministic `legacy:<fingerprint[:32]>` call_id is generated
+      (compatibility adapter).
+    - A per-`(session_id, call_id)` `asyncio.Lock` (`_report_call_locks`)
+      serializes the claim so concurrent same-call_id requests create at
+      most one report.
+    - On call_id reuse with a different fingerprint, raise
+      `ReportCallIdConflict(ValueError)` → HTTP 409.
+    - On call_id reuse with a matching fingerprint, return the existing
+      report and re-run the idempotent post-commit side effects.
+  - `api/workspaces.py`: catch `ReportCallIdConflict` → HTTP 409.
+  - `_prompts.py`: every report curl example (worker, reviewer, resident,
+    continue, recovery) includes a `call_id` field and instructs the agent
+    to reuse the same call_id on retry.
 - **Migration/rollback**: `report_call_ids` defaults to `{}` on existing
   sessions; no migration needed. Rollback is safe — the field is simply
-  ignored by older code.
+  ignored by older code. Legacy clients without `call_id` still work via
+  the deterministic adapter.
 
 ### fix: fail-closed durable mailbox (persist-intent-first → processing → ACK → delivered; ambiguous → uncertain) + tmux receipt at-most-once + Resident wait/ack + followup:delivered
 
