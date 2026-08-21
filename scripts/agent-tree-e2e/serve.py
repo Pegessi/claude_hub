@@ -21,15 +21,16 @@ import json  # noqa: E402
 import claude_hub.services.ttyd_manager as ttyd_mod  # noqa: E402
 
 ttyd_mod.TMUX_SESSION_PREFIX = os.environ.get("CLAUDE_HUB_E2E_TMUX_PREFIX", "claude-hub-e2e-")
-_overlay = _E2E_HOME / ".claude_hub" / "e2e_launch_env.json"
-if _overlay.exists():
-    ttyd_mod.DEFAULT_CLAUDE_LAUNCH_ENV = json.loads(_overlay.read_text())
+_overlay_json = os.environ.get("CLAUDE_HUB_E2E_LAUNCH_ENV_JSON", "")
+_overlay_env = json.loads(_overlay_json) if _overlay_json else {}
+if _overlay_env:
+    ttyd_mod.DEFAULT_CLAUDE_LAUNCH_ENV = dict(_overlay_env)
 
 from claude_hub.main import app  # noqa: E402
 
-if _overlay.exists():
+if _overlay_env:
     ttyd_mod.DEFAULT_CLAUDE_LAUNCH_ENV.clear()
-    ttyd_mod.DEFAULT_CLAUDE_LAUNCH_ENV.update(json.loads(_overlay.read_text()))
+    ttyd_mod.DEFAULT_CLAUDE_LAUNCH_ENV.update(_overlay_env)
 
 if __name__ == "__main__":
     import uvicorn

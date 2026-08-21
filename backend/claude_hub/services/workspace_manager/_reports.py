@@ -261,24 +261,32 @@ class _ReportsMixin:
                 live = self.sessions.get(session_id)
                 if not live:
                     raise KeyError(session_id)
-                # Rename is the only pre-commit await.  Do it BEFORE the
-                # rollback snapshot so a concurrent emit_event+_persist that
-                # still interleaves during update_tab is part of the snapshot
-                # and cannot be erased if this report later rolls back.
-                # Public Agent Tree APIs wait on workspace_mutation_lock and
-                # cannot enter that window.
-                rename_task_id = payload.task_id or live.task_id or live.current_task_id
-                if rename_task_id:
-                    rename_task = self.tasks.get(rename_task_id)
-                    if rename_task is not None and rename_task.workspace_id == live.workspace_id:
-                        if self._is_stale_report_for_aborted_task(rename_task, live):
-                            raise RuntimeError(
-                                "Task was manually aborted; restart or reassign "
-                                "it before accepting reports."
+                # Known call_ids (idempotent retry or fingerprint conflict)
+                # must be resolved BEFORE rename. A late retry of an old
+                # report after the session was reassigned would otherwise
+                # durably restore the previous task title.
+                if call_id not in live.report_call_ids:
+                    # Rename is the only pre-commit await for a *new*
+                    # report. Do it BEFORE the rollback snapshot so a
+                    # concurrent emit_event+_persist that still interleaves
+                    # during update_tab is part of the snapshot.
+                    # Public Agent Tree APIs wait on workspace_mutation_lock
+                    # and cannot enter that window.
+                    rename_task_id = payload.task_id or live.task_id or live.current_task_id
+                    if rename_task_id:
+                        rename_task = self.tasks.get(rename_task_id)
+                        if (
+                            rename_task is not None
+                            and rename_task.workspace_id == live.workspace_id
+                        ):
+                            if self._is_stale_report_for_aborted_task(rename_task, live):
+                                raise RuntimeError(
+                                    "Task was manually aborted; restart or reassign "
+                                    "it before accepting reports."
+                                )
+                            await self._rename_session_for_task(
+                                live, rename_task, updated_at=_wm._now()
                             )
-                        await self._rename_session_for_task(
-                            live, rename_task, updated_at=_wm._now()
-                        )
                 snapshot = self._snapshot_report_intake_workspace(live.workspace_id)
                 commit_token = f"{live.workspace_id}\0{session_id}\0{call_id}"
                 self._report_intake_committed.discard(commit_token)

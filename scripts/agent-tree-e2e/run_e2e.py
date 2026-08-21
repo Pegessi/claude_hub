@@ -88,7 +88,7 @@ def wait_health(timeout: float = 30.0) -> None:
     raise RuntimeError(f"backend not healthy: {last}")
 
 
-def start_backend(home: Path) -> subprocess.Popen:
+def start_backend(home: Path, launch_env: dict[str, str] | None = None) -> subprocess.Popen:
     env = os.environ.copy()
     env.update(NOPROXY)
     env["CLAUDE_HUB_E2E_HOME"] = str(home)
@@ -96,6 +96,10 @@ def start_backend(home: Path) -> subprocess.Popen:
     env["CLAUDE_HUB_E2E_TTYD_BASE"] = os.environ.get("CLAUDE_HUB_E2E_TTYD_BASE", "19100")
     env["CLAUDE_HUB_E2E_TMUX_PREFIX"] = TMUX_PREFIX
     env["PYTHONPATH"] = str(BACKEND)
+    env["PYTHONUNBUFFERED"] = "1"
+    env.pop("CLAUDE_HUB_E2E_LAUNCH_ENV_JSON", None)
+    if launch_env:
+        env["CLAUDE_HUB_E2E_LAUNCH_ENV_JSON"] = json.dumps(launch_env)
     log_path = home / "backend.stdout.log"
     log_f = open(log_path, "ab")
     python = Path(os.environ.get("CLAUDE_HUB_E2E_PYTHON", sys.executable))
@@ -215,19 +219,43 @@ def load_isolated_launch_env() -> tuple[str, dict[str, str]]:
 
 
 def install_isolated_launch_env(home: Path) -> tuple[str, dict[str, str]]:
-    """Copy local Claude launch credentials into isolated Hub home.
+    """Load local Claude launch credentials without writing them to disk.
 
     Hub state stays under ``home``. The CLI subprocess needs a real
     ANTHROPIC_* launch env or it 401s on the default Volcengine plan.
-    Preset names only are recorded; secret values stay on disk.
+    Values are passed to the isolated backend via process env only.
     """
 
     dest_dir = home / ".claude_hub"
     dest_dir.mkdir(parents=True, exist_ok=True)
+    leftover = dest_dir / "e2e_launch_env.json"
+    if leftover.exists():
+        leftover.unlink()
     name, env = load_isolated_launch_env()
-    if env:
-        (dest_dir / "e2e_launch_env.json").write_text(json.dumps(env))
     return name, env
+
+
+def unlink_credential_overlay(home: Path) -> dict:
+    """Remove copied auth files and record leftover proof. Never log values."""
+
+    overlay = home / ".claude_hub" / "e2e_launch_env.json"
+    proof: dict = {
+        "overlay_path": str(overlay),
+        "overlay_existed_before_unlink": overlay.exists(),
+    }
+    if overlay.exists():
+        proof["overlay_mode_before_unlink"] = oct(overlay.stat().st_mode & 0o777)
+        overlay.unlink(missing_ok=True)
+    leftovers = []
+    hub = home / ".claude_hub"
+    if hub.exists():
+        for path in hub.rglob("e2e_launch_env.json"):
+            leftovers.append(
+                {"path": str(path), "mode": oct(path.stat().st_mode & 0o777)}
+            )
+    proof["overlay_exists_after_unlink"] = overlay.exists()
+    proof["overlay_leftovers"] = leftovers
+    return proof
 
 
 def capture_tmux(session_name: str | None) -> str:
@@ -267,6 +295,12 @@ def main() -> int:
         E2E_ROOT.mkdir(parents=True, exist_ok=True)
         launch_preset, launch_env = install_isolated_launch_env(E2E_ROOT)
         evidence["launch_env_preset"] = launch_preset
+        evidence["credential_overlay_written"] = False
+        evidence["credential_overlay_exists_after_install"] = (
+            E2E_ROOT / ".claude_hub" / "e2e_launch_env.json"
+        ).exists()
+        if evidence["credential_overlay_exists_after_install"]:
+            raise RuntimeError("harness must not persist e2e_launch_env.json")
         evidence["launch_env_has_auth"] = bool(
             launch_env.get("ANTHROPIC_AUTH_TOKEN") or launch_env.get("ANTHROPIC_API_KEY")
         )
@@ -285,7 +319,7 @@ def main() -> int:
                 capture_output=True,
             )
 
-        backend = start_backend(E2E_ROOT)
+        backend = start_backend(E2E_ROOT, launch_env)
         wait_health()
         evidence["backend_pid"] = backend.pid
         evidence["steps"].append({"start_backend": {"pid": backend.pid}})
@@ -433,12 +467,18 @@ def main() -> int:
         evidence["cli_report_message"] = created.get("message")
         evidence["cli_report_session_id"] = created.get("session_id")
         assert created["session_id"] == session["id"]
-        log_hits = []
+        log_hits: list[str] = []
         log_path = E2E_ROOT / "backend.stdout.log"
-        if log_path.exists():
-            for line in log_path.read_text(errors="replace").splitlines():
-                if "/reports" in line and "POST" in line:
-                    log_hits.append(line[-240:])
+        log_deadline = time.time() + 3
+        while time.time() < log_deadline:
+            log_hits = []
+            if log_path.exists():
+                for line in log_path.read_text(errors="replace").splitlines():
+                    if "/sessions/" in line and "/reports" in line and "POST" in line:
+                        log_hits.append(line[-240:])
+            if any("201" in line for line in log_hits):
+                break
+            time.sleep(0.3)
         evidence["backend_report_access_log"] = log_hits[-8:]
         evidence["backend_report_201"] = any("201" in line for line in log_hits)
         if not evidence["backend_report_201"]:
@@ -524,7 +564,7 @@ def main() -> int:
         stop_backend(backend)
         backend = None
         time.sleep(1)
-        backend = start_backend(E2E_ROOT)
+        backend = start_backend(E2E_ROOT, launch_env)
         wait_health()
         evidence["backend_pid_after_reload"] = backend.pid
 
@@ -588,6 +628,23 @@ def main() -> int:
             evidence["killed_tmux"] = kill_e2e_tmux(evidence.get("known_tmux") or [])
             leftover = process_evidence(evidence.get("known_tmux") or [])
             evidence["process_after_cleanup"] = leftover
+            evidence["credential_cleanup"] = unlink_credential_overlay(E2E_ROOT)
+            launch_dir = E2E_ROOT / ".claude_hub" / "launch_env"
+            removed_launch = []
+            if launch_dir.is_dir():
+                for path in launch_dir.iterdir():
+                    if path.is_file():
+                        removed_launch.append(
+                            {
+                                "name": path.name,
+                                "mode": oct(path.stat().st_mode & 0o777),
+                            }
+                        )
+                        path.unlink()
+            evidence["launch_env_files_removed"] = removed_launch
+            evidence["credential_overlay_exists_after_cleanup"] = (
+                E2E_ROOT / ".claude_hub" / "e2e_launch_env.json"
+            ).exists()
             EVIDENCE.write_text(json.dumps(evidence, indent=2, default=str))
             print(json.dumps(evidence, indent=2, default=str))
 

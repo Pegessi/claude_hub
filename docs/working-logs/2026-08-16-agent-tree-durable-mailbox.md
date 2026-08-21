@@ -1804,3 +1804,73 @@ bash /Users/bytedance/claude_hub-agent-tree/scripts/agent-tree-e2e/run.sh
 In-process `test_manager_spawn_persists_and_reloads_real_executor_contract`
 and historical port-8174 `native_subagent` notes remain simulator-labeled.
 UI stay follow-up `487c630c-4b63-4883-8869-0e38546366c0`.
+
+## Round 7: known call_id before rename + E2E credential cleanup (2026-08-21)
+
+Delivery review of `80e5b102` / `0cd4d0e0` accepted the lost-event race
+fix and CLI-originated E2E, then required:
+
+1. Resolve existing/conflicting call_ids **before** rename. A late
+   idempotent retry after session reassignment was returning the same
+   report but durably restoring the old task title across cold reload.
+2. Do not leave copied auth material mode 0644 under `/tmp`.
+3. New exact SHA + corrected handoff.
+
+### Call-id-before-rename
+
+`create_report` now looks up `session.report_call_ids` first. Known
+call_ids (idempotent match or fingerprint conflict) skip
+`_rename_session_for_task`. New call_ids still rename before the
+rollback snapshot. Regression:
+`test_known_call_id_does_not_rename_reassigned_session` (conflict +
+retry + cold reload).
+
+### E2E credentials
+
+`scripts/agent-tree-e2e/` no longer writes
+`.claude_hub/e2e_launch_env.json`. Launch env is passed to `serve.py`
+as `CLAUDE_HUB_E2E_LAUNCH_ENV_JSON` (process env only). `finally`
+unlinks any leftover overlay and isolated `launch_env` files. Evidence
+records overlay absence / leftover modes, never secret values.
+
+### Exact rerun commands (successor SHA)
+
+```bash
+cd /Users/bytedance/claude_hub-agent-tree
+git rev-parse HEAD
+cd backend
+uv run pytest tests/test_report_intake_atomicity.py tests/test_agent_tree.py \
+  tests/test_workspaces.py tests/test_workspace_resident_agent.py \
+  tests/test_workspace_sessions.py tests/test_agent_tree_subtree_reliability.py \
+  tests/test_agent_tree_executor_selection.py tests/test_ttyd_manager.py \
+  tests/test_hard_recovery.py tests/test_workspace_orchestrator_contract.py
+uv run mypy claude_hub
+uv run black --check claude_hub tests
+uv run isort --check-only claude_hub tests
+python3 -m compileall -q claude_hub tests
+git -C /Users/bytedance/claude_hub-agent-tree diff --check
+bash /Users/bytedance/claude_hub-agent-tree/scripts/agent-tree-e2e/run.sh
+# evidence: /tmp/claude_hub_e2e_f6bf8165/home/evidence.json
+# proof: credential_overlay_exists_after_cleanup must be false
+```
+
+### Isolated real-CLI E2E evidence (2026-08-21, observe-only, no overlay file)
+
+| Item | Value |
+| --- | --- |
+| Data root | `/tmp/claude_hub_e2e_f6bf8165/home` |
+| Workspace | `f6cc144f-4859-4a91-b3b4-8664cf888133` |
+| Root / child | `bc475ced-...` / `9de74ded-...` |
+| Session / task | `e2e-agent-1` / `a0529a18-5160-4874-864b-f3b2700d21ef` |
+| Report | `60bd07cf-2910-4845-9749-e13743a649b4` CLI `E2E_CHILD_REPORT`; backend `POST /reports` **201** |
+| Bridge / ACK | `report:60bd07cf-...` seq=3; reload `ack_sequence=3` |
+| Overlay | never written; `credential_overlay_exists_after_cleanup=false`; leftover launch_env files were mode 0600 and unlinked |
+
+### Round 7 validation
+
+| Suite / check | Result | Exit |
+| --- | --- | --- |
+| listed pytest suites | 544 passed in 838.23s | 0 |
+| `test_known_call_id_does_not_rename_reassigned_session` | passed | 0 |
+| isolated real-CLI E2E | ok, CLI POST 201, overlay absent | 0 |
+| `mypy` / Black / isort / compileall / `git diff --check` | clean | 0 |
