@@ -217,6 +217,67 @@ class _ReportsMixin:
         canonical = json.dumps(content, sort_keys=True, default=str)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
+    def _existing_report_for_call_id(
+        self, session: ManagedSession, payload: AgentReportCreate
+    ) -> AgentReport | None:
+        """Return the durable report for this call_id, or raise on conflict.
+
+        Must run before any tab rename. A late retry after the session was
+        reused for another task must not restore the previous title.
+        """
+        call_id = payload.call_id
+        if not call_id:
+            return None
+        existing_report_id = session.report_call_ids.get(call_id)
+        if existing_report_id is None:
+            return None
+        existing = self.reports.get(existing_report_id)
+        if existing is None:
+            return None
+        new_fp = self._compute_report_fingerprint(payload)
+        persisted_fp = session.report_call_fingerprints.get(call_id)
+        existing_fp = persisted_fp or self._compute_report_fingerprint(existing)
+        if new_fp == existing_fp:
+            return existing
+        raise ReportCallIdConflict(
+            f"call_id {call_id!r} already used for a different "
+            f"report payload; refusing to overwrite."
+        )
+
+    def _session_still_bound_to_report(self, session: ManagedSession, report: AgentReport) -> bool:
+        if not report.task_id:
+            return True
+        bound = session.current_task_id or session.task_id
+        return bound == report.task_id
+
+    def _replay_existing_report_intake(
+        self, session: ManagedSession, existing: AgentReport
+    ) -> AgentReport:
+        """Idempotent retry of a known matching call_id. Does not rename."""
+        existing_task = self.tasks.get(existing.task_id) if existing.task_id else None
+        existing_session = self.sessions.get(existing.session_id)
+        retry_wake_targets: set[tuple[str, str]] = set()
+        if existing_session is not None:
+            retry_ack_set: set[str] = set(existing.acked_call_ids)
+            if existing_task is not None:
+                retry_ack_set.add(f"dispatch:{existing_task.id}:{existing_task.dispatch_attempt}")
+                retry_ack_set.add(f"dispatch:{existing_task.id}")
+            if retry_ack_set:
+                retry_wake_targets = self._ack_call_ids(
+                    existing_task.id if existing_task else None,
+                    existing_session.id,
+                    list(retry_ack_set),
+                )
+            bridge_wake_target = self._bridge_report_to_agent_event(existing, existing_session)
+            if bridge_wake_target is not None:
+                retry_wake_targets.add(bridge_wake_target)
+        self._save_state()
+        self._report_intake_committed.add(
+            f"{session.workspace_id}\0{session.id}\0{existing.call_id}"
+        )
+        self._wake_report_intake_runs(retry_wake_targets)
+        return existing
+
     async def create_report(self, session_id: str, payload: AgentReportCreate) -> AgentReport:
         session = self.sessions.get(session_id)
         if not session:
@@ -261,17 +322,18 @@ class _ReportsMixin:
                 live = self.sessions.get(session_id)
                 if not live:
                     raise KeyError(session_id)
-                # Known call_ids (idempotent retry or fingerprint conflict)
-                # must be resolved BEFORE rename. A late retry of an old
-                # report after the session was reassigned would otherwise
-                # durably restore the previous task title.
-                if call_id not in live.report_call_ids:
+                # Resolve same/conflicting call_ids BEFORE any tab rename.
+                existing = self._existing_report_for_call_id(live, payload)
+                if existing is not None:
+                    if self._session_still_bound_to_report(live, existing):
+                        report = self._replay_existing_report_intake(live, existing)
+                    else:
+                        report = existing
+                else:
                     # Rename is the only pre-commit await for a *new*
                     # report. Do it BEFORE the rollback snapshot so a
                     # concurrent emit_event+_persist that still interleaves
                     # during update_tab is part of the snapshot.
-                    # Public Agent Tree APIs wait on workspace_mutation_lock
-                    # and cannot enter that window.
                     rename_task_id = payload.task_id or live.task_id or live.current_task_id
                     if rename_task_id:
                         rename_task = self.tasks.get(rename_task_id)
@@ -287,19 +349,19 @@ class _ReportsMixin:
                             await self._rename_session_for_task(
                                 live, rename_task, updated_at=_wm._now()
                             )
-                snapshot = self._snapshot_report_intake_workspace(live.workspace_id)
-                commit_token = f"{live.workspace_id}\0{session_id}\0{call_id}"
-                self._report_intake_committed.discard(commit_token)
-                persistence_token = self._report_intake_workspace.set(live.workspace_id)
-                try:
-                    report = await self._create_report_under_lock(session_id, payload)
-                except Exception:
-                    if commit_token not in self._report_intake_committed:
-                        self._restore_report_intake_workspace(live.workspace_id, snapshot)
-                    raise
-                finally:
-                    self._report_intake_workspace.reset(persistence_token)
+                    snapshot = self._snapshot_report_intake_workspace(live.workspace_id)
+                    commit_token = f"{live.workspace_id}\0{session_id}\0{call_id}"
                     self._report_intake_committed.discard(commit_token)
+                    persistence_token = self._report_intake_workspace.set(live.workspace_id)
+                    try:
+                        report = await self._create_report_under_lock(session_id, payload)
+                    except Exception:
+                        if commit_token not in self._report_intake_committed:
+                            self._restore_report_intake_workspace(live.workspace_id, snapshot)
+                        raise
+                    finally:
+                        self._report_intake_workspace.reset(persistence_token)
+                        self._report_intake_committed.discard(commit_token)
 
         # Post-commit task/reviewer effects deliberately run after both locks
         # are released. They can send/pump messages and therefore must not
@@ -307,7 +369,11 @@ class _ReportsMixin:
         # Tree report bridge itself is already part of the transaction above.
         committed_session = self.sessions.get(report.session_id)
         committed_task = self.tasks.get(report.task_id) if report.task_id else None
-        if committed_task is not None and committed_session is not None:
+        if (
+            committed_task is not None
+            and committed_session is not None
+            and self._session_still_bound_to_report(committed_session, report)
+        ):
             await self._after_report_recorded(committed_task, committed_session, report)
         return report
 
@@ -338,76 +404,10 @@ class _ReportsMixin:
         # ------------------------------------------------------------------
         call_id = payload.call_id
         assert call_id  # guaranteed non-empty by create_report's adapter
+        existing = self._existing_report_for_call_id(session, payload)
+        if existing is not None:
+            return self._replay_existing_report_intake(session, existing)
         new_fp = self._compute_report_fingerprint(payload)
-        existing_report_id = session.report_call_ids.get(call_id)
-        if existing_report_id is not None:
-            existing = self.reports.get(existing_report_id)
-            if existing is not None:
-                # Prefer the persisted canonical fingerprint (stored at first
-                # creation) over recomputing from the existing report. The
-                # persisted fingerprint is the source of truth for the
-                # call_id's content; recomputing from the report could drift
-                # if the model's serialization changes. We still compute the
-                # existing report's fingerprint as a cross-check.
-                persisted_fp = session.report_call_fingerprints.get(call_id)
-                existing_fp = persisted_fp or self._compute_report_fingerprint(existing)
-                if new_fp == existing_fp:
-                    # Idempotent retry: the report was durably committed
-                    # in a previous attempt, but the response may have
-                    # failed (e.g. a late exception in
-                    # _after_report_recorded or the agent-tree bridge).
-                    # Re-run the post-commit side effects against the
-                    # EXISTING report. All are idempotent:
-                    #   * _ack_call_ids moves call_ids to delivered only
-                    #     if not already delivered; lifecycle
-                    #     reconciliation (followup delivered event,
-                    #     resident ack cursor) is call-id-deduplicated.
-                    #   * _after_report_recorded skips when a review is
-                    #     already in flight or a verdict is already
-                    #     recorded for this round.
-                    #   * _bridge_report_to_agent_event is staged before the
-                    #     same outer save and uses call_id=f"report:{existing.id}",
-                    #     so emit_event deduplicates the bridged event.
-                    # This guarantees exactly one report, one task
-                    # transition, one ACK commit, and one bridged event
-                    # across retries — including after a cold reload where
-                    # the report was persisted but the delivered-mutation
-                    # save failed (call_id stranded in processing).
-                    existing_task = self.tasks.get(existing.task_id) if existing.task_id else None
-                    existing_session = self.sessions.get(existing.session_id)
-                    retry_wake_targets: set[tuple[str, str]] = set()
-                    # Re-run ACK reconciliation in case the previous request
-                    # committed the report but failed during a later response
-                    # side effect.  All mutations are idempotent and are
-                    # committed together by the one save below.
-                    if existing_session is not None:
-                        retry_ack_set: set[str] = set(existing.acked_call_ids)
-                        if existing_task is not None:
-                            retry_ack_set.add(
-                                f"dispatch:{existing_task.id}:{existing_task.dispatch_attempt}"
-                            )
-                            retry_ack_set.add(f"dispatch:{existing_task.id}")
-                        if retry_ack_set:
-                            retry_wake_targets = self._ack_call_ids(
-                                existing_task.id if existing_task else None,
-                                existing_session.id,
-                                list(retry_ack_set),
-                            )
-                        bridge_wake_target = self._bridge_report_to_agent_event(
-                            existing, existing_session
-                        )
-                        if bridge_wake_target is not None:
-                            retry_wake_targets.add(bridge_wake_target)
-                    self._save_state()
-                    self._report_intake_committed.add(
-                        f"{session.workspace_id}\0{session_id}\0{call_id}"
-                    )
-                    self._wake_report_intake_runs(retry_wake_targets)
-                    return existing
-                raise ReportCallIdConflict(
-                    f"call_id {call_id!r} already used for a different "
-                    f"report payload; refusing to overwrite."
-                )
 
         task_id = payload.task_id or session.task_id or session.current_task_id
 

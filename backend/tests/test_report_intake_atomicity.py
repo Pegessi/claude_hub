@@ -472,10 +472,10 @@ async def test_report_rollback_serializes_agent_tree_spawn(
 
 
 @pytest.mark.asyncio
-async def test_known_call_id_does_not_rename_reassigned_session(
+async def test_reused_session_known_call_id_has_zero_side_effects(
     manager_and_workspace: tuple[WorkspaceManager, str],
 ) -> None:
-    """Late retry/conflict after reassignment must not restore the old title."""
+    """Known call_ids must not rename or rebind a reused session."""
 
     manager, workspace_id = manager_and_workspace
     task, session = _task_session(manager, workspace_id)
@@ -504,29 +504,32 @@ async def test_known_call_id_does_not_rename_reassigned_session(
             "task_id": new_task.id,
             "current_task_id": new_task.id,
             "title": new_task.title,
+            "updated_at": now,
         }
     )
     manager._save_state()
+    rebound = manager.sessions[session.id]
+    _wm.ttyd_manager.update_tab.reset_mock()
+
+    def _assignment(sess: ManagedSession) -> tuple[str, str | None, str | None, datetime]:
+        return sess.title, sess.task_id, sess.current_task_id, sess.updated_at
 
     with pytest.raises(ReportCallIdConflict, match="already used"):
         await manager.create_report(
             session.id,
             payload.model_copy(update={"message": "different payload"}),
         )
-    assert manager.sessions[session.id].title == new_task.title
-    assert manager.sessions[session.id].current_task_id == new_task.id
+    assert _assignment(manager.sessions[session.id]) == _assignment(rebound)
+    assert _wm.ttyd_manager.update_tab.await_count == 0
 
     retry = await manager.create_report(session.id, payload)
     assert retry.id == first.id
-    assert manager.sessions[session.id].title == new_task.title
-    assert manager.sessions[session.id].current_task_id == new_task.id
-    assert manager.sessions[session.id].task_id == new_task.id
+    assert _assignment(manager.sessions[session.id]) == _assignment(rebound)
+    assert _wm.ttyd_manager.update_tab.await_count == 0
 
     fresh = WorkspaceManager()
     assert fresh.reports[first.id].id == first.id
-    assert fresh.sessions[session.id].title == new_task.title
-    assert fresh.sessions[session.id].current_task_id == new_task.id
-    assert fresh.sessions[session.id].task_id == new_task.id
+    assert _assignment(fresh.sessions[session.id]) == _assignment(rebound)
 
 
 @pytest.mark.asyncio

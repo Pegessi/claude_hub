@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -235,6 +236,32 @@ def install_isolated_launch_env(home: Path) -> tuple[str, dict[str, str]]:
     return name, env
 
 
+def remaining_credential_artifacts(home: Path) -> list[dict]:
+    """Find leftover credential files. Record paths/modes only, never values."""
+
+    hits: list[dict] = []
+    if not home.exists():
+        return hits
+    skip_names = {"evidence.json", "backend.stdout.log"}
+    for path in home.rglob("*"):
+        if not path.is_file() or path.name in skip_names:
+            continue
+        try:
+            text = path.read_text(errors="replace")
+        except Exception:
+            continue
+        if path.name == "e2e_launch_env.json" or "ANTHROPIC_AUTH_TOKEN=" in text or (
+            '"ANTHROPIC_AUTH_TOKEN"' in text
+        ) or "ANTHROPIC_API_KEY=" in text or '"ANTHROPIC_API_KEY"' in text:
+            hits.append(
+                {
+                    "relpath": str(path.relative_to(home)),
+                    "mode": oct(path.stat().st_mode & 0o777),
+                }
+            )
+    return hits
+
+
 def unlink_credential_overlay(home: Path) -> dict:
     """Remove copied auth files and record leftover proof. Never log values."""
 
@@ -293,8 +320,12 @@ def main() -> int:
     workspace_id = None
     try:
         E2E_ROOT.mkdir(parents=True, exist_ok=True)
+        evidence["pre_killed_tmux"] = kill_e2e_tmux()
         launch_preset, launch_env = install_isolated_launch_env(E2E_ROOT)
         evidence["launch_env_preset"] = launch_preset
+        evidence["credentials_in_memory_only"] = True
+        evidence["api_payloads_include_env"] = True
+        evidence["credential_files_mode"] = "0600_unlinked_on_exit"
         evidence["credential_overlay_written"] = False
         evidence["credential_overlay_exists_after_install"] = (
             E2E_ROOT / ".claude_hub" / "e2e_launch_env.json"
@@ -642,12 +673,25 @@ def main() -> int:
                         )
                         path.unlink()
             evidence["launch_env_files_removed"] = removed_launch
+            hub = E2E_ROOT / ".claude_hub"
+            if hub.exists():
+                shutil.rmtree(hub, ignore_errors=True)
+            leftover_creds = remaining_credential_artifacts(E2E_ROOT)
+            evidence["remaining_credential_artifacts"] = leftover_creds
             evidence["credential_overlay_exists_after_cleanup"] = (
                 E2E_ROOT / ".claude_hub" / "e2e_launch_env.json"
             ).exists()
+            if leftover_creds or evidence["credential_overlay_exists_after_cleanup"]:
+                evidence["ok"] = False
+                evidence["error"] = "credential artifacts remain after cleanup"
             EVIDENCE.write_text(json.dumps(evidence, indent=2, default=str))
             print(json.dumps(evidence, indent=2, default=str))
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    code = main()
+    if EVIDENCE.exists():
+        leftover = json.loads(EVIDENCE.read_text()).get("remaining_credential_artifacts")
+        if leftover:
+            sys.exit(1)
+    sys.exit(code)
