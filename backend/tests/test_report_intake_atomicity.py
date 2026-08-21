@@ -613,6 +613,79 @@ async def test_padded_call_id_retry_has_zero_side_effects_after_reassignment(
 
 
 @pytest.mark.asyncio
+async def test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges(
+    manager_and_workspace: tuple[WorkspaceManager, str], monkeypatch: MonkeyPatch
+) -> None:
+    """Matching-call replay must snapshot/restore so a failed save cannot ACK."""
+
+    manager, workspace_id = manager_and_workspace
+    task, session = _task_session(manager, workspace_id)
+    call_ids = ["followup-report-intake-1", "followup-report-intake-2"]
+    payload = AgentReportCreate(
+        task_id=task.id,
+        state=AgentReportState.WORKING,
+        message="ack both",
+        call_id=f"{task.id}-working-progress-cycle-1-1",
+        acked_call_ids=call_ids,
+    )
+    first = await manager.create_report(session.id, payload)
+    installed, child_run_id = await _install_two_processing_followups(
+        manager, workspace_id, task, session
+    )
+    assert installed == call_ids
+    live = manager.sessions[session.id]
+    assert set(live.processing_call_ids) == set(call_ids)
+    for call_id in call_ids:
+        assert live.pending_messages[call_id] == f"process {call_id}"
+
+    state_file = manager._workspace_state_file(workspace_id)
+    original_write = manager._atomic_write_text
+    failed = False
+
+    def fail_replay_save_once(path: Path, text: str) -> None:
+        nonlocal failed
+        if path == state_file and not failed:
+            failed = True
+            raise OSError("replay save failed")
+        original_write(path, text)
+
+    monkeypatch.setattr(manager, "_atomic_write_text", fail_replay_save_once)
+    with pytest.raises(OSError, match="replay save failed"):
+        await manager.create_report(session.id, payload)
+
+    rolled_back = manager.sessions[session.id]
+    assert set(rolled_back.processing_call_ids) == set(call_ids)
+    assert not (set(rolled_back.delivered_call_ids) & set(call_ids))
+    for call_id in call_ids:
+        assert rolled_back.pending_messages[call_id] == f"process {call_id}"
+        assert manager.agent_tree._call_record(workspace_id, f"{call_id}:delivered") is None
+
+    cold = WorkspaceManager()
+    cold_session = cold.sessions[session.id]
+    assert set(cold_session.processing_call_ids) == set(call_ids)
+    assert not (set(cold_session.delivered_call_ids) & set(call_ids))
+    for call_id in call_ids:
+        assert cold_session.pending_messages[call_id] == f"process {call_id}"
+    assert cold.reports[first.id].id == first.id
+
+    retry = await cold.create_report(session.id, payload)
+    assert retry.id == first.id
+    committed = cold.sessions[session.id]
+    assert set(call_ids) <= set(committed.delivered_call_ids)
+    assert not (set(committed.processing_call_ids) & set(call_ids))
+    for call_id in call_ids:
+        assert call_id not in committed.pending_messages
+        assert cold.agent_tree._call_record(workspace_id, f"{call_id}:delivered") is not None
+    assert cold.agent_tree.get_run(child_run_id).status == AgentRunStatus.RUNNING
+
+    fresh = WorkspaceManager()
+    assert fresh.reports[first.id].id == first.id
+    assert set(call_ids) <= set(fresh.sessions[session.id].delivered_call_ids)
+    for call_id in call_ids:
+        assert call_id not in fresh.sessions[session.id].pending_messages
+
+
+@pytest.mark.asyncio
 async def test_postcommit_snapshot_failure_is_success_and_durable(
     manager_and_workspace: tuple[WorkspaceManager, str], monkeypatch: MonkeyPatch
 ) -> None:

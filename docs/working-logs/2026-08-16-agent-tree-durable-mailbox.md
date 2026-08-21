@@ -1961,3 +1961,15 @@ equality. Regression:
 | `test_padded_call_id_retry_has_zero_side_effects_after_reassignment` | passed | 0 |
 | isolated real-CLI E2E | unchanged from Round 8; accepted in attempt 7 | 0 |
 | `mypy` / Black / isort / compileall / `git diff --check` | clean | 0 |
+
+## Round 10: bound matching-call replay under snapshot/restore (2026-08-21)
+
+Delivery review of `38301f64` closed rename/E2E blockers, then required
+bound-session matching-call replay to use the same transactional
+snapshot/restore. A save failure after late ACK otherwise left memory
+delivered (payload gone) while disk stayed pending.
+
+`create_report` now snapshots before `_create_report_under_lock` for both
+new reports and still-bound matching replays. Reused-session known IDs
+still return with zero mutations. Regression:
+`test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges`.
