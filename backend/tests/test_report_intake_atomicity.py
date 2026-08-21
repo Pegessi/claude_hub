@@ -702,6 +702,93 @@ async def test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges
 
 
 @pytest.mark.asyncio
+async def test_predecessor_padded_call_id_post_save_failure_converges(
+    manager_and_workspace: tuple[WorkspaceManager, str], monkeypatch: MonkeyPatch
+) -> None:
+    """Legacy padded stored call_ids must use the same commit token as preflight."""
+
+    manager, workspace_id = manager_and_workspace
+    task, session = _task_session(manager, workspace_id)
+    call_ids = ["followup-report-intake-1", "followup-report-intake-2"]
+    canonical = f"{task.id}-working-progress-cycle-1-1"
+    padded = f"  {canonical}\t"
+    payload = AgentReportCreate(
+        task_id=task.id,
+        state=AgentReportState.WORKING,
+        message="ack both",
+        call_id=canonical,
+        acked_call_ids=call_ids,
+    )
+    first = await manager.create_report(session.id, payload)
+    installed, child_run_id = await _install_two_processing_followups(
+        manager, workspace_id, task, session
+    )
+    assert installed == call_ids
+
+    live = manager.sessions[session.id]
+    report_call_ids = dict(live.report_call_ids)
+    report_id = report_call_ids.pop(canonical)
+    report_call_ids[padded] = report_id
+    fingerprints = dict(live.report_call_fingerprints)
+    fingerprint = fingerprints.pop(canonical)
+    fingerprints[padded] = fingerprint
+    manager.sessions[session.id] = live.model_copy(
+        update={
+            "report_call_ids": report_call_ids,
+            "report_call_fingerprints": fingerprints,
+        }
+    )
+    manager.reports[first.id] = manager.reports[first.id].model_copy(update={"call_id": padded})
+    manager._save_state()
+
+    original_wake = manager._wake_report_intake_runs
+    wakes = {"n": 0}
+
+    def fail_wake_once(targets: set[tuple[str, str]]) -> None:
+        wakes["n"] += 1
+        if wakes["n"] == 1:
+            raise OSError("post-save wake failed")
+        original_wake(targets)
+
+    monkeypatch.setattr(manager, "_wake_report_intake_runs", fail_wake_once)
+    with pytest.raises(OSError, match="post-save wake failed"):
+        await manager.create_report(session.id, payload)
+
+    live_after = manager.sessions[session.id]
+    assert set(call_ids) <= set(live_after.delivered_call_ids)
+    assert not (set(live_after.processing_call_ids) & set(call_ids))
+    for call_id in call_ids:
+        assert call_id not in live_after.pending_messages
+        assert manager.agent_tree._call_record(workspace_id, f"{call_id}:delivered") is not None
+    bridge_call_id = f"report:{first.id}"
+    assert manager.agent_tree._call_record(workspace_id, bridge_call_id) is not None
+
+    cold = WorkspaceManager()
+    cold_session = cold.sessions[session.id]
+    assert set(call_ids) <= set(cold_session.delivered_call_ids)
+    assert not (set(cold_session.processing_call_ids) & set(call_ids))
+    for call_id in call_ids:
+        assert call_id not in cold_session.pending_messages
+        assert cold.agent_tree._call_record(workspace_id, f"{call_id}:delivered") is not None
+    assert cold.agent_tree._call_record(workspace_id, bridge_call_id) is not None
+    assert cold.reports[first.id].id == first.id
+
+    retry = await cold.create_report(session.id, payload.model_copy(update={"call_id": padded}))
+    assert retry.id == first.id
+    assert cold.agent_tree.get_run(child_run_id).status == AgentRunStatus.RUNNING
+    assert [
+        event.call_id
+        for event in cold.agent_tree._events.get(workspace_id, [])
+        if event.call_id == bridge_call_id
+    ].count(bridge_call_id) == 1
+
+    fresh = WorkspaceManager()
+    assert fresh.reports[first.id].id == first.id
+    assert set(call_ids) <= set(fresh.sessions[session.id].delivered_call_ids)
+    assert fresh.agent_tree._call_record(workspace_id, bridge_call_id) is not None
+
+
+@pytest.mark.asyncio
 async def test_postcommit_snapshot_failure_is_success_and_durable(
     manager_and_workspace: tuple[WorkspaceManager, str], monkeypatch: MonkeyPatch
 ) -> None:

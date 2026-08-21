@@ -1984,3 +1984,24 @@ save failure and appear exactly once after cold retry.
 | `test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges` | passed | 0 |
 | isolated real-CLI E2E | accepted in attempt 7/8 | 0 |
 | `mypy` / Black / isort / compileall / `git diff --check` | clean | 0 |
+
+## Round 11: canonical commit token for predecessor padded call_ids (2026-08-21)
+
+Delivery review of `8dd32884` accepted canonical bound-replay rollback,
+then required one commit token for legacy padded stored IDs.
+`_replay_existing_report_intake` used `existing.call_id` (raw) while
+`create_report` checked the stripped token, so a post-save wake failure
+restored memory while disk stayed committed.
+
+`_report_intake_commit_token` now canonicalizes in create, replay, and
+new-report persist, and `finally` discards that same token. Regression:
+`test_predecessor_padded_call_id_post_save_failure_converges`.
+
+### Round 11 validation
+
+| Suite / check | Result | Exit |
+| --- | --- | --- |
+| listed pytest suites | 547 passed in 834.25s | 0 |
+| `test_predecessor_padded_call_id_post_save_failure_converges` | passed | 0 |
+| isolated real-CLI E2E | accepted in attempt 7/8 | 0 |
+| `mypy` / Black / isort / compileall / `git diff --check` | clean | 0 |
