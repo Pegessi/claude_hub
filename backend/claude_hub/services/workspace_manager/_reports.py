@@ -262,15 +262,34 @@ class _ReportsMixin:
             # the transaction so neither side derives from a stale session.
             pump_lock = self._pump_locks.setdefault(session_id, asyncio.Lock())
             async with pump_lock:
-                snapshot = self._snapshot_report_intake_workspace(session.workspace_id)
-                commit_token = f"{session.workspace_id}\0{session_id}\0{call_id}"
+                live = self.sessions.get(session_id)
+                if not live:
+                    raise KeyError(session_id)
+                # Rename is the only pre-commit await.  Do it BEFORE the
+                # rollback snapshot so a concurrent Agent Tree persist that
+                # interleaves during update_tab is part of the snapshot and
+                # cannot be erased if this report later rolls back.
+                rename_task_id = payload.task_id or live.task_id or live.current_task_id
+                if rename_task_id:
+                    rename_task = self.tasks.get(rename_task_id)
+                    if rename_task is not None and rename_task.workspace_id == live.workspace_id:
+                        if self._is_stale_report_for_aborted_task(rename_task, live):
+                            raise RuntimeError(
+                                "Task was manually aborted; restart or reassign "
+                                "it before accepting reports."
+                            )
+                        await self._rename_session_for_task(
+                            live, rename_task, updated_at=_wm._now()
+                        )
+                snapshot = self._snapshot_report_intake_workspace(live.workspace_id)
+                commit_token = f"{live.workspace_id}\0{session_id}\0{call_id}"
                 self._report_intake_committed.discard(commit_token)
-                persistence_token = self._report_intake_workspace.set(session.workspace_id)
+                persistence_token = self._report_intake_workspace.set(live.workspace_id)
                 try:
                     report = await self._create_report_under_lock(session_id, payload)
                 except Exception:
                     if commit_token not in self._report_intake_committed:
-                        self._restore_report_intake_workspace(session.workspace_id, snapshot)
+                        self._restore_report_intake_workspace(live.workspace_id, snapshot)
                     raise
                 finally:
                     self._report_intake_workspace.reset(persistence_token)
@@ -396,6 +415,8 @@ class _ReportsMixin:
                 raise RuntimeError(
                     "Task was manually aborted; restart or reassign it before accepting reports."
                 )
+            # Title already matches after the outer pre-snapshot rename, so
+            # this is a synchronous no-op and does not yield the event loop.
             session = await self._rename_session_for_task(session, task, updated_at=now)
         goal_packet_for_task = payload.goal_packet
         if self._should_route_goal_packet_for_approval(task, session, payload):

@@ -9899,7 +9899,11 @@ async def test_report_save_failure_rolls_back_in_memory_state(
     )
     manager.tasks[task.id] = task
     manager.sessions[session_id] = manager.sessions[session_id].model_copy(
-        update={"task_id": task.id, "current_task_id": task.id}
+        update={
+            "task_id": task.id,
+            "current_task_id": task.id,
+            "title": task.title,
+        }
     )
 
     payload = AgentReportCreate(

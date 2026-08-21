@@ -28,6 +28,7 @@ from claude_hub.models import (
     WorkspaceTaskStatus,
 )
 from claude_hub.models.agent_tree import (
+    AgentEventType,
     AgentRunStatus,
     ExecutorKind,
     FollowupRequest,
@@ -300,6 +301,85 @@ async def test_precommit_failure_rolls_back_both_acks_and_cold_retry_converges(
         )
         == 1
     )
+
+
+@pytest.mark.asyncio
+async def test_report_rollback_preserves_concurrent_agent_tree_write(
+    manager_and_workspace: tuple[WorkspaceManager, str], monkeypatch: MonkeyPatch
+) -> None:
+    """Reproduce: Agent Tree persist during rename await must survive rollback.
+
+    create_report used to snapshot the workspace, then await tab rename, then
+    commit. A concurrent emit_event+_persist in that await window was durable
+    until rollback restored the stale snapshot and erased it. Snapshot now
+    happens after rename, so the concurrent write is kept.
+    """
+
+    manager, workspace_id = manager_and_workspace
+    task, session = _task_session(manager, workspace_id)
+    manager.sessions[session.id] = session.model_copy(update={"title": "stale title"})
+    root = manager.agent_tree.create_root_run(
+        workspace_id=workspace_id,
+        executor_kind=ExecutorKind.RESIDENT_ROOT,
+    )
+    concurrent_call_id = "concurrent-tree-write-during-rename"
+    rename_started = asyncio.Event()
+    concurrent_done = asyncio.Event()
+    fake_tab = MagicMock(id=session.tab_id, tmux_session=session.tmux_session)
+
+    async def slow_update_tab(tab_id: str, name: str | None = None, **_kwargs: object):
+        rename_started.set()
+        await concurrent_done.wait()
+        return fake_tab
+
+    monkeypatch.setattr(_wm.ttyd_manager, "update_tab", slow_update_tab)
+
+    original_write = manager._atomic_write_text
+    failed = False
+    state_file = manager._workspace_state_file(workspace_id)
+
+    def fail_report_commit_once(path: Path, text: str) -> None:
+        nonlocal failed
+        # The concurrent emit persists first (before concurrent_done). The
+        # next workspace save is the report commit and must fail.
+        if path == state_file and concurrent_done.is_set() and not failed:
+            failed = True
+            raise OSError("pre-commit fail after concurrent tree write")
+        original_write(path, text)
+
+    monkeypatch.setattr(manager, "_atomic_write_text", fail_report_commit_once)
+
+    async def concurrent_tree_write() -> None:
+        await rename_started.wait()
+        manager.agent_tree.emit_event(
+            workspace_id=workspace_id,
+            agent_run_id=root.id,
+            event_type=AgentEventType.PROGRESS,
+            author=root.id,
+            recipient=root.id,
+            call_id=concurrent_call_id,
+            payload={"note": "must survive report rollback"},
+        )
+        concurrent_done.set()
+
+    payload = AgentReportCreate(
+        task_id=task.id,
+        state=AgentReportState.WORKING,
+        message="rollback must not erase tree",
+        call_id=f"{task.id}-working-progress-cycle-1-1",
+    )
+    writer = asyncio.create_task(concurrent_tree_write())
+    with pytest.raises(OSError, match="pre-commit fail after concurrent tree write"):
+        await manager.create_report(session.id, payload)
+    await writer
+
+    assert manager.agent_tree._call_record(workspace_id, concurrent_call_id) is not None
+    assert payload.call_id not in manager.sessions[session.id].report_call_ids
+    assert not any(report.call_id == payload.call_id for report in manager.reports.values())
+
+    fresh = WorkspaceManager()
+    assert fresh.agent_tree._call_record(workspace_id, concurrent_call_id) is not None
+    assert payload.call_id not in fresh.sessions[session.id].report_call_ids
 
 
 @pytest.mark.asyncio

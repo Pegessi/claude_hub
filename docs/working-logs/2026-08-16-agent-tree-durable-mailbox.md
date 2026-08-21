@@ -1614,6 +1614,10 @@ Remaining control-plane gaps after the reviewed uncommitted repairs:
 
 ### Isolated real-CLI E2E evidence (2026-08-21, port 19173)
 
+> **Stale / harness-injected.** Round 4 spawned a real Claude child, but the
+> harness itself POSTed `create_report`. Delivery review rejected that as
+> not executor-originated. Use Round 5 and `scripts/agent-tree-e2e/`.
+
 | Item | Value |
 | --- | --- |
 | Data root | `/tmp/claude_hub_e2e_f6bf8165/home` (not `~/.claude_hub`) |
@@ -1622,17 +1626,9 @@ Remaining control-plane gaps after the reviewed uncommitted repairs:
 | Child run | `d1597085-2a90-4620-92e8-d9e04a0d65de` |
 | Child session / task | `e2e-agent-1` / `1734a33b-b3ba-4537-a0b6-8e5cc1b003b7` |
 | Child tmux | `claude-hub-939e0449` |
-| Report | `4b8136a0-7cea-4abb-9803-f8a2636208ab` via `POST /sessions/{id}/reports` |
-| Bridged event | `report:4b8136a0-7cea-4abb-9803-f8a2636208ab` seq=3 author=child recipient=root |
-| Wait | returned that call_id; ACK advanced `ack_sequence` 0→3; wait after ACK empty |
-| Persisted log | `e2e-spawn-child-1`, `e2e-spawn-child-1:started`, `report:4b8136a0-...` |
-| After reload | root `ack_sequence` still 3; child `executor_kind=managed_task` / Claude; GET events empty (ACK cursor); wait from 3 empty |
+| Report | `4b8136a0-7cea-4abb-9803-f8a2636208ab` via harness `POST /sessions/{id}/reports` |
+| Bridged event | `report:4b8136a0-...` seq=3 |
 | Cleanup | workspace deleted; e2e tmux/CLI processes gone |
-
-The report was posted through the production session report API against a live
-managed Claude executor. `emit_event` and `_FakeWorkspaceManager` were not used.
-`get_events` after ACK is empty by design: the Hub cursor is
-`max(since_sequence, ack_sequence)`.
 
 ### Round 4 validation
 
@@ -1645,3 +1641,75 @@ managed Claude executor. `emit_event` and `_FakeWorkspaceManager` were not used.
 
 UI remains follow-up `487c630c-4b63-4883-8869-0e38546366c0`. No push, merge,
 or main mutation.
+
+## Round 5: report-rollback race + CLI-originated E2E (2026-08-21)
+
+Delivery review of `a67ba6cd0efe1651c627cae5a8f77dc7af386c07` failed two
+criteria:
+
+1. **Rollback race.** `create_report` snapped workspace/Agent Tree state,
+   then `await`ed tab rename, then committed. A concurrent `emit_event` +
+   `_persist` in that await window was durable until rollback restored the
+   stale snapshot and erased it. Fix: rename first, snapshot after the only
+   pre-commit await. Regression:
+   `test_report_rollback_preserves_concurrent_agent_tree_write`.
+2. **Harness-injected E2E.** Round 4 POSTed the child report from the
+   harness. Fix: `scripts/agent-tree-e2e/` waits on
+   `GET /tasks/{id}/reports` until the managed Claude CLI posts; the
+   harness refuses `POST /reports`.
+
+### Exact rerun commands (this worktree / successor SHA)
+
+```bash
+cd /Users/bytedance/claude_hub-agent-tree
+git rev-parse HEAD
+cd backend
+uv run pytest tests/test_report_intake_atomicity.py tests/test_agent_tree.py \
+  tests/test_workspaces.py tests/test_workspace_resident_agent.py \
+  tests/test_workspace_sessions.py tests/test_agent_tree_subtree_reliability.py \
+  tests/test_agent_tree_executor_selection.py tests/test_ttyd_manager.py \
+  tests/test_hard_recovery.py tests/test_workspace_orchestrator_contract.py
+uv run mypy claude_hub
+uv run black --check claude_hub tests
+uv run isort --check-only claude_hub tests
+python3 -m compileall -q claude_hub tests
+git -C /Users/bytedance/claude_hub-agent-tree diff --check
+bash /Users/bytedance/claude_hub-agent-tree/scripts/agent-tree-e2e/run.sh
+# evidence: $CLAUDE_HUB_E2E_HOME/evidence.json (default /tmp/claude_hub_e2e_f6bf8165/home/evidence.json)
+```
+
+The E2E script redirects `Path.home()` off `~/.claude_hub`, uses port 19173,
+and deletes the throwaway workspace plus e2e tmux/CLI processes on exit.
+It reuses a local env-preset *name* so the isolated Claude CLI can
+authenticate; Hub workspace state stays under the temp home.
+
+### Isolated real-CLI E2E evidence (2026-08-21, CLI-originated)
+
+| Item | Value |
+| --- | --- |
+| Data root | `/tmp/claude_hub_e2e_f6bf8165/home` (not `~/.claude_hub`) |
+| Workspace | `599f5be2-4b86-4e0b-a6b5-5eaef4e7905f` |
+| Root run | `5ae6538e-6fbd-442c-b4fd-f1a5cb07c204` |
+| Child run | `c7532c76-7d7a-49dc-a5df-ec0f90ea9d44` |
+| Child session / task | `e2e-agent-1` / `ff5ae552-e907-403d-9f73-2c15c100347a` |
+| Child tmux | `claude-hub-275a566d` |
+| Report | `d7aa2f49-b010-4861-9173-c97386e09636` POSTed by managed Claude CLI (`E2E_CHILD_REPORT`); harness never called `POST /reports` |
+| Bridged event | `report:d7aa2f49-b010-4861-9173-c97386e09636` seq=3 author=child recipient=root |
+| Wait / ACK | wait returned that call_id; ACK `ack_sequence=3`; wait after ACK empty |
+| After reload | root `ack_sequence` still 3; child `managed_task` / Claude; original `report:d7aa2f49-...` not re-delivered |
+| Cleanup | workspace deleted; e2e tmux/CLI processes gone |
+
+### Round 5 validation
+
+| Suite / check | Result | Exit |
+| --- | --- | --- |
+| listed pytest suites | 542 passed in 829.09s | 0 |
+| `test_report_rollback_preserves_concurrent_agent_tree_write` | passed | 0 |
+| isolated real-CLI E2E (`scripts/agent-tree-e2e/run.sh`) | ok, CLI-originated | 0 |
+| `mypy claude_hub` | 67 source files, no issues | 0 |
+| Black / isort / compileall / `git diff --check` | clean | 0 |
+
+### Migration / rollback (unchanged)
+
+Forward load remains additive. Rolling back without a `state.json` backup
+drops Agent Tree / fingerprint metadata on the next old-version save.
