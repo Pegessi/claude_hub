@@ -1874,3 +1874,63 @@ bash /Users/bytedance/claude_hub-agent-tree/scripts/agent-tree-e2e/run.sh
 | `test_known_call_id_does_not_rename_reassigned_session` | passed | 0 |
 | isolated real-CLI E2E | ok, CLI POST 201, overlay absent | 0 |
 | `mypy` / Black / isort / compileall / `git diff --check` | clean | 0 |
+
+## Round 8: call_id preflight before any rename + in-memory E2E credentials (2026-08-21)
+
+Delivery review of `0cd4d0e0` still saw rename-before-lookup and a 0644
+overlay (that SHA predated Round 7). This successor makes the contract
+explicit:
+
+1. `_existing_report_for_call_id` runs under the workspace lock **before**
+   `_rename_session_for_task`. Same call_id on a reused session returns the
+   original report with **zero** assignment/title/`update_tab` side effects;
+   conflicting payload raises without rename. Cold reload keeps the new
+   binding. Regression:
+   `test_reused_session_known_call_id_has_zero_side_effects`.
+2. E2E does not write `e2e_launch_env.json`. Auth is passed as
+   `CLAUDE_HUB_E2E_LAUNCH_ENV_JSON` into the backend process (module
+   `DEFAULT_CLAUDE_LAUNCH_ENV` mutated in place via `sys.modules`) and as
+   spawn `executor_config.env` so the CLI does not 401. ttyd launch scripts
+   are mode 0600 and unlinked in `finally`; the isolated `.claude_hub` tree
+   is then removed. Scan `remaining_credential_artifacts` must be `[]`.
+
+### Isolated real-CLI E2E evidence (2026-08-21, observe-only, no leftover creds)
+
+| Item | Value |
+| --- | --- |
+| Data root | `/tmp/claude_hub_e2e_f6bf8165/home` |
+| Workspace | `99d9371b-23ff-4a46-b142-2acb5560f803` |
+| Root / child | `18772d12-...` / `2fbba195-...` |
+| Session / task | `e2e-agent-1` / `87e503a9-ad5e-4ab2-ad2b-191455917db2` |
+| Report | `0b77c71f-2020-4e56-9abb-e768f256eee7` CLI `E2E_CHILD_REPORT`; backend `POST /reports` 422 then **201** |
+| Bridge / ACK | `report:0b77c71f-...` seq=3; reload `ack_sequence=3` |
+| Credentials | overlay never written; launch_env files mode 0600 then unlinked; `.claude_hub` rmtree; `remaining_credential_artifacts=[]` |
+
+### Round 8 validation
+
+| Suite / check | Result | Exit |
+| --- | --- | --- |
+| listed pytest suites | 544 passed in 825.46s | 0 |
+| `test_reused_session_known_call_id_has_zero_side_effects` | passed | 0 |
+| isolated real-CLI E2E | ok, CLI POST 201, leftover creds `[]` | 0 |
+| `mypy` / Black / isort / compileall / `git diff --check` | clean | 0 |
+
+### Exact rerun commands (successor SHA)
+
+```bash
+cd /Users/bytedance/claude_hub-agent-tree
+git rev-parse HEAD
+cd backend
+uv run pytest tests/test_report_intake_atomicity.py tests/test_agent_tree.py \
+  tests/test_workspaces.py tests/test_workspace_resident_agent.py \
+  tests/test_workspace_sessions.py tests/test_agent_tree_subtree_reliability.py \
+  tests/test_agent_tree_executor_selection.py tests/test_ttyd_manager.py \
+  tests/test_hard_recovery.py tests/test_workspace_orchestrator_contract.py
+uv run mypy claude_hub
+uv run black --check claude_hub tests
+uv run isort --check-only claude_hub tests
+python3 -m compileall -q claude_hub tests
+git -C /Users/bytedance/claude_hub-agent-tree diff --check
+bash /Users/bytedance/claude_hub-agent-tree/scripts/agent-tree-e2e/run.sh
+# evidence remaining_credential_artifacts must be []
+```

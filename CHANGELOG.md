@@ -37,22 +37,24 @@
   per-workspace mutation lock, so a public tree write cannot persist
   between report snapshot and rollback restore
   (`test_report_rollback_serializes_agent_tree_spawn`).
-- Resolve existing or conflicting report call_ids before the tab rename so
-  a late idempotent retry cannot restore a reassigned session title
-  (`test_known_call_id_does_not_rename_reassigned_session`).
-- Isolated E2E passes Claude launch env through process environment only
-  and unlinks any leftover credential overlay in `finally`.
-- **Validation**: listed suites 544 passed in 838.23s
+- Resolve existing or conflicting report call_ids before any tab rename so
+  a late retry cannot restore a reused session's assignment
+  (`test_reused_session_known_call_id_has_zero_side_effects`).
+- Isolated E2E keeps Claude launch credentials in the backend process
+  environment; ttyd writes mode-0600 launch scripts and unlinks them on
+  every exit (`remaining_credential_artifacts=[]`).
+- **Validation**: listed suites 544 passed in 825.46s
   (`test_agent_tree.py`, `test_workspaces.py`, resident/session,
   report-atomicity including
-  `test_known_call_id_does_not_rename_reassigned_session`, subtree
+  `test_reused_session_known_call_id_has_zero_side_effects`, subtree
   reliability, executor selection, `test_ttyd_manager.py`, hard-recovery,
   orchestrator-contract); `mypy claude_hub` checked 67 source files with
   no issues; Black, isort, compileall, and `git diff --check` clean.
   Isolated real-CLI E2E observes only: managed Claude POSTed
-  `E2E_CHILD_REPORT` (`60bd07cf-...`, `POST /reports` 201, bridge seq=3);
-  wait/ACK/reload kept `ack_sequence=3`. Credential overlay was never
-  written and was absent after cleanup. Round 4 harness injection is stale.
+  `E2E_CHILD_REPORT` (`0b77c71f-...`, `POST /reports` 201, bridge seq=3);
+  wait/ACK/reload kept `ack_sequence=3`. Overlay never written; launch_env
+  files were mode 0600 then unlinked; `remaining_credential_artifacts=[]`.
+  Round 4 harness injection is stale.
 - **Migration/rollback**: new fields are additive on forward load. Before
   rollback, back up workspace `state.json` and drain writers: the first
   old-version save drops Agent Tree and report fingerprint metadata it does
