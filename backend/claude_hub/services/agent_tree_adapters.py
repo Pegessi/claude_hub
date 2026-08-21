@@ -2,8 +2,8 @@
 
 Each adapter wraps a different way of executing an agent run:
 - ``ManagedTaskAdapter``: the existing workspace task/session/report flow.
-- ``NativeSubagentAdapter``: future in-process subagent (stub with contract).
-- ``ExternalJobAdapter``: future remote/third-party job (stub with contract).
+- ``NativeSubagentAdapter``: unavailable in-memory simulator used by tests.
+- ``ExternalJobAdapter``: unavailable in-memory simulator used by tests.
 
 The adapter interface is intentionally small: ``spawn``, ``send_message``,
 ``followup``, ``interrupt``, and ``get_status``. The Hub owns lifecycle
@@ -17,15 +17,49 @@ import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Optional
 
+from claude_hub.models.agent_tree import ExecutorCapabilities, ManagedExecutorConfig
+from claude_hub.models.schemas import AgentType, ExecutionTarget
+
 if TYPE_CHECKING:
     from claude_hub.models.agent_tree import AgentRun, AgentRunStatus
+    from claude_hub.models.schemas import ManagedSession
     from claude_hub.services.workspace_manager import WorkspaceManager
 
 logger = logging.getLogger(__name__)
 
 
+class ExecutorUnavailableError(RuntimeError):
+    """Raised when a caller selects an executor with no real runtime."""
+
+
 class ExecutorAdapter(ABC):
     """Base interface for executing an agent run."""
+
+    @abstractmethod
+    def capabilities(self) -> ExecutorCapabilities:
+        """Return the adapter's public, serializable capability snapshot."""
+
+    def prepare_run(self, run: "AgentRun") -> None:
+        """Validate configuration and attach a durable capability snapshot.
+
+        The manager calls this before persisting a new run.  Keeping the
+        snapshot on ``AgentRun`` makes availability and supported operations
+        survive process restarts.  Availability is enforced separately at
+        the public API boundary so internal unit tests may still use explicit
+        simulators without advertising them as production executors.
+        """
+
+        capability = self.capabilities()
+        run.executor_capabilities = capability.model_copy(deep=True)
+
+    def require_available(self) -> None:
+        """Fail clearly when this adapter has no production runtime."""
+
+        capability = self.capabilities()
+        if not capability.available:
+            raise ExecutorUnavailableError(
+                capability.unavailable_reason or "The selected executor is unavailable"
+            )
 
     @abstractmethod
     async def spawn(self, run: "AgentRun", initial_message: str) -> str:
@@ -92,13 +126,226 @@ class ManagedTaskAdapter(ExecutorAdapter):
     def __init__(self, workspace_manager: "WorkspaceManager") -> None:
         self._wm = workspace_manager
 
+    def capabilities(self) -> ExecutorCapabilities:
+        return ExecutorCapabilities(
+            available=True,
+            supports_spawn=True,
+            supports_send=True,
+            supports_followup=True,
+            supports_interrupt=True,
+            durable_status=True,
+            supported_agent_types=[
+                AgentType.CLAUDE,
+                AgentType.CODEX,
+                AgentType.CURSOR,
+            ],
+            # Claude and Codex have verified model launch paths in ttyd_manager.
+            # Cursor model selection is intentionally not claimed here.
+            model_configurable_agent_types=[AgentType.CLAUDE, AgentType.CODEX],
+        )
+
+    def prepare_run(self, run: "AgentRun") -> None:
+        config = run.executor_config or ManagedExecutorConfig()
+        workspace = self._wm.workspaces.get(run.workspace_id)
+        if workspace is None:
+            raise ValueError(f"Workspace {run.workspace_id} not found")
+        target = config.target or workspace.target
+        updates: dict[str, object] = {"target": target}
+        if target == ExecutionTarget.REMOTE:
+            updates.update(
+                {
+                    "remote_profile_id": (config.remote_profile_id or workspace.remote_profile_id),
+                    "remote_cwd": config.remote_cwd or workspace.remote_cwd,
+                    "remote_reconnect": (
+                        config.remote_reconnect
+                        if config.remote_reconnect is not None
+                        else workspace.remote_reconnect
+                    ),
+                }
+            )
+        run.executor_config = config.model_copy(update=updates)
+        super().prepare_run(run)
+        self._launch_env(run.executor_config)
+
+    @staticmethod
+    def _config(run: "AgentRun") -> ManagedExecutorConfig:
+        config = run.executor_config
+        if config is None:
+            raise RuntimeError("Managed executor config was not prepared")
+        if config.target is None:
+            raise RuntimeError("Managed executor target was not resolved")
+        return config
+
+    @staticmethod
+    def _launch_env(config: ManagedExecutorConfig) -> dict[str, str]:
+        """Return the exact persisted launch environment for ``config``.
+
+        Agent type selects a known CLI integration.  No arbitrary executable
+        or shell fragment is accepted.  Model names are passed through the
+        existing Claude launch variable or the Codex launch variable consumed
+        by ``TTYDProcess``.
+        """
+
+        if config.agent_type == AgentType.TERMINAL:
+            raise ValueError("managed_task does not support the terminal executor")
+        if config.agent_type not in {AgentType.CLAUDE, AgentType.CODEX, AgentType.CURSOR}:
+            raise ValueError(f"Unsupported managed_task agent_type: {config.agent_type.value}")
+
+        launch_env = dict(config.env)
+        model = config.model.strip() if config.model else None
+        if config.model is not None and not model:
+            raise ValueError("executor_config.model must not be blank")
+        if not model:
+            return launch_env
+
+        if config.agent_type == AgentType.CLAUDE:
+            key = "ANTHROPIC_MODEL"
+        elif config.agent_type == AgentType.CODEX:
+            key = "CODEX_MODEL"
+        else:
+            raise ValueError("Cursor executor does not support an explicit model override")
+        configured = launch_env.get(key)
+        if configured is not None and configured != model:
+            raise ValueError(f"executor_config.model conflicts with executor_config.env[{key!r}]")
+        launch_env[key] = model
+        return launch_env
+
+    @staticmethod
+    def config_from_session(session: "ManagedSession") -> ManagedExecutorConfig:
+        """Recover an explicit managed config from an existing Hub session.
+
+        Legacy resident-master spawn calls pass only ``session_id``.  Deriving
+        the config from that session preserves the actual CLI/model/target
+        instead of silently relabelling a Codex or remote worker as Claude.
+        """
+
+        env = dict(session.env)
+        model = None
+        if session.agent_type == AgentType.CLAUDE:
+            model = env.pop("ANTHROPIC_MODEL", None)
+        elif session.agent_type == AgentType.CODEX:
+            model = env.pop("CODEX_MODEL", None)
+        return ManagedExecutorConfig(
+            agent_type=session.agent_type,
+            model=model,
+            env=env,
+            solo_mode=session.solo_mode,
+            target=session.target,
+            cwd=(session.workspace_path if session.target == ExecutionTarget.LOCAL else None),
+            remote_profile_id=session.remote_profile_id,
+            remote_cwd=session.remote_cwd,
+            remote_reconnect=session.remote_reconnect,
+        )
+
+    def validate_session(self, run: "AgentRun", session: "ManagedSession") -> None:
+        """Reject an explicit session that does not match the persisted spec."""
+
+        self.prepare_run(run)
+        config = self._config(run)
+        expected_env = self._launch_env(config)
+        mismatches = []
+        if session.workspace_id != run.workspace_id:
+            mismatches.append("workspace_id")
+        if session.agent_type != config.agent_type:
+            mismatches.append("agent_type")
+        if session.solo_mode != config.solo_mode:
+            mismatches.append("solo_mode")
+        if session.target != config.target:
+            mismatches.append("target")
+        if session.env != expected_env:
+            mismatches.append("env/model")
+        if config.cwd is not None and session.workspace_path != config.cwd:
+            mismatches.append("cwd")
+        if (
+            config.remote_profile_id is not None
+            and session.remote_profile_id != config.remote_profile_id
+        ):
+            mismatches.append("remote_profile_id")
+        if config.remote_cwd is not None and session.remote_cwd != config.remote_cwd:
+            mismatches.append("remote_cwd")
+        if mismatches:
+            raise ValueError(
+                f"Session {session.id} does not match executor_config: " + ", ".join(mismatches)
+            )
+
+    def _compatible_session(
+        self, run: "AgentRun", launch_env: dict[str, str]
+    ) -> Optional["ManagedSession"]:
+        """Find a real managed session with the exact requested CLI config."""
+
+        from claude_hub.models.schemas import (
+            AgentRuntimeStatus,
+            ManagedSessionStatus,
+            WorkspaceSessionRole,
+        )
+
+        config = self._config(run)
+        candidates = [
+            session
+            for session in self._wm.sessions.values()
+            if session.workspace_id == run.workspace_id
+            and session.role == WorkspaceSessionRole.ORCHESTRATOR
+            and session.status != ManagedSessionStatus.STOPPED
+            and session.runtime_status in {AgentRuntimeStatus.IDLE, AgentRuntimeStatus.WORKING}
+            and session.agent_type == config.agent_type
+            and session.solo_mode == config.solo_mode
+            and session.target == config.target
+            and session.env == launch_env
+            and (
+                config.cwd is None
+                or (
+                    session.target == ExecutionTarget.LOCAL and session.workspace_path == config.cwd
+                )
+            )
+            and (
+                config.remote_profile_id is None
+                or session.remote_profile_id == config.remote_profile_id
+            )
+            and (config.remote_cwd is None or session.remote_cwd == config.remote_cwd)
+        ]
+        if not candidates:
+            return None
+        return sorted(candidates, key=lambda item: (item.queued_count, item.created_at))[0]
+
+    async def _ensure_executor_session(self, run: "AgentRun") -> "ManagedSession":
+        from claude_hub.models.schemas import (
+            EnsureWorkspaceAgentRequest,
+            WorkspaceSessionRole,
+        )
+
+        config = self._config(run)
+        launch_env = self._launch_env(config)
+        compatible = self._compatible_session(run, launch_env)
+        if compatible is not None:
+            return compatible
+        return await self._wm.ensure_workspace_agent(
+            run.workspace_id,
+            EnsureWorkspaceAgentRequest(
+                agent_type=config.agent_type,
+                title=(run.title or f"agent-run-{run.id[:8]}") + f" ({config.agent_type.value})",
+                role=WorkspaceSessionRole.ORCHESTRATOR,
+                reuse_existing=False,
+                cwd=config.cwd,
+                solo_mode=config.solo_mode,
+                target=config.target,
+                remote_profile_id=config.remote_profile_id,
+                remote_cwd=config.remote_cwd,
+                remote_reconnect=config.remote_reconnect,
+                ephemeral=True,
+                env=launch_env,
+            ),
+        )
+
     async def spawn(self, run: "AgentRun", initial_message: str) -> str:
         from claude_hub.models.schemas import (
-            AgentType,
+            StartTaskRequest,
             WorkspaceTaskCreate,
             WorkspaceTaskMode,
             WorkspaceTaskStatus,
         )
+
+        self.prepare_run(run)
+        config = self._config(run)
 
         # Recoverability: if a previous spawn call already created a task for
         # this run (e.g. the process crashed after task creation but before
@@ -114,21 +361,39 @@ class ManagedTaskAdapter(ExecutorAdapter):
         )
         if existing_task is not None:
             if existing_task.status == WorkspaceTaskStatus.TODO:
-                await self._wm.start_task(existing_task.id)
+                await self._wm.start_task(
+                    existing_task.id,
+                    StartTaskRequest(
+                        agent_type=existing_task.agent_type,
+                        target_session_id=existing_task.session_id,
+                    ),
+                )
             return str(existing_task.id)
+
+        session = await self._ensure_executor_session(run)
 
         task = self._wm.create_task(
             run.workspace_id,
             WorkspaceTaskCreate(
                 title=run.title or f"agent-run-{run.id[:8]}",
                 prompt=initial_message,
-                agent_type=AgentType.CLAUDE,
+                agent_type=config.agent_type,
                 task_mode=WorkspaceTaskMode.REVIEWED,
                 agent_run_id=run.id,
+                session_id=session.id,
             ),
         )
-        # Start the task so it gets dispatched to a worker session.
-        await self._wm.start_task(task.id)
+        # Pin the start to the exact session whose persisted CLI/model/env
+        # configuration was selected above.  The generic dispatcher does not
+        # filter sessions by AgentType, so omitting this would allow a Codex
+        # child task to land on an arbitrary Claude worker.
+        await self._wm.start_task(
+            task.id,
+            StartTaskRequest(
+                agent_type=config.agent_type,
+                target_session_id=session.id,
+            ),
+        )
         return str(task.id)
 
     async def send_message(self, run: "AgentRun", message: str) -> None:
@@ -143,6 +408,9 @@ class ManagedTaskAdapter(ExecutorAdapter):
     async def followup(self, run: "AgentRun", message: str, call_id: Optional[str] = None) -> None:
         from claude_hub.models.schemas import ContinueTaskRequest, WorkspaceTaskStatus
 
+        self.prepare_run(run)
+        config = self._config(run)
+
         task_id = run.context_ref
         if not task_id:
             raise RuntimeError(f"Run {run.id} has no managed task context_ref")
@@ -152,7 +420,7 @@ class ManagedTaskAdapter(ExecutorAdapter):
             # same agent_run_id so the run's context_ref still points to a
             # valid task. The followup message becomes the new task's prompt.
             from claude_hub.models.schemas import (
-                AgentType,
+                StartTaskRequest,
                 WorkspaceTaskCreate,
                 WorkspaceTaskMode,
                 WorkspaceTaskStatus,
@@ -189,7 +457,13 @@ class ManagedTaskAdapter(ExecutorAdapter):
                 run.context_ref = str(existing_task.id)
                 self._wm._save_state()
                 if existing_task.status == WorkspaceTaskStatus.TODO:
-                    await self._wm.start_task(existing_task.id)
+                    await self._wm.start_task(
+                        existing_task.id,
+                        StartTaskRequest(
+                            agent_type=existing_task.agent_type,
+                            target_session_id=existing_task.session_id,
+                        ),
+                    )
                 # The call_id stays in pending_call_ids until the worker ACKs
                 # it. It is embedded in the prompt so the worker can list it
                 # in acked_call_ids.
@@ -207,14 +481,16 @@ class ManagedTaskAdapter(ExecutorAdapter):
             prompt_text = message
             if call_id:
                 prompt_text = f"[call_id:{call_id}]\n{message}"
+            session = await self._ensure_executor_session(run)
             new_task = self._wm.create_task(
                 run.workspace_id,
                 WorkspaceTaskCreate(
                     title=run.title or f"agent-run-{run.id[:8]}",
                     prompt=prompt_text,
-                    agent_type=AgentType.CLAUDE,
+                    agent_type=config.agent_type,
                     task_mode=WorkspaceTaskMode.REVIEWED,
                     agent_run_id=run.id,
+                    session_id=session.id,
                 ),
             )
             # Persist the new context_ref BEFORE dispatching. If we crash
@@ -224,7 +500,13 @@ class ManagedTaskAdapter(ExecutorAdapter):
             # durable context; start_task is idempotent on the task id.
             run.context_ref = str(new_task.id)
             self._wm._save_state()
-            await self._wm.start_task(new_task.id)
+            await self._wm.start_task(
+                new_task.id,
+                StartTaskRequest(
+                    agent_type=config.agent_type,
+                    target_session_id=session.id,
+                ),
+            )
             # The call_id stays in pending_call_ids until the worker ACKs it.
             # It is embedded in the prompt (above) so the worker can list it
             # in acked_call_ids of its report.
@@ -394,15 +676,25 @@ class ManagedTaskAdapter(ExecutorAdapter):
 
 
 class NativeSubagentAdapter(ExecutorAdapter):
-    """Stub adapter for future in-process native subagents.
+    """Explicitly unavailable simulator for future native subagents.
 
-    Provides the contract and a deterministic in-memory implementation so
-    the coordination layer can be tested end-to-end without a real
-    subagent runtime.
+    The deterministic in-memory behavior remains for coordination unit tests,
+    but ``capabilities().available`` is false and the public API must call
+    ``require_available`` before dispatch.  This prevents a simulator context
+    id from being mistaken for a running model.
     """
 
     def __init__(self) -> None:
         self._statuses: dict[str, "AgentRunStatus"] = {}
+
+    def capabilities(self) -> ExecutorCapabilities:
+        return ExecutorCapabilities(
+            available=False,
+            unavailable_reason=(
+                "native_subagent is not connected to a runtime; use managed_task "
+                "with executor_config.agent_type instead"
+            ),
+        )
 
     async def spawn(self, run: "AgentRun", initial_message: str) -> str:
         from claude_hub.models.agent_tree import AgentRunStatus
@@ -431,13 +723,20 @@ class NativeSubagentAdapter(ExecutorAdapter):
 
 
 class ExternalJobAdapter(ExecutorAdapter):
-    """Stub adapter for future remote/third-party jobs.
+    """Explicitly unavailable simulator for future external jobs.
 
-    Provides the contract and a deterministic in-memory implementation.
+    See ``NativeSubagentAdapter``: public callers must be rejected until a
+    durable external-job runtime is wired in.
     """
 
     def __init__(self) -> None:
         self._statuses: dict[str, "AgentRunStatus"] = {}
+
+    def capabilities(self) -> ExecutorCapabilities:
+        return ExecutorCapabilities(
+            available=False,
+            unavailable_reason="external_job is not connected to a durable job runtime",
+        )
 
     async def spawn(self, run: "AgentRun", initial_message: str) -> str:
         from claude_hub.models.agent_tree import AgentRunStatus
@@ -478,6 +777,15 @@ class ResidentRootAdapter(ExecutorAdapter):
 
     def __init__(self, workspace_manager: "WorkspaceManager") -> None:
         self._wm = workspace_manager
+
+    def capabilities(self) -> ExecutorCapabilities:
+        return ExecutorCapabilities(
+            available=True,
+            supports_send=True,
+            supports_followup=True,
+            supports_interrupt=True,
+            durable_status=True,
+        )
 
     async def spawn(self, run: "AgentRun", initial_message: str) -> str:
         # The resident session is created outside the agent tree. The

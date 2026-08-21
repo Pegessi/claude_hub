@@ -61,6 +61,13 @@ class _PromptsMixin:
             return f"http://127.0.0.1:{session.remote_forward_port}"
         return f"http://localhost:{settings.port}"
 
+    def _report_prompt_call_id(self, task_id: str, purpose: str, ordinal: int = 1) -> str:
+        """Return a stable backend-owned report call_id for one task cycle."""
+
+        task = self.tasks.get(task_id)
+        cycle = max(task.review_cycle, 1) if task is not None else "REVIEW_CYCLE"
+        return f"{task_id}-{purpose}-cycle-{cycle}-{ordinal}"
+
     def _report_endpoint_curl(self, session: ManagedSession, task_id: str | None = None) -> str:
         """Render the report-endpoint curl example for a session.
 
@@ -70,6 +77,7 @@ class _PromptsMixin:
         cleared agent has no curl target to POST to.
         """
         task_field = task_id if task_id is not None else "TASK_ID"
+        call_id = self._report_prompt_call_id(task_field, "working-progress")
         return (
             "Report endpoint (include a stable call_id; reuse the SAME call_id "
             "when resubmitting the same report after a failure or context "
@@ -80,7 +88,7 @@ class _PromptsMixin:
             f"/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task_field}","state":"working",'
-            f'"call_id":"{task_field}-working-1",'
+            f'"call_id":"{call_id}",'
             '"message":"Progress update",'
             '"message_en":"Progress update","message_zh":"进度更新"}\''
         )
@@ -142,7 +150,8 @@ class _PromptsMixin:
             "Report endpoint (POST JSON for assigned tasks):\n"
             f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
-            '-d \'{"task_id":"TASK_ID","state":"working","call_id":"TASK_ID-working-1",'
+            '-d \'{"task_id":"TASK_ID","state":"working",'
+            '"call_id":"TASK_ID-working-progress-cycle-REVIEW_CYCLE-1",'
             '"message":"Progress update",'
             '"message_en":"Progress update","message_zh":"进度更新"}\''
         )
@@ -203,7 +212,7 @@ class _PromptsMixin:
             f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             '-d \'{"task_id":"TASK_ID","state":"review_started",'
-            '"call_id":"TASK_ID-review_started-1",'
+            '"call_id":"TASK_ID-review-started-cycle-REVIEW_CYCLE-1",'
             '"message":"Started review","message_en":"Started review","message_zh":"开始评审"}\''
         )
 
@@ -282,6 +291,9 @@ class _PromptsMixin:
             ),
             workspace_id=workspace.id,
         )
+        goal_packet_call_id = self._report_prompt_call_id(task.id, "goal-packet")
+        started_call_id = self._report_prompt_call_id(task.id, "started")
+        progress_call_id = self._report_prompt_call_id(task.id, "working-progress")
         return (
             "New workspace task assigned.\n\n"
             f"Workspace: {workspace.name}\n"
@@ -319,7 +331,7 @@ class _PromptsMixin:
             f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"working",'
-            f'"call_id":"{task.id}-working-1",'
+            f'"call_id":"{goal_packet_call_id}",'
             '"message":"Goal Packet; awaiting approval.","message_en":"Goal Packet; awaiting approval.",'
             '"message_zh":"目标包已创建，等待审核。","goal_packet":{'
             '"objective":"...","acceptance_criteria":["..."],"validation_plan":["..."],'
@@ -340,7 +352,7 @@ class _PromptsMixin:
             f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"started",'
-            f'"call_id":"{task.id}-started-1",'
+            f'"call_id":"{started_call_id}",'
             '"message":"Started","message_en":"Started","message_zh":"已开始"}}\'\n\n'
             "Call-id ACK contract (at-least-once delivery to your tmux inbox):\n"
             "Messages from your supervisor may be prefixed with a `[call_id:<id>]` marker "
@@ -361,7 +373,7 @@ class _PromptsMixin:
             "- A call_id you do NOT list stays in processing and will be cleaned up only "
             "after you ACK it. List every call_id you process so the Hub can release it.\n"
             "Example report body with ACKs:\n"
-            f'{{"task_id":"{task.id}","state":"working","call_id":"{task.id}-working-2",'
+            f'{{"task_id":"{task.id}","state":"working","call_id":"{progress_call_id}",'
             '"message":"...","message_en":"...",'
             '"message_zh":"...","acked_call_ids":["followup-abc123"]}}\n'
         )
@@ -881,6 +893,8 @@ class _PromptsMixin:
             ),
             workspace_id=workspace.id,
         )
+        review_started_call_id = self._report_prompt_call_id(task.id, "review-started")
+        review_passed_call_id = self._report_prompt_call_id(task.id, "review-passed")
         return (
             "Review workspace task.\n\n"
             f"Workspace: {workspace.name}; Task ID: {task.id}\n"
@@ -917,8 +931,14 @@ class _PromptsMixin:
             "round counter so repeated reviews don't collide):\n"
             f"{INTERNAL_API_CURL} -X POST {self._report_base_url(reviewer)}/api/workspaces/sessions/{reviewer.id}/reports "
             "-H 'Content-Type: application/json' "
+            f'-d \'{{"task_id":"{task.id}","state":"review_started",'
+            f'"call_id":"{review_started_call_id}",'
+            '"message":"Started review","message_en":"Started review",'
+            '"message_zh":"开始评审"}}\'\n'
+            f"{INTERNAL_API_CURL} -X POST {self._report_base_url(reviewer)}/api/workspaces/sessions/{reviewer.id}/reports "
+            "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"review_passed",'
-            f'"call_id":"{task.id}-review_passed-1",'
+            f'"call_id":"{review_passed_call_id}",'
             '"message":"Verdict + summary + acceptance rollup + notes",'
             '"message_en":"Verdict + summary + acceptance rollup + notes",'
             '"message_zh":"结论 + 摘要 + 验收汇总 + 备注",'

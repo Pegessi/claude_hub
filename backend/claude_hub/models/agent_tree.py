@@ -22,6 +22,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from .schemas import AgentType, ExecutionTarget
+
 
 class ExecutorKind(str, Enum):
     """How a child agent run is executed.
@@ -36,6 +38,51 @@ class ExecutorKind(str, Enum):
     NATIVE_SUBAGENT = "native_subagent"
     EXTERNAL_JOB = "external_job"
     RESIDENT_ROOT = "resident_root"
+
+
+class ExecutorCapabilities(BaseModel):
+    """Durable snapshot of an executor adapter's public capabilities.
+
+    A run stores this snapshot when it is created.  Keeping it on the run,
+    instead of deriving it only from an in-memory adapter instance, makes the
+    execution contract visible after a Hub restart and prevents a placeholder
+    adapter from being presented as a real executor.
+    """
+
+    available: bool
+    supports_spawn: bool = False
+    supports_send: bool = False
+    supports_followup: bool = False
+    supports_interrupt: bool = False
+    durable_status: bool = False
+    supported_agent_types: List[AgentType] = Field(default_factory=list)
+    model_configurable_agent_types: List[AgentType] = Field(default_factory=list)
+    unavailable_reason: Optional[str] = None
+
+
+class ManagedExecutorConfig(BaseModel):
+    """Launch configuration for a real ``managed_task`` executor.
+
+    ``agent_type`` selects the existing Hub CLI integration (Claude Code,
+    Codex, or Cursor).  ``model`` is translated to the launch mechanism that
+    the selected CLI actually supports; arbitrary command strings are
+    intentionally not accepted.  The remaining fields map directly to the
+    existing managed-session creation API.
+
+    Defaults preserve the historical Agent Tree behavior: a legacy managed
+    spawn without ``executor_config`` runs Claude in solo mode and inherits
+    the workspace execution target.
+    """
+
+    agent_type: AgentType = AgentType.CLAUDE
+    model: Optional[str] = None
+    env: Dict[str, str] = Field(default_factory=dict)
+    solo_mode: bool = True
+    target: Optional[ExecutionTarget] = None
+    cwd: Optional[str] = None
+    remote_profile_id: Optional[str] = None
+    remote_cwd: Optional[str] = None
+    remote_reconnect: Optional[bool] = None
 
 
 class AgentRunStatus(str, Enum):
@@ -98,6 +145,13 @@ class AgentRun(BaseModel):
     # runs this is None.
     supervisor_id: Optional[str] = None
     executor_kind: ExecutorKind
+    # The concrete CLI/model launch contract for managed tasks.  This is
+    # persisted with the run so crash recovery reuses the same executor
+    # rather than falling back to a hard-coded Claude worker.
+    executor_config: Optional[ManagedExecutorConfig] = None
+    # Capability snapshot supplied by the adapter at creation time.  Legacy
+    # persisted runs may not have one; their manager can backfill it on load.
+    executor_capabilities: Optional[ExecutorCapabilities] = None
     status: AgentRunStatus = AgentRunStatus.PENDING
     # Opaque reference to the executor's context (e.g. workspace task id,
     # native subagent handle, external job id).
@@ -177,6 +231,7 @@ class SpawnRequest(BaseModel):
     workspace_id: str
     parent_id: str
     executor_kind: ExecutorKind
+    executor_config: Optional[ManagedExecutorConfig] = None
     title: Optional[str] = None
     initial_message: str
     call_id: str

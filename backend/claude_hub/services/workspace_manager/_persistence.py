@@ -35,7 +35,66 @@ class _PersistenceMixin:
                 pass
             raise
 
+    def _workspace_state_payload(self, workspace_id: str) -> dict[str, Any]:
+        """Serialize one workspace's durable mutable state."""
+
+        payload = {
+            "tasks": [
+                item.model_dump(mode="json")
+                for item in self.tasks.values()
+                if item.workspace_id == workspace_id
+            ],
+            "sessions": [
+                item.model_dump(mode="json")
+                for item in self.sessions.values()
+                if item.workspace_id == workspace_id
+            ],
+            "reports": [
+                item.model_dump(mode="json")
+                for item in self.reports.values()
+                if item.workspace_id == workspace_id
+            ],
+        }
+        payload.update(self.agent_tree.to_dict(workspace_id))
+        return payload
+
+    def _save_report_intake_workspace_state(self, workspace_id: str) -> None:
+        """Commit one report-intake transaction at its workspace state file.
+
+        Report intake never mutates the workspace index or any other
+        workspace.  Its sole durable commit point is therefore the atomic
+        replacement of ``<workspace>/state.json``.  The Markdown snapshot is
+        derived operator output: a failure writing it after the state commit
+        must not turn a committed report into an apparent rollback.
+        """
+
+        if workspace_id not in self.workspaces:
+            raise KeyError(workspace_id)
+        payload = self._workspace_state_payload(workspace_id)
+        self._atomic_write_text(
+            self._workspace_state_file(workspace_id),
+            json.dumps(payload, indent=2),
+        )
+        try:
+            self._write_snapshot(workspace_id)
+        except Exception:
+            logger.exception(
+                "Report intake committed state.json but failed to refresh derived snapshot "
+                "workspace_id=%s",
+                workspace_id,
+            )
+
     def _save_state(self) -> None:
+        # ``create_report`` deliberately retains this public/internal save
+        # call so existing failure injection hooks still exercise the report
+        # transaction.  Task-local routing makes the production operation a
+        # one-workspace commit instead of rewriting the index and unrelated
+        # workspaces.
+        report_workspace_id = self._report_intake_workspace.get()
+        if report_workspace_id is not None:
+            self._save_report_intake_workspace_state(report_workspace_id)
+            return
+
         _wm.STATE_ROOT.mkdir(parents=True, exist_ok=True)
         index_payload = {
             "workspaces": [item.model_dump(mode="json") for item in self.workspaces.values()]
@@ -45,25 +104,7 @@ class _PersistenceMixin:
         for workspace in self.workspaces.values():
             workspace_dir = self._workspace_dir(workspace.id)
             workspace_dir.mkdir(parents=True, exist_ok=True)
-            payload = {
-                "tasks": [
-                    item.model_dump(mode="json")
-                    for item in self.tasks.values()
-                    if item.workspace_id == workspace.id
-                ],
-                "sessions": [
-                    item.model_dump(mode="json")
-                    for item in self.sessions.values()
-                    if item.workspace_id == workspace.id
-                ],
-                "reports": [
-                    item.model_dump(mode="json")
-                    for item in self.reports.values()
-                    if item.workspace_id == workspace.id
-                ],
-            }
-            # Persist the agent tree (runs + event stream) for this workspace.
-            payload.update(self.agent_tree.to_dict(workspace.id))
+            payload = self._workspace_state_payload(workspace.id)
             self._atomic_write_text(
                 self._workspace_state_file(workspace.id),
                 json.dumps(payload, indent=2),

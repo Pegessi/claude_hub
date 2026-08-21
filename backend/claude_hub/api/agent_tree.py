@@ -35,6 +35,7 @@ from ..models.agent_tree import (
     WaitRequest,
 )
 from ..services import workspace_manager
+from ..services.agent_tree_adapters import ExecutorUnavailableError
 
 if TYPE_CHECKING:
     from ..services.agent_tree import AgentTreeManager
@@ -131,6 +132,26 @@ def _owned_subtree_run_ids(manager: "AgentTreeManager", session_id: str) -> set[
     return result
 
 
+def _assert_subtree_authority(
+    manager: "AgentTreeManager", run_id: str, session_id: Optional[str]
+) -> None:
+    """Verify that the caller owns or supervises ``run_id`` at any depth."""
+    if session_id is None:
+        return
+    if not _is_authenticated_session(manager, session_id):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Session {session_id} is not authenticated",
+        )
+    if _is_human_session(session_id):
+        return
+    if run_id not in _owned_subtree_run_ids(manager, session_id):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Session {session_id} may not access run {run_id}",
+        )
+
+
 def _assert_authority(
     manager: "AgentTreeManager", author_id: str, session_id: Optional[str]
 ) -> None:
@@ -173,7 +194,10 @@ async def spawn(
 ) -> AgentRun:
     try:
         _assert_authority(_manager(), req.parent_id, session_id)
+        _manager().require_executor_available(req.executor_kind)
         return await _manager().spawn(req)
+    except ExecutorUnavailableError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
@@ -222,23 +246,8 @@ async def wait(
         # Read permission: any authenticated caller (human or agent session)
         # may wait on events in their workspace. For agent sessions, the
         # recipient must be a run the session owns or supervises.
-        if session_id is not None:
-            # Reject forged or stale session cookies first.
-            if not _is_authenticated_session(_manager(), session_id):
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Session {session_id} is not authenticated",
-                )
-            run = _manager().get_run(req.recipient_id)
-            if run is not None:
-                if not _session_owns_run(_manager(), run, session_id):
-                    if run.supervisor_id:
-                        _assert_authority(_manager(), run.supervisor_id, session_id)
-                    elif not _is_human_session(session_id):
-                        raise HTTPException(
-                            status_code=403,
-                            detail=f"Session {session_id} may not wait on run {req.recipient_id}",
-                        )
+        if _manager().get_run(req.recipient_id) is not None:
+            _assert_subtree_authority(_manager(), req.recipient_id, session_id)
         return await _manager().wait(req)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -270,24 +279,10 @@ async def interrupt(
     session_id: Optional[str] = Depends(_get_session_id),
 ) -> AgentRun:
     try:
-        # The caller may interrupt any run in its subtree. For simplicity,
-        # we check that the caller owns the run or its supervisor.
+        # The caller may interrupt any run in its owned subtree, at any depth.
         run = _manager().get_run(req.run_id)
-        if run is not None and session_id is not None:
-            # Reject forged or stale session cookies first.
-            if not _is_authenticated_session(_manager(), session_id):
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Session {session_id} is not authenticated",
-                )
-            if not _session_owns_run(_manager(), run, session_id):
-                if run.supervisor_id:
-                    _assert_authority(_manager(), run.supervisor_id, session_id)
-                elif not _is_human_session(session_id):
-                    raise HTTPException(
-                        status_code=403,
-                        detail=f"Session {session_id} may not interrupt run {req.run_id}",
-                    )
+        if run is not None:
+            _assert_subtree_authority(_manager(), req.run_id, session_id)
         return await _manager().interrupt(req)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
