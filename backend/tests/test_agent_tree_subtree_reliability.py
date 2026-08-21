@@ -29,7 +29,10 @@ from claude_hub.models.agent_tree import (
     SpawnRequest,
     WaitRequest,
 )
-from claude_hub.services.agent_tree_adapters import NativeSubagentAdapter
+from claude_hub.services.agent_tree_adapters import (
+    ExternalJobAdapter,
+    NativeSubagentAdapter,
+)
 from claude_hub.services.workspace_manager import WorkspaceManager
 
 _wm = import_module("claude_hub.services.workspace_manager")
@@ -37,6 +40,19 @@ _wm = import_module("claude_hub.services.workspace_manager")
 
 class _AvailableNativeAdapter(NativeSubagentAdapter):
     """Test-only runtime: explicitly available, deterministic, and in-memory."""
+
+    def capabilities(self) -> ExecutorCapabilities:
+        return ExecutorCapabilities(
+            available=True,
+            supports_send=True,
+            supports_followup=True,
+            supports_interrupt=True,
+            durable_status=False,
+        )
+
+
+class _AvailableExternalAdapter(ExternalJobAdapter):
+    """Test-only runtime used to construct persisted legacy runs."""
 
     def capabilities(self) -> ExecutorCapabilities:
         return ExecutorCapabilities(
@@ -74,6 +90,7 @@ def manager(monkeypatch: MonkeyPatch, tmp_path: Path) -> WorkspaceManager:
     monkeypatch.setattr(_wm.WorkspaceManager, "_query_tmux_receipt", AsyncMock(return_value=False))
     workspace_manager = WorkspaceManager()
     workspace_manager.agent_tree._adapters[ExecutorKind.NATIVE_SUBAGENT] = _AvailableNativeAdapter()
+    workspace_manager.agent_tree._adapters[ExecutorKind.EXTERNAL_JOB] = _AvailableExternalAdapter()
     return workspace_manager
 
 
@@ -133,6 +150,29 @@ async def _three_level_tree(
     return root, child, grandchild
 
 
+async def _legacy_pair(
+    manager: WorkspaceManager,
+    workspace_id: str,
+    owner_session: str,
+    executor_kind: ExecutorKind,
+) -> tuple[AgentRun, AgentRun]:
+    root = manager.agent_tree.create_root_run(
+        workspace_id=workspace_id,
+        executor_kind=executor_kind,
+        context_ref=owner_session,
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=workspace_id,
+            parent_id=root.id,
+            executor_kind=executor_kind,
+            initial_message="legacy child",
+            call_id=f"spawn-legacy-{executor_kind.value}",
+        )
+    )
+    return root, child
+
+
 def test_owner_can_wait_and_interrupt_grandchild_via_api(
     manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
@@ -173,6 +213,122 @@ def test_owner_can_wait_and_interrupt_grandchild_via_api(
     )
     assert interrupt_response.status_code == 200
     assert interrupt_response.json()["status"] == "interrupted"
+
+
+@pytest.mark.parametrize(
+    ("executor_kind", "action"),
+    [
+        (ExecutorKind.NATIVE_SUBAGENT, "followup"),
+        (ExecutorKind.NATIVE_SUBAGENT, "interrupt"),
+        (ExecutorKind.EXTERNAL_JOB, "followup"),
+        (ExecutorKind.EXTERNAL_JOB, "interrupt"),
+    ],
+)
+def test_unavailable_legacy_executor_side_effects_are_422_after_authority(
+    manager: WorkspaceManager,
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    executor_kind: ExecutorKind,
+    action: str,
+) -> None:
+    from claude_hub.api import agent_tree as agent_tree_api
+    from claude_hub.auth import dependencies as auth_deps
+    from claude_hub.main import app
+
+    workspace_id = _workspace(manager, tmp_path)
+    owner_id = f"owner-{executor_kind.value}-{action}"
+    attacker_id = f"attacker-{executor_kind.value}-{action}"
+    manager.sessions[owner_id] = _session(owner_id, workspace_id)
+    manager.sessions[attacker_id] = _session(attacker_id, workspace_id)
+    root, child = asyncio.run(_legacy_pair(manager, workspace_id, owner_id, executor_kind))
+    if executor_kind == ExecutorKind.NATIVE_SUBAGENT:
+        manager.agent_tree._adapters[executor_kind] = NativeSubagentAdapter()
+    else:
+        manager.agent_tree._adapters[executor_kind] = ExternalJobAdapter()
+
+    monkeypatch.setattr(agent_tree_api, "workspace_manager", manager)
+    monkeypatch.setattr(auth_deps, "is_local_network_request", lambda request: False)
+    client = TestClient(app)
+    if action == "followup":
+        path = "/api/agent-tree/followup"
+        body = {
+            "workspace_id": workspace_id,
+            "recipient_id": child.id,
+            "author_id": root.id,
+            "message": "resume legacy executor",
+            "call_id": f"legacy-followup-{executor_kind.value}",
+        }
+    else:
+        path = "/api/agent-tree/interrupt"
+        body = {
+            "workspace_id": workspace_id,
+            "run_id": child.id,
+            "call_id": f"legacy-interrupt-{executor_kind.value}",
+            "reason": "legacy executor unavailable",
+        }
+
+    unauthorized = client.post(
+        path,
+        json=body,
+        cookies={"claude_hub_session": attacker_id},
+    )
+    assert unauthorized.status_code == 403
+
+    authorized = client.post(
+        path,
+        json=body,
+        cookies={"claude_hub_session": owner_id},
+    )
+    assert authorized.status_code == 422
+    assert "not connected" in authorized.json()["detail"]
+    assert manager.agent_tree._call_record(workspace_id, body["call_id"]) is None
+
+
+def test_unavailable_spawn_is_422_after_authority(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    from claude_hub.api import agent_tree as agent_tree_api
+    from claude_hub.auth import dependencies as auth_deps
+    from claude_hub.main import app
+
+    workspace_id = _workspace(manager, tmp_path)
+    owner_id = "owner-spawn-unavailable"
+    attacker_id = "attacker-spawn-unavailable"
+    manager.sessions[owner_id] = _session(owner_id, workspace_id)
+    manager.sessions[attacker_id] = _session(attacker_id, workspace_id)
+    root = manager.agent_tree.create_root_run(
+        workspace_id=workspace_id,
+        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+        context_ref=owner_id,
+    )
+    manager.agent_tree._adapters[ExecutorKind.NATIVE_SUBAGENT] = NativeSubagentAdapter()
+    monkeypatch.setattr(agent_tree_api, "workspace_manager", manager)
+    monkeypatch.setattr(auth_deps, "is_local_network_request", lambda request: False)
+    client = TestClient(app)
+    body = {
+        "workspace_id": workspace_id,
+        "parent_id": root.id,
+        "executor_kind": "native_subagent",
+        "initial_message": "should not spawn",
+        "call_id": "spawn-unavailable",
+    }
+
+    unauthorized = client.post(
+        "/api/agent-tree/spawn",
+        json=body,
+        cookies={"claude_hub_session": attacker_id},
+    )
+    assert unauthorized.status_code == 403
+    assert manager.agent_tree._call_record(workspace_id, "spawn-unavailable") is None
+
+    authorized = client.post(
+        "/api/agent-tree/spawn",
+        json=body,
+        cookies={"claude_hub_session": owner_id},
+    )
+    assert authorized.status_code == 422
+    assert "not connected" in authorized.json()["detail"]
+    assert manager.agent_tree._call_record(workspace_id, "spawn-unavailable") is None
 
 
 @pytest.mark.asyncio

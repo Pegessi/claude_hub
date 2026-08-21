@@ -276,16 +276,14 @@ class _ReportsMixin:
                     self._report_intake_workspace.reset(persistence_token)
                     self._report_intake_committed.discard(commit_token)
 
-        # Post-commit effects deliberately run after both locks are released.
-        # They can send/pump messages and therefore must not execute while the
-        # reporting session's pump lock is held.  A failure here is retried via
-        # the durable call_id -> existing report path.
+        # Post-commit task/reviewer effects deliberately run after both locks
+        # are released. They can send/pump messages and therefore must not
+        # execute while the reporting session's pump lock is held. The Agent
+        # Tree report bridge itself is already part of the transaction above.
         committed_session = self.sessions.get(report.session_id)
         committed_task = self.tasks.get(report.task_id) if report.task_id else None
         if committed_task is not None and committed_session is not None:
             await self._after_report_recorded(committed_task, committed_session, report)
-        if committed_session is not None:
-            self._bridge_report_to_agent_event(report, committed_session)
         return report
 
     async def _create_report_under_lock(
@@ -298,12 +296,12 @@ class _ReportsMixin:
         # ------------------------------------------------------------------
         # Report intake idempotency (call_id + payload fingerprint).
         #
-        # create_report durably persists the report (via _save_state) BEFORE
-        # running post-commit side effects (_after_report_recorded, the
-        # agent-tree bridge). If any of those side effects raises AFTER the
+        # create_report durably persists the report and Agent Tree bridge
+        # together (via _save_state) BEFORE running message-sending
+        # post-commit effects. If one of those effects raises AFTER the
         # durable commit, the client receives an error and retries. Without
-        # an idempotency key the retry creates a SECOND report, a second
-        # task transition, and a second bridged event.
+        # an idempotency key the retry creates a SECOND report and task
+        # transition.
         #
         # When the client supplies a call_id, we look up the previously
         # persisted report by call_id (stored on the session). If the
@@ -342,9 +340,9 @@ class _ReportsMixin:
                     #   * _after_report_recorded skips when a review is
                     #     already in flight or a verdict is already
                     #     recorded for this round.
-                    #   * _bridge_report_to_agent_event uses
-                    #     call_id=f"report:{existing.id}", so emit_event
-                    #     deduplicates the bridged event.
+                    #   * _bridge_report_to_agent_event is staged before the
+                    #     same outer save and uses call_id=f"report:{existing.id}",
+                    #     so emit_event deduplicates the bridged event.
                     # This guarantees exactly one report, one task
                     # transition, one ACK commit, and one bridged event
                     # across retries — including after a cold reload where
@@ -370,6 +368,11 @@ class _ReportsMixin:
                                 existing_session.id,
                                 list(retry_ack_set),
                             )
+                        bridge_wake_target = self._bridge_report_to_agent_event(
+                            existing, existing_session
+                        )
+                        if bridge_wake_target is not None:
+                            retry_wake_targets.add(bridge_wake_target)
                     self._save_state()
                     self._report_intake_committed.add(
                         f"{session.workspace_id}\0{session_id}\0{call_id}"
@@ -783,6 +786,15 @@ class _ReportsMixin:
         wake_targets: set[tuple[str, str]] = set()
         if ack_set:
             wake_targets = self._ack_call_ids(task_id, session.id, list(ack_set))
+
+        # Stage the report bridge event and its run projection in the same
+        # transaction as the report and ACK/cursor mutations. A pre-commit
+        # failure restores all of them from the outer workspace snapshot.
+        bridge_wake_target = self._bridge_report_to_agent_event(
+            report, self.sessions.get(session.id, session)
+        )
+        if bridge_wake_target is not None:
+            wake_targets.add(bridge_wake_target)
 
         # Single durable commit for report/session/task plus mailbox ACK and
         # Agent Tree lifecycle/cursor reconciliation.  The ACK helpers above
@@ -1219,7 +1231,7 @@ class _ReportsMixin:
         self,
         report: AgentReport,
         session: ManagedSession,
-    ) -> None:
+    ) -> tuple[str, str] | None:
         """Translate a managed-task report into an agent tree event.
 
         Finds the agent run whose ``context_ref`` matches the report's task
@@ -1228,10 +1240,10 @@ class _ReportsMixin:
         are silently skipped.
         """
         if not report.task_id:
-            return
+            return None
         run = self.agent_tree.get_run_by_context_ref(report.workspace_id, report.task_id)
         if run is None:
-            return
+            return None
 
         from claude_hub.models.agent_tree import AgentEventType
         from claude_hub.models.schemas import WorkspaceTaskMode
@@ -1266,12 +1278,13 @@ class _ReportsMixin:
 
         # The author is the run itself (the executor); the recipient is the
         # run's supervisor so the directed mailbox delivers it.
+        recipient = run.supervisor_id or run.id
         self.agent_tree.emit_event(
             workspace_id=report.workspace_id,
             agent_run_id=run.id,
             event_type=event_type,
             author=run.id,
-            recipient=run.supervisor_id or run.id,
+            recipient=recipient,
             call_id=f"report:{report.id}",
             payload={
                 "message": report.message,
@@ -1279,7 +1292,10 @@ class _ReportsMixin:
                 "report_state": report.state.value,
                 "task_id": report.task_id,
             },
+            persist=False,
+            wake=False,
         )
+        return run.id, recipient
 
     async def _after_report_recorded(
         self,
@@ -1742,7 +1758,11 @@ class _ReportsMixin:
         # Reopen-to-worker: this hands the task back for reviewable rework, so
         # open the next review round. The worker's subsequent gate report will
         # be stamped with the bumped cycle and thus outranks the prior verdict.
-        next_cycle = task.review_cycle + 1
+        # A retry of the same durable report must reopen the same round, not
+        # advance it again. The report carries the cycle at which the logical
+        # supplement was requested, so report.review_cycle + 1 is the stable
+        # target even when a post-send failure replays this method.
+        next_cycle = max(task.review_cycle, report.review_cycle + 1)
         self.tasks[task.id] = task.model_copy(
             update={
                 "status": WorkspaceTaskStatus.WORKING,
@@ -1762,7 +1782,12 @@ class _ReportsMixin:
             }
         )
         self._save_state()
-        supplement_call_id = self._report_prompt_call_id(task.id, "goal-packet-supplement")
+        supplement_call_id = self._report_prompt_call_id(
+            task.id,
+            "goal-packet-supplement",
+            attempt=report.id,
+            cycle=next_cycle,
+        )
         message = (
             "Your latest completion-style workspace report is missing required Goal Packet "
             f"audit evidence: {gap_text}.\n\n"

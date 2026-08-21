@@ -229,7 +229,12 @@ async def followup(
 ) -> AgentEvent:
     try:
         _assert_authority(_manager(), req.author_id, session_id)
+        recipient = _manager().get_run(req.recipient_id)
+        if recipient is not None:
+            _manager().require_executor_available(recipient.executor_kind)
         return await _manager().followup(req)
+    except ExecutorUnavailableError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
@@ -283,7 +288,10 @@ async def interrupt(
         run = _manager().get_run(req.run_id)
         if run is not None:
             _assert_subtree_authority(_manager(), req.run_id, session_id)
+            _manager().require_executor_available(run.executor_kind)
         return await _manager().interrupt(req)
+    except ExecutorUnavailableError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:

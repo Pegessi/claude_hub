@@ -1239,11 +1239,13 @@ asyncio.run(_main())
             )
         elif self.agent_type == AgentType.CLAUDE:
             cmd.append(self._with_env(self._agent_start_command(recover=recover)))
-        elif self.agent_type == AgentType.CODEX and recover:
-            # Non-solo codex normally launches via self.shell ("codex"); on
-            # recovery route through the agent command so an exact verified
-            # `resume <uuid>` (or a safe fresh launch) runs.
-            cmd.append(self._with_env(self._agent_start_command(recover=recover)))
+        elif self.agent_type == AgentType.CODEX:
+            # Always build local Codex launches through the persisted CLI
+            # contract.  In particular, ``CODEX_MODEL`` is an internal Hub
+            # variable and only selects a real Codex model once it is
+            # translated to ``--model`` here.  This also keeps fresh and
+            # restored non-solo tabs on the same command path.
+            cmd.append(self._with_env(self._codex_launch_command(recover=recover)))
         else:
             cmd.append(self._with_env(self.shell))
 
@@ -1428,11 +1430,12 @@ asyncio.run(_main())
             )
         elif self.agent_type == AgentType.CLAUDE and not session_exists:
             cmd.append(self._with_env(self._agent_start_command(recover=recover)))
-        elif self.agent_type == AgentType.CODEX and recover:
-            # Non-solo codex normally launches via self.shell ("codex"); on
-            # recovery route through the agent command so an exact verified
-            # `resume <uuid>` (or a safe fresh launch) runs.
-            cmd.append(self._with_env(self._agent_start_command(recover=recover)))
+        elif self.agent_type == AgentType.CODEX and not session_exists:
+            # A live tmux session is reattached below without starting a
+            # second process.  Every actual local Codex launch, fresh or
+            # recovered and solo or non-solo, uses the persisted command
+            # builder so ``CODEX_MODEL`` becomes a real ``--model`` flag.
+            cmd.append(self._with_env(self._codex_launch_command(recover=recover)))
         else:
             cmd.append(self._with_env(self.shell))
 

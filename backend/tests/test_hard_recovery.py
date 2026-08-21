@@ -19,6 +19,7 @@ from claude_hub.models import (
     ManagedSession,
     ManagedSessionStatus,
     TerminalTab,
+    Workspace,
     WorkspaceSessionRole,
     WorkspaceTask,
     WorkspaceTaskMode,
@@ -320,3 +321,92 @@ def test_latest_report_for_task_returns_most_recent() -> None:
 def test_latest_report_for_task_returns_none_when_no_reports() -> None:
     latest = workspace_manager._latest_report_for_task("nonexistent-task-id-xyz")
     assert latest is None
+
+
+def test_reviewer_fallback_recovery_call_ids_are_verdict_specific_and_stable() -> None:
+    """No-trigger reviewer recovery uses verdict-specific IDs that stay stable per attempt."""
+    session, task = _make_session_and_task(
+        task_status=WorkspaceTaskStatus.REVIEW,
+        role=WorkspaceSessionRole.REVIEWER,
+        hard_recovery_attempts=1,
+    )
+    workspace_manager.tasks[task.id] = task
+    try:
+        first = workspace_manager._build_hard_recovery_reviewer_fallback_prompt(
+            task, session, "api error"
+        )
+        retry = workspace_manager._build_hard_recovery_reviewer_fallback_prompt(
+            task, session, "api error"
+        )
+        assert first == retry
+        assert f"{task.id}-review-started-recovery-cycle-1-attempt-2" in first
+        for verdict in ("review-passed", "review-failed", "review-needs-input"):
+            assert f"{task.id}-{verdict}-recovery-cycle-1-attempt-2" in first
+        later = workspace_manager._build_hard_recovery_reviewer_fallback_prompt(
+            task, session, "api error", recovery_attempt=3
+        )
+        assert f"{task.id}-review-started-recovery-cycle-1-attempt-3" in later
+        assert first != later
+    finally:
+        workspace_manager.tasks.pop(task.id, None)
+
+
+def test_perform_hard_recovery_uses_verdict_fallback_when_no_trigger(
+    monkeypatch,
+) -> None:
+    """Monitor reviewer recovery without a trigger report still emits durable verdict IDs."""
+    import asyncio
+
+    now = datetime.now()
+    session, task = _make_session_and_task(
+        task_status=WorkspaceTaskStatus.REVIEW,
+        role=WorkspaceSessionRole.REVIEWER,
+        hard_recovery_attempts=0,
+    )
+    workspace = Workspace(
+        id=task.workspace_id,
+        name="Recovery WS",
+        path="/tmp/ws",
+        default_branch="main",
+        session_prefix="rec",
+        created_at=now,
+        updated_at=now,
+    )
+    sent: list[str] = []
+
+    async def fake_interrupt(_session) -> None:
+        return None
+
+    async def fake_send(session_id: str, message: str, **_kwargs) -> None:
+        sent.append(message)
+
+    async def fake_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(workspace_manager, "_interrupt_session", fake_interrupt)
+    monkeypatch.setattr(workspace_manager, "send_session_message", fake_send)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    workspace_manager.workspaces[workspace.id] = workspace
+    workspace_manager.tasks[task.id] = task
+    try:
+        update = asyncio.run(
+            workspace_manager._perform_hard_recovery(
+                session,
+                task,
+                now,
+                "api error",
+                soft_attempts=3,
+                hard_attempts=0,
+            )
+        )
+    finally:
+        workspace_manager.workspaces.pop(workspace.id, None)
+        workspace_manager.tasks.pop(task.id, None)
+
+    assert update["hard_recovery_attempts"] == 1
+    assert len(sent) == 2
+    assert sent[0] == "/clear"
+    prompt = sent[1]
+    assert f"{task.id}-review-started-recovery-cycle-1-attempt-1" in prompt
+    assert f"{task.id}-review-passed-recovery-cycle-1-attempt-1" in prompt
+    assert "working-progress" not in prompt
