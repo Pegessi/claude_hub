@@ -8658,3 +8658,668 @@ async def test_forged_ack_from_another_session_rejected(
     a_refreshed = manager.sessions[sess_a.id]
     assert call_id not in a_refreshed.delivered_call_ids
     assert call_id in a_refreshed.processing_call_ids
+
+
+# ---------------------------------------------------------------------------
+# Focused regression tests for the two reproduced failure chains
+# (followup DeliveryUncertain handling + emit_event duplicate persist)
+# and the reconcile-failure recovery / ACK-race fixes.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_followup_delivery_uncertain_keeps_run_non_terminal(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """followup raising DeliveryUncertain must NOT mark the run FAILED.
+
+    The MESSAGE intent event is persisted; the run stays non-terminal so
+    the operator can retry via retry_uncertain_delivery. No FAILED event
+    may be emitted.
+    """
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="spawn-uncertain",
+        )
+    )
+
+    adapter = manager.agent_tree._adapter(ExecutorKind.NATIVE_SUBAGENT)
+
+    async def _raise_uncertain(run, message, call_id=None):
+        raise DeliveryUncertain("tmux send ambiguous")
+
+    monkeypatch.setattr(adapter, "followup", _raise_uncertain)
+
+    with pytest.raises(DeliveryUncertain):
+        await manager.agent_tree.followup(
+            FollowupRequest(
+                workspace_id=ws_id,
+                recipient_id=child.id,
+                author_id=root.id,
+                message="continue",
+                call_id="followup-uncertain",
+            )
+        )
+
+    run = manager.agent_tree.get_run(child.id)
+    assert run is not None
+    # Run must NOT be FAILED — delivery is uncertain, retryable.
+    assert run.status != AgentRunStatus.FAILED
+    assert run.status not in (
+        AgentRunStatus.COMPLETED,
+        AgentRunStatus.INTERRUPTED,
+    )
+
+    # No FAILED event for this run.
+    events = manager.agent_tree._events.get(ws_id, [])
+    failed_events = [
+        e for e in events if e.agent_run_id == child.id and e.type == AgentEventType.FAILED
+    ]
+    assert failed_events == []
+
+    # The MESSAGE intent event was persisted (call record exists).
+    record = manager.agent_tree._call_record(ws_id, "followup-uncertain")
+    assert record is not None
+    assert record["action"] == "followup"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "initial_status,expected_running",
+    [
+        (AgentRunStatus.WAITING, True),
+        (AgentRunStatus.COMPLETED, True),
+        (AgentRunStatus.INTERRUPTED, True),
+        (AgentRunStatus.FAILED, False),
+    ],
+)
+async def test_reconcile_resumes_non_failed_terminal_runs(
+    manager: WorkspaceManager,
+    ws_id: str,
+    initial_status: AgentRunStatus,
+    expected_running: bool,
+) -> None:
+    """reconcile_followup_outcome must resume COMPLETED/INTERRUPTED runs
+    (and any non-terminal status) to RUNNING after a followup delivery
+    settles. Only FAILED is truly terminal and stays FAILED.
+
+    The transition decision is delegated to _update_run_status's
+    validator, which allows COMPLETED/INTERRUPTED -> RUNNING (resume)
+    and refuses FAILED -> RUNNING.
+    """
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id=f"spawn-resume-{initial_status.value}",
+        )
+    )
+    call_id = f"reconcile-resume:{initial_status.value}:1"
+    await manager.agent_tree.followup(
+        FollowupRequest(
+            workspace_id=ws_id,
+            recipient_id=child.id,
+            author_id=root.id,
+            message="continue",
+            call_id=call_id,
+        )
+    )
+
+    # Force the run into the initial status (in-memory, no persist).
+    run = manager.agent_tree.get_run(child.id)
+    assert run is not None
+    run.status = initial_status
+
+    manager.agent_tree.reconcile_followup_outcome(workspace_id=ws_id, call_id=call_id)
+
+    run = manager.agent_tree.get_run(child.id)
+    assert run is not None
+    if expected_running:
+        assert run.status == AgentRunStatus.RUNNING
+    else:
+        # FAILED stays FAILED — validator refuses the transition.
+        assert run.status == AgentRunStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_reconcile_persist_fail_in_memory_retained_then_durable(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """reconcile_followup_outcome: a _persist failure must retain the
+    in-memory RUNNING status + outcome event so the same call_id can retry
+    the persist. After a successful retry, the outcome + RUNNING are durable
+    and there is no duplicate sequence/event.
+
+    Method-level test: drives reconcile_followup_outcome directly with a
+    monkeypatched _persist that fails on the first call.
+    """
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="spawn-rp",
+        )
+    )
+    call_id = "reconcile-persist-fail:call:1"
+    await manager.agent_tree.followup(
+        FollowupRequest(
+            workspace_id=ws_id,
+            recipient_id=child.id,
+            author_id=root.id,
+            message="continue",
+            call_id=call_id,
+        )
+    )
+    assert manager.agent_tree._call_record(ws_id, call_id) is not None
+
+    outcome_call_id = f"{call_id}:outcome"
+
+    # First reconcile: _persist fails. The in-memory RUNNING status and
+    # outcome event must be retained; the exception propagates.
+    real_persist = manager.agent_tree._persist
+    persist_calls = {"n": 0}
+
+    def _fail_first_persist():
+        persist_calls["n"] += 1
+        if persist_calls["n"] == 1:
+            raise RuntimeError("simulated reconcile persist failure")
+        return real_persist()
+
+    monkeypatch.setattr(manager.agent_tree, "_persist", _fail_first_persist)
+
+    with pytest.raises(RuntimeError):
+        manager.agent_tree.reconcile_followup_outcome(workspace_id=ws_id, call_id=call_id)
+
+    # In-memory state retained: run is RUNNING, outcome event exists in the
+    # in-memory event list (not yet durable).
+    run = manager.agent_tree.get_run(child.id)
+    assert run is not None
+    assert run.status == AgentRunStatus.RUNNING
+    assert manager.agent_tree._call_record(ws_id, outcome_call_id) is not None
+
+    # Second reconcile: _persist succeeds. The outcome event + RUNNING status
+    # are now durable. No duplicate outcome event (idempotent call_id).
+    manager.agent_tree.reconcile_followup_outcome(workspace_id=ws_id, call_id=call_id)
+
+    # Count outcome events for this call_id in the in-memory stream.
+    outcome_events = [
+        e for e in manager.agent_tree._events.get(ws_id, []) if e.call_id == outcome_call_id
+    ]
+    assert len(outcome_events) == 1
+
+    # Fresh reload: outcome event + RUNNING status are durable.
+    fresh = WorkspaceManager()
+    fresh_run = fresh.agent_tree.get_run(child.id)
+    assert fresh_run is not None
+    assert fresh_run.status == AgentRunStatus.RUNNING
+    assert fresh.agent_tree._call_record(ws_id, outcome_call_id) is not None
+    fresh_outcome_events = [
+        e for e in fresh.agent_tree._events.get(ws_id, []) if e.call_id == outcome_call_id
+    ]
+    assert len(fresh_outcome_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_uncertain_reconcile_fail_compensates_then_succeeds(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """Operator retry integration: if reconcile_followup_outcome raises during
+    the receipt-present retry path, the call_id is compensated back to
+    uncertain (not stranded in processing). A second retry (receipt-present,
+    no re-paste) succeeds and reconciles the lifecycle.
+    """
+    from claude_hub.models import (
+        AgentType,
+        WorkspaceTask,
+        WorkspaceTaskStatus,
+    )
+
+    session_id = "retry-compensate-sess"
+    _make_managed_session(manager, session_id, ws_id)
+
+    manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+        context_ref=session_id,
+    )
+
+    task = WorkspaceTask(
+        id="retry-compensate-task",
+        workspace_id=ws_id,
+        title="retry compensate",
+        prompt="do it",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    manager.tasks[task.id] = task
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"task_id": task.id, "current_task_id": task.id}
+    )
+    task.session_id = session_id
+    manager.tasks[task.id] = task
+
+    call_id = "retry-compensate:call:1"
+    payload_body = "the followup body"
+
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="spawn-rc",
+        )
+    )
+    await manager.agent_tree.followup(
+        FollowupRequest(
+            workspace_id=ws_id,
+            recipient_id=child.id,
+            author_id=root.id,
+            message=payload_body,
+            call_id=call_id,
+        )
+    )
+    assert manager.agent_tree._call_record(ws_id, call_id) is not None
+
+    # Place the call_id in uncertain on both session and task, with payload.
+    sess = manager.sessions[session_id]
+    manager.sessions[session_id] = sess.model_copy(
+        update={
+            "uncertain_call_ids": [call_id],
+            "pending_messages": {call_id: payload_body},
+        }
+    )
+    t = manager.tasks[task.id]
+    manager.tasks[task.id] = t.model_copy(update={"uncertain_call_ids": [call_id]})
+
+    # Receipt is present (tmux already pasted) → receipt-present path.
+    monkeypatch.setattr(manager, "_query_tmux_receipt", AsyncMock(return_value=True))
+    monkeypatch.setattr(manager, "_ensure_submitted_without_repaste", AsyncMock())
+    monkeypatch.setattr(manager, "_send_tmux_message", AsyncMock())
+    monkeypatch.setattr(manager, "_ensure_session_ready_for_send", AsyncMock())
+
+    # Make reconcile_followup_outcome raise. The receipt-present compensation
+    # must move the call_id back to uncertain and raise DeliveryUncertain.
+    def _boom_reconcile(**kwargs):
+        raise RuntimeError("simulated reconcile failure")
+
+    monkeypatch.setattr(manager.agent_tree, "reconcile_followup_outcome", _boom_reconcile)
+
+    # First retry: reconcile fails → compensates to uncertain.
+    with pytest.raises(DeliveryUncertain):
+        await manager.retry_uncertain_delivery(session_id, call_id, reason="r", actor="op")
+
+    sess = manager.sessions[session_id]
+    assert call_id in sess.uncertain_call_ids
+    assert call_id not in sess.processing_call_ids
+    # Payload preserved.
+    assert sess.pending_messages.get(call_id) == payload_body
+
+    # Second retry: reconcile succeeds (real implementation). Receipt-present
+    # path: no re-paste, call_id → processing, reconcile emits outcome + RUNNING.
+    monkeypatch.delattr(manager.agent_tree, "reconcile_followup_outcome")
+
+    await manager.retry_uncertain_delivery(session_id, call_id, reason="r", actor="op")
+
+    sess = manager.sessions[session_id]
+    assert call_id in sess.processing_call_ids
+    assert call_id not in sess.uncertain_call_ids
+
+    # Lifecycle reconciled: outcome event exists, run is RUNNING.
+    outcome = manager.agent_tree._call_record(ws_id, f"{call_id}:outcome")
+    assert outcome is not None
+    run = manager.agent_tree.get_run(child.id)
+    assert run is not None
+    assert run.status == AgentRunStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_emit_event_duplicate_persist_fail_reraises_no_wake(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """emit_event's duplicate-call_id branch must re-raise _persist failures
+    (never return success for a non-durable event) and must NOT wake the
+    recipient until the durable commit succeeds.
+    """
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+
+    call_id = "emit-dup-persist"
+    # First emit succeeds (persist works).
+    manager.agent_tree.emit_event(
+        workspace_id=ws_id,
+        agent_run_id=root.id,
+        event_type=AgentEventType.PROGRESS,
+        author=root.id,
+        recipient=root.id,
+        call_id=call_id,
+        payload={"message": "first"},
+    )
+
+    # Now make _persist fail. The duplicate branch calls _persist directly.
+    real_persist = manager.agent_tree._persist
+
+    def _boom():
+        raise RuntimeError("simulated persist failure")
+
+    monkeypatch.setattr(manager.agent_tree, "_persist", _boom)
+
+    wake_calls = {"n": 0}
+    real_wake = manager.agent_tree._wake_for_run
+
+    def _counting_wake(*a, **kw):
+        wake_calls["n"] += 1
+        return real_wake(*a, **kw)
+
+    monkeypatch.setattr(manager.agent_tree, "_wake_for_run", _counting_wake)
+
+    # Duplicate emit with persist failure must raise, not return success.
+    with pytest.raises(RuntimeError):
+        manager.agent_tree.emit_event(
+            workspace_id=ws_id,
+            agent_run_id=root.id,
+            event_type=AgentEventType.PROGRESS,
+            author=root.id,
+            recipient=root.id,
+            call_id=call_id,
+            payload={"message": "first"},
+        )
+
+    # Wake must NOT have been called (no durable commit).
+    assert wake_calls["n"] == 0
+
+    # Restore persist and confirm a subsequent duplicate succeeds and wakes.
+    monkeypatch.setattr(manager.agent_tree, "_persist", real_persist)
+    manager.agent_tree.emit_event(
+        workspace_id=ws_id,
+        agent_run_id=root.id,
+        event_type=AgentEventType.PROGRESS,
+        author=root.id,
+        recipient=root.id,
+        call_id=call_id,
+        payload={"message": "first"},
+    )
+    assert wake_calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_ack_delivered_event_persist_fail_reload_keeps_processing_and_payload(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """If the followup:delivered event persist fails during ACK, the
+    session/task delivered mutation must NOT be committed to disk. After a
+    fresh reload the call_id is still in processing with payload intact, and
+    the ACK can be retried.
+
+    This guards the transaction ordering: lifecycle reconciliation runs
+    BEFORE the session/task delivered mutation, so a persist failure there
+    leaves disk at processing+payload.
+    """
+    from claude_hub.models import (
+        AgentReportCreate,
+        AgentReportState,
+        AgentType,
+        WorkspaceTask,
+        WorkspaceTaskStatus,
+    )
+
+    session_id = "ack-persist-fail-sess"
+    _make_managed_session(manager, session_id, ws_id)
+
+    manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+        context_ref=session_id,
+    )
+
+    task = WorkspaceTask(
+        id="ack-persist-fail-task",
+        workspace_id=ws_id,
+        title="ack persist fail",
+        prompt="do it",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    manager.tasks[task.id] = task
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"task_id": task.id, "current_task_id": task.id}
+    )
+    task.session_id = session_id
+    manager.tasks[task.id] = task
+
+    call_id = "ack-persist-fail:call:1"
+    payload_body = "followup body for ack"
+
+    # Create followup call record.
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="spawn-apf",
+        )
+    )
+    await manager.agent_tree.followup(
+        FollowupRequest(
+            workspace_id=ws_id,
+            recipient_id=child.id,
+            author_id=root.id,
+            message=payload_body,
+            call_id=call_id,
+        )
+    )
+
+    # Bind the target run's context_ref to the task so the ACK target
+    # verification (_verify_call_target) accepts this session's ACK.
+    child.context_ref = task.id
+    manager._save_state()
+
+    # Put call_id in processing with payload (worker received it, will ACK).
+    sess = manager.sessions[session_id]
+    manager.sessions[session_id] = sess.model_copy(
+        update={
+            "processing_call_ids": [call_id],
+            "pending_messages": {call_id: payload_body},
+        }
+    )
+    t = manager.tasks[task.id]
+    manager.tasks[task.id] = t.model_copy(update={"processing_call_ids": [call_id]})
+
+    # Persist the processing state so disk reflects it.
+    manager._save_state()
+
+    # Now make the followup:delivered event append fail. reconcile succeeds
+    # (outcome event persisted), but the delivered-event _persist fails.
+    real_append = manager.agent_tree._append_event
+    delivered_call_id = f"{call_id}:delivered"
+
+    def _fail_delivered_append(**kwargs):
+        if kwargs.get("call_id") == delivered_call_id:
+            raise RuntimeError("simulated delivered-event persist failure")
+        return real_append(**kwargs)
+
+    monkeypatch.setattr(manager.agent_tree, "_append_event", _fail_delivered_append)
+
+    # Worker ACKs. The delivered-event persist fails → exception propagates
+    # before the session/task delivered mutation.
+    with pytest.raises(RuntimeError):
+        await manager.create_report(
+            session_id,
+            AgentReportCreate(
+                task_id=task.id,
+                state=AgentReportState.WORKING,
+                message="acked",
+                acked_call_ids=[call_id],
+            ),
+        )
+
+    # Fresh reload: disk must still have call_id in processing with payload.
+    fresh = WorkspaceManager()
+    fresh_sess = fresh.sessions[session_id]
+    assert call_id in fresh_sess.processing_call_ids
+    assert call_id not in fresh_sess.delivered_call_ids
+    assert fresh_sess.pending_messages.get(call_id) == payload_body
+
+    # Retry the ACK (persist now succeeds).
+    await fresh.create_report(
+        session_id,
+        AgentReportCreate(
+            task_id=task.id,
+            state=AgentReportState.WORKING,
+            message="acked retry",
+            acked_call_ids=[call_id],
+        ),
+    )
+    fresh_sess = fresh.sessions[session_id]
+    assert call_id in fresh_sess.delivered_call_ids
+    assert call_id not in fresh_sess.processing_call_ids
+
+
+@pytest.mark.asyncio
+async def test_ack_vs_retry_race_delivered_not_downgraded(
+    manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
+) -> None:
+    """If the worker ACKs (call_id → delivered) between the receipt-present
+    processing move and the reconcile call, a reconcile failure must NOT
+    downgrade the delivered call_id to uncertain. The ACK path already
+    reconciled the lifecycle; downgrading would strand it (pending_messages
+    cleared on ACK).
+    """
+    from claude_hub.models import (
+        AgentType,
+        WorkspaceTask,
+        WorkspaceTaskStatus,
+    )
+
+    session_id = "ack-race-sess"
+    _make_managed_session(manager, session_id, ws_id)
+
+    manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+        context_ref=session_id,
+    )
+
+    task = WorkspaceTask(
+        id="ack-race-task",
+        workspace_id=ws_id,
+        title="ack race",
+        prompt="do it",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    manager.tasks[task.id] = task
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"task_id": task.id, "current_task_id": task.id}
+    )
+    task.session_id = session_id
+    manager.tasks[task.id] = task
+
+    call_id = "ack-race:call:1"
+    payload_body = "race body"
+
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
+    )
+    child = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=root.id,
+            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
+            initial_message="hi",
+            call_id="spawn-ar",
+        )
+    )
+    await manager.agent_tree.followup(
+        FollowupRequest(
+            workspace_id=ws_id,
+            recipient_id=child.id,
+            author_id=root.id,
+            message=payload_body,
+            call_id=call_id,
+        )
+    )
+
+    sess = manager.sessions[session_id]
+    manager.sessions[session_id] = sess.model_copy(
+        update={
+            "uncertain_call_ids": [call_id],
+            "pending_messages": {call_id: payload_body},
+        }
+    )
+    t = manager.tasks[task.id]
+    manager.tasks[task.id] = t.model_copy(update={"uncertain_call_ids": [call_id]})
+
+    # Receipt present.
+    monkeypatch.setattr(manager, "_query_tmux_receipt", AsyncMock(return_value=True))
+    monkeypatch.setattr(manager, "_send_tmux_message", AsyncMock())
+    monkeypatch.setattr(manager, "_ensure_session_ready_for_send", AsyncMock())
+
+    # Simulate the worker ACKing during _ensure_submitted_without_repaste:
+    # move the call_id to delivered (and clear pending_messages, as ACK does).
+    async def _ack_during_nudge(tmux_session, message):
+        s = manager.sessions[session_id]
+        manager.sessions[session_id] = s.model_copy(
+            update={
+                "processing_call_ids": [],
+                "uncertain_call_ids": [],
+                "delivered_call_ids": [call_id],
+                "pending_messages": {},
+            }
+        )
+        tk = manager.tasks[task.id]
+        manager.tasks[task.id] = tk.model_copy(
+            update={
+                "processing_call_ids": [],
+                "uncertain_call_ids": [],
+                "delivered_call_ids": [call_id],
+            }
+        )
+
+    monkeypatch.setattr(manager, "_ensure_submitted_without_repaste", _ack_during_nudge)
+
+    # Make reconcile fail to exercise the compensation branch.
+    def _boom_reconcile(**kwargs):
+        raise RuntimeError("simulated reconcile failure during race")
+
+    monkeypatch.setattr(manager.agent_tree, "reconcile_followup_outcome", _boom_reconcile)
+
+    # retry_uncertain_delivery must NOT raise (delivered path returns success)
+    # and must NOT downgrade the delivered call_id.
+    await manager.retry_uncertain_delivery(session_id, call_id, reason="r", actor="op")
+
+    sess = manager.sessions[session_id]
+    assert call_id in sess.delivered_call_ids
+    assert call_id not in sess.uncertain_call_ids
+    assert call_id not in sess.processing_call_ids

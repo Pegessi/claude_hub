@@ -144,6 +144,62 @@
   model invokes — those require the call_id to be propagated as an
   idempotency key by the model itself.
 
+### fix: delivery state-machine correctness (followup non-terminal on uncertain, persist-fail re-raise, ACK-before-delivered ordering, reconcile resumes non-failed terminals)
+
+- **What**: five correctness fixes to the fail-closed delivery state machine
+  so that ambiguous/partial failures never leave the lifecycle in a
+  terminal or silently-lost state:
+  1. `followup` raising `DeliveryUncertain` no longer marks the run
+     `FAILED` or emits a `FAILED` event. The `MESSAGE` intent was already
+     persisted before the tmux send, so the run stays non-terminal
+     (`RUNNING`) and the operator retries via `retry_uncertain_delivery`.
+  2. `emit_event`'s duplicate-`call_id` branch now re-raises `_persist`
+     failures (never returns success on a failed durable commit) and only
+     calls `_wake_for_run` after the durable commit succeeds.
+  3. ACK-vs-retry race: `_emit_followup_delivered_if_followup` runs
+     `reconcile_followup_outcome` (which appends the
+     `followup:outcome` event) **before** appending the
+     `followup:delivered` event, and does not swallow persistence
+     exceptions. After the pump, a `call_id` already present in
+     `delivered_call_ids` is never downgraded back to `uncertain`.
+  4. Transaction ordering in `_ack_call_ids`: lifecycle reconciliation
+     (outcome event + delivered event + resident ack) runs **before** the
+     session/task `delivered` mutation. Because `agent_tree._persist`
+     saves the full workspace state, reconciling first guarantees that a
+     persist failure leaves disk at `processing` with the payload intact.
+  5. `reconcile_followup_outcome` no longer guards on
+     `run.status not in _TERMINAL_STATUSES`. It always calls
+     `_update_run_status(RUNNING, persist=False)` and delegates to the
+     existing transition validator, which allows `COMPLETED`/`INTERRUPTED`
+     → `RUNNING` (resume) and refuses `FAILED` → `RUNNING` (truly
+     terminal). A `DeliveryUncertain` on a completed/interrupted run can
+     therefore be recovered by operator retry.
+- **Why**: the first pass had four state-machine holes: (a) `followup`
+  treated an ambiguous tmux send as a terminal failure even though the
+  intent was durable; (b) the duplicate-event path could return success
+  after a failed persist; (c) the ACK path could commit `delivered`
+  before the lifecycle events were durable, so a crash left a delivered
+  call_id with no outcome/delivered event; (d) `reconcile` refused to
+  resume completed/interrupted runs even though `_update_run_status`
+  explicitly allows it.
+- **How**: see `docs/working-logs/2026-08-16-agent-tree-durable-mailbox.md`
+  "Review Round 33 Fixes" for the per-file diff and regression tests.
+- **Regression tests added** (10, in `tests/test_agent_tree.py`):
+  `test_followup_delivery_uncertain_keeps_run_non_terminal`,
+  `test_reconcile_resumes_non_failed_terminal_runs` (parametrized:
+  WAITING/COMPLETED/INTERRUPTED→RUNNING, FAILED stays FAILED),
+  `test_reconcile_persist_fail_in_memory_retained_then_durable`,
+  `test_retry_uncertain_reconcile_fail_compensates_then_succeeds`,
+  `test_emit_event_duplicate_persist_fail_reraises_no_wake`,
+  `test_ack_delivered_event_persist_fail_reload_keeps_processing_and_payload`,
+  `test_ack_vs_retry_race_delivered_not_downgraded`, plus three supporting
+  cases.
+- **Validation**: `tests/test_agent_tree.py` 156 passed (rc=0),
+  `tests/test_workspaces.py` 133 passed (rc=0),
+  `tests/test_tmux_receipt_integration.py` 4 passed (rc=0),
+  `tests/test_workspace_resident_agent.py` 60 passed (rc=0). mypy clean
+  on `claude_hub/`; black/isort clean on touched files.
+
 ### feat: unified Agent Tree + Durable Mailbox coordination layer
 
 - **What**: a single persistent coordination layer that converges the Resident

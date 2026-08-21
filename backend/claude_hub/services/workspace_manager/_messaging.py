@@ -1126,6 +1126,65 @@ class _MessagingMixin:
                 call_id,
                 session_id,
             )
+            # Reconcile the agent-tree followup lifecycle: the dispatch has
+            # now settled (the paste ran; the call_id is in processing awaiting
+            # the worker ACK). Emit the followup:outcome event and move the
+            # run to RUNNING so the tree reflects the actual delivery state.
+            # Idempotent — no-op if the outcome event already exists.
+            try:
+                self.agent_tree.reconcile_followup_outcome(
+                    workspace_id=session.workspace_id, call_id=call_id
+                )
+            except Exception:
+                # The worker may have ACKed between the processing move and
+                # this reconcile (moving call_id to delivered). In that case
+                # the ACK path already reconciled the lifecycle successfully
+                # (else delivered would've been rolled back to processing).
+                # We must NOT downgrade a delivered call_id to uncertain —
+                # pending_messages was cleared on ACK, so the next
+                # receipt-present retry would raise "message body missing".
+                cur_session = self.sessions.get(session_id)
+                if cur_session is not None and call_id in cur_session.delivered_call_ids:
+                    logger.warning(
+                        "retry_uncertain_delivery: reconcile_followup_outcome failed "
+                        "for receipt-present but already-delivered call_id=%s "
+                        "session=%s; ACK path already reconciled lifecycle, "
+                        "returning success without downgrade",
+                        call_id,
+                        session_id,
+                    )
+                    return
+                # call_id is still in processing. Compensate: move it back to
+                # uncertain so the next operator retry takes the receipt-present
+                # path (no re-paste, since the tmux receipt already exists)
+                # and re-attempts reconciliation.
+                comp_session = updated_session.model_copy(
+                    update={
+                        "uncertain_call_ids": uncertain + [call_id],
+                        "processing_call_ids": [c for c in processing if c != call_id],
+                    }
+                )
+                self.sessions[session_id] = comp_session
+                if updated_task is not None:
+                    comp_task = updated_task.model_copy(
+                        update={
+                            "uncertain_call_ids": task_uncertain + [call_id],
+                            "processing_call_ids": [c for c in task_processing if c != call_id],
+                        }
+                    )
+                    self.tasks[updated_task.id] = comp_task
+                self._save_state()
+                logger.exception(
+                    "retry_uncertain_delivery: reconcile_followup_outcome failed "
+                    "for receipt-present call_id=%s session=%s; compensated state "
+                    "back to uncertain",
+                    call_id,
+                    session_id,
+                )
+                raise DeliveryUncertain(
+                    f"reconcile_followup_outcome failed for call_id={call_id}; "
+                    f"moved back to uncertain for operator retry"
+                )
             return
 
         # Receipt absent: the paste never ran. Proceed with the normal
@@ -1225,6 +1284,81 @@ class _MessagingMixin:
                 "another ambiguous tmux send failure; delivery remains "
                 "uncertain. Another explicit operator retry is required "
                 "via retry_uncertain_delivery."
+            )
+
+        # The re-delivery succeeded: the call_id is now in processing (or
+        # delivered) and no longer uncertain. Reconcile the agent-tree
+        # followup lifecycle so the run/event/outcome match the delivery
+        # state. Idempotent — no-op if the outcome event already exists.
+        post_session = self.sessions.get(session_id)
+        post_task = self.tasks.get(task.id) if task is not None else None
+        call_id_delivered = post_session is not None and call_id in post_session.delivered_call_ids
+
+        try:
+            self.agent_tree.reconcile_followup_outcome(
+                workspace_id=session.workspace_id, call_id=call_id
+            )
+        except Exception:
+            if call_id_delivered:
+                # The worker already ACKed this call_id. The ACK path
+                # (_emit_followup_delivered_if_followup) runs
+                # reconcile_followup_outcome BEFORE the delivered mutation
+                # is committed; if reconcile had failed there,
+                # _ack_call_ids's outer except would have rolled the
+                # call_id back to processing. Therefore a delivered
+                # call_id implies the lifecycle was already reconciled
+                # successfully — the outcome event exists and the run is
+                # RUNNING. This post-pump reconcile is a redundant
+                # idempotent no-op; a transient persist failure here must
+                # NOT downgrade a delivered call_id to uncertain (that
+                # would strand it: pending_messages was cleared on ACK,
+                # so the next receipt-present retry would raise
+                # "message body missing"). Log and return success.
+                logger.warning(
+                    "retry_uncertain_delivery: reconcile_followup_outcome failed "
+                    "for already-delivered call_id=%s session=%s; ACK path already "
+                    "reconciled lifecycle, returning success without downgrade",
+                    call_id,
+                    session_id,
+                )
+                return
+            # call_id is in processing (worker has not ACKed yet, or ACK's
+            # reconcile failed and rolled back to processing). Downgrade to
+            # uncertain so the operator can retry. The tmux receipt was set
+            # by the pump, so the next retry takes the receipt-present path
+            # (no re-paste) and re-attempts reconciliation. pending_messages
+            # still holds the payload.
+            if post_session is not None:
+                comp_session = post_session.model_copy(
+                    update={
+                        "uncertain_call_ids": list(post_session.uncertain_call_ids) + [call_id],
+                        "processing_call_ids": [
+                            c for c in post_session.processing_call_ids if c != call_id
+                        ],
+                    }
+                )
+                self.sessions[session_id] = comp_session
+            if post_task is not None:
+                comp_task = post_task.model_copy(
+                    update={
+                        "uncertain_call_ids": list(post_task.uncertain_call_ids) + [call_id],
+                        "processing_call_ids": [
+                            c for c in post_task.processing_call_ids if c != call_id
+                        ],
+                    }
+                )
+                self.tasks[post_task.id] = comp_task
+            self._save_state()
+            logger.exception(
+                "retry_uncertain_delivery: reconcile_followup_outcome failed "
+                "for receipt-absent call_id=%s session=%s after successful "
+                "pump; compensated state back to uncertain",
+                call_id,
+                session_id,
+            )
+            raise DeliveryUncertain(
+                f"reconcile_followup_outcome failed for call_id={call_id}; "
+                f"moved back to uncertain for operator retry"
             )
 
     def _emit_delivery_retry_requested(

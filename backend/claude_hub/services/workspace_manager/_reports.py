@@ -549,104 +549,102 @@ class _ReportsMixin:
             return
 
         verified_set = set(verified_acked)
+        workspace_id = (
+            session.workspace_id
+            if session is not None
+            else task.workspace_id if task is not None else None
+        )
 
-        # Snapshot the original session/task state so we can roll back if the
-        # resident ack_sequence advancement fails. The delivered-state
-        # mutation and the ack_sequence cursor advance must be atomic: if
-        # either fails, neither is committed.
-        original_session = session
-        original_task = task
+        # ---- Agent-tree lifecycle reconciliation (BEFORE delivered mutation) ----
+        #
+        # reconcile_followup_outcome and the followup:delivered event append
+        # each call agent_tree._persist() -> self._save_state(), which writes
+        # the FULL workspace state (sessions/tasks) to disk. If we ran these
+        # AFTER moving the call_id to delivered (and clearing pending_messages),
+        # a failure in the delivered-event append would leave disk committed
+        # to delivered + no payload while memory rolls back to processing —
+        # unrecoverable after restart.
+        #
+        # Therefore we run the lifecycle reconciliation FIRST, while the
+        # call_id is still in processing and pending_messages still holds
+        # the payload. Any persist failure here raises before the
+        # session/task delivered mutation, so disk stays processing+payload
+        # and the ACK can be retried.
+        for call_id in verified_acked:
+            # followup: reconcile outcome + emit delivered event.
+            self._emit_followup_delivered_if_followup(workspace_id, call_id)
+            # resident event-batch delivery: advance ack_sequence cursor.
+            self._advance_resident_ack_on_delivery(call_id)
 
-        try:
-            if task is not None:
-                to_ack_pending = [c for c in task.pending_call_ids if c in verified_set]
-                to_ack_processing = [c for c in task.processing_call_ids if c in verified_set]
-                to_ack_uncertain = [c for c in task.uncertain_call_ids if c in verified_set]
-                to_ack = to_ack_pending + to_ack_processing + to_ack_uncertain
-                if to_ack:
-                    pending = [c for c in task.pending_call_ids if c not in verified_set]
-                    processing = [c for c in task.processing_call_ids if c not in verified_set]
-                    uncertain = [c for c in task.uncertain_call_ids if c not in verified_set]
-                    delivered = list(task.delivered_call_ids)
-                    for cid in to_ack:
-                        if cid not in delivered:
-                            delivered.append(cid)
-                    self.tasks[task_id] = task.model_copy(
-                        update={
-                            "pending_call_ids": pending,
-                            "processing_call_ids": processing,
-                            "uncertain_call_ids": uncertain,
-                            "delivered_call_ids": delivered,
-                        }
-                    )
-
-            if session is not None:
-                to_ack_pending = [c for c in session.pending_call_ids if c in verified_set]
-                to_ack_processing = [c for c in session.processing_call_ids if c in verified_set]
-                to_ack_uncertain = [c for c in session.uncertain_call_ids if c in verified_set]
-                to_ack = to_ack_pending + to_ack_processing + to_ack_uncertain
-                if to_ack:
-                    pending = [c for c in session.pending_call_ids if c not in verified_set]
-                    processing = [c for c in session.processing_call_ids if c not in verified_set]
-                    uncertain = [c for c in session.uncertain_call_ids if c not in verified_set]
-                    delivered = list(session.delivered_call_ids)
-                    for cid in to_ack:
-                        if cid not in delivered:
-                            delivered.append(cid)
-                    # Remove committed messages from the durable inbox and clear
-                    # their claim timestamps.
-                    pending_messages = {
-                        cid: msg
-                        for cid, msg in session.pending_messages.items()
-                        if cid not in verified_set
+        # ---- Session/task delivered mutation (in-memory only) ----
+        #
+        # The lifecycle is now durably reconciled. Commit the delivery
+        # state machine: move call_ids to delivered and clear their
+        # payload from the durable inbox. This is in-memory only; the
+        # caller (create_report) persists via _save_state.
+        if task is not None:
+            to_ack_pending = [c for c in task.pending_call_ids if c in verified_set]
+            to_ack_processing = [c for c in task.processing_call_ids if c in verified_set]
+            to_ack_uncertain = [c for c in task.uncertain_call_ids if c in verified_set]
+            to_ack = to_ack_pending + to_ack_processing + to_ack_uncertain
+            if to_ack:
+                pending = [c for c in task.pending_call_ids if c not in verified_set]
+                processing = [c for c in task.processing_call_ids if c not in verified_set]
+                uncertain = [c for c in task.uncertain_call_ids if c not in verified_set]
+                delivered = list(task.delivered_call_ids)
+                for cid in to_ack:
+                    if cid not in delivered:
+                        delivered.append(cid)
+                self.tasks[task_id] = task.model_copy(
+                    update={
+                        "pending_call_ids": pending,
+                        "processing_call_ids": processing,
+                        "uncertain_call_ids": uncertain,
+                        "delivered_call_ids": delivered,
                     }
-                    pending_attachments = {
-                        cid: atts
-                        for cid, atts in session.pending_attachments.items()
-                        if cid not in verified_set
-                    }
-                    processing_call_ids_at = {
-                        cid: ts
-                        for cid, ts in session.processing_call_ids_at.items()
-                        if cid not in verified_set
-                    }
-                    self.sessions[session_id] = session.model_copy(
-                        update={
-                            "pending_call_ids": pending,
-                            "processing_call_ids": processing,
-                            "uncertain_call_ids": uncertain,
-                            "delivered_call_ids": delivered,
-                            "pending_messages": pending_messages,
-                            "pending_attachments": pending_attachments,
-                            "processing_call_ids_at": processing_call_ids_at,
-                        }
-                    )
-
-            # ---- ACK-correlated followup outcome ----
-            # For each VERIFIED acked call_id that corresponds to a followup
-            # dispatch, emit a ``followup:delivered`` event with
-            # ``delivered: True``. Because we only iterate over verified_acked
-            # (call_ids that were actually in this session's outbox AND target
-            # this session/task), a forged cross-session ACK can never produce a
-            # spurious followup:delivered event.
-            for call_id in verified_acked:
-                self._emit_followup_delivered_if_followup(
-                    session.workspace_id if session else task.workspace_id if task else None,
-                    call_id,
                 )
-                # If this is a resident event-batch delivery call_id, advance the
-                # resident root run's ack_sequence cursor.
-                self._advance_resident_ack_on_delivery(call_id)
-        except Exception:
-            # Roll back the session/task delivered-state mutation so the
-            # call_id and cursor stay retryable. The agent_tree state is
-            # already consistent (agent_tree.ack rolls back its own
-            # ack_sequence on persistence failure).
-            if original_session is not None:
-                self.sessions[session_id] = original_session
-            if original_task is not None:
-                self.tasks[task_id] = original_task
-            raise
+
+        if session is not None:
+            to_ack_pending = [c for c in session.pending_call_ids if c in verified_set]
+            to_ack_processing = [c for c in session.processing_call_ids if c in verified_set]
+            to_ack_uncertain = [c for c in session.uncertain_call_ids if c in verified_set]
+            to_ack = to_ack_pending + to_ack_processing + to_ack_uncertain
+            if to_ack:
+                pending = [c for c in session.pending_call_ids if c not in verified_set]
+                processing = [c for c in session.processing_call_ids if c not in verified_set]
+                uncertain = [c for c in session.uncertain_call_ids if c not in verified_set]
+                delivered = list(session.delivered_call_ids)
+                for cid in to_ack:
+                    if cid not in delivered:
+                        delivered.append(cid)
+                # Remove committed messages from the durable inbox and clear
+                # their claim timestamps.
+                pending_messages = {
+                    cid: msg
+                    for cid, msg in session.pending_messages.items()
+                    if cid not in verified_set
+                }
+                pending_attachments = {
+                    cid: atts
+                    for cid, atts in session.pending_attachments.items()
+                    if cid not in verified_set
+                }
+                processing_call_ids_at = {
+                    cid: ts
+                    for cid, ts in session.processing_call_ids_at.items()
+                    if cid not in verified_set
+                }
+                self.sessions[session_id] = session.model_copy(
+                    update={
+                        "pending_call_ids": pending,
+                        "processing_call_ids": processing,
+                        "uncertain_call_ids": uncertain,
+                        "delivered_call_ids": delivered,
+                        "pending_messages": pending_messages,
+                        "pending_attachments": pending_attachments,
+                        "processing_call_ids_at": processing_call_ids_at,
+                    }
+                )
 
     def _verify_call_target(self, call_id: str, task_id: Optional[str], session_id: str) -> bool:
         """Verify that ``call_id``'s call record targets ``task_id``/``session_id``.
@@ -735,9 +733,10 @@ class _ReportsMixin:
         proves it processed the events — not when the Hub sends the prompt.
 
         Fail-closed: any exception (including ``agent_tree.ack`` persistence
-        failures) propagates to the caller so ``_ack_call_ids`` can roll
-        back the session/task delivered-state mutation. The call_id and
-        cursor stay uncommitted and retryable.
+        failures) propagates to the caller. Because this runs BEFORE the
+        session/task delivered-state mutation, a failure here simply prevents
+        the delivered commit — the call_id stays in processing (with payload
+        intact) and the ACK can be retried.
         """
         # Find the workspace for this call_id by scanning call records.
         workspace_id = None
@@ -765,21 +764,40 @@ class _ReportsMixin:
         if not target_run_id:
             return
         # Do NOT catch exceptions here. If agent_tree.ack fails (e.g.
-        # persistence error), the caller (_ack_call_ids) must roll back the
-        # session/task delivered-state mutation so the call_id and cursor
-        # stay retryable. Swallowing the exception would commit delivered
-        # without advancing ack_sequence, stranding the events.
+        # persistence error), the exception propagates before the
+        # session/task delivered-state mutation, so the call_id stays in
+        # processing (payload intact) and the ACK can be retried.
         self.agent_tree.ack(workspace_id, target_run_id, max_sequence)
 
     def _emit_followup_delivered_if_followup(
         self, workspace_id: Optional[str], call_id: str
     ) -> None:
-        """If ``call_id`` is a followup call_id, emit a ``followup:delivered`` event.
+        """If ``call_id`` is a followup call_id, reconcile lifecycle + emit delivered.
 
-        The followup dispatch emits a ``followup:outcome`` event with
-        ``delivered: False``. When the worker ACKs the followup call_id, we
-        emit this event to record that the followup was actually received
-        and processed by the worker.
+        This runs BEFORE the session/task delivered-state mutation in
+        ``_ack_call_ids``. Both ``reconcile_followup_outcome`` and the
+        delivered-event append call ``agent_tree._persist()`` →
+        ``_save_state()``, which writes the full workspace state. Running
+        them before the delivered mutation ensures a persist failure leaves
+        disk at ``processing`` + intact payload, so the ACK is retryable.
+
+        Order:
+
+        1. ``reconcile_followup_outcome`` — emit the ``followup:outcome``
+           event (``delivered: False``) and move the run to ``RUNNING``.
+           This bridges the delivery state (processing/delivered) back to
+           the agent-tree lifecycle. Idempotent.
+        2. Append the ``followup:delivered`` event (``delivered: True``)
+           to record that the worker actually received and processed the
+           followup.
+
+        Persistence exceptions are NOT swallowed: they propagate to
+        ``_ack_call_ids`` (and then ``create_report``), which never reaches
+        the session/task delivered mutation or its final ``_save_state``.
+        The call_id stays in ``processing_call_ids`` (with
+        ``pending_messages`` payload intact) so the ACK or an operator
+        retry can re-attempt reconciliation. The tmux receipt is already
+        set, so no re-paste occurs.
         """
         if not workspace_id:
             return
@@ -791,29 +809,32 @@ class _ReportsMixin:
         followup_event = record["event"]
         recipient_id = followup_event.agent_run_id
         author_id = followup_event.author
-        # Emit the delivered event. Idempotent on call_id=f"{call_id}:delivered".
-        try:
-            self.agent_tree._append_event(
-                workspace_id=workspace_id,
-                agent_run_id=recipient_id,
-                event_type=AgentEventType.PROGRESS,
-                author=recipient_id,
-                recipient=author_id,
-                call_id=f"{call_id}:delivered",
-                action="followup:delivered",
-                target=recipient_id,
-                fingerprint=_request_fingerprint(
-                    "followup:delivered",
-                    {"followup_call_id": call_id},
-                ),
-                payload={"delivered": True, "followup_call_id": call_id},
-                rollback_on_error=False,
-            )
-        except Exception:
-            logger.exception(
-                "Failed to emit followup:delivered event for call_id=%s",
-                call_id,
-            )
+
+        # 1. Reconcile the followup lifecycle (outcome event + RUNNING).
+        # Must run before the delivered event so the run reflects the
+        # settled delivery state. Idempotent — no-op if the outcome
+        # event already exists.
+        self.agent_tree.reconcile_followup_outcome(workspace_id=workspace_id, call_id=call_id)
+
+        # 2. Emit the delivered event. Idempotent on call_id=f"{call_id}:delivered".
+        # Do NOT swallow exceptions: let _ack_call_ids roll back the
+        # session/task delivered mutation so the call_id stays retryable.
+        self.agent_tree._append_event(
+            workspace_id=workspace_id,
+            agent_run_id=recipient_id,
+            event_type=AgentEventType.PROGRESS,
+            author=recipient_id,
+            recipient=author_id,
+            call_id=f"{call_id}:delivered",
+            action="followup:delivered",
+            target=recipient_id,
+            fingerprint=_request_fingerprint(
+                "followup:delivered",
+                {"followup_call_id": call_id},
+            ),
+            payload={"delivered": True, "followup_call_id": call_id},
+            rollback_on_error=False,
+        )
 
     def _rollback_processing_to_pending(
         self, task_id: Optional[str], session_id: str, call_ids: list[str]
