@@ -1934,3 +1934,30 @@ git -C /Users/bytedance/claude_hub-agent-tree diff --check
 bash /Users/bytedance/claude_hub-agent-tree/scripts/agent-tree-e2e/run.sh
 # evidence remaining_credential_artifacts must be []
 ```
+
+## Round 9: strip public call_id whitespace before preflight (2026-08-21)
+
+Delivery review of `0c7982fe` accepted the race fix, CLI E2E, and
+credential cleanup, then required:
+
+1. Normalize or reject leading/trailing `call_id` whitespace **before**
+   both preflight and persistence. A padded retry was stored under the
+   raw key while outer preflight checked the stripped key, so a reused
+   session was renamed back to the old title across cold reload.
+2. A new clean exact SHA covering the padded retry/conflict + cold-reload
+   regression.
+
+`create_report` now always rewrites `payload.call_id` to
+`_canonical_report_call_id` (strip) before lookup/rename/persist.
+`_existing_report_for_call_id` also matches stored keys by stripped
+equality. Regression:
+`test_padded_call_id_retry_has_zero_side_effects_after_reassignment`.
+
+### Round 9 validation
+
+| Suite / check | Result | Exit |
+| --- | --- | --- |
+| listed pytest suites | 545 passed in 829.31s | 0 |
+| `test_padded_call_id_retry_has_zero_side_effects_after_reassignment` | passed | 0 |
+| isolated real-CLI E2E | unchanged from Round 8; accepted in attempt 7 | 0 |
+| `mypy` / Black / isort / compileall / `git diff --check` | clean | 0 |

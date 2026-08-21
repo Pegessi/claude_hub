@@ -533,6 +533,86 @@ async def test_reused_session_known_call_id_has_zero_side_effects(
 
 
 @pytest.mark.asyncio
+async def test_padded_call_id_retry_has_zero_side_effects_after_reassignment(
+    manager_and_workspace: tuple[WorkspaceManager, str],
+) -> None:
+    """Leading/trailing call_id whitespace must alias before preflight/persist."""
+
+    manager, workspace_id = manager_and_workspace
+    task, session = _task_session(manager, workspace_id)
+    canonical = f"{task.id}-working-progress-cycle-1-1"
+    padded = f"  {canonical}\t"
+    payload = AgentReportCreate(
+        task_id=task.id,
+        state=AgentReportState.WORKING,
+        message="original report",
+        call_id=padded,
+    )
+    first = await manager.create_report(session.id, payload)
+    assert first.call_id == canonical
+    stored = manager.sessions[session.id]
+    assert canonical in stored.report_call_ids
+    assert padded not in stored.report_call_ids
+    assert stored.report_call_ids[canonical] == first.id
+
+    now = datetime.utcnow()
+    new_task = WorkspaceTask(
+        id="task-reassigned-padded",
+        workspace_id=workspace_id,
+        title="padded reassignment title",
+        prompt="next assignment",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        session_id=session.id,
+        created_at=now,
+        updated_at=now,
+    )
+    manager.tasks[new_task.id] = new_task
+    manager.sessions[session.id] = manager.sessions[session.id].model_copy(
+        update={
+            "task_id": new_task.id,
+            "current_task_id": new_task.id,
+            "title": new_task.title,
+            "updated_at": now,
+        }
+    )
+    manager._save_state()
+    rebound = manager.sessions[session.id]
+    _wm.ttyd_manager.update_tab.reset_mock()
+
+    def _assignment(sess: ManagedSession) -> tuple[str, str | None, str | None, datetime]:
+        return sess.title, sess.task_id, sess.current_task_id, sess.updated_at
+
+    with pytest.raises(ReportCallIdConflict, match="already used"):
+        await manager.create_report(
+            session.id,
+            payload.model_copy(update={"message": "different payload", "call_id": padded}),
+        )
+    assert _assignment(manager.sessions[session.id]) == _assignment(rebound)
+    assert _wm.ttyd_manager.update_tab.await_count == 0
+
+    retry_padded = await manager.create_report(session.id, payload)
+    assert retry_padded.id == first.id
+    assert retry_padded.call_id == canonical
+    assert _assignment(manager.sessions[session.id]) == _assignment(rebound)
+
+    retry_canonical = await manager.create_report(
+        session.id,
+        payload.model_copy(update={"call_id": canonical}),
+    )
+    assert retry_canonical.id == first.id
+    assert _assignment(manager.sessions[session.id]) == _assignment(rebound)
+    assert _wm.ttyd_manager.update_tab.await_count == 0
+    assert padded not in manager.sessions[session.id].report_call_ids
+
+    fresh = WorkspaceManager()
+    assert fresh.reports[first.id].call_id == canonical
+    assert canonical in fresh.sessions[session.id].report_call_ids
+    assert padded not in fresh.sessions[session.id].report_call_ids
+    assert _assignment(fresh.sessions[session.id]) == _assignment(rebound)
+
+
+@pytest.mark.asyncio
 async def test_postcommit_snapshot_failure_is_success_and_durable(
     manager_and_workspace: tuple[WorkspaceManager, str], monkeypatch: MonkeyPatch
 ) -> None:

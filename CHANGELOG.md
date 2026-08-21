@@ -40,13 +40,17 @@
 - Resolve existing or conflicting report call_ids before any tab rename so
   a late retry cannot restore a reused session's assignment
   (`test_reused_session_known_call_id_has_zero_side_effects`).
+- Canonicalize leading/trailing `call_id` whitespace before preflight and
+  persistence so a padded retry cannot rename a reused session
+  (`test_padded_call_id_retry_has_zero_side_effects_after_reassignment`).
 - Isolated E2E keeps Claude launch credentials in the backend process
   environment; ttyd writes mode-0600 launch scripts and unlinks them on
   every exit (`remaining_credential_artifacts=[]`).
-- **Validation**: listed suites 544 passed in 825.46s
+- **Validation**: listed suites 545 passed in 829.31s
   (`test_agent_tree.py`, `test_workspaces.py`, resident/session,
   report-atomicity including
-  `test_reused_session_known_call_id_has_zero_side_effects`, subtree
+  `test_reused_session_known_call_id_has_zero_side_effects` and
+  `test_padded_call_id_retry_has_zero_side_effects_after_reassignment`, subtree
   reliability, executor selection, `test_ttyd_manager.py`, hard-recovery,
   orchestrator-contract); `mypy claude_hub` checked 67 source files with
   no issues; Black, isort, compileall, and `git diff --check` clean.

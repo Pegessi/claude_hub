@@ -217,6 +217,19 @@ class _ReportsMixin:
         canonical = json.dumps(content, sort_keys=True, default=str)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
+    def _canonical_report_call_id(self, call_id: str | None) -> str:
+        """Strip leading/trailing whitespace so padded public IDs alias."""
+        return (call_id or "").strip()
+
+    def _stored_report_call_key(self, session: ManagedSession, call_id: str) -> str | None:
+        """Match a canonical call_id to the key actually stored on the session."""
+        if call_id in session.report_call_ids:
+            return call_id
+        for key in session.report_call_ids:
+            if self._canonical_report_call_id(key) == call_id:
+                return key
+        return None
+
     def _existing_report_for_call_id(
         self, session: ManagedSession, payload: AgentReportCreate
     ) -> AgentReport | None:
@@ -224,18 +237,25 @@ class _ReportsMixin:
 
         Must run before any tab rename. A late retry after the session was
         reused for another task must not restore the previous title.
+        Public call_ids are compared after stripping leading/trailing
+        whitespace so a padded retry cannot bypass the preflight.
         """
-        call_id = payload.call_id
+        call_id = self._canonical_report_call_id(payload.call_id)
         if not call_id:
             return None
-        existing_report_id = session.report_call_ids.get(call_id)
+        stored_key = self._stored_report_call_key(session, call_id)
+        if stored_key is None:
+            return None
+        existing_report_id = session.report_call_ids.get(stored_key)
         if existing_report_id is None:
             return None
         existing = self.reports.get(existing_report_id)
         if existing is None:
             return None
         new_fp = self._compute_report_fingerprint(payload)
-        persisted_fp = session.report_call_fingerprints.get(call_id)
+        persisted_fp = session.report_call_fingerprints.get(
+            stored_key
+        ) or session.report_call_fingerprints.get(call_id)
         existing_fp = persisted_fp or self._compute_report_fingerprint(existing)
         if new_fp == existing_fp:
             return existing
@@ -294,10 +314,11 @@ class _ReportsMixin:
         # → same report. This preserves idempotency for legacy paths without
         # requiring them to track a call_id.
         # ------------------------------------------------------------------
-        call_id = (payload.call_id or "").strip()
+        call_id = self._canonical_report_call_id(payload.call_id)
         if not call_id:
             content_fp = self._compute_report_fingerprint(payload)
             call_id = f"legacy:{content_fp[:32]}"
+        if payload.call_id != call_id:
             payload = payload.model_copy(update={"call_id": call_id})
 
         # ------------------------------------------------------------------
