@@ -45,15 +45,19 @@
   (`test_padded_call_id_retry_has_zero_side_effects_after_reassignment`).
 - Bound-session matching-call replay runs under the same snapshot/restore
   as new reports (`test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges`).
+- Replay commit tokens always use the canonical call_id so predecessor
+  padded keys cannot restore memory after a durable save
+  (`test_predecessor_padded_call_id_post_save_failure_converges`).
 - Isolated E2E keeps Claude launch credentials in the backend process
   environment; ttyd writes mode-0600 launch scripts and unlinks them on
   every exit (`remaining_credential_artifacts=[]`).
-- **Validation**: listed suites 546 passed in 828.91s
+- **Validation**: listed suites 547 passed in 834.25s
   (`test_agent_tree.py`, `test_workspaces.py`, resident/session,
   report-atomicity including
   `test_reused_session_known_call_id_has_zero_side_effects`,
-  `test_padded_call_id_retry_has_zero_side_effects_after_reassignment`, and
-  `test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges`, subtree
+  `test_padded_call_id_retry_has_zero_side_effects_after_reassignment`,
+  `test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges`,
+  and `test_predecessor_padded_call_id_post_save_failure_converges`, subtree
   reliability, executor selection, `test_ttyd_manager.py`, hard-recovery,
   orchestrator-contract); `mypy claude_hub` checked 67 source files with
   no issues; Black, isort, compileall, and `git diff --check` clean.

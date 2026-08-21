@@ -221,6 +221,12 @@ class _ReportsMixin:
         """Strip leading/trailing whitespace so padded public IDs alias."""
         return (call_id or "").strip()
 
+    def _report_intake_commit_token(
+        self, workspace_id: str, session_id: str, call_id: str | None
+    ) -> str:
+        """Stable commit marker; always uses the canonical call_id."""
+        return f"{workspace_id}\0{session_id}\0{self._canonical_report_call_id(call_id)}"
+
     def _stored_report_call_key(self, session: ManagedSession, call_id: str) -> str | None:
         """Match a canonical call_id to the key actually stored on the session."""
         if call_id in session.report_call_ids:
@@ -293,7 +299,7 @@ class _ReportsMixin:
                 retry_wake_targets.add(bridge_wake_target)
         self._save_state()
         self._report_intake_committed.add(
-            f"{session.workspace_id}\0{session.id}\0{existing.call_id}"
+            self._report_intake_commit_token(session.workspace_id, session.id, existing.call_id)
         )
         self._wake_report_intake_runs(retry_wake_targets)
         return existing
@@ -369,7 +375,9 @@ class _ReportsMixin:
                                     live, rename_task, updated_at=_wm._now()
                                 )
                     snapshot = self._snapshot_report_intake_workspace(live.workspace_id)
-                    commit_token = f"{live.workspace_id}\0{session_id}\0{call_id}"
+                    commit_token = self._report_intake_commit_token(
+                        live.workspace_id, session_id, call_id
+                    )
                     self._report_intake_committed.discard(commit_token)
                     persistence_token = self._report_intake_workspace.set(live.workspace_id)
                     try:
@@ -847,7 +855,9 @@ class _ReportsMixin:
         # only mutate in-memory state (persist=False); if this save fails the
         # workspace snapshot owned by create_report restores every domain.
         self._save_state()
-        self._report_intake_committed.add(f"{session.workspace_id}\0{session_id}\0{call_id}")
+        self._report_intake_committed.add(
+            self._report_intake_commit_token(session.workspace_id, session_id, call_id)
+        )
         self._wake_report_intake_runs(wake_targets)
 
         return report
