@@ -637,6 +637,12 @@ async def test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges
     assert set(live.processing_call_ids) == set(call_ids)
     for call_id in call_ids:
         assert live.pending_messages[call_id] == f"process {call_id}"
+    bridge_call_id = f"report:{first.id}"
+
+    def _call_ids(mgr: WorkspaceManager) -> list[str]:
+        return [event.call_id for event in mgr.agent_tree._events.get(workspace_id, [])]
+
+    assert bridge_call_id not in _call_ids(manager)
 
     state_file = manager._workspace_state_file(workspace_id)
     original_write = manager._atomic_write_text
@@ -659,6 +665,8 @@ async def test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges
     for call_id in call_ids:
         assert rolled_back.pending_messages[call_id] == f"process {call_id}"
         assert manager.agent_tree._call_record(workspace_id, f"{call_id}:delivered") is None
+    assert manager.agent_tree._call_record(workspace_id, bridge_call_id) is None
+    assert bridge_call_id not in _call_ids(manager)
 
     cold = WorkspaceManager()
     cold_session = cold.sessions[session.id]
@@ -666,7 +674,10 @@ async def test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges
     assert not (set(cold_session.delivered_call_ids) & set(call_ids))
     for call_id in call_ids:
         assert cold_session.pending_messages[call_id] == f"process {call_id}"
+        assert cold.agent_tree._call_record(workspace_id, f"{call_id}:delivered") is None
     assert cold.reports[first.id].id == first.id
+    assert cold.agent_tree._call_record(workspace_id, bridge_call_id) is None
+    assert bridge_call_id not in _call_ids(cold)
 
     retry = await cold.create_report(session.id, payload)
     assert retry.id == first.id
@@ -676,6 +687,8 @@ async def test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges
     for call_id in call_ids:
         assert call_id not in committed.pending_messages
         assert cold.agent_tree._call_record(workspace_id, f"{call_id}:delivered") is not None
+    assert cold.agent_tree._call_record(workspace_id, bridge_call_id) is not None
+    assert _call_ids(cold).count(bridge_call_id) == 1
     assert cold.agent_tree.get_run(child_run_id).status == AgentRunStatus.RUNNING
 
     fresh = WorkspaceManager()
@@ -683,6 +696,9 @@ async def test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges
     assert set(call_ids) <= set(fresh.sessions[session.id].delivered_call_ids)
     for call_id in call_ids:
         assert call_id not in fresh.sessions[session.id].pending_messages
+        assert fresh.agent_tree._call_record(workspace_id, f"{call_id}:delivered") is not None
+    assert fresh.agent_tree._call_record(workspace_id, bridge_call_id) is not None
+    assert _call_ids(fresh).count(bridge_call_id) == 1
 
 
 @pytest.mark.asyncio

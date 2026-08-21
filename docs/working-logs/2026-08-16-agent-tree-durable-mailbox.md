@@ -1973,3 +1973,14 @@ delivered (payload gone) while disk stayed pending.
 new reports and still-bound matching replays. Reused-session known IDs
 still return with zero mutations. Regression:
 `test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges`.
+The regression now also asserts `report:<id>` bridge events roll back on
+save failure and appear exactly once after cold retry.
+
+### Round 10 validation
+
+| Suite / check | Result | Exit |
+| --- | --- | --- |
+| listed pytest suites | 546 passed in 828.91s | 0 |
+| `test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges` | passed | 0 |
+| isolated real-CLI E2E | accepted in attempt 7/8 | 0 |
+| `mypy` / Black / isort / compileall / `git diff --check` | clean | 0 |
