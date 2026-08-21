@@ -858,6 +858,21 @@ class ManagedSession(BaseModel):
     # fingerprint is always idempotent; same call_id + different fingerprint
     # raises ValueError.
     report_call_ids: Dict[str, str] = Field(default_factory=dict)
+    # Durable canonical report fingerprints: call_id → sha256 hex digest of
+    # the report's content (including the exact Goal Packet). Computed on
+    # first report creation and persisted so that:
+    #   * a retry with the same call_id compares against the stored
+    #     fingerprint directly (no reliance on recomputing from the
+    #     persisted report, which could drift if the model changes),
+    #   * same call_id + same fingerprint returns the existing report,
+    #   * same call_id + different fingerprint raises ReportCallIdConflict.
+    # The fingerprint covers every content field (state, message,
+    # changed_files, validation, risks, acceptance_check, goal_packet,
+    # evaluation_report, review_profiles, profile_results, artifact_refs,
+    # confidence, requires_human_judgment, review_decision, review_reason,
+    # risk_level, acked_call_ids) and excludes only bookkeeping fields
+    # (id, workspace_id, session_id, created_at, review_cycle, call_id).
+    report_call_fingerprints: Dict[str, str] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
     last_activity_at: Optional[datetime] = None

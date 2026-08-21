@@ -1413,3 +1413,78 @@ existence check and create two reports. This round closes all three.
 - `black`: clean (5 files).
 - `isort`: clean.
 - `mypy` on modified files: Success, no issues.
+
+## Round 3: durable fingerprint persistence + save-failure rollback + per-cycle call_ids (2026-08-21)
+
+Reviewer round-3 feedback identified three remaining gaps: (1) the canonical
+fingerprint was recomputed from the persisted report on each retry rather than
+stored at creation time, so a model-serialization drift could silently change
+the fingerprint and break idempotency; (2) a `_save_state` failure after
+in-memory mutation left the report/session/task in a half-committed state
+(in-memory report not on disk → phantom conflict on retry or data loss on
+restart); (3) production call_id formats used `{task_id}-{state}`, which
+collides across repeated progress/review rounds.
+
+### Changes
+
+1. **Persist the canonical fingerprint at creation time.**
+   Added `ManagedSession.report_call_fingerprints: Dict[str, str]` mapping
+   `call_id → sha256_hex_digest`. On first report creation, the fingerprint
+   computed from the incoming `AgentReportCreate` payload is stored on the
+   session. On retry, the persisted fingerprint is the source of truth for
+   comparison — we do NOT recompute from the persisted `AgentReport`, because
+   the report's serialization could drift from the original payload. This
+   guarantees that a retry with the exact same content (including the exact
+   Goal Packet) always matches, regardless of model changes.
+
+2. **Pre-commit rollback on `_save_state` failure.**
+   `_create_report_under_lock` now snapshots the original session and task
+   objects BEFORE any mutation (including `_rename_session_for_task`). If
+   `_save_state` raises, the handler:
+   - removes the report from `self.reports` if it was newly added,
+   - restores `self.sessions[session.id]` to the original session object,
+   - restores `self.tasks[task_id]` to the original task object,
+   - re-raises the exception.
+   Because all mutations replace dict entries with new objects (`model_copy`),
+   the original references are untouched and can be restored directly. The
+   client then retries with the same call_id; since nothing was persisted, the
+   retry creates the report fresh.
+
+3. **Per-cycle call_id identities in all production prompts.**
+   Replaced `{task_id}-{state}` call_id formats with `{task_id}-{state}-{n}`
+   where `n` is a monotonically increasing integer per logical report. This
+   prevents collisions when a worker posts multiple "working" reports across
+   review rounds, or when a reviewer runs multiple review rounds. Updated
+   examples: worker working/started, reviewer review_started/review_passed,
+   Goal Packet report, Goal Packet supplement, and resident heartbeat
+   (`resident-heartbeat-<cycle_count>`).
+
+4. **`call_id` in Resident heartbeat and Goal Packet supplement prompts.**
+   The resident master-mode heartbeat curl example and the Goal Packet
+   supplement curl example (sent to workers when GP evidence is missing) now
+   include a `call_id` field.
+
+### New regression tests
+
+- `test_report_call_id_fingerprint_includes_goal_packet`: same call_id +
+  identical Goal Packet returns the existing report; same call_id + changed
+  Goal Packet raises `ReportCallIdConflict`.
+- `test_report_save_failure_rolls_back_in_memory_state`: with `_save_state`
+  failing on the first call, the in-memory report/session/task are rolled
+  back to their pre-mutation state; a retry succeeds and creates the report.
+- `test_report_call_id_idempotent_across_cold_reload`: after persisting a
+  report with call_id C, a fresh `WorkspaceManager` loaded from the same
+  state root recognizes a retry with the same call_id + same content and
+  returns the existing report (proving the fingerprint is on disk, not just
+  in memory).
+
+### Validation (round 3)
+
+| Suite | Result | Exit |
+| --- | --- | --- |
+| `tests/test_agent_tree.py` | 165 passed | 0 |
+| `tests/test_workspaces.py` | 133 passed | 0 |
+
+- `black`: clean (4 files).
+- `isort`: clean.
+- `mypy` on modified files: Success, no issues.

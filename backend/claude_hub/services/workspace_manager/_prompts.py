@@ -73,12 +73,14 @@ class _PromptsMixin:
         return (
             "Report endpoint (include a stable call_id; reuse the SAME call_id "
             "when resubmitting the same report after a failure or context "
-            "reload so the Hub deduplicates it):\n"
+            "reload so the Hub deduplicates it). Use a per-cycle call_id so "
+            "repeated reports in the same state (e.g. multiple working updates "
+            "across review rounds) do not collide:\n"
             f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}"
             f"/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task_field}","state":"working",'
-            f'"call_id":"{task_field}-working",'
+            f'"call_id":"{task_field}-working-1",'
             '"message":"Progress update",'
             '"message_en":"Progress update","message_zh":"进度更新"}\''
         )
@@ -130,14 +132,17 @@ class _PromptsMixin:
             "fallback. Final reports include changed_files, validation, risks, acceptance_check, "
             "review_decision (request/skip/auto with review_reason when applicable), and risk_level; "
             "every completed task waits for human acceptance before it is done.\n\n"
-            "Every report MUST include a non-empty `call_id`. Use a stable call_id per logical "
-            "report (e.g. `{task_id}-{state}`); if you resubmit the SAME report after a failure "
-            "or context reload, reuse the SAME call_id so the Hub deduplicates it. Different "
-            "reports (e.g. a working update vs. the final report) use different call_ids.\n\n"
+            "Every report MUST include a non-empty `call_id`. Use a stable, per-logical-report "
+            "call_id that includes a cycle/round counter so repeated reports in the same state "
+            "(e.g. multiple working updates across review rounds) do not collide. Format: "
+            "`{task_id}-{state}-{n}` where n increments for each new logical report. If you "
+            "resubmit the SAME report after a failure or context reload, reuse the SAME call_id "
+            "so the Hub deduplicates it. Different reports (e.g. a working update vs. the final "
+            "report) use different call_ids.\n\n"
             "Report endpoint (POST JSON for assigned tasks):\n"
             f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
-            '-d \'{"task_id":"TASK_ID","state":"working","call_id":"TASK_ID-working",'
+            '-d \'{"task_id":"TASK_ID","state":"working","call_id":"TASK_ID-working-1",'
             '"message":"Progress update",'
             '"message_en":"Progress update","message_zh":"进度更新"}\''
         )
@@ -189,16 +194,16 @@ class _PromptsMixin:
             "- Keep message SHORT (<=12 lines; Verdicts/Summary/Acceptance rollup/Required fixes/Notes); "
             "put evidence in structured fields (validation/risks/acceptance_check/profile_results/artifact_refs).\n"
             "- Every report carries message_en (English) and message_zh (中文); legacy message is a short fallback.\n"
-            "- Every report MUST include a non-empty `call_id` (e.g. `{task_id}-{state}`). Reuse the "
-            "SAME call_id when resubmitting the same report after a failure or context reload so the "
-            "Hub deduplicates it.\n"
+            "- Every report MUST include a non-empty `call_id` (e.g. `{task_id}-{state}-{n}` "
+            "where n increments per review round). Reuse the SAME call_id when resubmitting "
+            "the same report after a failure or context reload so the Hub deduplicates it.\n"
             "- Use review_failed when the impl agent can fix concrete defects; review_needs_input only for "
             "genuine product/credential/environment blockers you cannot infer.\n\n"
             "Report endpoint (task_id supplied with each assignment):\n"
             f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             '-d \'{"task_id":"TASK_ID","state":"review_started",'
-            '"call_id":"TASK_ID-review_started",'
+            '"call_id":"TASK_ID-review_started-1",'
             '"message":"Started review","message_en":"Started review","message_zh":"开始评审"}\''
         )
 
@@ -314,7 +319,7 @@ class _PromptsMixin:
             f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"working",'
-            f'"call_id":"{task.id}-working",'
+            f'"call_id":"{task.id}-working-1",'
             '"message":"Goal Packet; awaiting approval.","message_en":"Goal Packet; awaiting approval.",'
             '"message_zh":"目标包已创建，等待审核。","goal_packet":{'
             '"objective":"...","acceptance_criteria":["..."],"validation_plan":["..."],'
@@ -324,15 +329,18 @@ class _PromptsMixin:
             "task_id/state/message/message_en/message_zh/changed_files/validation/risks/acceptance_check/"
             "review_decision/review_reason/risk_level; acceptance_check maps each Goal Packet criterion "
             "to passed/failed/partial/not_checked with evidence.\n\n"
-            "Every report MUST include a non-empty `call_id`. Use a stable call_id per logical report "
-            f"(e.g. `{task.id}-{{state}}`); if you resubmit the SAME report after a failure or context "
-            "reload, reuse the SAME call_id so the Hub deduplicates it. Different reports (e.g. a "
-            "working update vs. the final report) use different call_ids.\n\n"
+            "Every report MUST include a non-empty `call_id`. Use a stable, per-logical-report "
+            f"call_id that includes a cycle/round counter (e.g. `{task.id}-{{state}}-{{n}}` where "
+            "n increments for each new logical report) so repeated reports in the same state "
+            "(e.g. multiple working updates across review rounds) do not collide. If you "
+            "resubmit the SAME report after a failure or context reload, reuse the SAME call_id "
+            "so the Hub deduplicates it. Different reports (e.g. a working update vs. the final "
+            "report) use different call_ids.\n\n"
             "Report endpoint (POST JSON for other states):\n"
             f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"started",'
-            f'"call_id":"{task.id}-started",'
+            f'"call_id":"{task.id}-started-1",'
             '"message":"Started","message_en":"Started","message_zh":"已开始"}}\'\n\n'
             "Call-id ACK contract (at-least-once delivery to your tmux inbox):\n"
             "Messages from your supervisor may be prefixed with a `[call_id:<id>]` marker "
@@ -353,7 +361,7 @@ class _PromptsMixin:
             "- A call_id you do NOT list stays in processing and will be cleaned up only "
             "after you ACK it. List every call_id you process so the Hub can release it.\n"
             "Example report body with ACKs:\n"
-            f'{{"task_id":"{task.id}","state":"working","call_id":"{task.id}-working",'
+            f'{{"task_id":"{task.id}","state":"working","call_id":"{task.id}-working-2",'
             '"message":"...","message_en":"...",'
             '"message_zh":"...","acked_call_ids":["followup-abc123"]}}\n'
         )
@@ -905,11 +913,12 @@ class _PromptsMixin:
             f"earlier summarized with verbose fields truncated; trigger report is above):\n"
             f"{json.dumps(report_payload, indent=2)}\n\n"
             "Report workflow: first POST review_started, then exactly one final verdict "
-            "(use a stable call_id per report; reuse the same call_id on retry):\n"
+            "(use a stable call_id per report; reuse the same call_id on retry; include a "
+            "round counter so repeated reviews don't collide):\n"
             f"{INTERNAL_API_CURL} -X POST {self._report_base_url(reviewer)}/api/workspaces/sessions/{reviewer.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"review_passed",'
-            f'"call_id":"{task.id}-review_passed",'
+            f'"call_id":"{task.id}-review_passed-1",'
             '"message":"Verdict + summary + acceptance rollup + notes",'
             '"message_en":"Verdict + summary + acceptance rollup + notes",'
             '"message_zh":"结论 + 摘要 + 验收汇总 + 备注",'
