@@ -124,8 +124,17 @@ class HubClient:
         data: Any = None,
         files: Any = None,
         params: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
     ) -> Any:
-        resp = self.request_response(method, path, json=json, data=data, files=files, params=params)
+        resp = self.request_response(
+            method,
+            path,
+            json=json,
+            data=data,
+            files=files,
+            params=params,
+            timeout=timeout,
+        )
 
         if resp.status_code == 204 or not resp.content:
             return None
@@ -143,18 +152,22 @@ class HubClient:
         data: Any = None,
         files: Any = None,
         params: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
     ) -> httpx.Response:
         # Build the request up front so verbose logging reflects the REAL
         # outgoing URL (httpx's own base_url+path joining), and so the URL is
         # available to log even when sending raises.
-        request = self._client.build_request(
-            method,
-            path,
-            json=json,
-            data=data,
-            files=files,
-            params=params,
-        )
+        # httpx 0.28 Client.send has no timeout kwarg. Per-request timeout
+        # belongs on build_request, which stores it in request.extensions.
+        build_kwargs: Dict[str, Any] = {
+            "json": json,
+            "data": data,
+            "files": files,
+            "params": params,
+        }
+        if timeout is not None:
+            build_kwargs["timeout"] = timeout
+        request = self._client.build_request(method, path, **build_kwargs)
         if self._verbose:
             print(f"{request.method} {request.url}", file=sys.stderr)
         try:
@@ -429,3 +442,76 @@ class HubClient:
             f"/api/workspaces/{workspace_id}/lessons/summarize",
             json=body,
         )
+
+    # -- Agent Tree ---------------------------------------------------------
+
+    def list_agent_tree_runs(
+        self,
+        workspace_id: str,
+        root_id: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> Any:
+        """GET /api/agent-tree/runs."""
+        params: Dict[str, Any] = {"workspace_id": workspace_id}
+        if root_id is not None:
+            params["root_id"] = root_id
+        if status is not None:
+            params["status"] = status
+        return self._request("GET", "/api/agent-tree/runs", params=params)
+
+    def get_agent_tree_events(
+        self,
+        run_id: str,
+        since_sequence: int = 0,
+        subtree: bool = True,
+    ) -> Any:
+        """GET /api/agent-tree/runs/{run_id}/events."""
+        return self._request(
+            "GET",
+            f"/api/agent-tree/runs/{run_id}/events",
+            params={"since_sequence": since_sequence, "subtree": subtree},
+        )
+
+    def spawn_agent_run(self, body: Dict[str, Any]) -> Any:
+        """POST /api/agent-tree/spawn."""
+        return self._request("POST", "/api/agent-tree/spawn", json=body)
+
+    def send_agent_message(self, body: Dict[str, Any]) -> Any:
+        """POST /api/agent-tree/send."""
+        return self._request("POST", "/api/agent-tree/send", json=body)
+
+    def followup_agent_run(self, body: Dict[str, Any]) -> Any:
+        """POST /api/agent-tree/followup."""
+        return self._request("POST", "/api/agent-tree/followup", json=body)
+
+    def wait_agent_events(self, body: Dict[str, Any]) -> Any:
+        """POST /api/agent-tree/wait.
+
+        Raises the per-request HTTP timeout to ``timeout_seconds + 5`` via
+        ``build_request(..., timeout=...)`` so a blocking wait can finish
+        without changing HubClient's 30s default or calling ``Client.send``
+        with a timeout kwarg (unsupported on httpx 0.28).
+        """
+        timeout_seconds = float(body.get("timeout_seconds", 30.0))
+        return self._request(
+            "POST",
+            "/api/agent-tree/wait",
+            json=body,
+            timeout=timeout_seconds + 5.0,
+        )
+
+    def ack_agent_run(self, workspace_id: str, run_id: str, sequence: int) -> Any:
+        """POST /api/agent-tree/ack (query params only; no body, no call_id)."""
+        return self._request(
+            "POST",
+            "/api/agent-tree/ack",
+            params={
+                "workspace_id": workspace_id,
+                "run_id": run_id,
+                "sequence": sequence,
+            },
+        )
+
+    def interrupt_agent_run(self, body: Dict[str, Any]) -> Any:
+        """POST /api/agent-tree/interrupt."""
+        return self._request("POST", "/api/agent-tree/interrupt", json=body)

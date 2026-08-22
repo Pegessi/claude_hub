@@ -11,6 +11,8 @@ only (Claude / Codex / Cursor). `native_subagent` and `external_job` return
 HTTP 422. There is no Agent Tree UI yet.
 
 REST lives under `/api/agent-tree` (see also http://localhost:8173/docs).
+Agents may also use `uv run claude-hub agent-tree --help` (thin client;
+`--call-id` is only on spawn/send/followup/interrupt).
 
 ## Development
 

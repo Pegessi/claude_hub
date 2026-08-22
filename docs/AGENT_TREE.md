@@ -12,8 +12,25 @@ curl --noproxy 'localhost,127.0.0.1,::1' --fail-with-body -sS
 ```
 
 Local-network callers may omit a session cookie. Non-local callers must send
-the Hub session cookie. Do not invent a CLI; there is no `claude-hub agent-tree`
-command.
+the Hub session cookie. Agents may use `claude-hub agent-tree` or the REST
+recipes below; REST remains the source of truth.
+
+## CLI
+
+Thin Click client over this contract. `--call-id` exists only on `spawn` /
+`send` / `followup` / `interrupt` (omit → new UUID, stderr `call_id=<id>`).
+`POST /ack` has no `call_id`; `ack` and `wait` reject that flag. `wait` does
+not ACK unless `--ack` (render/flush events, then ACK `max(sequence)`).
+`--json --ack` then writes `{"acked_sequence": N}` to stderr.
+
+```bash
+uv run claude-hub --json agent-tree roots WS_ID
+uv run claude-hub --json agent-tree runs WS_ID
+uv run claude-hub --json agent-tree events RUN_ID --since-sequence 0
+uv run claude-hub --json agent-tree spawn WS_ID PARENT --message "..." --agent-type claude
+uv run claude-hub --json agent-tree wait WS_ID RECIPIENT --since-sequence 0
+uv run claude-hub --json agent-tree ack WS_ID RUN_ID SEQUENCE
+```
 
 ## Mental model
 
