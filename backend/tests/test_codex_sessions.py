@@ -52,9 +52,11 @@ def _fake_scan(entries):
 
     tm = importlib.import_module("claude_hub.services.ttyd_manager")
 
-    def _scan():
+    def _scan(with_title: bool = False, skip_title_sids: set = None):
         out = {}
         for sid, cwd, epoch, path in entries:
+            need_title = with_title and (skip_title_sids is None or sid not in skip_title_sids)
+            title = tm._codex_session_title(str(path)) if need_title else ""
             out[sid] = tm.ScanEntry(
                 path=str(path),
                 mtime_ns=int(epoch * 1e9),
@@ -62,6 +64,7 @@ def _fake_scan(entries):
                 cwd=cwd,
                 ts=epoch,
                 is_archived=False,
+                title=title,
             )
         return out
 
@@ -192,12 +195,14 @@ async def test_list_codex_sessions_dedupes_by_session_id(
     # we produce two entries with the same sid and rely on the "keep most
     # recent" logic. Note: _codex_scan_sessions itself dedups per root, but
     # the endpoint handles duplicates defensively.
-    def _fake():
+    def _fake(with_title: bool = False, skip_title_sids: set = None):
         out = {}
         for sid, cwd, epoch, path in [
             ("00000005-0000-0000-0000-000000000005", "/tmp/proj-d", 1000.0, older),
             ("00000005-0000-0000-0000-000000000005", "/tmp/proj-d", 5000.0, newer),
         ]:
+            need_title = with_title and (skip_title_sids is None or sid not in skip_title_sids)
+            title = tm._codex_session_title(str(path)) if need_title else ""
             out[sid] = tm.ScanEntry(
                 path=str(path),
                 mtime_ns=int(epoch * 1e9),
@@ -205,6 +210,7 @@ async def test_list_codex_sessions_dedupes_by_session_id(
                 cwd=cwd,
                 ts=epoch,
                 is_archived=False,
+                title=title,
             )
         return out
 
