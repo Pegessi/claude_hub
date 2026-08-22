@@ -1487,3 +1487,106 @@ def test_history_resync_does_not_replace_near_bottom_view(terminal_tab: dict, pa
         f"near-bottom historical view was replaced by idle resync: "
         f"before={before}, after={after}"
     )
+
+
+def test_fit_during_replay_preserves_content_and_scroll(
+    terminal_tab: dict, page: Page
+) -> None:
+    """A mode-return fit fired while history is replaying must not corrupt
+    terminal content or scroll state.
+
+    Regression guard for the loading-speed optimization: ``resizeWhenReady``
+    no longer blocks on ``__claudeHubReplayBuffering``. If a
+    ``terminal-resize`` message arrives while the initial history replay is
+    still buffering, the fit runs immediately. This test proves that:
+
+    1. The fit actually runs during buffering (nonce is recorded, proving
+       the request was not queued behind the replay).
+    2. After the replay completes, the full terminal content matches the
+       tmux ground truth (the fit did not truncate or duplicate lines).
+    3. The viewport ends at the bottom (the fit did not leave the user
+       scrolled into the middle of history).
+    """
+    tab = terminal_tab
+    session_name = f"claude-hub-{tab['id'][:8]}"
+
+    # Step 1: produce deterministic scrollback
+    ensure_tmux_session(page, tab["id"], session_name)
+    produce_scrollback(session_name, count=200)
+    ground_truth = capture_pane_sync(session_name)
+    tmux_lines = normalize_terminal_output(ground_truth)
+
+    # Step 2: load the terminal. The initial history replay sets
+    # __claudeHubReplayBuffering = true for at least FULL_REPLAY_MIN_HOLD_MS
+    # (2500ms for local terminals). We fire the mode-return resize inside
+    # that window.
+    page.goto(f"{BACKEND_URL}/api/terminal/proxy/{tab['id']}/")
+    page.wait_for_selector(".xterm", timeout=15000)
+    # Wait until the replay buffering flag is set (history fetch returned
+    # and replayHistory started buffering writes).
+    page.wait_for_function(
+        "() => window.term && window.term.__claudeHubReplayBuffering === true",
+        timeout=10000,
+    )
+
+    # Step 3: fire a mode-return resize with a unique nonce while
+    # buffering is still active.
+    nonce = f"fit-during-replay-{int(time.time() * 1000)}"
+    page.evaluate(
+        """(args) => {
+            window.postMessage({
+                type: 'terminal-resize',
+                tabId: args.tabId,
+                nonce: args.nonce,
+            }, '*');
+        }""",
+        arg={"tabId": tab["id"], "nonce": nonce},
+    )
+
+    # Step 4: the fit must complete during buffering — the nonce is
+    # recorded as soon as callFit runs. If resizeWhenReady still blocked
+    # on __claudeHubReplayBuffering, this would time out.
+    page.wait_for_function(
+        """(expectedNonce) => {
+            const term = window.term;
+            return term && term.__claudeHubLastFitNonce === expectedNonce;
+        }""",
+        arg=nonce,
+        timeout=5000,
+    )
+
+    # Confirm buffering is still active at fit-completion time — the
+    # fit really did run during replay, not after it.
+    still_buffering = page.evaluate(
+        "() => window.term && window.term.__claudeHubReplayBuffering === true"
+    )
+    assert still_buffering is True, (
+        "fit completed after replay buffering ended; the test did not "
+        "exercise the fit-during-replay path"
+    )
+
+    # Step 5: let the replay finish and the visible screen settle.
+    wait_for_replay_done(page)
+    wait_for_visible_screen(page)
+    wait_for_xterm_buffer_lines(page, len(tmux_lines))
+
+    # Step 6: content must match tmux ground truth exactly.
+    xterm_content = read_xterm_buffer(page)
+    assert xterm_content is not None, "window.term not found after replay"
+    xterm_lines = normalize_xterm_lines(xterm_content)
+    assert xterm_lines == tmux_lines, (
+        f"fit-during-replay corrupted terminal content "
+        f"({len(xterm_lines)} vs {len(tmux_lines)} lines):\n"
+        f"{diff_summary(xterm_lines, tmux_lines)}"
+    )
+
+    # Step 7: viewport must be at the bottom (scroll state preserved).
+    alignment = read_scroll_alignment(page)
+    assert alignment is not None
+    assert alignment["viewportY"] == alignment["baseY"], (
+        f"fit-during-replay left viewport away from bottom: {alignment}"
+    )
+    assert (
+        alignment["bottomGap"] <= alignment["rowHeight"] * 2
+    ), f"fit-during-replay left DOM viewport away from bottom: {alignment}"
+

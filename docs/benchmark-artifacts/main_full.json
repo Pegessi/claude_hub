@@ -1,0 +1,47 @@
+1x1: total=192.1ms, first_fit={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': 190.6}, nonce_ack={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': None}, settled={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': True}
+2x1: total=231.0ms, first_fit={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': 226.4, '329349ae-3fec-48d1-ba6d-37f47953a707': 226.4}, nonce_ack={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': None, '329349ae-3fec-48d1-ba6d-37f47953a707': None}, settled={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': True, '329349ae-3fec-48d1-ba6d-37f47953a707': True}
+{
+  "1x1": {
+    "elapsed_ms": 192.1,
+    "settled": {
+      "bc858b71-b034-45d6-9bf4-ae6b30c50a73": true
+    },
+    "first_fit_times_ms": {
+      "bc858b71-b034-45d6-9bf4-ae6b30c50a73": 190.6
+    },
+    "nonce_ack_times_ms": {
+      "bc858b71-b034-45d6-9bf4-ae6b30c50a73": null
+    },
+    "tab_ids": [
+      "bc858b71-b034-45d6-9bf4-ae6b30c50a73"
+    ],
+    "expected_nonces": {},
+    "baseline_fit_counts": {
+      "bc858b71-b034-45d6-9bf4-ae6b30c50a73": 0
+    }
+  },
+  "2x1": {
+    "elapsed_ms": 231.0,
+    "settled": {
+      "bc858b71-b034-45d6-9bf4-ae6b30c50a73": true,
+      "329349ae-3fec-48d1-ba6d-37f47953a707": true
+    },
+    "first_fit_times_ms": {
+      "bc858b71-b034-45d6-9bf4-ae6b30c50a73": 226.4,
+      "329349ae-3fec-48d1-ba6d-37f47953a707": 226.4
+    },
+    "nonce_ack_times_ms": {
+      "bc858b71-b034-45d6-9bf4-ae6b30c50a73": null,
+      "329349ae-3fec-48d1-ba6d-37f47953a707": null
+    },
+    "tab_ids": [
+      "bc858b71-b034-45d6-9bf4-ae6b30c50a73",
+      "329349ae-3fec-48d1-ba6d-37f47953a707"
+    ],
+    "expected_nonces": {},
+    "baseline_fit_counts": {
+      "bc858b71-b034-45d6-9bf4-ae6b30c50a73": 5,
+      "329349ae-3fec-48d1-ba6d-37f47953a707": 0
+    }
+  }
+}

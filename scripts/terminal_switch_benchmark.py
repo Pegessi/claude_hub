@@ -300,7 +300,7 @@ def ensure_split_layout_with_tabs(page):
           const panes = store.panes;
           const tabs = store.tabs || [];
           if (tabs.length < 2 && store.createTab) {
-            await store.createTab({ title: 'tab-2' });
+            await store.createTab({ name: 'tab-2' });
           }
           const tabIds = (store.tabs || []).map(t => t.id);
           for (let i = 0; i < panes.length && i < tabIds.length; i++) {

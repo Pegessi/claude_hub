@@ -77,25 +77,31 @@
     alone. Scroll-to-bottom is not measured because the feature branch
     no longer dispatches a forced scroll-to-bottom on mode return
     (xterm.js preserves the user's scroll position).
-  - **Causal benchmark results** (feature `e5126ac` vs main `16404fe`,
-    3 runs each, same causal fit-call counter signal on both branches):
+  - **Causal benchmark results** (feature `dec8ac8` vs main `16404fe`,
+    3 runs each, isolated matching backends/frontends — feature frontend
+    proxies to feature backend on :8173, main frontend proxies to main
+    backend on :8174; same causal fit-call counter signal on both branches):
 
     | Layout | Pane | Feature first-fit median | Main first-fit median | Delta |
     | --- | --- | --- | --- | --- |
-    | 1x1 | single | 172.6 ms | 223.6 ms | feature −51.0 ms (−22.8%) |
-    | 2x1 | pane 1 | 182.5 ms | 257.0 ms | feature −74.5 ms (−29.0%) |
-    | 2x1 | pane 2 | 182.5 ms | 257.0 ms | feature −74.5 ms (−29.0%) |
+    | 1x1 | single | 173.6 ms | 256.7 ms | feature −83.1 ms (−32.4%) |
+    | 2x1 | pane 1 | 162.4 ms | 239.8 ms | feature −77.4 ms (−32.3%) |
+    | 2x1 | pane 2 | 162.4 ms | 239.8 ms | feature −77.4 ms (−32.3%) |
 
     Feature-only nonce-ack median (request-correlation, `__claudeHubLastFitNonce`
-    matched against the dispatched nonce): 172.6 ms (1x1), 182.5 ms (2x1) —
+    matched against the dispatched nonce): 173.6 ms (1x1), 162.4 ms (2x1) —
     equal to first-fit because the nonce is recorded when the fit completes.
+
+    Raw per-run output retained in `docs/benchmark-artifacts/`:
+    `feature_dec8ac8_runs.txt`, `main_runs.txt`, and the full JSON dumps
+    `feature_dec8ac8_full.json`, `main_full.json`.
 
     Both branches settle (`settled=true`) with the fit-call count
     increasing past the pre-switch baseline, confirming the causal
     signal works on main (no nonces) and feature (nonces matched).
 
     **Honest assessment**: feature is faster than main across all layouts
-    (1x1: −22.8%, 2x1 both panes: −29.0%). The speedup comes from two
+    (1x1: −32.4%, 2x1 both panes: −32.3%). The speedup comes from two
     changes: (1) the terminal shell keeps its layout box alive
     (`visibility: hidden` + `position: absolute`) instead of collapsing
     to zero size (`display: none`), so xterm.js does not start from a

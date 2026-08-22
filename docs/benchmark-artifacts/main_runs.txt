@@ -1,0 +1,9 @@
+=== Main run 1 ===
+1x1: total=259.5ms, first_fit={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': 256.7}, nonce_ack={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': None}, settled={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': True}
+2x1: total=259.8ms, first_fit={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': 255.4, '329349ae-3fec-48d1-ba6d-37f47953a707': 255.4}, nonce_ack={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': None, '329349ae-3fec-48d1-ba6d-37f47953a707': None}, settled={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': True, '329349ae-3fec-48d1-ba6d-37f47953a707': True}
+=== Main run 2 ===
+1x1: total=285.5ms, first_fit={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': 283.1}, nonce_ack={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': None}, settled={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': True}
+2x1: total=241.9ms, first_fit={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': 239.8, '329349ae-3fec-48d1-ba6d-37f47953a707': 239.8}, nonce_ack={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': None, '329349ae-3fec-48d1-ba6d-37f47953a707': None}, settled={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': True, '329349ae-3fec-48d1-ba6d-37f47953a707': True}
+=== Main run 3 ===
+1x1: total=202.7ms, first_fit={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': 200.7}, nonce_ack={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': None}, settled={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': True}
+2x1: total=171.0ms, first_fit={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': 169.2, '329349ae-3fec-48d1-ba6d-37f47953a707': 169.2}, nonce_ack={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': None, '329349ae-3fec-48d1-ba6d-37f47953a707': None}, settled={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': True, '329349ae-3fec-48d1-ba6d-37f47953a707': True}
