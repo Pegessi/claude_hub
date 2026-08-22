@@ -2,6 +2,7 @@ import asyncio
 import errno
 import glob
 import hashlib
+import itertools
 import json
 import logging
 import os
@@ -341,7 +342,13 @@ GLOBAL_CODEX_LAUNCH_LOCK = asyncio.Lock()
 
 # Per-rollout snapshot entry. mtime_ns/size are st_mtime_ns/st_size; cwd is
 # parsed from session_meta (realpath of workspace); ts is session_meta epoch.
-ScanEntry = namedtuple("ScanEntry", ["path", "mtime_ns", "size", "cwd", "ts", "is_archived"])
+# title is the extracted session title (only populated when the scan is run
+# with with_title=True; otherwise "").
+ScanEntry = namedtuple(
+    "ScanEntry",
+    ["path", "mtime_ns", "size", "cwd", "ts", "is_archived", "title"],
+    defaults=[""],
+)
 
 
 def _tmux_session_created(session_name: str) -> Optional[float]:
@@ -506,7 +513,9 @@ def _codex_roots() -> List[Tuple[Path, bool]]:
     return roots
 
 
-def _codex_scan_sessions() -> Dict[str, ScanEntry]:
+def _codex_scan_sessions(
+    with_title: bool = False, skip_title_sids: Optional[set] = None
+) -> Dict[str, ScanEntry]:
     """Scan all codex rollouts (active + archived).
 
     Returns a dict mapping canonical sid -> ScanEntry. When the same sid is
@@ -514,6 +523,14 @@ def _codex_scan_sessions() -> Dict[str, ScanEntry]:
     prefer: active over archived (active is live), then highest mtime_ns.
     Corrupt / unreadable files are silently skipped (with a WARNING log the
     first time per path).
+
+    When ``with_title`` is True, the session title is extracted into
+    ``ScanEntry.title``. To avoid reading the (potentially large) rollout body
+    for sessions that already have a title from ``session_index.jsonl``, pass
+    ``skip_title_sids`` — the set of sids that do NOT need a rollout-extracted
+    title (because they have a ``thread_name`` in the index). Only sids NOT in
+    this set have their first ``_CODEX_TITLE_SCAN_MAX_LINES`` lines read; all
+    others read just the ``session_meta`` line.
     """
     result: Dict[str, ScanEntry] = {}
     for root, is_archived in _codex_roots():
@@ -526,12 +543,19 @@ def _codex_scan_sessions() -> Dict[str, ScanEntry]:
             try:
                 with open(path_str, "r", encoding="utf-8", errors="ignore") as f:
                     first = f.readline()
+                    sid, ts_epoch, cwd = _parse_session_meta(first)
+                    if sid is None:
+                        logger.warning("codex scan: cannot parse session_meta from %s", path_str)
+                        continue
+                    if with_title and (skip_title_sids is None or sid not in skip_title_sids):
+                        # first line already consumed; read up to N-1 more for
+                        # title extraction, then prepend the session_meta line.
+                        rest = list(itertools.islice(f, _CODEX_TITLE_SCAN_MAX_LINES - 1))
+                        title = _codex_title_from_lines([first] + rest)
+                    else:
+                        title = ""
             except OSError:
                 logger.warning("codex scan: cannot read %s", path_str)
-                continue
-            sid, ts_epoch, cwd = _parse_session_meta(first)
-            if sid is None:
-                logger.warning("codex scan: cannot parse session_meta from %s", path_str)
                 continue
             entry = ScanEntry(
                 path=path_str,
@@ -540,6 +564,7 @@ def _codex_scan_sessions() -> Dict[str, ScanEntry]:
                 cwd=cwd or "",
                 ts=ts_epoch,
                 is_archived=is_archived,
+                title=title,
             )
             existing = result.get(sid)
             if existing is None:
@@ -649,6 +674,7 @@ _CODEX_SKIP_TITLE_PREFIXES = (
     "<system-reminder>",
     "<recommended_plugins>",
     "# AGENTS.md instructions",
+    "<codex_internal_context",
 )
 
 # Prefixes for workspace-manager-injected bootstrap/role prompts. These are
@@ -698,6 +724,11 @@ _CODEX_SESSION_LINE_RE = re.compile(r"^\s*Session:\s*(.+?)\s*$", re.MULTILINE)
 
 # Maximum length of the extracted session title (truncated with ellipsis).
 _CODEX_TITLE_MAX_LEN = 80
+# The first meaningful user message (and any task-delivery prompt) always
+# appears near the top of the rollout — within the first few dozen lines.
+# Scanning the whole file (which can be 10+ MB) for sessions that never
+# contain a task-title prompt is wasteful, so cap the scan.
+_CODEX_TITLE_SCAN_MAX_LINES = 100
 
 
 def _extract_task_title_from_text(text: str) -> str | None:
@@ -785,6 +816,66 @@ def _codex_classify_and_extract(text: str) -> tuple[str, str | None]:
     return ("fallback", stripped)
 
 
+def _codex_title_from_lines(lines: Iterable[str]) -> str:
+    """Extract a session title from an iterable of rollout JSONL lines.
+
+    See :func:`_codex_session_title` for the extraction rules. This variant
+    operates on already-read lines so callers can combine session_meta parsing
+    and title extraction in a single file open.
+    """
+    fallback_title = ""
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("type") != "response_item":
+            continue
+        payload = record.get("payload") or {}
+        if payload.get("role") != "user":
+            continue
+        content = payload.get("content")
+        if not isinstance(content, list):
+            continue
+        texts: List[str] = []
+        is_preamble = False
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") != "input_text":
+                continue
+            text = str(item.get("text", "")).strip()
+            if not text:
+                continue
+            if any(text.startswith(p) for p in _CODEX_SKIP_TITLE_PREFIXES):
+                is_preamble = True
+                break
+            texts.append(text)
+        if is_preamble:
+            continue
+        if not texts:
+            continue
+
+        joined = "\n\n".join(texts)
+        action, extracted = _codex_classify_and_extract(joined)
+        if action == "skip":
+            continue
+        if action == "title" and extracted:
+            title = " ".join(extracted.split())
+            if len(title) > _CODEX_TITLE_MAX_LEN:
+                title = title[: _CODEX_TITLE_MAX_LEN - 1] + "…"
+            return title
+        if action == "fallback" and extracted:
+            collapsed = " ".join(extracted.split())
+            if len(collapsed) > _CODEX_TITLE_MAX_LEN:
+                collapsed = collapsed[: _CODEX_TITLE_MAX_LEN - 1] + "…"
+            fallback_title = collapsed
+    return fallback_title
+
+
 def _codex_session_title(path: str) -> str:
     """Extract a human-readable title from a codex rollout file.
 
@@ -799,7 +890,24 @@ def _codex_session_title(path: str) -> str:
     """
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            fallback_title = ""
+            return _codex_title_from_lines(itertools.islice(f, _CODEX_TITLE_SCAN_MAX_LINES))
+    except OSError:
+        return ""
+
+
+def _codex_load_session_index() -> Dict[str, str]:
+    """Load ``~/.codex/session_index.jsonl`` as ``{session_id: thread_name}``.
+
+    ``thread_name`` is the conversation title shown in the Codex app / IDE
+    extension — exactly what the user expects to see in the session picker.
+    The index is small (a few hundred KB) so loading it is cheap and lets us
+    avoid scanning the (potentially multi-GB) rollout files for titles.
+    Returns an empty dict if the file is missing or unreadable.
+    """
+    index_path = _codex_home_dir() / "session_index.jsonl"
+    out: Dict[str, str] = {}
+    try:
+        with open(index_path, "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -808,60 +916,13 @@ def _codex_session_title(path: str) -> str:
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if record.get("type") != "response_item":
-                    continue
-                payload = record.get("payload") or {}
-                if payload.get("role") != "user":
-                    continue
-                content = payload.get("content")
-                if not isinstance(content, list):
-                    continue
-                # Collect all non-empty input_text blocks in this record and
-                # check for codex boilerplate. If ANY block is boilerplate, the
-                # whole record is preamble.
-                texts: List[str] = []
-                is_preamble = False
-                for item in content:
-                    if not isinstance(item, dict):
-                        continue
-                    if item.get("type") != "input_text":
-                        continue
-                    text = str(item.get("text", "")).strip()
-                    if not text:
-                        continue
-                    if any(text.startswith(p) for p in _CODEX_SKIP_TITLE_PREFIXES):
-                        is_preamble = True
-                        break
-                    texts.append(text)
-                if is_preamble:
-                    continue
-                if not texts:
-                    continue
-
-                joined = "\n\n".join(texts)
-                action, extracted = _codex_classify_and_extract(joined)
-                if action == "skip":
-                    continue
-                if action == "title" and extracted:
-                    title = " ".join(extracted.split())
-                    if len(title) > _CODEX_TITLE_MAX_LEN:
-                        title = title[: _CODEX_TITLE_MAX_LEN - 1] + "…"
-                    return title
-                # fallback: remember the first non-bootstrap candidate; later
-                # fallbacks are also remembered (override) so that e.g. a task
-                # prompt whose title-regex missed beats the earlier bootstrap
-                # role label. A successful "title" match below returns
-                # immediately and always wins over any fallback.
-                if action == "fallback" and extracted:
-                    collapsed = " ".join(extracted.split())
-                    if len(collapsed) > _CODEX_TITLE_MAX_LEN:
-                        collapsed = collapsed[: _CODEX_TITLE_MAX_LEN - 1] + "…"
-                    fallback_title = collapsed
-
-            # End of rollout: return the best fallback we saw, or "".
-            return fallback_title
+                sid = record.get("id")
+                name = record.get("thread_name")
+                if isinstance(sid, str) and sid and isinstance(name, str) and name:
+                    out[sid] = name
     except OSError:
-        return ""
+        return {}
+    return out
 
 
 def list_codex_sessions() -> List[Dict[str, Any]]:
@@ -871,22 +932,31 @@ def list_codex_sessions() -> List[Dict[str, Any]]:
     - ``session_id``: stable codex session UUID (for ``codex resume <id>``)
     - ``cwd``: working directory the session was started in
     - ``start_time``: ISO-8601 timestamp of the session start
-    - ``title``: human-readable title from the first real user message
+    - ``title``: human-readable title. Prefers the Codex app's conversation
+      title (``thread_name`` from ``session_index.jsonl``); falls back to the
+      first real user message extracted from the rollout file.
 
     Sessions are sorted most-recent-first within each cwd group, and cwd
     groups are ordered by their most recent session. Walks both active
     (``sessions/``) and archived (``archived_sessions/``) locations since
     ``codex resume`` works against both.
     """
-    # Collect raw sessions: {session_id: {session_id, cwd, start_epoch, title}}.
-    # A session may have multiple rollout files (resumes); keep the most recent.
+    # Load the Codex app's conversation titles once. This covers the majority
+    # of sessions and avoids reading the (large) rollout files for titles.
+    thread_names = _codex_load_session_index()
+
+    # Single-pass scan: read session_meta for every session, but only read the
+    # rollout body (for title extraction) for sessions NOT in the index.
+    # Sessions in the index use thread_name directly.
     raw: Dict[str, Dict[str, Any]] = {}
-    for sid, entry in _codex_scan_sessions().items():
+    for sid, entry in _codex_scan_sessions(
+        with_title=True, skip_title_sids=set(thread_names.keys())
+    ).items():
         start_epoch = entry.ts or 0.0
         existing = raw.get(sid)
         if existing and existing["start_epoch"] >= start_epoch:
             continue
-        title = _codex_session_title(entry.path)
+        title = thread_names.get(sid) or entry.title
         raw[sid] = {
             "session_id": sid,
             "cwd": entry.cwd or "",
