@@ -79,31 +79,23 @@ function makeIframe() {
   }
 }
 
-test('dispatch sends resize + scroll-bottom to the single visible pane in 1x1 layout', () => {
+test('dispatch sends resize to the single visible pane in 1x1 layout', () => {
   const iframe1 = makeIframe()
   const iframes = { 'tab-1': iframe1, 'tab-hidden': makeIframe() }
   const panes = [{ tabId: 'tab-1' }]
 
   const dispatched = dispatchTerminalReturnResize(panes, iframes)
 
-  assert.equal(dispatched.length, 2)
-  // Each message carries a unique request-correlation nonce.
+  assert.equal(dispatched.length, 1)
+  // The message carries a unique request-correlation nonce.
   assert.equal(dispatched[0].type, 'terminal-resize')
   assert.equal(dispatched[0].tabId, 'tab-1')
   assert.equal(typeof dispatched[0].nonce, 'string')
   assert.ok(dispatched[0].nonce.length > 0)
-  assert.equal(dispatched[1].type, 'terminal-scroll-bottom')
-  assert.equal(dispatched[1].tabId, 'tab-1')
-  assert.equal(typeof dispatched[1].nonce, 'string')
-  assert.ok(dispatched[1].nonce.length > 0)
-  // The resize and scroll nonces must be distinct (one per request).
-  assert.notEqual(dispatched[0].nonce, dispatched[1].nonce)
 
-  assert.equal(iframe1.calls.length, 2)
+  assert.equal(iframe1.calls.length, 1)
   assert.equal(iframe1.calls[0].message.type, 'terminal-resize')
   assert.equal(iframe1.calls[0].message.nonce, dispatched[0].nonce)
-  assert.equal(iframe1.calls[1].message.type, 'terminal-scroll-bottom')
-  assert.equal(iframe1.calls[1].message.nonce, dispatched[1].nonce)
 })
 
 test('dispatch sends to every visible pane in a split layout', () => {
@@ -118,9 +110,9 @@ test('dispatch sends to every visible pane in a split layout', () => {
 
   const dispatched = dispatchTerminalReturnResize(panes, iframes)
 
-  assert.equal(dispatched.length, 4)
-  assert.equal(iframe1.calls.length, 2)
-  assert.equal(iframe2.calls.length, 2)
+  assert.equal(dispatched.length, 2)
+  assert.equal(iframe1.calls.length, 1)
+  assert.equal(iframe2.calls.length, 1)
 })
 
 test('dispatch skips iframes whose tab is not in any visible pane (hidden cache)', () => {
@@ -132,7 +124,7 @@ test('dispatch skips iframes whose tab is not in any visible pane (hidden cache)
   dispatchTerminalReturnResize(panes, iframes)
 
   assert.equal(hidden.calls.length, 0)
-  assert.equal(iframe1.calls.length, 2)
+  assert.equal(iframe1.calls.length, 1)
 })
 
 test('dispatch skips null iframes even if the tab is in a visible pane', () => {
@@ -142,10 +134,10 @@ test('dispatch skips null iframes even if the tab is in a visible pane', () => {
 
   const dispatched = dispatchTerminalReturnResize(panes, iframes)
 
-  // Only tab-2 gets messages; tab-1's iframe is null.
-  assert.equal(dispatched.length, 2)
+  // Only tab-2 gets a message; tab-1's iframe is null.
+  assert.equal(dispatched.length, 1)
   assert.equal(dispatched[0].tabId, 'tab-2')
-  assert.equal(iframe2.calls.length, 2)
+  assert.equal(iframe2.calls.length, 1)
 })
 
 test('dispatch skips iframes whose contentWindow is null', () => {
@@ -156,7 +148,7 @@ test('dispatch skips iframes whose contentWindow is null', () => {
 
   const dispatched = dispatchTerminalReturnResize(panes, iframes)
 
-  assert.equal(dispatched.length, 2)
+  assert.equal(dispatched.length, 1)
   assert.equal(dispatched[0].tabId, 'tab-2')
 })
 
@@ -168,9 +160,9 @@ test('dispatch does not double-send when the same tab is assigned to multiple pa
 
   const dispatched = dispatchTerminalReturnResize(panes, iframes)
 
-  // visiblePaneTabIds dedups, so only one resize + one scroll-bottom.
-  assert.equal(dispatched.length, 2)
-  assert.equal(iframe1.calls.length, 2)
+  // visiblePaneTabIds dedups, so only one resize.
+  assert.equal(dispatched.length, 1)
+  assert.equal(iframe1.calls.length, 1)
 })
 
 test('rapid re-toggle: calling dispatch twice does not leak stale state', () => {
@@ -184,10 +176,10 @@ test('rapid re-toggle: calling dispatch twice does not leak stale state', () => 
   const first = dispatchTerminalReturnResize(panes, iframes)
   const second = dispatchTerminalReturnResize(panes, iframes)
 
-  assert.equal(first.length, 2)
-  assert.equal(second.length, 2)
-  // Each call sends exactly 2 messages; total = 4 (no cross-call state).
-  assert.equal(iframe1.calls.length, 4)
+  assert.equal(first.length, 1)
+  assert.equal(second.length, 1)
+  // Each call sends exactly 1 message; total = 2 (no cross-call state).
+  assert.equal(iframe1.calls.length, 2)
 })
 
 // ---------------------------------------------------------------------------
@@ -243,7 +235,7 @@ test('scheduleTerminalReturnResize defers dispatch until the next frame', () => 
 
   // Fire the frame — now the dispatch runs.
   scheduler.fireAll()
-  assert.equal(iframe1.calls.length, 2)
+  assert.equal(iframe1.calls.length, 1)
 })
 
 test('scheduleTerminalReturnResize skips dispatch if mode left terminal before frame fires', () => {
@@ -280,8 +272,8 @@ test('scheduleTerminalReturnResize cancels the previous pending callback when ca
   assert.equal(scheduler.pendingCount(), 1)
 
   scheduler.fireAll()
-  // Only the second callback's dispatch runs — total 2 messages, not 4.
-  assert.equal(iframe1.calls.length, 2)
+  // Only the second callback's dispatch runs — total 1 message, not 2.
+  assert.equal(iframe1.calls.length, 1)
 })
 
 test('scheduleTerminalReturnResize cleanup function cancels the pending callback', () => {
@@ -329,5 +321,5 @@ test('scheduleTerminalReturnResize rapid re-toggle: mode leaves and re-enters te
 
   // Fire B's frame.
   scheduler.fireAll()
-  assert.equal(iframe1.calls.length, 2)
+  assert.equal(iframe1.calls.length, 1)
 })

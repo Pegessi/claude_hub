@@ -2,10 +2,15 @@
  * Terminal mode-return dispatch helpers.
  *
  * When the user switches back to Terminal mode, the parent frame must ask
- * every visible terminal iframe to re-fit and scroll to bottom. These
- * helpers isolate the dispatch logic (which tab IDs to target, which
- * messages to send) so it can be unit-tested for 1x1 and split layouts,
- * hidden-cache exclusion, and rapid re-toggle safety.
+ * every visible terminal iframe to re-fit. These helpers isolate the
+ * dispatch logic (which tab IDs to target, which messages to send) so it
+ * can be unit-tested for 1x1 and split layouts, hidden-cache exclusion,
+ * and rapid re-toggle safety.
+ *
+ * Scroll position is intentionally NOT forced to the bottom on mode return.
+ * The terminal iframe is kept alive (visibility:hidden, not display:none),
+ * so xterm.js naturally preserves the scroll position and auto-scrolls to
+ * bottom when new data arrives IF the user was already at the bottom.
  */
 
 export interface PaneLike {
@@ -17,14 +22,14 @@ export interface IframeLike {
 }
 
 export interface TerminalReturnMessage {
-  type: 'terminal-resize' | 'terminal-scroll-bottom'
+  type: 'terminal-resize'
   tabId: string
   /**
    * Optional request-correlation nonce. When present, the terminal iframe
-   * records it in `__claudeHubLastFitNonce` / `__claudeHubLastScrollNonce`
-   * once the corresponding operation completes. The benchmark sends a unique
-   * nonce per request and waits for the matching nonce — proving the
-   * *current* request ran, not a delayed unrelated fit/scroll.
+   * records it in `__claudeHubLastFitNonce` once the corresponding operation
+   * completes. The benchmark sends a unique nonce per request and waits for
+   * the matching nonce — proving the *current* request ran, not a delayed
+   * unrelated fit.
    */
   nonce?: string
 }
@@ -63,19 +68,23 @@ function makeNonce(): string {
 }
 
 /**
- * Dispatch terminal-resize and terminal-scroll-bottom messages to every
- * iframe whose tab ID is assigned to a currently visible pane.
+ * Dispatch a terminal-resize message to every iframe whose tab ID is
+ * assigned to a currently visible pane.
  *
  * Cached/hidden iframes (tabs not in any pane) are skipped because their
  * containers are not laid out and a fit there would be a no-op or race
  * against a stale size.
  *
- * Each message carries a unique `nonce`. The terminal records the nonce in
- * `__claudeHubLastFitNonce` / `__claudeHubLastScrollNonce` once the
- * operation completes, so callers (notably the benchmark) can prove the
- * *current* request ran. The dispatched nonces are also stored on
+ * The message carries a unique `nonce`. The terminal records the nonce in
+ * `__claudeHubLastFitNonce` once the operation completes, so callers
+ * (notably the benchmark) can prove the *current* request ran. The
+ * dispatched nonce is also stored on
  * `window.__claudeHubTerminalReturnNonces` keyed by tab ID so the benchmark
- * can read them after triggering a mode switch.
+ * can read it after triggering a mode switch.
+ *
+ * Scroll position is NOT forced to the bottom: the iframe is kept alive
+ * (visibility:hidden), so xterm.js preserves the user's scroll position and
+ * only auto-scrolls on new data if the user was already at the bottom.
  *
  * @param panes - the current visible panes
  * @param iframes - map of tab ID -> iframe element
@@ -89,28 +98,24 @@ export function dispatchTerminalReturnResize(
 ): TerminalReturnMessage[] {
   const visible = visiblePaneTabIds(panes)
   const dispatched: TerminalReturnMessage[] = []
-  const nonces: Record<string, { fit: string; scroll: string }> = {}
+  const nonces: Record<string, { fit: string }> = {}
   for (const tabId of visible) {
     const iframe = iframes[tabId]
     if (!iframe || !iframe.contentWindow) continue
     const fitNonce = makeNonce()
-    const scrollNonce = makeNonce()
-    nonces[tabId] = { fit: fitNonce, scroll: scrollNonce }
+    nonces[tabId] = { fit: fitNonce }
     const resizeMsg: TerminalReturnMessage = { type: 'terminal-resize', tabId, nonce: fitNonce }
-    const scrollMsg: TerminalReturnMessage = { type: 'terminal-scroll-bottom', tabId, nonce: scrollNonce }
     if (postMessage) {
       postMessage(iframe, resizeMsg)
-      postMessage(iframe, scrollMsg)
     } else {
       iframe.contentWindow.postMessage(resizeMsg, '*')
-      iframe.contentWindow.postMessage(scrollMsg, '*')
     }
-    dispatched.push(resizeMsg, scrollMsg)
+    dispatched.push(resizeMsg)
   }
   // Expose nonces to the benchmark so it can wait for the matching
-  // __claudeHubLastFitNonce / __claudeHubLastScrollNonce in each iframe.
+  // __claudeHubLastFitNonce in each iframe.
   if (typeof window !== 'undefined') {
-    ;(window as unknown as { __claudeHubTerminalReturnNonces?: Record<string, { fit: string; scroll: string }> }).__claudeHubTerminalReturnNonces = nonces
+    ;(window as unknown as { __claudeHubTerminalReturnNonces?: Record<string, { fit: string }> }).__claudeHubTerminalReturnNonces = nonces
   }
   return dispatched
 }

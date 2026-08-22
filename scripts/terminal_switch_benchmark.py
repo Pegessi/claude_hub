@@ -1,13 +1,22 @@
 """
 Terminal switch benchmark — measures time from mode switch to actual
-xterm fit completion + scroll-bottom settlement, using CAUSAL counters.
+xterm fit completion, using a NEUTRAL readiness signal that works on both
+main and feature branches.
 
-Causal signal: the terminal exposes __claudeHubFitCount (incremented
-every time fitAddon.fit() runs) and __claudeHubScrollCount (incremented
-when a scroll-bottom settle loop finishes). The benchmark records these
-counts BEFORE the mode switch, then waits for them to INCREASE — proving
-the current resize/scroll request was processed, not just that the
-terminal happened to already be at a stable size.
+Neutral readiness signal: fit completion (cols > 0 AND rows > 0). This
+works on both main and feature because every terminal reports its
+dimensions once it has been laid out and fitted.
+
+Causal correlation (feature only): when nonces are present, the benchmark
+additionally requires `lastFitNonce == expected_fit_nonce` to prove the
+*current* mode-return resize request ran (not a delayed unrelated fit).
+On main, where no nonce protocol exists, the benchmark falls back to the
+neutral cols>0/rows>0 signal alone.
+
+Scroll-to-bottom is NOT measured: the feature branch no longer dispatches
+a forced scroll-to-bottom on mode return (xterm.js preserves the user's
+scroll position and only auto-scrolls on new data if the user was at the
+bottom).
 
 Also requires that EVERY requested visible tab's iframe is found; if a
 frame is missing the benchmark fails rather than silently succeeding on
@@ -22,7 +31,6 @@ from playwright.sync_api import sync_playwright
 
 APP_URL = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:5173"
 POLL_INTERVAL_MS = 30
-SETTLE_TOLERANCE = 1  # px from bottom counts as "at bottom"
 TIMEOUT_MS = 15000
 
 
@@ -33,15 +41,12 @@ def get_term_state(frame):
         () => {
           const term = (window.ttyd && window.ttyd.terminal) || window.term;
           if (!term) return null;
-          const vp = document.querySelector('.xterm-viewport');
-          const atBottom = vp ? (vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 1) : false;
           return {
             cols: term.cols || 0,
             rows: term.rows || 0,
-            atBottom,
-            fitCount: term.__claudeHubFitCount || 0,
-            scrollCount: term.__claudeHubScrollCount || 0,
             lastFitNonce: term.__claudeHubLastFitNonce || null,
+            // lastScrollNonce kept for backward compat; the benchmark no
+            // longer measures scroll-to-bottom (it is not dispatched).
             lastScrollNonce: term.__claudeHubLastScrollNonce || null,
           };
         }
@@ -57,28 +62,28 @@ def find_frame_for_tab(page, tab_id):
     return None
 
 
-def wait_for_fit_and_scroll(page, tab_ids, expected_nonces, t0):
+def wait_for_fit(page, tab_ids, expected_nonces, t0):
     """
-    Wait until every visible pane's terminal has processed the specific
-    resize/scroll request identified by its nonce.
+    Wait until every visible pane's terminal has completed a fit after the
+    mode switch.
 
-    Request-correlation (CAUSAL): the frontend's dispatchTerminalReturnResize
-    generates a unique nonce per resize/scroll message and stores them on
-    window.__claudeHubTerminalReturnNonces. The terminal records the nonce in
-    __claudeHubLastFitNonce / __claudeHubLastScrollNonce once the operation
-    completes. We wait for these to match the expected nonces — proving the
-    *current* mode-return request ran, not a delayed unrelated fit/scroll
-    (e.g. a ResizeObserver callback that fired before the switch).
+    Neutral readiness signal (works on both main and feature): cols > 0
+    AND rows > 0. Every terminal reports its dimensions once it has been
+    laid out and fitted, so this works regardless of whether the branch
+    dispatches nonce-correlated resize messages.
 
-    Also requires cols > 0 and rows > 0 (fit produced valid dimensions) and
-    atBottom true (scroll settled).
+    Causal correlation (feature only): when nonces are present for a tab
+    (i.e. `expected_nonces[tab_id]["fit"]` is not None), the benchmark
+    additionally requires `lastFitNonce == expected_fit_nonce` to prove
+    the *current* mode-return resize request ran (not a delayed unrelated
+    fit from a ResizeObserver callback that fired before the switch).
 
-    Tracks fit_completed_at and scroll_completed_at per tab so that even if
-    one signal never fires (e.g. main does not send scroll-bottom on mode
-    return), the other's timing is still reported.
+    On main, where no nonce protocol exists, `expected_nonces` is empty
+    and the benchmark falls back to the neutral cols>0/rows>0 signal
+    alone.
 
     Fails (raises) if any requested tab's iframe cannot be found.
-    Returns (elapsed_ms, settled_dict, fit_times, scroll_times).
+    Returns (elapsed_ms, settled_dict, fit_times).
     """
     frames_by_tab = {}
     missing = []
@@ -97,57 +102,48 @@ def wait_for_fit_and_scroll(page, tab_ids, expected_nonces, t0):
         )
 
     fit_done = {tid: False for tid in frames_by_tab}
-    scroll_done = {tid: False for tid in frames_by_tab}
     fit_times = {tid: None for tid in frames_by_tab}
-    scroll_times = {tid: None for tid in frames_by_tab}
 
     deadline = time.time() + TIMEOUT_MS / 1000
     while time.time() < deadline:
         all_done = True
         now = time.time()
         for tid, frame in frames_by_tab.items():
-            if fit_done[tid] and scroll_done[tid]:
+            if fit_done[tid]:
                 continue
             state = get_term_state(frame)
             if state is None:
                 all_done = False
                 continue
-            cols, rows, at_bottom = state["cols"], state["rows"], state["atBottom"]
+            cols, rows = state["cols"], state["rows"]
             last_fit_nonce = state["lastFitNonce"]
-            last_scroll_nonce = state["lastScrollNonce"]
-            expected = expected_nonces.get(tid, {"fit": None, "scroll": None})
+            expected = expected_nonces.get(tid, {"fit": None})
+            expected_fit_nonce = expected.get("fit")
 
-            # Fit done: the terminal's lastFitNonce matches the nonce we
-            # sent with this mode-return's resize message (request-correlated),
-            # AND the fit produced valid (nonzero) dimensions.
-            fit_matched = (
-                expected["fit"] is not None
-                and last_fit_nonce == expected["fit"]
+            # Neutral signal: fit produced valid (nonzero) dimensions.
+            fit_valid = cols > 0 and rows > 0
+
+            # Causal correlation (feature only): when a nonce was
+            # dispatched for this tab, require the terminal's lastFitNonce
+            # to match it. On main (no nonces), this check is skipped.
+            nonce_matched = (
+                expected_fit_nonce is None
+                or last_fit_nonce == expected_fit_nonce
             )
-            if fit_matched and cols > 0 and rows > 0 and not fit_done[tid]:
+
+            if fit_valid and nonce_matched and not fit_done[tid]:
                 fit_done[tid] = True
                 fit_times[tid] = round((now - t0) * 1000, 1)
 
-            # Scroll done: the terminal's lastScrollNonce matches the nonce
-            # we sent with this mode-return's scroll-bottom message, AND
-            # the viewport is at the bottom.
-            scroll_matched = (
-                expected["scroll"] is not None
-                and last_scroll_nonce == expected["scroll"]
-            )
-            if scroll_matched and at_bottom and not scroll_done[tid]:
-                scroll_done[tid] = True
-                scroll_times[tid] = round((now - t0) * 1000, 1)
-
-            if not (fit_done[tid] and scroll_done[tid]):
+            if not fit_done[tid]:
                 all_done = False
         if all_done:
             break
         time.sleep(POLL_INTERVAL_MS / 1000)
 
     elapsed = (time.time() - t0) * 1000
-    settled = {tid: fit_done[tid] and scroll_done[tid] for tid in frames_by_tab}
-    return elapsed, settled, fit_times, scroll_times
+    settled = {tid: fit_done[tid] for tid in frames_by_tab}
+    return elapsed, settled, fit_times
 
 
 def get_terminal_store(page):
@@ -250,7 +246,9 @@ def read_dispatched_nonces(page):
     """
     Read the nonces that the frontend's dispatchTerminalReturnResize stored
     on window.__claudeHubTerminalReturnNonces after the last mode-return
-    dispatch. Returns {tab_id: {fit: nonce, scroll: nonce}}.
+    dispatch. Returns {tab_id: {fit: nonce}}.
+
+    On main (no nonce protocol), this returns an empty dict.
     """
     return page.evaluate(
         """
@@ -260,25 +258,6 @@ def read_dispatched_nonces(page):
         }
         """
     )
-
-
-def read_baseline(page, tab_ids):
-    """Read fitCount/scrollCount for each tab BEFORE the mode switch."""
-    baseline = {}
-    for tid in tab_ids:
-        f = find_frame_for_tab(page, tid)
-        if f is None:
-            baseline[tid] = {"fitCount": 0, "scrollCount": 0}
-            continue
-        state = get_term_state(f)
-        if state is None:
-            baseline[tid] = {"fitCount": 0, "scrollCount": 0}
-        else:
-            baseline[tid] = {
-                "fitCount": state["fitCount"],
-                "scrollCount": state["scrollCount"],
-            }
-    return baseline
 
 
 CHROMIUM_PATH = "/Users/bytedance/Library/Caches/ms-playwright/chromium-1223/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
@@ -313,21 +292,19 @@ def run_benchmark():
         # wait briefly for it to run and store the nonces on window.
         time.sleep(0.1)
         expected_nonces = read_dispatched_nonces(page)
-        elapsed_1x1, settled_1x1, fit_times_1x1, scroll_times_1x1 = wait_for_fit_and_scroll(
+        elapsed_1x1, settled_1x1, fit_times_1x1 = wait_for_fit(
             page, tab_ids, expected_nonces, t0
         )
         results["1x1"] = {
             "elapsed_ms": round(elapsed_1x1, 1),
             "settled": settled_1x1,
             "fit_times_ms": fit_times_1x1,
-            "scroll_times_ms": scroll_times_1x1,
             "tab_ids": tab_ids,
             "expected_nonces": expected_nonces,
         }
         print(
             f"1x1: total={elapsed_1x1:.1f}ms, "
-            f"fit={fit_times_1x1}, scroll={scroll_times_1x1}, "
-            f"settled={settled_1x1}"
+            f"fit={fit_times_1x1}, settled={settled_1x1}"
         )
 
         # ---- split (2x1) layout ----
@@ -340,21 +317,19 @@ def run_benchmark():
         switch_mode(page, "terminal")
         time.sleep(0.1)
         expected_nonces = read_dispatched_nonces(page)
-        elapsed_split, settled_split, fit_times_split, scroll_times_split = wait_for_fit_and_scroll(
+        elapsed_split, settled_split, fit_times_split = wait_for_fit(
             page, tab_ids, expected_nonces, t0
         )
         results["2x1"] = {
             "elapsed_ms": round(elapsed_split, 1),
             "settled": settled_split,
             "fit_times_ms": fit_times_split,
-            "scroll_times_ms": scroll_times_split,
             "tab_ids": tab_ids,
             "expected_nonces": expected_nonces,
         }
         print(
             f"2x1: total={elapsed_split:.1f}ms, "
-            f"fit={fit_times_split}, scroll={scroll_times_split}, "
-            f"settled={settled_split}"
+            f"fit={fit_times_split}, settled={settled_split}"
         )
 
         browser.close()
