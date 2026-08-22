@@ -5,6 +5,21 @@
 
 ## Unreleased
 
+### feat: add agent-friendly Agent Tree CLI
+
+- Add `claude-hub agent-tree` over the existing `/api/agent-tree` REST
+  contract (`roots`, `runs`, `events`, `spawn`, `send`, `followup`, `wait`,
+  `ack`, `interrupt`). No new server endpoints.
+- `--call-id` is accepted only on spawn/send/followup/interrupt (`POST /ack`
+  has no `call_id`). Omitted ids are new UUIDs echoed to stderr before HTTP.
+- `wait --ack` renders and flushes the event list, then ACKs `max(sequence)`.
+  JSON stdout stays one event array; `--json` then writes
+  `{"acked_sequence": N}` to stderr. Human mode prints `acked sequence N`
+  after the table.
+- Wait HTTP timeout is attached on `build_request` (`request.extensions`);
+  httpx 0.28 `Client.send` has no `timeout` kwarg, and the client default
+  stays 30s.
+
 ### docs: make Agent Tree discoverable for agents
 
 - Add `docs/AGENT_TREE.md` as the canonical backend-only agent guide (mental

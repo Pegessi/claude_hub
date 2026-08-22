@@ -18,7 +18,8 @@ resident agents, sending follow-up instructions, and reviewing progress reports.
 - Dispatch tasks to a specific agent or let the workspace choose the available agent.
 - Use the backend Agent Tree (`docs/AGENT_TREE.md`) so a Resident or worker
   can spawn managed Claude/Codex/Cursor children, wait/ACK the durable
-  mailbox, and retry with stable `call_id`s. There is no tree UI yet.
+  mailbox, and retry with stable `call_id`s (`claude-hub agent-tree` or
+  REST). There is no tree UI yet.
 - Track task state across Todo, Queued, Working, Review, and Done columns.
 - Send follow-up messages from the task detail panel without leaving the board.
 - Record agent reports with changed files, validation, risks, and review status.
@@ -162,6 +163,10 @@ uv run claude-hub session send <SESSION_ID> --message "continue"
 uv run claude-hub session report <SESSION_ID> --state working --message "..."
 uv run claude-hub lessons list <WORKSPACE_ID> --query terminal
 uv run claude-hub lessons get <WORKSPACE_ID> <LESSON_ID>
+uv run claude-hub --json agent-tree roots <WORKSPACE_ID>
+uv run claude-hub --json agent-tree spawn <WORKSPACE_ID> <PARENT_RUN_ID> --message "..." --agent-type claude
+uv run claude-hub --json agent-tree wait <WORKSPACE_ID> <RECIPIENT_RUN_ID> --since-sequence 0
+uv run claude-hub --json agent-tree ack <WORKSPACE_ID> <RUN_ID> <SEQUENCE>
 ```
 
 Loopback requests bypass auth, so a local backend needs no token; commands exit
@@ -265,7 +270,7 @@ rules). **No change — even a small one — should be made directly on `main`.*
 ## Reference Docs
 
 - [docs/AGENT_TREE.md](docs/AGENT_TREE.md): agent-facing Agent Tree / durable
-  mailbox recipes (backend-only; no UI yet)
+  mailbox recipes and `claude-hub agent-tree` CLI (backend-only; no UI yet)
 - [CLAUDE.md](CLAUDE.md): project conventions and development workflow
 - [CHANGELOG.md](CHANGELOG.md): merge-level change history
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): auth and public deployment setup
