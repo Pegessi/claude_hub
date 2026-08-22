@@ -1798,34 +1798,39 @@ async def proxy_terminal_request(
           }}
         }}
 
-        // Re-fit the terminal when it becomes ready. Mirrors the retry pattern
-        // of scrollBottomWhenReady / refreshHistoryWhenReady: resolve the term
-        // via termForHistoryAction() (which falls back to _getTerm()), and if
-        // it is not yet available (or still mid-replay), retry on a short
-        // interval up to attemptsLeft times. Once ready, invoke the immediate
+        // Re-fit the terminal when it becomes ready. Resolves the term via
+        // termForHistoryAction() (which falls back to _getTerm()), and if it
+        // is not yet available, retries on the next animation frame up to
+        // attemptsLeft times. Once the term exists, invoke the immediate
         // requestFit (not the debounced scheduleFit): for mode-return the
         // terminal shell's layout box is already at its final size because
         // visibility:hidden preserves dimensions (unlike display:none), so
         // there is no layout transition to absorb and the 150ms debounce
         // would only add latency. A single rAF follow-up matches
         // scheduleFit's double-fit pattern to catch sub-frame drift.
+        //
+        // NOTE: we intentionally do NOT wait for __claudeHubReplayBuffering
+        // to clear. Fitting during history replay is safe: xterm.js handles
+        // resizes while the buffer is being written, and the fit only
+        // adjusts cols/rows to the container size — it does not interfere
+        // with the replay stream. Blocking on replay buffering here caused
+        // the second pane of a split layout to stall for up to several
+        // seconds when its initial history replay was still in flight at
+        // mode-return time.
         function resizeWhenReady(attemptsLeft, nonce) {{
           const term = termForHistoryAction();
           if (!term) {{
             if (attemptsLeft > 0) {{
-              setTimeout(function() {{
-                resizeWhenReady(attemptsLeft - 1, nonce);
-              }}, 100);
+              if (typeof requestAnimationFrame === 'function') {{
+                requestAnimationFrame(function() {{
+                  resizeWhenReady(attemptsLeft - 1, nonce);
+                }});
+              }} else {{
+                setTimeout(function() {{
+                  resizeWhenReady(attemptsLeft - 1, nonce);
+                }}, 16);
+              }}
             }}
-            return;
-          }}
-
-          // Do not fit while the initial replay is still buffering; the
-          // renderer size may change under us.
-          if (term.__claudeHubReplayBuffering === true && attemptsLeft > 0) {{
-            setTimeout(function() {{
-              resizeWhenReady(attemptsLeft - 1, nonce);
-            }}, 100);
             return;
           }}
 

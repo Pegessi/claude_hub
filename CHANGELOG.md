@@ -77,33 +77,40 @@
     alone. Scroll-to-bottom is not measured because the feature branch
     no longer dispatches a forced scroll-to-bottom on mode return
     (xterm.js preserves the user's scroll position).
-  - **Causal benchmark results** (feature `0ffbb0e` vs main `16404fe`,
+  - **Causal benchmark results** (feature `e5126ac` vs main `16404fe`,
     3 runs each, same causal fit-call counter signal on both branches):
 
-    | Layout | Pane | Feature median | Main median | Delta |
+    | Layout | Pane | Feature first-fit median | Main first-fit median | Delta |
     | --- | --- | --- | --- | --- |
-    | 1x1 | single | 238.2 ms | 249.4 ms | feature −11.2 ms (−4.5%) |
-    | 2x1 | pane 1 | 206.4 ms | 229.1 ms | feature −22.7 ms (−9.9%) |
-    | 2x1 | pane 2 | 996.1 ms | 229.1 ms | feature **+767.0 ms (+335%)** |
+    | 1x1 | single | 172.6 ms | 223.6 ms | feature −51.0 ms (−22.8%) |
+    | 2x1 | pane 1 | 182.5 ms | 257.0 ms | feature −74.5 ms (−29.0%) |
+    | 2x1 | pane 2 | 182.5 ms | 257.0 ms | feature −74.5 ms (−29.0%) |
 
-    Raw output: `/tmp/benchmark_feature_0ffbb0e.txt`,
-    `/tmp/benchmark_main_16404fe_causal.txt`.
+    Feature-only nonce-ack median (request-correlation, `__claudeHubLastFitNonce`
+    matched against the dispatched nonce): 172.6 ms (1x1), 182.5 ms (2x1) —
+    equal to first-fit because the nonce is recorded when the fit completes.
 
     Both branches settle (`settled=true`) with the fit-call count
     increasing past the pre-switch baseline, confirming the causal
     signal works on main (no nonces) and feature (nonces matched).
 
-    **Honest assessment**: feature is slightly faster for the 1x1 layout
-    and the first pane of a 2x1 split (the immediate `requestFit` path
-    avoids the 150 ms debounce). However, the *second* pane of a 2x1
-    split is substantially slower on feature (~1 s vs ~229 ms on main).
-    The likely cause is that the second pane's terminal is not yet ready
-    when the mode-return resize is dispatched, so `resizeWhenReady`
-    retries (100 ms spacing) until the terminal is available. On main,
-    both panes are driven by the same ResizeObserver fire and settle
-    together. The 1x1 win is real but small; the 2x1 pane-2 regression
-    needs investigation (e.g. pre-warming the second pane's terminal or
-    dispatching the resize only after all visible panes report ready).
+    **Honest assessment**: feature is faster than main across all layouts
+    (1x1: −22.8%, 2x1 both panes: −29.0%). The speedup comes from two
+    changes: (1) the terminal shell keeps its layout box alive
+    (`visibility: hidden` + `position: absolute`) instead of collapsing
+    to zero size (`display: none`), so xterm.js does not start from a
+    zero-size viewport; (2) mode-return uses the immediate
+    `requestFit` path (no 150 ms debounce) with a single rAF follow-up,
+    since the shell's dimensions are already final when the resize is
+    dispatched. A previous measurement showed a 2x1 pane-2 regression
+    (~1 s) caused by `resizeWhenReady` blocking on the terminal's
+    `__claudeHubReplayBuffering` flag; the second pane's terminal was
+    still replaying history when the mode-return resize fired. The fix
+    removes the buffering block (fit is safe during replay — xterm.js
+    handles resizes while the buffer is being written) and switches
+    polling from `setTimeout(100ms)` to `requestAnimationFrame`, so
+    pane 2 now fits at the same time as pane 1. No remaining slowness
+    was observed in 3 runs of both 1x1 and 2x1 layouts.
 
 ### fix: filter subagent sessions and cache codex session listing
 

@@ -13,11 +13,18 @@ waits for the counter to INCREASE past that baseline — proving a fit ran
 where the terminal preserves its dimensions while hidden (display:none),
 a stale cols>0/rows>0 state cannot satisfy the "count increased" check.
 
-Causal correlation (feature only): when nonces are present, the benchmark
-additionally requires `lastFitNonce == expected_fit_nonce` to prove the
-*current* mode-return resize request ran (not a delayed unrelated fit).
-On main, where no nonce protocol exists, the benchmark relies on the
-fit-call counter increase alone.
+Two metrics are collected:
+
+1. **first-fit time** (apples-to-apples, BOTH main and feature): time from
+   the mode switch to the first fit that ran after the switch AND produced
+   valid (nonzero) dimensions. This is the primary main-vs-feature
+   comparison metric.
+
+2. **nonce-ack time** (feature only): time from the mode switch to the
+   terminal's `__claudeHubLastFitNonce` matching the nonce dispatched with
+   the mode-return resize message. This proves the *current* request ran
+   (not a delayed unrelated fit). On main (no nonce protocol) this metric
+   is not populated.
 
 Scroll-to-bottom is NOT measured: the feature branch no longer dispatches
 a forced scroll-to-bottom on mode return (xterm.js preserves the user's
@@ -122,25 +129,29 @@ def wait_for_fit(page, tab_ids, expected_nonces, baseline_fit_counts, t0):
     Wait until every visible pane's terminal has completed a fit after the
     mode switch.
 
-    Causal fit-call counter (works on both main and feature): the benchmark
-    requires `state["fitCallCount"] > baseline_fit_counts[tid]`. The
-    baseline is recorded *before* the mode switch, so an increase proves a
-    `term.resize()` (i.e. a fit) ran *after* the switch. This is causal on
-    both branches: even on main, where the terminal preserves its
-    dimensions while hidden (display:none), a stale cols>0/rows>0 state
-    cannot satisfy the "count increased" check.
+    Two metrics are collected:
 
-    Causal correlation (feature only): when nonces are present for a tab
-    (i.e. `expected_nonces[tab_id]["fit"]` is not None), the benchmark
-    additionally requires `lastFitNonce == expected_fit_nonce` to prove
-    the *current* mode-return resize request ran (not a delayed unrelated
-    fit from a ResizeObserver callback that fired before the switch).
+    1. **first-fit time** (apples-to-apples, works on BOTH main and feature):
+       the time from the mode switch to the first fit that ran *after* the
+       switch and produced valid (nonzero) dimensions. The causal signal is
+       `fitCallCount > baseline_fit_counts[tid]` — the baseline is recorded
+       *before* the switch, so an increase proves a fit ran after the switch.
+       This is causal on both branches: even on main, where the terminal
+       preserves its dimensions while hidden (display:none), a stale
+       cols>0/rows>0 state cannot satisfy the "count increased" check.
 
-    On main, where no nonce protocol exists, `expected_nonces` is empty
-    and the benchmark relies on the fit-call counter increase alone.
+    2. **nonce-ack time** (feature only): the time from the mode switch to
+       the terminal's `__claudeHubLastFitNonce` matching the nonce dispatched
+       with the mode-return resize message. This proves the *current*
+       request ran (not a delayed unrelated fit from a ResizeObserver
+       callback). On main, where no nonce protocol exists, this metric is
+       not populated.
+
+    The primary main-vs-feature comparison MUST use the first-fit time for
+    both branches. The nonce-ack time is a supplementary feature-only metric.
 
     Fails (raises) if any requested tab's iframe cannot be found.
-    Returns (elapsed_ms, settled_dict, fit_times).
+    Returns (elapsed_ms, settled_dict, first_fit_times, nonce_ack_times).
     """
     frames_by_tab = {}
     missing = []
@@ -158,20 +169,21 @@ def wait_for_fit(page, tab_ids, expected_nonces, baseline_fit_counts, t0):
             f"succeed on a subset."
         )
 
-    fit_done = {tid: False for tid in frames_by_tab}
-    fit_times = {tid: None for tid in frames_by_tab}
+    first_fit_done = {tid: False for tid in frames_by_tab}
+    first_fit_times = {tid: None for tid in frames_by_tab}
+    nonce_ack_done = {tid: False for tid in frames_by_tab}
+    nonce_ack_times = {tid: None for tid in frames_by_tab}
 
     deadline = time.time() + TIMEOUT_MS / 1000
     while time.time() < deadline:
-        all_done = True
+        all_first_fit_done = True
         now = time.time()
         for tid, frame in frames_by_tab.items():
-            if fit_done[tid]:
-                continue
             state = get_term_state(frame)
             if state is None:
-                all_done = False
+                all_first_fit_done = False
                 continue
+
             cols, rows = state["cols"], state["rows"]
             fit_call_count = state["fitCallCount"]
             last_fit_nonce = state["lastFitNonce"]
@@ -179,33 +191,30 @@ def wait_for_fit(page, tab_ids, expected_nonces, baseline_fit_counts, t0):
             expected_fit_nonce = expected.get("fit")
             baseline = baseline_fit_counts.get(tid, 0)
 
-            # Causal signal: a fit (term.resize) ran AFTER the mode switch.
-            fit_ran_after_switch = fit_call_count > baseline
+            # --- First-fit (common metric, both branches) ---
+            if not first_fit_done[tid]:
+                fit_ran_after_switch = fit_call_count > baseline
+                fit_valid = cols > 0 and rows > 0
+                if fit_ran_after_switch and fit_valid:
+                    first_fit_done[tid] = True
+                    first_fit_times[tid] = round((now - t0) * 1000, 1)
 
-            # Neutral signal: fit produced valid (nonzero) dimensions.
-            fit_valid = cols > 0 and rows > 0
+            # --- Nonce-ack (feature only) ---
+            if not nonce_ack_done[tid] and expected_fit_nonce is not None:
+                if last_fit_nonce == expected_fit_nonce:
+                    nonce_ack_done[tid] = True
+                    nonce_ack_times[tid] = round((now - t0) * 1000, 1)
 
-            # Causal correlation (feature only): when a nonce was
-            # dispatched for this tab, require the terminal's lastFitNonce
-            # to match it. On main (no nonces), this check is skipped.
-            nonce_matched = (
-                expected_fit_nonce is None
-                or last_fit_nonce == expected_fit_nonce
-            )
+            if not first_fit_done[tid]:
+                all_first_fit_done = False
 
-            if fit_ran_after_switch and fit_valid and nonce_matched and not fit_done[tid]:
-                fit_done[tid] = True
-                fit_times[tid] = round((now - t0) * 1000, 1)
-
-            if not fit_done[tid]:
-                all_done = False
-        if all_done:
+        if all_first_fit_done:
             break
         time.sleep(POLL_INTERVAL_MS / 1000)
 
     elapsed = (time.time() - t0) * 1000
-    settled = {tid: fit_done[tid] for tid in frames_by_tab}
-    return elapsed, settled, fit_times
+    settled = {tid: first_fit_done[tid] for tid in frames_by_tab}
+    return elapsed, settled, first_fit_times, nonce_ack_times
 
 
 def get_terminal_store(page):
@@ -378,20 +387,22 @@ def run_benchmark():
         # wait briefly for it to run and store the nonces on window.
         time.sleep(0.1)
         expected_nonces = read_dispatched_nonces(page)
-        elapsed_1x1, settled_1x1, fit_times_1x1 = wait_for_fit(
+        elapsed_1x1, settled_1x1, first_fit_times_1x1, nonce_ack_times_1x1 = wait_for_fit(
             page, tab_ids, expected_nonces, baseline_fit_counts, t0
         )
         results["1x1"] = {
             "elapsed_ms": round(elapsed_1x1, 1),
             "settled": settled_1x1,
-            "fit_times_ms": fit_times_1x1,
+            "first_fit_times_ms": first_fit_times_1x1,
+            "nonce_ack_times_ms": nonce_ack_times_1x1,
             "tab_ids": tab_ids,
             "expected_nonces": expected_nonces,
             "baseline_fit_counts": baseline_fit_counts,
         }
         print(
             f"1x1: total={elapsed_1x1:.1f}ms, "
-            f"fit={fit_times_1x1}, settled={settled_1x1}"
+            f"first_fit={first_fit_times_1x1}, "
+            f"nonce_ack={nonce_ack_times_1x1}, settled={settled_1x1}"
         )
 
         # ---- split (2x1) layout ----
@@ -407,20 +418,22 @@ def run_benchmark():
         switch_mode(page, "terminal")
         time.sleep(0.1)
         expected_nonces = read_dispatched_nonces(page)
-        elapsed_split, settled_split, fit_times_split = wait_for_fit(
+        elapsed_split, settled_split, first_fit_times_split, nonce_ack_times_split = wait_for_fit(
             page, tab_ids, expected_nonces, baseline_fit_counts, t0
         )
         results["2x1"] = {
             "elapsed_ms": round(elapsed_split, 1),
             "settled": settled_split,
-            "fit_times_ms": fit_times_split,
+            "first_fit_times_ms": first_fit_times_split,
+            "nonce_ack_times_ms": nonce_ack_times_split,
             "tab_ids": tab_ids,
             "expected_nonces": expected_nonces,
             "baseline_fit_counts": baseline_fit_counts,
         }
         print(
             f"2x1: total={elapsed_split:.1f}ms, "
-            f"fit={fit_times_split}, settled={settled_split}"
+            f"first_fit={first_fit_times_split}, "
+            f"nonce_ack={nonce_ack_times_split}, settled={settled_split}"
         )
 
         browser.close()
