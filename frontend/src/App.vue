@@ -1134,11 +1134,13 @@ textarea {
   min-height: 0;
 }
 
-/* When the workspace view is active, keep the terminal shell rendered (so
-   iframe content stays live and switching back is instant) but remove it from
-   the layout flow and make it non-interactive. Using visibility:hidden instead
-   of display:none means the xterm.js canvases keep their pixels and don't need
-   a full re-render on tab switch. */
+/* When the workspace view is active, keep the terminal shell rendered but
+   remove it from the layout flow and make it non-interactive. Using
+   visibility:hidden + position:absolute instead of display:none preserves
+   the terminal container's layout box, so xterm.js does not start from a
+   zero-size viewport and need a full fit() cycle on return. The iframe
+   content stays loaded in both cases; the difference is that the layout
+   box (and thus the terminal's measured dimensions) is retained. */
 .terminal-mode-shell--hidden {
   position: absolute;
   inset: 0;

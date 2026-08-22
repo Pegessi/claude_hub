@@ -259,10 +259,13 @@ test('scheduleTerminalReturnResize cancels the previous pending callback when ca
   const scheduler = makeMockScheduler()
   let mode = 'terminal'
 
-  // Calling schedule again cancels the first callback internally.
+  // First schedule — one pending callback.
   scheduleTerminalReturnResize(() => mode, panes, iframes, scheduler)
+  assert.equal(scheduler.pendingCount(), 1)
 
-  // Only one pending callback should remain.
+  // Second schedule — the first callback is cancelled internally, so
+  // there is still only one pending callback (the second one).
+  scheduleTerminalReturnResize(() => mode, panes, iframes, scheduler)
   assert.equal(scheduler.pendingCount(), 1)
 
   scheduler.fireAll()

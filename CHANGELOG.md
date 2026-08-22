@@ -12,14 +12,17 @@
   completed tasks, with a "Show more (N)" button to reveal the rest. For a
   workspace with 272 done tasks this reduces the number of rendered task
   cards from 272 to 15 (a ~94.5% reduction). Switching to Terminal mode keeps
-  the terminal shell mounted (off-screen via `visibility: hidden`) instead of
-  hiding it with `display: none`, so the iframe content stays loaded across
-  mode switches; only the visible panes are re-fit on return.
+  the terminal shell's layout box intact (off-screen via `visibility: hidden`
+  + `position: absolute`) instead of collapsing it with `display: none`, so
+  the terminal's measured dimensions are preserved across mode switches and
+  only the visible panes are re-fit on return.
 - **Why**: workspaces with hundreds of done tasks paid the full card-render
   cost (latest report, session, agent/reviewer title, review status, injected
   lessons) on every mode switch because `AgentWorkspaceView` is destroyed and
-  recreated. Terminal mode used `v-show` (`display: none`), which stops iframe
-  rendering and forces a full xterm re-paint on return.
+  recreated. Terminal mode used `v-show` (`display: none`), which collapses
+  the terminal container's layout box to zero size, so xterm.js had to run a
+  full `fit()` cycle from a zero-size viewport on every return to Terminal
+  mode.
 - **How**: `tasksByStatus('done')` now sorts by `completed_at` desc and slices
   to `DONE_TASKS_PREVIEW_LIMIT` (15) unless `showAllDoneTasks` is set; the
   column header shows the real total and a toggle button (always visible on
@@ -30,8 +33,9 @@
   cards and processes faster than rendering all 272. The terminal shell switched
   from `v-show` to a `terminal-mode-shell--hidden` class that uses
   `position: absolute; inset: 0; visibility: hidden; pointer-events: none`,
-  and a mode watcher posts `terminal-resize` + `terminal-scroll-bottom` only
-  to iframes whose tab ID is assigned to a currently visible pane (the
+  preserving the layout box so xterm.js does not start from a zero-size
+  viewport. A mode watcher posts `terminal-resize` + `terminal-scroll-bottom`
+  only to iframes whose tab ID is assigned to a currently visible pane (the
   visible-pane selection lives in `utils/terminalPanes.ts` and is tested for
   1x1 and split layouts). The iframe injected script gained a `resizeWhenReady`
   helper that resolves the terminal via `termForHistoryAction()` and retries
