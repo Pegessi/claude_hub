@@ -5,6 +5,23 @@
 
 ## Unreleased
 
+### fix: filter subagent sessions and cache codex session listing
+
+- **What**: the Codex session picker now shows only user-initiated sessions
+  (`thread_source == "user"` or legacy rollouts without the field), hiding
+  subagent and automation sessions that cannot receive direct user input.
+  The listing is also cached in-memory keyed on the session index and rollout
+  directory mtimes, so repeat calls return in <5 ms instead of re-scanning
+  all rollout files.
+- **Why**: subagent sessions cluttered the picker and selecting one produced
+  a "cannot receive input" error. The full scan of ~1100 rollout files took
+  ~3-4 s on every call.
+- **How**: `_parse_session_meta` now extracts `thread_source`; `ScanEntry`
+  carries it; `list_codex_sessions` skips `subagent`/`automation` entries.
+  A module-level cache stores the last result; `_codex_sessions_cache_key()`
+  stats `session_index.jsonl` and the date directories under `sessions/` and
+  `archived_sessions/` to detect changes and invalidate.
+
 ### fix: use Codex app conversation titles in session picker
 
 - **What**: the Codex session selector now shows the same conversation titles
