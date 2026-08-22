@@ -192,7 +192,7 @@
           v-for="column in columns"
           :key="column.status"
         >
-          {{ column.label }} {{ tasksByStatus(column.status).length }}
+          {{ column.label }} {{ column.status === 'done' ? totalDoneTasks : tasksByStatus(column.status).length }}
         </span>
       </div>
     </div>
@@ -424,7 +424,15 @@
             <div class="column-header">
               <h2>{{ column.label }}</h2>
               <div class="column-meta">
-                <span>{{ tasksByStatus(column.status).length }}</span>
+                <span>{{ column.status === 'done' ? totalDoneTasks : tasksByStatus(column.status).length }}</span>
+                <button
+                  v-if="column.status === 'done' && totalDoneTasks > DONE_TASKS_PREVIEW_LIMIT"
+                  type="button"
+                  class="column-collapse-button"
+                  @click.stop="showAllDoneTasks = !showAllDoneTasks"
+                >
+                  {{ showAllDoneTasks ? 'Show less' : `Show more (${totalDoneTasks - DONE_TASKS_PREVIEW_LIMIT})` }}
+                </button>
                 <button
                   type="button"
                   class="column-collapse-button"
@@ -3082,6 +3090,14 @@ const startOptions = reactive<Record<string, TaskStartOptions>>({})
 let boardPollTimer: number | null = null
 let elapsedClockTimer: number | null = null
 
+// Done-column preview limit. The Done column can accumulate hundreds of tasks;
+// rendering every card on every board mount (which happens on each workspace
+// switch because AgentWorkspaceView uses v-if) makes the switch feel sluggish.
+// We show only the most recent N done tasks by default and expose a "Show more"
+// button to reveal the rest.
+const DONE_TASKS_PREVIEW_LIMIT = 15
+const showAllDoneTasks = ref(false)
+
 const columns: { status: WorkspaceTaskStatus; label: string }[] = [
   { status: 'todo', label: 'Todo' },
   { status: 'queued', label: 'Queued' },
@@ -3764,8 +3780,22 @@ function startOptionsFor(task: WorkspaceTask): TaskStartOptions {
 }
 
 function tasksByStatus(status: WorkspaceTaskStatus) {
-  return tasks.value.filter(task => task.status === status)
+  const filtered = tasks.value.filter(task => task.status === status)
+  if (status !== 'done') return filtered
+  // Done tasks: sort by completion time (most recent first) so the preview
+  // shows the latest work. Fall back to created_at when completed_at is absent.
+  const sorted = [...filtered].sort((a, b) => {
+    const aMs = parseTimestampMs(a.completed_at) ?? parseTimestampMs(a.created_at) ?? 0
+    const bMs = parseTimestampMs(b.completed_at) ?? parseTimestampMs(b.created_at) ?? 0
+    return bMs - aMs
+  })
+  if (showAllDoneTasks.value) return sorted
+  return sorted.slice(0, DONE_TASKS_PREVIEW_LIMIT)
 }
+
+// Total done task count (unaffected by the preview limit) for the column header
+// badge and the "Show more" button label.
+const totalDoneTasks = computed(() => tasks.value.filter(task => task.status === 'done').length)
 
 function sessionForTask(task: WorkspaceTask) {
   return workspaceStore.sessionForTask(task)
@@ -5557,6 +5587,9 @@ watch(activeWorkspaceId, value => {
   workspaceSessionView.value = 'agents'
   workspaceStore.clearTaskReports()
   closeTaskDetail()
+  // Reset the done-column "show all" toggle on workspace switch so each
+  // workspace opens with the fast 15-task preview.
+  showAllDoneTasks.value = false
 })
 
 watch(

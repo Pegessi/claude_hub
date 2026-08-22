@@ -95,8 +95,8 @@
         </button>
       </div>
       <div
-        v-show="mode === 'terminal'"
         class="terminal-mode-shell"
+        :class="{ 'terminal-mode-shell--hidden': mode !== 'terminal' }"
       >
         <TabBar />
         <LayoutSelector />
@@ -160,6 +160,26 @@ watch(() => activePane.value?.tabId || null, (tabId) => {
 watch(colorScheme, (scheme) => {
   document.documentElement.dataset.theme = scheme
 }, { immediate: true })
+
+// When switching back to terminal mode, nudge the active terminal iframe to
+// resize and scroll to bottom. The shell stays rendered (visibility:hidden)
+// while the workspace is active, so this is a cheap correctness pass rather
+// than a full history replay.
+watch(mode, (newMode, oldMode) => {
+  if (newMode !== 'terminal' || oldMode === 'terminal') return
+  const activeTabId = window.__claudeHub?.activePaneTabId
+  if (!activeTabId) return
+  // Defer to the next frame so the shell has left the absolute-positioned
+  // hidden state and its layout box is final before we ask the iframe to fit.
+  requestAnimationFrame(() => {
+    const state = window.__claudeHub?.terminalState
+    const iframe = state?.iframes?.[activeTabId]
+    if (iframe?.contentWindow) {
+      iframe.contentWindow.postMessage({ type: 'terminal-resize', tabId: activeTabId }, '*')
+      iframe.contentWindow.postMessage({ type: 'terminal-scroll-bottom', tabId: activeTabId }, '*')
+    }
+  })
+})
 
 // ---- Mobile viewport sync with visualViewport API ----
 // When the virtual keyboard appears/disappears on mobile, the visual
@@ -1101,6 +1121,18 @@ textarea {
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+/* When the workspace view is active, keep the terminal shell rendered (so
+   iframe content stays live and switching back is instant) but remove it from
+   the layout flow and make it non-interactive. Using visibility:hidden instead
+   of display:none means the xterm.js canvases keep their pixels and don't need
+   a full re-render on tab switch. */
+.terminal-mode-shell--hidden {
+  position: absolute;
+  inset: 0;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .empty-state {

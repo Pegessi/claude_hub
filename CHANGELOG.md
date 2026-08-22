@@ -5,6 +5,28 @@
 
 ## Unreleased
 
+### feat: speed up Agent Workspace and Terminal mode switching
+
+- **What**: switching to the Agent Workspace view no longer renders every
+  completed task by default — the Done column shows only the 15 most recently
+  completed tasks, with a "Show more (N)" button to reveal the rest. Switching
+  to Terminal mode is now near-instant because the terminal shell stays mounted
+  (kept off-screen via `visibility: hidden`) instead of being hidden with
+  `display: none`, so ttyd iframes and xterm canvases do not have to be
+  re-rendered.
+- **Why**: workspaces with hundreds of done tasks paid the full card-render
+  cost (latest report, session, agent/reviewer title, review status, injected
+  lessons) on every mode switch because `AgentWorkspaceView` is destroyed and
+  recreated. Terminal mode used `v-show` (`display: none`), which stops iframe
+  rendering and forces a full xterm re-paint on return.
+- **How**: `tasksByStatus('done')` now sorts by `completed_at` desc and slices
+  to `DONE_TASKS_PREVIEW_LIMIT` (15) unless `showAllDoneTasks` is set; the
+  column header shows the real total and a toggle button. The terminal shell
+  switched from `v-show` to a `terminal-mode-shell--hidden` class that uses
+  `position: absolute; inset: 0; visibility: hidden; pointer-events: none`,
+  and a mode watcher re-sends resize/scroll-bottom to the active iframe when
+  returning to terminal mode.
+
 ### fix: filter subagent sessions and cache codex session listing
 
 - **What**: the Codex session picker now shows only user-initiated sessions
