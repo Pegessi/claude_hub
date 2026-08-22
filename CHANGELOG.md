@@ -5,6 +5,28 @@
 
 ## Unreleased
 
+### fix: show meaningful titles in Codex session resume picker
+
+- **What**: the Codex session selector now displays task titles (e.g.
+  "codex session选择") or role labels (e.g. "Reviewer (Claude Hub)") instead
+  of boilerplate first lines like "New workspace task assigned." or
+  "Review workspace task."
+- **Why**: workspace-managed Codex sessions receive a system-injected task or
+  bootstrap prompt as their first user message; the title extractor only
+  filtered Codex's own environment/permission preamble, so the picker showed
+  the first line of system prompt text rather than anything a human would
+  recognize.
+- **How**: `_codex_session_title()` now classifies workspace-injected messages
+  — task assignment, review, continue, dispatch-decision, hard-recovery, and
+  revision-resume prompts yield their embedded `Task title:` field; idle
+  role-bootstrap prompts (agent / reviewer / dispatcher / resident) produce a
+  workspace-qualified role label as a fallback that is overridden if a later
+  task message exists.
+- **Verified**: 11 new unit tests cover each workspace prompt variant,
+  bootstrap-to-task override, inline `Task: id (title)` resume format,
+  long-title truncation, and codex-boilerplate-plus-task ordering; all
+  14 codex-session tests pass.
+
 ### fix: persist custom env presets to backend so they survive cross-origin access
 
 - **What**: user-defined Launch Environment presets (the named KEY=VALUE sets in
