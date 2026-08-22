@@ -94,23 +94,25 @@
           ×
         </button>
       </div>
-      <div
-        class="terminal-mode-shell"
-        :class="{ 'terminal-mode-shell--hidden': mode !== 'terminal' }"
-      >
-        <TabBar />
-        <LayoutSelector />
+      <div class="content-area">
         <div
-          v-if="tabs.length === 0"
-          class="empty-state"
+          class="terminal-mode-shell"
+          :class="{ 'terminal-mode-shell--hidden': mode !== 'terminal' }"
         >
-          <h2>No Terminal Tabs</h2>
-          <p>Click the + button to create a new terminal tab</p>
+          <TabBar />
+          <LayoutSelector />
+          <div
+            v-if="tabs.length === 0"
+            class="empty-state"
+          >
+            <h2>No Terminal Tabs</h2>
+            <p>Click the + button to create a new terminal tab</p>
+          </div>
+          <TerminalGridView v-else />
+          <MobileControls />
         </div>
-        <TerminalGridView v-else />
-        <MobileControls />
+        <AgentWorkspaceView v-if="mode === 'workspace'" />
       </div>
-      <AgentWorkspaceView v-if="mode === 'workspace'" />
     </template>
   </div>
 </template>
@@ -1127,23 +1129,28 @@ textarea {
   background: rgba(255, 255, 255, 0.15);
 }
 
-.terminal-mode-shell {
+.content-area {
   flex: 1;
+  position: relative;
+  min-height: 0;
+}
+
+.terminal-mode-shell {
+  position: absolute;
+  inset: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
 }
 
 /* When the workspace view is active, keep the terminal shell rendered but
-   remove it from the layout flow and make it non-interactive. Using
-   visibility:hidden + position:absolute instead of display:none preserves
-   the terminal container's layout box, so xterm.js does not start from a
-   zero-size viewport and need a full fit() cycle on return. The iframe
-   content stays loaded in both cases; the difference is that the layout
-   box (and thus the terminal's measured dimensions) is retained. */
+   invisible and non-interactive. The shell is always position:absolute;
+   inset:0 inside .content-area (which reserves the flex-allocated space
+   below the mode bar), so its measured dimensions are identical whether
+   visible or hidden. visibility:hidden (not display:none) preserves the
+   layout box, so xterm.js does not start from a zero-size viewport and
+   need a full fit() cycle on return. */
 .terminal-mode-shell--hidden {
-  position: absolute;
-  inset: 0;
   visibility: hidden;
   pointer-events: none;
 }

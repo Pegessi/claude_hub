@@ -5669,7 +5669,8 @@ onUnmounted(() => {
 
 <style scoped>
 .workspace-view {
-  flex: 1;
+  position: absolute;
+  inset: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
