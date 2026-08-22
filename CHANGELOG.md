@@ -66,29 +66,41 @@
     because the feature branch no longer dispatches a forced scroll-to-bottom
     on mode return (xterm.js preserves the user's scroll position). Run
     against isolated backends with 3 runs each:
-    - Feature (`b08bf1d`, frontend 5173 → backend 8174), 3 runs:
-      - 1x1 layout: fit completes in **235.0 / 140.6 / 249.6 ms** (median
-        235.0 ms), settled=true in all 3 runs.
-      - 2x1 split layout: pane 1 (active terminal) fit completes in
-        **197.7 / 240.9 / 148.4 ms**; pane 2 (inactive terminal tab
-        `22331dec`) fit completes in **1420.2 / 859.6 / 986.3 ms**. The
+    - Feature (`fcafcc4`, frontend 5173 → backend 8174), 3 runs:
+      - 1x1 layout: fit completes in **207.1 / 147.5 / 217.8 ms** (median
+        207.1 ms), settled=true in all 3 runs.
+      - 2x1 split layout: pane 1 (active terminal `6f822a86`) fit completes
+        in **242.0 / 189.1 / 253.6 ms**; pane 2 (inactive terminal tab
+        `22331dec`) fit completes in **742.2 / 765.0 / 756.8 ms**. The
         pane-2 cost is dominated by cold-starting the terminal process (the
         tab was `is_active=false`), not by the mode switch itself.
         settled=true for both panes in all 3 runs.
-      - Raw output: `/tmp/benchmark_feature_b08bf1d.txt`.
+      - Raw output: `/tmp/benchmark_feature_fcafcc4.txt`.
     - Main (`16404fe`, frontend 5174 → backend 8173), 3 runs:
-      - 1x1 layout: fit completes (cols>0, rows>0) — main does not dispatch
-        nonce-correlated resize messages on mode return, so the benchmark
-        uses the neutral cols>0/rows>0 signal. settled=true in all 3 runs.
-      - 2x1 split layout: same — both panes' fit completes via the neutral
-        signal, settled=true in all 3 runs.
-      - Raw output: `/tmp/benchmark_main_16404fe.txt`.
+      - 1x1 layout: fit completes in **232.3 / 260.6 / 112.6 ms** (median
+        232.3 ms) via the neutral cols>0/rows>0 signal (main does not
+        dispatch nonce-correlated resize messages on mode return).
+        settled=true in all 3 runs.
+      - 2x1 split layout: both panes' fit completes via the neutral signal
+        in **253.8 / 251.3 / 186.1 ms** (median 251.3 ms) — both panes
+        report the same fit time because they are revealed simultaneously
+        from `display: none` and reach cols>0/rows>0 in the same poll
+        interval. settled=true for both panes in all 3 runs.
+      - Raw output: `/tmp/benchmark_main_16404fe_fit.txt`.
     - Interpretation: the feature branch's contribution is the
       preserved-layout-box fit that avoids starting from a zero-size
-      viewport, plus nonce-correlated resize dispatch for causal
-      measurement. Scroll position is preserved on mode return (xterm.js
-      auto-scrolls on new data only if the user was at the bottom), so no
-      forced scroll-to-bottom is dispatched.
+      viewport. In 1x1 the feature fits marginally faster (median 207 ms
+      vs 232 ms on main) because the terminal's layout box is kept at its
+      final size across the mode switch. In 2x1 the active pane fits
+      similarly on both branches (~240–250 ms median); the feature's
+      second pane is slower (~757 ms median) because that tab's terminal
+      process cold-starts on first visibility, whereas on main both panes
+      are already instantiated under `display: none` and fit together.
+      Nonce-correlated resize dispatch on feature provides causal proof
+      that the current mode-return resize request ran. Scroll position is
+      preserved on mode return (xterm.js auto-scrolls on new data only if
+      the user was at the bottom), so no forced scroll-to-bottom is
+      dispatched.
 
 ### fix: filter subagent sessions and cache codex session listing
 
