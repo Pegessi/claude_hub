@@ -1057,25 +1057,52 @@ async def proxy_terminal_request(
           // the cross-context timing dependency: any size change of the
           // element xterm renders into (body, since ttyd sizes html/body
           // to 100% of the iframe) triggers a debounced fit().
+          // Causal completion counters. Each callFit() that actually runs
+          // fitAddon.fit() increments __claudeHubFitCount; each completed
+          // scroll-bottom settle loop increments __claudeHubScrollCount.
+          // The parent-frame benchmark reads these before a mode switch and
+          // waits for them to increase — proving the *current* resize/scroll
+          // request was processed, not just that the terminal happened to
+          // already be at a stable size.
+          term.__claudeHubFitCount = term.__claudeHubFitCount || 0;
+          term.__claudeHubScrollCount = term.__claudeHubScrollCount || 0;
+
           function callFit() {{
             try {{
+              let fitRan = false;
               if (term.fitAddon && typeof term.fitAddon.fit === 'function') {{
                 term.fitAddon.fit();
+                fitRan = true;
               }} else if (typeof term.fit === 'function') {{
                 term.fit();
+                fitRan = true;
               }}
               if (typeof term.__claudeHubRecomputeBottom === 'function') {{
                 term.__claudeHubRecomputeBottom();
               }}
+              // Only count fits that actually invoked a fit method; if
+              // neither fitAddon.fit nor term.fit exists, the counter
+              // stays put so the benchmark cannot mistake a no-op for a
+              // completed resize.
+              if (fitRan) {{
+                term.__claudeHubFitCount = (term.__claudeHubFitCount || 0) + 1;
+              }}
             }} catch (e) {{}}
           }}
-          // Expose on term so other closures (history refresh / replay)
-          // can request a re-fit without duplicating the fallback chain.
+          // Immediate fit (no debounce, no double-fit). Exposed on term so
+          // other closures (history refresh / replay, and mode-return resize
+          // via resizeWhenReady) can request a re-fit without duplicating the
+          // fallback chain. For mode-return the layout box is already final,
+          // so the debounce/double-fit of scheduleFit would only add latency.
           term.__claudeHubRequestFit = callFit;
-          // Debounced fit for cross-frame requests (e.g. parent mode-return
-          // resize). scheduleFit debounces and double-fits to absorb layout
-          // transitions, so it is safer than callFit for externally-triggered
-          // resizes where the container may still be settling.
+          // Debounced fit for in-frame container size changes
+          // (ResizeObserver / window.resize). scheduleFit debounces and
+          // double-fits to absorb layout transitions where the container
+          // may still be settling, so it is safer than callFit for these
+          // externally-triggered resizes. For cross-frame mode-return
+          // (the 'terminal-resize' message) the layout box is already
+          // final, so the immediate requestFit is used instead — see
+          // resizeWhenReady.
           term.__claudeHubScheduleFit = scheduleFit;
 
           let fitTimer = null;
@@ -1745,6 +1772,13 @@ async def proxy_terminal_request(
             setTimeout(function() {{
               scrollBottomWhenReady(0, remainingSettle - 1, scrollHeight);
             }}, 60);
+          }} else {{
+            // Scroll request has been processed and the settle loop has
+            // finished (either the viewport is at bottom with stable
+            // content height, or we exhausted settle retries). Increment
+            // the causal completion counter so the parent-frame benchmark
+            // can prove this scroll request ran.
+            term.__claudeHubScrollCount = (term.__claudeHubScrollCount || 0) + 1;
           }}
         }}
 
@@ -1752,8 +1786,13 @@ async def proxy_terminal_request(
         // of scrollBottomWhenReady / refreshHistoryWhenReady: resolve the term
         // via termForHistoryAction() (which falls back to _getTerm()), and if
         // it is not yet available (or still mid-replay), retry on a short
-        // interval up to attemptsLeft times. Once ready, invoke the debounced
-        // scheduler so the fit lands after layout settles.
+        // interval up to attemptsLeft times. Once ready, invoke the immediate
+        // requestFit (not the debounced scheduleFit): for mode-return the
+        // terminal shell's layout box is already at its final size because
+        // visibility:hidden preserves dimensions (unlike display:none), so
+        // there is no layout transition to absorb and the 150ms debounce
+        // would only add latency. A single rAF follow-up matches
+        // scheduleFit's double-fit pattern to catch sub-frame drift.
         function resizeWhenReady(attemptsLeft) {{
           const term = termForHistoryAction();
           if (!term) {{
@@ -1816,8 +1855,12 @@ async def proxy_terminal_request(
             // Explicit re-fit requested by the parent frame (e.g. after
             // switching back to Terminal mode). Resolve the terminal via
             // termForHistoryAction() (which falls back to _getTerm()) and
-            // retry until it is ready, then call the debounced scheduler so
-            // the fit lands after the shell has left its hidden state.
+            // retry until it is ready, then call the immediate requestFit
+            // (not the debounced scheduleFit): for mode-return the shell's
+            // layout box is already at its final size because
+            // visibility:hidden preserves dimensions, so the 150ms debounce
+            // would only add latency. A single rAF follow-up matches
+            // scheduleFit's double-fit pattern to catch sub-frame drift.
             resizeWhenReady(50);
             return;
           }}

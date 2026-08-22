@@ -39,9 +39,52 @@
   visible-pane selection lives in `utils/terminalPanes.ts` and is tested for
   1x1 and split layouts). The iframe injected script gained a `resizeWhenReady`
   helper that resolves the terminal via `termForHistoryAction()` and retries
-  until the terminal (and its replay) is ready before calling the debounced
-  `scheduleFit`, so all visible panes (1x1 and split layouts) re-fit correctly
-  after the shell leaves its hidden state.
+  until the terminal (and its replay) is ready before calling the immediate
+  `requestFit` (not the debounced `scheduleFit`): for mode-return the shell's
+  layout box is already at its final size because `visibility: hidden`
+  preserves dimensions, so the 150ms debounce would only add latency. A single
+  rAF follow-up matches `scheduleFit`'s double-fit pattern to catch sub-frame
+  drift, so all visible panes (1x1 and split layouts) re-fit correctly after
+  the shell leaves its hidden state.
+- **Verified**:
+  - Done-tasks preview: 32 frontend tests pass (including
+    `doneTasksPreview.test.ts` boundary tests and
+    `doneTasksPreviewTiming.test.mjs` which asserts 272→15 cards, a ~94.5%
+    reduction, and that the preview path is faster than rendering all 272).
+  - Terminal mode-return benchmark (`scripts/terminal_switch_benchmark.py`),
+    using causal `__claudeHubFitCount` / `__claudeHubScrollCount` counters
+    (incremented only when `fitAddon.fit()` actually runs / a scroll-bottom
+    settle loop finishes), run against isolated backends with 3 runs each:
+    - Feature (`f488bfe`, frontend 5173 → backend 8174), 3 runs:
+      - 1x1 layout: fit completes in **3.8 / 42.3 / 177.7 ms** (median 42.3 ms),
+        scroll-to-bottom completes in **187.5 / 157.4 / 177.7 ms** (median
+        177.7 ms), settled=true in all 3 runs.
+      - 2x1 split layout: pane 1 (active terminal) fit+scroll completes in
+        **39.6 / 174.6 / 171.1 ms**; pane 2 (inactive terminal tab
+        `22331dec`) fit+scroll completes in **1471.9 / 994.0 / 988.9 ms**.
+        The pane-2 cost is dominated by cold-starting the terminal process
+        (the tab was `is_active=false`), not by the mode switch itself.
+        settled=true for both panes in all 3 runs.
+    - Main (`16404fe`, frontend 5174 → backend 8173), 3 runs:
+      - 1x1 layout: fit completes in **318.3 / 243.4 / 240.8 ms** (median
+        243.4 ms) but **scroll never completes** (scroll_times_ms=null,
+        settled=false, 15 s timeout) in all 3 runs.
+      - 2x1 split layout: both panes' fit completes in **326.0 / 219.4 /
+        189.8 ms** but scroll never completes for either pane in all 3 runs.
+        Main's `App.vue` uses `v-show` (`display: none`) and has no
+        mode-watcher that posts `terminal-scroll-bottom` on return to
+        Terminal mode, so the terminal is left scrolled to wherever it was
+        before the switch.
+    - Interpretation: the feature branch fixes a real correctness gap —
+      main never scrolls the terminal to the bottom on mode return, while
+      the feature does so reliably in ~150–190 ms for the active pane.
+      The feature's fit is also faster for the active pane (median 42 ms
+      vs main's 243 ms) because the preserved layout box means xterm.js
+      does not start from a zero-size viewport. No single "X% faster"
+      number is claimed for the full fit+scroll cycle because main does
+      not complete that cycle (scroll never fires); the comparable
+      fit-only metric shows the feature's active-pane fit is ~5–6x faster
+      than main's in the 1x1 case.
 
 ### fix: filter subagent sessions and cache codex session listing
 
