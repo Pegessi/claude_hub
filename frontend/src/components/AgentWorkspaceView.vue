@@ -428,7 +428,7 @@
                 <button
                   v-if="column.status === 'done' && totalDoneTasks > DONE_TASKS_PREVIEW_LIMIT"
                   type="button"
-                  class="column-collapse-button"
+                  class="column-collapse-button column-collapse-button--done-toggle"
                   @click.stop="showAllDoneTasks = !showAllDoneTasks"
                 >
                   {{ showAllDoneTasks ? 'Show less' : `Show more (${totalDoneTasks - DONE_TASKS_PREVIEW_LIMIT})` }}
@@ -6837,6 +6837,42 @@ onUnmounted(() => {
 
 .column-collapse-button {
   display: none;
+}
+
+/* The Done-column "Show more / Show less" toggle must be visible on desktop
+   (unlike the mobile-only column collapse button) so users can reveal older
+   completed tasks. It reuses the mobile button styling. */
+.column-collapse-button--done-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  min-width: 54px;
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-control-active);
+  color: var(--ch-color-text);
+  font-size: var(--ch-font-size-sm);
+  font-weight: 500;
+  padding: 0 8px;
+  cursor: pointer;
+  transition: all var(--ch-motion-fast);
+}
+
+.column-collapse-button--done-toggle:hover {
+  background: var(--ch-color-surface-raised);
+  border-color: var(--ch-color-border-hover);
+}
+
+.column-collapse-button--done-toggle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+  border-color: var(--ch-color-accent);
+}
+
+.column-collapse-button--done-toggle:active {
+  background: var(--ch-color-surface-pressed);
+  transform: translateY(1px);
 }
 
 .task-list {

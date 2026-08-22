@@ -161,22 +161,27 @@ watch(colorScheme, (scheme) => {
   document.documentElement.dataset.theme = scheme
 }, { immediate: true })
 
-// When switching back to terminal mode, nudge the active terminal iframe to
+// When switching back to terminal mode, nudge every visible terminal iframe to
 // resize and scroll to bottom. The shell stays rendered (visibility:hidden)
 // while the workspace is active, so this is a cheap correctness pass rather
-// than a full history replay.
+// than a full history replay. We resize *all* registered iframes (not just the
+// active pane) because split layouts show multiple panes side-by-side, and
+// each pane's iframe needs to re-fit its container after the shell leaves the
+// absolute-positioned hidden state.
 watch(mode, (newMode, oldMode) => {
   if (newMode !== 'terminal' || oldMode === 'terminal') return
-  const activeTabId = window.__claudeHub?.activePaneTabId
-  if (!activeTabId) return
   // Defer to the next frame so the shell has left the absolute-positioned
-  // hidden state and its layout box is final before we ask the iframe to fit.
+  // hidden state and its layout box is final before we ask iframes to fit.
   requestAnimationFrame(() => {
     const state = window.__claudeHub?.terminalState
-    const iframe = state?.iframes?.[activeTabId]
-    if (iframe?.contentWindow) {
-      iframe.contentWindow.postMessage({ type: 'terminal-resize', tabId: activeTabId }, '*')
-      iframe.contentWindow.postMessage({ type: 'terminal-scroll-bottom', tabId: activeTabId }, '*')
+    const iframes = state?.iframes
+    if (!iframes) return
+    for (const tabId of Object.keys(iframes)) {
+      const iframe = iframes[tabId]
+      if (iframe?.contentWindow) {
+        iframe.contentWindow.postMessage({ type: 'terminal-resize', tabId }, '*')
+        iframe.contentWindow.postMessage({ type: 'terminal-scroll-bottom', tabId }, '*')
+      }
     }
   })
 })
