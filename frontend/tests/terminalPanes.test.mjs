@@ -87,12 +87,23 @@ test('dispatch sends resize + scroll-bottom to the single visible pane in 1x1 la
   const dispatched = dispatchTerminalReturnResize(panes, iframes)
 
   assert.equal(dispatched.length, 2)
-  assert.deepEqual(dispatched[0], { type: 'terminal-resize', tabId: 'tab-1' })
-  assert.deepEqual(dispatched[1], { type: 'terminal-scroll-bottom', tabId: 'tab-1' })
+  // Each message carries a unique request-correlation nonce.
+  assert.equal(dispatched[0].type, 'terminal-resize')
+  assert.equal(dispatched[0].tabId, 'tab-1')
+  assert.equal(typeof dispatched[0].nonce, 'string')
+  assert.ok(dispatched[0].nonce.length > 0)
+  assert.equal(dispatched[1].type, 'terminal-scroll-bottom')
+  assert.equal(dispatched[1].tabId, 'tab-1')
+  assert.equal(typeof dispatched[1].nonce, 'string')
+  assert.ok(dispatched[1].nonce.length > 0)
+  // The resize and scroll nonces must be distinct (one per request).
+  assert.notEqual(dispatched[0].nonce, dispatched[1].nonce)
 
   assert.equal(iframe1.calls.length, 2)
   assert.equal(iframe1.calls[0].message.type, 'terminal-resize')
+  assert.equal(iframe1.calls[0].message.nonce, dispatched[0].nonce)
   assert.equal(iframe1.calls[1].message.type, 'terminal-scroll-bottom')
+  assert.equal(iframe1.calls[1].message.nonce, dispatched[1].nonce)
 })
 
 test('dispatch sends to every visible pane in a split layout', () => {

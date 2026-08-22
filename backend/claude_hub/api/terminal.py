@@ -1057,17 +1057,22 @@ async def proxy_terminal_request(
           // the cross-context timing dependency: any size change of the
           // element xterm renders into (body, since ttyd sizes html/body
           // to 100% of the iframe) triggers a debounced fit().
-          // Causal completion counters. Each callFit() that actually runs
-          // fitAddon.fit() increments __claudeHubFitCount; each completed
-          // scroll-bottom settle loop increments __claudeHubScrollCount.
-          // The parent-frame benchmark reads these before a mode switch and
-          // waits for them to increase — proving the *current* resize/scroll
-          // request was processed, not just that the terminal happened to
-          // already be at a stable size.
+          // Causal completion counters + request-correlation nonces.
+          // Each callFit() that actually runs fitAddon.fit() increments
+          // __claudeHubFitCount; each completed scroll-bottom settle loop
+          // increments __claudeHubScrollCount. When a fit/scroll is triggered
+          // by a parent-frame message that carries a `nonce`, the terminal
+          // stores that nonce in __claudeHubLastFitNonce /
+          // __claudeHubLastScrollNonce once the operation completes. The
+          // benchmark sends a unique nonce per request and waits for the
+          // matching nonce — proving the *current* request ran, not a
+          // delayed unrelated fit/scroll.
           term.__claudeHubFitCount = term.__claudeHubFitCount || 0;
           term.__claudeHubScrollCount = term.__claudeHubScrollCount || 0;
+          term.__claudeHubLastFitNonce = term.__claudeHubLastFitNonce || null;
+          term.__claudeHubLastScrollNonce = term.__claudeHubLastScrollNonce || null;
 
-          function callFit() {{
+          function callFit(nonce) {{
             try {{
               let fitRan = false;
               if (term.fitAddon && typeof term.fitAddon.fit === 'function') {{
@@ -1086,6 +1091,12 @@ async def proxy_terminal_request(
               // completed resize.
               if (fitRan) {{
                 term.__claudeHubFitCount = (term.__claudeHubFitCount || 0) + 1;
+                // If this fit was triggered by a request carrying a nonce,
+                // record it so the caller can prove this specific request
+                // completed (request-correlation, not just counter increase).
+                if (nonce) {{
+                  term.__claudeHubLastFitNonce = nonce;
+                }}
               }}
             }} catch (e) {{}}
           }}
@@ -1736,12 +1747,12 @@ async def proxy_terminal_request(
         // (bounded), scroll, then verify we actually reached the bottom AND the
         // scrollHeight is stable between two ticks, retrying briefly otherwise.
         // This never reintroduces a history replay — it is scroll-only.
-        function scrollBottomWhenReady(attemptsLeft, settleTries, lastScrollHeight) {{
+        function scrollBottomWhenReady(attemptsLeft, settleTries, lastScrollHeight, nonce) {{
           const term = termForHistoryAction();
           if (!term) {{
             if (attemptsLeft > 0) {{
               setTimeout(function() {{
-                scrollBottomWhenReady(attemptsLeft - 1, settleTries, lastScrollHeight);
+                scrollBottomWhenReady(attemptsLeft - 1, settleTries, lastScrollHeight, nonce);
               }}, 100);
             }}
             return;
@@ -1751,7 +1762,7 @@ async def proxy_terminal_request(
           // buffering/writing, or the buffer will be rewritten under us.
           if (term.__claudeHubReplayBuffering === true && attemptsLeft > 0) {{
             setTimeout(function() {{
-              scrollBottomWhenReady(attemptsLeft - 1, settleTries, lastScrollHeight);
+              scrollBottomWhenReady(attemptsLeft - 1, settleTries, lastScrollHeight, nonce);
             }}, 100);
             return;
           }}
@@ -1770,7 +1781,7 @@ async def proxy_terminal_request(
           const settled = terminalIsAtBottom(term) && scrollHeight === lastScrollHeight;
           if (remainingSettle > 0 && !settled) {{
             setTimeout(function() {{
-              scrollBottomWhenReady(0, remainingSettle - 1, scrollHeight);
+              scrollBottomWhenReady(0, remainingSettle - 1, scrollHeight, nonce);
             }}, 60);
           }} else {{
             // Scroll request has been processed and the settle loop has
@@ -1779,6 +1790,11 @@ async def proxy_terminal_request(
             // the causal completion counter so the parent-frame benchmark
             // can prove this scroll request ran.
             term.__claudeHubScrollCount = (term.__claudeHubScrollCount || 0) + 1;
+            // If this scroll was triggered by a request carrying a nonce,
+            // record it for request-correlation.
+            if (nonce) {{
+              term.__claudeHubLastScrollNonce = nonce;
+            }}
           }}
         }}
 
@@ -1793,12 +1809,12 @@ async def proxy_terminal_request(
         // there is no layout transition to absorb and the 150ms debounce
         // would only add latency. A single rAF follow-up matches
         // scheduleFit's double-fit pattern to catch sub-frame drift.
-        function resizeWhenReady(attemptsLeft) {{
+        function resizeWhenReady(attemptsLeft, nonce) {{
           const term = termForHistoryAction();
           if (!term) {{
             if (attemptsLeft > 0) {{
               setTimeout(function() {{
-                resizeWhenReady(attemptsLeft - 1);
+                resizeWhenReady(attemptsLeft - 1, nonce);
               }}, 100);
             }}
             return;
@@ -1808,7 +1824,7 @@ async def proxy_terminal_request(
           // renderer size may change under us.
           if (term.__claudeHubReplayBuffering === true && attemptsLeft > 0) {{
             setTimeout(function() {{
-              resizeWhenReady(attemptsLeft - 1);
+              resizeWhenReady(attemptsLeft - 1, nonce);
             }}, 100);
             return;
           }}
@@ -1821,9 +1837,9 @@ async def proxy_terminal_request(
           // double-fit pattern) to catch any sub-frame layout drift
           // without the 150ms debounce penalty.
           if (typeof term.__claudeHubRequestFit === 'function') {{
-            term.__claudeHubRequestFit();
+            term.__claudeHubRequestFit(nonce);
             if (typeof requestAnimationFrame === 'function') {{
-              requestAnimationFrame(function() {{ term.__claudeHubRequestFit(); }});
+              requestAnimationFrame(function() {{ term.__claudeHubRequestFit(nonce); }});
             }}
           }} else if (typeof term.__claudeHubScheduleFit === 'function') {{
             term.__claudeHubScheduleFit();
@@ -1847,7 +1863,10 @@ async def proxy_terminal_request(
           }}
 
           if (event.data.type === 'terminal-scroll-bottom') {{
-            scrollBottomWhenReady(50);
+            // Optional `nonce` for request-correlation: the benchmark sends
+            // a unique nonce and waits for __claudeHubLastScrollNonce to
+            // match it, proving this specific scroll request completed.
+            scrollBottomWhenReady(50, undefined, undefined, event.data.nonce || null);
             return;
           }}
 
@@ -1861,7 +1880,8 @@ async def proxy_terminal_request(
             // visibility:hidden preserves dimensions, so the 150ms debounce
             // would only add latency. A single rAF follow-up matches
             // scheduleFit's double-fit pattern to catch sub-frame drift.
-            resizeWhenReady(50);
+            // Optional `nonce` enables request-correlation for the benchmark.
+            resizeWhenReady(50, event.data.nonce || null);
             return;
           }}
 
@@ -1877,7 +1897,7 @@ async def proxy_terminal_request(
                 scrollToBottom: event.data.scrollToBottom !== false,
               }}, 80);
             }} else if (event.data.scrollToBottom) {{
-              scrollBottomWhenReady(50);
+              scrollBottomWhenReady(50, undefined, undefined, event.data.nonce || null);
             }}
           }}
         }});

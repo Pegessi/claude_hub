@@ -52,39 +52,43 @@
     `doneTasksPreviewTiming.test.mjs` which asserts 272→15 cards, a ~94.5%
     reduction, and that the preview path is faster than rendering all 272).
   - Terminal mode-return benchmark (`scripts/terminal_switch_benchmark.py`),
-    using causal `__claudeHubFitCount` / `__claudeHubScrollCount` counters
-    (incremented only when `fitAddon.fit()` actually runs / a scroll-bottom
-    settle loop finishes), run against isolated backends with 3 runs each:
-    - Feature (`f488bfe`, frontend 5173 → backend 8174), 3 runs:
-      - 1x1 layout: fit completes in **3.8 / 42.3 / 177.7 ms** (median 42.3 ms),
-        scroll-to-bottom completes in **187.5 / 157.4 / 177.7 ms** (median
-        177.7 ms), settled=true in all 3 runs.
+    using causal nonce correlation (`__claudeHubLastFitNonce` /
+    `__claudeHubLastScrollNonce` matched against the nonce dispatched with
+    the mode-return resize/scroll message), run against isolated backends
+    with 3 runs each:
+    - Feature (`4831ce6`, frontend 5173 → backend 8174), 3 runs:
+      - 1x1 layout: fit completes in **245.7 / 246.5 / 188.6 ms** (median
+        245.7 ms), scroll-to-bottom completes in **245.7 / 246.5 / 188.6 ms**
+        (median 245.7 ms), settled=true in all 3 runs.
       - 2x1 split layout: pane 1 (active terminal) fit+scroll completes in
-        **39.6 / 174.6 / 171.1 ms**; pane 2 (inactive terminal tab
-        `22331dec`) fit+scroll completes in **1471.9 / 994.0 / 988.9 ms**.
-        The pane-2 cost is dominated by cold-starting the terminal process
-        (the tab was `is_active=false`), not by the mode switch itself.
-        settled=true for both panes in all 3 runs.
+        **195.4 / 243.5 / 203.7 ms**; pane 2 (inactive terminal tab
+        `22331dec`) fit completes in **919.2 / 737.4 / 881.3 ms** and scroll
+        completes in **919.2 / 858.8 / 914.6 ms**. The pane-2 cost is
+        dominated by cold-starting the terminal process (the tab was
+        `is_active=false`), not by the mode switch itself. settled=true for
+        both panes in all 3 runs.
     - Main (`16404fe`, frontend 5174 → backend 8173), 3 runs:
-      - 1x1 layout: fit completes in **318.3 / 243.4 / 240.8 ms** (median
-        243.4 ms) but **scroll never completes** (scroll_times_ms=null,
-        settled=false, 15 s timeout) in all 3 runs.
-      - 2x1 split layout: both panes' fit completes in **326.0 / 219.4 /
-        189.8 ms** but scroll never completes for either pane in all 3 runs.
-        Main's `App.vue` uses `v-show` (`display: none`) and has no
-        mode-watcher that posts `terminal-scroll-bottom` on return to
-        Terminal mode, so the terminal is left scrolled to wherever it was
-        before the switch.
+      - 1x1 layout: **neither fit nor scroll completes** —
+        `expected_nonces={}` (main's `App.vue` does not dispatch
+        nonce-correlated resize/scroll messages on mode return), so the
+        benchmark's causal correlation never matches and the run times out
+        at 15 s with settled=false in all 3 runs.
+      - 2x1 split layout: same — both panes' fit and scroll are null,
+        settled=false, 15 s timeout in all 3 runs.
     - Interpretation: the feature branch fixes a real correctness gap —
-      main never scrolls the terminal to the bottom on mode return, while
-      the feature does so reliably in ~150–190 ms for the active pane.
-      The feature's fit is also faster for the active pane (median 42 ms
-      vs main's 243 ms) because the preserved layout box means xterm.js
-      does not start from a zero-size viewport. No single "X% faster"
-      number is claimed for the full fit+scroll cycle because main does
-      not complete that cycle (scroll never fires); the comparable
-      fit-only metric shows the feature's active-pane fit is ~5–6x faster
-      than main's in the 1x1 case.
+      main never sends a scroll-to-bottom (nor a nonce-correlated resize)
+      on return to Terminal mode, so the terminal is left scrolled to
+      wherever it was before the switch and the benchmark cannot confirm
+      any fit/scroll cycle. The feature branch dispatches nonce-correlated
+      resize + scroll-bottom messages on mode return and both complete
+      reliably: ~190–250 ms for the active pane in 1x1, and ~200 ms for
+      the active pane / ~740–920 ms for the cold-started inactive pane in
+      2x1. No single "X% faster" number is claimed for the full
+      fit+scroll cycle because main does not complete that cycle (no
+      scroll-bottom is dispatched); the feature's contribution is the
+      correctness fix (scroll to bottom on mode return) plus the
+      preserved-layout-box fit that avoids starting from a zero-size
+      viewport.
 
 ### fix: filter subagent sessions and cache codex session listing
 
