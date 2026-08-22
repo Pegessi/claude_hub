@@ -56,17 +56,18 @@
     `__claudeHubLastScrollNonce` matched against the nonce dispatched with
     the mode-return resize/scroll message), run against isolated backends
     with 3 runs each:
-    - Feature (`4831ce6`, frontend 5173 → backend 8174), 3 runs:
-      - 1x1 layout: fit completes in **245.7 / 246.5 / 188.6 ms** (median
-        245.7 ms), scroll-to-bottom completes in **245.7 / 246.5 / 188.6 ms**
-        (median 245.7 ms), settled=true in all 3 runs.
+    - Feature (`b08bf1d`, frontend 5173 → backend 8174), 3 runs:
+      - 1x1 layout: fit completes in **235.0 / 140.6 / 249.6 ms** (median
+        235.0 ms), scroll-to-bottom completes in **235.0 / 140.6 / 249.6 ms**
+        (median 235.0 ms), settled=true in all 3 runs.
       - 2x1 split layout: pane 1 (active terminal) fit+scroll completes in
-        **195.4 / 243.5 / 203.7 ms**; pane 2 (inactive terminal tab
-        `22331dec`) fit completes in **919.2 / 737.4 / 881.3 ms** and scroll
-        completes in **919.2 / 858.8 / 914.6 ms**. The pane-2 cost is
+        **197.7 / 240.9 / 148.4 ms**; pane 2 (inactive terminal tab
+        `22331dec`) fit completes in **1420.2 / 859.6 / 986.3 ms** and scroll
+        completes in **1595.9 / 991.8 / 1045.8 ms**. The pane-2 cost is
         dominated by cold-starting the terminal process (the tab was
         `is_active=false`), not by the mode switch itself. settled=true for
         both panes in all 3 runs.
+      - Raw output: `/tmp/benchmark_feature_b08bf1d.txt`.
     - Main (`16404fe`, frontend 5174 → backend 8173), 3 runs:
       - 1x1 layout: **neither fit nor scroll completes** —
         `expected_nonces={}` (main's `App.vue` does not dispatch
@@ -75,14 +76,15 @@
         at 15 s with settled=false in all 3 runs.
       - 2x1 split layout: same — both panes' fit and scroll are null,
         settled=false, 15 s timeout in all 3 runs.
+      - Raw output: `/tmp/benchmark_main_16404fe.txt`.
     - Interpretation: the feature branch fixes a real correctness gap —
       main never sends a scroll-to-bottom (nor a nonce-correlated resize)
       on return to Terminal mode, so the terminal is left scrolled to
       wherever it was before the switch and the benchmark cannot confirm
       any fit/scroll cycle. The feature branch dispatches nonce-correlated
       resize + scroll-bottom messages on mode return and both complete
-      reliably: ~190–250 ms for the active pane in 1x1, and ~200 ms for
-      the active pane / ~740–920 ms for the cold-started inactive pane in
+      reliably: ~140–250 ms for the active pane in 1x1, and ~150–240 ms for
+      the active pane / ~860–1600 ms for the cold-started inactive pane in
       2x1. No single "X% faster" number is claimed for the full
       fit+scroll cycle because main does not complete that cycle (no
       scroll-bottom is dispatched); the feature's contribution is the
