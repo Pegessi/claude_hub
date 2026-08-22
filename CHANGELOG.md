@@ -5,6 +5,26 @@
 
 ## Unreleased
 
+### fix: use Codex app conversation titles in session picker
+
+- **What**: the Codex session selector now shows the same conversation titles
+  as the Codex app / IDE extension (the `thread_name` stored in
+  `~/.codex/session_index.jsonl`), instead of the raw first user message.
+- **Why**: previously the picker extracted the title from the first user
+  message in the rollout file, which for workspace-managed sessions was the
+  task-delivery prompt text — not the short, human-readable title the user
+  sees in the Codex app. It also required scanning every rollout file
+  (~12 GB total), making the endpoint take ~34 s.
+- **How**: `list_codex_sessions()` loads `session_index.jsonl` once and uses
+  `thread_name` as the primary title for the ~44% of sessions that have one.
+  For sessions absent from the index it falls back to the existing
+  first-user-message extractor, capped at the first 100 lines. The scan and
+  fallback title extraction are combined into a single file open per session,
+  and the rollout body is only read for sessions that lack a `thread_name`.
+- **Verified**: 14/14 codex-session tests pass; endpoint response time drops
+  from ~34 s to ~4 s on a corpus of 1145 sessions; titles match the Codex
+  app's conversation list.
+
 ### fix: show meaningful titles in Codex session resume picker
 
 - **What**: the Codex session selector now displays task titles (e.g.
