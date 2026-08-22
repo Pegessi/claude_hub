@@ -18,7 +18,7 @@ const { outputText } = ts.transpileModule(helperSource, {
 const helperModule = await import(
   `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`
 )
-const { visiblePaneTabIds, dispatchTerminalReturnResize } = helperModule
+const { visiblePaneTabIds, dispatchTerminalReturnResize, scheduleTerminalReturnResize } = helperModule
 
 // ---------------------------------------------------------------------------
 // visiblePaneTabIds
@@ -177,4 +177,143 @@ test('rapid re-toggle: calling dispatch twice does not leak stale state', () => 
   assert.equal(second.length, 2)
   // Each call sends exactly 2 messages; total = 4 (no cross-call state).
   assert.equal(iframe1.calls.length, 4)
+})
+
+// ---------------------------------------------------------------------------
+// scheduleTerminalReturnResize — the deferred scheduling + cancellation logic
+// ---------------------------------------------------------------------------
+
+// A mock rAF scheduler that records pending callbacks and lets tests fire
+// them on demand. This lets us exercise the scheduling/cancellation path
+// without a real browser event loop.
+function makeMockScheduler() {
+  let nextId = 1
+  const pending = new Map()
+  return {
+    requestAnimationFrame(cb) {
+      const id = nextId++
+      pending.set(id, cb)
+      return id
+    },
+    cancelAnimationFrame(id) {
+      pending.delete(id)
+    },
+    fire(id) {
+      const cb = pending.get(id)
+      if (cb) {
+        pending.delete(id)
+        cb()
+      }
+    },
+    fireAll() {
+      for (const [id, cb] of pending) {
+        pending.delete(id)
+        cb()
+      }
+    },
+    pendingCount() {
+      return pending.size
+    },
+  }
+}
+
+test('scheduleTerminalReturnResize defers dispatch until the next frame', () => {
+  const iframe1 = makeIframe()
+  const iframes = { 'tab-1': iframe1 }
+  const panes = [{ tabId: 'tab-1' }]
+  const scheduler = makeMockScheduler()
+  let mode = 'terminal'
+
+  scheduleTerminalReturnResize(() => mode, panes, iframes, scheduler)
+
+  // Before the frame fires, no messages should have been sent.
+  assert.equal(iframe1.calls.length, 0)
+  assert.equal(scheduler.pendingCount(), 1)
+
+  // Fire the frame — now the dispatch runs.
+  scheduler.fireAll()
+  assert.equal(iframe1.calls.length, 2)
+})
+
+test('scheduleTerminalReturnResize skips dispatch if mode left terminal before frame fires', () => {
+  const iframe1 = makeIframe()
+  const iframes = { 'tab-1': iframe1 }
+  const panes = [{ tabId: 'tab-1' }]
+  const scheduler = makeMockScheduler()
+  let mode = 'terminal'
+
+  scheduleTerminalReturnResize(() => mode, panes, iframes, scheduler)
+
+  // User switches away from terminal before the frame fires.
+  mode = 'workspace'
+  scheduler.fireAll()
+
+  // The stale callback must NOT dispatch.
+  assert.equal(iframe1.calls.length, 0)
+})
+
+test('scheduleTerminalReturnResize cancels the previous pending callback when called again', () => {
+  const iframe1 = makeIframe()
+  const iframes = { 'tab-1': iframe1 }
+  const panes = [{ tabId: 'tab-1' }]
+  const scheduler = makeMockScheduler()
+  let mode = 'terminal'
+
+  // Calling schedule again cancels the first callback internally.
+  scheduleTerminalReturnResize(() => mode, panes, iframes, scheduler)
+
+  // Only one pending callback should remain.
+  assert.equal(scheduler.pendingCount(), 1)
+
+  scheduler.fireAll()
+  // Only the second callback's dispatch runs — total 2 messages, not 4.
+  assert.equal(iframe1.calls.length, 2)
+})
+
+test('scheduleTerminalReturnResize cleanup function cancels the pending callback', () => {
+  const iframe1 = makeIframe()
+  const iframes = { 'tab-1': iframe1 }
+  const panes = [{ tabId: 'tab-1' }]
+  const scheduler = makeMockScheduler()
+  let mode = 'terminal'
+
+  const cancel = scheduleTerminalReturnResize(() => mode, panes, iframes, scheduler)
+  assert.equal(scheduler.pendingCount(), 1)
+
+  // Invoke the cleanup (e.g. when the mode watcher fires again).
+  cancel()
+  assert.equal(scheduler.pendingCount(), 0)
+
+  // Firing does nothing because the callback was cancelled.
+  scheduler.fireAll()
+  assert.equal(iframe1.calls.length, 0)
+})
+
+test('scheduleTerminalReturnResize rapid re-toggle: mode leaves and re-enters terminal', () => {
+  // Simulate: workspace -> terminal (schedule A) -> workspace (cancel A)
+  // -> terminal (schedule B). Only B's dispatch should run.
+  const iframe1 = makeIframe()
+  const iframes = { 'tab-1': iframe1 }
+  const panes = [{ tabId: 'tab-1' }]
+  const scheduler = makeMockScheduler()
+  let mode = 'workspace'
+
+  // Enter terminal.
+  mode = 'terminal'
+  const cancelA = scheduleTerminalReturnResize(() => mode, panes, iframes, scheduler)
+  assert.equal(scheduler.pendingCount(), 1)
+
+  // Rapidly leave terminal — cancel A.
+  mode = 'workspace'
+  cancelA()
+  assert.equal(scheduler.pendingCount(), 0)
+
+  // Re-enter terminal — schedule B.
+  mode = 'terminal'
+  scheduleTerminalReturnResize(() => mode, panes, iframes, scheduler)
+  assert.equal(scheduler.pendingCount(), 1)
+
+  // Fire B's frame.
+  scheduler.fireAll()
+  assert.equal(iframe1.calls.length, 2)
 })

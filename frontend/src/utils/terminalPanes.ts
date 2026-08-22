@@ -22,6 +22,15 @@ export interface TerminalReturnMessage {
 }
 
 /**
+ * A minimal animation-frame scheduler interface so the scheduling logic can
+ * be tested without a real browser (node --test provides no rAF).
+ */
+export interface RafScheduler {
+  requestAnimationFrame: (cb: () => void) => number
+  cancelAnimationFrame: (id: number) => void
+}
+
+/**
  * Return the set of tab IDs currently assigned to a visible pane.
  * Null tab IDs (empty panes) are skipped.
  */
@@ -71,4 +80,67 @@ export function dispatchTerminalReturnResize(
     dispatched.push(resizeMsg, scrollMsg)
   }
   return dispatched
+}
+
+// Module-level handle for the currently pending terminal-return resize
+// callback. Only one such callback can be pending at a time — scheduling a
+// new one cancels the previous. This mirrors how App.vue's mode watcher
+// cancels the previous cleanup before scheduling a new dispatch.
+let pendingTerminalReturnRafId: number | null = null
+let pendingTerminalReturnCancel: (() => void) | null = null
+
+/**
+ * Schedule a deferred terminal-return resize dispatch.
+ *
+ * The dispatch is deferred to the next animation frame so the terminal
+ * shell has left its absolute-positioned hidden state and its layout box
+ * is final before iframes are asked to fit.
+ *
+ * To guard against stale callbacks (the user rapidly toggles away from
+ * terminal mode before the frame fires), this function:
+ *   1. cancels any previously scheduled callback that hasn't fired yet;
+ *   2. re-checks `getMode()` inside the callback and skips the dispatch
+ *      if the mode is no longer 'terminal'.
+ *
+ * @param getMode - returns the current app mode at callback time
+ * @param panes - the current visible panes (captured at schedule time)
+ * @param iframes - map of tab ID -> iframe element
+ * @param scheduler - rAF implementation (defaults to the global one)
+ * @returns a cleanup function that cancels the pending callback
+ */
+export function scheduleTerminalReturnResize(
+  getMode: () => string,
+  panes: PaneLike[],
+  iframes: Record<string, IframeLike | null>,
+  scheduler: RafScheduler = {
+    requestAnimationFrame: globalThis.requestAnimationFrame?.bind(globalThis) as (cb: () => void) => number,
+    cancelAnimationFrame: globalThis.cancelAnimationFrame?.bind(globalThis) as (id: number) => void,
+  },
+): () => void {
+  // Cancel any previously scheduled callback from an earlier mode change
+  // that hasn't fired yet.
+  if (pendingTerminalReturnCancel) {
+    pendingTerminalReturnCancel()
+    pendingTerminalReturnCancel = null
+  }
+
+  pendingTerminalReturnRafId = scheduler.requestAnimationFrame(() => {
+    pendingTerminalReturnRafId = null
+    pendingTerminalReturnCancel = null
+    // Stale-callback guard: if the mode has already left terminal by the
+    // time this frame fires, skip the dispatch entirely.
+    if (getMode() !== 'terminal') return
+    dispatchTerminalReturnResize(panes, iframes)
+  })
+
+  const cancel = () => {
+    if (pendingTerminalReturnRafId !== null) {
+      scheduler.cancelAnimationFrame(pendingTerminalReturnRafId)
+      pendingTerminalReturnRafId = null
+    }
+    pendingTerminalReturnCancel = null
+  }
+
+  pendingTerminalReturnCancel = cancel
+  return cancel
 }

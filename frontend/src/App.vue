@@ -128,7 +128,7 @@ import LoginView from '@/views/LoginView.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useAuthStore } from '@/stores/authStore'
-import { dispatchTerminalReturnResize } from '@/utils/terminalPanes'
+import { scheduleTerminalReturnResize } from '@/utils/terminalPanes'
 
 const appStore = useAppStore()
 const store = useTerminalStore()
@@ -169,21 +169,27 @@ watch(colorScheme, (scheme) => {
 // a visible pane (store.panes) — cached/hidden iframes for tabs not in any
 // pane are skipped because their containers are not laid out and a fit there
 // would be a no-op or race against a stale size.
+let cancelTerminalReturnResize: (() => void) | null = null
 watch(mode, (newMode, oldMode) => {
+  // On every mode change, cancel any pending terminal-return resize
+  // callback. If the user rapidly toggles away from terminal before the
+  // deferred frame fires, this prevents dispatching resize/scroll to
+  // iframes while the shell is hidden again.
+  if (cancelTerminalReturnResize) {
+    cancelTerminalReturnResize()
+    cancelTerminalReturnResize = null
+  }
   if (newMode !== 'terminal' || oldMode === 'terminal') return
-  // Defer to the next frame so the shell has left the absolute-positioned
-  // hidden state and its layout box is final before we ask iframes to fit.
-  requestAnimationFrame(() => {
-    const state = window.__claudeHub?.terminalState
-    const iframes = state?.iframes
-    if (!iframes) return
-    // Dispatch terminal-resize + terminal-scroll-bottom to every iframe
-    // whose tab is assigned to a currently visible pane. Cached/hidden
-    // iframes (tabs not in any pane) are skipped because their containers
-    // are not laid out and a fit there would be a no-op or race against
-    // a stale size.
-    dispatchTerminalReturnResize(store.panes, iframes)
-  })
+  const iframes = window.__claudeHub?.terminalState?.iframes
+  if (!iframes) return
+  // scheduleTerminalReturnResize defers the dispatch to the next frame
+  // (so the shell's layout box is final) and re-checks the mode inside
+  // the callback as a second stale-callback guard.
+  cancelTerminalReturnResize = scheduleTerminalReturnResize(
+    () => mode.value,
+    store.panes,
+    iframes,
+  )
 })
 
 // ---- Mobile viewport sync with visualViewport API ----
