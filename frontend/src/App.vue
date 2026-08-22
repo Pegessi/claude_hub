@@ -128,6 +128,7 @@ import LoginView from '@/views/LoginView.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useAuthStore } from '@/stores/authStore'
+import { visiblePaneTabIds } from '@/utils/terminalPanes'
 
 const appStore = useAppStore()
 const store = useTerminalStore()
@@ -177,11 +178,7 @@ watch(mode, (newMode, oldMode) => {
     const iframes = state?.iframes
     if (!iframes) return
     // Collect tab IDs assigned to currently visible panes (non-null only).
-    const visibleTabIds = new Set(
-      store.panes
-        .map((p) => p.tabId)
-        .filter((id): id is string => typeof id === 'string' && id !== null),
-    )
+    const visibleTabIds = visiblePaneTabIds(store.panes)
     for (const tabId of visibleTabIds) {
       const iframe = iframes[tabId]
       if (iframe?.contentWindow) {

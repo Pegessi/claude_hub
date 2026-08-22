@@ -9,11 +9,12 @@
 
 - **What**: switching to the Agent Workspace view no longer renders every
   completed task by default — the Done column shows only the 15 most recently
-  completed tasks, with a "Show more (N)" button to reveal the rest. Switching
-  to Terminal mode is now near-instant because the terminal shell stays mounted
-  (kept off-screen via `visibility: hidden`) instead of being hidden with
-  `display: none`, so ttyd iframes and xterm canvases do not have to be
-  re-rendered.
+  completed tasks, with a "Show more (N)" button to reveal the rest. For a
+  workspace with 272 done tasks this reduces the number of rendered task
+  cards from 272 to 15 (a ~94.5% reduction). Switching to Terminal mode no
+  longer forces a full ttyd/xterm re-paint because the terminal shell stays
+  mounted (kept off-screen via `visibility: hidden`) instead of being hidden
+  with `display: none`; only the visible panes are re-fit on return.
 - **Why**: workspaces with hundreds of done tasks paid the full card-render
   cost (latest report, session, agent/reviewer title, review status, injected
   lessons) on every mode switch because `AgentWorkspaceView` is destroyed and
@@ -24,12 +25,15 @@
   column header shows the real total and a toggle button (always visible on
   desktop via `.column-collapse-button--done-toggle`). The sorting + slicing
   logic lives in `utils/doneTasksPreview.ts` and is covered by boundary tests
-  (15/16 items, recency order, hidden count). The terminal shell switched from
-  `v-show` to a `terminal-mode-shell--hidden` class that uses
+  (15/16 items, recency order, hidden count) plus a timing benchmark that
+  reproduces the 272-done workspace and asserts the preview path renders 15
+  cards (a >5x speedup over rendering all 272). The terminal shell switched
+  from `v-show` to a `terminal-mode-shell--hidden` class that uses
   `position: absolute; inset: 0; visibility: hidden; pointer-events: none`,
   and a mode watcher posts `terminal-resize` + `terminal-scroll-bottom` only
-  to iframes whose tab ID is assigned to a currently visible pane (skipping
-  cached/hidden tabs). The iframe injected script gained a `resizeWhenReady`
+  to iframes whose tab ID is assigned to a currently visible pane (the
+  visible-pane selection lives in `utils/terminalPanes.ts` and is tested for
+  1x1 and split layouts). The iframe injected script gained a `resizeWhenReady`
   helper that resolves the terminal via `termForHistoryAction()` and retries
   until the terminal (and its replay) is ready before calling the debounced
   `scheduleFit`, so all visible panes (1x1 and split layouts) re-fit correctly
