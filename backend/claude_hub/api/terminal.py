@@ -1774,10 +1774,20 @@ async def proxy_terminal_request(
             return;
           }}
 
-          if (typeof term.__claudeHubScheduleFit === 'function') {{
-            term.__claudeHubScheduleFit();
-          }} else if (typeof term.__claudeHubRequestFit === 'function') {{
+          // For mode-return resize the terminal shell's layout box is
+          // already at its final size (visibility:hidden preserves
+          // dimensions, unlike display:none), so the debounced
+          // scheduleFit is unnecessary. Use the immediate requestFit
+          // plus a single rAF follow-up (matching scheduleFit's
+          // double-fit pattern) to catch any sub-frame layout drift
+          // without the 150ms debounce penalty.
+          if (typeof term.__claudeHubRequestFit === 'function') {{
             term.__claudeHubRequestFit();
+            if (typeof requestAnimationFrame === 'function') {{
+              requestAnimationFrame(function() {{ term.__claudeHubRequestFit(); }});
+            }}
+          }} else if (typeof term.__claudeHubScheduleFit === 'function') {{
+            term.__claudeHubScheduleFit();
           }}
         }}
 
