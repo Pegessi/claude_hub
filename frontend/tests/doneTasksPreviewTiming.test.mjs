@@ -81,13 +81,14 @@ test('done preview processing is faster than processing all tasks', () => {
 
   const previewAvg = previewTotal / iterations
   const fullAvg = fullTotal / iterations
-  const speedup = fullAvg / previewAvg
 
-  // The preview path should be substantially faster because it renders
-  // 15 cards instead of 272. We assert a >5x speedup (the theoretical
-  // ratio is 272/15 ≈ 18x; we use a conservative floor to avoid flakiness).
+  // The preview path processes 15 cards instead of 272, so it must be
+  // faster. We assert only the ordering (preview < full), not a specific
+  // multiplier, because the per-card cost here is a simulation, not a
+  // real Vue/DOM render measurement. The factual claim is the 272->15
+  // card count reduction (~94.5%), asserted in the test above.
   assert.ok(
-    speedup > 5,
-    `expected >5x speedup, got ${speedup.toFixed(2)}x (preview=${previewAvg.toFixed(3)}ms, full=${fullAvg.toFixed(3)}ms)`,
+    previewAvg < fullAvg,
+    `expected preview (${previewAvg.toFixed(3)}ms) < full (${fullAvg.toFixed(3)}ms)`,
   )
 })

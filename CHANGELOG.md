@@ -11,10 +11,10 @@
   completed task by default — the Done column shows only the 15 most recently
   completed tasks, with a "Show more (N)" button to reveal the rest. For a
   workspace with 272 done tasks this reduces the number of rendered task
-  cards from 272 to 15 (a ~94.5% reduction). Switching to Terminal mode no
-  longer forces a full ttyd/xterm re-paint because the terminal shell stays
-  mounted (kept off-screen via `visibility: hidden`) instead of being hidden
-  with `display: none`; only the visible panes are re-fit on return.
+  cards from 272 to 15 (a ~94.5% reduction). Switching to Terminal mode keeps
+  the terminal shell mounted (off-screen via `visibility: hidden`) instead of
+  hiding it with `display: none`, so the iframe content stays loaded across
+  mode switches; only the visible panes are re-fit on return.
 - **Why**: workspaces with hundreds of done tasks paid the full card-render
   cost (latest report, session, agent/reviewer title, review status, injected
   lessons) on every mode switch because `AgentWorkspaceView` is destroyed and
@@ -27,7 +27,7 @@
   logic lives in `utils/doneTasksPreview.ts` and is covered by boundary tests
   (15/16 items, recency order, hidden count) plus a timing benchmark that
   reproduces the 272-done workspace and asserts the preview path renders 15
-  cards (a >5x speedup over rendering all 272). The terminal shell switched
+  cards and processes faster than rendering all 272. The terminal shell switched
   from `v-show` to a `terminal-mode-shell--hidden` class that uses
   `position: absolute; inset: 0; visibility: hidden; pointer-events: none`,
   and a mode watcher posts `terminal-resize` + `terminal-scroll-bottom` only

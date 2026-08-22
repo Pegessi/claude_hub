@@ -18,7 +18,11 @@ const { outputText } = ts.transpileModule(helperSource, {
 const helperModule = await import(
   `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`
 )
-const { visiblePaneTabIds, visibleIframes } = helperModule
+const { visiblePaneTabIds, dispatchTerminalReturnResize } = helperModule
+
+// ---------------------------------------------------------------------------
+// visiblePaneTabIds
+// ---------------------------------------------------------------------------
 
 test('visiblePaneTabIds returns empty set for empty panes', () => {
   const result = visiblePaneTabIds([])
@@ -59,31 +63,118 @@ test('visiblePaneTabIds deduplicates tab ids assigned to multiple panes', () => 
   assert.ok(result.has('tab-1'))
 })
 
-test('visibleIframes returns only iframes for visible pane tabs', () => {
-  const iframes = {
-    'tab-1': { contentWindow: {} },
-    'tab-2': { contentWindow: {} },
-    'tab-hidden': { contentWindow: {} },
+// ---------------------------------------------------------------------------
+// dispatchTerminalReturnResize — the actual mode-return dispatch logic
+// ---------------------------------------------------------------------------
+
+function makeIframe() {
+  const calls = []
+  return {
+    contentWindow: {
+      postMessage(message, targetOrigin) {
+        calls.push({ message, targetOrigin })
+      },
+    },
+    calls,
   }
-  const panes = [{ tabId: 'tab-1' }, { tabId: 'tab-2' }]
-  const result = visibleIframes(iframes, panes)
-  assert.deepEqual(Object.keys(result).sort(), ['tab-1', 'tab-2'])
-  assert.ok(!('tab-hidden' in result))
+}
+
+test('dispatch sends resize + scroll-bottom to the single visible pane in 1x1 layout', () => {
+  const iframe1 = makeIframe()
+  const iframes = { 'tab-1': iframe1, 'tab-hidden': makeIframe() }
+  const panes = [{ tabId: 'tab-1' }]
+
+  const dispatched = dispatchTerminalReturnResize(panes, iframes)
+
+  assert.equal(dispatched.length, 2)
+  assert.deepEqual(dispatched[0], { type: 'terminal-resize', tabId: 'tab-1' })
+  assert.deepEqual(dispatched[1], { type: 'terminal-scroll-bottom', tabId: 'tab-1' })
+
+  assert.equal(iframe1.calls.length, 2)
+  assert.equal(iframe1.calls[0].message.type, 'terminal-resize')
+  assert.equal(iframe1.calls[1].message.type, 'terminal-scroll-bottom')
 })
 
-test('visibleIframes skips null iframes even if tab is in a pane', () => {
+test('dispatch sends to every visible pane in a split layout', () => {
+  const iframe1 = makeIframe()
+  const iframe2 = makeIframe()
   const iframes = {
-    'tab-1': null,
-    'tab-2': { contentWindow: {} },
+    'tab-1': iframe1,
+    'tab-2': iframe2,
+    'tab-hidden': makeIframe(),
   }
   const panes = [{ tabId: 'tab-1' }, { tabId: 'tab-2' }]
-  const result = visibleIframes(iframes, panes)
-  assert.deepEqual(Object.keys(result), ['tab-2'])
+
+  const dispatched = dispatchTerminalReturnResize(panes, iframes)
+
+  assert.equal(dispatched.length, 4)
+  assert.equal(iframe1.calls.length, 2)
+  assert.equal(iframe2.calls.length, 2)
 })
 
-test('visibleIframes returns empty object when no panes have tabs', () => {
-  const iframes = { 'tab-1': { contentWindow: {} } }
-  const panes = [{ tabId: null }]
-  const result = visibleIframes(iframes, panes)
-  assert.deepEqual(result, {})
+test('dispatch skips iframes whose tab is not in any visible pane (hidden cache)', () => {
+  const iframe1 = makeIframe()
+  const hidden = makeIframe()
+  const iframes = { 'tab-1': iframe1, 'tab-hidden': hidden }
+  const panes = [{ tabId: 'tab-1' }]
+
+  dispatchTerminalReturnResize(panes, iframes)
+
+  assert.equal(hidden.calls.length, 0)
+  assert.equal(iframe1.calls.length, 2)
+})
+
+test('dispatch skips null iframes even if the tab is in a visible pane', () => {
+  const iframe2 = makeIframe()
+  const iframes = { 'tab-1': null, 'tab-2': iframe2 }
+  const panes = [{ tabId: 'tab-1' }, { tabId: 'tab-2' }]
+
+  const dispatched = dispatchTerminalReturnResize(panes, iframes)
+
+  // Only tab-2 gets messages; tab-1's iframe is null.
+  assert.equal(dispatched.length, 2)
+  assert.equal(dispatched[0].tabId, 'tab-2')
+  assert.equal(iframe2.calls.length, 2)
+})
+
+test('dispatch skips iframes whose contentWindow is null', () => {
+  const noWindow = { contentWindow: null }
+  const iframe2 = makeIframe()
+  const iframes = { 'tab-1': noWindow, 'tab-2': iframe2 }
+  const panes = [{ tabId: 'tab-1' }, { tabId: 'tab-2' }]
+
+  const dispatched = dispatchTerminalReturnResize(panes, iframes)
+
+  assert.equal(dispatched.length, 2)
+  assert.equal(dispatched[0].tabId, 'tab-2')
+})
+
+test('dispatch does not double-send when the same tab is assigned to multiple panes', () => {
+  const iframe1 = makeIframe()
+  const iframes = { 'tab-1': iframe1 }
+  // Same tab in two panes (e.g. mirrored split).
+  const panes = [{ tabId: 'tab-1' }, { tabId: 'tab-1' }]
+
+  const dispatched = dispatchTerminalReturnResize(panes, iframes)
+
+  // visiblePaneTabIds dedups, so only one resize + one scroll-bottom.
+  assert.equal(dispatched.length, 2)
+  assert.equal(iframe1.calls.length, 2)
+})
+
+test('rapid re-toggle: calling dispatch twice does not leak stale state', () => {
+  // Simulate the user switching to terminal, away, and back quickly.
+  // Each call is independent — there is no shared mutable state in the
+  // dispatcher, so the second call produces the same messages as the first.
+  const iframe1 = makeIframe()
+  const iframes = { 'tab-1': iframe1 }
+  const panes = [{ tabId: 'tab-1' }]
+
+  const first = dispatchTerminalReturnResize(panes, iframes)
+  const second = dispatchTerminalReturnResize(panes, iframes)
+
+  assert.equal(first.length, 2)
+  assert.equal(second.length, 2)
+  // Each call sends exactly 2 messages; total = 4 (no cross-call state).
+  assert.equal(iframe1.calls.length, 4)
 })

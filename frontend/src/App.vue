@@ -128,7 +128,7 @@ import LoginView from '@/views/LoginView.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useAuthStore } from '@/stores/authStore'
-import { visiblePaneTabIds } from '@/utils/terminalPanes'
+import { dispatchTerminalReturnResize } from '@/utils/terminalPanes'
 
 const appStore = useAppStore()
 const store = useTerminalStore()
@@ -177,15 +177,12 @@ watch(mode, (newMode, oldMode) => {
     const state = window.__claudeHub?.terminalState
     const iframes = state?.iframes
     if (!iframes) return
-    // Collect tab IDs assigned to currently visible panes (non-null only).
-    const visibleTabIds = visiblePaneTabIds(store.panes)
-    for (const tabId of visibleTabIds) {
-      const iframe = iframes[tabId]
-      if (iframe?.contentWindow) {
-        iframe.contentWindow.postMessage({ type: 'terminal-resize', tabId }, '*')
-        iframe.contentWindow.postMessage({ type: 'terminal-scroll-bottom', tabId }, '*')
-      }
-    }
+    // Dispatch terminal-resize + terminal-scroll-bottom to every iframe
+    // whose tab is assigned to a currently visible pane. Cached/hidden
+    // iframes (tabs not in any pane) are skipped because their containers
+    // are not laid out and a fit there would be a no-op or race against
+    // a stale size.
+    dispatchTerminalReturnResize(store.panes, iframes)
   })
 })
 
