@@ -58,23 +58,52 @@
     reduction, and that the preview path is faster than rendering all 272).
   - Terminal mode-return benchmark (`scripts/terminal_switch_benchmark.py`),
     using a **causal fit-call counter** injected into each terminal iframe
-    before the mode switch. The counter increments every time
-    `term.resize()` is called (what the fit addon calls internally); the
-    benchmark records the count before the switch and waits for it to
-    increase afterward, proving a fit ran *after* the switch. This is
-    causal on both main and feature: even on main, where the terminal
-    preserves its dimensions while hidden (`display: none`), a stale
-    `cols>0 && rows>0` state cannot satisfy the "count increased" check.
-    On feature, nonce correlation (`__claudeHubLastFitNonce` matched
-    against the nonce dispatched with the mode-return resize message)
-    provides additional causal proof that the *current* request ran; on
-    main (no nonce protocol) the benchmark relies on the fit-call counter
-    increase alone. Scroll-to-bottom is not measured because the feature
-    branch no longer dispatches a forced scroll-to-bottom on mode return
-    (xterm.js preserves the user's scroll position). Specific timing
-    numbers (main vs feature medians, cold-start pane-2 cost) are
-    intentionally omitted here until the new causal benchmark has been
-    run against both branches and produced matched, reproducible results.
+    before the mode switch. The counter wraps `term.fit` (the public fit
+    entry point that ttyd exposes, which invokes the fit addon) and
+    `term.resize` (which the fit addon calls when dimensions actually
+    change). Wrapping only `term.resize` is insufficient because the fit
+    addon skips `resize` when the terminal's cols/rows already match the
+    proposed dimensions — the common case on mode return where the
+    terminal shell preserves its layout box. The benchmark records the
+    count before the switch and waits for it to increase afterward,
+    proving a fit ran *after* the switch. This is causal on both main and
+    feature: even on main, where the terminal preserves its dimensions
+    while hidden (`display: none`), a stale `cols>0 && rows>0` state
+    cannot satisfy the "count increased" check. On feature, nonce
+    correlation (`__claudeHubLastFitNonce` matched against the nonce
+    dispatched with the mode-return resize message) provides additional
+    causal proof that the *current* request ran; on main (no nonce
+    protocol) the benchmark relies on the fit-call counter increase
+    alone. Scroll-to-bottom is not measured because the feature branch
+    no longer dispatches a forced scroll-to-bottom on mode return
+    (xterm.js preserves the user's scroll position).
+  - **Causal benchmark results** (feature `0ffbb0e` vs main `16404fe`,
+    3 runs each, same causal fit-call counter signal on both branches):
+
+    | Layout | Pane | Feature median | Main median | Delta |
+    | --- | --- | --- | --- | --- |
+    | 1x1 | single | 238.2 ms | 249.4 ms | feature −11.2 ms (−4.5%) |
+    | 2x1 | pane 1 | 206.4 ms | 229.1 ms | feature −22.7 ms (−9.9%) |
+    | 2x1 | pane 2 | 996.1 ms | 229.1 ms | feature **+767.0 ms (+335%)** |
+
+    Raw output: `/tmp/benchmark_feature_0ffbb0e.txt`,
+    `/tmp/benchmark_main_16404fe_causal.txt`.
+
+    Both branches settle (`settled=true`) with the fit-call count
+    increasing past the pre-switch baseline, confirming the causal
+    signal works on main (no nonces) and feature (nonces matched).
+
+    **Honest assessment**: feature is slightly faster for the 1x1 layout
+    and the first pane of a 2x1 split (the immediate `requestFit` path
+    avoids the 150 ms debounce). However, the *second* pane of a 2x1
+    split is substantially slower on feature (~1 s vs ~229 ms on main).
+    The likely cause is that the second pane's terminal is not yet ready
+    when the mode-return resize is dispatched, so `resizeWhenReady`
+    retries (100 ms spacing) until the terminal is available. On main,
+    both panes are driven by the same ResizeObserver fire and settle
+    together. The 1x1 win is real but small; the 2x1 pane-2 regression
+    needs investigation (e.g. pre-warming the second pane's terminal or
+    dispatching the resize only after all visible panes report ready).
 
 ### fix: filter subagent sessions and cache codex session listing
 

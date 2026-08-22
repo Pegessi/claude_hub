@@ -66,10 +66,16 @@ def inject_fit_counter(frame):
     """
     Inject a fit-call counter into the terminal inside `frame`.
 
-    The counter increments every time `term.resize()` is called (which is
-    what the fit addon calls internally). If the counter was already
-    installed, this is a no-op. Returns True if the terminal was found and
-    the counter is installed, False otherwise.
+    The counter increments every time a fit is requested. We wrap both
+    `term.fit` (the public fit entry point that ttyd exposes, which calls
+    the fit addon's fit) and `term.resize` (which the fit addon calls when
+    dimensions actually change). Wrapping only `term.resize` is insufficient
+    because the fit addon skips `resize` when the terminal's cols/rows
+    already match the proposed dimensions — which is the common case on
+    mode return where the terminal shell preserves its layout box.
+
+    If the counter was already installed, this is a no-op. Returns True if
+    the terminal was found and the counter is installed, False otherwise.
     """
     return frame.evaluate(
         """
@@ -78,9 +84,22 @@ def inject_fit_counter(frame):
           if (!term) return false;
           if (term.__claudeHubFitCallCount === undefined) {
             term.__claudeHubFitCallCount = 0;
+            const bump = () => { term.__claudeHubFitCallCount++; };
+            // Wrap term.fit (ttyd's public fit entry point).
+            if (typeof term.fit === 'function') {
+              const origFit = term.fit.bind(term);
+              term.fit = function() { bump(); return origFit(); };
+            }
+            // Wrap term.fitAddon.fit if present (callFit prefers it).
+            if (term.fitAddon && typeof term.fitAddon.fit === 'function') {
+              const origAddonFit = term.fitAddon.fit.bind(term.fitAddon);
+              term.fitAddon.fit = function() { bump(); return origAddonFit(); };
+            }
+            // Also wrap term.resize for completeness (fit addon calls it
+            // when dimensions change).
             const origResize = term.resize.bind(term);
             term.resize = function(cols, rows) {
-              term.__claudeHubFitCallCount++;
+              bump();
               return origResize(cols, rows);
             };
           }
