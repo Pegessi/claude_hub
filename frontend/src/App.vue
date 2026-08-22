@@ -161,13 +161,13 @@ watch(colorScheme, (scheme) => {
   document.documentElement.dataset.theme = scheme
 }, { immediate: true })
 
-// When switching back to terminal mode, nudge every visible terminal iframe to
-// resize and scroll to bottom. The shell stays rendered (visibility:hidden)
+// When switching back to terminal mode, nudge every *visible* terminal iframe
+// to resize and scroll to bottom. The shell stays rendered (visibility:hidden)
 // while the workspace is active, so this is a cheap correctness pass rather
-// than a full history replay. We resize *all* registered iframes (not just the
-// active pane) because split layouts show multiple panes side-by-side, and
-// each pane's iframe needs to re-fit its container after the shell leaves the
-// absolute-positioned hidden state.
+// than a full history replay. We target only the tab IDs currently assigned to
+// a visible pane (store.panes) — cached/hidden iframes for tabs not in any
+// pane are skipped because their containers are not laid out and a fit there
+// would be a no-op or race against a stale size.
 watch(mode, (newMode, oldMode) => {
   if (newMode !== 'terminal' || oldMode === 'terminal') return
   // Defer to the next frame so the shell has left the absolute-positioned
@@ -176,7 +176,13 @@ watch(mode, (newMode, oldMode) => {
     const state = window.__claudeHub?.terminalState
     const iframes = state?.iframes
     if (!iframes) return
-    for (const tabId of Object.keys(iframes)) {
+    // Collect tab IDs assigned to currently visible panes (non-null only).
+    const visibleTabIds = new Set(
+      store.panes
+        .map((p) => p.tabId)
+        .filter((id): id is string => typeof id === 'string' && id !== null),
+    )
+    for (const tabId of visibleTabIds) {
       const iframe = iframes[tabId]
       if (iframe?.contentWindow) {
         iframe.contentWindow.postMessage({ type: 'terminal-resize', tabId }, '*')

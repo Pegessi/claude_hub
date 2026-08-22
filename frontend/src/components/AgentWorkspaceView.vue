@@ -2920,6 +2920,7 @@ import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
 import { DEFAULT_ABORT_REASON, resolveAbortReason } from '@/utils/taskAbort'
+import { DONE_TASKS_PREVIEW_LIMIT, previewDoneTasks } from '@/utils/doneTasksPreview'
 import {
   awaitingHumanAcceptance as taskAcceptanceAwaiting,
   canMarkDoneTask as taskAcceptanceCanMarkDone,
@@ -3094,8 +3095,8 @@ let elapsedClockTimer: number | null = null
 // rendering every card on every board mount (which happens on each workspace
 // switch because AgentWorkspaceView uses v-if) makes the switch feel sluggish.
 // We show only the most recent N done tasks by default and expose a "Show more"
-// button to reveal the rest.
-const DONE_TASKS_PREVIEW_LIMIT = 15
+// button to reveal the rest. The limit lives in utils/doneTasksPreview.ts so
+// the sorting + slicing logic can be unit-tested.
 const showAllDoneTasks = ref(false)
 
 const columns: { status: WorkspaceTaskStatus; label: string }[] = [
@@ -3782,15 +3783,10 @@ function startOptionsFor(task: WorkspaceTask): TaskStartOptions {
 function tasksByStatus(status: WorkspaceTaskStatus) {
   const filtered = tasks.value.filter(task => task.status === status)
   if (status !== 'done') return filtered
-  // Done tasks: sort by completion time (most recent first) so the preview
-  // shows the latest work. Fall back to created_at when completed_at is absent.
-  const sorted = [...filtered].sort((a, b) => {
-    const aMs = parseTimestampMs(a.completed_at) ?? parseTimestampMs(a.created_at) ?? 0
-    const bMs = parseTimestampMs(b.completed_at) ?? parseTimestampMs(b.created_at) ?? 0
-    return bMs - aMs
-  })
-  if (showAllDoneTasks.value) return sorted
-  return sorted.slice(0, DONE_TASKS_PREVIEW_LIMIT)
+  // Done tasks: sort by completion time (most recent first) and slice to the
+  // preview limit unless the user has expanded the column. The sorting +
+  // slicing logic lives in utils/doneTasksPreview.ts for testability.
+  return previewDoneTasks(filtered, showAllDoneTasks.value)
 }
 
 // Total done task count (unaffected by the preview limit) for the column header

@@ -1748,6 +1748,39 @@ async def proxy_terminal_request(
           }}
         }}
 
+        // Re-fit the terminal when it becomes ready. Mirrors the retry pattern
+        // of scrollBottomWhenReady / refreshHistoryWhenReady: resolve the term
+        // via termForHistoryAction() (which falls back to _getTerm()), and if
+        // it is not yet available (or still mid-replay), retry on a short
+        // interval up to attemptsLeft times. Once ready, invoke the debounced
+        // scheduler so the fit lands after layout settles.
+        function resizeWhenReady(attemptsLeft) {{
+          const term = termForHistoryAction();
+          if (!term) {{
+            if (attemptsLeft > 0) {{
+              setTimeout(function() {{
+                resizeWhenReady(attemptsLeft - 1);
+              }}, 100);
+            }}
+            return;
+          }}
+
+          // Do not fit while the initial replay is still buffering; the
+          // renderer size may change under us.
+          if (term.__claudeHubReplayBuffering === true && attemptsLeft > 0) {{
+            setTimeout(function() {{
+              resizeWhenReady(attemptsLeft - 1);
+            }}, 100);
+            return;
+          }}
+
+          if (typeof term.__claudeHubScheduleFit === 'function') {{
+            term.__claudeHubScheduleFit();
+          }} else if (typeof term.__claudeHubRequestFit === 'function') {{
+            term.__claudeHubRequestFit();
+          }}
+        }}
+
         window.addEventListener('message', function(event) {{
           if (!event.data || (event.data.tabId && event.data.tabId !== TAB_ID)) return;
 
@@ -1771,13 +1804,11 @@ async def proxy_terminal_request(
 
           if (event.data.type === 'terminal-resize') {{
             // Explicit re-fit requested by the parent frame (e.g. after
-            // switching back to Terminal mode). Use the debounced scheduler
-            // so the fit lands after the shell has left its hidden state.
-            if (term && typeof term.__claudeHubScheduleFit === 'function') {{
-              term.__claudeHubScheduleFit();
-            }} else if (term && typeof term.__claudeHubRequestFit === 'function') {{
-              term.__claudeHubRequestFit();
-            }}
+            // switching back to Terminal mode). Resolve the terminal via
+            // termForHistoryAction() (which falls back to _getTerm()) and
+            // retry until it is ready, then call the debounced scheduler so
+            // the fit lands after the shell has left its hidden state.
+            resizeWhenReady(50);
             return;
           }}
 

@@ -22,14 +22,18 @@
 - **How**: `tasksByStatus('done')` now sorts by `completed_at` desc and slices
   to `DONE_TASKS_PREVIEW_LIMIT` (15) unless `showAllDoneTasks` is set; the
   column header shows the real total and a toggle button (always visible on
-  desktop via `.column-collapse-button--done-toggle`). The terminal shell
-  switched from `v-show` to a `terminal-mode-shell--hidden` class that uses
+  desktop via `.column-collapse-button--done-toggle`). The sorting + slicing
+  logic lives in `utils/doneTasksPreview.ts` and is covered by boundary tests
+  (15/16 items, recency order, hidden count). The terminal shell switched from
+  `v-show` to a `terminal-mode-shell--hidden` class that uses
   `position: absolute; inset: 0; visibility: hidden; pointer-events: none`,
-  and a mode watcher posts `terminal-resize` + `terminal-scroll-bottom` to
-  every registered iframe on return to terminal mode. The iframe injected
-  script gained a `terminal-resize` message handler that calls the debounced
-  `scheduleFit` so all visible panes (1x1 and split layouts) re-fit after the
-  shell leaves its hidden state.
+  and a mode watcher posts `terminal-resize` + `terminal-scroll-bottom` only
+  to iframes whose tab ID is assigned to a currently visible pane (skipping
+  cached/hidden tabs). The iframe injected script gained a `resizeWhenReady`
+  helper that resolves the terminal via `termForHistoryAction()` and retries
+  until the terminal (and its replay) is ready before calling the debounced
+  `scheduleFit`, so all visible panes (1x1 and split layouts) re-fit correctly
+  after the shell leaves its hidden state.
 
 ### fix: filter subagent sessions and cache codex session listing
 

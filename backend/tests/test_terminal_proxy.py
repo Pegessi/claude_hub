@@ -126,6 +126,11 @@ async def test_terminal_html_proxy_injects_history_and_resize_guards(
     assert "__claudeHubRequestFit" in body
     assert "terminal-history-refresh" in body
     assert "ResizeObserver" in body
+    # The terminal-resize handler must resolve the terminal via
+    # termForHistoryAction() and retry until ready (resizeWhenReady),
+    # rather than using a possibly-stale closure `term` variable.
+    assert "resizeWhenReady" in body
+    assert "termForHistoryAction" in body
     assert response.headers["content-length"] == str(len(body.encode("utf-8")))
 
 
