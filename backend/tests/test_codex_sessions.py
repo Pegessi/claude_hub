@@ -47,14 +47,26 @@ def _write_rollout(tmp_path, session_id, cwd, start_epoch, messages):
 
 
 def _fake_scan(entries):
-    """Build a fake _codex_scan_sessions returning a dict sid -> ScanEntry."""
+    """Build a fake _codex_scan_sessions returning a dict sid -> ScanEntry.
+
+    Each entry is ``(sid, cwd, epoch, path)`` or
+    ``(sid, cwd, epoch, path, thread_source)``.
+    """
     import importlib
 
     tm = importlib.import_module("claude_hub.services.ttyd_manager")
 
+    # Invalidate the sessions cache so the mocked scan is used.
+    tm._CODEX_SESSIONS_CACHE = None
+
     def _scan(with_title: bool = False, skip_title_sids: set = None):
         out = {}
-        for sid, cwd, epoch, path in entries:
+        for entry in entries:
+            if len(entry) == 5:
+                sid, cwd, epoch, path, thread_source = entry
+            else:
+                sid, cwd, epoch, path = entry
+                thread_source = ""
             need_title = with_title and (skip_title_sids is None or sid not in skip_title_sids)
             title = tm._codex_session_title(str(path)) if need_title else ""
             out[sid] = tm.ScanEntry(
@@ -65,6 +77,7 @@ def _fake_scan(entries):
                 ts=epoch,
                 is_archived=False,
                 title=title,
+                thread_source=thread_source,
             )
         return out
 
@@ -195,6 +208,8 @@ async def test_list_codex_sessions_dedupes_by_session_id(
     # we produce two entries with the same sid and rely on the "keep most
     # recent" logic. Note: _codex_scan_sessions itself dedups per root, but
     # the endpoint handles duplicates defensively.
+    tm._CODEX_SESSIONS_CACHE = None
+
     def _fake(with_title: bool = False, skip_title_sids: set = None):
         out = {}
         for sid, cwd, epoch, path in [

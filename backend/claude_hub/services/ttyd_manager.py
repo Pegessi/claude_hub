@@ -344,10 +344,12 @@ GLOBAL_CODEX_LAUNCH_LOCK = asyncio.Lock()
 # parsed from session_meta (realpath of workspace); ts is session_meta epoch.
 # title is the extracted session title (only populated when the scan is run
 # with with_title=True; otherwise "").
+# thread_source is the session's thread_source from session_meta ("user",
+# "subagent", "automation", or "" for legacy rollouts that lack the field).
 ScanEntry = namedtuple(
     "ScanEntry",
-    ["path", "mtime_ns", "size", "cwd", "ts", "is_archived", "title"],
-    defaults=[""],
+    ["path", "mtime_ns", "size", "cwd", "ts", "is_archived", "title", "thread_source"],
+    defaults=["", ""],
 )
 
 
@@ -464,29 +466,34 @@ def _codex_home_dir() -> Path:
     return Path.home() / ".codex"
 
 
-def _parse_session_meta(first_line: str) -> Tuple[Optional[str], Optional[float], Optional[str]]:
-    """Parse a codex rollout first line into (sid, ts_epoch, cwd).
+def _parse_session_meta(
+    first_line: str,
+) -> Tuple[Optional[str], Optional[float], Optional[str], str]:
+    """Parse a codex rollout first line into (sid, ts_epoch, cwd, thread_source).
 
-    Returns ``(None, None, None)`` for unparseable lines. Canonical sid is
+    Returns ``(None, None, None, "")`` for unparseable lines. Canonical sid is
     ``payload.id`` (V0 verified: matches the filename uuid and is what codex
     resume keys off when the exact uuid is passed); ``payload.session_id`` is
     the stable parent thread id and differs on forks, so we treat it as a
     secondary alias only for back-compat with older legacy-flat rollouts.
     Defensive against legacy format (no ``payload`` wrapper) which stores
     ``session_id``/``id``/``cwd``/``timestamp`` at the top level.
+
+    ``thread_source`` is one of ``"user"``, ``"subagent"``, ``"automation"``,
+    or ``""`` for legacy rollouts that don't carry the field.
     """
     try:
         record = json.loads(first_line)
     except (json.JSONDecodeError, TypeError):
-        return None, None, None
+        return None, None, None, ""
     if not isinstance(record, dict):
-        return None, None, None
+        return None, None, None, ""
     payload = record.get("payload")
     if not isinstance(payload, dict):
         payload = record  # legacy flat format
     sid = payload.get("id") or payload.get("session_id")
     if not isinstance(sid, str) or not sid:
-        return None, None, None
+        return None, None, None, ""
     ts_raw = payload.get("timestamp") or record.get("timestamp")
     ts_epoch: Optional[float] = None
     if isinstance(ts_raw, str):
@@ -497,7 +504,10 @@ def _parse_session_meta(first_line: str) -> Tuple[Optional[str], Optional[float]
     cwd = payload.get("cwd")
     if not isinstance(cwd, str):
         cwd = None
-    return sid, ts_epoch, cwd
+    thread_source = payload.get("thread_source")
+    if not isinstance(thread_source, str):
+        thread_source = ""
+    return sid, ts_epoch, cwd, thread_source
 
 
 def _codex_roots() -> List[Tuple[Path, bool]]:
@@ -543,7 +553,7 @@ def _codex_scan_sessions(
             try:
                 with open(path_str, "r", encoding="utf-8", errors="ignore") as f:
                     first = f.readline()
-                    sid, ts_epoch, cwd = _parse_session_meta(first)
+                    sid, ts_epoch, cwd, thread_source = _parse_session_meta(first)
                     if sid is None:
                         logger.warning("codex scan: cannot parse session_meta from %s", path_str)
                         continue
@@ -565,6 +575,7 @@ def _codex_scan_sessions(
                 ts=ts_epoch,
                 is_archived=is_archived,
                 title=title,
+                thread_source=thread_source,
             )
             existing = result.get(sid)
             if existing is None:
@@ -925,6 +936,76 @@ def _codex_load_session_index() -> Dict[str, str]:
     return out
 
 
+# Cache for list_codex_sessions(): (cache_key, result). The cache key is a
+# tuple of (session_index mtime_ns, max rollout mtime_ns) so we invalidate
+# whenever the index or any rollout changes. TTL-bounded as a safety net.
+_CODEX_SESSIONS_CACHE: Optional[Tuple[Tuple[int, int], List[Dict[str, Any]]]] = None
+_CODEX_SESSIONS_CACHE_TTL = 30.0  # seconds
+
+
+def _codex_sessions_cache_key() -> Tuple[int, int]:
+    """Return a cache key for the codex sessions listing.
+
+    The key is ``(session_index_mtime_ns, max_rollout_mtime_ns)``. When either
+    changes (user renamed a thread, or a new rollout was written), the cache is
+    invalidated. We stat the index and every date-level directory under the
+    codex session roots; since rollout files are append-only and never modified
+    in place, directory mtime changes (file additions/removals) are sufficient
+    to detect new sessions.
+    """
+    index_path = _codex_home_dir() / "session_index.jsonl"
+    try:
+        index_mtime = index_path.stat().st_mtime_ns
+    except OSError:
+        index_mtime = 0
+
+    max_rollout_mtime = 0
+    for root, _ in _codex_roots():
+        if not root.is_dir():
+            continue
+        try:
+            dir_mtime = root.stat().st_mtime_ns
+            if dir_mtime > max_rollout_mtime:
+                max_rollout_mtime = dir_mtime
+        except OSError:
+            pass
+        # Walk date subdirectories (codex organises rollouts as
+        # sessions/YYYY/MM/DD/...). Stat each level's mtime; a new rollout
+        # bumps the DD dir mtime.
+        try:
+            for year_dir in root.iterdir():
+                if not year_dir.is_dir():
+                    continue
+                try:
+                    ym = year_dir.stat().st_mtime_ns
+                    if ym > max_rollout_mtime:
+                        max_rollout_mtime = ym
+                except OSError:
+                    pass
+                for month_dir in year_dir.iterdir():
+                    if not month_dir.is_dir():
+                        continue
+                    try:
+                        mm = month_dir.stat().st_mtime_ns
+                        if mm > max_rollout_mtime:
+                            max_rollout_mtime = mm
+                    except OSError:
+                        pass
+                    for day_dir in month_dir.iterdir():
+                        if not day_dir.is_dir():
+                            continue
+                        try:
+                            dm = day_dir.stat().st_mtime_ns
+                            if dm > max_rollout_mtime:
+                                max_rollout_mtime = dm
+                        except OSError:
+                            pass
+        except OSError:
+            pass
+
+    return (index_mtime, max_rollout_mtime)
+
+
 def list_codex_sessions() -> List[Dict[str, Any]]:
     """List available Codex sessions from on-disk rollout files.
 
@@ -940,7 +1021,20 @@ def list_codex_sessions() -> List[Dict[str, Any]]:
     groups are ordered by their most recent session. Walks both active
     (``sessions/``) and archived (``archived_sessions/``) locations since
     ``codex resume`` works against both.
+
+    Only user-initiated sessions (``thread_source == "user"`` or legacy
+    rollouts without the field) are returned; subagent and automation
+    sessions are filtered out. Results are cached in-memory keyed on the
+    session index and rollout directory mtimes.
     """
+    global _CODEX_SESSIONS_CACHE
+
+    cache_key = _codex_sessions_cache_key()
+    if _CODEX_SESSIONS_CACHE is not None:
+        cached_key, cached_result = _CODEX_SESSIONS_CACHE
+        if cached_key == cache_key:
+            return cached_result
+
     # Load the Codex app's conversation titles once. This covers the majority
     # of sessions and avoids reading the (large) rollout files for titles.
     thread_names = _codex_load_session_index()
@@ -952,6 +1046,11 @@ def list_codex_sessions() -> List[Dict[str, Any]]:
     for sid, entry in _codex_scan_sessions(
         with_title=True, skip_title_sids=set(thread_names.keys())
     ).items():
+        # Filter out subagent and automation sessions. Only user-initiated
+        # sessions (thread_source == "user") and legacy rollouts (empty
+        # thread_source) are shown in the picker.
+        if entry.thread_source in ("subagent", "automation"):
+            continue
         start_epoch = entry.ts or 0.0
         existing = raw.get(sid)
         if existing and existing["start_epoch"] >= start_epoch:
@@ -986,6 +1085,8 @@ def list_codex_sessions() -> List[Dict[str, Any]]:
                 "sessions": sessions,
             }
         )
+
+    _CODEX_SESSIONS_CACHE = (cache_key, result)
     return result
 
 
