@@ -2674,11 +2674,12 @@ def test_parse_session_meta_new_payload_format() -> None:
             "timestamp": "2026-07-23T10:00:00.000Z",
         },
     }
-    sid, epoch, cwd = ttyd_manager_module._parse_session_meta(json.dumps(meta))
+    sid, epoch, cwd, thread_source = ttyd_manager_module._parse_session_meta(json.dumps(meta))
     assert sid == "019f8e90-79d1-7a92-a165-8075ab17f552"
     assert cwd == "/Users/bytedance/claude_hub"
     assert epoch is not None
     assert abs(epoch - datetime(2026, 7, 23, 10, 0, 0, tzinfo=timezone.utc).timestamp()) < 1.0
+    assert thread_source == ""
 
 
 def test_parse_session_meta_legacy_flat_format() -> None:
@@ -2688,16 +2689,17 @@ def test_parse_session_meta_legacy_flat_format() -> None:
         "cwd": "/legacy",
         "timestamp": "2026-01-01T00:00:00Z",
     }
-    sid, epoch, cwd = ttyd_manager_module._parse_session_meta(json.dumps(meta))
+    sid, epoch, cwd, thread_source = ttyd_manager_module._parse_session_meta(json.dumps(meta))
     assert sid == "legacy-sid"
     assert cwd == "/legacy"
     assert epoch is not None
+    assert thread_source == ""
 
 
 def test_parse_session_meta_bad_line_returns_none() -> None:
-    assert ttyd_manager_module._parse_session_meta("not json") == (None, None, None)
-    assert ttyd_manager_module._parse_session_meta("") == (None, None, None)
-    assert ttyd_manager_module._parse_session_meta("{}") == (None, None, None)
+    assert ttyd_manager_module._parse_session_meta("not json") == (None, None, None, "")
+    assert ttyd_manager_module._parse_session_meta("") == (None, None, None, "")
+    assert ttyd_manager_module._parse_session_meta("{}") == (None, None, None, "")
 
 
 def test_codex_scan_sessions_walks_active_and_archived(monkeypatch: MonkeyPatch, tmp_path) -> None:
