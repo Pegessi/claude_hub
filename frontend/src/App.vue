@@ -165,18 +165,21 @@ watch(colorScheme, (scheme) => {
 }, { immediate: true })
 
 // When switching back to terminal mode, nudge every *visible* terminal iframe
-// to resize and scroll to bottom. The shell stays rendered (visibility:hidden)
-// while the workspace is active, so this is a cheap correctness pass rather
-// than a full history replay. We target only the tab IDs currently assigned to
-// a visible pane (store.panes) — cached/hidden iframes for tabs not in any
-// pane are skipped because their containers are not laid out and a fit there
-// would be a no-op or race against a stale size.
+// to resize (re-fit). The shell stays rendered (visibility:hidden) while the
+// workspace is active, so this is a cheap correctness pass rather than a full
+// history replay. We target only the tab IDs currently assigned to a visible
+// pane (store.panes) — cached/hidden iframes for tabs not in any pane are
+// skipped because their containers are not laid out and a fit there would be
+// a no-op or race against a stale size. Scroll position is intentionally NOT
+// forced to the bottom: because the iframe is kept alive (visibility:hidden,
+// not display:none), xterm.js preserves the user's scroll position and only
+// auto-scrolls on new data if the user was already at the bottom.
 let cancelTerminalReturnResize: (() => void) | null = null
 watch(mode, (newMode, oldMode) => {
   // On every mode change, cancel any pending terminal-return resize
   // callback. If the user rapidly toggles away from terminal before the
-  // deferred frame fires, this prevents dispatching resize/scroll to
-  // iframes while the shell is hidden again.
+  // deferred frame fires, this prevents dispatching resize to iframes
+  // while the shell is hidden again.
   if (cancelTerminalReturnResize) {
     cancelTerminalReturnResize()
     cancelTerminalReturnResize = null

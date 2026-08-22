@@ -57,50 +57,24 @@
     `doneTasksPreviewTiming.test.mjs` which asserts 272→15 cards, a ~94.5%
     reduction, and that the preview path is faster than rendering all 272).
   - Terminal mode-return benchmark (`scripts/terminal_switch_benchmark.py`),
-    using **fit completion** (cols > 0 AND rows > 0) as the neutral readiness
-    signal that works on both main and feature. On feature, nonce correlation
-    (`__claudeHubLastFitNonce` matched against the nonce dispatched with the
-    mode-return resize message) provides causal proof that the *current*
-    request ran; on main (no nonce protocol) the benchmark falls back to the
-    neutral cols>0/rows>0 signal alone. Scroll-to-bottom is not measured
-    because the feature branch no longer dispatches a forced scroll-to-bottom
-    on mode return (xterm.js preserves the user's scroll position). Run
-    against isolated backends with 3 runs each:
-    - Feature (`fcafcc4`, frontend 5173 → backend 8174), 3 runs:
-      - 1x1 layout: fit completes in **207.1 / 147.5 / 217.8 ms** (median
-        207.1 ms), settled=true in all 3 runs.
-      - 2x1 split layout: pane 1 (active terminal `6f822a86`) fit completes
-        in **242.0 / 189.1 / 253.6 ms**; pane 2 (inactive terminal tab
-        `22331dec`) fit completes in **742.2 / 765.0 / 756.8 ms**. The
-        pane-2 cost is dominated by cold-starting the terminal process (the
-        tab was `is_active=false`), not by the mode switch itself.
-        settled=true for both panes in all 3 runs.
-      - Raw output: `/tmp/benchmark_feature_fcafcc4.txt`.
-    - Main (`16404fe`, frontend 5174 → backend 8173), 3 runs:
-      - 1x1 layout: fit completes in **232.3 / 260.6 / 112.6 ms** (median
-        232.3 ms) via the neutral cols>0/rows>0 signal (main does not
-        dispatch nonce-correlated resize messages on mode return).
-        settled=true in all 3 runs.
-      - 2x1 split layout: both panes' fit completes via the neutral signal
-        in **253.8 / 251.3 / 186.1 ms** (median 251.3 ms) — both panes
-        report the same fit time because they are revealed simultaneously
-        from `display: none` and reach cols>0/rows>0 in the same poll
-        interval. settled=true for both panes in all 3 runs.
-      - Raw output: `/tmp/benchmark_main_16404fe_fit.txt`.
-    - Interpretation: the feature branch's contribution is the
-      preserved-layout-box fit that avoids starting from a zero-size
-      viewport. In 1x1 the feature fits marginally faster (median 207 ms
-      vs 232 ms on main) because the terminal's layout box is kept at its
-      final size across the mode switch. In 2x1 the active pane fits
-      similarly on both branches (~240–250 ms median); the feature's
-      second pane is slower (~757 ms median) because that tab's terminal
-      process cold-starts on first visibility, whereas on main both panes
-      are already instantiated under `display: none` and fit together.
-      Nonce-correlated resize dispatch on feature provides causal proof
-      that the current mode-return resize request ran. Scroll position is
-      preserved on mode return (xterm.js auto-scrolls on new data only if
-      the user was at the bottom), so no forced scroll-to-bottom is
-      dispatched.
+    using a **causal fit-call counter** injected into each terminal iframe
+    before the mode switch. The counter increments every time
+    `term.resize()` is called (what the fit addon calls internally); the
+    benchmark records the count before the switch and waits for it to
+    increase afterward, proving a fit ran *after* the switch. This is
+    causal on both main and feature: even on main, where the terminal
+    preserves its dimensions while hidden (`display: none`), a stale
+    `cols>0 && rows>0` state cannot satisfy the "count increased" check.
+    On feature, nonce correlation (`__claudeHubLastFitNonce` matched
+    against the nonce dispatched with the mode-return resize message)
+    provides additional causal proof that the *current* request ran; on
+    main (no nonce protocol) the benchmark relies on the fit-call counter
+    increase alone. Scroll-to-bottom is not measured because the feature
+    branch no longer dispatches a forced scroll-to-bottom on mode return
+    (xterm.js preserves the user's scroll position). Specific timing
+    numbers (main vs feature medians, cold-start pane-2 cost) are
+    intentionally omitted here until the new causal benchmark has been
+    run against both branches and produced matched, reproducible results.
 
 ### fix: filter subagent sessions and cache codex session listing
 

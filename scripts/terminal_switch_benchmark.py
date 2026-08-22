@@ -1,17 +1,23 @@
 """
 Terminal switch benchmark — measures time from mode switch to actual
-xterm fit completion, using a NEUTRAL readiness signal that works on both
+xterm fit completion, using a CAUSAL fit-call counter that works on both
 main and feature branches.
 
-Neutral readiness signal: fit completion (cols > 0 AND rows > 0). This
-works on both main and feature because every terminal reports its
-dimensions once it has been laid out and fitted.
+Causal fit-call counter: before each mode switch (workspace -> terminal),
+the benchmark injects a counter into every visible terminal iframe that
+increments every time `term.resize()` is called (which is what the fit
+addon calls internally). The counter's value is recorded as the baseline
+*before* the switch. After switching back to terminal mode, the benchmark
+waits for the counter to INCREASE past that baseline — proving a fit ran
+*after* the switch. This is causal on both main and feature: even on main,
+where the terminal preserves its dimensions while hidden (display:none),
+a stale cols>0/rows>0 state cannot satisfy the "count increased" check.
 
 Causal correlation (feature only): when nonces are present, the benchmark
 additionally requires `lastFitNonce == expected_fit_nonce` to prove the
 *current* mode-return resize request ran (not a delayed unrelated fit).
-On main, where no nonce protocol exists, the benchmark falls back to the
-neutral cols>0/rows>0 signal alone.
+On main, where no nonce protocol exists, the benchmark relies on the
+fit-call counter increase alone.
 
 Scroll-to-bottom is NOT measured: the feature branch no longer dispatches
 a forced scroll-to-bottom on mode return (xterm.js preserves the user's
@@ -35,7 +41,8 @@ TIMEOUT_MS = 15000
 
 
 def get_term_state(frame):
-    """Return terminal state including request-correlation nonces."""
+    """Return terminal state including request-correlation nonces and the
+    fit-call counter injected by `inject_fit_counter`."""
     return frame.evaluate(
         """
         () => {
@@ -45,10 +52,39 @@ def get_term_state(frame):
             cols: term.cols || 0,
             rows: term.rows || 0,
             lastFitNonce: term.__claudeHubLastFitNonce || null,
+            fitCallCount: term.__claudeHubFitCallCount || 0,
             // lastScrollNonce kept for backward compat; the benchmark no
             // longer measures scroll-to-bottom (it is not dispatched).
             lastScrollNonce: term.__claudeHubLastScrollNonce || null,
           };
+        }
+        """
+    )
+
+
+def inject_fit_counter(frame):
+    """
+    Inject a fit-call counter into the terminal inside `frame`.
+
+    The counter increments every time `term.resize()` is called (which is
+    what the fit addon calls internally). If the counter was already
+    installed, this is a no-op. Returns True if the terminal was found and
+    the counter is installed, False otherwise.
+    """
+    return frame.evaluate(
+        """
+        () => {
+          const term = (window.ttyd && window.ttyd.terminal) || window.term;
+          if (!term) return false;
+          if (term.__claudeHubFitCallCount === undefined) {
+            term.__claudeHubFitCallCount = 0;
+            const origResize = term.resize.bind(term);
+            term.resize = function(cols, rows) {
+              term.__claudeHubFitCallCount++;
+              return origResize(cols, rows);
+            };
+          }
+          return true;
         }
         """
     )
@@ -62,15 +98,18 @@ def find_frame_for_tab(page, tab_id):
     return None
 
 
-def wait_for_fit(page, tab_ids, expected_nonces, t0):
+def wait_for_fit(page, tab_ids, expected_nonces, baseline_fit_counts, t0):
     """
     Wait until every visible pane's terminal has completed a fit after the
     mode switch.
 
-    Neutral readiness signal (works on both main and feature): cols > 0
-    AND rows > 0. Every terminal reports its dimensions once it has been
-    laid out and fitted, so this works regardless of whether the branch
-    dispatches nonce-correlated resize messages.
+    Causal fit-call counter (works on both main and feature): the benchmark
+    requires `state["fitCallCount"] > baseline_fit_counts[tid]`. The
+    baseline is recorded *before* the mode switch, so an increase proves a
+    `term.resize()` (i.e. a fit) ran *after* the switch. This is causal on
+    both branches: even on main, where the terminal preserves its
+    dimensions while hidden (display:none), a stale cols>0/rows>0 state
+    cannot satisfy the "count increased" check.
 
     Causal correlation (feature only): when nonces are present for a tab
     (i.e. `expected_nonces[tab_id]["fit"]` is not None), the benchmark
@@ -79,8 +118,7 @@ def wait_for_fit(page, tab_ids, expected_nonces, t0):
     fit from a ResizeObserver callback that fired before the switch).
 
     On main, where no nonce protocol exists, `expected_nonces` is empty
-    and the benchmark falls back to the neutral cols>0/rows>0 signal
-    alone.
+    and the benchmark relies on the fit-call counter increase alone.
 
     Fails (raises) if any requested tab's iframe cannot be found.
     Returns (elapsed_ms, settled_dict, fit_times).
@@ -116,9 +154,14 @@ def wait_for_fit(page, tab_ids, expected_nonces, t0):
                 all_done = False
                 continue
             cols, rows = state["cols"], state["rows"]
+            fit_call_count = state["fitCallCount"]
             last_fit_nonce = state["lastFitNonce"]
             expected = expected_nonces.get(tid, {"fit": None})
             expected_fit_nonce = expected.get("fit")
+            baseline = baseline_fit_counts.get(tid, 0)
+
+            # Causal signal: a fit (term.resize) ran AFTER the mode switch.
+            fit_ran_after_switch = fit_call_count > baseline
 
             # Neutral signal: fit produced valid (nonzero) dimensions.
             fit_valid = cols > 0 and rows > 0
@@ -131,7 +174,7 @@ def wait_for_fit(page, tab_ids, expected_nonces, t0):
                 or last_fit_nonce == expected_fit_nonce
             )
 
-            if fit_valid and nonce_matched and not fit_done[tid]:
+            if fit_ran_after_switch and fit_valid and nonce_matched and not fit_done[tid]:
                 fit_done[tid] = True
                 fit_times[tid] = round((now - t0) * 1000, 1)
 
@@ -263,6 +306,26 @@ def read_dispatched_nonces(page):
 CHROMIUM_PATH = "/Users/bytedance/Library/Caches/ms-playwright/chromium-1223/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
 
 
+def collect_baseline_fit_counts(page, tab_ids):
+    """
+    For each visible tab, inject the fit-call counter into its iframe and
+    return the current (baseline) fit-call count keyed by tab ID.
+
+    Tabs whose iframe cannot be found are skipped (they will cause
+    `wait_for_fit` to fail, which is the desired behavior).
+    """
+    baseline = {}
+    for tab_id in tab_ids:
+        frame = find_frame_for_tab(page, tab_id)
+        if frame is None:
+            continue
+        inject_fit_counter(frame)
+        state = get_term_state(frame)
+        if state is not None:
+            baseline[tab_id] = state["fitCallCount"]
+    return baseline
+
+
 def run_benchmark():
     results = {}
     with sync_playwright() as p:
@@ -286,6 +349,10 @@ def run_benchmark():
         switch_mode(page, "workspace")
         time.sleep(0.8)
         tab_ids = get_visible_tab_ids(page)
+        # Inject the fit-call counter and record the baseline count BEFORE
+        # the mode switch, so any fit that runs after the switch will
+        # increment the count past this baseline.
+        baseline_fit_counts = collect_baseline_fit_counts(page, tab_ids)
         t0 = time.time()
         switch_mode(page, "terminal")
         # The frontend defers dispatchTerminalReturnResize to the next rAF;
@@ -293,7 +360,7 @@ def run_benchmark():
         time.sleep(0.1)
         expected_nonces = read_dispatched_nonces(page)
         elapsed_1x1, settled_1x1, fit_times_1x1 = wait_for_fit(
-            page, tab_ids, expected_nonces, t0
+            page, tab_ids, expected_nonces, baseline_fit_counts, t0
         )
         results["1x1"] = {
             "elapsed_ms": round(elapsed_1x1, 1),
@@ -301,6 +368,7 @@ def run_benchmark():
             "fit_times_ms": fit_times_1x1,
             "tab_ids": tab_ids,
             "expected_nonces": expected_nonces,
+            "baseline_fit_counts": baseline_fit_counts,
         }
         print(
             f"1x1: total={elapsed_1x1:.1f}ms, "
@@ -313,12 +381,15 @@ def run_benchmark():
         switch_mode(page, "workspace")
         time.sleep(0.8)
         tab_ids = get_visible_tab_ids(page)
+        # Re-inject the counter (no-op if already present) and record the
+        # baseline count before this second mode switch.
+        baseline_fit_counts = collect_baseline_fit_counts(page, tab_ids)
         t0 = time.time()
         switch_mode(page, "terminal")
         time.sleep(0.1)
         expected_nonces = read_dispatched_nonces(page)
         elapsed_split, settled_split, fit_times_split = wait_for_fit(
-            page, tab_ids, expected_nonces, t0
+            page, tab_ids, expected_nonces, baseline_fit_counts, t0
         )
         results["2x1"] = {
             "elapsed_ms": round(elapsed_split, 1),
@@ -326,6 +397,7 @@ def run_benchmark():
             "fit_times_ms": fit_times_split,
             "tab_ids": tab_ids,
             "expected_nonces": expected_nonces,
+            "baseline_fit_counts": baseline_fit_counts,
         }
         print(
             f"2x1: total={elapsed_split:.1f}ms, "
