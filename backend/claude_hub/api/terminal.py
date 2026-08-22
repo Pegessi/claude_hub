@@ -1072,6 +1072,11 @@ async def proxy_terminal_request(
           // Expose on term so other closures (history refresh / replay)
           // can request a re-fit without duplicating the fallback chain.
           term.__claudeHubRequestFit = callFit;
+          // Debounced fit for cross-frame requests (e.g. parent mode-return
+          // resize). scheduleFit debounces and double-fits to absorb layout
+          // transitions, so it is safer than callFit for externally-triggered
+          // resizes where the container may still be settling.
+          term.__claudeHubScheduleFit = scheduleFit;
 
           let fitTimer = null;
           function scheduleFit() {{
@@ -1761,6 +1766,18 @@ async def proxy_terminal_request(
 
           if (event.data.type === 'terminal-scroll-bottom') {{
             scrollBottomWhenReady(50);
+            return;
+          }}
+
+          if (event.data.type === 'terminal-resize') {{
+            // Explicit re-fit requested by the parent frame (e.g. after
+            // switching back to Terminal mode). Use the debounced scheduler
+            // so the fit lands after the shell has left its hidden state.
+            if (term && typeof term.__claudeHubScheduleFit === 'function') {{
+              term.__claudeHubScheduleFit();
+            }} else if (term && typeof term.__claudeHubRequestFit === 'function') {{
+              term.__claudeHubRequestFit();
+            }}
             return;
           }}
 

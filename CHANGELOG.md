@@ -21,11 +21,15 @@
   rendering and forces a full xterm re-paint on return.
 - **How**: `tasksByStatus('done')` now sorts by `completed_at` desc and slices
   to `DONE_TASKS_PREVIEW_LIMIT` (15) unless `showAllDoneTasks` is set; the
-  column header shows the real total and a toggle button. The terminal shell
+  column header shows the real total and a toggle button (always visible on
+  desktop via `.column-collapse-button--done-toggle`). The terminal shell
   switched from `v-show` to a `terminal-mode-shell--hidden` class that uses
   `position: absolute; inset: 0; visibility: hidden; pointer-events: none`,
-  and a mode watcher re-sends resize/scroll-bottom to the active iframe when
-  returning to terminal mode.
+  and a mode watcher posts `terminal-resize` + `terminal-scroll-bottom` to
+  every registered iframe on return to terminal mode. The iframe injected
+  script gained a `terminal-resize` message handler that calls the debounced
+  `scheduleFit` so all visible panes (1x1 and split layouts) re-fit after the
+  shell leaves its hidden state.
 
 ### fix: filter subagent sessions and cache codex session listing
 
