@@ -534,12 +534,8 @@ def _init_e2e_repo() -> None:
 
 def main() -> int:
     sys.path.insert(0, str(BACKEND))
-    from claude_hub.models import WorkspaceTask
-    from claude_hub.services.task_graph import (
-        compat_run_id_for_task,
-        make_resident_consumer_key,
-        make_task_consumer_key,
-    )
+    from claude_hub.models import WorkspaceTask  # noqa: WPS433
+    from claude_hub.services import task_graph as tg  # noqa: WPS433
 
     evidence: dict = {
         "port": base.PORT,
@@ -599,7 +595,7 @@ def main() -> int:
         )
         workspace_id = workspace["id"]
         evidence["workspace_id"] = workspace_id
-        resident_key = make_resident_consumer_key(workspace_id)
+        resident_key = tg.make_resident_consumer_key(workspace_id)
         evidence["resident_consumer_key"] = resident_key
         assert resident_key == f"workspace:{workspace_id}:resident"
 
@@ -617,7 +613,7 @@ def main() -> int:
         )
         parent_id = parent["id"]
         evidence["parent_task_id"] = parent_id
-        evidence["parent_consumer_key"] = make_task_consumer_key(parent_id)
+        evidence["parent_consumer_key"] = tg.make_task_consumer_key(parent_id)
 
         worker_call_id = "e2e-worker-report-1"
         child = task_cli(
@@ -642,7 +638,7 @@ def main() -> int:
         )
         child_id = child["id"]
         evidence["child_task_id"] = child_id
-        evidence["child_consumer_key"] = make_task_consumer_key(child_id)
+        evidence["child_consumer_key"] = tg.make_task_consumer_key(child_id)
         assert child.get("parent_task_id") == parent_id
 
         started = task_cli(
@@ -854,12 +850,12 @@ def main() -> int:
         evidence["child_compat_run_id_before_reload"] = _compat_run_id(child_detail)
         parent_model = WorkspaceTask.model_validate(parent_detail)
         child_model = WorkspaceTask.model_validate(child_detail)
-        assert evidence["parent_compat_run_id_before_reload"] == compat_run_id_for_task(
-            parent_model
-        )
-        assert evidence["child_compat_run_id_before_reload"] == compat_run_id_for_task(
-            child_model
-        )
+        assert evidence[
+            "parent_compat_run_id_before_reload"
+        ] == tg.compat_run_id_for_task(parent_model)
+        assert evidence[
+            "child_compat_run_id_before_reload"
+        ] == tg.compat_run_id_for_task(child_model)
 
         # Freeze the original target set at verdict time (seq 1..3). Do not re-fetch
         # before reload — late mailbox rows (e.g. reaper follow-ups) may arrive in between.
@@ -957,7 +953,7 @@ def main() -> int:
             evidence["child_compat_run_id_after_reload"]
             == evidence["child_compat_run_id_before_reload"]
         )
-        assert make_resident_consumer_key(workspace_id) == resident_key
+        assert tg.make_resident_consumer_key(workspace_id) == resident_key
 
         ack_seq = int(original_registry["max_sequence"])
         acked = task_cli("ack", workspace_id, parent_id, str(ack_seq))
