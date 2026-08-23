@@ -11271,7 +11271,19 @@ def test_monitor_does_not_auto_continue_reviewer_after_sealed_terminal_verdict(
     monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture)
 
     sampled_at = datetime.now()
+    reviewer_tmux = f"claude-hub-{reviewer.tab_id}"
     status_samples[:] = [
+        TerminalAgentStatus(
+            tab_id=reviewer.tab_id,
+            tab_name="r",
+            agent_type=AgentType.CODEX,
+            status=AgentRuntimeStatus.IDLE,
+            status_text="Idle",
+            detail="reviewer idle after verdict",
+            tmux_session=reviewer_tmux,
+            last_changed_at=sampled_at - timedelta(seconds=120),
+            sampled_at=sampled_at,
+        ),
         TerminalAgentStatus(
             tab_id=worker.tab_id,
             tab_name="w",
@@ -11283,17 +11295,6 @@ def test_monitor_does_not_auto_continue_reviewer_after_sealed_terminal_verdict(
             last_changed_at=sampled_at - timedelta(seconds=120),
             sampled_at=sampled_at,
         ),
-        TerminalAgentStatus(
-            tab_id=reviewer.tab_id,
-            tab_name="r",
-            agent_type=AgentType.CODEX,
-            status=AgentRuntimeStatus.IDLE,
-            status_text="Idle",
-            detail="reviewer idle after verdict",
-            tmux_session=f"claude-hub-{reviewer.tab_id}",
-            last_changed_at=sampled_at - timedelta(seconds=120),
-            sampled_at=sampled_at,
-        ),
     ]
 
     asyncio.run(
@@ -11302,7 +11303,6 @@ def test_monitor_does_not_auto_continue_reviewer_after_sealed_terminal_verdict(
 
     reviewer_after = workspace_manager.sessions[reviewer_id]
     recovered = workspace_manager.tasks[task["id"]]
-    reviewer_tmux = f"claude-hub-{reviewer.tab_id}"
     reviewer_prompts = [msg for tmux, msg in sent_messages if tmux == reviewer_tmux]
 
     assert reviewer_prompts == [], "reviewer must not be auto-continued after sealed verdict"
