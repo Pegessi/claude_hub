@@ -117,25 +117,6 @@ def agent_tree() -> None:
     """Thin Agent Tree client over /api/agent-tree (managed_task only)."""
 
 
-@agent_tree.command("roots")
-@click.argument("workspace_id")
-@click.pass_context
-def roots(ctx: click.Context, workspace_id: str) -> None:
-    """List resident_root runs (client filter of GET /runs)."""
-    try:
-        with cli_main.get_client(ctx) as client:
-            rows = client.list_agent_tree_runs(workspace_id)
-    except HubError as exc:
-        _raise_hub_error(exc)
-    listed = rows if isinstance(rows, list) else []
-    runs = [
-        row
-        for row in listed
-        if isinstance(row, dict) and row.get("executor_kind") == "resident_root"
-    ]
-    _emit_runs(runs, cli_main.as_json(ctx))
-
-
 @agent_tree.command("runs")
 @click.argument("workspace_id")
 @click.option("--root-id", default=None, help="Limit to this root subtree.")

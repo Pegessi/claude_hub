@@ -37,22 +37,10 @@ class _PromptsMixin:
             # _run_resident_agent for the reuse path.)
             if session.agent_type == AgentType.TERMINAL:
                 return ""
-            # Find the resident's root run so the bootstrap prompt includes its
-            # id and persisted ACK cursor. The root run is created before the
-            # session in _run_resident_agent.
-            root_run_id = None
-            ack_sequence = 0
-            for run in self.agent_tree._runs.values():
-                if run.workspace_id == workspace.id and run.parent_id is None:
-                    root_run_id = run.id
-                    ack_sequence = run.ack_sequence
-                    break
             return _wm.build_resident_agent_prompt(
                 workspace,
                 self._report_base_url(session),
                 session.id,
-                root_run_id,
-                ack_sequence,
             )
         return self._build_workspace_agent_prompt(workspace, session)
 

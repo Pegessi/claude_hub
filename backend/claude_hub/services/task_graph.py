@@ -9,12 +9,11 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from ..models import Workspace, WorkspaceTask
+from ..models import WorkspaceTask
 
 logger = logging.getLogger(__name__)
 
 TASK_CONSUMER_PREFIX = "task:"
-RESIDENT_CONSUMER_TEMPLATE = "workspace:{workspace_id}:resident"
 
 
 def compat_run_id_for_task(task: WorkspaceTask) -> str:
@@ -49,23 +48,6 @@ def make_task_consumer_key(task_id: str) -> str:
     return f"{TASK_CONSUMER_PREFIX}{task_id}"
 
 
-def make_resident_consumer_key(workspace_id: str) -> str:
-    """Stable workspace-resident consumer key. Never a Session id."""
-
-    if not workspace_id:
-        raise ValueError("Resident consumer key requires a workspace id")
-    return RESIDENT_CONSUMER_TEMPLATE.format(workspace_id=workspace_id)
-
-
-def ensure_resident_consumer_key(workspace: Workspace) -> str:
-    """Return the persisted resident key, filling it from workspace id if absent."""
-
-    key = workspace.resident_consumer_key
-    if key:
-        return key
-    return make_resident_consumer_key(workspace.id)
-
-
 def parent_task_consumer_key(task: WorkspaceTask) -> str:
     """Consumer identity for this Task when it supervises children."""
 
@@ -79,11 +61,15 @@ def task_inbox_consumer_key(task: WorkspaceTask) -> str:
 
 
 def task_supervisor_consumer_key(task: WorkspaceTask) -> str:
-    """Events this Task sends to its supervisor (STARTED / REPORT / verdicts)."""
+    """Events this Task sends to its supervisor (STARTED / REPORT / verdicts).
+
+    Root tasks (no ``parent_task_id``) address their own Task consumer —
+    there is no implicit Resident / workspace-level supervisor.
+    """
 
     if task.parent_task_id:
         return make_task_consumer_key(task.parent_task_id)
-    return make_resident_consumer_key(task.workspace_id)
+    return make_task_consumer_key(task.id)
 
 
 def validate_parent_task(

@@ -16,10 +16,12 @@ resident agents, sending follow-up instructions, and reviewing progress reports.
 - Keep resident Claude or Codex agents running in persistent terminal tabs.
 - Add tasks with optional pasted image attachments.
 - Dispatch tasks to a specific agent or let the workspace choose the available agent.
-- Use the backend Agent Tree (`docs/AGENT_TREE.md`) so a Resident or worker
-  can spawn managed Claude/Codex/Cursor children, wait/ACK the durable
-  mailbox, and retry with stable `call_id`s (`claude-hub agent-tree` or
-  REST). There is no tree UI yet.
+- Use the Task Graph / TaskMailbox ([docs/AGENT_TREE.md](docs/AGENT_TREE.md)) so
+  parent Tasks wait/ACK subtree events on `task:<task_id>` cursors
+  (`claude-hub task tree/events/wait/ack/followup/start`). Worker and reviewer
+  agents are ordinary Task session assignments; the optional Resident is an
+  independent long-running agent (not a mailbox consumer). `/api/agent-tree/*`
+  and `claude-hub agent-tree` are legacy compat projection only.
 - Track task state across Todo, Queued, Working, Review, and Done columns.
 - Send follow-up messages from the task detail panel without leaving the board.
 - Record agent reports with changed files, validation, risks, and review status.
@@ -163,10 +165,13 @@ uv run claude-hub session send <SESSION_ID> --message "continue"
 uv run claude-hub session report <SESSION_ID> --state working --message "..."
 uv run claude-hub lessons list <WORKSPACE_ID> --query terminal
 uv run claude-hub lessons get <WORKSPACE_ID> <LESSON_ID>
-uv run claude-hub --json agent-tree roots <WORKSPACE_ID>
-uv run claude-hub --json agent-tree spawn <WORKSPACE_ID> <PARENT_RUN_ID> --message "..." --agent-type claude
-uv run claude-hub --json agent-tree wait <WORKSPACE_ID> <RECIPIENT_RUN_ID> --since-sequence 0
-uv run claude-hub --json agent-tree ack <WORKSPACE_ID> <RUN_ID> <SEQUENCE>
+uv run claude-hub --json task tree <WORKSPACE_ID> [<PARENT_TASK_ID>]
+uv run claude-hub --json task events <WORKSPACE_ID> <TASK_ID> --subtree --since-sequence 0
+uv run claude-hub --json task wait <WORKSPACE_ID> <TASK_ID> --subtree --since-sequence 0
+uv run claude-hub --json task ack <WORKSPACE_ID> <TASK_ID> <SEQUENCE>
+uv run claude-hub --json task followup <WORKSPACE_ID> <TASK_ID> --message "..."
+# Legacy compat projection only (linked AgentRun ids; new work uses task above):
+# uv run claude-hub --json agent-tree roots|spawn|wait|ack ...
 ```
 
 Loopback requests bypass auth, so a local backend needs no token; commands exit
@@ -269,8 +274,8 @@ rules). **No change — even a small one — should be made directly on `main`.*
 
 ## Reference Docs
 
-- [docs/AGENT_TREE.md](docs/AGENT_TREE.md): agent-facing Agent Tree / durable
-  mailbox recipes and `claude-hub agent-tree` CLI (backend-only; no UI yet)
+- [docs/AGENT_TREE.md](docs/AGENT_TREE.md): Task Graph / TaskMailbox agent guide
+  (`claude-hub task` primary; `claude-hub agent-tree` legacy compat only)
 - [CLAUDE.md](CLAUDE.md): project conventions and development workflow
 - [CHANGELOG.md](CHANGELOG.md): merge-level change history
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): auth and public deployment setup

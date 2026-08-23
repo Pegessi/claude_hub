@@ -154,11 +154,12 @@ def _seed_linked_managed_runs(
     workspace_id: str,
     task: WorkspaceTask,
 ) -> tuple[AgentRun, AgentRun]:
-    resident = _session(
+    parent_task_id = "task-parent-root"
+    _session(
         manager,
         workspace_id,
         session_id="session-resident",
-        task_id="",
+        task_id=parent_task_id,
         role=WorkspaceSessionRole.RESIDENT,
     )
     root = AgentRun(
@@ -167,14 +168,28 @@ def _seed_linked_managed_runs(
         parent_id=None,
         path="run-root",
         supervisor_id=None,
-        executor_kind=ExecutorKind.RESIDENT_ROOT,
+        executor_kind=ExecutorKind.MANAGED_TASK,
         executor_config=_RUN_CONFIG,
         executor_capabilities=_RUN_CAPS,
         status=AgentRunStatus.RUNNING,
-        context_ref=resident.id,
+        context_ref=parent_task_id,
         ack_sequence=1,
         last_task_message="root-old",
-        title="resident-root",
+        title="managed-parent",
+        created_at=_RUN_STAMP,
+        updated_at=_RUN_STAMP,
+    )
+    manager.tasks[parent_task_id] = WorkspaceTask(
+        id=parent_task_id,
+        workspace_id=workspace_id,
+        title="managed-parent",
+        prompt="supervise",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        session_id="session-resident",
+        agent_run_id=root.id,
+        root_task_id=parent_task_id,
+        path=parent_task_id,
         created_at=_RUN_STAMP,
         updated_at=_RUN_STAMP,
     )

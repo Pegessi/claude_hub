@@ -7,13 +7,11 @@ from ...models.agent_tree import (
     AgentEventType,
     AgentRun,
     AgentRunStatus,
-    ExecutorKind,
 )
 from ...models.task_mailbox import TaskActorRole, TaskEvent, TaskEventType
 from ..agent_tree import _request_fingerprint
 from ..task_graph import (
     compat_run_id_for_task,
-    make_resident_consumer_key,
     make_task_consumer_key,
     resolve_task_tree_fields,
     task_inbox_consumer_key,
@@ -139,18 +137,14 @@ class _TasksMixin:
     def task_mailbox_consumer_key(
         self,
         workspace_id: str,
-        task_id: Optional[str] = None,
+        task_id: str,
     ) -> str:
-        if task_id is None:
-            if workspace_id not in self.workspaces:
-                raise KeyError(workspace_id)
-            return make_resident_consumer_key(workspace_id)
         return make_task_consumer_key(self.require_workspace_task(workspace_id, task_id).id)
 
     def list_task_mailbox_events(
         self,
         workspace_id: str,
-        task_id: Optional[str] = None,
+        task_id: str,
         *,
         since_sequence: int = 0,
         subtree: bool = False,
@@ -165,7 +159,7 @@ class _TasksMixin:
     async def wait_task_mailbox_events(
         self,
         workspace_id: str,
-        task_id: Optional[str] = None,
+        task_id: str,
         *,
         since_sequence: int = 0,
         subtree: bool = False,
@@ -183,12 +177,10 @@ class _TasksMixin:
         self,
         workspace_id: str,
         sequence: int,
-        task_id: Optional[str] = None,
-    ) -> WorkspaceTask | Workspace:
+        task_id: str,
+    ) -> WorkspaceTask:
         consumer_key = self.task_mailbox_consumer_key(workspace_id, task_id)
         self.task_mailbox.ack(workspace_id, consumer_key, sequence)
-        if task_id is None:
-            return self.workspaces[workspace_id]
         return self.tasks[task_id]
 
     async def summarize_workspace_feedback(
@@ -632,22 +624,10 @@ class _TasksMixin:
         workspace_id: str,
         author: Optional[AgentRun],
     ) -> Optional[str]:
-        """Resolve a real Session id for the followup actor.
+        """Resolve a real Session id from Task assignment linked to the author run."""
 
-        A ``RESIDENT_ROOT`` ``context_ref`` may win only when it names a
-        live ``RESIDENT`` Session. Otherwise Task linkage
-        (``Task.agent_run_id == author.id``) is the source of truth.
-        """
         if author is None or author.workspace_id != workspace_id:
             return None
-        if author.executor_kind == ExecutorKind.RESIDENT_ROOT and author.context_ref:
-            session = self.sessions.get(author.context_ref)
-            if (
-                session is not None
-                and session.workspace_id == workspace_id
-                and session.role == WorkspaceSessionRole.RESIDENT
-            ):
-                return session.id
         linked_session_ids = [
             item.session_id
             for item in self.tasks.values()

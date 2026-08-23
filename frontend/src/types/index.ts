@@ -172,8 +172,6 @@ export interface Workspace {
   resident_agent_remote_profile_id?: string | null
   resident_agent_cwd?: string | null
   resident_agent_remote_reconnect: boolean
-  resident_consumer_key?: string | null
-  resident_ack_sequence?: number
   created_at: string
   updated_at: string
 }

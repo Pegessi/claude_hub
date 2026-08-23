@@ -65,13 +65,11 @@ from .agent_tree_adapters import (
     ExternalJobAdapter,
     ManagedTaskAdapter,
     NativeSubagentAdapter,
-    ResidentRootAdapter,
 )
 from .directed_wait import DirectedWaitCoordinator
 from .task_graph import (
     compat_path_for_task,
     compat_run_id_for_task,
-    make_resident_consumer_key,
     make_task_consumer_key,
     task_inbox_consumer_key,
     task_supervisor_consumer_key,
@@ -160,7 +158,6 @@ class AgentTreeManager:
             ExecutorKind.MANAGED_TASK: ManagedTaskAdapter(workspace_manager),
             ExecutorKind.NATIVE_SUBAGENT: NativeSubagentAdapter(),
             ExecutorKind.EXTERNAL_JOB: ExternalJobAdapter(),
-            ExecutorKind.RESIDENT_ROOT: ResidentRootAdapter(workspace_manager),
         }
 
     # ------------------------------------------------------------------
@@ -168,6 +165,8 @@ class AgentTreeManager:
     # ------------------------------------------------------------------
 
     def _adapter(self, kind: ExecutorKind) -> ExecutorAdapter:
+        if kind == ExecutorKind.RESIDENT_ROOT:
+            raise ValueError("Legacy resident_root runs are load-only and have no runtime adapter")
         return self._adapters[kind]
 
     def require_executor_available(self, kind: ExecutorKind) -> None:
@@ -482,15 +481,15 @@ class AgentTreeManager:
         return session
 
     def _consumer_key_for_run(self, run: AgentRun) -> Optional[str]:
-        """Task or resident mailbox consumer. Never a Session id."""
+        """Task mailbox consumer for a linked managed task. Never a Session id."""
 
         if run.executor_kind == ExecutorKind.RESIDENT_ROOT:
-            return make_resident_consumer_key(run.workspace_id)
+            return None
         try:
             task = self._wm._resolve_task_for_compat_run(run.workspace_id, run)
         except (KeyError, ValueError):
-            if run.executor_kind == ExecutorKind.MANAGED_TASK and not run.parent_id:
-                return make_resident_consumer_key(run.workspace_id)
+            return None
+        if task is None:
             return None
         return make_task_consumer_key(task.id)
 
@@ -550,6 +549,9 @@ class AgentTreeManager:
             raise KeyError(f"Parent run {req.parent_id} not found")
         if parent.workspace_id != req.workspace_id:
             raise ValueError("Parent run belongs to a different workspace")
+        if parent.executor_kind == ExecutorKind.RESIDENT_ROOT:
+            raise ValueError("Cannot spawn from legacy resident_root; use Task Graph parent Task")
+        self._reject_legacy_resident_public(req.parent_id, req.workspace_id, operation="spawn")
 
         # Full request fingerprint so a reused call_id with a different
         # payload is rejected.
@@ -773,14 +775,27 @@ class AgentTreeManager:
 
         return self._project_run(run)
 
-    def _managed_spawn_parent_assignment(
-        self, run: AgentRun
-    ) -> Tuple[Optional[str], Optional[str]]:
+    def _reject_legacy_resident_public(
+        self, run_id: str, workspace_id: str, *, operation: str
+    ) -> None:
+        """Fail closed: legacy ``resident_root`` blobs are load-only, not public API."""
+
+        stored = self._runs.get(run_id)
+        if (
+            stored is not None
+            and stored.workspace_id == workspace_id
+            and stored.executor_kind == ExecutorKind.RESIDENT_ROOT
+        ):
+            raise ValueError(
+                f"Legacy resident_root run {run_id!r} is load-only and cannot {operation}"
+            )
+
+    def _managed_spawn_parent_assignment(self, run: AgentRun) -> Tuple[str, str]:
         """Resolve Task parent and supervisor assignment for a managed spawn.
 
         Session ids are assignment metadata only: never a cursor or parent.
-        Missing parent, cross-workspace parent, or an unresolved parent Task
-        fail closed. ``RESIDENT_ROOT`` is the only top-level (null parent).
+        Missing parent, cross-workspace parent, unresolved parent Task, or a
+        parent without a live session assigned to that Task fail closed.
         """
 
         if not run.parent_id:
@@ -791,20 +806,10 @@ class AgentTreeManager:
         if parent.workspace_id != run.workspace_id:
             raise ValueError("Parent run belongs to a different workspace")
         if parent.executor_kind == ExecutorKind.RESIDENT_ROOT:
-            session = self._live_resident_session(run.workspace_id)
-            if session is None:
-                raise ValueError("Resident spawn requires a live resident assignment")
-            return None, session.id
-        try:
-            parent_task = self._wm._resolve_task_for_compat_run(run.workspace_id, parent)
-        except KeyError:
-            if parent.executor_kind != ExecutorKind.MANAGED_TASK:
-                raise
-            # Unlinked historical MANAGED_TASK parent: spawn a top-level
-            # child Task. Supervisor mailbox is the workspace-resident
-            # consumer. Do not invent a writable AgentRun lifecycle.
-            resident = self._live_resident_session(run.workspace_id)
-            return None, resident.id if resident is not None else None
+            raise ValueError(
+                "Managed spawn requires an explicit parent Task run, not legacy resident_root"
+            )
+        parent_task = self._wm._resolve_task_for_compat_run(run.workspace_id, parent)
         session = self._wm.sessions.get(parent_task.session_id or "")
         if session is None or session.workspace_id != run.workspace_id:
             raise ValueError("Managed spawn parent has no live session assignment")
@@ -970,6 +975,9 @@ class AgentTreeManager:
         """Append a message to the recipient's mailbox without waking it."""
         self._validate_workspace(req.workspace_id)
 
+        self._reject_legacy_resident_public(req.author_id, req.workspace_id, operation="send")
+        self._reject_legacy_resident_public(req.recipient_id, req.workspace_id, operation="send")
+
         recipient = self._runs.get(req.recipient_id)
         if recipient is None:
             raise KeyError(f"Recipient run {req.recipient_id} not found")
@@ -1047,6 +1055,11 @@ class AgentTreeManager:
         adapter.
         """
         self._validate_workspace(req.workspace_id)
+
+        self._reject_legacy_resident_public(req.author_id, req.workspace_id, operation="followup")
+        self._reject_legacy_resident_public(
+            req.recipient_id, req.workspace_id, operation="followup"
+        )
 
         recipient = self._runs.get(req.recipient_id)
         if recipient is None:
@@ -1235,17 +1248,15 @@ class AgentTreeManager:
         lost.
         """
         self._validate_workspace(req.workspace_id)
+        self._reject_legacy_resident_public(req.recipient_id, req.workspace_id, operation="wait")
 
         recipient = self._lookup_compat_run(req.recipient_id, req.workspace_id)
         if recipient is None:
             raise KeyError(f"Recipient run {req.recipient_id} not found")
 
-        # Hub-enforced receiver cursor: managed/resident use TaskMailbox;
+        # Hub-enforced receiver cursor: managed tasks use TaskMailbox;
         # other runs still use the raw AgentRun.ack_sequence blob.
-        use_mailbox = recipient.executor_kind in (
-            ExecutorKind.MANAGED_TASK,
-            ExecutorKind.RESIDENT_ROOT,
-        )
+        use_mailbox = recipient.executor_kind == ExecutorKind.MANAGED_TASK
         if use_mailbox:
             consumer = self._consumer_key_for_run(recipient)
             mailbox_cursor = (
@@ -1298,17 +1309,19 @@ class AgentTreeManager:
         not change the run's lifecycle status.
         """
         self._validate_workspace(workspace_id)
+        self._reject_legacy_resident_public(run_id, workspace_id, operation="ack")
         run = self._lookup_compat_run(run_id, workspace_id)
         if run is None:
             raise KeyError(f"Run {run_id} not found")
 
-        if run.executor_kind in (ExecutorKind.MANAGED_TASK, ExecutorKind.RESIDENT_ROOT):
+        if run.executor_kind == ExecutorKind.MANAGED_TASK:
             consumer = self._consumer_key_for_run(run)
             if consumer is None:
                 raise ValueError(f"Run {run_id} has no TaskMailbox consumer")
             self._wm.task_mailbox.ack(workspace_id, consumer, sequence, persist=persist)
             return self._lookup_compat_run(run_id, workspace_id) or run
 
+        # RESIDENT_ROOT and other legacy kinds: AgentRun cursor only (no TaskMailbox).
         max_seq = self._next_seq.get(workspace_id, 1) - 1
         if sequence > max_seq:
             raise ValueError(f"ACK sequence {sequence} exceeds workspace max sequence {max_seq}")
@@ -1342,6 +1355,8 @@ class AgentTreeManager:
         COMPLETED, FAILED, or INTERRUPTED is returned unchanged.
         """
         self._validate_workspace(req.workspace_id)
+
+        self._reject_legacy_resident_public(req.run_id, req.workspace_id, operation="interrupt")
 
         run = self._runs.get(req.run_id)
         if run is None:
@@ -1445,6 +1460,8 @@ class AgentTreeManager:
         for run in self._runs.values():
             if run.workspace_id != req.workspace_id or run.id in by_id:
                 continue
+            if run.executor_kind == ExecutorKind.RESIDENT_ROOT:
+                continue
             by_id[run.id] = self._project_run(run)
         runs = list(by_id.values())
         if req.root_id is not None:
@@ -1473,11 +1490,9 @@ class AgentTreeManager:
         The effective cursor is ``max(since_sequence, run.ack_sequence)`` so
         ACKed events are never re-delivered (Hub-enforced dedupe).
         """
+        self._reject_legacy_resident_public(run_id, workspace_id, operation="read events")
         run = self._lookup_compat_run(run_id, workspace_id)
-        if run is not None and run.executor_kind in (
-            ExecutorKind.MANAGED_TASK,
-            ExecutorKind.RESIDENT_ROOT,
-        ):
+        if run is not None and run.executor_kind == ExecutorKind.MANAGED_TASK:
             return self._compat_mailbox_events(workspace_id, run, since_sequence, subtree)
         effective_since = max(since_sequence, run.ack_sequence if run else 0)
         return self._events_for(workspace_id, run_id, effective_since, subtree)
@@ -1500,8 +1515,10 @@ class AgentTreeManager:
 
         if run.workspace_id != workspace_id:
             raise ValueError("Run belongs to a different workspace")
-        consumer = self._consumer_key_for_run(run)
+        if run.executor_kind != ExecutorKind.MANAGED_TASK:
+            raise ValueError(f"Mailbox compat events require MANAGED_TASK, got {run.executor_kind}")
         mailbox = self._wm.task_mailbox
+        consumer = self._consumer_key_for_run(run)
         cursor = 0
         projected: List[AgentEvent] = []
         if consumer is not None:
@@ -1925,6 +1942,11 @@ class AgentTreeManager:
         if stored is not None:
             if workspace_id is not None and stored.workspace_id != workspace_id:
                 raise ValueError("Run belongs to a different workspace")
+            if stored.executor_kind == ExecutorKind.RESIDENT_ROOT:
+                raise ValueError(
+                    f"Legacy resident_root run {run_id!r} is load-only and not accessible "
+                    "via Agent Tree API"
+                )
             return self._project_run(stored)
         matches = [
             task for task in self._wm.tasks.values() if compat_run_id_for_task(task) == run_id
@@ -1942,13 +1964,8 @@ class AgentTreeManager:
 
     def _project_run(self, run: AgentRun) -> AgentRun:
         """Return a non-durable AgentRun view. Storage bytes stay unchanged."""
-        consumer = self._consumer_key_for_run(run)
-        if consumer == make_resident_consumer_key(run.workspace_id):
-            try:
-                cursor = self._wm.task_mailbox.consumer_cursor(run.workspace_id, consumer)
-            except (KeyError, ValueError):
-                return run
-            return run.model_copy(update={"ack_sequence": cursor})
+        if run.executor_kind == ExecutorKind.RESIDENT_ROOT:
+            return run
         if run.executor_kind != ExecutorKind.MANAGED_TASK:
             return run
         try:
@@ -1978,7 +1995,12 @@ class AgentTreeManager:
         for run in self._runs.values():
             if run.workspace_id != workspace_id:
                 continue
-            if run.executor_kind == ExecutorKind.MANAGED_TASK:
+            if run.executor_kind in {
+                ExecutorKind.MANAGED_TASK,
+                ExecutorKind.RESIDENT_ROOT,
+            }:
+                continue
+            if run.executor_kind == ExecutorKind.RESIDENT_ROOT:
                 continue
             if run.context_ref == context_ref:
                 return self._project_run(run)
@@ -1992,8 +2014,10 @@ class AgentTreeManager:
         title: Optional[str] = None,
         context_ref: Optional[str] = None,
     ) -> AgentRun:
-        """Create a root run (no parent). Used to bootstrap the resident."""
+        """Create a root run (no parent) for a supported executor kind."""
         self._validate_workspace(workspace_id)
+        if executor_kind == ExecutorKind.RESIDENT_ROOT:
+            raise ValueError("Cannot create resident_root runs; legacy blobs are load-only")
         run = AgentRun(
             workspace_id=workspace_id,
             parent_id=None,
@@ -2099,48 +2123,6 @@ class AgentTreeManager:
         self._call_index[workspace_id] = ws_calls
         self._next_seq[workspace_id] = max_seq + 1
 
-        # Migration: historical root runs may have been persisted as
-        # ``managed_task`` before the ``resident_root`` executor kind existed.
-        # A root run (parent_id is None) that is ``managed_task`` represents
-        # the resident agent itself; convert it to ``resident_root`` and link
-        # it to the workspace's resident session so authority checks work.
-        #
-        # Also, old resident root runs may have been persisted without a
-        # context_ref (the resident session id); link them to the workspace's
-        # resident session.
-        from claude_hub.models.agent_tree import ExecutorKind
-
-        workspace = self._wm.workspaces.get(workspace_id)
-        resident_session_id = (
-            getattr(workspace, "resident_agent_session_id", None) if workspace else None
-        )
-        for run in self._runs.values():
-            if run.workspace_id != workspace_id:
-                continue
-            if run.parent_id is not None:
-                continue
-            # Historical managed_task root -> resident_root.
-            if run.executor_kind == ExecutorKind.MANAGED_TASK:
-                run.executor_kind = ExecutorKind.RESIDENT_ROOT
-                run.updated_at = datetime.utcnow()
-                logger.info(
-                    "Migrated root run %s from managed_task to resident_root",
-                    run.id,
-                )
-            # Resident root without context_ref -> link to resident session.
-            if (
-                run.executor_kind == ExecutorKind.RESIDENT_ROOT
-                and run.context_ref is None
-                and resident_session_id is not None
-            ):
-                run.context_ref = resident_session_id
-                run.updated_at = datetime.utcnow()
-                logger.info(
-                    "Migrated resident root run %s: set context_ref=%s",
-                    run.id,
-                    resident_session_id,
-                )
-
         # Backfill the durable executor contract for runs written before
         # executor_config/capability snapshots existed. Managed runs recover
         # the real task session when possible, so a historical Codex/Cursor or
@@ -2149,6 +2131,8 @@ class AgentTreeManager:
         # snapshot rather than being advertised as executable.
         for run in self._runs.values():
             if run.workspace_id != workspace_id:
+                continue
+            if run.executor_kind == ExecutorKind.RESIDENT_ROOT:
                 continue
             adapter = self._adapter(run.executor_kind)
             needs_prepare = run.executor_capabilities is None or (

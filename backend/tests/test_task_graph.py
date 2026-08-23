@@ -17,11 +17,10 @@ from claude_hub.models import (
     WorkspaceTaskUpdate,
 )
 from claude_hub.services.task_graph import (
-    ensure_resident_consumer_key,
-    make_resident_consumer_key,
     make_task_consumer_key,
     parent_task_consumer_key,
     reparent_task,
+    task_supervisor_consumer_key,
     validate_parent_task,
 )
 from claude_hub.services.workspace_manager import WorkspaceManager
@@ -295,19 +294,14 @@ async def test_reparent_save_failure_rolls_back_current_and_descendants(
     assert persisted.tasks[great.id].path == f"{b.id}/{child.id}/{grand.id}/{great.id}"
 
 
-def test_resident_consumer_key_is_stable_and_not_session_id(
+def test_root_task_supervisor_consumer_key_is_self(
     manager: WorkspaceManager, tmp_path: Path
 ) -> None:
     ws_id = _make_workspace(manager, tmp_path)
-    workspace = manager.workspaces[ws_id]
-    expected = make_resident_consumer_key(ws_id)
-    assert workspace.resident_consumer_key == expected
-    assert workspace.resident_ack_sequence == 0
-    assert workspace.resident_agent_session_id is None
-    assert "session" not in expected
-    workspace.resident_agent_session_id = "sess-replaced"
-    assert ensure_resident_consumer_key(workspace) == expected
-    assert workspace.resident_consumer_key == expected
+    root = _create_task(manager, ws_id, "root")
+    assert task_supervisor_consumer_key(root) == make_task_consumer_key(root.id)
+    child = _create_task(manager, ws_id, "child", parent_task_id=root.id)
+    assert task_supervisor_consumer_key(child) == make_task_consumer_key(root.id)
 
 
 def test_parent_consumer_key_is_task_prefixed(manager: WorkspaceManager, tmp_path: Path) -> None:
@@ -315,9 +309,6 @@ def test_parent_consumer_key_is_task_prefixed(manager: WorkspaceManager, tmp_pat
     parent = _create_task(manager, ws_id, "parent")
     key = parent_task_consumer_key(parent)
     assert key == f"task:{parent.id}"
-    workspace = manager.workspaces[ws_id]
-    assert key != workspace.resident_consumer_key
-    assert workspace.resident_consumer_key != workspace.resident_agent_session_id
 
 
 def test_normalize_old_task_and_workspace_are_roots(manager: WorkspaceManager) -> None:
@@ -345,10 +336,8 @@ def test_normalize_old_task_and_workspace_are_roots(manager: WorkspaceManager) -
         "session_prefix": "n",
     }
     ws_norm = manager._normalize_workspace_item(old_ws)
-    assert ws_norm["resident_consumer_key"] == make_resident_consumer_key("ws-old")
-    assert ws_norm["resident_ack_sequence"] == 0
-    again = manager._normalize_workspace_item(ws_norm)
-    assert again["resident_consumer_key"] == ws_norm["resident_consumer_key"]
+    assert "resident_consumer_key" not in ws_norm
+    assert "resident_ack_sequence" not in ws_norm
 
 
 def test_tree_and_consumer_keys_survive_cold_load(
@@ -357,10 +346,8 @@ def test_tree_and_consumer_keys_survive_cold_load(
     ws_id = _make_workspace(manager, tmp_path)
     parent = _create_task(manager, ws_id, "parent")
     child = _create_task(manager, ws_id, "child", parent_task_id=parent.id)
-    resident_key = manager.workspaces[ws_id].resident_consumer_key
-    manager.workspaces[ws_id] = manager.workspaces[ws_id].model_copy(
-        update={"resident_agent_session_id": "sess-1"}
-    )
+    parent_key = make_task_consumer_key(parent.id)
+    manager.tasks[parent.id] = parent.model_copy(update={"consumer_ack_sequence": 3})
     manager._save_state()
 
     fresh = WorkspaceManager()
@@ -370,11 +357,9 @@ def test_tree_and_consumer_keys_survive_cold_load(
     assert loaded_child.parent_task_id == parent.id
     assert loaded_child.root_task_id == parent.id
     assert loaded_child.path == f"{parent.id}/{child.id}"
-    assert loaded_parent.consumer_ack_sequence == 0
-    assert loaded_ws.resident_consumer_key == resident_key
-    loaded_ws.resident_agent_session_id = "sess-2"
-    assert ensure_resident_consumer_key(loaded_ws) == resident_key
+    assert loaded_parent.consumer_ack_sequence == 3
 
     again = WorkspaceManager()
-    assert again.workspaces[ws_id].resident_consumer_key == resident_key
+    assert again.tasks[parent.id].consumer_ack_sequence == 3
+    assert again.task_mailbox.consumer_cursor(ws_id, parent_key) == 3
     assert again.tasks[child.id].path == loaded_child.path

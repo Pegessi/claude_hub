@@ -159,6 +159,7 @@ class _StateMixin:
     def _load_nested_state(self) -> None:
         try:
             index = json.loads(INDEX_FILE.read_text(encoding="utf-8"))
+            legacy_resident_ack_by_workspace: dict[str, int] = {}
             missing_resident_ack_ids: set[str] = set()
             self.workspaces = {}
             for item in index.get("workspaces", []):
@@ -167,6 +168,10 @@ class _StateMixin:
                 workspace_id = str(item["id"])
                 if "resident_ack_sequence" not in item:
                     missing_resident_ack_ids.add(workspace_id)
+                else:
+                    legacy_resident_ack_by_workspace[workspace_id] = int(
+                        item.get("resident_ack_sequence", 0)
+                    )
                 self.workspaces[workspace_id] = Workspace(**self._normalize_workspace_item(item))
             for workspace_id in self.workspaces:
                 state_file = self._workspace_state_file(workspace_id)
@@ -200,6 +205,7 @@ class _StateMixin:
                     missing_parent_ids=missing_parent_ids,
                     missing_ack_ids=missing_ack_ids,
                     missing_resident_ack=workspace_id in missing_resident_ack_ids,
+                    legacy_resident_ack=legacy_resident_ack_by_workspace.get(workspace_id, 0),
                 )
                 materialize_loaded_task_graph(self.tasks, workspace_id)
                 self.task_mailbox.load_from_dict(workspace_id, data)

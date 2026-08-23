@@ -224,7 +224,8 @@ def test_mixed_graph_projection_unions_tasks_once_and_filters(
     assert listed_ids.count("run-linked") == 1
     assert listed_ids.count(linked_child.id) == 1
     assert listed_ids.count(other_root.id) == 1
-    assert listed_ids.count(resident.id) == 1
+    assert listed_ids.count(resident.id) == 0
+    assert resident.id not in listed_ids
     assert listed_ids.count(native.id) == 1
     assert linked_parent.id not in listed_ids
     assert set(listed_ids) == {
@@ -233,7 +234,6 @@ def test_mixed_graph_projection_unions_tasks_once_and_filters(
         "run-linked",
         linked_child.id,
         other_root.id,
-        resident.id,
         native.id,
     }
 

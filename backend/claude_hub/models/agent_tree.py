@@ -1,16 +1,15 @@
-"""Unified Agent Tree + Durable Mailbox/Event Stream models.
+"""AgentRun + Durable Mailbox/Event Stream models (deprecated compatibility).
 
-This module defines the data structures for the agent-to-agent coordination
-layer that unifies the Resident agent, managed workspace tasks, native
-subagents, and external jobs under a single parent/child tree with an
-append-only event stream.
+``AgentRun`` is the deprecated compatibility projection of the canonical
+Workspace Task Graph. New orchestration should use Task Graph / TaskMailbox
+APIs; this module remains for legacy linked run ids and cold replay.
 
 Design goals:
 - Runtime/Hub owns lifecycle state; agents never forge status via free text.
 - Every action and result carries a ``call_id`` / ``correlation_id`` for
   idempotency, retry, and replay.
 - Events are append-only and addressable by a monotonic ``sequence`` cursor
-  so supervisors can ``wait`` for directed events from their subtree.
+  so callers can ``wait`` for directed events from a linked run subtree.
 """
 
 from __future__ import annotations
@@ -26,12 +25,13 @@ from .schemas import AgentType, ExecutionTarget
 
 
 class ExecutorKind(str, Enum):
-    """How a child agent run is executed.
+    """How a linked AgentRun child is executed (compat projection).
 
-    ``managed_task`` wraps the existing workspace task/session/report flow.
+    ``managed_task`` wraps the workspace task/session/report flow.
     ``native_subagent`` is a future in-process subagent (stub for now).
     ``external_job`` is a future remote/third-party job (stub for now).
-    ``resident_root`` is the resident agent itself (the root supervisor).
+    ``resident_root`` is a legacy load-only enum value from pre-Task-Graph
+    persistence; it is not a supervisor role and has no runtime semantics.
     """
 
     MANAGED_TASK = "managed_task"

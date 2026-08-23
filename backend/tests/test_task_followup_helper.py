@@ -463,11 +463,12 @@ def _seed_linked_managed_runs(
     workspace_id: str,
     task: WorkspaceTask,
 ) -> tuple[AgentRun, AgentRun]:
-    resident = _session(
+    parent_task_id = "task-parent-root"
+    _session(
         manager,
         workspace_id,
         session_id="session-resident",
-        task_id="",
+        task_id=parent_task_id,
         role=WorkspaceSessionRole.RESIDENT,
     )
     root = AgentRun(
@@ -476,14 +477,28 @@ def _seed_linked_managed_runs(
         parent_id=None,
         path="run-root",
         supervisor_id=None,
-        executor_kind=ExecutorKind.RESIDENT_ROOT,
+        executor_kind=ExecutorKind.MANAGED_TASK,
         executor_config=_RUN_CONFIG,
         executor_capabilities=_RUN_CAPS,
         status=AgentRunStatus.RUNNING,
-        context_ref=resident.id,
+        context_ref=parent_task_id,
         ack_sequence=1,
         last_task_message="root-old",
-        title="resident-root",
+        title="managed-parent",
+        created_at=_RUN_STAMP,
+        updated_at=_RUN_STAMP,
+    )
+    manager.tasks[parent_task_id] = WorkspaceTask(
+        id=parent_task_id,
+        workspace_id=workspace_id,
+        title="managed-parent",
+        prompt="supervise",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        session_id="session-resident",
+        agent_run_id=root.id,
+        root_task_id=parent_task_id,
+        path=parent_task_id,
         created_at=_RUN_STAMP,
         updated_at=_RUN_STAMP,
     )
@@ -1660,3 +1675,84 @@ async def test_todo_followup_ack_is_task_first_after_worker_assignment(
         item.call_id for item in _mailbox_events(cold, workspace_id) if item.call_id == call_id
     ] == [call_id]
     assert cold.sessions[wrong.id].task_id == "task-other"
+
+
+def test_resolve_followup_actor_session_from_linked_task_assignment(
+    manager_and_workspace: tuple[WorkspaceManager, str],
+) -> None:
+    """Worker/reviewer session comes only from Task.agent_run_id linkage."""
+    manager, workspace_id = manager_and_workspace
+    now = datetime.utcnow()
+    worker_task = WorkspaceTask(
+        id="task-supervisor",
+        workspace_id=workspace_id,
+        title="supervisor",
+        prompt="supervise",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.WORKING,
+        session_id="session-supervisor",
+        agent_run_id="run-supervisor",
+        created_at=now,
+        updated_at=now,
+    )
+    manager.tasks[worker_task.id] = worker_task
+    _session(
+        manager,
+        workspace_id,
+        session_id="session-supervisor",
+        task_id=worker_task.id,
+        role=WorkspaceSessionRole.ORCHESTRATOR,
+    )
+    author = AgentRun(
+        id="run-supervisor",
+        workspace_id=workspace_id,
+        parent_id=None,
+        path="run-supervisor",
+        supervisor_id=None,
+        executor_kind=ExecutorKind.MANAGED_TASK,
+        status=AgentRunStatus.RUNNING,
+        context_ref="stale-unrelated-ref",
+        created_at=now,
+        updated_at=now,
+    )
+    assert manager._resolve_followup_actor_session_id(workspace_id, author) == "session-supervisor"
+
+
+def test_resolve_followup_actor_session_ignores_resident_root_context_ref(
+    manager_and_workspace: tuple[WorkspaceManager, str],
+) -> None:
+    """Legacy RESIDENT_ROOT context_ref must not map to the live Resident session."""
+    manager, workspace_id = manager_and_workspace
+    now = datetime.utcnow()
+    resident_session_id = "session-resident-live"
+    manager.sessions[resident_session_id] = ManagedSession(
+        id=resident_session_id,
+        workspace_id=workspace_id,
+        tab_id="tab-resident",
+        role=WorkspaceSessionRole.RESIDENT,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.IDLE,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="resident",
+        workspace_path="/tmp",
+        tmux_session="tmux-resident",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+    )
+    manager.workspaces[workspace_id] = manager.workspaces[workspace_id].model_copy(
+        update={"resident_agent_session_id": resident_session_id}
+    )
+    author = AgentRun(
+        id="run-resident-root",
+        workspace_id=workspace_id,
+        parent_id=None,
+        path="run-resident-root",
+        supervisor_id=None,
+        executor_kind=ExecutorKind.RESIDENT_ROOT,
+        status=AgentRunStatus.RUNNING,
+        context_ref=resident_session_id,
+        created_at=now,
+        updated_at=now,
+    )
+    assert manager._resolve_followup_actor_session_id(workspace_id, author) is None
