@@ -2,7 +2,7 @@
 
 Task: 加载速度优化 (90f3a50e-7dfd-4b12-82e1-4efc14004fe0)
 Branch: feat/loading-speed-optimization
-Feature HEAD: cb57ac6 (fix: address cycle-24 review findings) + cycle-27 benchmark artifact fixes
+Feature HEAD: 9b35216 (fix: address cycle-26 review findings) + cycle-28 artifact/ledger fixes
 Main HEAD: 16404fe
 
 ## workflow.roles
@@ -15,8 +15,11 @@ Main HEAD: 16404fe
 | exec-ledger | P-EXECUTE | Produce workflow.roles + subagent ledger with agent/model_or_api fields | cb-agent-1 | claude-sonnet-4-6 |
 | exec-cycle26 | P-EXECUTE | Update CHANGELOG to cb57ac6 benchmark numbers (8-run medians); update ledger with cycle-25/26 entries; stop feature validation services | cb-agent-1 | claude-sonnet-4-6 |
 | exec-cycle27 | P-EXECUTE | Fix cycle-26 artifact inconsistency: re-run benchmarks 8x each, build aggregate *_full.json containing all 8 raw runs, update CHANGELOG medians, rename ledger model→model_or_api, add agent+model_or_api to all ledger entries | cb-agent-1 | claude-sonnet-4-6 |
+| exec-cycle28 | P-EXECUTE | Fix cycle-27 findings: correct main 2x1 pane-2 median (240.9→242.7ms) in runs.txt+CHANGELOG, update ledger HEAD to 9b35216, add validate-tests to workflow.roles, ensure roles map exactly across working report/review-gate/ledger | cb-agent-1 | claude-sonnet-4-6 |
 | validate-cycle26 | P-VALIDATE | Re-run feature/main benchmarks 8 runs each; verify JSON artifacts valid; confirm nonce-ack matches first-fit | cb-agent-1 | claude-sonnet-4-6 |
 | validate-cycle27 | P-VALIDATE | Verify aggregate JSON artifacts parse and match runs.txt medians; run 23/23 replay tests against feature backend; black/isort/diff-check clean | cb-agent-1 | claude-sonnet-4-6 |
+| validate-cycle28 | P-VALIDATE | Verify main pane-2 median 242.7ms matches JSON; verify feature pane-1==pane-2; verify CHANGELOG deltas; black/isort/diff-check clean; JSON valid | cb-agent-1 | claude-sonnet-4-6 |
+| validate-tests | P-VALIDATE | Run backend tests (test_terminal_replay.py), black/isort, git diff --check, JSON validation | cb-agent-1 | claude-sonnet-4-6 |
 | judge-cycle23 | P-JUDGE | Cycle 23 review verdict (review_failed) — 4 blocking findings | cb-reviewer-4 | codex |
 | judge-cycle24 | P-JUDGE | Cycle 24 review verdict (review_failed) — uncommitted artifact, ledger gaps, fit-invocation vs completion | cb-reviewer-4 | codex |
 | judge-cycle25 | P-JUDGE | Cycle 25 review verdict (review_failed) — 3 findings (workflow.roles predeclaration, re-run benchmarks with post-return counter, stop 8175 + cb57ac6 provenance) | cb-reviewer-4 | codex |
@@ -38,13 +41,16 @@ Main HEAD: 16404fe
 | 10 | judge-cycle25 | P-JUDGE | cb-reviewer-4 | codex | Cycle 25 review_failed — 3 findings: (1) predeclare workflow.roles + embed ledger in review-gate, (2) re-run benchmarks with post-return counter + remove no-remaining-slowness claim, (3) stop 8175 + submit cb57ac6 provenance | review_failed | addressed by entries 8–9; workflow.roles present in ledger; benchmarks re-run with completion counter; 8175 to be stopped before submit |
 | 11 | judge-cycle26 | P-JUDGE | cb-reviewer-4 | codex | Cycle 26 review_failed — 3 findings: (1) artifact consistency: *_full.json single-run values didn't match any of the 8 runs in runs.txt; (2) workflow contract: workflow.roles must be predeclared in FIRST working report, ledger entries need agent+model_or_api, roles table uses model not model_or_api; (3) risks & acceptance_check missing from handoff | review_failed | addressed by entries 12–13 |
 | 12 | exec-cycle27 | P-EXECUTE | cb-agent-1 | claude-sonnet-4-6 | Fix cycle-26 findings: (1) re-run feature cb57ac6 + main 16404fe benchmarks 8x each, save all raw JSON, build aggregate *_full.json containing all 8 runs so summarized runs match JSON exactly; (2) rename roles table model→model_or_api, add agent+model_or_api columns to all ledger entries; (3) update CHANGELOG medians to match new runs | accepted | feature 1x1=225.1ms 2x1=200.7ms; main 1x1=239.7ms 2x1=240.9ms; deltas 1x1=−6.1% 2x1=−16.7%; feature_cb57ac6_full.json and main_full.json are aggregates with all 8 runs; ledger model→model_or_api; CHANGELOG table updated |
-| 13 | validate-cycle27 | P-VALIDATE | cb-agent-1 | claude-sonnet-4-6 | Verify aggregate JSON artifacts parse and runs match runs.txt medians; run 23/23 replay tests against feature backend; black/isort/diff-check clean | accepted | python3 -m json.tool on both *_full.json PASS; medians computed from runs match runs.txt; tests pass against feature backend 8176 |
+| 13 | validate-cycle27 | P-VALIDATE | cb-agent-1 | claude-sonnet-4-6 | Verify aggregate JSON artifacts parse and runs match runs.txt medians; run 23/23 replay tests against feature backend; black/isort/diff-check clean | accepted | python3 -m json.tool on both *_full.json PASS; medians computed from runs match runs.txt; tests pass against feature backend 8175 |
+| 14 | judge-cycle27 | P-JUDGE | cb-reviewer-4 | codex | Cycle 27 review_failed — 3 findings: (1) main 2x1 pane-2 median wrong (240.9 vs correct 242.7; runs.txt omitted pane 2), (2) ledger HEAD cb57ac6 != actual 9b35216, (3) validate-tests missing from workflow.roles + artifact_refs empty | review_failed | addressed by entries 15–16 |
+| 15 | exec-cycle28 | P-EXECUTE | cb-agent-1 | claude-sonnet-4-6 | Fix cycle-27: correct main 2x1 pane-2 median to 242.7ms in runs.txt+CHANGELOG; update ledger HEAD cb57ac6→9b35216; add validate-tests to workflow.roles; ensure roles map exactly across working report/review-gate/ledger | accepted | main_runs.txt now lists pane1+pane2 per run; pane2 median=242.7ms; CHANGELOG pane2 delta=−17.3%; ledger HEAD=9b35216; validate-tests in roles |
+| 16 | validate-cycle28 | P-VALIDATE | cb-agent-1 | claude-sonnet-4-6 | Verify main pane-2 median 242.7ms matches JSON; feature pane1==pane2; CHANGELOG deltas correct; black/isort/diff-check clean; JSON valid | accepted | main pane2 sorted median=242.7; feature pane1==pane2 all runs; deltas 1x1=−6.1% pane1=−16.7% pane2=−17.3%; all lint clean |
 
 ## Branch / HEAD provenance
 
 - Feature worktree: /Users/bytedance/claude_hub-loading-opt
 - Feature branch: feat/loading-speed-optimization
-- Feature HEAD (cycle-27 fixes): cb57ac6
+- Feature HEAD (cycle-28 fixes): 9b35216
 - Main worktree: /Users/bytedance/claude_hub
 - Main HEAD: 16404fe (merge fix/codex-session-filters)
-- Benchmark feature SHA referenced in CHANGELOG: cb57ac6
+- Benchmark feature SHA referenced in CHANGELOG: cb57ac6 (the feature code SHA being benchmarked; cycle-27/28 commits only touch docs/artifacts, not product code)

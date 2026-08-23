@@ -94,7 +94,7 @@
     | --- | --- | --- | --- | --- |
     | 1x1 | single | 225.1 ms | 239.7 ms | feature −14.6 ms (−6.1%) |
     | 2x1 | pane 1 | 200.7 ms | 240.9 ms | feature −40.2 ms (−16.7%) |
-    | 2x1 | pane 2 | 200.7 ms | 240.9 ms | feature −40.2 ms (−16.7%) |
+    | 2x1 | pane 2 | 200.7 ms | 242.7 ms | feature −42.0 ms (−17.3%) |
 
     Feature-only nonce-ack median (request-correlation, `__claudeHubLastFitNonce`
     matched against the dispatched nonce): 225.1 ms (1x1), 200.7 ms (2x1) —
@@ -114,8 +114,8 @@
     first `fit()` call on each visible terminal pane. It does **not**
     measure visible-content-ready time (the moment the terminal's text
     buffer is fully painted after the fit). Feature is faster than main
-    in first-fit time across all layouts (1x1: −6.1%, 2x1 both panes:
-    −16.7%). The first-fit speedup comes from two changes: (1) the
+    in first-fit time across all layouts (1x1: −6.1%, 2x1 pane 1:
+    −16.7%, 2x1 pane 2: −17.3%). The first-fit speedup comes from two changes: (1) the
     terminal shell keeps its layout box alive (`visibility: hidden` +
     `position: absolute`) instead of collapsing to zero size
     (`display: none`), so xterm.js does not start from a zero-size
