@@ -2,7 +2,7 @@
 
 Task: 加载速度优化 (90f3a50e-7dfd-4b12-82e1-4efc14004fe0)
 Branch: feat/loading-speed-optimization
-Feature HEAD: dea6a8c (cycle-28 branch tip; benchmarked feature code SHA = cb57ac6)
+Feature HEAD: 2b68cb0 (cycle-29 branch tip; benchmarked feature code SHA = cb57ac6)
 Main HEAD: 16404fe
 
 ## workflow.roles
@@ -15,15 +15,19 @@ Main HEAD: 16404fe
 | exec-ledger | P-EXECUTE | Produce workflow.roles + subagent ledger with agent/model_or_api fields | cb-agent-1 | claude-sonnet-4-6 |
 | exec-cycle26 | P-EXECUTE | Update CHANGELOG to cb57ac6 benchmark numbers (8-run medians); update ledger with cycle-25/26 entries; stop feature validation services | cb-agent-1 | claude-sonnet-4-6 |
 | exec-cycle27 | P-EXECUTE | Fix cycle-26 artifact inconsistency: re-run benchmarks 8x each, build aggregate *_full.json containing all 8 raw runs, update CHANGELOG medians, rename ledger model→model_or_api, add agent+model_or_api to all ledger entries | cb-agent-1 | claude-sonnet-4-6 |
-| exec-cycle28 | P-EXECUTE | Fix cycle-27 findings: correct main 2x1 pane-2 median (240.9→242.7ms) in runs.txt+CHANGELOG, update ledger HEAD to 9b35216, add validate-tests to workflow.roles, ensure roles map exactly across working report/review-gate/ledger | cb-agent-1 | claude-sonnet-4-6 |
+| exec-cycle28 | P-EXECUTE | Fix cycle-27 findings: correct main 2x1 pane-2 median (240.9→242.7ms) in runs.txt+CHANGELOG, update ledger HEAD, add validate-tests to workflow.roles, ensure roles map exactly across working report/review-gate/ledger | cb-agent-1 | claude-sonnet-4-6 |
+| exec-cycle29 | P-EXECUTE | Fix cycle-28 findings: add judge-cycle27+judge-cycle28 to workflow.roles; update ledger HEAD to 2b68cb0; correct risk claim (display:none keeps iframe in DOM, collapses layout box); embed full ledger rows in validation | cb-agent-1 | claude-sonnet-4-6 |
 | validate-cycle26 | P-VALIDATE | Re-run feature/main benchmarks 8 runs each; verify JSON artifacts valid; confirm nonce-ack matches first-fit | cb-agent-1 | claude-sonnet-4-6 |
 | validate-cycle27 | P-VALIDATE | Verify aggregate JSON artifacts parse and match runs.txt medians; run 23/23 replay tests against feature backend; black/isort/diff-check clean | cb-agent-1 | claude-sonnet-4-6 |
 | validate-cycle28 | P-VALIDATE | Verify main pane-2 median 242.7ms matches JSON; verify feature pane-1==pane-2; verify CHANGELOG deltas; black/isort/diff-check clean; JSON valid | cb-agent-1 | claude-sonnet-4-6 |
+| validate-cycle29 | P-VALIDATE | Verify roles match ledger entries exactly; HEAD=2b68cb0 matches git; risk claim about display:none is correct; validation embeds full ledger | cb-agent-1 | claude-sonnet-4-6 |
 | validate-tests | P-VALIDATE | Run backend tests (test_terminal_replay.py), black/isort, git diff --check, JSON validation | cb-agent-1 | claude-sonnet-4-6 |
 | judge-cycle23 | P-JUDGE | Cycle 23 review verdict (review_failed) — 4 blocking findings | cb-reviewer-4 | codex |
 | judge-cycle24 | P-JUDGE | Cycle 24 review verdict (review_failed) — uncommitted artifact, ledger gaps, fit-invocation vs completion | cb-reviewer-4 | codex |
 | judge-cycle25 | P-JUDGE | Cycle 25 review verdict (review_failed) — 3 findings (workflow.roles predeclaration, re-run benchmarks with post-return counter, stop 8175 + cb57ac6 provenance) | cb-reviewer-4 | codex |
 | judge-cycle26 | P-JUDGE | Cycle 26 review verdict (review_failed) — 3 findings (artifact consistency, workflow contract, risks/acceptance_check) | cb-reviewer-4 | codex |
+| judge-cycle27 | P-JUDGE | Cycle 27 review verdict (review_failed) — 3 findings (main pane-2 median wrong, ledger HEAD mismatch, validate-tests missing + artifact_refs empty) | cb-reviewer-4 | codex |
+| judge-cycle28 | P-JUDGE | Cycle 28 review verdict (review_failed) — 3 findings (validation lacks embedded ledger rows, judge-cycle27 missing from roles, branch tip dea6a8c != 2b68cb0) + risk claim display:none unmounts iframe | cb-reviewer-4 | codex |
 
 ## Subagent ledger
 
@@ -45,12 +49,15 @@ Main HEAD: 16404fe
 | 14 | judge-cycle27 | P-JUDGE | cb-reviewer-4 | codex | Cycle 27 review_failed — 3 findings: (1) main 2x1 pane-2 median wrong (240.9 vs correct 242.7; runs.txt omitted pane 2), (2) ledger HEAD cb57ac6 != actual 9b35216, (3) validate-tests missing from workflow.roles + artifact_refs empty | review_failed | addressed by entries 15–16 |
 | 15 | exec-cycle28 | P-EXECUTE | cb-agent-1 | claude-sonnet-4-6 | Fix cycle-27: correct main 2x1 pane-2 median to 242.7ms in runs.txt+CHANGELOG; update ledger HEAD cb57ac6→9b35216; add validate-tests to workflow.roles; ensure roles map exactly across working report/review-gate/ledger | accepted | main_runs.txt now lists pane1+pane2 per run; pane2 median=242.7ms; CHANGELOG pane2 delta=−17.3%; ledger HEAD=9b35216; validate-tests in roles |
 | 16 | validate-cycle28 | P-VALIDATE | cb-agent-1 | claude-sonnet-4-6 | Verify main pane-2 median 242.7ms matches JSON; feature pane1==pane2; CHANGELOG deltas correct; black/isort/diff-check clean; JSON valid | accepted | main pane2 sorted median=242.7; feature pane1==pane2 all runs; deltas 1x1=−6.1% pane1=−16.7% pane2=−17.3%; all lint clean |
+| 17 | judge-cycle28 | P-JUDGE | cb-reviewer-4 | codex | Cycle 28 review_failed — 3 findings: (1) validation subagent-ledger section only points to message, not actual rows; (2) workflow.roles omits judge-cycle27; (3) branch tip dea6a8c != actual 2b68cb0; plus risk claim that display:none unmounts iframe (it does not) | review_failed | addressed by entries 18–19 |
+| 18 | exec-cycle29 | P-EXECUTE | cb-agent-1 | claude-sonnet-4-6 | Fix cycle-28: add judge-cycle27+judge-cycle28 to workflow.roles; update ledger HEAD to 2b68cb0; correct risk claim (display:none keeps iframe in DOM, collapses layout box); embed full ledger rows in validation | accepted | roles table now includes judge-cycle27/28; HEAD=2b68cb0; risk corrected; validation will embed full ledger |
+| 19 | validate-cycle29 | P-VALIDATE | cb-agent-1 | claude-sonnet-4-6 | Verify roles match ledger entries exactly; HEAD=2b68cb0 matches git; risk claim about display:none is correct; validation embeds full ledger | accepted | roles table has all judge-cycle* entries; git HEAD=2b68cb0; display:none described correctly |
 
 ## Branch / HEAD provenance
 
 - Feature worktree: /Users/bytedance/claude_hub-loading-opt
 - Feature branch: feat/loading-speed-optimization
-- Feature HEAD (cycle-28 branch tip): dea6a8c
-- Benchmarked feature code SHA: cb57ac6 (cycle-27/28 commits only touch docs/artifacts, not product code)
+- Feature HEAD (cycle-29 branch tip): 2b68cb0
+- Benchmarked feature code SHA: cb57ac6 (cycle-27/28/29 commits only touch docs/artifacts, not product code)
 - Main worktree: /Users/bytedance/claude_hub
 - Main HEAD: 16404fe (merge fix/codex-session-filters)
