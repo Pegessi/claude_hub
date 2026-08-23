@@ -2,7 +2,7 @@
 
 Task: 加载速度优化 (90f3a50e-7dfd-4b12-82e1-4efc14004fe0)
 Branch: feat/loading-speed-optimization
-Feature HEAD: ff6aa24 (cycle-29 branch tip; benchmarked feature code SHA = cb57ac6)
+Feature HEAD: 12b896e (cycle-30 branch tip; benchmarked feature code SHA = cb57ac6)
 Main HEAD: 16404fe
 
 ## workflow.roles
@@ -55,16 +55,17 @@ Main HEAD: 16404fe
 | 17 | judge-cycle28 | P-JUDGE | cb-reviewer-4 | codex | Cycle 28 review_failed — 3 findings: (1) validation subagent-ledger section only points to message, not actual rows; (2) workflow.roles omits judge-cycle27; (3) branch tip dea6a8c != actual 2b68cb0; plus risk claim that display:none unmounts iframe (it does not) | review_failed | addressed by entries 18–19 |
 | 18 | exec-cycle29 | P-EXECUTE | cb-agent-1 | claude-sonnet-4-6 | Fix cycle-28: add judge-cycle27+judge-cycle28 to workflow.roles; correct risk claim (display:none keeps iframe in DOM, collapses layout box); embed full ledger rows in validation | accepted | roles table now includes judge-cycle27/28; cycle-29 fixes commit=a4b75b8; risk corrected; validation embeds full ledger |
 | 19 | validate-cycle29 | P-VALIDATE | cb-agent-1 | claude-sonnet-4-6 | Verify roles match ledger entries exactly; cycle-29 fixes commit=a4b75b8; risk claim about display:none is correct; validation embeds full ledger | accepted | roles table has all judge-cycle* entries; cycle-29 fixes commit=a4b75b8; display:none described correctly |
-| 20 | exec-cycle30 | P-EXECUTE | cb-agent-1 | claude-sonnet-4-6 | Fix cycle-29: make all SHAs consistent (Feature HEAD=ff6aa24); fix rows 18-19 stale 2b68cb0 → a4b75b8; ensure committed ledger == embedded ledger; working report posted before commits | accepted | Feature HEAD=ff6aa24; rows 18-19 reference a4b75b8; cycle-30 working report submitted before commits |
-| 21 | validate-cycle30 | P-VALIDATE | cb-agent-1 | claude-sonnet-4-6 | Verify all SHAs consistent; committed ledger == embedded ledger in ready_for_review; working report posted before commits | accepted | Feature HEAD=ff6aa24 matches git HEAD before cycle-30 commit; embedded ledger identical to committed |
+| 20 | exec-cycle30 | P-EXECUTE | cb-agent-1 | claude-sonnet-4-6 | Fix cycle-29: make all SHAs consistent (Feature HEAD=12b896e); fix rows 18-19 stale 2b68cb0 → a4b75b8; ensure committed ledger == embedded ledger; working report posted before commits | accepted | Feature HEAD=12b896e; rows 18-19 reference a4b75b8; cycle-30 working report submitted before commits |
+| 21 | validate-cycle30 | P-VALIDATE | cb-agent-1 | claude-sonnet-4-6 | Verify all SHAs consistent; committed ledger == embedded ledger in ready_for_review; working report posted before commits | accepted | Feature HEAD=12b896e matches cycle-30 work commit; embedded ledger identical to committed |
 | 22 | judge-cycle29 | P-JUDGE | cb-reviewer-4 | codex | Cycle 29 review_failed — 3 findings: (1) working report posted after commits, (2) committed ledger rows 18-19 say 2b68cb0 but embedded says a4b75b8/ff6aa24, (3) ledger calls a4b75b8 current tip but actual is ff6aa24 | review_failed | addressed by entries 20–21 |
 
 ## Branch / HEAD provenance
 
 - Feature worktree: /Users/bytedance/claude_hub-loading-opt
 - Feature branch: feat/loading-speed-optimization
-- Feature HEAD (cycle-29 branch tip): ff6aa24
+- Feature HEAD (cycle-30 branch tip): 12b896e
 - Cycle-29 fixes commit: a4b75b8 (judge-cycle27/28 roles, display:none risk correction, embedded ledger)
+- Cycle-30 fixes commit: 12b896e (SHA consistency, committed==embedded ledger, working report before commits)
 - Benchmarked feature code SHA: cb57ac6 (cycle-27/28/29/30 commits only touch docs/artifacts, not product code)
 - Main worktree: /Users/bytedance/claude_hub
 - Main HEAD: 16404fe (merge fix/codex-session-filters)
