@@ -110,7 +110,7 @@ task.
 
 | Task shape | Read first |
 | --- | --- |
-| Agent Tree / durable mailbox (agent use) | `docs/AGENT_TREE.md` (`claude-hub agent-tree`) |
+| Task Graph / TaskMailbox (agent use) | `docs/AGENT_TREE.md` (primary: `claude-hub task`; `agent-tree` compat only) |
 | Architecture / data flow | `ARCHITECTURE.md` |
 | Recent shipped behavior | `CHANGELOG.md` |
 | Bug symptom history | `WORKLOG.md` |

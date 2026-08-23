@@ -7,6 +7,7 @@ from contextvars import ContextVar
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
 from ..agent_tree import AgentTreeManager
+from ..task_mailbox import TaskMailbox
 from ._constants import *  # noqa: F401,F403
 
 
@@ -57,6 +58,7 @@ class _StateMixin:
         # idempotency. Managed tasks are bridged into this layer via
         # context_ref (task id) so reports surface as agent events.
         self.agent_tree = AgentTreeManager(self)  # type: ignore[arg-type]
+        self.task_mailbox = TaskMailbox(self)
         self._load_state()
 
     def _workspace_dir(self, workspace_id: str) -> Path:
@@ -157,16 +159,28 @@ class _StateMixin:
     def _load_nested_state(self) -> None:
         try:
             index = json.loads(INDEX_FILE.read_text(encoding="utf-8"))
-            self.workspaces = {
-                item["id"]: Workspace(**self._normalize_workspace_item(item))
-                for item in index.get("workspaces", [])
-            }
+            missing_resident_ack_ids: set[str] = set()
+            self.workspaces = {}
+            for item in index.get("workspaces", []):
+                if not isinstance(item, dict) or not item.get("id"):
+                    continue
+                workspace_id = str(item["id"])
+                if "resident_ack_sequence" not in item:
+                    missing_resident_ack_ids.add(workspace_id)
+                self.workspaces[workspace_id] = Workspace(**self._normalize_workspace_item(item))
             for workspace_id in self.workspaces:
                 state_file = self._workspace_state_file(workspace_id)
                 if not state_file.exists():
                     continue
                 data = json.loads(state_file.read_text(encoding="utf-8"))
+                missing_parent_ids: set[str] = set()
+                missing_ack_ids: set[str] = set()
                 for item in data.get("tasks", []):
+                    if isinstance(item, dict) and item.get("id"):
+                        if "parent_task_id" not in item:
+                            missing_parent_ids.add(str(item["id"]))
+                        if "consumer_ack_sequence" not in item:
+                            missing_ack_ids.add(str(item["id"]))
                     task = WorkspaceTask(**self._normalize_task_item(item))
                     self.tasks[task.id] = task
                 for item in data.get("sessions", []):
@@ -175,8 +189,22 @@ class _StateMixin:
                 for item in data.get("reports", []):
                     report = AgentReport(**self._normalize_report_item(item))
                     self.reports[report.id] = report
-                # Load the agent tree (runs + event stream) for this workspace.
                 self.agent_tree.load_from_dict(workspace_id, data)
+                from ..task_graph import materialize_loaded_task_graph
+                from ..task_migration import migrate_pre_unification_graph
+
+                self.workspaces[workspace_id] = migrate_pre_unification_graph(
+                    tasks=self.tasks,
+                    runs=self.agent_tree._runs,
+                    workspace=self.workspaces[workspace_id],
+                    missing_parent_ids=missing_parent_ids,
+                    missing_ack_ids=missing_ack_ids,
+                    missing_resident_ack=workspace_id in missing_resident_ack_ids,
+                )
+                materialize_loaded_task_graph(self.tasks, workspace_id)
+                self.task_mailbox.load_from_dict(workspace_id, data)
+        except ValueError:
+            raise
         except Exception as e:
             logger.error(f"Failed to load nested workspace state: {e}")
 
@@ -199,6 +227,10 @@ class _StateMixin:
                 item["id"]: AgentReport(**self._normalize_report_item(item))
                 for item in data.get("reports", [])
             }
+            from ..task_graph import materialize_loaded_task_graph
+
+            for workspace_id in self.workspaces:
+                materialize_loaded_task_graph(self.tasks, workspace_id)
             self._save_state()
         except Exception as e:
             logger.error(f"Failed to load legacy workspace state: {e}")

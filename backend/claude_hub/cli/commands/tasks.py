@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import sys
+import uuid
 from typing import Any, Dict, List, Optional
 
 import click
@@ -17,6 +20,9 @@ from claude_hub.cli.output import emit, print_rows
 from claude_hub.models.schemas import WorkspaceTaskStatus
 
 TASK_COLUMNS = ["id", "title", "status", "agent_type", "task_mode"]
+TASK_TREE_COLUMNS = ["id", "title", "status", "parent_task_id", "agent_type"]
+TASK_EVENT_COLUMNS = ["sequence", "type", "call_id", "task_id", "consumer_key"]
+ACK_FAILED_NOTE = "events delivered but ACK failed/not acknowledged"
 TASK_STATUS_FIELDS = [
     "workspace_id",
     "id",
@@ -37,6 +43,31 @@ TASK_STATUS_FIELDS = [
     "human_accepted_at",
     "updated_at",
 ]
+
+
+def _echo_call_id(call_id: str) -> None:
+    click.echo(f"call_id={call_id}", err=True)
+
+
+def _resolve_call_id(explicit: Optional[str]) -> str:
+    return explicit or str(uuid.uuid4())
+
+
+def _emit_task_events(rows: List[Any], as_json: bool) -> None:
+    if as_json:
+        emit(rows, True)
+    else:
+        print_rows(rows, TASK_EVENT_COLUMNS)
+    sys.stdout.flush()
+
+
+def _emit_task_tree(rows: List[dict], as_json: bool) -> None:
+    if as_json:
+        emit(rows, True)
+    else:
+        print_rows(rows, TASK_TREE_COLUMNS)
+
+
 GOAL_PACKET_FIELDS = ["status", "objective", "updated_at", "source"]
 ACCEPTANCE_COLUMNS = ["criterion", "status", "evidence"]
 REVIEW_COLUMNS = [
@@ -695,55 +726,189 @@ def task_accept(
     emit(data, cli_main.as_json(ctx))
 
 
+@task.command("tree")
+@click.argument("workspace_id")
+@click.argument("task_id", required=False)
+@click.pass_context
+def task_tree(ctx: click.Context, workspace_id: str, task_id: Optional[str]) -> None:
+    """List top-level Tasks, or the subtree rooted at TASK_ID."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.list_task_tree(workspace_id, task_id)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    rows = data if isinstance(data, list) else []
+    _emit_task_tree(rows, cli_main.as_json(ctx))
+
+
+@task.command("events")
+@click.argument("workspace_id")
+@click.argument("task_id", required=False)
+@click.option("--since-sequence", default=0, type=int, show_default=True)
+@click.option("--subtree/--no-subtree", default=False, show_default=True)
+@click.pass_context
+def task_events(
+    ctx: click.Context,
+    workspace_id: str,
+    task_id: Optional[str],
+    since_sequence: int,
+    subtree: bool,
+) -> None:
+    """List Task mailbox events. Omit TASK_ID to use the resident consumer."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.get_task_events(
+                workspace_id,
+                task_id,
+                since_sequence=since_sequence,
+                subtree=subtree,
+            )
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    rows = data if isinstance(data, list) else []
+    _emit_task_events(rows, cli_main.as_json(ctx))
+
+
+@task.command("wait")
+@click.argument("workspace_id")
+@click.argument("task_id", required=False)
+@click.option("--since-sequence", default=0, type=int, show_default=True)
+@click.option("--subtree/--no-subtree", default=False, show_default=True)
+@click.option("--timeout-seconds", default=30.0, type=float, show_default=True)
+@click.option(
+    "--ack",
+    is_flag=True,
+    default=False,
+    help="After a non-empty flushed event list, POST /ack at max(sequence).",
+)
+@click.pass_context
+def task_wait(
+    ctx: click.Context,
+    workspace_id: str,
+    task_id: Optional[str],
+    since_sequence: int,
+    subtree: bool,
+    timeout_seconds: float,
+    ack: bool,
+) -> None:
+    """Wait on the Task mailbox. Omit TASK_ID for the resident consumer."""
+    as_json = cli_main.as_json(ctx)
+    try:
+        with cli_main.get_client(ctx) as client:
+            rows = client.wait_task_events(
+                workspace_id,
+                task_id,
+                since_sequence=since_sequence,
+                subtree=subtree,
+                timeout_seconds=timeout_seconds,
+            )
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    events = rows if isinstance(rows, list) else []
+    _emit_task_events(events, as_json)
+    if not ack or not events:
+        return
+    sequences = [
+        int(item["sequence"])
+        for item in events
+        if isinstance(item, dict) and item.get("sequence") is not None
+    ]
+    if not sequences:
+        raise click.ClickException("wait events missing sequence; not acknowledging")
+    max_sequence = max(sequences)
+    try:
+        with cli_main.get_client(ctx) as client:
+            client.ack_task_events(workspace_id, max_sequence, task_id=task_id)
+    except HubError as e:
+        click.echo(ACK_FAILED_NOTE, err=True)
+        raise click.ClickException(str(e)) from e
+    if as_json:
+        click.echo(json.dumps({"acked_sequence": max_sequence}), err=True)
+    else:
+        click.echo(f"acked sequence {max_sequence}")
+
+
+@task.command("ack")
+@click.argument("workspace_id")
+@click.argument("task_id")
+@click.argument("sequence", required=False, type=int)
+@click.pass_context
+def task_ack(
+    ctx: click.Context,
+    workspace_id: str,
+    task_id: str,
+    sequence: Optional[int],
+) -> None:
+    """ACK a Task cursor, or the resident cursor when SEQUENCE is the only id."""
+    resolved_task_id: Optional[str]
+    resolved_sequence: int
+    if sequence is None:
+        try:
+            resolved_sequence = int(task_id)
+        except ValueError as exc:
+            raise click.ClickException(
+                "Usage: task ack WORKSPACE_ID TASK_ID SEQUENCE, "
+                "or task ack WORKSPACE_ID SEQUENCE for the resident cursor"
+            ) from exc
+        resolved_task_id = None
+    else:
+        resolved_task_id = task_id
+        resolved_sequence = sequence
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.ack_task_events(
+                workspace_id,
+                resolved_sequence,
+                task_id=resolved_task_id,
+            )
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(data, cli_main.as_json(ctx))
+
+
+@task.command("followup")
+@click.argument("workspace_id")
+@click.argument("task_id")
+@click.option("--message", required=True, help="Follow-up message for the Task inbox.")
+@click.option("--call-id", default=None, help="Stable retry id. New UUID if omitted.")
+@click.pass_context
+def task_followup(
+    ctx: click.Context,
+    workspace_id: str,
+    task_id: str,
+    message: str,
+    call_id: Optional[str],
+) -> None:
+    """POST Task followup with a durable call_id. Does not write AgentRun."""
+    resolved = _resolve_call_id(call_id)
+    _echo_call_id(resolved)
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.followup_task(
+                workspace_id,
+                task_id,
+                {"message": message, "call_id": resolved},
+            )
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(data, cli_main.as_json(ctx))
+
+
 @task.command("send")
 @click.argument("workspace_id")
 @click.argument("task_id")
-@click.option("--message", required=True, help="Message to send to the task's agent.")
-@click.option(
-    "--attachment-json",
-    "attachment_json",
-    multiple=True,
-    help="Attachment JSON object (repeatable).",
-)
+@click.option("--message", required=True, help="Follow-up message for the Task inbox.")
+@click.option("--call-id", default=None, help="Stable retry id. New UUID if omitted.")
 @click.pass_context
 def task_send(
     ctx: click.Context,
     workspace_id: str,
     task_id: str,
     message: str,
-    attachment_json: tuple,
+    call_id: Optional[str],
 ) -> None:
-    """Send a message to the agent session currently running a task.
-
-    Convenience wrapper: resolves the task's session from the workspace board,
-    then delegates to the session send endpoint. Errors clearly if the task has
-    no active session (not started yet, or already finished) — in that case use
-    ``session send`` directly, or ``task continue`` to resume from review.
-    """
-    try:
-        with cli_main.get_client(ctx) as client:
-            board = client.get_board(workspace_id)
-            tasks: List[dict] = board.get("tasks", []) if isinstance(board, dict) else []
-            match = next((t for t in tasks if t.get("id") == task_id), None)
-            if match is None:
-                raise click.ClickException(f"Task {task_id} not found in workspace {workspace_id}.")
-            session_id = match.get("session_id")
-            if not session_id:
-                raise click.ClickException(
-                    f"Task {task_id} has no active session "
-                    f"(status: {match.get('status', '?')}). "
-                    "Use `session send` directly, or `task continue` to resume from review."
-                )
-            client.send_session(
-                session_id,
-                {"message": message, "attachments": parse_attachment_json(attachment_json)},
-            )
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    if cli_main.as_json(ctx):
-        emit({"ok": True, "task_id": task_id, "session_id": session_id}, True)
-    else:
-        click.echo(f"sent to session {session_id}")
+    """Compatibility alias for ``task followup``. Uses Task call_id, not session send."""
+    ctx.forward(task_followup)
 
 
 @task.command("abort")

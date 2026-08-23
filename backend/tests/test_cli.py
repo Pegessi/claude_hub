@@ -162,58 +162,43 @@ def test_error_nonzero_exit(monkeypatch):
     assert "Task not found" in result.output
 
 
-def test_task_send_resolves_session(monkeypatch):
-    board = {
-        "tasks": [
-            {"id": "t1", "status": "working", "session_id": "s9"},
-            {"id": "t2", "status": "queued", "session_id": None},
-        ]
-    }
-    paths: List[str] = []
-    bodies: List[Dict[str, Any]] = []
-
+def test_task_send_is_followup_alias(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
-        paths.append(request.url.path)
-        if request.url.path.endswith("/board"):
-            return httpx.Response(200, json=board)
-        bodies.append(json.loads(request.content))
-        return httpx.Response(204)
+        return httpx.Response(
+            200,
+            json={
+                "sequence": 1,
+                "call_id": "send-1",
+                "type": "followup",
+                "task_id": "t1",
+                "consumer_key": "task:t1",
+            },
+        )
 
-    patch_get_client(monkeypatch, handler)
+    captured = patch_get_client(monkeypatch, handler)
     runner = CliRunner()
-    result = runner.invoke(cli, ["task", "send", "ws1", "t1", "--message", "hello"])
+    result = runner.invoke(
+        cli,
+        ["--json", "task", "send", "ws1", "t1", "--message", "hello", "--call-id", "send-1"],
+    )
     assert result.exit_code == 0, result.output
-    assert "/api/workspaces/ws1/board" in paths
-    assert "/api/workspaces/sessions/s9/send" in paths
-    assert bodies[0] == {"message": "hello", "attachments": []}
-    assert "s9" in result.output
-
-
-def test_task_send_no_session_errors(monkeypatch):
-    board = {"tasks": [{"id": "t2", "status": "queued", "session_id": None}]}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path.endswith("/board")  # must never reach send
-        return httpx.Response(200, json=board)
-
-    patch_get_client(monkeypatch, handler)
-    runner = CliRunner()
-    result = runner.invoke(cli, ["task", "send", "ws1", "t2", "--message", "hi"])
-    assert result.exit_code != 0
-    assert "no active session" in result.output
+    assert [request.url.path for request in captured] == ["/api/workspaces/ws1/tasks/t1/followup"]
+    assert json.loads(captured[0].content) == {"message": "hello", "call_id": "send-1"}
+    assert "call_id=send-1" in result.stderr
+    assert "/board" not in captured[0].url.path
+    assert "/sessions/" not in captured[0].url.path
 
 
 def test_task_send_missing_task_errors(monkeypatch):
-    board = {"tasks": [{"id": "other", "status": "working", "session_id": "s1"}]}
-
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=board)
+        return httpx.Response(404, json={"detail": "Task not found"})
 
-    patch_get_client(monkeypatch, handler)
+    captured = patch_get_client(monkeypatch, handler)
     runner = CliRunner()
     result = runner.invoke(cli, ["task", "send", "ws1", "nope", "--message", "hi"])
     assert result.exit_code != 0
-    assert "not found" in result.output
+    assert "not found" in result.output.lower()
+    assert captured[0].url.path.endswith("/followup")
 
 
 def test_task_get_scans_workspaces_and_includes_reports(monkeypatch):

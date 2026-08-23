@@ -551,6 +551,10 @@ class Workspace(BaseModel):
     resident_agent_remote_profile_id: Optional[str] = None
     resident_agent_cwd: Optional[str] = None
     resident_agent_remote_reconnect: bool = True
+    # Durable mailbox consumer for the workspace Resident. Keyed by workspace
+    # identity, never by the replaceable resident ManagedSession id.
+    resident_consumer_key: Optional[str] = None
+    resident_ack_sequence: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -599,6 +603,8 @@ class WorkspaceTaskCreate(BaseModel):
     # recover from crashes: a retry can find the existing task instead of
     # creating a duplicate.
     agent_run_id: Optional[str] = None
+    # Task Graph parent. Independent of related_task_id (session-affinity).
+    parent_task_id: Optional[str] = None
 
 
 class WorkspaceAttachmentCreate(BaseModel):
@@ -637,6 +643,7 @@ class WorkspaceTaskUpdate(BaseModel):
     related_task_id: Optional[str] = None
     clear_context: Optional[bool] = None
     session_id: Optional[str] = None
+    parent_task_id: Optional[str] = None
 
 
 class WorkspaceTask(BaseModel):
@@ -659,6 +666,12 @@ class WorkspaceTask(BaseModel):
     session_id: Optional[str] = None
     related_task_id: Optional[str] = None
     clear_context: Optional[bool] = None
+    # Task Graph: parent/root/path. related_task_id stays a dispatch hint.
+    parent_task_id: Optional[str] = None
+    root_task_id: Optional[str] = None
+    path: str = ""
+    # Consumer cursor for this Task when it waits on its subtree. Not a Session field.
+    consumer_ack_sequence: int = 0
     # Agent tree run id that owns this task (set by ManagedTaskAdapter.spawn).
     agent_run_id: Optional[str] = None
     # Call ids of followup messages already ACKed (processed) by the worker.
@@ -1234,6 +1247,19 @@ class ContinueTaskRequest(BaseModel):
     attachments: List[WorkspaceAttachmentCreate] = Field(default_factory=list)
 
 
+class TaskFollowupRequest(BaseModel):
+    """Task-first follow-up. ``call_id`` is optional; the API mints one if omitted."""
+
+    message: str = Field(..., min_length=1)
+    call_id: Optional[str] = Field(default=None, min_length=1)
+
+
+class TaskMailboxAckRequest(BaseModel):
+    """Advance a Task-owned mailbox cursor. Never writes AgentRun.ack_sequence."""
+
+    sequence: int = Field(..., ge=0)
+
+
 class RequestTaskReviewRequest(BaseModel):
     """Payload for manually requesting reviewer checks."""
 
@@ -1244,6 +1270,7 @@ class ManualTaskControlRequest(BaseModel):
     """Payload for exceptional manual task state control."""
 
     reason: str
+    call_id: Optional[str] = None
 
 
 class DispatchDecisionRequest(BaseModel):

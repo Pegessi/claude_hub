@@ -3,6 +3,7 @@
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
 from ..agent_tree import _request_fingerprint
+from ..task_graph import make_resident_consumer_key
 from ._constants import *  # noqa: F401,F403
 
 
@@ -368,10 +369,10 @@ class _WorkspacesMixin:
             self._monitor_task = None
 
     async def _background_monitor_loop(self) -> None:
-        # One-time agent tree crash recovery: retry any PENDING runs whose
-        # adapter spawn was lost (process crashed after the run was persisted
-        # but before the executor context was created). Runs that already have
-        # a context_ref are advanced to RUNNING.
+        # One-time agent tree crash recovery for non-managed executors:
+        # retry PENDING runs whose adapter spawn was lost. MANAGED_TASK
+        # lifecycle recovery is Task-owned via dispatch_workspace /
+        # ``_recover_queued_task_ownership``.
         for workspace_id in list(self.workspaces):
             try:
                 await self.agent_tree.recover_pending_runs(workspace_id)
@@ -481,6 +482,8 @@ class _WorkspacesMixin:
             resident_agent_remote_profile_id=payload.resident_agent_remote_profile_id,
             resident_agent_cwd=resident_cwd,
             resident_agent_remote_reconnect=payload.resident_agent_remote_reconnect,
+            resident_consumer_key=make_resident_consumer_key(workspace_id),
+            resident_ack_sequence=0,
             created_at=now,
             updated_at=now,
         )

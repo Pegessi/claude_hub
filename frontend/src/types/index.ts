@@ -172,6 +172,8 @@ export interface Workspace {
   resident_agent_remote_profile_id?: string | null
   resident_agent_cwd?: string | null
   resident_agent_remote_reconnect: boolean
+  resident_consumer_key?: string | null
+  resident_ack_sequence?: number
   created_at: string
   updated_at: string
 }
@@ -371,6 +373,10 @@ export interface WorkspaceTask {
   status: WorkspaceTaskStatus
   session_id?: string | null
   related_task_id?: string | null
+  parent_task_id?: string | null
+  root_task_id?: string | null
+  path?: string
+  consumer_ack_sequence?: number
   clear_context?: boolean | null
   dispatch_reason?: string | null
   dispatch_pending: boolean
@@ -402,6 +408,7 @@ export interface WorkspaceTaskCreate {
   task_mode?: WorkspaceTaskMode
   execution_complexity?: WorkspaceTaskExecutionComplexity
   related_task_id?: string | null
+  parent_task_id?: string | null
   attachments?: WorkspaceAttachmentCreate[]
   goal_packet?: GoalPacket | null
   review_profiles?: ReviewProfile[]
@@ -417,6 +424,7 @@ export interface WorkspaceTaskUpdate {
   add_attachments?: WorkspaceAttachmentCreate[]
   removed_attachment_ids?: string[]
   related_task_id?: string | null
+  parent_task_id?: string | null
   clear_context?: boolean | null
   session_id?: string | null
 }

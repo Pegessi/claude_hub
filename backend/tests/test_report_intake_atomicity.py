@@ -221,7 +221,7 @@ async def test_precommit_failure_rolls_back_both_acks_and_cold_retry_converges(
             assert len(staged_reports) == 1
             staged_report_id = staged_reports[0].id
             assert (
-                manager.agent_tree._call_record(workspace_id, f"report:{staged_report_id}")
+                manager.task_mailbox._call_record(workspace_id, f"report:{staged_report_id}")
                 is not None
             )
             raise OSError("pre-state atomic replace failed")
@@ -237,7 +237,7 @@ async def test_precommit_failure_rolls_back_both_acks_and_cold_retry_converges(
     assert payload.call_id not in rolled_back.report_call_ids
     assert staged_report_id is not None
     assert staged_report_id not in manager.reports
-    assert manager.agent_tree._call_record(workspace_id, f"report:{staged_report_id}") is None
+    assert manager.task_mailbox._call_record(workspace_id, f"report:{staged_report_id}") is None
     assert manager.agent_tree.get_run(child_run_id).status == baseline_run_status
     for call_id in call_ids:
         # The followup API already committed its dispatch outcome. Report ACK
@@ -296,7 +296,7 @@ async def test_precommit_failure_rolls_back_both_acks_and_cold_retry_converges(
         len(
             [
                 event
-                for event in fresh.agent_tree._events[workspace_id]
+                for event in fresh.task_mailbox._events.get(workspace_id, [])
                 if event.call_id == report_bridge_call_id
             ]
         )
@@ -499,6 +499,7 @@ async def test_reused_session_known_call_id_has_zero_side_effects(
         updated_at=now,
     )
     manager.tasks[new_task.id] = new_task
+    manager.tasks[task.id] = manager.tasks[task.id].model_copy(update={"session_id": None})
     manager.sessions[session.id] = manager.sessions[session.id].model_copy(
         update={
             "task_id": new_task.id,
@@ -568,6 +569,7 @@ async def test_padded_call_id_retry_has_zero_side_effects_after_reassignment(
         updated_at=now,
     )
     manager.tasks[new_task.id] = new_task
+    manager.tasks[task.id] = manager.tasks[task.id].model_copy(update={"session_id": None})
     manager.sessions[session.id] = manager.sessions[session.id].model_copy(
         update={
             "task_id": new_task.id,
@@ -640,9 +642,9 @@ async def test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges
     bridge_call_id = f"report:{first.id}"
 
     def _call_ids(mgr: WorkspaceManager) -> list[str]:
-        return [event.call_id for event in mgr.agent_tree._events.get(workspace_id, [])]
+        return [event.call_id for event in mgr.task_mailbox._events.get(workspace_id, [])]
 
-    assert bridge_call_id not in _call_ids(manager)
+    assert _call_ids(manager).count(bridge_call_id) == 1
 
     state_file = manager._workspace_state_file(workspace_id)
     original_write = manager._atomic_write_text
@@ -665,8 +667,8 @@ async def test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges
     for call_id in call_ids:
         assert rolled_back.pending_messages[call_id] == f"process {call_id}"
         assert manager.agent_tree._call_record(workspace_id, f"{call_id}:delivered") is None
-    assert manager.agent_tree._call_record(workspace_id, bridge_call_id) is None
-    assert bridge_call_id not in _call_ids(manager)
+    assert manager.task_mailbox._call_record(workspace_id, bridge_call_id) is not None
+    assert _call_ids(manager).count(bridge_call_id) == 1
 
     cold = WorkspaceManager()
     cold_session = cold.sessions[session.id]
@@ -676,8 +678,8 @@ async def test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges
         assert cold_session.pending_messages[call_id] == f"process {call_id}"
         assert cold.agent_tree._call_record(workspace_id, f"{call_id}:delivered") is None
     assert cold.reports[first.id].id == first.id
-    assert cold.agent_tree._call_record(workspace_id, bridge_call_id) is None
-    assert bridge_call_id not in _call_ids(cold)
+    assert cold.task_mailbox._call_record(workspace_id, bridge_call_id) is not None
+    assert _call_ids(cold).count(bridge_call_id) == 1
 
     retry = await cold.create_report(session.id, payload)
     assert retry.id == first.id
@@ -687,7 +689,7 @@ async def test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges
     for call_id in call_ids:
         assert call_id not in committed.pending_messages
         assert cold.agent_tree._call_record(workspace_id, f"{call_id}:delivered") is not None
-    assert cold.agent_tree._call_record(workspace_id, bridge_call_id) is not None
+    assert cold.task_mailbox._call_record(workspace_id, bridge_call_id) is not None
     assert _call_ids(cold).count(bridge_call_id) == 1
     assert cold.agent_tree.get_run(child_run_id).status == AgentRunStatus.RUNNING
 
@@ -697,7 +699,7 @@ async def test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges
     for call_id in call_ids:
         assert call_id not in fresh.sessions[session.id].pending_messages
         assert fresh.agent_tree._call_record(workspace_id, f"{call_id}:delivered") is not None
-    assert fresh.agent_tree._call_record(workspace_id, bridge_call_id) is not None
+    assert fresh.task_mailbox._call_record(workspace_id, bridge_call_id) is not None
     assert _call_ids(fresh).count(bridge_call_id) == 1
 
 
@@ -761,7 +763,7 @@ async def test_predecessor_padded_call_id_post_save_failure_converges(
         assert call_id not in live_after.pending_messages
         assert manager.agent_tree._call_record(workspace_id, f"{call_id}:delivered") is not None
     bridge_call_id = f"report:{first.id}"
-    assert manager.agent_tree._call_record(workspace_id, bridge_call_id) is not None
+    assert manager.task_mailbox._call_record(workspace_id, bridge_call_id) is not None
 
     cold = WorkspaceManager()
     cold_session = cold.sessions[session.id]
@@ -770,7 +772,7 @@ async def test_predecessor_padded_call_id_post_save_failure_converges(
     for call_id in call_ids:
         assert call_id not in cold_session.pending_messages
         assert cold.agent_tree._call_record(workspace_id, f"{call_id}:delivered") is not None
-    assert cold.agent_tree._call_record(workspace_id, bridge_call_id) is not None
+    assert cold.task_mailbox._call_record(workspace_id, bridge_call_id) is not None
     assert cold.reports[first.id].id == first.id
 
     retry = await cold.create_report(session.id, payload.model_copy(update={"call_id": padded}))
@@ -778,14 +780,14 @@ async def test_predecessor_padded_call_id_post_save_failure_converges(
     assert cold.agent_tree.get_run(child_run_id).status == AgentRunStatus.RUNNING
     assert [
         event.call_id
-        for event in cold.agent_tree._events.get(workspace_id, [])
+        for event in cold.task_mailbox._events.get(workspace_id, [])
         if event.call_id == bridge_call_id
     ].count(bridge_call_id) == 1
 
     fresh = WorkspaceManager()
     assert fresh.reports[first.id].id == first.id
     assert set(call_ids) <= set(fresh.sessions[session.id].delivered_call_ids)
-    assert fresh.agent_tree._call_record(workspace_id, bridge_call_id) is not None
+    assert fresh.task_mailbox._call_record(workspace_id, bridge_call_id) is not None
 
 
 @pytest.mark.asyncio

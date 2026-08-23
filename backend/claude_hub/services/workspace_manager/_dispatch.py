@@ -472,7 +472,10 @@ class _DispatchMixin:
             created_at=now,
         )
         self.reports[continue_report.id] = continue_report
+        bridge_wake_target = self._bridge_report_to_agent_event(continue_report, session)
         self._save_state()
+        if bridge_wake_target is not None:
+            self._wake_report_intake_runs({bridge_wake_target})
 
         # Send the continue prompt; on tmux submit failure mark the dispatch
         # as stalled so the monitor stall-detector and auto-continue can
@@ -584,136 +587,6 @@ class _DispatchMixin:
         )
         self.reports[report.id] = report
         await self._request_task_review(task, report)
-        return self.tasks[task.id]
-
-    async def abort_task(
-        self,
-        task_id: str,
-        payload: ManualTaskControlRequest,
-    ) -> WorkspaceTask:
-        task = self.tasks.get(task_id)
-        if not task:
-            raise KeyError(task_id)
-        if task.status not in {
-            WorkspaceTaskStatus.QUEUED,
-            WorkspaceTaskStatus.WORKING,
-            WorkspaceTaskStatus.REVIEW,
-        }:
-            raise RuntimeError("Only queued, working, or review tasks can be manually aborted")
-
-        reason = payload.reason.strip()
-        if not reason:
-            raise RuntimeError("Manual abort requires a reason")
-
-        now = _wm._now()
-        report_session_id = task.session_id or task.review_session_id or "manual-control"
-        report = AgentReport(
-            id=str(uuid.uuid4()),
-            workspace_id=task.workspace_id,
-            task_id=task.id,
-            session_id=report_session_id,
-            state=AgentReportState.BLOCKED,
-            message=f"Task manually aborted by operator: {reason}",
-            message_en=f"Task manually aborted by operator: {reason}",
-            message_zh=f"操作员已手动终止任务：{reason}",
-            changed_files=[],
-            validation=None,
-            risks="Task state was manually recovered; prior worker/reviewer output may be incomplete.",
-            review_decision=ReviewDecision.SKIP,
-            review_reason="Manual abort is an exceptional recovery action, not task completion.",
-            risk_level="manual_control",
-            review_cycle=task.review_cycle,
-            created_at=now,
-        )
-        self.reports[report.id] = report
-        task_before_release = task
-        is_feedback_summary = task.system_internal and task.internal_kind == "feedback_reaper"
-
-        # Collect sessions to interrupt before we clear the session IDs on the
-        # task object.  Only sessions actually assigned to THIS task are targeted
-        # (worker via task.session_id, reviewers via task.review_session_id plus
-        # stale REVIEWER-role sessions still pointing at this task) — we never
-        # interrupt unrelated/idle sessions.  Interrupts are sent concurrently
-        # and are best-effort: failures are logged inside _interrupt_session and
-        # do not block the bookkeeping abort.
-        sessions_to_interrupt: list[ManagedSession] = []
-        if task_before_release.session_id:
-            worker_session = self.sessions.get(task_before_release.session_id)
-            if worker_session and (
-                worker_session.task_id == task.id or worker_session.current_task_id == task.id
-            ):
-                sessions_to_interrupt.append(worker_session)
-        reviewer_ids: set[str] = set()
-        if task_before_release.review_session_id:
-            reviewer_ids.add(task_before_release.review_session_id)
-        reviewer_ids.update(
-            s.id
-            for s in self.sessions.values()
-            if s.role == WorkspaceSessionRole.REVIEWER
-            and (s.task_id == task.id or s.current_task_id == task.id)
-        )
-        for sid in reviewer_ids:
-            reviewer_session = self.sessions.get(sid)
-            if (
-                reviewer_session
-                and reviewer_session.role == WorkspaceSessionRole.REVIEWER
-                and (
-                    reviewer_session.task_id == task.id
-                    or reviewer_session.current_task_id == task.id
-                )
-            ):
-                sessions_to_interrupt.append(reviewer_session)
-        if sessions_to_interrupt:
-            await asyncio.gather(*(self._interrupt_session(s) for s in sessions_to_interrupt))
-
-        self.tasks[task.id] = task.model_copy(
-            update={
-                "status": (
-                    WorkspaceTaskStatus.DONE if is_feedback_summary else WorkspaceTaskStatus.TODO
-                ),
-                "session_id": None,
-                "clear_context": None,
-                "dispatch_reason": f"Manually aborted: {reason}",
-                "dispatch_pending": False,
-                "review_session_id": None,
-                "review_requested_at": None,
-                "review_completed_at": None,
-                "review_skipped_at": now if is_feedback_summary else None,
-                "review_skip_reason": (
-                    "Feedback Reaper was manually aborted; pending input was released."
-                    if is_feedback_summary
-                    else None
-                ),
-                "manual_aborted_at": now,
-                "manual_abort_reason": reason,
-                "human_acceptance_requested_at": None,
-                "human_accepted_at": None,
-                "queued_at": None,
-                "started_at": None,
-                "reviewed_at": None,
-                "completed_at": now if is_feedback_summary else None,
-                "updated_at": now,
-            }
-        )
-        if is_feedback_summary:
-            try:
-                self._feedback_store().abandon_summary_run(
-                    task.workspace_id,
-                    task.id,
-                    reason="manually_aborted",
-                    now=now,
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to abandon Feedback Reaper summary run during manual abort "
-                    "workspace_id=%s task_id=%s",
-                    task.workspace_id,
-                    task.id,
-                )
-        self._release_task_session(task_before_release)
-        await self._cleanup_reviewer_for_terminal_task(task_before_release, updated_at=now)
-        self._save_state()
-        await self.dispatch_workspace(task.workspace_id)
         return self.tasks[task.id]
 
     async def dispatch_workspace(

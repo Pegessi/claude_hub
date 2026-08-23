@@ -8,6 +8,10 @@ from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
 
+from claude_hub.services.task_graph import (
+    RESIDENT_CONSUMER_TEMPLATE,
+    make_resident_consumer_key,
+)
 from claude_hub.services.workspace_manager._workspaces import (
     _build_agent_tree_block,
     _build_resident_master_prompt,
@@ -15,6 +19,23 @@ from claude_hub.services.workspace_manager._workspaces import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GUIDE = REPO_ROOT / "docs" / "AGENT_TREE.md"
+
+CHANGELOG = REPO_ROOT / "CHANGELOG.md"
+
+
+_FORBIDDEN_DUAL_CONTROL_PHRASES = (
+    "do not treat Task status as a substitute for run events",
+    "do not treat Task board status",
+    "Agent Tree itself is the run tree",
+    "without creating a new Hub Task by hand",
+    "Tasks and sessions are how",
+    "managed_task executes. Agent Tree",
+    "independent tree",
+    "dual control",
+    "durable mailbox (agent use)",
+    "resident:<workspace",
+    "resident:<workspace_id>",
+)
 
 # A copy-paste spawn JSON that sends both keys can invent a Claude config
 # for a Codex/Cursor worker. Recipes must split derive vs Hub-pick.
@@ -29,11 +50,40 @@ def _assert_spawn_recipes_do_not_pair_generic_config_with_session(text: str) -> 
     assert _BOTH_KEYS_IN_OBJECT.search(compact) is None, text
 
 
+def test_changelog_and_guide_use_exact_resident_consumer_key() -> None:
+    """Resident consumer key must match task_graph.make_resident_consumer_key."""
+    guide = GUIDE.read_text(encoding="utf-8")
+    changelog = CHANGELOG.read_text(encoding="utf-8")
+    template = RESIDENT_CONSUMER_TEMPLATE
+    assert template == "workspace:{workspace_id}:resident"
+    assert template in guide
+    assert template in changelog
+    for forbidden in ("resident:<workspace>", "resident:<workspace_id>"):
+        assert forbidden not in guide, forbidden
+        assert forbidden not in changelog, forbidden
+
+
 def test_agent_tree_guide_covers_required_agent_contract() -> None:
     text = GUIDE.read_text(encoding="utf-8")
-    assert 150 <= text.count("\n") + 1 <= 280
+    assert 320 <= text.count("\n") + 1 <= 420
     for needle in (
         "## Mental model",
+        "Task Graph (canonical)",
+        "Session assignment",
+        "compat projection",
+        "compat projection only",
+        "claude-hub task",
+        "workspace:{workspace_id}:resident",
+        "/api/workspaces/WS_ID/tasks/tree",
+        "/tasks/TASK_ID/abort",
+        "TaskMailbox `ABORT`",
+        "manual control",
+        "parent_task_id",
+        "TaskMailbox",
+        "consumer_ack_sequence",
+        "resident_ack_sequence",
+        "pre-migration",
+        "related_task_id",
         "## Runtime boundary",
         "/api/agent-tree/runs",
         "/api/agent-tree/spawn",
@@ -62,10 +112,53 @@ def test_agent_tree_guide_covers_required_agent_contract() -> None:
         "external_job",
     ):
         assert needle in text, needle
+    for forbidden in _FORBIDDEN_DUAL_CONTROL_PHRASES:
+        assert forbidden not in text, forbidden
     assert "managed kind the adapter rejects" not in text
     assert "Invalid `managed_task` config" in text
     assert "not 422" in text
     _assert_spawn_recipes_do_not_pair_generic_config_with_session(text)
+
+
+def test_task_graph_guide_forbids_dual_control_plane_wording() -> None:
+    """Lock Task Graph as canonical; agent-tree is compat projection only."""
+    text = GUIDE.read_text(encoding="utf-8")
+    lowered = text.lower()
+    agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    claude = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    for forbidden in _FORBIDDEN_DUAL_CONTROL_PHRASES:
+        assert forbidden.lower() not in lowered, forbidden
+    assert RESIDENT_CONSUMER_TEMPLATE in text
+    assert make_resident_consumer_key("ws-example") == "workspace:ws-example:resident"
+    assert "claude-hub task" in lowered
+    assert "compat projection" in lowered
+    assert "task graph (primary)" in lowered or "task graph (canonical)" in lowered
+    assert "task graph / taskmailbox" in agents.lower()
+    assert "primary: `claude-hub task`" in agents
+    assert "agent-tree` compat only" in agents
+    assert agents == claude
+
+
+def test_task_graph_primary_contract_matches_source() -> None:
+    """Task Graph primary semantics: keys, assignment, abort, compat-only agent-tree."""
+    text = GUIDE.read_text(encoding="utf-8")
+    assert RESIDENT_CONSUMER_TEMPLATE in text
+    assert make_resident_consumer_key("ws-1") == "workspace:ws-1:resident"
+    for needle in (
+        "## Task Graph REST (primary)",
+        "Task Graph (primary)",
+        "parent_task_id",
+        "Session assignment",
+        "compat projection only",
+        "claude-hub --json task abort",
+        "TaskMailbox `ABORT`",
+        "session/context reuse",
+        "487c630c",
+    ):
+        assert needle in text, needle
+    assert "## Agent Tree REST (compat projection)" in text
+    for forbidden in _FORBIDDEN_DUAL_CONTROL_PHRASES:
+        assert forbidden not in text, forbidden
 
 
 def test_readmes_and_agent_entry_link_the_guide() -> None:
@@ -76,6 +169,8 @@ def test_readmes_and_agent_entry_link_the_guide() -> None:
     assert "docs/AGENT_TREE.md" in root_readme
     assert "../docs/AGENT_TREE.md" in backend_readme
     assert "docs/AGENT_TREE.md" in agents
+    assert "Task Graph / TaskMailbox" in agents
+    assert "primary: `claude-hub task`" in agents
     assert agents == claude
 
 

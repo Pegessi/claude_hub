@@ -14,6 +14,12 @@ class _NormalizeMixin:
         normalized.setdefault("remote_profile_id", None)
         normalized.setdefault("remote_cwd", None)
         normalized.setdefault("remote_reconnect", True)
+        workspace_id = str(normalized.get("id") or "")
+        if not normalized.get("resident_consumer_key") and workspace_id:
+            from claude_hub.services.task_graph import make_resident_consumer_key
+
+            normalized["resident_consumer_key"] = make_resident_consumer_key(workspace_id)
+        normalized.setdefault("resident_ack_sequence", 0)
         return normalized
 
     def _normalize_task_item(self, item: dict[str, Any]) -> dict[str, Any]:
@@ -28,6 +34,16 @@ class _NormalizeMixin:
         if normalized.get("origin") not in {"human", "resident"}:
             normalized["origin"] = WorkspaceTaskOrigin.HUMAN.value
         normalized.setdefault("related_task_id", None)
+        normalized.setdefault("parent_task_id", None)
+        task_id = str(normalized.get("id") or "")
+        if not normalized.get("parent_task_id"):
+            normalized["parent_task_id"] = None
+            if task_id:
+                normalized.setdefault("root_task_id", task_id)
+                normalized.setdefault("path", task_id)
+        normalized.setdefault("root_task_id", normalized.get("root_task_id") or task_id or None)
+        normalized.setdefault("path", normalized.get("path") or task_id or "")
+        normalized.setdefault("consumer_ack_sequence", 0)
         normalized.setdefault("attachments", [])
         normalized["review_profiles"] = self._normalize_review_profiles(
             normalized.get("review_profiles")

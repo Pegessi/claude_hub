@@ -56,6 +56,7 @@ class _PersistenceMixin:
             ],
         }
         payload.update(self.agent_tree.to_dict(workspace_id))
+        payload.update(self.task_mailbox.to_dict(workspace_id))
         return payload
 
     def _save_report_intake_workspace_state(self, workspace_id: str) -> None:
