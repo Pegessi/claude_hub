@@ -1,5 +1,3 @@
-1x1: total=192.1ms, first_fit={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': 190.6}, nonce_ack={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': None}, settled={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': True}
-2x1: total=231.0ms, first_fit={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': 226.4, '329349ae-3fec-48d1-ba6d-37f47953a707': 226.4}, nonce_ack={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': None, '329349ae-3fec-48d1-ba6d-37f47953a707': None}, settled={'bc858b71-b034-45d6-9bf4-ae6b30c50a73': True, '329349ae-3fec-48d1-ba6d-37f47953a707': True}
 {
   "1x1": {
     "elapsed_ms": 192.1,

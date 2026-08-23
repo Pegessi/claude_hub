@@ -1489,9 +1489,7 @@ def test_history_resync_does_not_replace_near_bottom_view(terminal_tab: dict, pa
     )
 
 
-def test_fit_during_replay_preserves_content_and_scroll(
-    terminal_tab: dict, page: Page
-) -> None:
+def test_fit_during_replay_preserves_content_and_scroll(terminal_tab: dict, page: Page) -> None:
     """A mode-return fit fired while history is replaying must not corrupt
     terminal content or scroll state.
 
@@ -1583,10 +1581,9 @@ def test_fit_during_replay_preserves_content_and_scroll(
     # Step 7: viewport must be at the bottom (scroll state preserved).
     alignment = read_scroll_alignment(page)
     assert alignment is not None
-    assert alignment["viewportY"] == alignment["baseY"], (
-        f"fit-during-replay left viewport away from bottom: {alignment}"
-    )
+    assert (
+        alignment["viewportY"] == alignment["baseY"]
+    ), f"fit-during-replay left viewport away from bottom: {alignment}"
     assert (
         alignment["bottomGap"] <= alignment["rowHeight"] * 2
     ), f"fit-during-replay left DOM viewport away from bottom: {alignment}"
-

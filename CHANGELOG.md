@@ -67,16 +67,20 @@
     terminal shell preserves its layout box. The benchmark records the
     count before the switch and waits for it to increase afterward,
     proving a fit ran *after* the switch. This is causal on both main and
-    feature: even on main, where the terminal preserves its dimensions
-    while hidden (`display: none`), a stale `cols>0 && rows>0` state
-    cannot satisfy the "count increased" check. On feature, nonce
-    correlation (`__claudeHubLastFitNonce` matched against the nonce
-    dispatched with the mode-return resize message) provides additional
-    causal proof that the *current* request ran; on main (no nonce
-    protocol) the benchmark relies on the fit-call counter increase
-    alone. Scroll-to-bottom is not measured because the feature branch
-    no longer dispatches a forced scroll-to-bottom on mode return
-    (xterm.js preserves the user's scroll position).
+    feature: on main, the terminal is hidden with `display: none`, which
+    collapses the layout box to zero size; returning to Terminal mode
+    forces xterm.js to fit from a zero-size viewport, so the fit-call
+    count always increases. On feature, the terminal is hidden with
+    `visibility: hidden` + `position: absolute`, which preserves the
+    layout box at its final size; the mode-return `terminal-resize`
+    message triggers an explicit `requestFit`. Nonce correlation
+    (`__claudeHubLastFitNonce` matched against the nonce dispatched with
+    the mode-return resize message) provides additional causal proof
+    that the *current* request ran; on main (no nonce protocol) the
+    benchmark relies on the fit-call counter increase alone.
+    Scroll-to-bottom is not measured because the feature branch no longer
+    dispatches a forced scroll-to-bottom on mode return (xterm.js
+    preserves the user's scroll position).
   - **Causal benchmark results** (feature `dec8ac8` vs main `16404fe`,
     3 runs each, isolated matching backends/frontends — feature frontend
     proxies to feature backend on :8173, main frontend proxies to main
@@ -100,16 +104,21 @@
     increasing past the pre-switch baseline, confirming the causal
     signal works on main (no nonces) and feature (nonces matched).
 
-    **Honest assessment**: feature is faster than main across all layouts
-    (1x1: −32.4%, 2x1 both panes: −32.3%). The speedup comes from two
-    changes: (1) the terminal shell keeps its layout box alive
-    (`visibility: hidden` + `position: absolute`) instead of collapsing
-    to zero size (`display: none`), so xterm.js does not start from a
-    zero-size viewport; (2) mode-return uses the immediate
-    `requestFit` path (no 150 ms debounce) with a single rAF follow-up,
-    since the shell's dimensions are already final when the resize is
-    dispatched. A previous measurement showed a 2x1 pane-2 regression
-    (~1 s) caused by `resizeWhenReady` blocking on the terminal's
+    **Honest assessment**: the benchmark measures **first-fit time** — the
+    elapsed time from the mode-switch trigger to the completion of the
+    first `fit()` call on each visible terminal pane. It does **not**
+    measure visible-content-ready time (the moment the terminal's text
+    buffer is fully painted after the fit). Feature is faster than main
+    in first-fit time across all layouts (1x1: −32.4%, 2x1 both panes:
+    −32.3%). The first-fit speedup comes from two changes: (1) the
+    terminal shell keeps its layout box alive (`visibility: hidden` +
+    `position: absolute`) instead of collapsing to zero size
+    (`display: none`), so xterm.js does not start from a zero-size
+    viewport; (2) mode-return uses the immediate `requestFit` path (no
+    150 ms debounce) with a single rAF follow-up, since the shell's
+    dimensions are already final when the resize is dispatched. A
+    previous measurement showed a 2x1 pane-2 regression (~1 s) caused by
+    `resizeWhenReady` blocking on the terminal's
     `__claudeHubReplayBuffering` flag; the second pane's terminal was
     still replaying history when the mode-return resize fired. The fix
     removes the buffering block (fit is safe during replay — xterm.js
