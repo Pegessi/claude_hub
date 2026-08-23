@@ -11213,6 +11213,105 @@ def test_monitor_does_not_auto_continue_review_needs_input_parking(
     assert sent_messages == []
 
 
+def test_monitor_does_not_auto_continue_reviewer_after_sealed_terminal_verdict(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Sealed round with terminal verdict: reviewer must stay idle; worker recovery only.
+
+    Regression for monitor auto-continuing the reviewer after review_passed,
+    which re-posted review_started and polluted the TaskMailbox stream.
+    """
+    (
+        _,
+        workspace,
+        task,
+        started,
+        worker,
+        sent_messages,
+        status_samples,
+    ) = _seed_sealed_round(
+        monkeypatch,
+        tmp_path,
+        tab_id="no-reviewer-sealed-tab",
+        port=12610,
+        prefix="norevseal",
+        workspace_name="NoReviewerSealed",
+        task_title="norevseal",
+        prompt="x",
+        verdict_state=AgentReportState.REVIEW_PASSED,
+        packet_status=GoalPacketStatus.APPROVED,
+    )
+    reviewer_id = workspace_manager.tasks[task["id"]].review_session_id
+    reviewer = workspace_manager.sessions[reviewer_id]
+    workspace_manager.sessions[reviewer_id] = reviewer.model_copy(
+        update={
+            "status": ManagedSessionStatus.IDLE,
+            "runtime_status": AgentRuntimeStatus.IDLE,
+            "current_task_id": task["id"],
+            "auto_continue_task_id": None,
+            "auto_continue_attempts": 0,
+            "last_activity_at": datetime.now() - timedelta(seconds=120),
+        }
+    )
+
+    async def fake_capture(tmux: str) -> str:
+        # Completion-shaped output that would trigger reviewer report-missing
+        # auto-continue if the sealed-round guard were absent.
+        return "\n".join(
+            [
+                "Review complete.",
+                "Validation: criteria met.",
+                "Risks: none.",
+                "",
+                "› ",
+            ]
+        )
+
+    monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture)
+
+    sampled_at = datetime.now()
+    status_samples[:] = [
+        TerminalAgentStatus(
+            tab_id=worker.tab_id,
+            tab_name="w",
+            agent_type=AgentType.CLAUDE,
+            status=AgentRuntimeStatus.IDLE,
+            status_text="Idle",
+            detail="worker idle",
+            tmux_session=f"claude-hub-{worker.tab_id}",
+            last_changed_at=sampled_at - timedelta(seconds=120),
+            sampled_at=sampled_at,
+        ),
+        TerminalAgentStatus(
+            tab_id=reviewer.tab_id,
+            tab_name="r",
+            agent_type=AgentType.CODEX,
+            status=AgentRuntimeStatus.IDLE,
+            status_text="Idle",
+            detail="reviewer idle after verdict",
+            tmux_session=f"claude-hub-{reviewer.tab_id}",
+            last_changed_at=sampled_at - timedelta(seconds=120),
+            sampled_at=sampled_at,
+        ),
+    ]
+
+    asyncio.run(
+        workspace_manager._refresh_session_statuses(workspace["id"], run_auto_continue=True)
+    )
+
+    reviewer_after = workspace_manager.sessions[reviewer_id]
+    recovered = workspace_manager.tasks[task["id"]]
+    reviewer_tmux = f"claude-hub-{reviewer.tab_id}"
+    reviewer_prompts = [msg for tmux, msg in sent_messages if tmux == reviewer_tmux]
+
+    assert reviewer_prompts == [], "reviewer must not be auto-continued after sealed verdict"
+    assert reviewer_after.auto_continue_attempts == 0
+    assert (
+        recovered.status == WorkspaceTaskStatus.WORKING
+    ), f"worker sealed recovery must still run, got {recovered.status}"
+
+
 def test_monitor_recovers_sealed_gp_rejected_verdict(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,

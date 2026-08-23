@@ -394,15 +394,23 @@ class _MonitorMixin:
             # human). This catches pre-existing stranded GP-approval /
             # GP-rejected / impl-review-failed tasks as well as any future
             # strandings from cold-resume races.
+            round_has_verdict = state_policy.current_round_has_verdict(
+                task.review_cycle, task.reviewed_cycle
+            )
             sealed_verdict_state = self._sealed_cycle_verdict_state(task.id, task.review_cycle)
             sealed_round_awaiting_continue = (
                 is_worker
-                and state_policy.current_round_has_verdict(task.review_cycle, task.reviewed_cycle)
+                and round_has_verdict
                 and task.human_acceptance_requested_at is None
                 and not self._task_has_post_cycle_report(task.id, task.review_cycle)
                 and sealed_verdict_state
                 in {AgentReportState.REVIEW_PASSED, AgentReportState.REVIEW_FAILED}
             )
+            # Sealed current round: reviewer duty is complete — never auto-continue
+            # the reviewer (avoids duplicate review_started / verdict noise).
+            # Worker sealed-verdict recovery remains via sealed_round_awaiting_continue.
+            if is_reviewer and round_has_verdict:
+                return None
             if not is_reviewer and not sealed_round_awaiting_continue:
                 return None
         else:
