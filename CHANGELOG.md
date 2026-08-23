@@ -44,10 +44,14 @@
   data arrives IF the user was already at the bottom. The iframe injected
   script gained a `resizeWhenReady`
   helper that resolves the terminal via `termForHistoryAction()` and retries
-  until the terminal (and its replay) is ready before calling the immediate
-  `requestFit` (not the debounced `scheduleFit`): for mode-return the shell's
-  layout box is already at its final size because `visibility: hidden`
-  preserves dimensions, so the 150ms debounce would only add latency. A single
+  until the terminal object exists before calling the immediate
+  `requestFit` (not the debounced `scheduleFit`). Note: `resizeWhenReady`
+  intentionally does NOT wait for history replay to finish — fitting during
+  replay is safe (xterm.js handles resizes while the buffer is being
+  written), and blocking on replay caused split-layout pane 2 to stall.
+  For mode-return the shell's layout box is already at its final size
+  because `visibility: hidden` preserves dimensions, so the 150ms debounce
+  would only add latency. A single
   rAF follow-up matches `scheduleFit`'s double-fit pattern to catch sub-frame
   drift, so all visible panes (1x1 and split layouts) re-fit correctly after
   the shell leaves its hidden state.

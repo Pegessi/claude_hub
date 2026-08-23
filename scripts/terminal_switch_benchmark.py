@@ -9,9 +9,10 @@ increments every time `term.resize()` is called (which is what the fit
 addon calls internally). The counter's value is recorded as the baseline
 *before* the switch. After switching back to terminal mode, the benchmark
 waits for the counter to INCREASE past that baseline — proving a fit ran
-*after* the switch. This is causal on both main and feature: even on main,
-where the terminal preserves its dimensions while hidden (display:none),
-a stale cols>0/rows>0 state cannot satisfy the "count increased" check.
+*after* the switch. This is causal on both main and feature: on main,
+the terminal is hidden with `display: none`, which collapses the layout
+box to zero size; returning to Terminal mode forces xterm.js to fit
+from a zero-size viewport, so the fit-call count always increases.
 
 Two metrics are collected:
 
@@ -37,9 +38,11 @@ a subset.
 
 Runs for both 1x1 and split (2x1) layouts.
 """
+
 import json
 import sys
 import time
+
 from playwright.sync_api import sync_playwright
 
 APP_URL = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:5173"
@@ -50,8 +53,7 @@ TIMEOUT_MS = 15000
 def get_term_state(frame):
     """Return terminal state including request-correlation nonces and the
     fit-call counter injected by `inject_fit_counter`."""
-    return frame.evaluate(
-        """
+    return frame.evaluate("""
         () => {
           const term = (window.ttyd && window.ttyd.terminal) || window.term;
           if (!term) return null;
@@ -65,8 +67,7 @@ def get_term_state(frame):
             lastScrollNonce: term.__claudeHubLastScrollNonce || null,
           };
         }
-        """
-    )
+        """)
 
 
 def inject_fit_counter(frame):
@@ -84,36 +85,40 @@ def inject_fit_counter(frame):
     If the counter was already installed, this is a no-op. Returns True if
     the terminal was found and the counter is installed, False otherwise.
     """
-    return frame.evaluate(
-        """
+    return frame.evaluate("""
         () => {
           const term = (window.ttyd && window.ttyd.terminal) || window.term;
           if (!term) return false;
           if (term.__claudeHubFitCallCount === undefined) {
             term.__claudeHubFitCallCount = 0;
+            // bump() runs AFTER the original fit/resize returns, so the
+            // counter observes fit *completion*, not invocation. Since
+            // fitAddon.fit / term.fit are synchronous, this is the moment
+            // xterm.js has finished recomputing cols/rows for the current
+            // container size.
             const bump = () => { term.__claudeHubFitCallCount++; };
             // Wrap term.fit (ttyd's public fit entry point).
             if (typeof term.fit === 'function') {
               const origFit = term.fit.bind(term);
-              term.fit = function() { bump(); return origFit(); };
+              term.fit = function() { const r = origFit(); bump(); return r; };
             }
             // Wrap term.fitAddon.fit if present (callFit prefers it).
             if (term.fitAddon && typeof term.fitAddon.fit === 'function') {
               const origAddonFit = term.fitAddon.fit.bind(term.fitAddon);
-              term.fitAddon.fit = function() { bump(); return origAddonFit(); };
+              term.fitAddon.fit = function() { const r = origAddonFit(); bump(); return r; };
             }
             // Also wrap term.resize for completeness (fit addon calls it
             // when dimensions change).
             const origResize = term.resize.bind(term);
             term.resize = function(cols, rows) {
+              const r = origResize(cols, rows);
               bump();
-              return origResize(cols, rows);
+              return r;
             };
           }
           return true;
         }
-        """
-    )
+        """)
 
 
 def find_frame_for_tab(page, tab_id):
@@ -136,9 +141,10 @@ def wait_for_fit(page, tab_ids, expected_nonces, baseline_fit_counts, t0):
        switch and produced valid (nonzero) dimensions. The causal signal is
        `fitCallCount > baseline_fit_counts[tid]` — the baseline is recorded
        *before* the switch, so an increase proves a fit ran after the switch.
-       This is causal on both branches: even on main, where the terminal
-       preserves its dimensions while hidden (display:none), a stale
-       cols>0/rows>0 state cannot satisfy the "count increased" check.
+       This is causal on both branches: on main, the terminal is hidden with
+       `display: none`, which collapses the layout box to zero size; returning
+       to Terminal mode forces xterm.js to fit from a zero-size viewport, so
+       the fit-call count always increases.
 
     2. **nonce-ack time** (feature only): the time from the mode switch to
        the terminal's `__claudeHubLastFitNonce` matching the nonce dispatched
@@ -219,8 +225,7 @@ def wait_for_fit(page, tab_ids, expected_nonces, baseline_fit_counts, t0):
 
 def get_terminal_store(page):
     """Access the Pinia terminal store via the Vue app instance."""
-    return page.evaluate(
-        """
+    return page.evaluate("""
         () => {
           const app = document.querySelector('#app').__vue_app__;
           if (!app) return null;
@@ -228,8 +233,7 @@ def get_terminal_store(page):
           if (!pinia) return null;
           return pinia._s.get('terminal') || null;
         }
-        """
-    )
+        """)
 
 
 def switch_mode(page, mode):
@@ -256,8 +260,7 @@ def switch_mode(page, mode):
 
 def get_visible_tab_ids(page):
     """Return the tab IDs currently assigned to visible panes."""
-    return page.evaluate(
-        """
+    return page.evaluate("""
         () => {
           const app = document.querySelector('#app').__vue_app__;
           const pinia = app.config.globalProperties.$pinia;
@@ -265,8 +268,7 @@ def get_visible_tab_ids(page):
           if (!store) return [];
           return store.panes.map(p => p.tabId).filter(Boolean);
         }
-        """
-    )
+        """)
 
 
 def set_layout(page, layout_type):
@@ -288,8 +290,7 @@ def set_layout(page, layout_type):
 
 def ensure_split_layout_with_tabs(page):
     """Set up a 2x1 split layout with both panes having tabs."""
-    page.evaluate(
-        """
+    page.evaluate("""
         async () => {
           const app = document.querySelector('#app').__vue_app__;
           const pinia = app.config.globalProperties.$pinia;
@@ -309,8 +310,7 @@ def ensure_split_layout_with_tabs(page):
             }
           }
         }
-        """
-    )
+        """)
 
 
 def read_dispatched_nonces(page):
@@ -321,14 +321,12 @@ def read_dispatched_nonces(page):
 
     On main (no nonce protocol), this returns an empty dict.
     """
-    return page.evaluate(
-        """
+    return page.evaluate("""
         () => {
           const w = window;
           return w.__claudeHubTerminalReturnNonces || {};
         }
-        """
-    )
+        """)
 
 
 CHROMIUM_PATH = "/Users/bytedance/Library/Caches/ms-playwright/chromium-1223/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
@@ -387,8 +385,8 @@ def run_benchmark():
         # wait briefly for it to run and store the nonces on window.
         time.sleep(0.1)
         expected_nonces = read_dispatched_nonces(page)
-        elapsed_1x1, settled_1x1, first_fit_times_1x1, nonce_ack_times_1x1 = wait_for_fit(
-            page, tab_ids, expected_nonces, baseline_fit_counts, t0
+        elapsed_1x1, settled_1x1, first_fit_times_1x1, nonce_ack_times_1x1 = (
+            wait_for_fit(page, tab_ids, expected_nonces, baseline_fit_counts, t0)
         )
         results["1x1"] = {
             "elapsed_ms": round(elapsed_1x1, 1),
@@ -418,8 +416,8 @@ def run_benchmark():
         switch_mode(page, "terminal")
         time.sleep(0.1)
         expected_nonces = read_dispatched_nonces(page)
-        elapsed_split, settled_split, first_fit_times_split, nonce_ack_times_split = wait_for_fit(
-            page, tab_ids, expected_nonces, baseline_fit_counts, t0
+        elapsed_split, settled_split, first_fit_times_split, nonce_ack_times_split = (
+            wait_for_fit(page, tab_ids, expected_nonces, baseline_fit_counts, t0)
         )
         results["2x1"] = {
             "elapsed_ms": round(elapsed_split, 1),
