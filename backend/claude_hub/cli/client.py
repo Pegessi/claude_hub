@@ -320,6 +320,92 @@ class HubClient:
         """GET /api/workspaces/{workspace_id}/tasks/{task_id}/reports."""
         return self._request("GET", f"/api/workspaces/{workspace_id}/tasks/{task_id}/reports")
 
+    def list_task_tree(self, workspace_id: str, task_id: Optional[str] = None) -> Any:
+        """GET /api/workspaces/{workspace_id}/tasks/tree or .../tasks/{task_id}/tree."""
+        if task_id:
+            return self._request("GET", f"/api/workspaces/{workspace_id}/tasks/{task_id}/tree")
+        return self._request("GET", f"/api/workspaces/{workspace_id}/tasks/tree")
+
+    def get_task_events(
+        self,
+        workspace_id: str,
+        task_id: Optional[str] = None,
+        since_sequence: int = 0,
+        subtree: bool = False,
+    ) -> Any:
+        """GET Task or resident mailbox events. Never /api/agent-tree."""
+        params: Dict[str, Any] = {
+            "since_sequence": since_sequence,
+            "subtree": subtree,
+        }
+        if task_id:
+            return self._request(
+                "GET",
+                f"/api/workspaces/{workspace_id}/tasks/{task_id}/events",
+                params=params,
+            )
+        return self._request(
+            "GET",
+            f"/api/workspaces/{workspace_id}/resident/events",
+            params=params,
+        )
+
+    def wait_task_events(
+        self,
+        workspace_id: str,
+        task_id: Optional[str] = None,
+        since_sequence: int = 0,
+        subtree: bool = False,
+        timeout_seconds: float = 30.0,
+    ) -> Any:
+        """POST Task or resident mailbox wait. Never /api/agent-tree."""
+        params: Dict[str, Any] = {
+            "since_sequence": since_sequence,
+            "subtree": subtree,
+            "timeout_seconds": timeout_seconds,
+        }
+        if task_id:
+            return self._request(
+                "POST",
+                f"/api/workspaces/{workspace_id}/tasks/{task_id}/wait",
+                params=params,
+                timeout=timeout_seconds + 5.0,
+            )
+        return self._request(
+            "POST",
+            f"/api/workspaces/{workspace_id}/resident/wait",
+            params=params,
+            timeout=timeout_seconds + 5.0,
+        )
+
+    def ack_task_events(
+        self,
+        workspace_id: str,
+        sequence: int,
+        task_id: Optional[str] = None,
+    ) -> Any:
+        """POST Task or resident mailbox ACK. Never /api/agent-tree."""
+        body = {"sequence": sequence}
+        if task_id:
+            return self._request(
+                "POST",
+                f"/api/workspaces/{workspace_id}/tasks/{task_id}/ack",
+                json=body,
+            )
+        return self._request(
+            "POST",
+            f"/api/workspaces/{workspace_id}/resident/ack",
+            json=body,
+        )
+
+    def followup_task(self, workspace_id: str, task_id: str, body: Dict[str, Any]) -> Any:
+        """POST /api/workspaces/{workspace_id}/tasks/{task_id}/followup."""
+        return self._request(
+            "POST",
+            f"/api/workspaces/{workspace_id}/tasks/{task_id}/followup",
+            json=body,
+        )
+
     # -- Agents / sessions --------------------------------------------------
 
     def ensure_agent(self, workspace_id: str, body: Dict[str, Any]) -> Any:

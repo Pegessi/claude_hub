@@ -13,6 +13,7 @@ import pytest
 from claude_hub.models.agent_tree import (
     AgentEventType,
     AgentRun,
+    AgentRunStatus,
     ExecutorKind,
     ManagedExecutorConfig,
     SpawnRequest,
@@ -35,6 +36,7 @@ from claude_hub.services.agent_tree_adapters import (
     ManagedTaskAdapter,
     NativeSubagentAdapter,
 )
+from claude_hub.services.task_mailbox import TaskMailbox
 from claude_hub.services.ttyd_manager import TTYDProcess
 
 
@@ -47,13 +49,17 @@ class _FakeWorkspaceManager:
                 remote_profile_id=None,
                 remote_cwd=None,
                 remote_reconnect=True,
+                resident_agent_session_id=None,
+                resident_ack_sequence=0,
             )
         }
         self.tasks: dict[str, WorkspaceTask] = {}
         self.sessions: dict[str, ManagedSession] = {}
+        self.reports: dict[str, object] = {}
         self.ensure_payloads = []
         self.start_payloads = []
         self.save_calls = 0
+        self.task_mailbox = TaskMailbox(self)  # type: ignore[arg-type]
 
     def _save_state(self) -> None:
         self.save_calls += 1
@@ -126,6 +132,31 @@ class _FakeWorkspaceManager:
             }
         )
         return self.tasks[task_id]
+
+    def _managed_spawn_parent_assignment(self, run: AgentRun) -> tuple[str | None, str | None]:
+        return None, None
+
+    def _resolve_task_for_compat_run(self, workspace_id: str, run: AgentRun) -> WorkspaceTask:
+        linked = [
+            task
+            for task in self.tasks.values()
+            if task.workspace_id == workspace_id and task.agent_run_id == run.id
+        ]
+        if len(linked) == 1:
+            return linked[0]
+        if not linked:
+            raise KeyError(run.id)
+        raise ValueError(f"Run {run.id} links to {len(linked)} Tasks")
+
+    def _projected_task_status(self, task: WorkspaceTask) -> AgentRunStatus:
+        mapping = {
+            WorkspaceTaskStatus.TODO: AgentRunStatus.PENDING,
+            WorkspaceTaskStatus.QUEUED: AgentRunStatus.PENDING,
+            WorkspaceTaskStatus.WORKING: AgentRunStatus.RUNNING,
+            WorkspaceTaskStatus.REVIEW: AgentRunStatus.WAITING,
+            WorkspaceTaskStatus.DONE: AgentRunStatus.COMPLETED,
+        }
+        return mapping.get(task.status, AgentRunStatus.PENDING)
 
 
 def _run(run_id: str, config: ManagedExecutorConfig | None = None) -> AgentRun:
@@ -375,12 +406,38 @@ def test_codex_model_is_in_real_cli_launch_command(tmp_path: Path) -> None:
     )
 
 
+def _wire_fake_manager_for_agent_tree_spawn(
+    wm: _FakeWorkspaceManager, manager: AgentTreeManager
+) -> None:
+    """Resident parent spawn + TaskMailbox staging need these fake hooks."""
+    now = datetime.utcnow()
+    resident_id = "resident-session"
+    wm.workspaces["workspace-1"].resident_agent_session_id = resident_id
+    wm.sessions[resident_id] = ManagedSession(
+        id=resident_id,
+        workspace_id="workspace-1",
+        tab_id="tab-resident",
+        role=WorkspaceSessionRole.RESIDENT,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.IDLE,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="resident",
+        workspace_path=str(wm.workspace_path),
+        tmux_session="tmux-resident",
+        target=ExecutionTarget.LOCAL,
+        created_at=now,
+        updated_at=now,
+    )
+    wm.agent_tree = manager  # type: ignore[attr-defined]
+
+
 @pytest.mark.asyncio
 async def test_manager_spawn_persists_and_reloads_real_executor_contract(
     tmp_path: Path,
 ) -> None:
     wm = _FakeWorkspaceManager(tmp_path)
     manager = AgentTreeManager(wm)  # type: ignore[arg-type]
+    _wire_fake_manager_for_agent_tree_spawn(wm, manager)
     root = manager.create_root_run(
         workspace_id="workspace-1",
         executor_kind=ExecutorKind.RESIDENT_ROOT,
@@ -429,14 +486,45 @@ async def test_manager_spawn_persists_and_reloads_real_executor_contract(
         for event in initial_events
     )
     cursor = max(event.sequence for event in initial_events)
+    agent_event_count = len(manager._events.get("workspace-1", []))
+    agent_call_ids = set(manager._call_index.get("workspace-1", {}))
+    progress_call_id = "codex-child-progress-1"
     manager.emit_event(
         workspace_id="workspace-1",
         agent_run_id=child.id,
         event_type=AgentEventType.PROGRESS,
         author=child.id,
         recipient=root.id,
-        call_id="codex-child-progress-1",
+        call_id=progress_call_id,
         payload={"message": "managed child made progress"},
+    )
+    assert progress_call_id not in manager._call_index.get("workspace-1", {})
+    assert len(manager._events.get("workspace-1", [])) == agent_event_count
+    assert agent_call_ids == set(manager._call_index.get("workspace-1", {}))
+    progress_task_events = [
+        item
+        for item in wm.task_mailbox._events.get("workspace-1", [])
+        if item.call_id == progress_call_id
+    ]
+    assert len(progress_task_events) == 1
+    manager.emit_event(
+        workspace_id="workspace-1",
+        agent_run_id=child.id,
+        event_type=AgentEventType.PROGRESS,
+        author=child.id,
+        recipient=root.id,
+        call_id=progress_call_id,
+        payload={"message": "managed child made progress"},
+    )
+    assert (
+        len(
+            [
+                item
+                for item in wm.task_mailbox._events.get("workspace-1", [])
+                if item.call_id == progress_call_id
+            ]
+        )
+        == 1
     )
     waited = await manager.wait(
         WaitRequest(
@@ -447,18 +535,35 @@ async def test_manager_spawn_persists_and_reloads_real_executor_contract(
             timeout_seconds=0,
         )
     )
-    assert [event.call_id for event in waited] == ["codex-child-progress-1"]
+    assert [event.call_id for event in waited] == [progress_call_id]
 
-    persisted = manager.to_dict("workspace-1")
+    persisted = {
+        **manager.to_dict("workspace-1"),
+        **wm.task_mailbox.to_dict("workspace-1"),
+    }
     restored_wm = _FakeWorkspaceManager(tmp_path)
+    restored_wm.tasks = dict(wm.tasks)
+    restored_wm.sessions = dict(wm.sessions)
     restored = AgentTreeManager(restored_wm)  # type: ignore[arg-type]
+    _wire_fake_manager_for_agent_tree_spawn(restored_wm, restored)
     restored.load_from_dict("workspace-1", persisted)
+    restored_wm.task_mailbox.load_from_dict("workspace-1", persisted)
     restored_child = restored.get_run(child.id)
 
     assert restored_child is not None
     assert restored_child.executor_config == child.executor_config
     assert restored_child.executor_capabilities == child.executor_capabilities
-    assert "codex-child-progress-1" in {
+    assert progress_call_id in {
         event.call_id
         for event in restored.get_events("workspace-1", root.id, since_sequence=0, subtree=True)
     }
+    cold_waited = await restored.wait(
+        WaitRequest(
+            workspace_id="workspace-1",
+            recipient_id=root.id,
+            since_sequence=cursor,
+            subtree=True,
+            timeout_seconds=0,
+        )
+    )
+    assert [event.call_id for event in cold_waited] == [progress_call_id]

@@ -1104,9 +1104,11 @@ class _MonitorMixin:
         task: WorkspaceTask,
         *,
         updated_at: datetime,
-    ) -> None:
+        delete_tabs: bool = True,
+    ) -> list[str]:
         """Release persistent reviewers and delete task-scoped temporary reviewers."""
 
+        ephemeral_tab_ids: list[str] = []
         session_ids: set[str] = set()
         if task.review_session_id:
             session_ids.add(task.review_session_id)
@@ -1123,14 +1125,17 @@ class _MonitorMixin:
                 continue
             if session.ephemeral:
                 self.sessions.pop(session.id, None)
-                try:
-                    await ttyd_manager.delete_tab(session.tab_id)
-                except Exception:
-                    logger.exception(
-                        "Failed to delete temporary reviewer tab session_id=%s tab_id=%s",
-                        session.id,
-                        session.tab_id,
-                    )
+                if delete_tabs:
+                    try:
+                        await ttyd_manager.delete_tab(session.tab_id)
+                    except Exception:
+                        logger.exception(
+                            "Failed to delete temporary reviewer tab session_id=%s tab_id=%s",
+                            session.id,
+                            session.tab_id,
+                        )
+                else:
+                    ephemeral_tab_ids.append(session.tab_id)
                 continue
             self.sessions[session.id] = session.model_copy(
                 update={
@@ -1148,6 +1153,7 @@ class _MonitorMixin:
                     "last_activity_at": updated_at,
                 }
             )
+        return ephemeral_tab_ids
 
     def _assign_current_task(self, session_id: str, task_id: str) -> None:
         session = self.sessions.get(session_id)

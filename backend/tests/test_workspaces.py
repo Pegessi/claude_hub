@@ -5371,13 +5371,21 @@ def test_dispatch_holds_agent_during_in_flight_review(
     assert workspace_manager.sessions[busy_agent["id"]].current_task_id == first_task["id"]
 
 
-def test_report_with_task_renames_non_orchestrator_session(
+def test_report_with_task_renames_assigned_non_orchestrator_session(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Report intake renames an assigned worker even when the session is not the orchestrator.
+
+    Task assignment is explicit: ``task.session_id`` must name the reporting worker
+    before intake (implicit claim via the first report is rejected). The session may
+    still carry a stale tab title and ``current_task_id=None`` until report intake
+    runs ``_rename_session_for_task``.
+    """
     repo = tmp_path / "repo"
     repo.mkdir()
     renamed_tabs: list[tuple[str, str | None]] = []
+    worker_session_id = "review-reviewer-1"
 
     async def fake_update_tab(tab_id: str, name: Optional[str] = None, **_: object) -> TerminalTab:
         renamed_tabs.append((tab_id, name))
@@ -5412,18 +5420,20 @@ def test_report_with_task_renames_non_orchestrator_session(
             "session_prefix": "review",
         },
     )
+    workspace_id = workspace_response.json()["id"]
     task_response = client.post(
-        f"/api/workspaces/{workspace_response.json()['id']}/tasks",
+        f"/api/workspaces/{workspace_id}/tasks",
         json={
             "title": "Review assigned task",
             "prompt": "Review this change",
             "agent_type": "codex",
         },
     )
+    task_id = task_response.json()["id"]
     now = datetime.now()
-    workspace_manager.sessions["review-reviewer-1"] = ManagedSession(
-        id="review-reviewer-1",
-        workspace_id=workspace_response.json()["id"],
+    workspace_manager.sessions[worker_session_id] = ManagedSession(
+        id=worker_session_id,
+        workspace_id=workspace_id,
         task_id=None,
         tab_id="tab-reviewer",
         role=WorkspaceSessionRole.WORKER,
@@ -5445,21 +5455,28 @@ def test_report_with_task_renames_non_orchestrator_session(
         created_at=now,
         updated_at=now,
     )
+    workspace_manager.tasks[task_id] = workspace_manager.tasks[task_id].model_copy(
+        update={"session_id": worker_session_id}
+    )
+    pre_report_session = workspace_manager.sessions[worker_session_id]
+    assert pre_report_session.current_task_id is None
+    assert pre_report_session.title == "Reviewer 1"
+    assert workspace_manager.tasks[task_id].session_id == worker_session_id
 
     report_response = client.post(
-        "/api/workspaces/sessions/review-reviewer-1/reports",
+        f"/api/workspaces/sessions/{worker_session_id}/reports",
         json={
-            "task_id": task_response.json()["id"],
+            "task_id": task_id,
             "state": "started",
             "message": "Started review",
         },
     )
 
     assert report_response.status_code == 201
-    session = workspace_manager.sessions["review-reviewer-1"]
+    session = workspace_manager.sessions[worker_session_id]
     assert session.role == WorkspaceSessionRole.WORKER
     assert session.title == "Review assigned task"
-    assert session.current_task_id == task_response.json()["id"]
+    assert session.current_task_id == task_id
     assert renamed_tabs == [("tab-reviewer", "Review assigned task")]
 
 

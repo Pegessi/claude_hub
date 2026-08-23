@@ -7,8 +7,23 @@ import json
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
 from ...models.agent_tree import AgentEventType
+from ...models.task_mailbox import TaskActorRole, TaskEventType
 from ..agent_tree import _request_fingerprint
+from ..task_graph import task_supervisor_consumer_key
 from ._constants import *  # noqa: F401,F403
+
+_REPORT_STATE_TO_TASK_EVENT: dict[AgentReportState, TaskEventType] = {
+    AgentReportState.STARTED: TaskEventType.STARTED,
+    AgentReportState.WORKING: TaskEventType.PROGRESS,
+    AgentReportState.BLOCKED: TaskEventType.NEEDS_INPUT,
+    AgentReportState.NEEDS_INPUT: TaskEventType.NEEDS_INPUT,
+    AgentReportState.READY_FOR_REVIEW: TaskEventType.REPORT,
+    AgentReportState.COMPLETED: TaskEventType.COMPLETED,
+    AgentReportState.REVIEW_STARTED: TaskEventType.REVIEW_STARTED,
+    AgentReportState.REVIEW_PASSED: TaskEventType.REVIEW_PASSED,
+    AgentReportState.REVIEW_FAILED: TaskEventType.REVIEW_FAILED,
+    AgentReportState.REVIEW_NEEDS_INPUT: TaskEventType.REVIEW_NEEDS_INPUT,
+}
 
 
 class ReportCallIdConflict(ValueError):
@@ -27,14 +42,16 @@ class _ReportsMixin:
     def _snapshot_report_intake_workspace(self, workspace_id: str) -> dict[str, Any]:
         """Deep snapshot every durable domain mutated by report intake.
 
-        Report intake is a single-workspace transaction.  Besides the new
-        report and the reporting session/task it can update reviewer bindings,
-        mailbox ACK state, Agent Tree run status/events, and a resident ACK
-        cursor.  A shallow snapshot is insufficient because AgentRun cursor
-        fields are mutated in-place.
+        Report intake is a single-workspace transaction. Besides the new
+        report and the reporting session/task it can update reviewer
+        bindings, TaskMailbox events/call_index/next_seq, and the objects
+        that hold Task/Workspace consumer cursors. Agent Tree blobs stay
+        in the snapshot so leftover compat state is not dropped on restore.
         """
 
         tree = self.agent_tree
+        mailbox = self.task_mailbox
+        workspace = self.workspaces.get(workspace_id)
         return {
             "sessions": {
                 key: value.model_copy(deep=True)
@@ -51,6 +68,7 @@ class _ReportsMixin:
                 for key, value in self.reports.items()
                 if value.workspace_id == workspace_id
             },
+            "workspace": workspace.model_copy(deep=True) if workspace is not None else None,
             "runs": {
                 key: value.model_copy(deep=True)
                 for key, value in tree._runs.items()
@@ -62,6 +80,12 @@ class _ReportsMixin:
             "call_index": copy.deepcopy(tree._call_index.get(workspace_id, {})),
             "next_seq_present": workspace_id in tree._next_seq,
             "next_seq": tree._next_seq.get(workspace_id),
+            "task_events_present": workspace_id in mailbox._events,
+            "task_events": copy.deepcopy(mailbox._events.get(workspace_id, [])),
+            "task_call_index_present": workspace_id in mailbox._call_index,
+            "task_call_index": copy.deepcopy(mailbox._call_index.get(workspace_id, {})),
+            "task_next_seq_present": workspace_id in mailbox._next_seq,
+            "task_next_seq": mailbox._next_seq.get(workspace_id),
         }
 
     def _restore_report_intake_workspace(self, workspace_id: str, snapshot: dict[str, Any]) -> None:
@@ -73,6 +97,9 @@ class _ReportsMixin:
                 if value.workspace_id == workspace_id:
                     collection.pop(key, None)
             collection.update(snapshot[collection_name])
+
+        if snapshot.get("workspace") is not None:
+            self.workspaces[workspace_id] = snapshot["workspace"]
 
         tree = self.agent_tree
         for key, value in list(tree._runs.items()):
@@ -91,6 +118,20 @@ class _ReportsMixin:
             tree._next_seq[workspace_id] = snapshot["next_seq"]
         else:
             tree._next_seq.pop(workspace_id, None)
+
+        mailbox = self.task_mailbox
+        if snapshot.get("task_events_present"):
+            mailbox._events[workspace_id] = snapshot["task_events"]
+        else:
+            mailbox._events.pop(workspace_id, None)
+        if snapshot.get("task_call_index_present"):
+            mailbox._call_index[workspace_id] = snapshot["task_call_index"]
+        else:
+            mailbox._call_index.pop(workspace_id, None)
+        if snapshot.get("task_next_seq_present"):
+            mailbox._next_seq[workspace_id] = snapshot["task_next_seq"]
+        else:
+            mailbox._next_seq.pop(workspace_id, None)
 
     def _wake_report_intake_runs(self, wake_targets: set[tuple[str, str]]) -> None:
         """Wake Agent Tree recipients only after the outer commit succeeds."""
@@ -276,6 +317,24 @@ class _ReportsMixin:
         bound = session.current_task_id or session.task_id
         return bound == report.task_id
 
+    def _ensure_session_may_report_task(self, session: ManagedSession, task: WorkspaceTask) -> None:
+        """Reject reports from a session that is not the Task's current assignee.
+
+        Reviewers must match ``task.review_session_id``. Workers must match
+        ``task.session_id``. An unassigned Task (``session_id is None``) cannot
+        be claimed by a worker report; callers must fail closed.
+        """
+        if session.workspace_id != task.workspace_id:
+            raise RuntimeError("Session belongs to a different workspace")
+        if session.role == WorkspaceSessionRole.REVIEWER:
+            if task.review_session_id != session.id:
+                raise RuntimeError("Session is not the current reviewer for this task")
+            return
+        if task.session_id is None:
+            raise RuntimeError("Task has no assigned worker session")
+        if task.session_id != session.id:
+            raise RuntimeError("Session is not the current worker for this task")
+
     def _replay_existing_report_intake(
         self, session: ManagedSession, existing: AgentReport
     ) -> AgentReport:
@@ -355,10 +414,10 @@ class _ReportsMixin:
                     report = existing
                 else:
                     if existing is None:
-                        # Rename is the only pre-commit await for a *new*
-                        # report. Do it BEFORE the rollback snapshot so a
-                        # concurrent emit_event+_persist that still interleaves
-                        # during update_tab is part of the snapshot.
+                        # New reports only: assignment must fail closed before
+                        # rename, snapshot, or any report write. Matching
+                        # existing reports replay above even after the
+                        # session was rebound to another task.
                         rename_task_id = payload.task_id or live.task_id or live.current_task_id
                         if rename_task_id:
                             rename_task = self.tasks.get(rename_task_id)
@@ -371,6 +430,7 @@ class _ReportsMixin:
                                         "Task was manually aborted; restart or reassign "
                                         "it before accepting reports."
                                     )
+                                self._ensure_session_may_report_task(live, rename_task)
                                 await self._rename_session_for_task(
                                     live, rename_task, updated_at=_wm._now()
                                 )
@@ -448,6 +508,7 @@ class _ReportsMixin:
                 raise RuntimeError(
                     "Task was manually aborted; restart or reassign it before accepting reports."
                 )
+            self._ensure_session_may_report_task(session, task)
             # Title already matches after the outer pre-snapshot rename, so
             # this is a synchronous no-op and does not yield the event loop.
             session = await self._rename_session_for_task(session, task, updated_at=now)
@@ -841,9 +902,9 @@ class _ReportsMixin:
         if ack_set:
             wake_targets = self._ack_call_ids(task_id, session.id, list(ack_set))
 
-        # Stage the report bridge event and its run projection in the same
-        # transaction as the report and ACK/cursor mutations. A pre-commit
-        # failure restores all of them from the outer workspace snapshot.
+        # Stage the TaskMailbox event in the same transaction as the report
+        # and ACK/cursor mutations. A pre-commit failure restores all of them
+        # from the outer workspace snapshot. Wake stays after the outer save.
         bridge_wake_target = self._bridge_report_to_agent_event(
             report, self.sessions.get(session.id, session)
         )
@@ -876,12 +937,17 @@ class _ReportsMixin:
 
         **Target verification (anti-forgery):**
 
-        A call_id can only be ACKed by the session/task that it was targeted
-        at. For each call_id we look up its call record
-        (``agent_tree._call_record``) and verify that the record's target
-        run corresponds to the current ``task_id`` / ``session_id``. A
-        cross-task or cross-session ACK is rejected: the call_id is NOT
-        moved to delivered and NO ``followup:delivered`` event is emitted.
+        TaskMailbox followups are verified Task-first: the call_id must sit
+        on the Task outbox, the mailbox call record target must be exactly
+        this Task, and the reporting session must be the Task's current
+        worker assignment. Session outbox membership is not required for
+        that path; Session delivered is updated only when the same call_id
+        is also present on the Session.
+
+        Legacy dispatch/internal call_ids (no TaskMailbox record) still
+        require Session outbox membership plus
+        ``agent_tree._call_record`` target binding. Cross-task and
+        cross-session ACKs fail closed.
 
         Call_ids in ``pending_call_ids``, ``processing_call_ids``, or
         ``uncertain_call_ids`` are all eligible for ACK (the worker may have
@@ -901,22 +967,40 @@ class _ReportsMixin:
         task = self.tasks.get(task_id)
         session = self.sessions.get(session_id)
 
-        # Determine which call_ids are actually present in this session's
-        # pending/processing/uncertain lists. Only these can be committed.
         session_call_ids: set[str] = set()
         if session is not None:
             session_call_ids.update(session.pending_call_ids)
             session_call_ids.update(session.processing_call_ids)
             session_call_ids.update(session.uncertain_call_ids)
 
-        # Target verification: for each call_id, check that its call record's
-        # target run matches the current task/session. Reject cross-session
-        # or cross-task ACKs.
         verified_acked: list[str] = []
         for call_id in acked:
+            mailbox_record = (
+                self.task_mailbox._call_record(task.workspace_id, call_id)
+                if task is not None
+                else None
+            )
+            mailbox_target = mailbox_record.get("target") if mailbox_record else None
+            if mailbox_record is not None and task is not None and mailbox_target == task.id:
+                if not self._can_ack_task_mailbox_call(call_id, task, session, mailbox_record):
+                    logger.warning(
+                        "Rejecting TaskMailbox ACK: call_id=%s task_id=%s session_id=%s",
+                        call_id,
+                        task_id,
+                        session_id,
+                    )
+                    continue
+                verified_acked.append(call_id)
+                continue
+            if mailbox_target in self.tasks:
+                logger.warning(
+                    "Rejecting cross-task TaskMailbox ACK: call_id=%s target=%s task_id=%s",
+                    call_id,
+                    mailbox_target,
+                    task_id,
+                )
+                continue
             if call_id not in session_call_ids:
-                # Not in this session's outbox — ignore (future-ID poisoning
-                # or cross-session forgery).
                 continue
             if not self._verify_call_target(call_id, task_id, session_id):
                 logger.warning(
@@ -1031,6 +1115,31 @@ class _ReportsMixin:
                     }
                 )
         return wake_targets
+
+    def _can_ack_task_mailbox_call(
+        self,
+        call_id: str,
+        task: Optional[WorkspaceTask],
+        session: Optional[ManagedSession],
+        record: dict[str, Any],
+    ) -> bool:
+        """Allow ACK for a TaskMailbox-tracked call_id on the assigned worker."""
+        if task is None or session is None:
+            return False
+        if call_id not in (
+            set(task.pending_call_ids)
+            | set(task.processing_call_ids)
+            | set(task.uncertain_call_ids)
+        ):
+            return False
+        if record.get("target") != task.id:
+            return False
+        if task.session_id != session.id or session.workspace_id != task.workspace_id:
+            return False
+        assigned = {session.task_id, session.current_task_id}
+        if task.id not in assigned:
+            return False
+        return True
 
     def _verify_call_target(self, call_id: str, task_id: Optional[str], session_id: str) -> bool:
         """Verify that ``call_id``'s call record targets ``task_id``/``session_id``.
@@ -1283,75 +1392,111 @@ class _ReportsMixin:
                     }
                 )
 
+    def _task_actor_role_for_session(self, session: ManagedSession) -> TaskActorRole:
+        if session.role == WorkspaceSessionRole.REVIEWER:
+            return TaskActorRole.REVIEWER
+        if session.role == WorkspaceSessionRole.RESIDENT:
+            return TaskActorRole.SUPERVISOR
+        return TaskActorRole.WORKER
+
+    def _task_event_type_for_report(
+        self, state: AgentReportState, task: WorkspaceTask | None = None
+    ) -> TaskEventType:
+        """Map a report state to a Task event. REVIEWED worker COMPLETED is REPORT.
+
+        Compat AgentEventType.COMPLETED is reserved for REVIEW_PASSED / a
+        DIRECT-mode terminal completion. A REVIEWED worker completion waits
+        for the reviewer and must project as PROGRESS.
+        """
+        if (
+            state == AgentReportState.COMPLETED
+            and task is not None
+            and task.task_mode == WorkspaceTaskMode.REVIEWED
+        ):
+            return TaskEventType.REPORT
+        return _REPORT_STATE_TO_TASK_EVENT.get(state, TaskEventType.PROGRESS)
+
+    def _task_actor_for_report(self, report: AgentReport) -> tuple[str | None, TaskActorRole]:
+        session = self.sessions.get(report.session_id)
+        if session is not None and session.workspace_id == report.workspace_id:
+            return session.id, self._task_actor_role_for_session(session)
+        review_states = {
+            AgentReportState.REVIEW_STARTED,
+            AgentReportState.REVIEW_PASSED,
+            AgentReportState.REVIEW_FAILED,
+            AgentReportState.REVIEW_NEEDS_INPUT,
+        }
+        if report.state in review_states:
+            return report.session_id or None, TaskActorRole.REVIEWER
+        return report.session_id or None, TaskActorRole.WORKER
+
+    def _canonical_report_event_payload(
+        self,
+        report: AgentReport,
+        task: WorkspaceTask,
+        *,
+        actor_session_id: str | None,
+        actor_role: TaskActorRole,
+    ) -> dict[str, object]:
+        return {
+            "message": report.message,
+            "report_id": report.id,
+            "report_state": report.state.value,
+            "task_id": task.id,
+            "actor_role": actor_role.value,
+            "actor_session_id": actor_session_id,
+            "review_cycle": report.review_cycle,
+        }
+
+    def _canonical_report_bridge_payload(
+        self, report: AgentReport, session: ManagedSession, task: WorkspaceTask
+    ) -> dict[str, object]:
+        """Authoritative TaskMailbox payload for a persisted report rewrite."""
+
+        actor_role = self._task_actor_role_for_session(session)
+        return self._canonical_report_event_payload(
+            report, task, actor_session_id=session.id, actor_role=actor_role
+        )
+
     def _bridge_report_to_agent_event(
         self,
         report: AgentReport,
         session: ManagedSession,
     ) -> tuple[str, str] | None:
-        """Translate a managed-task report into an agent tree event.
+        """Append a TaskMailbox event for a persisted report.
 
-        Finds the agent run whose ``context_ref`` matches the report's task
-        id and emits the corresponding event type. Reports from sessions
-        that are not part of an agent tree (e.g. direct human-driven tasks)
-        are silently skipped.
+        Ordinary and legacy-linked Tasks both write a TaskEvent. AgentRun
+        status, cursor, and context are not written here. Persist is deferred
+        to the outer report-intake ``_save_state``.
         """
         if not report.task_id:
             return None
+        task = self.tasks.get(report.task_id)
+        if task is None or task.workspace_id != report.workspace_id:
+            return None
+
+        actor_role = self._task_actor_role_for_session(session)
+        event_type = self._task_event_type_for_report(report.state, task)
+        call_id = f"report:{report.id}"
+        self.task_mailbox.append_event(
+            workspace_id=report.workspace_id,
+            task_id=task.id,
+            actor_role=actor_role,
+            event_type=event_type,
+            call_id=call_id,
+            action="report",
+            consumer_key=task_supervisor_consumer_key(task),
+            actor_session_id=session.id,
+            review_cycle=report.review_cycle,
+            payload=self._canonical_report_bridge_payload(report, session, task),
+            report_id=report.id,
+            persist=False,
+        )
+
         run = self.agent_tree.get_run_by_context_ref(report.workspace_id, report.task_id)
         if run is None:
             return None
-
-        from claude_hub.models.agent_tree import AgentEventType
-        from claude_hub.models.schemas import WorkspaceTaskMode
-
-        task = self.tasks.get(report.task_id)
-        is_reviewed = task is not None and task.task_mode == WorkspaceTaskMode.REVIEWED
-
-        state_map = {
-            AgentReportState.STARTED: AgentEventType.STARTED,
-            AgentReportState.WORKING: AgentEventType.PROGRESS,
-            AgentReportState.BLOCKED: AgentEventType.BLOCKED,
-            AgentReportState.NEEDS_INPUT: AgentEventType.APPROVAL_REQUIRED,
-            AgentReportState.READY_FOR_REVIEW: AgentEventType.PROGRESS,
-            # For REVIEWED tasks, the worker's COMPLETED report does NOT
-            # terminate the run — the task moves to REVIEW status and waits
-            # for the reviewer. Only REVIEW_PASSED (from the reviewer) emits
-            # the terminal COMPLETED event. For DIRECT tasks, the worker's
-            # COMPLETED is the terminal event.
-            AgentReportState.COMPLETED: (
-                AgentEventType.PROGRESS if is_reviewed else AgentEventType.COMPLETED
-            ),
-            AgentReportState.REVIEW_STARTED: AgentEventType.PROGRESS,
-            AgentReportState.REVIEW_PASSED: AgentEventType.COMPLETED,
-            # REVIEW_FAILED does NOT mean the run failed: the task is sent
-            # back to WORKING for revisions. Map to PROGRESS so the run
-            # status is reconciled to RUNNING (see emit_event's report_state
-            # handling).
-            AgentReportState.REVIEW_FAILED: AgentEventType.PROGRESS,
-            AgentReportState.REVIEW_NEEDS_INPUT: AgentEventType.BLOCKED,
-        }
-        event_type = state_map.get(report.state, AgentEventType.PROGRESS)
-
-        # The author is the run itself (the executor); the recipient is the
-        # run's supervisor so the directed mailbox delivers it.
-        recipient = run.supervisor_id or run.id
-        self.agent_tree.emit_event(
-            workspace_id=report.workspace_id,
-            agent_run_id=run.id,
-            event_type=event_type,
-            author=run.id,
-            recipient=recipient,
-            call_id=f"report:{report.id}",
-            payload={
-                "message": report.message,
-                "report_id": report.id,
-                "report_state": report.state.value,
-                "task_id": report.task_id,
-            },
-            persist=False,
-            wake=False,
-        )
-        return run.id, recipient
+        return run.id, run.supervisor_id or run.id
 
     async def _after_report_recorded(
         self,

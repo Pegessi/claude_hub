@@ -57,6 +57,8 @@ from claude_hub.models.agent_tree import (
     SpawnRequest,
     WaitRequest,
 )
+from claude_hub.models.schemas import WorkspaceSessionRole
+from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
 
 from .agent_tree_adapters import (
     ExecutorAdapter,
@@ -64,6 +66,15 @@ from .agent_tree_adapters import (
     ManagedTaskAdapter,
     NativeSubagentAdapter,
     ResidentRootAdapter,
+)
+from .directed_wait import DirectedWaitCoordinator
+from .task_graph import (
+    compat_path_for_task,
+    compat_run_id_for_task,
+    make_resident_consumer_key,
+    make_task_consumer_key,
+    task_inbox_consumer_key,
+    task_supervisor_consumer_key,
 )
 from .workspace_manager._constants import DeliveryUncertain
 
@@ -138,13 +149,12 @@ class AgentTreeManager:
         # Reusing the same call_id for a different action, target, or request
         # payload is a caller bug and is rejected (ValueError).
         self._call_index: Dict[str, Dict[str, dict]] = {}
-        # Per-run asyncio.Event for wait() wakeups.
-        self._run_events: Dict[str, asyncio.Event] = {}
-        # Per-run asyncio.Lock to make wait() race-free (no lost wakeups).
-        self._run_locks: Dict[str, asyncio.Lock] = {}
-        # Active subtree waiters. Ancestors are woken only when they opted
-        # into subtree replay, preserving directed-wakeup behavior otherwise.
-        self._subtree_waiters: Dict[str, int] = {}
+        # Shared lock+Event wait algorithm. Attribute aliases keep existing
+        # tests and ``_wake_ancestors`` on the same dicts.
+        self._waiters = DirectedWaitCoordinator()
+        self._run_events = self._waiters.events
+        self._run_locks = self._waiters.locks
+        self._subtree_waiters = self._waiters.subtree_waiters
         # Executor adapters keyed by ExecutorKind.
         self._adapters: Dict[ExecutorKind, ExecutorAdapter] = {
             ExecutorKind.MANAGED_TASK: ManagedTaskAdapter(workspace_manager),
@@ -340,18 +350,13 @@ class AgentTreeManager:
 
     def _wake_for_run(self, author_run_id: str, recipient: str) -> None:
         """Wake the directed recipient and active ancestor subtree waiters."""
-        ev = self._run_events.get(recipient)
-        if ev is not None:
-            ev.set()
+        self._waiters.wake(recipient)
         node = self._runs.get(author_run_id)
         while node is not None and node.parent_id is not None:
             node = self._runs.get(node.parent_id)
             if node is None:
                 break
-            if self._subtree_waiters.get(node.id, 0) > 0:
-                ancestor_event = self._run_events.get(node.id)
-                if ancestor_event is not None:
-                    ancestor_event.set()
+            self._waiters.wake_if_subtree(node.id)
 
     def _wake_ancestors(self, run: AgentRun) -> None:
         """Wake waiters on the run and all its ancestors."""
@@ -390,6 +395,10 @@ class AgentTreeManager:
         """
         run = self._runs.get(run_id)
         if run is None:
+            return
+        if run.executor_kind == ExecutorKind.MANAGED_TASK:
+            # AC2: managed_task lifecycle lives on Task. AgentRun.status is a
+            # non-durable projection from Task + abort facts.
             return
         # Terminal guard: FAILED is truly terminal. INTERRUPTED and COMPLETED
         # may be resumed via followup (transition back to RUNNING).
@@ -455,6 +464,36 @@ class AgentTreeManager:
             run.updated_at = old_updated_at
             raise
 
+    def _live_resident_session(self, workspace_id: str) -> Optional[Any]:
+        """Return the live RESIDENT session assignment, or None."""
+
+        workspace = self._wm.workspaces.get(workspace_id)
+        if workspace is None:
+            return None
+        session_id = workspace.resident_agent_session_id
+        session = self._wm.sessions.get(session_id or "")
+        if (
+            session is None
+            or session.workspace_id != workspace_id
+            or session.role != WorkspaceSessionRole.RESIDENT
+            or session.id != workspace.resident_agent_session_id
+        ):
+            return None
+        return session
+
+    def _consumer_key_for_run(self, run: AgentRun) -> Optional[str]:
+        """Task or resident mailbox consumer. Never a Session id."""
+
+        if run.executor_kind == ExecutorKind.RESIDENT_ROOT:
+            return make_resident_consumer_key(run.workspace_id)
+        try:
+            task = self._wm._resolve_task_for_compat_run(run.workspace_id, run)
+        except (KeyError, ValueError):
+            if run.executor_kind == ExecutorKind.MANAGED_TASK and not run.parent_id:
+                return make_resident_consumer_key(run.workspace_id)
+            return None
+        return make_task_consumer_key(task.id)
+
     def _active_children(self, parent_id: str) -> List[AgentRun]:
         """Return non-terminal child runs of the given parent."""
         terminal = {
@@ -463,37 +502,20 @@ class AgentTreeManager:
             AgentRunStatus.INTERRUPTED,
         }
         return [
-            r for r in self._runs.values() if r.parent_id == parent_id and r.status not in terminal
+            r
+            for r in self._runs.values()
+            if r.parent_id == parent_id and self._project_run(r).status not in terminal
         ]
 
-    def _recover_context_ref(self, run: AgentRun) -> None:
-        """Recover a run's context_ref from its executor's side effects.
+    def _recover_context_ref(self, run: AgentRun) -> Optional[str]:
+        """Look up managed Task identity. Never write AgentRun.context_ref."""
 
-        If the process crashed after the adapter created the executor
-        context (e.g. a workspace task) but before the run's context_ref
-        was persisted, this method finds the existing context and links it
-        back to the run. The run's status is advanced to RUNNING to match
-        the executor's actual state.
-        """
-        if run.context_ref is not None:
-            return
         if run.executor_kind == ExecutorKind.MANAGED_TASK:
-            for task in self._wm.tasks.values():
-                if (
-                    task.workspace_id == run.workspace_id
-                    and getattr(task, "agent_run_id", None) == run.id
-                ):
-                    run.context_ref = str(task.id)
-                    run.updated_at = datetime.utcnow()
-                    if run.status == AgentRunStatus.PENDING:
-                        run.status = AgentRunStatus.RUNNING
-                    try:
-                        self._persist()
-                    except Exception:
-                        run.context_ref = None
-                        run.updated_at = run.updated_at  # can't easily restore; leave as-is
-                        raise
-                    return
+            try:
+                return self._wm._resolve_task_for_compat_run(run.workspace_id, run).id
+            except (KeyError, ValueError):
+                return None
+        return run.context_ref
 
     # ------------------------------------------------------------------
     # Public actions
@@ -509,11 +531,17 @@ class AgentTreeManager:
 
         Durability contract:
         1. The run node is persisted before the adapter is invoked, so a
-           crash mid-spawn leaves a recoverable PENDING run on disk.
-        2. The adapter's ``spawn`` is idempotent: if a task already exists
+           crash mid-spawn leaves a recoverable PENDING run on disk for
+           non-managed executors.
+        2. For ``MANAGED_TASK``, lifecycle and crash recovery are Task-owned:
+           the adapter creates/starts a Task and dispatch recovery
+           (``_recover_queued_task_ownership``) resumes the persisted
+           dispatch envelope. ``recover_pending_runs`` skips MANAGED_TASK
+           raw runs entirely.
+        3. The adapter's ``spawn`` is idempotent: if a task already exists
            for this run (``agent_run_id``), it is reused.
-        3. On recovery, ``_recover_pending_runs`` retries the adapter for
-           any run that was persisted but never reached RUNNING.
+        4. On recovery, ``recover_pending_runs`` retries adapter spawns
+           only for non-managed executors that never reached RUNNING.
         """
         self._validate_workspace(req.workspace_id)
 
@@ -563,9 +591,15 @@ class AgentTreeManager:
                 )
             existing_run = self._runs.get(existing_record["event"].agent_run_id)
             if existing_run is not None:
-                if existing_run.context_ref is None:
-                    self._recover_context_ref(existing_run)
-                return existing_run
+                if existing_run.executor_kind == ExecutorKind.MANAGED_TASK:
+                    self._stage_managed_spawn_mailbox_events(
+                        workspace_id=req.workspace_id,
+                        run=existing_run,
+                        call_id=req.call_id,
+                        message=req.initial_message,
+                        persist=True,
+                    )
+                return self._project_run(existing_run)
 
         # Parent/child concurrency limit: a supervisor may not have more
         # than MAX_CONCURRENT_CHILDREN active (non-terminal) children.
@@ -617,7 +651,9 @@ class AgentTreeManager:
         self._runs[run.id] = run
         # Emit a dispatched event addressed to the child. This is the
         # durable "intent" record: if the process crashes after this point
-        # but before the adapter returns, recovery will retry the spawn.
+        # but before the adapter returns, non-managed recovery will retry
+        # the adapter spawn; MANAGED_TASK recovery is Task-owned via
+        # ``_recover_queued_task_ownership``.
         #
         # The run node and the DISPATCHED event (which carries the call_id)
         # are persisted as a SINGLE atomic unit. If they were persisted in
@@ -689,7 +725,16 @@ class AgentTreeManager:
         # kept (it matches the executor's actual state) and the next
         # successful persist will reconcile the durable state. We do
         # NOT mark the run FAILED here — the executor is running.
-        run.context_ref = context_ref
+        if req.executor_kind != ExecutorKind.MANAGED_TASK:
+            run.context_ref = context_ref
+        else:
+            self._stage_managed_spawn_mailbox_events(
+                workspace_id=req.workspace_id,
+                run=run,
+                call_id=req.call_id,
+                message=req.initial_message,
+                persist=False,
+            )
         self._update_run_status(
             run.id, AgentRunStatus.RUNNING, rollback_on_error=False, persist=False
         )
@@ -726,7 +771,109 @@ class AgentTreeManager:
         # event) after the batched persist succeeds.
         self._wake_for_run(run.id, parent.id)
 
-        return run
+        return self._project_run(run)
+
+    def _managed_spawn_parent_assignment(
+        self, run: AgentRun
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Resolve Task parent and supervisor assignment for a managed spawn.
+
+        Session ids are assignment metadata only: never a cursor or parent.
+        Missing parent, cross-workspace parent, or an unresolved parent Task
+        fail closed. ``RESIDENT_ROOT`` is the only top-level (null parent).
+        """
+
+        if not run.parent_id:
+            raise ValueError("Managed spawn requires a parent run")
+        parent = self._runs.get(run.parent_id)
+        if parent is None:
+            raise KeyError(run.parent_id)
+        if parent.workspace_id != run.workspace_id:
+            raise ValueError("Parent run belongs to a different workspace")
+        if parent.executor_kind == ExecutorKind.RESIDENT_ROOT:
+            session = self._live_resident_session(run.workspace_id)
+            if session is None:
+                raise ValueError("Resident spawn requires a live resident assignment")
+            return None, session.id
+        try:
+            parent_task = self._wm._resolve_task_for_compat_run(run.workspace_id, parent)
+        except KeyError:
+            if parent.executor_kind != ExecutorKind.MANAGED_TASK:
+                raise
+            # Unlinked historical MANAGED_TASK parent: spawn a top-level
+            # child Task. Supervisor mailbox is the workspace-resident
+            # consumer. Do not invent a writable AgentRun lifecycle.
+            resident = self._live_resident_session(run.workspace_id)
+            return None, resident.id if resident is not None else None
+        session = self._wm.sessions.get(parent_task.session_id or "")
+        if session is None or session.workspace_id != run.workspace_id:
+            raise ValueError("Managed spawn parent has no live session assignment")
+        if parent_task.id not in {session.current_task_id, session.task_id}:
+            raise ValueError("Supervisor session is not assigned to the parent Task")
+        return parent_task.id, session.id
+
+    def _stage_managed_spawn_mailbox_events(
+        self,
+        *,
+        workspace_id: str,
+        run: AgentRun,
+        call_id: str,
+        message: str,
+        persist: bool,
+    ) -> None:
+        """Write Task-owned spawn facts after the linked Task exists.
+
+        Agent Tree DISPATCHED/STARTED remain a compatibility blob. Reads stay
+        pure; both appends stay ``persist=False``. A ``persist=True`` caller
+        always flushes once after the pair exists, including idempotent
+        replay, and wakes only after that flush succeeds.
+        """
+
+        try:
+            task = self._wm._resolve_task_for_compat_run(workspace_id, run)
+        except (KeyError, ValueError):
+            return
+        _parent_task_id, actor_session_id = self._managed_spawn_parent_assignment(run)
+        mailbox = self._wm.task_mailbox
+        staged: List[Any] = []
+        try:
+            dispatched, created_dispatched = mailbox.append_event(
+                workspace_id=workspace_id,
+                task_id=task.id,
+                actor_role=TaskActorRole.SUPERVISOR,
+                actor_session_id=actor_session_id,
+                event_type=TaskEventType.DISPATCHED,
+                call_id=f"task:{call_id}",
+                action="spawn",
+                consumer_key=task_inbox_consumer_key(task),
+                target=task.id,
+                payload={"message": message, "compat_run_id": run.id},
+                persist=False,
+            )
+            if created_dispatched:
+                staged.append(dispatched)
+            started, created_started = mailbox.append_event(
+                workspace_id=workspace_id,
+                task_id=task.id,
+                actor_role=TaskActorRole.SUPERVISOR,
+                actor_session_id=actor_session_id,
+                event_type=TaskEventType.STARTED,
+                call_id=f"task:{call_id}:started",
+                action="spawn:started",
+                consumer_key=task_supervisor_consumer_key(task),
+                target=task.id,
+                payload={"compat_run_id": run.id},
+                persist=False,
+            )
+            if created_started:
+                staged.append(started)
+        except Exception:
+            mailbox._unstage_events(workspace_id, staged)
+            raise
+        if persist:
+            mailbox._persist()
+            mailbox._wake_compat_waiters(dispatched)
+            mailbox._wake_compat_waiters(started)
 
     async def _spawn_managed_task(
         self, run: AgentRun, initial_message: str, session_id: str
@@ -773,6 +920,7 @@ class AgentTreeManager:
         if config is None:
             raise RuntimeError("Managed executor config was not prepared")
 
+        parent_task_id, _actor_session_id = self._managed_spawn_parent_assignment(run)
         task = self._wm.create_task(
             run.workspace_id,
             WorkspaceTaskCreate(
@@ -782,6 +930,7 @@ class AgentTreeManager:
                 task_mode=WorkspaceTaskMode.REVIEWED,
                 agent_run_id=run.id,
                 session_id=session_id,
+                parent_task_id=parent_task_id,
             ),
         )
         await self._wm.start_task(
@@ -915,6 +1064,27 @@ class AgentTreeManager:
         # run in its own subtree, or itself. Cross-subtree messaging is not
         # allowed (siblings cannot directly wake each other).
         self._validate_messaging_boundary(author, recipient)
+
+        if recipient.executor_kind == ExecutorKind.MANAGED_TASK:
+            task = self._wm._resolve_task_for_compat_run(req.workspace_id, recipient)
+            task_event = await self._wm.followup_task(
+                req.workspace_id,
+                task.id,
+                req.message,
+                req.call_id,
+                actor_role=TaskActorRole.SUPERVISOR,
+                actor_session_id=self._wm._resolve_followup_actor_session_id(
+                    req.workspace_id, author
+                ),
+                compat_author_run_id=req.author_id,
+                correlation_id=req.correlation_id,
+            )
+            return self._wm._project_followup_task_event(
+                task_event,
+                author_id=req.author_id,
+                recipient_id=recipient.id,
+                correlation_id=req.correlation_id,
+            )
 
         fingerprint = _request_fingerprint(
             "followup",
@@ -1066,53 +1236,48 @@ class AgentTreeManager:
         """
         self._validate_workspace(req.workspace_id)
 
-        recipient = self._runs.get(req.recipient_id)
+        recipient = self._lookup_compat_run(req.recipient_id, req.workspace_id)
         if recipient is None:
             raise KeyError(f"Recipient run {req.recipient_id} not found")
-        if recipient.workspace_id != req.workspace_id:
-            raise ValueError("Recipient run belongs to a different workspace")
 
-        lock = self._run_locks.setdefault(req.recipient_id, asyncio.Lock())
-        ev = self._run_events.setdefault(req.recipient_id, asyncio.Event())
-
-        # Hub-enforced receiver cursor: the effective since_sequence is the
-        # max of the caller's requested cursor and the run's persisted
-        # ack_sequence. This guarantees that ACKed events are never re-delivered
-        # (dedupe) while still allowing a caller that has processed events
-        # beyond its ACK point to use its local cursor. On restart the
-        # caller's local cursor is lost, so we fall back to ack_sequence
-        # (at-least-once replay of unACKed events).
-        effective_since = max(req.since_sequence, recipient.ack_sequence)
-
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + req.timeout_seconds
-        if req.subtree:
-            self._subtree_waiters[req.recipient_id] = (
-                self._subtree_waiters.get(req.recipient_id, 0) + 1
+        # Hub-enforced receiver cursor: managed/resident use TaskMailbox;
+        # other runs still use the raw AgentRun.ack_sequence blob.
+        use_mailbox = recipient.executor_kind in (
+            ExecutorKind.MANAGED_TASK,
+            ExecutorKind.RESIDENT_ROOT,
+        )
+        if use_mailbox:
+            consumer = self._consumer_key_for_run(recipient)
+            mailbox_cursor = (
+                self._wm.task_mailbox.consumer_cursor(req.workspace_id, consumer)
+                if consumer is not None
+                else 0
             )
-        try:
-            while True:
-                async with lock:
-                    events = self._events_for(
-                        req.workspace_id, req.recipient_id, effective_since, req.subtree
-                    )
-                    if events:
-                        return events
-                    ev.clear()
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    return []
-                try:
-                    await asyncio.wait_for(ev.wait(), timeout=remaining)
-                except asyncio.TimeoutError:
-                    return []
-        finally:
-            if req.subtree:
-                remaining_waiters = self._subtree_waiters.get(req.recipient_id, 1) - 1
-                if remaining_waiters > 0:
-                    self._subtree_waiters[req.recipient_id] = remaining_waiters
-                else:
-                    self._subtree_waiters.pop(req.recipient_id, None)
+            effective_since = max(req.since_sequence, mailbox_cursor)
+        else:
+            effective_since = max(req.since_sequence, recipient.ack_sequence)
+
+        def _poll() -> List[AgentEvent]:
+            if use_mailbox:
+                return self._compat_mailbox_events(
+                    req.workspace_id,
+                    recipient,
+                    effective_since,
+                    req.subtree,
+                )
+            return self._events_for(
+                req.workspace_id,
+                req.recipient_id,
+                effective_since,
+                req.subtree,
+            )
+
+        return await self._waiters.wait(
+            req.recipient_id,
+            subtree=req.subtree,
+            timeout_seconds=req.timeout_seconds,
+            poll=_poll,
+        )
 
     def ack(
         self,
@@ -1133,11 +1298,16 @@ class AgentTreeManager:
         not change the run's lifecycle status.
         """
         self._validate_workspace(workspace_id)
-        run = self._runs.get(run_id)
+        run = self._lookup_compat_run(run_id, workspace_id)
         if run is None:
             raise KeyError(f"Run {run_id} not found")
-        if run.workspace_id != workspace_id:
-            raise ValueError("Run belongs to a different workspace")
+
+        if run.executor_kind in (ExecutorKind.MANAGED_TASK, ExecutorKind.RESIDENT_ROOT):
+            consumer = self._consumer_key_for_run(run)
+            if consumer is None:
+                raise ValueError(f"Run {run_id} has no TaskMailbox consumer")
+            self._wm.task_mailbox.ack(workspace_id, consumer, sequence, persist=persist)
+            return self._lookup_compat_run(run_id, workspace_id) or run
 
         max_seq = self._next_seq.get(workspace_id, 1) - 1
         if sequence > max_seq:
@@ -1178,6 +1348,27 @@ class AgentTreeManager:
             raise KeyError(f"Run {req.run_id} not found")
         if run.workspace_id != req.workspace_id:
             raise ValueError("Run belongs to a different workspace")
+
+        if run.executor_kind == ExecutorKind.MANAGED_TASK:
+            from claude_hub.models.schemas import ManualTaskControlRequest
+
+            task = self._wm._resolve_task_for_compat_run(req.workspace_id, run)
+            supervisor = self._runs.get(run.supervisor_id) if run.supervisor_id else None
+            await self._wm.abort_task(
+                task.id,
+                ManualTaskControlRequest(
+                    reason=req.reason or "interrupted by supervisor",
+                    call_id=req.call_id,
+                ),
+                workspace_id=req.workspace_id,
+                call_id=req.call_id,
+                actor_role=TaskActorRole.SUPERVISOR,
+                actor_session_id=self._wm._resolve_followup_actor_session_id(
+                    req.workspace_id, supervisor
+                ),
+                compat_author_run_id=supervisor.id if supervisor is not None else None,
+            )
+            return self._project_run(run)
 
         fingerprint = _request_fingerprint(
             "interrupt",
@@ -1245,20 +1436,30 @@ class AgentTreeManager:
     def list_runs(self, req: ListRunsRequest) -> List[AgentRun]:
         """List runs, optionally scoped to a subtree or status."""
         self._validate_workspace(req.workspace_id)
-        runs = [r for r in self._runs.values() if r.workspace_id == req.workspace_id]
+        by_id: Dict[str, AgentRun] = {}
+        for task in self._wm.tasks.values():
+            if task.workspace_id != req.workspace_id:
+                continue
+            projected = self._project_task_as_run(task)
+            by_id[projected.id] = projected
+        for run in self._runs.values():
+            if run.workspace_id != req.workspace_id or run.id in by_id:
+                continue
+            by_id[run.id] = self._project_run(run)
+        runs = list(by_id.values())
         if req.root_id is not None:
-            root = self._runs.get(req.root_id)
+            root = by_id.get(req.root_id)
             if root is None:
                 return []
             prefix = f"{root.path}/"
             runs = [
-                r
-                for r in runs
-                if r.id == root.id or r.path.startswith(prefix) or r.path == root.path
+                run
+                for run in runs
+                if run.id == root.id or run.path.startswith(prefix) or run.path == root.path
             ]
         if req.status is not None:
-            runs = [r for r in runs if r.status == req.status]
-        return sorted(runs, key=lambda r: r.created_at)
+            runs = [run for run in runs if run.status == req.status]
+        return sorted(runs, key=lambda run: run.created_at)
 
     def get_events(
         self,
@@ -1272,9 +1473,70 @@ class AgentTreeManager:
         The effective cursor is ``max(since_sequence, run.ack_sequence)`` so
         ACKed events are never re-delivered (Hub-enforced dedupe).
         """
-        run = self._runs.get(run_id)
+        run = self._lookup_compat_run(run_id, workspace_id)
+        if run is not None and run.executor_kind in (
+            ExecutorKind.MANAGED_TASK,
+            ExecutorKind.RESIDENT_ROOT,
+        ):
+            return self._compat_mailbox_events(workspace_id, run, since_sequence, subtree)
         effective_since = max(since_sequence, run.ack_sequence if run else 0)
         return self._events_for(workspace_id, run_id, effective_since, subtree)
+
+    def _compat_mailbox_events(
+        self,
+        workspace_id: str,
+        run: AgentRun,
+        since_sequence: int,
+        subtree: bool,
+    ) -> List[AgentEvent]:
+        """Merge mailbox-visible and raw-visible events for a compat run.
+
+        Mailbox projections and leftover AgentEvents are unioned and
+        deduped by ``call_id`` / ``sequence``. Raw events are filtered by
+        ``task_mailbox.consumer_cursor`` so an ACK cannot replay the blob.
+        """
+
+        from .task_mailbox import project_task_event_to_agent_event
+
+        if run.workspace_id != workspace_id:
+            raise ValueError("Run belongs to a different workspace")
+        consumer = self._consumer_key_for_run(run)
+        mailbox = self._wm.task_mailbox
+        cursor = 0
+        projected: List[AgentEvent] = []
+        if consumer is not None:
+            try:
+                cursor = mailbox.consumer_cursor(workspace_id, consumer)
+            except (KeyError, ValueError):
+                cursor = 0
+            projected = [
+                project_task_event_to_agent_event(event, recipient_id=run.id)
+                for event in mailbox.wait(
+                    workspace_id,
+                    consumer,
+                    since_sequence=since_sequence,
+                    subtree=subtree,
+                )
+            ]
+        floor = max(int(since_sequence), int(cursor))
+        raw = self._events_for(workspace_id, run.id, floor, subtree)
+        mailbox_call_ids = {event.call_id for event in projected}
+        raw_aliases = {
+            call_id[len("task:") :] for call_id in mailbox_call_ids if call_id.startswith("task:")
+        }
+        merged: List[AgentEvent] = []
+        seen_call_ids: set[str] = set()
+        seen_pairs: set[tuple[str, int]] = set()
+        for event in sorted([*projected, *raw], key=lambda item: (item.sequence, item.call_id)):
+            pair = (event.call_id, event.sequence)
+            if event.call_id in seen_call_ids or pair in seen_pairs:
+                continue
+            if event.call_id in raw_aliases and event.call_id not in mailbox_call_ids:
+                continue
+            seen_call_ids.add(event.call_id)
+            seen_pairs.add(pair)
+            merged.append(event)
+        return merged
 
     def _events_for(
         self,
@@ -1398,6 +1660,79 @@ class AgentTreeManager:
         if persist and wake:
             self._wake_for_run(recipient_id, author_id)
 
+    def _emit_linked_managed_task_event(
+        self,
+        *,
+        workspace_id: str,
+        run: AgentRun,
+        task: Any,
+        event_type: AgentEventType,
+        author: str,
+        recipient: str,
+        call_id: str,
+        payload: Optional[dict],
+        persist: bool,
+        wake: bool,
+    ) -> AgentEvent:
+        """Write-through emit for linked managed_task runs. No AgentTree storage."""
+
+        from .task_mailbox import _AGENT_TYPE_TO_TASK, project_task_event_to_agent_event
+
+        payload_dict = dict(payload or {})
+        report_id_raw = payload_dict.get("report_id")
+        report_id = report_id_raw if isinstance(report_id_raw, str) else None
+        actor_session_id: Optional[str] = None
+        actor_role = TaskActorRole.WORKER
+        task_event_type = _AGENT_TYPE_TO_TASK.get(event_type, TaskEventType.PROGRESS)
+        review_cycle: Optional[int] = None
+
+        if report_id is not None:
+            report = self._wm.reports.get(report_id)
+            if report is not None and report.workspace_id == workspace_id:
+                actor_session_id, actor_role = self._wm._task_actor_for_report(report)
+                task_event_type = self._wm._task_event_type_for_report(report.state, task)
+                review_cycle = report.review_cycle
+            else:
+                report_id = None
+
+        if report_id is None:
+            session_id = payload_dict.get("actor_session_id")
+            if not isinstance(session_id, str) or not session_id:
+                fallback = payload_dict.get("session_id")
+                session_id = fallback if isinstance(fallback, str) and fallback else task.session_id
+            actor_session_id = session_id if isinstance(session_id, str) else task.session_id
+            role_raw = payload_dict.get("actor_role")
+            if isinstance(role_raw, str):
+                try:
+                    actor_role = TaskActorRole(role_raw)
+                except ValueError:
+                    actor_role = TaskActorRole.WORKER
+            raw_cycle = payload_dict.get("review_cycle")
+            if raw_cycle is not None:
+                review_cycle = int(raw_cycle)
+
+        task_event, _created = self._wm.task_mailbox.append_event(
+            workspace_id=workspace_id,
+            task_id=task.id,
+            actor_role=actor_role,
+            event_type=task_event_type,
+            call_id=call_id,
+            action="emit",
+            target=run.id,
+            consumer_key=task_supervisor_consumer_key(task),
+            actor_session_id=actor_session_id,
+            review_cycle=review_cycle,
+            payload=payload_dict,
+            report_id=report_id,
+            persist=persist,
+            wake=wake,
+        )
+        return project_task_event_to_agent_event(
+            task_event,
+            recipient_id=recipient,
+            author_id=author,
+        )
+
     def emit_event(
         self,
         *,
@@ -1414,8 +1749,9 @@ class AgentTreeManager:
         """Ingest an event from an executor into the Hub stream.
 
         This is how managed-task reports, native-subagent progress, etc.
-        flow back into the tree. The Hub updates the run's status and
-        last_task_message from the event.
+        flow back into the tree. Native/external runs still project status
+        and last_task_message from the event. managed_task AgentRun bytes
+        stay unchanged; callers read Task-derived status via get_run.
 
         All in-memory mutations (event append, status projection,
         last_task_message) are batched into a single ``_persist()`` call
@@ -1423,6 +1759,24 @@ class AgentTreeManager:
         ``persist=False, wake=False`` to stage the same projection alongside
         other workspace state, then persist once and wake after that commit.
         """
+        run = self._runs.get(agent_run_id)
+        if run is not None and run.executor_kind == ExecutorKind.MANAGED_TASK:
+            if run.workspace_id != workspace_id:
+                raise ValueError("Run belongs to a different workspace")
+            linked_task = self._wm._resolve_task_for_compat_run(workspace_id, run)
+            return self._emit_linked_managed_task_event(
+                workspace_id=workspace_id,
+                run=run,
+                task=linked_task,
+                event_type=event_type,
+                author=author,
+                recipient=recipient,
+                call_id=call_id,
+                payload=payload,
+                persist=persist,
+                wake=wake,
+            )
+
         fingerprint = _request_fingerprint(
             "emit",
             {
@@ -1462,7 +1816,7 @@ class AgentTreeManager:
             return event
 
         run = self._runs.get(agent_run_id)
-        if run is not None:
+        if run is not None and run.executor_kind != ExecutorKind.MANAGED_TASK:
             if event_type in TERMINAL_EVENT_TYPES:
                 status_map = {
                     AgentEventType.COMPLETED: AgentRunStatus.COMPLETED,
@@ -1519,14 +1873,115 @@ class AgentTreeManager:
 
         return event
 
+    def _project_task_as_run(self, task: Any) -> AgentRun:
+        """Pure Task → AgentRun view. Never inserts into ``_runs``."""
+
+        run_id = compat_run_id_for_task(task)
+        parent_id = None
+        if task.parent_task_id:
+            parent = self._wm.tasks.get(task.parent_task_id)
+            if parent is None or parent.workspace_id != task.workspace_id:
+                raise KeyError(task.parent_task_id)
+            parent_id = compat_run_id_for_task(parent)
+        path = compat_path_for_task(self._wm.tasks, task)
+        status = self._wm._projected_task_status(task)
+        consumer = make_task_consumer_key(task.id)
+        try:
+            cursor = self._wm.task_mailbox.consumer_cursor(task.workspace_id, consumer)
+        except (KeyError, ValueError):
+            cursor = 0
+        updates = {
+            "parent_id": parent_id,
+            "path": path,
+            "supervisor_id": parent_id,
+            "status": status,
+            "context_ref": task.id,
+            "ack_sequence": cursor,
+        }
+        stored = self._runs.get(run_id)
+        if stored is not None and stored.workspace_id == task.workspace_id:
+            return stored.model_copy(update=updates)
+        return AgentRun(
+            id=run_id,
+            workspace_id=task.workspace_id,
+            parent_id=parent_id,
+            path=path,
+            supervisor_id=parent_id,
+            executor_kind=ExecutorKind.MANAGED_TASK,
+            status=status,
+            context_ref=task.id,
+            ack_sequence=cursor,
+            title=task.title,
+            created_at=task.created_at,
+            updated_at=task.updated_at,
+        )
+
+    def _lookup_compat_run(
+        self, run_id: str, workspace_id: Optional[str] = None
+    ) -> Optional[AgentRun]:
+        """Resolve a stored run or ordinary Task. Never mutates ``_runs``."""
+
+        stored = self._runs.get(run_id)
+        if stored is not None:
+            if workspace_id is not None and stored.workspace_id != workspace_id:
+                raise ValueError("Run belongs to a different workspace")
+            return self._project_run(stored)
+        matches = [
+            task for task in self._wm.tasks.values() if compat_run_id_for_task(task) == run_id
+        ]
+        if workspace_id is not None:
+            foreign = [task for task in matches if task.workspace_id != workspace_id]
+            if foreign:
+                raise ValueError("Run belongs to a different workspace")
+            matches = [task for task in matches if task.workspace_id == workspace_id]
+        if len(matches) == 1:
+            return self._project_task_as_run(matches[0])
+        if len(matches) > 1:
+            raise ValueError(f"Run {run_id} links to {len(matches)} Tasks")
+        return None
+
+    def _project_run(self, run: AgentRun) -> AgentRun:
+        """Return a non-durable AgentRun view. Storage bytes stay unchanged."""
+        consumer = self._consumer_key_for_run(run)
+        if consumer == make_resident_consumer_key(run.workspace_id):
+            try:
+                cursor = self._wm.task_mailbox.consumer_cursor(run.workspace_id, consumer)
+            except (KeyError, ValueError):
+                return run
+            return run.model_copy(update={"ack_sequence": cursor})
+        if run.executor_kind != ExecutorKind.MANAGED_TASK:
+            return run
+        try:
+            task = self._wm._resolve_task_for_compat_run(run.workspace_id, run)
+        except (KeyError, ValueError):
+            return run
+        projected = self._project_task_as_run(task)
+        if projected.id == run.id:
+            return projected
+        return run.model_copy(
+            update={
+                "status": projected.status,
+                "context_ref": task.id,
+                "ack_sequence": projected.ack_sequence,
+            }
+        )
+
     def get_run(self, run_id: str) -> Optional[AgentRun]:
-        return self._runs.get(run_id)
+        return self._lookup_compat_run(run_id)
 
     def get_run_by_context_ref(self, workspace_id: str, context_ref: str) -> Optional[AgentRun]:
-        """Find a run by its executor context reference (e.g. task id)."""
+        """Find a run by Task identity for managed_task, else raw context_ref."""
+
+        task = self._wm.tasks.get(context_ref)
+        if task is not None and task.workspace_id == workspace_id:
+            return self._project_task_as_run(task)
         for run in self._runs.values():
-            if run.workspace_id == workspace_id and run.context_ref == context_ref:
-                return run
+            if run.workspace_id != workspace_id:
+                continue
+            if run.executor_kind == ExecutorKind.MANAGED_TASK:
+                continue
+            if run.context_ref == context_ref:
+                return self._project_run(run)
         return None
 
     def create_root_run(
@@ -1716,7 +2171,11 @@ class AgentTreeManager:
     async def recover_pending_runs(self, workspace_id: str) -> None:
         """Recover runs that were persisted but never reached a consistent state.
 
-        After a crash, a run may be in an inconsistent state:
+        ``MANAGED_TASK`` runs are skipped entirely: Task lifecycle, dispatch
+        envelopes, and queued-ownership recovery live on WorkspaceTask /
+        ``_recover_queued_task_ownership``, not on raw AgentRun mutation.
+
+        After a crash, a non-managed run may be in an inconsistent state:
 
         1. **PENDING with no context_ref**: the adapter spawn was lost. Retry
            the spawn (the adapter is idempotent and reuses any existing
@@ -1747,77 +2206,10 @@ class AgentTreeManager:
             for call_id in session.uncertain_call_ids:
                 self._wm._emit_delivery_uncertain(workspace_id, session.id, call_id)
 
-        # Reconcile persisted reports into agent tree events. A report may
-        # have been persisted to the workspace state while its corresponding
-        # agent tree event was not (crash between the two persists).
-        # emit_event is idempotent on call_id=f"report:{report.id}", so
-        # re-emitting is safe.
-        #
-        # The mapping MUST be reviewed-aware: for REVIEWED tasks, the
-        # worker's COMPLETED report does NOT terminate the run — it maps to
-        # PROGRESS (the run waits for the reviewer). Only REVIEW_PASSED
-        # emits the terminal COMPLETED event. This mirrors
-        # _bridge_report_to_agent_event in _reports.py.
-        from ..models.agent_tree import ExecutorKind
-        from ..models.schemas import AgentReportState, WorkspaceTaskMode
-
         for run in list(self._runs.values()):
             if run.workspace_id != workspace_id:
                 continue
-            if run.executor_kind != ExecutorKind.MANAGED_TASK:
-                continue
-            task_id = run.context_ref
-            if not task_id:
-                continue
-            task = self._wm.tasks.get(task_id)
-            is_reviewed = task is not None and task.task_mode == WorkspaceTaskMode.REVIEWED
-
-            report_state_map = {
-                AgentReportState.STARTED: AgentEventType.STARTED,
-                AgentReportState.WORKING: AgentEventType.PROGRESS,
-                AgentReportState.BLOCKED: AgentEventType.BLOCKED,
-                AgentReportState.NEEDS_INPUT: AgentEventType.APPROVAL_REQUIRED,
-                AgentReportState.READY_FOR_REVIEW: AgentEventType.PROGRESS,
-                # REVIEWED: worker COMPLETED -> PROGRESS (wait for reviewer).
-                # DIRECT: worker COMPLETED -> COMPLETED (terminal).
-                AgentReportState.COMPLETED: (
-                    AgentEventType.PROGRESS if is_reviewed else AgentEventType.COMPLETED
-                ),
-                AgentReportState.REVIEW_STARTED: AgentEventType.PROGRESS,
-                AgentReportState.REVIEW_PASSED: AgentEventType.COMPLETED,
-                AgentReportState.REVIEW_FAILED: AgentEventType.PROGRESS,
-                AgentReportState.REVIEW_NEEDS_INPUT: AgentEventType.BLOCKED,
-            }
-            for report in self._wm.reports.values():
-                if report.workspace_id != workspace_id:
-                    continue
-                if report.task_id != task_id:
-                    continue
-                event_type = report_state_map.get(report.state, AgentEventType.PROGRESS)
-                try:
-                    self.emit_event(
-                        workspace_id=workspace_id,
-                        agent_run_id=run.id,
-                        event_type=event_type,
-                        author=run.id,
-                        recipient=run.supervisor_id or run.id,
-                        call_id=f"report:{report.id}",
-                        payload={
-                            "message": report.message,
-                            "report_id": report.id,
-                            "report_state": report.state.value,
-                            "task_id": report.task_id,
-                        },
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to reconcile report %s to event for run %s",
-                        report.id,
-                        run.id,
-                    )
-
-        for run in list(self._runs.values()):
-            if run.workspace_id != workspace_id:
+            if run.executor_kind == ExecutorKind.MANAGED_TASK:
                 continue
 
             run_events = sorted(

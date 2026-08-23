@@ -543,6 +543,7 @@
                   </label>
                   <label>
                     Related task
+                    <span class="field-hint-inline">Session/context reuse hint — not a Task parent.</span>
                     <select v-model="startOptionsFor(task).related_task_id">
                       <option value="">Auto</option>
                       <option
@@ -2080,6 +2081,10 @@
           </div>
           <div class="modal-field">
             <label>Related task</label>
+            <p class="modal-hint">
+              Session/context reuse hint — not a Task parent (<code>parent_task_id</code>).
+              Task Graph tree UI is follow-up <code>487c630c</code>; not implemented here.
+            </p>
             <select
               v-model="taskForm.related_task_id"
               :disabled="!activeWorkspaceId"
@@ -2157,6 +2162,10 @@
           </div>
           <div class="modal-field">
             <label>Related task</label>
+            <p class="modal-hint">
+              Session/context reuse hint — not a Task parent (<code>parent_task_id</code>).
+              Task Graph tree UI is follow-up <code>487c630c</code>; not implemented here.
+            </p>
             <select v-model="editTaskForm.related_task_id">
               <option value="">
                 None

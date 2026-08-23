@@ -1,9 +1,10 @@
-# Agent Tree (agent guide)
+# Task Graph (agent guide)
 
-Canonical, backend-only guide for using the already-reviewed Agent Tree /
-durable mailbox. Design history lives in
+Canonical, backend-only guide for **Workspace Task Graph / TaskMailbox**
+orchestration. `/api/agent-tree/*` and `claude-hub agent-tree` remain a **compat
+projection** for legacy run ids only. Design history:
 [2026-08-16-agent-tree-durable-mailbox.md](working-logs/2026-08-16-agent-tree-durable-mailbox.md).
-UI is a separate follow-up: task `487c630c-4b63-4883-8869-0e38546366c0`.
+Task Graph tree UI is a separate follow-up: task `487c630c-4b63-4883-8869-0e38546366c0`.
 
 Default Hub: `http://localhost:8173`. Prefix every recipe with:
 
@@ -12,16 +13,30 @@ curl --noproxy 'localhost,127.0.0.1,::1' --fail-with-body -sS
 ```
 
 Local-network callers may omit a session cookie. Non-local callers must send
-the Hub session cookie. Agents may use `claude-hub agent-tree` or the REST
-recipes below; REST remains the source of truth.
+the Hub session cookie. **Prefer `claude-hub task`** (Task Graph) for new
+orchestration; use `claude-hub agent-tree` only when you already hold a compat
+`AgentRun` id. REST below is the source of truth.
 
 ## CLI
 
-Thin Click client over this contract. `--call-id` exists only on `spawn` /
-`send` / `followup` / `interrupt` (omit → new UUID, stderr `call_id=<id>`).
-`POST /ack` has no `call_id`; `ack` and `wait` reject that flag. `wait` does
-not ACK unless `--ack` (render/flush events, then ACK `max(sequence)`).
-`--json --ack` then writes `{"acked_sequence": N}` to stderr.
+**Task Graph (primary).** `claude-hub task` over `/api/workspaces/.../tasks/*`
+and `/resident/*`. `--call-id` on `followup` only (omit → new UUID, stderr
+`call_id=<id>`). `wait` does not ACK unless `--ack`.
+
+```bash
+uv run claude-hub --json task tree WS_ID
+uv run claude-hub --json task tree WS_ID TASK_ID
+uv run claude-hub --json task events WS_ID TASK_ID --since-sequence 0
+uv run claude-hub --json task wait WS_ID TASK_ID --since-sequence 0 --subtree
+uv run claude-hub --json task ack WS_ID TASK_ID SEQUENCE
+uv run claude-hub --json task followup WS_ID TASK_ID --message "..." --call-id fu-1
+uv run claude-hub --json task abort TASK_ID --reason "superseded"
+uv run claude-hub --json task events WS_ID --since-sequence 0   # resident consumer
+```
+
+**Agent Tree (compat projection only).** Legacy `/api/agent-tree/*` for
+`resident_root` and historically linked managed runs. `--call-id` on `spawn` /
+`send` / `followup` / `interrupt`. `POST /ack` has no `call_id`.
 
 ```bash
 uv run claude-hub --json agent-tree roots WS_ID
@@ -34,23 +49,114 @@ uv run claude-hub --json agent-tree ack WS_ID RUN_ID SEQUENCE
 
 ## Mental model
 
-- **Resident / root.** A workspace Resident (when enabled) owns a
-  `resident_root` `AgentRun`. That run is the supervisor mailbox.
-- **Child run.** `POST /api/agent-tree/spawn` creates an `AgentRun` under
-  `parent_id`. For `managed_task`, Hub also creates a workspace Task and
-  dispatches it to a worker session. `context_ref` is the Task id.
-- **Events / cursor / ACK.** Actions append to a per-workspace event stream
-  (`sequence` is monotonic). `wait` returns events with `sequence > since_sequence`
-  for `recipient_id` (or its subtree when `subtree=true`). `ack` persists
-  `ack_sequence` so a restart resumes there.
-- **Hub Task / session vs Agent Tree.** Tasks and sessions are how
-  `managed_task` executes. Agent Tree itself is the run tree + event stream;
-  you can list/wait/ack runs without creating a new Hub Task by hand. Do not
-  treat Task status as a substitute for run events.
+**Workspace → Task Graph → Session assignment.** One workspace owns one Task
+Graph, worker/reviewer sessions, reports, and a single TaskMailbox stream.
 
-Hub owns lifecycle (`pending` / `running` / `waiting` / `blocked` /
-`completed` / `failed` / `interrupted`). Agents report via events and
-`POST /api/workspaces/sessions/{id}/reports`, not by forging run status.
+- **Workspace.** Container for tasks, managed sessions, resident settings, and
+  durable state under `~/.claude_hub/workspaces/`.
+- **Task Graph (canonical).** `WorkspaceTask` nodes linked by `parent_task_id`
+  (materialized `root_task_id` / `path`). Supervisors coordinate via TaskMailbox
+  consumers (`task:<task_id>`, `workspace:{workspace_id}:resident`). Primary commands:
+  `tree`, `events`, `wait`, `ack`, `followup`, `abort`. Durable cursors:
+  `consumer_ack_sequence` (per Task) and `resident_ack_sequence` (workspace).
+- **Session assignment.** Each Task names at most one worker (`session_id`) and
+  one reviewer (`review_session_id`). Dispatch/start assigns workers; report
+  intake is fail-closed to those ids. Sessions **execute** work; the Task Graph
+  **owns orchestration** (events, cursors, parent/child structure).
+- **TaskMailbox.** Append-only `TaskEvent` log (`sequence` monotonic). Agents
+  wait/ack/followup/abort through Task APIs. Identical `call_id` + payload →
+  idempotent replay (**409** on followup conflict).
+- **Agent Tree (compat projection only).** `/api/agent-tree/*` mirrors linked
+  runs for legacy callers (`resident_root`, `Task.agent_run_id` links). Ordinary
+  Tasks project to `task.id`; runtime resolution uses canonical
+  `Task.agent_run_id` only — `context_ref` is a one-shot cold-load backfill
+  hint, not a runtime disambiguator. **Do not start new orchestration here when
+  a Task id exists.**
+
+Lifecycle columns (`todo` / `working` / …) are human-facing board state.
+Agents driving automation should use TaskMailbox `wait`/`ack`, not poll board
+status as a control plane.
+
+Report intake remains fail-closed: workers match `task.session_id`, reviewers
+match `task.review_session_id`; unassigned Tasks (`session_id is None`) cannot
+be claimed by the first report — assign via dispatch/start or set `session_id`
+on the Task record first.
+
+## Task Graph REST (primary)
+
+Top-level tasks:
+
+```bash
+curl --noproxy 'localhost,127.0.0.1,::1' --fail-with-body -sS \
+  'http://localhost:8173/api/workspaces/WS_ID/tasks/tree'
+```
+
+Subtree (includes root):
+
+```bash
+curl --noproxy 'localhost,127.0.0.1,::1' --fail-with-body -sS \
+  'http://localhost:8173/api/workspaces/WS_ID/tasks/TASK_ID/tree'
+```
+
+Replay / wait / ack (TaskMailbox only; no AgentRun writes):
+
+```bash
+curl --noproxy 'localhost,127.0.0.1,::1' --fail-with-body -sS \
+  'http://localhost:8173/api/workspaces/WS_ID/tasks/TASK_ID/events?since_sequence=0&subtree=true'
+
+curl --noproxy 'localhost,127.0.0.1,::1' --fail-with-body -sS \
+  -X POST 'http://localhost:8173/api/workspaces/WS_ID/tasks/TASK_ID/wait?subtree=true&timeout_seconds=30'
+
+curl --noproxy 'localhost,127.0.0.1,::1' --fail-with-body -sS \
+  -X POST 'http://localhost:8173/api/workspaces/WS_ID/tasks/TASK_ID/ack' \
+  -H 'Content-Type: application/json' \
+  -d '{"sequence":MAX_SEQ}'
+```
+
+Followup (TaskMailbox `FOLLOWUP`; **409** on call_id reuse with different body):
+
+```bash
+curl --noproxy 'localhost,127.0.0.1,::1' --fail-with-body -sS \
+  -X POST 'http://localhost:8173/api/workspaces/WS_ID/tasks/TASK_ID/followup' \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Continue with the plan.","call_id":"followup-task-1"}'
+```
+
+Abort (returns Task to manual control; emits TaskMailbox `ABORT`):
+
+```bash
+curl --noproxy 'localhost,127.0.0.1,::1' --fail-with-body -sS \
+  -X POST 'http://localhost:8173/api/workspaces/tasks/TASK_ID/abort' \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"operator stop"}'
+```
+
+Resident consumer (stable `workspace:{workspace_id}:resident`; subtree sees workspace Task events):
+
+```bash
+curl --noproxy 'localhost,127.0.0.1,::1' --fail-with-body -sS \
+  'http://localhost:8173/api/workspaces/WS_ID/resident/events?subtree=true&since_sequence=0'
+
+curl --noproxy 'localhost,127.0.0.1,::1' --fail-with-body -sS \
+  -X POST 'http://localhost:8173/api/workspaces/WS_ID/resident/ack' \
+  -H 'Content-Type: application/json' \
+  -d '{"sequence":MAX_SEQ}'
+```
+
+Create a child Task (explicit graph edge; does not spawn AgentRun):
+
+```bash
+curl --noproxy 'localhost,127.0.0.1,::1' --fail-with-body -sS \
+  -X POST 'http://localhost:8173/api/workspaces/WS_ID/tasks' \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"Child step","prompt":"Do the sub-step.","parent_task_id":"PARENT_TASK_ID"}'
+```
+
+## Agent Tree REST (compat projection)
+
+Legacy `/api/agent-tree/*` run-tree APIs below remain for `resident_root` and
+historically linked managed runs. Prefer Task Graph REST above for new
+orchestration.
 
 ## Runtime boundary
 
@@ -253,11 +359,33 @@ or 404. Another ambiguous paste stays uncertain (400), not a fake 204.
 
 ## Migration / rollback
 
-Forward load is additive (`AgentRun` / events / fingerprints on
-`state.json`). Before rolling back a binary that does not know those fields,
-back up each workspace `state.json` and drain writers. The first old-version
-save **drops** Agent Tree and report-fingerprint metadata; replay and
-`call_id` dedup cannot be recovered without that backup.
+Forward load is additive. New Task Graph fields on `state.json` / workspace
+index:
+
+- **Tasks:** `parent_task_id`, `root_task_id`, `path`, `consumer_ack_sequence`,
+  optional persisted `agent_run_id` (compat link to a legacy run id).
+- **Workspace index:** `resident_ack_sequence` (explicit `0` is authoritative;
+  only a **missing** index field may cold-lift from legacy `RESIDENT_ROOT`
+  `ack_sequence` once).
+- **TaskMailbox:** `task_events`, `task_call_index`, `task_next_seq` in the
+  persisted workspace blob (see working log).
+
+Cold load runs `migrate_pre_unification_graph` once: inherit missing
+`parent_task_id` from linked AgentRun parentage, backfill `agent_run_id` when
+unique, lift missing ACK cursors. Runtime code **never** materializes Tasks from
+unlinked AgentRuns.
+
+**Rollback requires restoring pre-migration backups.** Before deploying or
+rolling back across the Task Graph boundary, copy each workspace
+`state.json`, the workspace `index.json`, and any nested workspace directory.
+The first save from an older binary **drops** TaskMailbox events, Task/Workspace
+ACK cursors, parent/root/path fields, and legacy Agent Tree metadata; `call_id`
+dedup and mailbox replay cannot be reconstructed without those files.
+
+**UI boundary:** the web board uses flat task columns and session assignment
+only. `related_task_id` is a **session/context reuse hint**, not a Task parent
+(`parent_task_id`). Task Graph tree UI is follow-up `487c630c` (not implemented
+on the board).
 
 Details: [working log](working-logs/2026-08-16-agent-tree-durable-mailbox.md)
 and `CHANGELOG.md` Unreleased.

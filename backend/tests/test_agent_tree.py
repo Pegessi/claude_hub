@@ -60,7 +60,11 @@ def state_root(monkeypatch: MonkeyPatch, tmp_path: Path) -> Generator[Path, None
     # Mock the workspace manager's tmux message sender.
     # _send_tmux_message_with_receipt delegates to _send_tmux_message so tests
     # that override _send_tmux_message (recording side effects) still work.
+    # managed_task spawn still creates a session via ensure_workspace_agent;
+    # without this mock, _ensure_session_ready_for_send polls fake tmux
+    # (claude-hub-tab-mock) until the production ready timeout.
     monkeypatch.setattr(_wm.WorkspaceManager, "_send_tmux_message", AsyncMock())
+    monkeypatch.setattr(_wm.WorkspaceManager, "_ensure_session_ready_for_send", AsyncMock())
 
     async def _fake_send_with_receipt(self, tmux_session, message, call_id, **kwargs):
         return await self._send_tmux_message(tmux_session, message, **kwargs)
@@ -417,6 +421,1114 @@ def test_emit_event_updates_run_status(manager: WorkspaceManager, ws_id: str) ->
     assert run.last_task_message == "finished"
 
 
+def test_managed_task_emit_event_keeps_raw_run_bytes(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """AC2: emit_event must not write managed_task AgentRun status/message."""
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentType,
+        WorkspaceTaskCreate,
+        WorkspaceTaskMode,
+        WorkspaceTaskStatus,
+    )
+    from claude_hub.models.agent_tree import AgentRun
+
+    ws_id = _make_workspace(manager, tmp_path)
+    task = manager.create_task(
+        ws_id,
+        WorkspaceTaskCreate(
+            title="linked",
+            prompt="do work",
+            agent_type=AgentType.CLAUDE,
+            task_mode=WorkspaceTaskMode.REVIEWED,
+        ),
+    )
+    manager.tasks[task.id] = manager.tasks[task.id].model_copy(
+        update={"status": WorkspaceTaskStatus.WORKING, "agent_run_id": "run-child"}
+    )
+    stamp = datetime(2026, 8, 23, 4, 0, 0)
+    child = AgentRun(
+        id="run-child",
+        workspace_id=ws_id,
+        parent_id=None,
+        path="run-child",
+        supervisor_id=None,
+        executor_kind=ExecutorKind.MANAGED_TASK,
+        status=AgentRunStatus.WAITING,
+        context_ref=task.id,
+        ack_sequence=4,
+        last_task_message="child-old",
+        title="managed-child",
+        created_at=stamp,
+        updated_at=stamp,
+    )
+    manager.agent_tree._runs[child.id] = child
+    before = child.model_dump(mode="json")
+
+    manager.agent_tree.emit_event(
+        workspace_id=ws_id,
+        agent_run_id=child.id,
+        event_type=AgentEventType.COMPLETED,
+        author=child.id,
+        recipient=child.id,
+        call_id="emit-managed-1",
+        payload={"message": "must not stick", "report_state": "ready_for_review"},
+    )
+    manager.agent_tree._update_run_status(child.id, AgentRunStatus.COMPLETED)
+
+    stored = manager.agent_tree._runs[child.id]
+    assert stored.model_dump(mode="json") == before
+    projected = manager.agent_tree.get_run(child.id)
+    assert projected is not None
+    assert projected.status == AgentRunStatus.RUNNING
+    listed = manager.agent_tree.list_runs(ListRunsRequest(workspace_id=ws_id))
+    assert [item.status for item in listed if item.id == child.id] == [AgentRunStatus.RUNNING]
+
+
+def _emit_side_effect_snapshots(
+    manager: WorkspaceManager, ws_id: str
+) -> tuple[int, set[str], int, set[str]]:
+    tree = manager.agent_tree
+    return (
+        len(tree._events.get(ws_id, [])),
+        set(tree._call_index.get(ws_id, {})),
+        len(manager.task_mailbox._events.get(ws_id, [])),
+        set(manager.task_mailbox._call_index.get(ws_id, {})),
+    )
+
+
+def test_managed_task_emit_event_fail_closed_when_unlinked(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """AC5/AC9: unlinked MANAGED_TASK emit must not write raw AgentTree or TaskMailbox."""
+    from datetime import datetime
+
+    from claude_hub.models.agent_tree import AgentRun
+
+    ws_id = _make_workspace(manager, tmp_path)
+    stamp = datetime(2026, 8, 23, 10, 0, 0)
+    orphan = AgentRun(
+        id="run-orphan-emit",
+        workspace_id=ws_id,
+        parent_id=None,
+        path="run-orphan-emit",
+        supervisor_id=None,
+        executor_kind=ExecutorKind.MANAGED_TASK,
+        status=AgentRunStatus.RUNNING,
+        context_ref="task-missing",
+        ack_sequence=2,
+        title="orphan-managed",
+        created_at=stamp,
+        updated_at=stamp,
+    )
+    manager.agent_tree._runs[orphan.id] = orphan
+    agent_events_before, agent_calls_before, task_events_before, task_calls_before = (
+        _emit_side_effect_snapshots(manager, ws_id)
+    )
+
+    with pytest.raises(KeyError):
+        manager.agent_tree.emit_event(
+            workspace_id=ws_id,
+            agent_run_id=orphan.id,
+            event_type=AgentEventType.PROGRESS,
+            author=orphan.id,
+            recipient=orphan.id,
+            call_id="emit-orphan-unlinked",
+            payload={"message": "must not persist"},
+        )
+
+    agent_events_after, agent_calls_after, task_events_after, task_calls_after = (
+        _emit_side_effect_snapshots(manager, ws_id)
+    )
+    assert agent_events_after == agent_events_before
+    assert agent_calls_after == agent_calls_before
+    assert task_events_after == task_events_before
+    assert task_calls_after == task_calls_before
+
+
+def test_managed_task_emit_event_fail_closed_when_dual_linked(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """AC5/AC9: ambiguous dual Task linkage must fail closed with zero writes."""
+    from datetime import datetime
+
+    from claude_hub.models import AgentType, WorkspaceTaskCreate, WorkspaceTaskStatus
+    from claude_hub.models.agent_tree import AgentRun
+
+    ws_id = _make_workspace(manager, tmp_path)
+    first = manager.create_task(
+        ws_id,
+        WorkspaceTaskCreate(title="dual-a", prompt="a", agent_type=AgentType.CLAUDE),
+    )
+    second = manager.create_task(
+        ws_id,
+        WorkspaceTaskCreate(title="dual-b", prompt="b", agent_type=AgentType.CLAUDE),
+    )
+    manager.tasks[first.id] = manager.tasks[first.id].model_copy(
+        update={"status": WorkspaceTaskStatus.WORKING, "agent_run_id": "run-dual-emit"}
+    )
+    manager.tasks[second.id] = manager.tasks[second.id].model_copy(
+        update={"status": WorkspaceTaskStatus.WORKING, "agent_run_id": "run-dual-emit"}
+    )
+    stamp = datetime(2026, 8, 23, 10, 5, 0)
+    dual = AgentRun(
+        id="run-dual-emit",
+        workspace_id=ws_id,
+        parent_id=None,
+        path="run-dual-emit",
+        supervisor_id=None,
+        executor_kind=ExecutorKind.MANAGED_TASK,
+        status=AgentRunStatus.RUNNING,
+        context_ref=first.id,
+        ack_sequence=1,
+        title="dual-linked",
+        created_at=stamp,
+        updated_at=stamp,
+    )
+    manager.agent_tree._runs[dual.id] = dual
+    agent_events_before, agent_calls_before, task_events_before, task_calls_before = (
+        _emit_side_effect_snapshots(manager, ws_id)
+    )
+
+    with pytest.raises(ValueError, match="canonical Task.agent_run_id linkage must be unique"):
+        manager.agent_tree.emit_event(
+            workspace_id=ws_id,
+            agent_run_id=dual.id,
+            event_type=AgentEventType.PROGRESS,
+            author=dual.id,
+            recipient=dual.id,
+            call_id="emit-dual-linked",
+            payload={"message": "must not persist"},
+        )
+
+    agent_events_after, agent_calls_after, task_events_after, task_calls_after = (
+        _emit_side_effect_snapshots(manager, ws_id)
+    )
+    assert agent_events_after == agent_events_before
+    assert agent_calls_after == agent_calls_before
+    assert task_events_after == task_events_before
+    assert task_calls_after == task_calls_before
+
+
+@pytest.mark.asyncio
+async def test_managed_run_projection_leaves_raw_bytes_and_maps_task_fields(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    from claude_hub.models import AgentType, WorkspaceTaskCreate, WorkspaceTaskStatus
+    from claude_hub.models.agent_tree import AgentRun
+
+    ws_id = _make_workspace(manager, tmp_path)
+    task = manager.create_task(
+        ws_id,
+        WorkspaceTaskCreate(
+            title="projected",
+            prompt="do work",
+            agent_type=AgentType.CLAUDE,
+        ),
+    )
+    manager.tasks[task.id] = manager.tasks[task.id].model_copy(
+        update={
+            "status": WorkspaceTaskStatus.WORKING,
+            "agent_run_id": "run-projected",
+            "consumer_ack_sequence": 7,
+        }
+    )
+    stamp = datetime(2026, 8, 23, 5, 0, 0)
+    raw = AgentRun(
+        id="run-projected",
+        workspace_id=ws_id,
+        parent_id=None,
+        path="run-projected",
+        supervisor_id=None,
+        executor_kind=ExecutorKind.MANAGED_TASK,
+        status=AgentRunStatus.PENDING,
+        context_ref=None,
+        ack_sequence=4,
+        last_task_message="stale",
+        title="projected-child",
+        created_at=stamp,
+        updated_at=stamp,
+    )
+    manager.agent_tree._runs[raw.id] = raw
+    before = raw.model_dump(mode="json")
+
+    projected = manager.agent_tree.get_run(raw.id)
+    assert projected is not None
+    assert projected.status == AgentRunStatus.RUNNING
+    assert projected.context_ref == task.id
+    assert projected.ack_sequence == 7
+    assert manager.agent_tree._runs[raw.id].model_dump(mode="json") == before
+    assert manager.agent_tree._recover_context_ref(raw) == task.id
+    assert manager.agent_tree._runs[raw.id].model_dump(mode="json") == before
+
+    _live_resident_assignment(manager, "resident-projected", ws_id)
+    parent = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.RESIDENT_ROOT
+    )
+    spawned = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=parent.id,
+            executor_kind=ExecutorKind.MANAGED_TASK,
+            title="spawn-projected",
+            initial_message="do spawn",
+            call_id="spawn-projected-1",
+        )
+    )
+    stored_spawn = manager.agent_tree._runs[spawned.id]
+    spawn_before = stored_spawn.model_dump(mode="json")
+    assert stored_spawn.context_ref is None
+    assert stored_spawn.status == AgentRunStatus.PENDING
+    linked = manager._resolve_task_for_compat_run(ws_id, stored_spawn)
+    assert linked is not None
+    assert spawned.context_ref == linked.id
+    assert spawned.status == AgentRunStatus.RUNNING
+    replayed = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=parent.id,
+            executor_kind=ExecutorKind.MANAGED_TASK,
+            title="spawn-projected",
+            initial_message="do spawn",
+            call_id="spawn-projected-1",
+        )
+    )
+    assert replayed.id == spawned.id
+    assert replayed.context_ref == linked.id
+    assert manager.agent_tree._runs[spawned.id].model_dump(mode="json") == spawn_before
+
+
+@pytest.mark.asyncio
+async def test_completed_task_releases_managed_child_concurrency(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    from claude_hub.models import AgentType, WorkspaceTaskCreate, WorkspaceTaskStatus
+    from claude_hub.models.agent_tree import AgentRun
+    from claude_hub.services.agent_tree import MAX_CONCURRENT_CHILDREN
+
+    ws_id = _make_workspace(manager, tmp_path)
+    _live_resident_assignment(manager, "resident-concurrency", ws_id)
+    parent = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.RESIDENT_ROOT
+    )
+    stamp = datetime(2026, 8, 23, 5, 1, 0)
+    for index in range(MAX_CONCURRENT_CHILDREN):
+        task = manager.create_task(
+            ws_id,
+            WorkspaceTaskCreate(
+                title=f"done-{index}",
+                prompt="done",
+                agent_type=AgentType.CLAUDE,
+            ),
+        )
+        run_id = f"run-done-{index}"
+        manager.tasks[task.id] = manager.tasks[task.id].model_copy(
+            update={"status": WorkspaceTaskStatus.DONE, "agent_run_id": run_id}
+        )
+        manager.agent_tree._runs[run_id] = AgentRun(
+            id=run_id,
+            workspace_id=ws_id,
+            parent_id=parent.id,
+            path=f"{parent.path}/{run_id}",
+            supervisor_id=parent.id,
+            executor_kind=ExecutorKind.MANAGED_TASK,
+            status=AgentRunStatus.RUNNING,
+            context_ref=None,
+            ack_sequence=0,
+            created_at=stamp,
+            updated_at=stamp,
+        )
+
+    assert manager.agent_tree._active_children(parent.id) == []
+    extra = await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=parent.id,
+            executor_kind=ExecutorKind.MANAGED_TASK,
+            title="after-done",
+            initial_message="one more",
+            call_id="spawn-after-done",
+        )
+    )
+    assert extra.id not in {f"run-done-{index}" for index in range(MAX_CONCURRENT_CHILDREN)}
+    assert extra.status == AgentRunStatus.RUNNING
+    assert manager.agent_tree._runs[extra.id].context_ref is None
+
+
+def test_get_run_by_context_ref_uses_linked_task_when_raw_context_is_none(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    from claude_hub.models import AgentType, WorkspaceTaskCreate, WorkspaceTaskStatus
+    from claude_hub.models.agent_tree import AgentRun
+
+    ws_id = _make_workspace(manager, tmp_path)
+    task = manager.create_task(
+        ws_id,
+        WorkspaceTaskCreate(title="lookup", prompt="do work", agent_type=AgentType.CLAUDE),
+    )
+    manager.tasks[task.id] = manager.tasks[task.id].model_copy(
+        update={"status": WorkspaceTaskStatus.WORKING, "agent_run_id": "run-lookup"}
+    )
+    manager.agent_tree._runs["run-lookup"] = AgentRun(
+        id="run-lookup",
+        workspace_id=ws_id,
+        parent_id=None,
+        path="run-lookup",
+        supervisor_id=None,
+        executor_kind=ExecutorKind.MANAGED_TASK,
+        status=AgentRunStatus.PENDING,
+        context_ref=None,
+        ack_sequence=9,
+    )
+    before = manager.agent_tree._runs["run-lookup"].model_dump(mode="json")
+    found = manager.agent_tree.get_run_by_context_ref(ws_id, task.id)
+    assert found is not None
+    assert found.id == "run-lookup"
+    assert found.context_ref == task.id
+    assert manager.agent_tree._runs["run-lookup"].model_dump(mode="json") == before
+    assert manager.agent_tree.get_run_by_context_ref(ws_id, "missing-task") is None
+
+
+def test_get_events_rejects_cross_workspace_run_without_mailbox_read(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    from claude_hub.models import AgentType, ExecutionTarget, WorkspaceCreate, WorkspaceTaskCreate
+    from claude_hub.models.agent_tree import AgentRun
+    from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
+
+    ws_a = _make_workspace(manager, tmp_path)
+    other_repo = tmp_path / "other-repo"
+    other_repo.mkdir()
+    ws_b = manager.create_workspace(
+        WorkspaceCreate(name="Other WS", path=str(other_repo), target=ExecutionTarget.LOCAL)
+    ).id
+    task = manager.create_task(
+        ws_a,
+        WorkspaceTaskCreate(title="owner", prompt="do work", agent_type=AgentType.CLAUDE),
+    )
+    manager.tasks[task.id] = manager.tasks[task.id].model_copy(update={"agent_run_id": "run-owner"})
+    manager.agent_tree._runs["run-owner"] = AgentRun(
+        id="run-owner",
+        workspace_id=ws_a,
+        parent_id=None,
+        path="run-owner",
+        supervisor_id=None,
+        executor_kind=ExecutorKind.MANAGED_TASK,
+        status=AgentRunStatus.RUNNING,
+        context_ref=None,
+    )
+    manager.task_mailbox.append_event(
+        workspace_id=ws_a,
+        task_id=task.id,
+        actor_role=TaskActorRole.WORKER,
+        event_type=TaskEventType.REPORT,
+        call_id="owner-report",
+        action="report",
+        payload={"message": "secret-a"},
+    )
+    reads: list[tuple[str, str]] = []
+    original_wait = manager.task_mailbox.wait
+
+    def _spy_wait(
+        workspace_id: str, consumer_key: str, since_sequence: int = 0, subtree: bool = False
+    ):
+        reads.append((workspace_id, consumer_key))
+        return original_wait(workspace_id, consumer_key, since_sequence, subtree)
+
+    monkeypatch.setattr(manager.task_mailbox, "wait", _spy_wait)
+    with pytest.raises(ValueError, match="different workspace"):
+        manager.agent_tree.get_events(ws_b, "run-owner")
+    assert reads == []
+
+
+@pytest.mark.asyncio
+async def test_compat_mailbox_get_events_wait_and_ack_keep_raw_bytes(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    from claude_hub.models import AgentType, WorkspaceTaskCreate, WorkspaceTaskStatus
+    from claude_hub.models.agent_tree import AgentRun
+    from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
+    from claude_hub.services.task_graph import make_resident_consumer_key, make_task_consumer_key
+
+    ws_id = _make_workspace(manager, tmp_path)
+    parent_task = manager.create_task(
+        ws_id,
+        WorkspaceTaskCreate(title="parent", prompt="supervise", agent_type=AgentType.CLAUDE),
+    )
+    child_task = manager.create_task(
+        ws_id,
+        WorkspaceTaskCreate(
+            title="child",
+            prompt="work",
+            agent_type=AgentType.CLAUDE,
+            parent_task_id=parent_task.id,
+        ),
+    )
+    manager.tasks[parent_task.id] = manager.tasks[parent_task.id].model_copy(
+        update={"status": WorkspaceTaskStatus.WORKING, "agent_run_id": "run-parent"}
+    )
+    manager.tasks[child_task.id] = manager.tasks[child_task.id].model_copy(
+        update={"status": WorkspaceTaskStatus.WORKING, "agent_run_id": "run-child"}
+    )
+    stamp = datetime(2026, 8, 23, 5, 10, 0)
+    parent_run = AgentRun(
+        id="run-parent",
+        workspace_id=ws_id,
+        parent_id="run-resident",
+        path="run-resident/run-parent",
+        supervisor_id="run-resident",
+        executor_kind=ExecutorKind.MANAGED_TASK,
+        status=AgentRunStatus.PENDING,
+        context_ref=None,
+        ack_sequence=3,
+        created_at=stamp,
+        updated_at=stamp,
+    )
+    child_run = AgentRun(
+        id="run-child",
+        workspace_id=ws_id,
+        parent_id="run-parent",
+        path="run-resident/run-parent/run-child",
+        supervisor_id="run-parent",
+        executor_kind=ExecutorKind.MANAGED_TASK,
+        status=AgentRunStatus.PENDING,
+        context_ref=None,
+        ack_sequence=8,
+        created_at=stamp,
+        updated_at=stamp,
+    )
+    resident = AgentRun(
+        id="run-resident",
+        workspace_id=ws_id,
+        parent_id=None,
+        path="run-resident",
+        supervisor_id=None,
+        executor_kind=ExecutorKind.RESIDENT_ROOT,
+        status=AgentRunStatus.RUNNING,
+        context_ref="sess-old",
+        ack_sequence=11,
+        created_at=stamp,
+        updated_at=stamp,
+    )
+    manager.agent_tree._runs[parent_run.id] = parent_run
+    manager.agent_tree._runs[child_run.id] = child_run
+    manager.agent_tree._runs[resident.id] = resident
+    parent_before = parent_run.model_dump(mode="json")
+    resident_before = resident.model_dump(mode="json")
+
+    waiter = asyncio.create_task(
+        manager.agent_tree.wait(
+            WaitRequest(
+                workspace_id=ws_id,
+                recipient_id=parent_run.id,
+                since_sequence=0,
+                subtree=False,
+                timeout_seconds=2.0,
+            )
+        )
+    )
+    await asyncio.sleep(0.05)
+    event, created = manager.task_mailbox.append_event(
+        workspace_id=ws_id,
+        task_id=child_task.id,
+        actor_role=TaskActorRole.WORKER,
+        event_type=TaskEventType.REPORT,
+        call_id="child-report-1",
+        action="report",
+        payload={"message": "MAILBOX_CHILD_REPORT"},
+    )
+    assert created is True
+    assert event.consumer_key == make_task_consumer_key(parent_task.id)
+    waited = await waiter
+    assert [item.call_id for item in waited] == ["child-report-1"]
+
+    visible = manager.agent_tree.get_events(ws_id, parent_run.id, subtree=False)
+    assert [item.call_id for item in visible] == ["child-report-1"]
+    assert visible[0].payload.get("message") == "MAILBOX_CHILD_REPORT"
+    assert manager.agent_tree._runs[parent_run.id].model_dump(mode="json") == parent_before
+
+    acked = manager.agent_tree.ack(ws_id, parent_run.id, event.sequence)
+    assert acked.ack_sequence == event.sequence
+    assert manager.tasks[parent_task.id].consumer_ack_sequence == event.sequence
+    assert manager.agent_tree._runs[parent_run.id].model_dump(mode="json") == parent_before
+    assert manager.agent_tree.get_events(ws_id, parent_run.id, subtree=False) == []
+
+    resident_event, _ = manager.task_mailbox.append_event(
+        workspace_id=ws_id,
+        task_id=child_task.id,
+        actor_role=TaskActorRole.WORKER,
+        event_type=TaskEventType.PROGRESS,
+        call_id="resident-visible-1",
+        action="progress",
+        consumer_key=make_resident_consumer_key(ws_id),
+        payload={"message": "MAILBOX_RESIDENT"},
+    )
+    resident_visible = manager.agent_tree.get_events(ws_id, resident.id, subtree=False)
+    assert [item.call_id for item in resident_visible] == ["resident-visible-1"]
+    manager.agent_tree.ack(ws_id, resident.id, resident_event.sequence)
+    assert manager.workspaces[ws_id].resident_ack_sequence == resident_event.sequence
+    assert manager.agent_tree._runs[resident.id].model_dump(mode="json") == resident_before
+    assert manager.agent_tree.get_events(ws_id, resident.id, subtree=False) == []
+
+    manager.workspaces[ws_id] = manager.workspaces[ws_id].model_copy(
+        update={"resident_agent_session_id": "sess-replaced"}
+    )
+    manager.agent_tree._runs[resident.id] = manager.agent_tree._runs[resident.id].model_copy(
+        update={"context_ref": "sess-replaced"}
+    )
+    manager._save_state()
+    fresh = WorkspaceManager()
+    assert fresh.tasks[parent_task.id].consumer_ack_sequence == event.sequence
+    assert fresh.workspaces[ws_id].resident_ack_sequence == resident_event.sequence
+    reloaded_parent = fresh.agent_tree.get_run(parent_run.id)
+    reloaded_resident = fresh.agent_tree.get_run(resident.id)
+    assert reloaded_parent is not None
+    assert reloaded_resident is not None
+    assert reloaded_parent.ack_sequence == event.sequence
+    assert reloaded_resident.ack_sequence == resident_event.sequence
+    assert fresh.agent_tree.get_events(ws_id, parent_run.id, subtree=False) == []
+    assert fresh.agent_tree.get_events(ws_id, resident.id, subtree=False) == []
+    assert fresh.workspaces[ws_id].resident_agent_session_id == "sess-replaced"
+    assert fresh.workspaces[ws_id].resident_ack_sequence == resident_event.sequence
+
+
+def test_cold_load_projects_legacy_agent_events_without_read_mutation(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    from claude_hub.models import AgentType, WorkspaceTaskCreate
+    from claude_hub.models.agent_tree import AgentEvent, AgentRun
+
+    ws_id = _make_workspace(manager, tmp_path)
+    task = manager.create_task(
+        ws_id,
+        WorkspaceTaskCreate(title="legacy", prompt="do work", agent_type=AgentType.CLAUDE),
+    )
+    manager.tasks[task.id] = manager.tasks[task.id].model_copy(
+        update={"agent_run_id": "run-legacy"}
+    )
+    resident = AgentRun(
+        id="run-legacy-root",
+        workspace_id=ws_id,
+        parent_id=None,
+        path="run-legacy-root",
+        supervisor_id=None,
+        executor_kind=ExecutorKind.RESIDENT_ROOT,
+        status=AgentRunStatus.RUNNING,
+        context_ref="sess-legacy",
+        ack_sequence=0,
+    )
+    run = AgentRun(
+        id="run-legacy",
+        workspace_id=ws_id,
+        parent_id=resident.id,
+        path=f"{resident.id}/run-legacy",
+        supervisor_id=resident.id,
+        executor_kind=ExecutorKind.MANAGED_TASK,
+        status=AgentRunStatus.RUNNING,
+        context_ref=None,
+        ack_sequence=0,
+    )
+    legacy = AgentEvent(
+        sequence=4,
+        call_id="legacy-progress",
+        agent_run_id="run-legacy",
+        type=AgentEventType.PROGRESS,
+        author="run-legacy",
+        recipient="run-legacy",
+        action="emit",
+        target="run-legacy",
+        fingerprint="legacy-fp",
+        payload={"message": "LEGACY_PROGRESS", "task_id": task.id},
+        created_at=datetime(2026, 1, 1),
+    )
+    manager.agent_tree._runs[resident.id] = resident
+    manager.agent_tree._runs[run.id] = run
+    manager.agent_tree._events[ws_id] = [legacy]
+    manager.agent_tree._next_seq[ws_id] = 5
+    manager._save_state()
+    assert manager.task_mailbox._events.get(ws_id, []) == []
+
+    fresh = WorkspaceManager()
+    loaded_mailbox = list(fresh.task_mailbox._events.get(ws_id, []))
+    assert [item.call_id for item in loaded_mailbox] == ["legacy-progress"]
+    project_calls = {"n": 0}
+    original_project = fresh.task_mailbox._project_legacy_agent_events
+
+    def _count_project(workspace_id: str) -> None:
+        project_calls["n"] += 1
+        return original_project(workspace_id)
+
+    monkeypatch.setattr(fresh.task_mailbox, "_project_legacy_agent_events", _count_project)
+    events = fresh.agent_tree.get_events(ws_id, run.id, subtree=False)
+    assert [item.call_id for item in events] == ["legacy-progress"]
+    assert project_calls["n"] == 0
+    assert [item.call_id for item in fresh.task_mailbox._events.get(ws_id, [])] == [
+        "legacy-progress"
+    ]
+
+
+def _orchestrator_session_for_spawn(
+    manager: WorkspaceManager, session_id: str, workspace_id: str
+) -> None:
+    from claude_hub.models import WorkspaceSessionRole
+
+    _make_managed_session(manager, session_id, workspace_id)
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"role": WorkspaceSessionRole.ORCHESTRATOR}
+    )
+
+
+def _live_resident_assignment(manager: WorkspaceManager, session_id: str, workspace_id: str) -> str:
+    from claude_hub.models import WorkspaceSessionRole
+
+    _make_managed_session(manager, session_id, workspace_id)
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"role": WorkspaceSessionRole.RESIDENT}
+    )
+    manager.workspaces[workspace_id] = manager.workspaces[workspace_id].model_copy(
+        update={"resident_agent_session_id": session_id}
+    )
+    return session_id
+
+
+def _bind_session_to_task(manager: WorkspaceManager, session_id: str, task_id: str) -> None:
+    session = manager.sessions[session_id]
+    manager.sessions[session_id] = session.model_copy(
+        update={"task_id": task_id, "current_task_id": task_id}
+    )
+    manager.tasks[task_id] = manager.tasks[task_id].model_copy(update={"session_id": session_id})
+
+
+async def _spawn_managed_child(
+    manager: WorkspaceManager,
+    ws_id: str,
+    parent_id: str,
+    *,
+    title: str,
+    call_id: str,
+    session_id: str | None = None,
+):
+    return await manager.agent_tree.spawn(
+        SpawnRequest(
+            workspace_id=ws_id,
+            parent_id=parent_id,
+            executor_kind=ExecutorKind.MANAGED_TASK,
+            title=title,
+            initial_message=f"do {title}",
+            call_id=call_id,
+            session_id=session_id,
+        )
+    )
+
+
+def _spawn_mailbox_pair(manager: WorkspaceManager, workspace_id: str, task_id: str, call_id: str):
+    return [
+        event
+        for event in manager.task_mailbox._events.get(workspace_id, [])
+        if event.task_id == task_id
+        and event.call_id in {f"task:{call_id}", f"task:{call_id}:started"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_managed_parent_spawn_child_inherits_task_assignment(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
+    from claude_hub.services.task_graph import (
+        task_inbox_consumer_key,
+        task_supervisor_consumer_key,
+    )
+
+    ws_id = _make_workspace(manager, tmp_path)
+    _live_resident_assignment(manager, "resident-assign", ws_id)
+    resident = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.RESIDENT_ROOT
+    )
+    parent_run = await _spawn_managed_child(
+        manager, ws_id, resident.id, title="supervisor", call_id="spawn-supervisor"
+    )
+    parent_task = manager._resolve_task_for_compat_run(
+        ws_id, manager.agent_tree._runs[parent_run.id]
+    )
+    assert parent_task.session_id is not None
+    _bind_session_to_task(manager, parent_task.session_id, parent_task.id)
+    parent_task = manager.tasks[parent_task.id]
+    supervisor_session_id = parent_task.session_id
+    _orchestrator_session_for_spawn(manager, "worker-explicit", ws_id)
+
+    for title, call_id, session_id in (
+        ("child-adapter", "spawn-child-adapter", None),
+        ("child-explicit", "spawn-child-explicit", "worker-explicit"),
+    ):
+        child = await _spawn_managed_child(
+            manager, ws_id, parent_run.id, title=title, call_id=call_id, session_id=session_id
+        )
+        child_task = manager._resolve_task_for_compat_run(ws_id, manager.agent_tree._runs[child.id])
+        assert child_task.parent_task_id == parent_task.id
+        assert child_task.root_task_id == parent_task.id
+        assert child_task.path == f"{parent_task.id}/{child_task.id}"
+        pair = _spawn_mailbox_pair(manager, ws_id, child_task.id, call_id)
+        assert [event.call_id for event in pair] == [f"task:{call_id}", f"task:{call_id}:started"]
+        assert [event.type for event in pair] == [TaskEventType.DISPATCHED, TaskEventType.STARTED]
+        dispatched, started = pair
+        assert dispatched.consumer_key == task_inbox_consumer_key(child_task)
+        assert started.consumer_key == task_supervisor_consumer_key(child_task)
+        assert dispatched.consumer_key != started.consumer_key
+        for event in pair:
+            assert event.task_id == child_task.id
+            assert event.actor_role == TaskActorRole.SUPERVISOR
+            assert event.actor_session_id == supervisor_session_id
+            assert event.review_cycle is None
+            assert event.actor_session_id != child_task.session_id
+            assert manager.sessions[event.actor_session_id].workspace_id == ws_id
+
+
+@pytest.mark.asyncio
+async def test_resident_spawn_child_is_top_level_with_resident_assignment(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
+    from claude_hub.services.task_graph import (
+        task_inbox_consumer_key,
+        task_supervisor_consumer_key,
+    )
+
+    ws_id = _make_workspace(manager, tmp_path)
+    resident_session_id = _live_resident_assignment(manager, "resident-assign", ws_id)
+    resident = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.RESIDENT_ROOT
+    )
+    _orchestrator_session_for_spawn(manager, "worker-explicit", ws_id)
+
+    for title, call_id, session_id in (
+        ("top-adapter", "spawn-top-adapter", None),
+        ("top-explicit", "spawn-top-explicit", "worker-explicit"),
+    ):
+        child = await _spawn_managed_child(
+            manager, ws_id, resident.id, title=title, call_id=call_id, session_id=session_id
+        )
+        child_task = manager._resolve_task_for_compat_run(ws_id, manager.agent_tree._runs[child.id])
+        assert child_task.parent_task_id is None
+        assert child_task.root_task_id == child_task.id
+        assert child_task.path == child_task.id
+        pair = _spawn_mailbox_pair(manager, ws_id, child_task.id, call_id)
+        assert [event.call_id for event in pair] == [f"task:{call_id}", f"task:{call_id}:started"]
+        assert [event.type for event in pair] == [TaskEventType.DISPATCHED, TaskEventType.STARTED]
+        dispatched, started = pair
+        assert dispatched.consumer_key == task_inbox_consumer_key(child_task)
+        assert started.consumer_key == task_supervisor_consumer_key(child_task)
+        assert dispatched.consumer_key != started.consumer_key
+        for event in pair:
+            assert event.task_id == child_task.id
+            assert event.actor_role == TaskActorRole.SUPERVISOR
+            assert event.actor_session_id == resident_session_id
+            assert event.review_cycle is None
+            assert event.actor_session_id != child_task.session_id
+            assert manager.sessions[event.actor_session_id].role.value == "resident"
+
+
+@pytest.mark.asyncio
+async def test_managed_spawn_mailbox_late_persist_retry_flushes_pair(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    ws_id = _make_workspace(manager, tmp_path)
+    _live_resident_assignment(manager, "resident-assign", ws_id)
+    resident = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.RESIDENT_ROOT
+    )
+    wakes: list[str] = []
+    real_wake = manager.task_mailbox._wake_compat_waiters
+
+    def _spy_wake(event) -> None:
+        wakes.append(event.call_id)
+        return real_wake(event)
+
+    monkeypatch.setattr(manager.task_mailbox, "_wake_compat_waiters", _spy_wake)
+    persist_calls = {"n": 0}
+    real_persist = manager.agent_tree._persist
+
+    def _flaky_persist() -> None:
+        persist_calls["n"] += 1
+        if persist_calls["n"] == 2:
+            raise OSError("disk full during outcome")
+        return real_persist()
+
+    monkeypatch.setattr(manager.agent_tree, "_persist", _flaky_persist)
+    with pytest.raises(OSError, match="disk full during outcome"):
+        await _spawn_managed_child(
+            manager, ws_id, resident.id, title="late-flush", call_id="late-persist-spawn"
+        )
+    assert wakes == []
+    child = next(run for run in manager.agent_tree._runs.values() if run.parent_id == resident.id)
+    child_task = manager._resolve_task_for_compat_run(ws_id, child)
+    assert [
+        event.call_id
+        for event in _spawn_mailbox_pair(manager, ws_id, child_task.id, "late-persist-spawn")
+    ] == [
+        "task:late-persist-spawn",
+        "task:late-persist-spawn:started",
+    ]
+    cold_before = WorkspaceManager()
+    assert [
+        event.call_id
+        for event in _spawn_mailbox_pair(cold_before, ws_id, child_task.id, "late-persist-spawn")
+    ] == []
+
+    replayed = await _spawn_managed_child(
+        manager, ws_id, resident.id, title="late-flush", call_id="late-persist-spawn"
+    )
+    assert replayed.id == child.id
+    assert wakes == ["task:late-persist-spawn", "task:late-persist-spawn:started"]
+    reloaded = WorkspaceManager()
+    assert [
+        event.call_id
+        for event in _spawn_mailbox_pair(reloaded, ws_id, child_task.id, "late-persist-spawn")
+    ] == ["task:late-persist-spawn", "task:late-persist-spawn:started"]
+
+
+@pytest.mark.asyncio
+async def test_mailbox_directed_routing_splits_inbox_and_supervisor(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    from claude_hub.models import (
+        AgentReportCreate,
+        AgentReportState,
+        ManualTaskControlRequest,
+        WorkspaceSessionRole,
+    )
+    from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
+    from claude_hub.services.task_graph import (
+        make_resident_consumer_key,
+        task_inbox_consumer_key,
+        task_supervisor_consumer_key,
+    )
+
+    ws_id = _make_workspace(manager, tmp_path)
+    resident_session_id = _live_resident_assignment(manager, "resident-assign", ws_id)
+    resident = manager.agent_tree.create_root_run(
+        workspace_id=ws_id, executor_kind=ExecutorKind.RESIDENT_ROOT
+    )
+    parent_run = await _spawn_managed_child(
+        manager, ws_id, resident.id, title="route-parent", call_id="spawn-route-parent"
+    )
+    parent_task = manager._resolve_task_for_compat_run(
+        ws_id, manager.agent_tree._runs[parent_run.id]
+    )
+    _bind_session_to_task(manager, parent_task.session_id, parent_task.id)
+    parent_task = manager.tasks[parent_task.id]
+    child = await _spawn_managed_child(
+        manager, ws_id, parent_run.id, title="route-child", call_id="spawn-route-child"
+    )
+    child_task = manager._resolve_task_for_compat_run(ws_id, manager.agent_tree._runs[child.id])
+    await manager.followup_task(
+        ws_id,
+        child_task.id,
+        "keep going",
+        "route-followup",
+        actor_session_id=parent_task.session_id,
+        actor_role=TaskActorRole.SUPERVISOR,
+    )
+    await manager.create_report(
+        child_task.session_id,
+        AgentReportCreate(
+            task_id=child_task.id,
+            state=AgentReportState.READY_FOR_REVIEW,
+            message="child ready",
+        ),
+    )
+    await manager.abort_task(
+        child_task.id,
+        ManualTaskControlRequest(reason="stop child"),
+        workspace_id=ws_id,
+        call_id="route-abort",
+        actor_session_id=parent_task.session_id,
+        actor_role=TaskActorRole.SUPERVISOR,
+    )
+
+    child_mailbox = [
+        event
+        for event in manager.task_mailbox._events.get(ws_id, [])
+        if event.task_id == child_task.id
+    ]
+    by_call = {event.call_id: event for event in child_mailbox}
+    assert by_call["task:spawn-route-child"].consumer_key == task_inbox_consumer_key(child_task)
+    assert by_call["task:spawn-route-child:started"].consumer_key == task_supervisor_consumer_key(
+        child_task
+    )
+    assert by_call["route-followup"].consumer_key == task_inbox_consumer_key(child_task)
+    assert by_call["route-abort"].consumer_key == task_inbox_consumer_key(child_task)
+    report_event = next(event for event in child_mailbox if event.action == "report")
+    assert report_event.consumer_key == task_supervisor_consumer_key(child_task)
+    assert report_event.type == TaskEventType.REPORT
+
+    child_direct = manager.agent_tree.get_events(ws_id, child.id, subtree=False)
+    parent_direct = manager.agent_tree.get_events(ws_id, parent_run.id, subtree=False)
+    parent_subtree = manager.agent_tree.get_events(ws_id, parent_run.id, subtree=True)
+    assert {item.call_id for item in child_direct} == {
+        "task:spawn-route-child",
+        "route-followup",
+        "route-abort",
+    }
+    assert "task:spawn-route-child:started" not in {item.call_id for item in child_direct}
+    assert report_event.call_id not in {item.call_id for item in child_direct}
+    assert "task:spawn-route-child:started" in {item.call_id for item in parent_direct}
+    assert report_event.call_id in {item.call_id for item in parent_direct}
+    assert {item.call_id for item in child_direct}.isdisjoint(
+        {item.call_id for item in parent_direct}
+    )
+    assert {item.call_id for item in child_direct} | {
+        "task:spawn-route-child:started",
+        report_event.call_id,
+    } <= {item.call_id for item in parent_subtree}
+
+    top = await _spawn_managed_child(
+        manager, ws_id, resident.id, title="route-top", call_id="spawn-route-top"
+    )
+    top_task = manager._resolve_task_for_compat_run(ws_id, manager.agent_tree._runs[top.id])
+    top_pair = _spawn_mailbox_pair(manager, ws_id, top_task.id, "spawn-route-top")
+    assert top_pair[0].consumer_key == task_inbox_consumer_key(top_task)
+    assert top_pair[1].consumer_key == make_resident_consumer_key(ws_id)
+    assert top_pair[1].actor_session_id == resident_session_id
+    started = top_pair[1]
+    await manager.create_report(
+        top_task.session_id,
+        AgentReportCreate(
+            task_id=top_task.id,
+            state=AgentReportState.WORKING,
+            message="top working",
+        ),
+    )
+    worker_report = next(
+        event
+        for event in manager.task_mailbox._events.get(ws_id, [])
+        if event.task_id == top_task.id and event.action == "report"
+    )
+    assert worker_report.consumer_key == make_resident_consumer_key(ws_id)
+    ack_sequence = max(started.sequence, worker_report.sequence)
+    assert ack_sequence > 0
+    manager.agent_tree.ack(ws_id, resident.id, ack_sequence)
+    assert manager.workspaces[ws_id].resident_ack_sequence == ack_sequence
+    acked_direct = manager.agent_tree.get_events(ws_id, resident.id, subtree=False)
+    acked_ids = {item.call_id for item in acked_direct}
+    assert started.call_id not in acked_ids
+    assert worker_report.call_id not in acked_ids
+
+    reviewer_id = "reviewer-assign"
+    _make_managed_session(manager, reviewer_id, ws_id)
+    manager.sessions[reviewer_id] = manager.sessions[reviewer_id].model_copy(
+        update={"role": WorkspaceSessionRole.REVIEWER, "task_id": top_task.id}
+    )
+    manager.tasks[top_task.id] = manager.tasks[top_task.id].model_copy(
+        update={"review_session_id": reviewer_id}
+    )
+    await manager.create_report(
+        reviewer_id,
+        AgentReportCreate(
+            task_id=top_task.id,
+            state=AgentReportState.REVIEW_PASSED,
+            message="top verdict",
+        ),
+    )
+    later_report = next(
+        event
+        for event in manager.task_mailbox._events.get(ws_id, [])
+        if event.task_id == top_task.id
+        and event.action == "report"
+        and event.call_id != worker_report.call_id
+    )
+    assert later_report.consumer_key == make_resident_consumer_key(ws_id)
+    assert later_report.sequence > ack_sequence
+    later_direct = manager.agent_tree.get_events(ws_id, resident.id, subtree=False)
+    later_ids = {item.call_id for item in later_direct}
+    assert later_report.call_id in later_ids
+    assert started.call_id not in later_ids
+    assert worker_report.call_id not in later_ids
+
+    _live_resident_assignment(manager, "resident-replaced", ws_id)
+    manager._save_state()
+    fresh = WorkspaceManager()
+    assert fresh.workspaces[ws_id].resident_agent_session_id == "resident-replaced"
+    assert fresh.workspaces[ws_id].resident_ack_sequence == ack_sequence
+    assert fresh.workspaces[ws_id].resident_ack_sequence > 0
+    reloaded_resident = fresh.agent_tree.get_events(ws_id, resident.id, subtree=False)
+    reloaded_ids = {item.call_id for item in reloaded_resident}
+    assert started.call_id not in reloaded_ids
+    assert worker_report.call_id not in reloaded_ids
+    assert later_report.call_id in reloaded_ids
+    assert all(item.sequence > ack_sequence for item in reloaded_resident)
+
+
+@pytest.mark.asyncio
+async def test_managed_task_recovery_does_not_write_run_status(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    """AC2: recovery/status sync must not persist managed_task AgentRun.status."""
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentType,
+        WorkspaceTaskCreate,
+        WorkspaceTaskMode,
+        WorkspaceTaskStatus,
+    )
+    from claude_hub.models.agent_tree import AgentRun
+
+    ws_id = _make_workspace(manager, tmp_path)
+    task = manager.create_task(
+        ws_id,
+        WorkspaceTaskCreate(
+            title="linked-recover",
+            prompt="do work",
+            agent_type=AgentType.CLAUDE,
+            task_mode=WorkspaceTaskMode.REVIEWED,
+        ),
+    )
+    manager.tasks[task.id] = manager.tasks[task.id].model_copy(
+        update={"status": WorkspaceTaskStatus.WORKING, "agent_run_id": "run-recover"}
+    )
+    stamp = datetime(2026, 8, 23, 4, 0, 0)
+    child = AgentRun(
+        id="run-recover",
+        workspace_id=ws_id,
+        parent_id=None,
+        path="run-recover",
+        supervisor_id=None,
+        executor_kind=ExecutorKind.MANAGED_TASK,
+        status=AgentRunStatus.WAITING,
+        context_ref=task.id,
+        ack_sequence=7,
+        last_task_message="recover-old",
+        title="managed-recover",
+        created_at=stamp,
+        updated_at=stamp,
+    )
+    manager.agent_tree._runs[child.id] = child
+    manager.agent_tree._append_event(
+        workspace_id=ws_id,
+        agent_run_id=child.id,
+        event_type=AgentEventType.MESSAGE,
+        author=child.id,
+        recipient=child.id,
+        call_id="recover-followup",
+        action="followup",
+        target=child.id,
+        fingerprint="fp-recover-followup",
+        payload={"message": "resume", "followup": True},
+    )
+    before = child.model_dump(mode="json")
+
+    await manager.agent_tree.recover_pending_runs(ws_id)
+
+    stored = manager.agent_tree._runs[child.id]
+    assert stored.model_dump(mode="json") == before
+    projected = manager.agent_tree.get_run(child.id)
+    assert projected is not None
+    assert projected.status == AgentRunStatus.RUNNING
+
+
 def test_emit_event_idempotent_on_call_id(manager: WorkspaceManager, ws_id: str) -> None:
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id, executor_kind=ExecutorKind.NATIVE_SUBAGENT
@@ -498,11 +1610,10 @@ async def test_report_bridges_to_agent_event(manager: WorkspaceManager, tmp_path
     )
 
     ws_id = _make_workspace(manager, tmp_path)
-    # Create a root run and a managed-task child run WITHOUT going through
-    # the full spawn (which would start a real ttyd session). We create the
-    # task directly and set the run's context_ref manually.
     root = manager.agent_tree.create_root_run(
-        workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.RESIDENT_ROOT,
+        title="Resident",
     )
     task = manager.create_task(
         ws_id,
@@ -513,23 +1624,22 @@ async def test_report_bridges_to_agent_event(manager: WorkspaceManager, tmp_path
             task_mode=WorkspaceTaskMode.REVIEWED,
         ),
     )
-    # Create a child run whose context_ref is the task id.
     child = manager.agent_tree.create_root_run(
         workspace_id=ws_id,
         executor_kind=ExecutorKind.MANAGED_TASK,
         title="child",
         context_ref=task.id,
     )
-    # Wire parent/supervisor so the bridge addresses the event to root.
     child.parent_id = root.id
     child.supervisor_id = root.id
     child.path = f"{root.path}/{child.id}"
+    manager.agent_tree._runs[child.id] = child
 
     now = datetime.utcnow()
     session = ManagedSession(
         id="sess-1",
         workspace_id=ws_id,
-        role=WorkspaceSessionRole.ORCHESTRATOR,
+        role=WorkspaceSessionRole.WORKER,
         agent_type=AgentType.CLAUDE,
         target=ExecutionTarget.LOCAL,
         status=ManagedSessionStatus.WORKING,
@@ -544,6 +1654,12 @@ async def test_report_bridges_to_agent_event(manager: WorkspaceManager, tmp_path
         updated_at=now,
     )
     manager.sessions[session.id] = session
+    manager.tasks[task.id] = task.model_copy(
+        update={
+            "session_id": session.id,
+            "agent_run_id": child.id,
+        }
+    )
 
     # Submit a report; it should be bridged into the agent event stream.
     # For a REVIEWED task, the worker's COMPLETED report maps to a PROGRESS
@@ -607,7 +1723,7 @@ async def test_resident_directed_wakeup_via_subtree_event(
     # Resident root run: context_ref is the resident session id.
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id,
-        executor_kind=ExecutorKind.MANAGED_TASK,
+        executor_kind=ExecutorKind.RESIDENT_ROOT,
         title="Resident",
         context_ref=resident_session_id,
     )
@@ -631,13 +1747,14 @@ async def test_resident_directed_wakeup_via_subtree_event(
     child.parent_id = root.id
     child.supervisor_id = root.id
     child.path = f"{root.path}/{child.id}"
+    manager.agent_tree._runs[child.id] = child
 
     # Worker session that owns the task.
     now = datetime.utcnow()
     session = ManagedSession(
         id="worker-sess-1",
         workspace_id=ws_id,
-        role=WorkspaceSessionRole.ORCHESTRATOR,
+        role=WorkspaceSessionRole.WORKER,
         agent_type=AgentType.CLAUDE,
         target=ExecutionTarget.LOCAL,
         status=ManagedSessionStatus.WORKING,
@@ -652,6 +1769,12 @@ async def test_resident_directed_wakeup_via_subtree_event(
         updated_at=now,
     )
     manager.sessions[session.id] = session
+    manager.tasks[task.id] = task.model_copy(
+        update={
+            "session_id": session.id,
+            "agent_run_id": child.id,
+        }
+    )
 
     last_run = now - timedelta(hours=1)
 
@@ -1346,6 +2469,7 @@ async def test_resident_spawn_report_wake_ack_e2e(
         updated_at=now,
     )
     manager.sessions[session.id] = session
+    _bind_session_to_task(manager, session.id, task.id)
 
     # Child reports ready_for_review -> bridges to a PROGRESS event with
     # report_state=ready_for_review, addressed to the resident.
@@ -1361,7 +2485,9 @@ async def test_resident_spawn_report_wake_ack_e2e(
     )
 
     # The run's status should be WAITING (review gate).
-    assert child.status == AgentRunStatus.WAITING
+    projected = manager.agent_tree.get_run(child.id)
+    assert projected is not None
+    assert projected.status == AgentRunStatus.WAITING
 
     # Resident's wait(subtree=True) returns the directed event.
     events = await manager.agent_tree.wait(
@@ -1462,58 +2588,194 @@ async def test_spawn_recovers_existing_task_by_agent_run_id(
 
 
 # ---------------------------------------------------------------------------
-# Crash recovery: recover_pending_runs retries lost adapter spawns
+# Crash recovery: Task-owned queued dispatch recovery (not AgentRun spawn)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_recover_pending_runs_retries_lost_spawn(
-    manager: WorkspaceManager, tmp_path: Path
+async def test_recover_queued_task_ownership_resumes_stored_dispatch_prompt(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    """After a crash, a PENDING run with no context_ref has its adapter spawn
-    retried by recover_pending_runs. The managed-task adapter finds the
-    existing task (tagged with agent_run_id) and reuses it.
+    """QUEUED Task + session ownership claim is recovered via dispatch, not AgentRun.
+
+    ``recover_pending_runs`` is a no-op for MANAGED_TASK raw runs. A crash
+    after ``_dispatch_task_to_session`` persists ``session.task_id`` but before
+    the Task is marked WORKING leaves a QUEUED task owned by the session;
+    ``_recover_queued_task_ownership`` must resume the persisted dispatch
+    envelope (original prompt, same call_id) and mark the Task WORKING without
+    duplicating Tasks or mutating raw managed AgentRun bytes.
     """
-    from claude_hub.models import WorkspaceTaskStatus
+    from claude_hub.models import (
+        AgentRuntimeStatus,
+        AgentType,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+        WorkspaceTaskCreate,
+        WorkspaceTaskStatus,
+    )
+    from claude_hub.models.agent_tree import AgentRun
+    from claude_hub.models.agent_tree import AgentRunStatus as RunStatus
 
     ws_id = _make_workspace(manager, tmp_path)
+    worker_session_id = "worker-queued-dispatch-recover"
+    _make_managed_session(manager, worker_session_id, ws_id)
+    manager.sessions[worker_session_id] = manager.sessions[worker_session_id].model_copy(
+        update={"role": WorkspaceSessionRole.ORCHESTRATOR}
+    )
+
+    task = manager.create_task(
+        ws_id,
+        WorkspaceTaskCreate(
+            title="queued dispatch recover",
+            prompt="implement the feature exactly once",
+            agent_type=AgentType.CLAUDE,
+            session_id=worker_session_id,
+        ),
+    )
+    manager.tasks[task.id] = manager.tasks[task.id].model_copy(
+        update={"status": WorkspaceTaskStatus.QUEUED}
+    )
+
     root = manager.agent_tree.create_root_run(
-        workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.RESIDENT_ROOT,
+        context_ref="root-session-queued-recover",
     )
 
-    # Spawn a child: creates a run + a managed task tagged with agent_run_id.
-    child = await manager.agent_tree.spawn(
-        SpawnRequest(
-            workspace_id=ws_id,
-            parent_id=root.id,
-            executor_kind=ExecutorKind.MANAGED_TASK,
-            title="child",
-            initial_message="do work",
-            call_id="recover-pending",
-        )
+    legacy_run_id = "run-legacy-queued-dispatch"
+    legacy_managed = AgentRun(
+        id=legacy_run_id,
+        workspace_id=ws_id,
+        parent_id=root.id,
+        path=f"{root.path}/{legacy_run_id}",
+        supervisor_id=root.id,
+        executor_kind=ExecutorKind.MANAGED_TASK,
+        status=RunStatus.PENDING,
+        context_ref=task.id,
+        title="legacy compat hint",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
     )
-    task_id = child.context_ref
-    assert task_id is not None
+    manager.agent_tree._runs[legacy_run_id] = legacy_managed
+    manager.tasks[task.id] = manager.tasks[task.id].model_copy(
+        update={"agent_run_id": legacy_run_id}
+    )
 
-    # Simulate a crash mid-spawn: the run is persisted as PENDING with no
-    # context_ref, but the task already exists on disk (tagged agent_run_id).
-    child.context_ref = None
-    child.status = AgentRunStatus.PENDING
+    workspace = manager.workspaces[ws_id]
+    session = manager.sessions[worker_session_id]
+    task = manager.tasks[task.id]
+    original_prompt = manager._build_task_assignment_prompt(workspace, task, session)
+    dispatch_call_id = f"dispatch:{task.id}:{task.dispatch_attempt}"
+
+    manager.sessions[worker_session_id] = session.model_copy(
+        update={
+            "task_id": task.id,
+            "current_task_id": task.id,
+            "status": ManagedSessionStatus.WORKING,
+            "runtime_status": AgentRuntimeStatus.WORKING,
+            "pending_call_ids": [dispatch_call_id],
+            "pending_messages": {dispatch_call_id: original_prompt},
+            "processing_call_ids": [],
+            "delivered_call_ids": [],
+        }
+    )
     manager._save_state()
 
-    # Recovery: retry the spawn for all PENDING runs without context_ref.
-    await manager.agent_tree.recover_pending_runs(ws_id)
+    cold = WorkspaceManager()
+    sent_messages: list[str] = []
 
-    # The run should now have its context_ref restored and be RUNNING.
-    recovered = manager.agent_tree.get_run(child.id)
-    assert recovered is not None
-    assert recovered.context_ref == task_id
-    assert recovered.status == AgentRunStatus.RUNNING
-    # The task was reused, not duplicated.
-    tasks_with_run_id = [
-        t for t in manager.tasks.values() if getattr(t, "agent_run_id", None) == child.id
+    async def recording_send(tmux_session: str, message: str, call_id: str) -> None:
+        sent_messages.append(message)
+
+    monkeypatch.setattr(cold, "_send_tmux_message_with_receipt", recording_send)
+
+    task_events_before = [
+        event.model_dump(mode="json") for event in cold.task_mailbox._events.get(ws_id, [])
     ]
-    assert len(tasks_with_run_id) == 1
+    call_index_before = {
+        call_id: {
+            "action": record["action"],
+            "target": record["target"],
+            "fingerprint": record["fingerprint"],
+            "event": record["event"].model_dump(mode="json"),
+        }
+        for call_id, record in cold.task_mailbox._call_index.get(ws_id, {}).items()
+    }
+    managed_runs_before = {
+        run_id: run.model_dump(mode="json")
+        for run_id, run in cold.agent_tree._runs.items()
+        if run_id == legacy_run_id
+    }
+    raw_events_before = [
+        event.model_dump(mode="json")
+        for event in cold.agent_tree._events.get(ws_id, [])
+        if event.agent_run_id == legacy_run_id
+    ]
+    legacy_run_dump_before = cold.agent_tree._runs[legacy_run_id].model_dump(mode="json")
+    assert cold.agent_tree._runs[legacy_run_id].executor_kind == ExecutorKind.MANAGED_TASK
+    assert cold.agent_tree._runs[legacy_run_id].status == RunStatus.PENDING
+    stored_prompt_before = cold.sessions[worker_session_id].pending_messages[dispatch_call_id]
+    task_ids_before = {tid for tid, item in cold.tasks.items() if item.workspace_id == ws_id}
+
+    projected_before = cold.agent_tree.get_run(legacy_run_id)
+    assert projected_before is not None
+    assert projected_before.id == legacy_run_id
+    assert projected_before.context_ref == task.id
+    assert projected_before.status == AgentRunStatus.PENDING
+
+    await cold._recover_queued_task_ownership(ws_id)
+
+    assert cold.tasks[task.id].status == WorkspaceTaskStatus.WORKING
+    assert {
+        tid for tid, item in cold.tasks.items() if item.workspace_id == ws_id
+    } == task_ids_before
+    assert (
+        cold.sessions[worker_session_id].pending_messages[dispatch_call_id] == stored_prompt_before
+    )
+    assert cold.sessions[worker_session_id].pending_messages[dispatch_call_id] == original_prompt
+    wire_prompt = f"[call_id:{dispatch_call_id}]\n{original_prompt}"
+    assert sent_messages == [wire_prompt]
+
+    await cold._recover_queued_task_ownership(ws_id)
+    assert sent_messages == [wire_prompt]
+
+    await cold.agent_tree.recover_pending_runs(ws_id)
+
+    task_events_after = [
+        event.model_dump(mode="json") for event in cold.task_mailbox._events.get(ws_id, [])
+    ]
+    assert task_events_after == task_events_before
+    call_index_after = {
+        call_id: {
+            "action": record["action"],
+            "target": record["target"],
+            "fingerprint": record["fingerprint"],
+            "event": record["event"].model_dump(mode="json"),
+        }
+        for call_id, record in cold.task_mailbox._call_index.get(ws_id, {}).items()
+    }
+    assert call_index_after == call_index_before
+    managed_runs_after = {
+        run_id: run.model_dump(mode="json")
+        for run_id, run in cold.agent_tree._runs.items()
+        if run_id == legacy_run_id
+    }
+    assert managed_runs_after == managed_runs_before
+    raw_events_after = [
+        event.model_dump(mode="json")
+        for event in cold.agent_tree._events.get(ws_id, [])
+        if event.agent_run_id == legacy_run_id
+    ]
+    assert raw_events_after == raw_events_before
+    assert cold.agent_tree._runs[legacy_run_id].model_dump(mode="json") == legacy_run_dump_before
+    assert cold.agent_tree._runs[legacy_run_id].executor_kind == ExecutorKind.MANAGED_TASK
+    assert cold.agent_tree._runs[legacy_run_id].status == RunStatus.PENDING
+
+    projected_after = cold.agent_tree.get_run(legacy_run_id)
+    assert projected_after is not None
+    assert projected_after.id == legacy_run_id
+    assert projected_after.context_ref == task.id
+    assert projected_after.status == AgentRunStatus.RUNNING
 
 
 @pytest.mark.asyncio
@@ -1774,8 +3036,9 @@ async def test_followup_maps_to_continue_task(manager: WorkspaceManager, tmp_pat
     )
 
     ws_id = _make_workspace(manager, tmp_path)
+    _live_resident_assignment(manager, "resident-continue", ws_id)
     root = manager.agent_tree.create_root_run(
-        workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
+        workspace_id=ws_id, executor_kind=ExecutorKind.RESIDENT_ROOT
     )
 
     child = await manager.agent_tree.spawn(
@@ -2742,8 +4005,9 @@ async def test_managed_task_followup_starts_todo_task(
     from claude_hub.models import WorkspaceTaskStatus
 
     ws_id = _make_workspace(manager, tmp_path)
+    _live_resident_assignment(manager, "resident-todo", ws_id)
     root = manager.agent_tree.create_root_run(
-        workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
+        workspace_id=ws_id, executor_kind=ExecutorKind.RESIDENT_ROOT
     )
     child = await manager.agent_tree.spawn(
         SpawnRequest(
@@ -2781,11 +4045,11 @@ async def test_managed_task_followup_starts_todo_task(
 async def test_managed_task_followup_recreates_deleted_task(
     manager: WorkspaceManager, tmp_path: Path
 ) -> None:
-    """If the managed task was deleted, followup re-creates it with the same
-    agent_run_id and updates the run's context_ref."""
+    """Public AgentTree followup must not recreate a deleted Task or write AgentRun."""
     ws_id = _make_workspace(manager, tmp_path)
+    _live_resident_assignment(manager, "resident-recreate", ws_id)
     root = manager.agent_tree.create_root_run(
-        workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
+        workspace_id=ws_id, executor_kind=ExecutorKind.RESIDENT_ROOT
     )
     child = await manager.agent_tree.spawn(
         SpawnRequest(
@@ -2799,29 +4063,25 @@ async def test_managed_task_followup_recreates_deleted_task(
     )
     old_task_id = child.context_ref
     assert old_task_id is not None
+    stored = manager.agent_tree._runs[child.id]
+    before = stored.model_dump(mode="json")
 
-    # Delete the task (simulating cleanup).
     del manager.tasks[old_task_id]
 
-    # followup should re-create the task.
-    await manager.agent_tree.followup(
-        FollowupRequest(
-            workspace_id=ws_id,
-            recipient_id=child.id,
-            author_id=root.id,
-            message="recreate",
-            call_id="followup-recreate-1",
+    with pytest.raises(KeyError):
+        await manager.agent_tree.followup(
+            FollowupRequest(
+                workspace_id=ws_id,
+                recipient_id=child.id,
+                author_id=root.id,
+                message="recreate",
+                call_id="followup-recreate-1",
+            )
         )
-    )
 
-    # The run's context_ref should now point to a new task.
-    _run = manager.agent_tree.get_run(child.id)
-    assert _run is not None
-    new_task_id = _run.context_ref
-    assert new_task_id is not None
-    assert new_task_id != old_task_id
-    new_task = manager.tasks[new_task_id]
-    assert new_task.agent_run_id == child.id
+    assert manager.agent_tree._runs[child.id].model_dump(mode="json") == before
+    assert old_task_id not in manager.tasks
+    assert "followup-recreate-1" not in manager.agent_tree._call_index.get(ws_id, {})
 
 
 # ---------------------------------------------------------------------------
@@ -3370,8 +4630,9 @@ async def test_managed_task_followup_queued_appends_to_prompt(
     from claude_hub.models import WorkspaceTaskStatus
 
     ws_id = _make_workspace(manager, tmp_path)
+    _live_resident_assignment(manager, "resident-queued", ws_id)
     root = manager.agent_tree.create_root_run(
-        workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
+        workspace_id=ws_id, executor_kind=ExecutorKind.RESIDENT_ROOT
     )
     child = await manager.agent_tree.spawn(
         SpawnRequest(
@@ -3420,8 +4681,9 @@ async def test_managed_task_followup_working_sends_session_message(
     from claude_hub.models import WorkspaceTaskStatus
 
     ws_id = _make_workspace(manager, tmp_path)
+    _live_resident_assignment(manager, "resident-working", ws_id)
     root = manager.agent_tree.create_root_run(
-        workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
+        workspace_id=ws_id, executor_kind=ExecutorKind.RESIDENT_ROOT
     )
     child = await manager.agent_tree.spawn(
         SpawnRequest(
@@ -3701,8 +4963,9 @@ async def test_followup_persists_pending_call_ids_atomically(
     worker's ACK moves it to ``delivered_call_ids``. So after the followup
     returns, the call_id is in ``processing_call_ids``.
     """
+    _live_resident_assignment(manager, "resident-receipt", ws_id)
     root = manager.agent_tree.create_root_run(
-        workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
+        workspace_id=ws_id, executor_kind=ExecutorKind.RESIDENT_ROOT
     )
     child = await manager.agent_tree.spawn(
         SpawnRequest(
@@ -4225,8 +5488,9 @@ async def test_followup_outbox_pending_survives_crash_and_redelivers_idempotentl
     """A followup call_id stays in pending_call_ids until the worker ACKs it.
     A re-delivery (e.g. after a Hub crash) is idempotent: the [followup] line
     is not appended twice to the prompt."""
+    _live_resident_assignment(manager, "resident-outbox", ws_id)
     root = manager.agent_tree.create_root_run(
-        workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
+        workspace_id=ws_id, executor_kind=ExecutorKind.RESIDENT_ROOT
     )
     child = await manager.agent_tree.spawn(
         SpawnRequest(
@@ -4290,12 +5554,10 @@ async def test_followup_outbox_pending_survives_crash_and_redelivers_idempotentl
 async def test_followup_recreates_deleted_task_with_call_id_pending(
     manager: WorkspaceManager, ws_id: str
 ) -> None:
-    """If the managed task was deleted (e.g. by abort), followup must
-    recreate it with the followup message as the prompt. The call_id
-    stays in pending_call_ids until the worker ACKs it; the call_id is
-    embedded in the prompt so the worker can ACK it."""
+    """Deleted Tasks are not a second lifecycle. Adapter followup fail-closes."""
+    _live_resident_assignment(manager, "resident-deleted", ws_id)
     root = manager.agent_tree.create_root_run(
-        workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
+        workspace_id=ws_id, executor_kind=ExecutorKind.RESIDENT_ROOT
     )
     child = await manager.agent_tree.spawn(
         SpawnRequest(
@@ -4313,29 +5575,21 @@ async def test_followup_recreates_deleted_task_with_call_id_pending(
     call_id = "followup-deleted-task"
     message = "recreate me"
 
-    # Delete the task from the manager (simulating abort cleanup).
+    stored = manager.agent_tree._runs[child.id]
+    before = stored.model_dump(mode="json")
     del manager.tasks[task_id]
     manager._save_state()
 
-    run = manager.agent_tree.get_run(child.id)
-    assert run is not None
-    adapter = manager.agent_tree._adapter(run.executor_kind)
+    adapter = manager.agent_tree._adapter(stored.executor_kind)
+    with pytest.raises(RuntimeError, match="no linked Task"):
+        await adapter.followup(stored, message, call_id=call_id)
 
-    await adapter.followup(run, message, call_id=call_id)
-
-    # The run's context_ref should now point to a new task.
-    new_task_id = run.context_ref
-    assert new_task_id is not None
-    assert new_task_id != task_id
-    new_task = manager.tasks.get(new_task_id)
-    assert new_task is not None
-    # The followup message becomes the new task's prompt, with the call_id
-    # marker embedded so the worker can ACK it.
-    assert message in new_task.prompt
-    assert f"[call_id:{call_id}]" in new_task.prompt
-    # The call_id stays in pending_call_ids until the worker ACKs it.
-    assert call_id in new_task.pending_call_ids
-    assert call_id not in new_task.delivered_call_ids
+    assert manager.agent_tree._runs[child.id].model_dump(mode="json") == before
+    assert task_id not in manager.tasks
+    assert not any(
+        item.workspace_id == ws_id and item.agent_run_id == child.id
+        for item in manager.tasks.values()
+    )
 
 
 def test_forged_session_cookie_rejected_for_all_actions(
@@ -4579,6 +5833,7 @@ async def test_report_acks_only_listed_call_ids_not_unrelated_pending_followup(
         prompt="do the thing",
         agent_type=AgentType.CLAUDE,
         status=WorkspaceTaskStatus.WORKING,
+        session_id=session_id,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
@@ -4684,6 +5939,7 @@ async def test_report_auto_acks_dispatch_call_id_even_when_not_listed(
         prompt="do the thing",
         agent_type=AgentType.CLAUDE,
         status=WorkspaceTaskStatus.WORKING,
+        session_id=session_id,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
@@ -4767,6 +6023,7 @@ async def test_report_ignores_unknown_future_call_ids_no_poisoning(
         prompt="do the thing",
         agent_type=AgentType.CLAUDE,
         status=WorkspaceTaskStatus.WORKING,
+        session_id=session_id,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
@@ -4863,6 +6120,7 @@ async def test_crash_after_processing_before_ack_exactly_one_side_effect(
         prompt="do the thing",
         agent_type=AgentType.CLAUDE,
         status=WorkspaceTaskStatus.WORKING,
+        session_id=session_id,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
@@ -4968,6 +6226,7 @@ async def test_resident_root_managed_task_report_ack_cold_replay(
     ws_id = _make_workspace(manager, tmp_path)
 
     # 1. Resident root supervisor.
+    _live_resident_assignment(manager, "resident-session", ws_id)
     root = manager.agent_tree.create_root_run(
         workspace_id=ws_id,
         executor_kind=ExecutorKind.RESIDENT_ROOT,
@@ -5063,20 +6322,10 @@ async def test_resident_root_managed_task_report_ack_cold_replay(
 async def test_deleted_task_recreation_persists_context_ref_before_start_task(
     manager: WorkspaceManager, ws_id: str, monkeypatch: MonkeyPatch
 ) -> None:
-    """When a followup recreates a deleted task, run.context_ref must be
-    persisted BEFORE start_task is called. If start_task's dispatch side
-    effect crashes the process, a retry must:
-      1. reuse the already-persisted task (one task id, no duplicate), and
-      2. NOT re-run the start side effect (the task was already QUEUED by
-         start_task before the dispatch crash, so followup skips start_task).
-
-    start_task persists status=QUEUED before calling dispatch_workspace, so a
-    crash during dispatch leaves QUEUED on disk. followup only calls
-    start_task when the task is TODO, so the retry is a no-op for the start
-    side effect.
-    """
+    """Deleted Tasks fail closed before any start/dispatch side effect."""
+    _live_resident_assignment(manager, "resident-deleted-crash", ws_id)
     root = manager.agent_tree.create_root_run(
-        workspace_id=ws_id, executor_kind=ExecutorKind.MANAGED_TASK
+        workspace_id=ws_id, executor_kind=ExecutorKind.RESIDENT_ROOT
     )
     child = await manager.agent_tree.spawn(
         SpawnRequest(
@@ -5091,16 +6340,11 @@ async def test_deleted_task_recreation_persists_context_ref_before_start_task(
     task_id = child.context_ref
     assert task_id is not None
 
-    # Delete the task (simulating abort cleanup).
     del manager.tasks[task_id]
     manager._save_state()
 
     call_id = "followup-recreate-crash"
     message = "recreate me"
-
-    # Count start_task and dispatch_workspace calls. We wrap the real
-    # start_task so it still persists QUEUED, and make dispatch_workspace
-    # crash to simulate a hard exit during the dispatch side effect.
     start_task_calls = 0
     dispatch_calls = 0
     real_start_task = manager.start_task
@@ -5120,34 +6364,26 @@ async def test_deleted_task_recreation_persists_context_ref_before_start_task(
 
     run = manager.agent_tree.get_run(child.id)
     assert run is not None
+    before = run.model_dump(mode="json")
     adapter = manager.agent_tree._adapter(run.executor_kind)
 
-    with pytest.raises(RuntimeError, match="simulated hard exit during dispatch"):
+    with pytest.raises(RuntimeError, match="no linked Task"):
         await adapter.followup(run, message, call_id=call_id)
 
-    # start_task ran once and persisted QUEUED before dispatch crashed.
-    assert start_task_calls == 1
-    assert dispatch_calls == 1
-    new_task_id = run.context_ref
-    assert new_task_id is not None
-    assert new_task_id != task_id
-    new_task = manager.tasks[new_task_id]
-    from claude_hub.models.schemas import WorkspaceTaskStatus
+    assert start_task_calls == 0
+    assert dispatch_calls == 0
+    assert task_id not in manager.tasks
+    assert manager.agent_tree._runs[child.id].model_dump(mode="json") == before
+    assert not any(
+        item.workspace_id == ws_id and item.agent_run_id == child.id
+        for item in manager.tasks.values()
+    )
 
-    assert new_task.status == WorkspaceTaskStatus.QUEUED
-
-    # Reload the manager from disk and verify the task is still there and
-    # context_ref still points to it (no duplicate created on retry).
     manager._save_state()
     reloaded = WorkspaceManager()
     reloaded_run = reloaded.agent_tree.get_run(child.id)
     assert reloaded_run is not None
-    assert reloaded_run.context_ref == new_task_id
-    assert new_task_id in reloaded.tasks
-
-    # A retry of followup must NOT create another task AND must NOT re-run
-    # the start side effect: the task is already QUEUED, so followup skips
-    # start_task entirely.
+    assert reloaded_run.model_dump(mode="json") == before
     reloaded_start_calls = 0
     reloaded_dispatch_calls = 0
     reloaded_real_start = reloaded.start_task
@@ -5165,16 +6401,11 @@ async def test_deleted_task_recreation_persists_context_ref_before_start_task(
     monkeypatch.setattr(reloaded, "dispatch_workspace", _reloaded_counting_dispatch)
 
     task_count_before = len(reloaded.tasks)
-    reloaded_run = reloaded.agent_tree.get_run(child.id)
-    assert reloaded_run is not None
     reloaded_adapter = reloaded.agent_tree._adapter(reloaded_run.executor_kind)
-    await reloaded_adapter.followup(reloaded_run, message, call_id=call_id)
+    with pytest.raises(RuntimeError, match="no linked Task"):
+        await reloaded_adapter.followup(reloaded_run, message, call_id=call_id)
 
-    # Exactly one task id, no duplicate.
     assert len(reloaded.tasks) == task_count_before
-    assert reloaded_run.context_ref == new_task_id
-    # Exactly one total start side effect: followup saw QUEUED and skipped
-    # start_task, so neither start_task nor dispatch_workspace ran again.
     assert reloaded_start_calls == 0
     assert reloaded_dispatch_calls == 0
 
@@ -5315,26 +6546,33 @@ async def test_reviewed_task_full_lifecycle_through_resident(
     correct event types and run-status transitions at every step, and the
     terminal COMPLETED event must fire ONLY on REVIEW_PASSED (not on the
     worker's COMPLETED report)."""
-    from datetime import timedelta
-
     from claude_hub.models import (
         AgentReportCreate,
         AgentReportState,
         AgentRuntimeStatus,
         AgentType,
-        ExecutionTarget,
-        ManagedSession,
         ManagedSessionStatus,
         WorkspaceSessionRole,
         WorkspaceTaskCreate,
         WorkspaceTaskMode,
         WorkspaceTaskStatus,
     )
+    from claude_hub.models.agent_tree import AgentRun
+
+    def _projected_task_run(task_id: str) -> AgentRun:
+        projected = manager.agent_tree.get_run_by_context_ref(ws_id, task_id)
+        assert projected is not None
+        assert projected.id == task_id
+        assert projected.context_ref == task_id
+        return projected
+
+    def _assert_only_resident_raw_run() -> None:
+        ws_runs = [run for run in manager.agent_tree._runs.values() if run.workspace_id == ws_id]
+        assert ws_runs == [manager.agent_tree._runs[root.id]]
+        assert ws_runs[0].executor_kind == ExecutorKind.RESIDENT_ROOT
 
     ws_id = _make_workspace(manager, tmp_path)
-    workspace = manager.workspaces[ws_id]
 
-    # Resident root run (supervisor).
     resident_session_id = "resident-lifecycle"
     _make_managed_session(manager, resident_session_id, ws_id)
     manager.sessions[resident_session_id] = manager.sessions[resident_session_id].model_copy(
@@ -5346,14 +6584,12 @@ async def test_reviewed_task_full_lifecycle_through_resident(
         context_ref=resident_session_id,
     )
 
-    # Worker session (must be ORCHESTRATOR role to receive task assignments).
     worker_session_id = "worker-lifecycle"
     _make_managed_session(manager, worker_session_id, ws_id)
     manager.sessions[worker_session_id] = manager.sessions[worker_session_id].model_copy(
         update={"role": WorkspaceSessionRole.ORCHESTRATOR}
     )
 
-    # Create a REVIEWED managed task and link it to a child run.
     task = manager.create_task(
         ws_id,
         WorkspaceTaskCreate(
@@ -5364,18 +6600,6 @@ async def test_reviewed_task_full_lifecycle_through_resident(
             session_id=worker_session_id,
         ),
     )
-    child = manager.agent_tree.create_root_run(
-        workspace_id=ws_id,
-        executor_kind=ExecutorKind.MANAGED_TASK,
-        title="child",
-        context_ref=task.id,
-    )
-    child.parent_id = root.id
-    child.supervisor_id = root.id
-    child.path = f"{root.path}/{child.id}"
-
-    # Bind the task to the worker session.
-    now = datetime.utcnow()
     manager.sessions[worker_session_id] = manager.sessions[worker_session_id].model_copy(
         update={
             "task_id": task.id,
@@ -5387,8 +6611,8 @@ async def test_reviewed_task_full_lifecycle_through_resident(
     manager.tasks[task.id] = manager.tasks[task.id].model_copy(
         update={"status": WorkspaceTaskStatus.WORKING, "session_id": worker_session_id}
     )
+    _assert_only_resident_raw_run()
 
-    # ---- Step 1: worker submits COMPLETED. ----
     await manager.create_report(
         worker_session_id,
         AgentReportCreate(
@@ -5400,20 +6624,19 @@ async def test_reviewed_task_full_lifecycle_through_resident(
 
     task = manager.tasks[task.id]
     assert task.status == WorkspaceTaskStatus.REVIEW
+    assert task.review_completed_at is None
     assert task.review_session_id is not None
     reviewer_session_id = task.review_session_id
 
-    # The worker's COMPLETED report bridges to PROGRESS (not COMPLETED)
-    # because the task is REVIEWED. The run waits for the reviewer.
-    child_run = manager.agent_tree.get_run(child.id)
-    assert child_run is not None
-    assert child_run.status == AgentRunStatus.WAITING
+    projected = _projected_task_run(task.id)
+    assert projected.status == AgentRunStatus.WAITING
+    assert manager.agent_tree.get_run(task.id) == projected
+    _assert_only_resident_raw_run()
 
     events = manager.agent_tree.get_events(ws_id, root.id, subtree=False)
     completed_events = [e for e in events if e.type == AgentEventType.COMPLETED]
     assert completed_events == [], "COMPLETED must not fire before REVIEW_PASSED"
 
-    # ---- Step 2: reviewer submits REVIEW_FAILED. ----
     await manager.create_report(
         reviewer_session_id,
         AgentReportCreate(
@@ -5424,20 +6647,17 @@ async def test_reviewed_task_full_lifecycle_through_resident(
     )
 
     task = manager.tasks[task.id]
-    # REVIEW_FAILED sends the task back to WORKING for revisions.
     assert task.status == WorkspaceTaskStatus.WORKING
+    assert task.review_completed_at is None
 
-    # The run is RUNNING again (not FAILED).
-    child_run = manager.agent_tree.get_run(child.id)
-    assert child_run is not None
-    assert child_run.status == AgentRunStatus.RUNNING
+    projected = _projected_task_run(task.id)
+    assert projected.status == AgentRunStatus.RUNNING
+    _assert_only_resident_raw_run()
 
-    # Still no terminal COMPLETED event.
     events = manager.agent_tree.get_events(ws_id, root.id, subtree=False)
     completed_events = [e for e in events if e.type == AgentEventType.COMPLETED]
     assert completed_events == []
 
-    # ---- Step 3: worker retries and submits COMPLETED again. ----
     await manager.create_report(
         worker_session_id,
         AgentReportCreate(
@@ -5449,12 +6669,12 @@ async def test_reviewed_task_full_lifecycle_through_resident(
 
     task = manager.tasks[task.id]
     assert task.status == WorkspaceTaskStatus.REVIEW
+    assert task.review_completed_at is None
 
-    child_run = manager.agent_tree.get_run(child.id)
-    assert child_run is not None
-    assert child_run.status == AgentRunStatus.WAITING
+    projected = _projected_task_run(task.id)
+    assert projected.status == AgentRunStatus.WAITING
+    _assert_only_resident_raw_run()
 
-    # ---- Step 4: reviewer submits REVIEW_PASSED. ----
     await manager.create_report(
         reviewer_session_id,
         AgentReportCreate(
@@ -5465,22 +6685,18 @@ async def test_reviewed_task_full_lifecycle_through_resident(
     )
 
     task = manager.tasks[task.id]
-    # REVIEW_PASSED sets the task to REVIEW with review_completed_at and
-    # human_acceptance_requested_at (waiting for human acceptance). The task
-    # does NOT move to DONE until the human accepts.
     assert task.status == WorkspaceTaskStatus.REVIEW
     assert task.review_completed_at is not None
     assert task.human_acceptance_requested_at is not None
 
-    # NOW the terminal COMPLETED event fires (on REVIEW_PASSED, not before).
-    child_run = manager.agent_tree.get_run(child.id)
-    assert child_run is not None
-    assert child_run.status == AgentRunStatus.COMPLETED
+    projected = _projected_task_run(task.id)
+    assert projected.status == AgentRunStatus.COMPLETED
+    _assert_only_resident_raw_run()
 
     events = manager.agent_tree.get_events(ws_id, root.id, subtree=False)
     completed_events = [e for e in events if e.type == AgentEventType.COMPLETED]
     assert len(completed_events) == 1
-    assert completed_events[0].author == child.id
+    assert completed_events[0].author == task.id
     assert completed_events[0].recipient == root.id
 
 
@@ -5520,6 +6736,7 @@ async def test_mailbox_side_effect_probes_crash_and_replay(
         prompt="do the thing",
         agent_type=AgentType.CLAUDE,
         status=WorkspaceTaskStatus.WORKING,
+        session_id=session_id,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
@@ -5995,45 +7212,50 @@ async def test_resident_cycle_e2e_with_unacked_followup_cold_replay(
 
 
 # ---------------------------------------------------------------------------
-# Fix 1: reviewed-aware report mapping during recover_pending_runs
+# Legacy report-only cold backfill (predecessor state)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_recover_pending_runs_reviewed_completed_maps_to_progress(
-    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+async def test_legacy_report_only_cold_backfill_maps_reviewed_completed_to_progress(
+    manager: WorkspaceManager,
+    tmp_path: Path,
 ) -> None:
-    """Crash after report persist but before event bridging.
+    """Predecessor report-only JSON backfills TaskMailbox on cold load.
 
-    For a REVIEWED task, the worker's COMPLETED report must map to a
-    PROGRESS event (the run waits for the reviewer), NOT the terminal
-    COMPLETED event. ``recover_pending_runs`` reconciles persisted reports
-    into agent tree events and must use the same reviewed-aware mapping as
-    ``_bridge_report_to_agent_event``.
+    Modern ``create_report`` commits report + TaskEvent atomically. Legacy
+    workspaces may persist AgentReport rows without ``task_events``; cold load
+    must map a REVIEWED worker COMPLETED report to TaskEvent PROGRESS and
+    expose it to the Resident via compat projection without any synthetic
+    managed raw run or ``recover_pending_runs`` bridge.
     """
     from claude_hub.models import (
-        AgentReportCreate,
+        AgentReport,
         AgentReportState,
         AgentRuntimeStatus,
         AgentType,
-        ExecutionTarget,
         ManagedSessionStatus,
         WorkspaceSessionRole,
         WorkspaceTaskCreate,
         WorkspaceTaskMode,
         WorkspaceTaskStatus,
     )
+    from claude_hub.models.task_mailbox import TaskEventType
 
     ws_id = _make_workspace(manager, tmp_path)
 
-    # Worker session.
     worker_session_id = "worker-reviewed-recover"
     _make_managed_session(manager, worker_session_id, ws_id)
     manager.sessions[worker_session_id] = manager.sessions[worker_session_id].model_copy(
         update={"role": WorkspaceSessionRole.ORCHESTRATOR}
     )
 
-    # Create a REVIEWED managed task.
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.RESIDENT_ROOT,
+        context_ref="root-session",
+    )
+
     task = manager.create_task(
         ws_id,
         WorkspaceTaskCreate(
@@ -6044,27 +7266,6 @@ async def test_recover_pending_runs_reviewed_completed_maps_to_progress(
             session_id=worker_session_id,
         ),
     )
-
-    # Create a child run linked to the task.
-    child = manager.agent_tree.create_root_run(
-        workspace_id=ws_id,
-        executor_kind=ExecutorKind.MANAGED_TASK,
-        title="child",
-        context_ref=task.id,
-    )
-    # Link the child to a supervisor (root) so the event has a recipient.
-    root = manager.agent_tree.create_root_run(
-        workspace_id=ws_id,
-        executor_kind=ExecutorKind.RESIDENT_ROOT,
-        context_ref="root-session",
-    )
-    child.parent_id = root.id
-    child.supervisor_id = root.id
-    child.path = f"{root.path}/{child.id}"
-
-    # Bind the task to the worker session. In a real crash-after-persist
-    # scenario, create_report has already moved the task to REVIEW status
-    # before the crash. Set it here to match.
     manager.sessions[worker_session_id] = manager.sessions[worker_session_id].model_copy(
         update={
             "task_id": task.id,
@@ -6077,12 +7278,6 @@ async def test_recover_pending_runs_reviewed_completed_maps_to_progress(
         update={"status": WorkspaceTaskStatus.REVIEW, "session_id": worker_session_id}
     )
 
-    # ---- Simulate crash after report persist but before event bridging. ----
-    # We directly persist a COMPLETED report to manager.reports WITHOUT
-    # calling _bridge_report_to_agent_event. This mimics a crash between
-    # _save_state() and _bridge_report_to_agent_event() in create_report.
-    from claude_hub.models import AgentReport
-
     report = AgentReport(
         id="report-reviewed-completed",
         workspace_id=ws_id,
@@ -6093,37 +7288,199 @@ async def test_recover_pending_runs_reviewed_completed_maps_to_progress(
         created_at=datetime.utcnow(),
     )
     manager.reports[report.id] = report
+    manager.task_mailbox._events.pop(ws_id, None)
+    manager.task_mailbox._call_index.pop(ws_id, None)
     manager._save_state()
 
-    # Sanity: no agent tree event for this report exists yet.
-    # The event is addressed to the supervisor (root), so query from root's
-    # perspective (recipient-directed mailbox).
-    events = manager.agent_tree.get_events(ws_id, root.id, subtree=False)
-    assert not any(
-        e.call_id == f"report:{report.id}" for e in events
-    ), "event should not exist before recovery"
+    cold = WorkspaceManager()
+    report_call_id = f"report:{report.id}"
+    mailbox_events = [
+        event
+        for event in cold.task_mailbox._events.get(ws_id, [])
+        if event.call_id == report_call_id
+    ]
+    assert len(mailbox_events) == 1
+    assert mailbox_events[0].type == TaskEventType.REPORT
+    assert mailbox_events[0].task_id == task.id
 
-    # ---- Run recovery. ----
-    await manager.agent_tree.recover_pending_runs(ws_id)
+    projected = cold.agent_tree.get_run_by_context_ref(ws_id, task.id)
+    assert projected is not None
+    assert projected.id == task.id
+    assert projected.status == AgentRunStatus.WAITING
+    assert cold.agent_tree.get_run(task.id) == projected
 
-    # The COMPLETED report for a REVIEWED task must map to PROGRESS,
-    # NOT the terminal COMPLETED event. The event is addressed to the
-    # supervisor (root), so query from root's perspective.
-    events = manager.agent_tree.get_events(ws_id, root.id, subtree=False)
-    report_events = [e for e in events if e.call_id == f"report:{report.id}"]
-    assert len(report_events) == 1
-    assert (
-        report_events[0].type == AgentEventType.PROGRESS
-    ), "REVIEWED task COMPLETED report must map to PROGRESS, not COMPLETED"
+    resident_events = cold.agent_tree.get_events(ws_id, root.id, subtree=False)
+    bridged = [event for event in resident_events if event.call_id == report_call_id]
+    assert len(bridged) == 1
+    assert bridged[0].type == AgentEventType.PROGRESS
+    assert bridged[0].author == task.id
+    assert bridged[0].recipient == root.id
+    assert [event for event in resident_events if event.type == AgentEventType.COMPLETED] == []
 
-    # The run must be WAITING (for the reviewer), not COMPLETED.
-    child_run = manager.agent_tree.get_run(child.id)
-    assert child_run is not None
-    assert child_run.status == AgentRunStatus.WAITING
+    ws_runs = [run for run in cold.agent_tree._runs.values() if run.workspace_id == ws_id]
+    assert ws_runs == [cold.agent_tree._runs[root.id]]
+    assert ws_runs[0].executor_kind == ExecutorKind.RESIDENT_ROOT
 
-    # No terminal COMPLETED event should have been emitted.
-    completed_events = [e for e in events if e.type == AgentEventType.COMPLETED]
-    assert completed_events == [], "COMPLETED must not fire before REVIEW_PASSED"
+
+@pytest.mark.asyncio
+async def test_recover_pending_runs_does_not_bridge_reports_from_raw_managed_context(
+    manager: WorkspaceManager,
+    tmp_path: Path,
+) -> None:
+    """Runtime recovery must not reopen the legacy report bridge control plane."""
+    from claude_hub.models import (
+        AgentReport,
+        AgentReportState,
+        AgentRuntimeStatus,
+        AgentType,
+        ManagedSessionStatus,
+        WorkspaceSessionRole,
+        WorkspaceTaskCreate,
+        WorkspaceTaskMode,
+        WorkspaceTaskStatus,
+    )
+    from claude_hub.models.agent_tree import AgentRun
+    from claude_hub.models.agent_tree import AgentRunStatus as RunStatus
+    from claude_hub.models.task_mailbox import TaskEventType
+
+    ws_id = _make_workspace(manager, tmp_path)
+    worker_session_id = "worker-recover-no-bridge"
+    _make_managed_session(manager, worker_session_id, ws_id)
+    manager.sessions[worker_session_id] = manager.sessions[worker_session_id].model_copy(
+        update={"role": WorkspaceSessionRole.ORCHESTRATOR}
+    )
+    root = manager.agent_tree.create_root_run(
+        workspace_id=ws_id,
+        executor_kind=ExecutorKind.RESIDENT_ROOT,
+        context_ref="root-session-recover",
+    )
+    task = manager.create_task(
+        ws_id,
+        WorkspaceTaskCreate(
+            title="recover no bridge",
+            prompt="implement",
+            agent_type=AgentType.CLAUDE,
+            task_mode=WorkspaceTaskMode.REVIEWED,
+            session_id=worker_session_id,
+        ),
+    )
+    manager.sessions[worker_session_id] = manager.sessions[worker_session_id].model_copy(
+        update={
+            "task_id": task.id,
+            "current_task_id": task.id,
+            "status": ManagedSessionStatus.WORKING,
+            "runtime_status": AgentRuntimeStatus.WORKING,
+        }
+    )
+    manager.tasks[task.id] = manager.tasks[task.id].model_copy(
+        update={"status": WorkspaceTaskStatus.REVIEW, "session_id": worker_session_id}
+    )
+    legacy_managed = AgentRun(
+        id="run-legacy-managed-bridge",
+        workspace_id=ws_id,
+        parent_id=root.id,
+        path=f"{root.path}/run-legacy-managed-bridge",
+        supervisor_id=root.id,
+        executor_kind=ExecutorKind.MANAGED_TASK,
+        status=RunStatus.PENDING,
+        context_ref=task.id,
+        title="legacy managed hint",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    manager.agent_tree._runs[legacy_managed.id] = legacy_managed
+    report = AgentReport(
+        id="report-recover-no-bridge",
+        workspace_id=ws_id,
+        task_id=task.id,
+        session_id=worker_session_id,
+        state=AgentReportState.COMPLETED,
+        message="done",
+        created_at=datetime.utcnow(),
+    )
+    manager.reports[report.id] = report
+    manager.task_mailbox._events.pop(ws_id, None)
+    manager.task_mailbox._call_index.pop(ws_id, None)
+    manager._save_state()
+
+    cold = WorkspaceManager()
+    legacy_id = legacy_managed.id
+    report_call_id = f"report:{report.id}"
+
+    report_events_before = [
+        event
+        for event in cold.task_mailbox._events.get(ws_id, [])
+        if event.call_id == report_call_id
+    ]
+    assert len(report_events_before) == 1
+    assert report_events_before[0].type == TaskEventType.REPORT
+
+    task_events_before = [
+        event.model_dump(mode="json") for event in cold.task_mailbox._events.get(ws_id, [])
+    ]
+    call_index_before = {
+        call_id: {
+            "action": record["action"],
+            "target": record["target"],
+            "fingerprint": record["fingerprint"],
+            "event": record["event"].model_dump(mode="json"),
+        }
+        for call_id, record in cold.task_mailbox._call_index.get(ws_id, {}).items()
+    }
+    legacy_run_dump_before = cold.agent_tree._runs[legacy_id].model_dump(mode="json")
+    assert cold.agent_tree._runs[legacy_id].status == RunStatus.PENDING
+    managed_runs_before = {
+        run_id: run.model_dump(mode="json")
+        for run_id, run in cold.agent_tree._runs.items()
+        if run.workspace_id == ws_id and run.executor_kind == ExecutorKind.MANAGED_TASK
+    }
+    raw_events_before = [
+        event.model_dump(mode="json") for event in cold.agent_tree._events.get(ws_id, [])
+    ]
+
+    projected_before = cold.agent_tree.get_run(legacy_id)
+    assert projected_before is not None
+    assert projected_before.status == AgentRunStatus.WAITING
+
+    await cold.agent_tree.recover_pending_runs(ws_id)
+
+    report_events_after = [
+        event
+        for event in cold.task_mailbox._events.get(ws_id, [])
+        if event.call_id == report_call_id
+    ]
+    assert report_events_after == report_events_before
+    task_events_after = [
+        event.model_dump(mode="json") for event in cold.task_mailbox._events.get(ws_id, [])
+    ]
+    assert task_events_after == task_events_before
+    call_index_after = {
+        call_id: {
+            "action": record["action"],
+            "target": record["target"],
+            "fingerprint": record["fingerprint"],
+            "event": record["event"].model_dump(mode="json"),
+        }
+        for call_id, record in cold.task_mailbox._call_index.get(ws_id, {}).items()
+    }
+    assert call_index_after == call_index_before
+    assert cold.agent_tree._runs[legacy_id].model_dump(mode="json") == legacy_run_dump_before
+    assert cold.agent_tree._runs[legacy_id].status == RunStatus.PENDING
+    managed_runs_after = {
+        run_id: run.model_dump(mode="json")
+        for run_id, run in cold.agent_tree._runs.items()
+        if run.workspace_id == ws_id and run.executor_kind == ExecutorKind.MANAGED_TASK
+    }
+    assert managed_runs_after == managed_runs_before
+    raw_events_after = [
+        event.model_dump(mode="json") for event in cold.agent_tree._events.get(ws_id, [])
+    ]
+    assert raw_events_after == raw_events_before
+
+    projected_after = cold.agent_tree.get_run(legacy_id)
+    assert projected_after is not None
+    assert projected_after.status == AgentRunStatus.WAITING
+    assert projected_after.model_dump(mode="json") == projected_before.model_dump(mode="json")
 
 
 # ---------------------------------------------------------------------------
@@ -6226,6 +7583,52 @@ def test_load_from_dict_migrates_recipient_null_events(
     assert events[0].author == run_id
 
 
+def test_resident_get_events_does_not_replay_raw_after_mailbox_ack(
+    manager: WorkspaceManager, ws_id: str
+) -> None:
+    """Mailbox ACK owns the stream; empty wait must not replay raw AgentEvents."""
+
+    from claude_hub.models.agent_tree import AgentEventType, AgentRun, ExecutorKind
+
+    run_id = "root-run-ack-no-replay"
+    root = AgentRun(
+        id=run_id,
+        workspace_id=ws_id,
+        parent_id=None,
+        path=run_id,
+        executor_kind=ExecutorKind.RESIDENT_ROOT,
+        title="root",
+        status=AgentRunStatus.RUNNING,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    raw_event = {
+        "sequence": 1,
+        "workspace_id": ws_id,
+        "agent_run_id": run_id,
+        "type": AgentEventType.STARTED.value,
+        "author": run_id,
+        "recipient": None,
+        "call_id": "start:ack-no-replay",
+        "payload": {},
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    manager.agent_tree.load_from_dict(
+        ws_id,
+        {
+            "agent_runs": [root.model_dump(mode="json")],
+            "agent_events": [raw_event],
+        },
+    )
+    assert ws_id not in manager.task_mailbox._events
+    events = manager.agent_tree.get_events(ws_id, run_id, subtree=False)
+    assert [item.call_id for item in events] == ["start:ack-no-replay"]
+    manager.agent_tree.ack(ws_id, run_id, events[0].sequence)
+    assert manager.workspaces[ws_id].resident_ack_sequence == 1
+    assert manager.agent_tree.get_events(ws_id, run_id, subtree=False) == []
+    assert [item.call_id for item in manager.agent_tree._events[ws_id]] == ["start:ack-no-replay"]
+
+
 # ---------------------------------------------------------------------------
 # Fix 2b: cumulative side effects before ACK + cold recovery pump
 # ---------------------------------------------------------------------------
@@ -6273,6 +7676,7 @@ async def test_cumulative_side_effects_before_ack_and_cold_recovery_pump(
         prompt="do the things",
         agent_type=AgentType.CLAUDE,
         status=WorkspaceTaskStatus.WORKING,
+        session_id=session_id,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
@@ -9362,7 +10766,7 @@ async def test_report_intake_idempotent_after_error_then_retry(
     (e.g. reviewer dispatch failed). The client receives an error and
     retries with the SAME call_id. The retry must:
       * return the EXISTING report (no second report row),
-      * produce exactly one bridged agent-tree event,
+      * produce exactly one TaskMailbox report event,
       * leave the ACKed call_id in delivered_call_ids (not re-processed),
       * not double the task's review_attempts / review_requested_at.
     """
@@ -9376,6 +10780,7 @@ async def test_report_intake_idempotent_after_error_then_retry(
         WorkspaceTaskMode,
         WorkspaceTaskStatus,
     )
+    from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
 
     session_id = "idem-report-session"
     _make_managed_session(manager, session_id, ws_id)
@@ -9388,22 +10793,13 @@ async def test_report_intake_idempotent_after_error_then_retry(
         agent_type=AgentType.CLAUDE,
         task_mode=WorkspaceTaskMode.REVIEWED,
         status=WorkspaceTaskStatus.WORKING,
+        session_id=session_id,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
     manager.tasks[task.id] = task
     manager.sessions[session_id] = manager.sessions[session_id].model_copy(
         update={"task_id": task.id, "current_task_id": task.id}
-    )
-
-    from claude_hub.models.agent_tree import ExecutorKind
-
-    # Bind an agent run to the task so the report bridges to an event.
-    # _bridge_report_to_agent_event looks up the run by context_ref == task_id.
-    run = manager.agent_tree.create_root_run(
-        workspace_id=ws_id,
-        executor_kind=ExecutorKind.MANAGED_TASK,
-        context_ref=task.id,
     )
 
     dispatch_call_id = f"dispatch:{task.id}:{task.dispatch_attempt}"
@@ -9434,12 +10830,20 @@ async def test_report_intake_idempotent_after_error_then_retry(
         acked_call_ids=[dispatch_call_id],
     )
 
+    def _report_mailbox_events(report_id: str) -> list:
+        bridge_call_id = f"report:{report_id}"
+        return [
+            event
+            for event in manager.task_mailbox._events.get(ws_id, [])
+            if event.task_id == task.id and event.call_id == bridge_call_id
+        ]
+
     # First attempt: persist succeeds, then _after_report_recorded raises.
     real_after = manager._after_report_recorded
 
     async def _boom_after_recorded(task_, session_, report_):
         # Let the real side effect run once (so review_attempts increments
-        # and the bridged event is emitted), then raise to simulate a
+        # and the TaskMailbox event is emitted), then raise to simulate a
         # post-commit response failure.
         await real_after(task_, session_, report_)
         raise RuntimeError("simulated post-commit failure")
@@ -9461,12 +10865,13 @@ async def test_report_intake_idempotent_after_error_then_retry(
     assert dispatch_call_id in sess.delivered_call_ids
     assert dispatch_call_id not in sess.processing_call_ids
 
-    # The bridged agent-tree event is part of the same durable commit as the
-    # report. _after_report_recorded raising after that commit must not drop
-    # or duplicate the report:<id> bridge event.
-    events = manager.agent_tree.get_events(ws_id, run.id, subtree=True)
-    bridged = [e for e in events if e.call_id == f"report:{committed_report.id}"]
+    bridged = _report_mailbox_events(committed_report.id)
     assert len(bridged) == 1
+    assert bridged[0].type == TaskEventType.REPORT
+    assert bridged[0].actor_session_id == session_id
+    assert bridged[0].actor_role == TaskActorRole.WORKER
+    assert bridged[0].review_cycle == committed_report.review_cycle
+    assert bridged[0].report_id == committed_report.id
 
     review_attempts_before = manager.tasks[task.id].review_attempts
 
@@ -9478,12 +10883,9 @@ async def test_report_intake_idempotent_after_error_then_retry(
     assert retry_report.id == committed_report.id
     assert len(manager.reports) == 1
 
-    # The idempotent retry path re-stages _bridge_report_to_agent_event, which
-    # is call_id-deduplicated (call_id = report:<report.id>), so the bridge
-    # count stays exactly one.
-    events = manager.agent_tree.get_events(ws_id, run.id, subtree=True)
-    bridged = [e for e in events if e.call_id == f"report:{committed_report.id}"]
-    assert len(bridged) == 1
+    bridged_after_retry = _report_mailbox_events(committed_report.id)
+    assert len(bridged_after_retry) == 1
+    assert bridged_after_retry[0].model_dump(mode="json") == bridged[0].model_dump(mode="json")
 
     # The dispatch call_id stays delivered (not re-processed, not duplicated).
     sess = manager.sessions[session_id]
@@ -9526,6 +10928,7 @@ async def test_report_call_id_reuse_with_different_payload_raises(
         prompt="do it",
         agent_type=AgentType.CLAUDE,
         status=WorkspaceTaskStatus.WORKING,
+        session_id=session_id,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
@@ -9588,6 +10991,7 @@ async def test_report_concurrent_same_call_id_creates_one_report(
         prompt="do it",
         agent_type=AgentType.CLAUDE,
         status=WorkspaceTaskStatus.WORKING,
+        session_id=session_id,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
@@ -9720,6 +11124,7 @@ async def test_report_legacy_call_id_adapter_is_deterministic(
         prompt="do it",
         agent_type=AgentType.CLAUDE,
         status=WorkspaceTaskStatus.WORKING,
+        session_id=session_id,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
@@ -9822,6 +11227,7 @@ async def test_report_call_id_fingerprint_includes_goal_packet(
         prompt="do it",
         agent_type=AgentType.CLAUDE,
         status=WorkspaceTaskStatus.WORKING,
+        session_id=session_id,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
@@ -9894,6 +11300,7 @@ async def test_report_save_failure_rolls_back_in_memory_state(
         prompt="do it",
         agent_type=AgentType.CLAUDE,
         status=WorkspaceTaskStatus.WORKING,
+        session_id=session_id,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
@@ -9981,6 +11388,7 @@ async def test_report_call_id_idempotent_across_cold_reload(
         prompt="do it",
         agent_type=AgentType.CLAUDE,
         status=WorkspaceTaskStatus.WORKING,
+        session_id=session_id,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
