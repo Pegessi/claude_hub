@@ -1,56 +1,455 @@
 {
-  "1x1": {
-    "elapsed_ms": 169.5,
-    "settled": {
-      "6f822a86-9558-449b-a1c3-3a7abf89fdab": true
-    },
-    "first_fit_times_ms": {
-      "6f822a86-9558-449b-a1c3-3a7abf89fdab": 168.8
-    },
-    "nonce_ack_times_ms": {
-      "6f822a86-9558-449b-a1c3-3a7abf89fdab": 168.8
-    },
-    "tab_ids": [
-      "6f822a86-9558-449b-a1c3-3a7abf89fdab"
-    ],
-    "expected_nonces": {
-      "6f822a86-9558-449b-a1c3-3a7abf89fdab": {
-        "fit": "mt52iec8-gcjmqdoy"
-      }
-    },
-    "baseline_fit_counts": {
-      "6f822a86-9558-449b-a1c3-3a7abf89fdab": 0
-    }
-  },
-  "2x1": {
-    "elapsed_ms": 220.6,
-    "settled": {
-      "6f822a86-9558-449b-a1c3-3a7abf89fdab": true,
-      "22331dec-e000-401d-8418-bbc41b0b1c98": true
-    },
-    "first_fit_times_ms": {
-      "6f822a86-9558-449b-a1c3-3a7abf89fdab": 218.3,
-      "22331dec-e000-401d-8418-bbc41b0b1c98": 218.3
-    },
-    "nonce_ack_times_ms": {
-      "6f822a86-9558-449b-a1c3-3a7abf89fdab": 218.3,
-      "22331dec-e000-401d-8418-bbc41b0b1c98": 218.3
-    },
-    "tab_ids": [
-      "6f822a86-9558-449b-a1c3-3a7abf89fdab",
-      "22331dec-e000-401d-8418-bbc41b0b1c98"
-    ],
-    "expected_nonces": {
-      "6f822a86-9558-449b-a1c3-3a7abf89fdab": {
-        "fit": "mt52igm4-3vqdbtsc"
+  "feature_sha": "cb57ac6",
+  "main_sha": "16404fe",
+  "num_runs": 8,
+  "runs": [
+    {
+      "1x1": {
+        "elapsed_ms": 237.7,
+        "settled": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": true
+        },
+        "first_fit_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 237.0
+        },
+        "nonce_ack_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 237.0
+        },
+        "tab_ids": [
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab"
+        ],
+        "expected_nonces": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": {
+            "fit": "mt53rl6w-etphjff2"
+          }
+        },
+        "baseline_fit_counts": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 0
+        }
       },
-      "22331dec-e000-401d-8418-bbc41b0b1c98": {
-        "fit": "mt52igm4-o30pmp38"
+      "2x1": {
+        "elapsed_ms": 188.9,
+        "settled": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": true,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": true
+        },
+        "first_fit_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 185.0,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 185.0
+        },
+        "nonce_ack_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 185.0,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 185.0
+        },
+        "tab_ids": [
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab",
+          "22331dec-e000-401d-8418-bbc41b0b1c98"
+        ],
+        "expected_nonces": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": {
+            "fit": "mt53rnhb-p4zcas9j"
+          },
+          "22331dec-e000-401d-8418-bbc41b0b1c98": {
+            "fit": "mt53rnhb-gebkxo1y"
+          }
+        },
+        "baseline_fit_counts": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 7,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 0
+        }
       }
     },
-    "baseline_fit_counts": {
-      "6f822a86-9558-449b-a1c3-3a7abf89fdab": 7,
-      "22331dec-e000-401d-8418-bbc41b0b1c98": 0
+    {
+      "1x1": {
+        "elapsed_ms": 230.7,
+        "settled": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": true
+        },
+        "first_fit_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 229.1
+        },
+        "nonce_ack_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 229.1
+        },
+        "tab_ids": [
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab"
+        ],
+        "expected_nonces": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": {
+            "fit": "mt53rtt3-6qfanf34"
+          }
+        },
+        "baseline_fit_counts": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 0
+        }
+      },
+      "2x1": {
+        "elapsed_ms": 192.9,
+        "settled": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": true,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": true
+        },
+        "first_fit_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 184.5,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 184.5
+        },
+        "nonce_ack_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 184.5,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 184.5
+        },
+        "tab_ids": [
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab",
+          "22331dec-e000-401d-8418-bbc41b0b1c98"
+        ],
+        "expected_nonces": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": {
+            "fit": "mt53rw1n-041c1l3f"
+          },
+          "22331dec-e000-401d-8418-bbc41b0b1c98": {
+            "fit": "mt53rw1n-t5nzan6x"
+          }
+        },
+        "baseline_fit_counts": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 7,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 0
+        }
+      }
+    },
+    {
+      "1x1": {
+        "elapsed_ms": 187.4,
+        "settled": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": true
+        },
+        "first_fit_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 185.7
+        },
+        "nonce_ack_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 185.7
+        },
+        "tab_ids": [
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab"
+        ],
+        "expected_nonces": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": {
+            "fit": "mt53s24v-upr7z5se"
+          }
+        },
+        "baseline_fit_counts": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 0
+        }
+      },
+      "2x1": {
+        "elapsed_ms": 255.8,
+        "settled": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": true,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": true
+        },
+        "first_fit_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 253.8,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 253.8
+        },
+        "nonce_ack_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 253.8,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 253.8
+        },
+        "tab_ids": [
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab",
+          "22331dec-e000-401d-8418-bbc41b0b1c98"
+        ],
+        "expected_nonces": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": {
+            "fit": "mt53s4e3-m8yf4rr6"
+          },
+          "22331dec-e000-401d-8418-bbc41b0b1c98": {
+            "fit": "mt53s4e4-i2jo5zuv"
+          }
+        },
+        "baseline_fit_counts": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 7,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 0
+        }
+      }
+    },
+    {
+      "1x1": {
+        "elapsed_ms": 247.3,
+        "settled": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": true
+        },
+        "first_fit_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 246.5
+        },
+        "nonce_ack_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 246.5
+        },
+        "tab_ids": [
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab"
+        ],
+        "expected_nonces": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": {
+            "fit": "mt53sari-xk3443ql"
+          }
+        },
+        "baseline_fit_counts": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 0
+        }
+      },
+      "2x1": {
+        "elapsed_ms": 250.9,
+        "settled": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": true,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": true
+        },
+        "first_fit_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 249.6,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 249.6
+        },
+        "nonce_ack_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 249.6,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 249.6
+        },
+        "tab_ids": [
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab",
+          "22331dec-e000-401d-8418-bbc41b0b1c98"
+        ],
+        "expected_nonces": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": {
+            "fit": "mt53sd24-cg6bop7t"
+          },
+          "22331dec-e000-401d-8418-bbc41b0b1c98": {
+            "fit": "mt53sd24-vb5vzpjy"
+          }
+        },
+        "baseline_fit_counts": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 7,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 0
+        }
+      }
+    },
+    {
+      "1x1": {
+        "elapsed_ms": 164.9,
+        "settled": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": true
+        },
+        "first_fit_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 155.8
+        },
+        "nonce_ack_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 155.8
+        },
+        "tab_ids": [
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab"
+        ],
+        "expected_nonces": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": {
+            "fit": "mt53sjrd-x7mu73yj"
+          }
+        },
+        "baseline_fit_counts": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 0
+        }
+      },
+      "2x1": {
+        "elapsed_ms": 246.0,
+        "settled": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": true,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": true
+        },
+        "first_fit_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 240.4,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 240.4
+        },
+        "nonce_ack_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 240.4,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 240.4
+        },
+        "tab_ids": [
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab",
+          "22331dec-e000-401d-8418-bbc41b0b1c98"
+        ],
+        "expected_nonces": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": {
+            "fit": "mt53slu4-xvkjoxi9"
+          },
+          "22331dec-e000-401d-8418-bbc41b0b1c98": {
+            "fit": "mt53slu4-tin14vzh"
+          }
+        },
+        "baseline_fit_counts": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 7,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 0
+        }
+      }
+    },
+    {
+      "1x1": {
+        "elapsed_ms": 221.9,
+        "settled": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": true
+        },
+        "first_fit_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 221.2
+        },
+        "nonce_ack_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 221.2
+        },
+        "tab_ids": [
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab"
+        ],
+        "expected_nonces": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": {
+            "fit": "mt53srxs-1rfrx3ar"
+          }
+        },
+        "baseline_fit_counts": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 0
+        }
+      },
+      "2x1": {
+        "elapsed_ms": 123.2,
+        "settled": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": true,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": true
+        },
+        "first_fit_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 121.7,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 121.7
+        },
+        "nonce_ack_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 121.7,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 121.7
+        },
+        "tab_ids": [
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab",
+          "22331dec-e000-401d-8418-bbc41b0b1c98"
+        ],
+        "expected_nonces": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": {
+            "fit": "mt53su7q-e3gp9d5q"
+          },
+          "22331dec-e000-401d-8418-bbc41b0b1c98": {
+            "fit": "mt53su7q-1ht6wx10"
+          }
+        },
+        "baseline_fit_counts": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 7,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 0
+        }
+      }
+    },
+    {
+      "1x1": {
+        "elapsed_ms": 201.3,
+        "settled": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": true
+        },
+        "first_fit_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 200.5
+        },
+        "nonce_ack_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 200.5
+        },
+        "tab_ids": [
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab"
+        ],
+        "expected_nonces": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": {
+            "fit": "mt53t0z1-ilc4mips"
+          }
+        },
+        "baseline_fit_counts": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 0
+        }
+      },
+      "2x1": {
+        "elapsed_ms": 220.5,
+        "settled": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": true,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": true
+        },
+        "first_fit_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 216.4,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 216.4
+        },
+        "nonce_ack_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 216.4,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 216.4
+        },
+        "tab_ids": [
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab",
+          "22331dec-e000-401d-8418-bbc41b0b1c98"
+        ],
+        "expected_nonces": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": {
+            "fit": "mt53t359-ft9ngivc"
+          },
+          "22331dec-e000-401d-8418-bbc41b0b1c98": {
+            "fit": "mt53t359-r3kavr8v"
+          }
+        },
+        "baseline_fit_counts": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 7,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 0
+        }
+      }
+    },
+    {
+      "1x1": {
+        "elapsed_ms": 252.4,
+        "settled": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": true
+        },
+        "first_fit_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 251.2
+        },
+        "nonce_ack_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 251.2
+        },
+        "tab_ids": [
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab"
+        ],
+        "expected_nonces": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": {
+            "fit": "mt53tb3v-qp8aggqc"
+          }
+        },
+        "baseline_fit_counts": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 0
+        }
+      },
+      "2x1": {
+        "elapsed_ms": 169.0,
+        "settled": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": true,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": true
+        },
+        "first_fit_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 166.2,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 166.2
+        },
+        "nonce_ack_times_ms": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 166.2,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 166.2
+        },
+        "tab_ids": [
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab",
+          "22331dec-e000-401d-8418-bbc41b0b1c98"
+        ],
+        "expected_nonces": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": {
+            "fit": "mt53tdfu-mm964fmm"
+          },
+          "22331dec-e000-401d-8418-bbc41b0b1c98": {
+            "fit": "mt53tdfu-nc0qno2a"
+          }
+        },
+        "baseline_fit_counts": {
+          "6f822a86-9558-449b-a1c3-3a7abf89fdab": 7,
+          "22331dec-e000-401d-8418-bbc41b0b1c98": 0
+        }
+      }
     }
-  }
+  ]
 }
