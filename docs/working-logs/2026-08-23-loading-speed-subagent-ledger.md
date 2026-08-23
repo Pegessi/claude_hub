@@ -2,7 +2,7 @@
 
 Task: 加载速度优化 (90f3a50e-7dfd-4b12-82e1-4efc14004fe0)
 Branch: feat/loading-speed-optimization
-Feature HEAD: 01f1bad (cycle-28; benchmarked feature code SHA = cb57ac6)
+Feature HEAD: dea6a8c (cycle-28 branch tip; benchmarked feature code SHA = cb57ac6)
 Main HEAD: 16404fe
 
 ## workflow.roles
@@ -50,7 +50,7 @@ Main HEAD: 16404fe
 
 - Feature worktree: /Users/bytedance/claude_hub-loading-opt
 - Feature branch: feat/loading-speed-optimization
-- Feature HEAD (cycle-28): 9f74123
+- Feature HEAD (cycle-28 branch tip): dea6a8c
 - Benchmarked feature code SHA: cb57ac6 (cycle-27/28 commits only touch docs/artifacts, not product code)
 - Main worktree: /Users/bytedance/claude_hub
 - Main HEAD: 16404fe (merge fix/codex-session-filters)
