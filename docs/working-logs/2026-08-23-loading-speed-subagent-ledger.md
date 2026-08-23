@@ -17,12 +17,12 @@ Main HEAD: 16404fe
 | exec-cycle27 | P-EXECUTE | Fix cycle-26 artifact inconsistency: re-run benchmarks 8x each, build aggregate *_full.json containing all 8 raw runs, update CHANGELOG medians, rename ledger model→model_or_api, add agent+model_or_api to all ledger entries | cb-agent-1 | claude-sonnet-4-6 |
 | exec-cycle28 | P-EXECUTE | Fix cycle-27 findings: correct main 2x1 pane-2 median (240.9→242.7ms) in runs.txt+CHANGELOG, update ledger HEAD, add validate-tests to workflow.roles, ensure roles map exactly across working report/review-gate/ledger | cb-agent-1 | claude-sonnet-4-6 |
 | exec-cycle29 | P-EXECUTE | Fix cycle-28 findings: add judge-cycle27+judge-cycle28 to workflow.roles; update ledger HEAD; correct risk claim (display:none keeps iframe in DOM, collapses layout box); embed full ledger rows in validation | cb-agent-1 | claude-sonnet-4-6 |
-| exec-cycle30 | P-EXECUTE | Fix cycle-29 findings: make all SHAs consistent (ff6aa24); ensure committed ledger == embedded ledger; working report posted before commits | cb-agent-1 | claude-sonnet-4-6 |
+| exec-cycle30 | P-EXECUTE | Fix cycle-29 findings: make all SHAs consistent (12b896e); ensure committed ledger == embedded ledger; working report posted before commits | cb-agent-1 | claude-sonnet-4-6 |
 | validate-cycle26 | P-VALIDATE | Re-run feature/main benchmarks 8 runs each; verify JSON artifacts valid; confirm nonce-ack matches first-fit | cb-agent-1 | claude-sonnet-4-6 |
 | validate-cycle27 | P-VALIDATE | Verify aggregate JSON artifacts parse and match runs.txt medians; run 23/23 replay tests against feature backend; black/isort/diff-check clean | cb-agent-1 | claude-sonnet-4-6 |
 | validate-cycle28 | P-VALIDATE | Verify main pane-2 median 242.7ms matches JSON; verify feature pane-1==pane-2; verify CHANGELOG deltas; black/isort/diff-check clean; JSON valid | cb-agent-1 | claude-sonnet-4-6 |
 | validate-cycle29 | P-VALIDATE | Verify roles match ledger entries exactly; cycle-29 fixes commit=a4b75b8; risk claim about display:none is correct; validation embeds full ledger | cb-agent-1 | claude-sonnet-4-6 |
-| validate-cycle30 | P-VALIDATE | Verify all SHAs consistent (ff6aa24); committed ledger == embedded ledger; working report posted before commits | cb-agent-1 | claude-sonnet-4-6 |
+| validate-cycle30 | P-VALIDATE | Verify all SHAs consistent (12b896e); committed ledger == embedded ledger; working report posted before commits | cb-agent-1 | claude-sonnet-4-6 |
 | validate-tests | P-VALIDATE | Run backend tests (test_terminal_replay.py), black/isort, git diff --check, JSON validation | cb-agent-1 | claude-sonnet-4-6 |
 | judge-cycle23 | P-JUDGE | Cycle 23 review verdict (review_failed) — 4 blocking findings | cb-reviewer-4 | codex |
 | judge-cycle24 | P-JUDGE | Cycle 24 review verdict (review_failed) — uncommitted artifact, ledger gaps, fit-invocation vs completion | cb-reviewer-4 | codex |
