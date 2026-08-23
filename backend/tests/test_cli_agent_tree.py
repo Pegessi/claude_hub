@@ -94,7 +94,6 @@ def test_help_registers_agent_tree_group() -> None:
     group = runner.invoke(cli, ["agent-tree", "--help"])
     assert group.exit_code == 0, group.output
     for name in (
-        "roots",
         "runs",
         "events",
         "spawn",
@@ -114,27 +113,12 @@ def test_ack_and_wait_reject_call_id() -> None:
     for args in (
         ["agent-tree", "ack", "ws1", "run-root", "1", "--call-id", "x"],
         ["agent-tree", "wait", "ws1", "run-root", "--call-id", "x"],
-        ["agent-tree", "roots", "ws1", "--call-id", "x"],
         ["agent-tree", "runs", "ws1", "--call-id", "x"],
         ["agent-tree", "events", "run-root", "--call-id", "x"],
     ):
         result = runner.invoke(cli, args)
         assert result.exit_code != 0
         assert "No such option: --call-id" in result.output
-
-
-def test_roots_filters_resident_root(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.method == "GET"
-        assert request.url.path == "/api/agent-tree/runs"
-        assert _query(request) == {"workspace_id": ["ws1"]}
-        return httpx.Response(200, json=[SAMPLE_RUN, SAMPLE_CHILD])
-
-    captured = patch_get_client(monkeypatch, handler)
-    result = CliRunner().invoke(cli, ["--json", "agent-tree", "roots", "ws1"])
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.output) == [SAMPLE_RUN]
-    assert len(captured) == 1
 
 
 def test_runs_and_events_query_params(monkeypatch: pytest.MonkeyPatch) -> None:

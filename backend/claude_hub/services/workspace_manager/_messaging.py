@@ -101,10 +101,15 @@ recreation require the operator to verify the worker state before
 retrying.
 """
 
+from typing import TYPE_CHECKING
+
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
 from ..agent_tree import _request_fingerprint
 from ._constants import *  # noqa: F401,F403
+
+if TYPE_CHECKING:
+    from claude_hub.models.agent_tree import AgentRun
 
 
 class _MessagingMixin:
@@ -1361,6 +1366,28 @@ class _MessagingMixin:
                 f"moved back to uncertain for operator retry"
             )
 
+    def _audit_run_for_session(self, workspace_id: str, session_id: str) -> Optional["AgentRun"]:
+        """Return a compat AgentRun for agent-tree audit events (never creates resident_root)."""
+
+        from claude_hub.models.agent_tree import ExecutorKind
+
+        session = self.sessions.get(session_id)
+        if session is not None and session.current_task_id:
+            task = self.tasks.get(session.current_task_id)
+            if task is not None and task.agent_run_id:
+                run = self.agent_tree._runs.get(task.agent_run_id)
+                if run is not None and run.workspace_id == workspace_id:
+                    return run
+        run = self.agent_tree.get_run_by_context_ref(workspace_id, session_id)
+        if run is not None:
+            return run
+        for candidate in self.agent_tree._runs.values():
+            if candidate.workspace_id != workspace_id:
+                continue
+            if candidate.executor_kind == ExecutorKind.MANAGED_TASK:
+                return candidate
+        return None
+
     def _emit_delivery_retry_requested(
         self,
         workspace_id: str,
@@ -1389,25 +1416,10 @@ class _MessagingMixin:
         """
         from claude_hub.models.agent_tree import AgentEventType
 
-        root_run = self.agent_tree.get_run_by_context_ref(workspace_id, session_id)
-        if root_run is None:
-            for run in self.agent_tree._runs.values():
-                if run.workspace_id == workspace_id and run.parent_id is None:
-                    root_run = run
-                    break
-        if root_run is None:
-            # No resident root run exists yet (e.g. the workspace's resident
-            # agent hasn't been started). Create one so the audit event has a
-            # durable home. We pass session_id=None to avoid mis-linking the
-            # root run to a non-resident session.
-            self._ensure_resident_root_run(workspace_id, session_id=None)
-            for run in self.agent_tree._runs.values():
-                if run.workspace_id == workspace_id and run.parent_id is None:
-                    root_run = run
-                    break
+        root_run = self._audit_run_for_session(workspace_id, session_id)
         if root_run is None:
             raise RuntimeError(
-                f"no root run found for workspace {workspace_id}; "
+                f"no audit run found for workspace {workspace_id} session {session_id}; "
                 "cannot emit delivery:retry_requested audit event"
             )
 

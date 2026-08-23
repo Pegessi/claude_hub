@@ -329,51 +329,38 @@ class HubClient:
     def get_task_events(
         self,
         workspace_id: str,
-        task_id: Optional[str] = None,
+        task_id: str,
         since_sequence: int = 0,
         subtree: bool = False,
     ) -> Any:
-        """GET Task or resident mailbox events. Never /api/agent-tree."""
+        """GET Task mailbox events. Never /api/agent-tree."""
         params: Dict[str, Any] = {
             "since_sequence": since_sequence,
             "subtree": subtree,
         }
-        if task_id:
-            return self._request(
-                "GET",
-                f"/api/workspaces/{workspace_id}/tasks/{task_id}/events",
-                params=params,
-            )
         return self._request(
             "GET",
-            f"/api/workspaces/{workspace_id}/resident/events",
+            f"/api/workspaces/{workspace_id}/tasks/{task_id}/events",
             params=params,
         )
 
     def wait_task_events(
         self,
         workspace_id: str,
-        task_id: Optional[str] = None,
+        task_id: str,
         since_sequence: int = 0,
         subtree: bool = False,
         timeout_seconds: float = 30.0,
     ) -> Any:
-        """POST Task or resident mailbox wait. Never /api/agent-tree."""
+        """POST Task mailbox wait. Never /api/agent-tree."""
         params: Dict[str, Any] = {
             "since_sequence": since_sequence,
             "subtree": subtree,
             "timeout_seconds": timeout_seconds,
         }
-        if task_id:
-            return self._request(
-                "POST",
-                f"/api/workspaces/{workspace_id}/tasks/{task_id}/wait",
-                params=params,
-                timeout=timeout_seconds + 5.0,
-            )
         return self._request(
             "POST",
-            f"/api/workspaces/{workspace_id}/resident/wait",
+            f"/api/workspaces/{workspace_id}/tasks/{task_id}/wait",
             params=params,
             timeout=timeout_seconds + 5.0,
         )
@@ -381,20 +368,14 @@ class HubClient:
     def ack_task_events(
         self,
         workspace_id: str,
+        task_id: str,
         sequence: int,
-        task_id: Optional[str] = None,
     ) -> Any:
-        """POST Task or resident mailbox ACK. Never /api/agent-tree."""
+        """POST Task mailbox ACK. Never /api/agent-tree."""
         body = {"sequence": sequence}
-        if task_id:
-            return self._request(
-                "POST",
-                f"/api/workspaces/{workspace_id}/tasks/{task_id}/ack",
-                json=body,
-            )
         return self._request(
             "POST",
-            f"/api/workspaces/{workspace_id}/resident/ack",
+            f"/api/workspaces/{workspace_id}/tasks/{task_id}/ack",
             json=body,
         )
 

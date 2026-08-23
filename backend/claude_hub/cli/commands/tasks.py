@@ -743,18 +743,18 @@ def task_tree(ctx: click.Context, workspace_id: str, task_id: Optional[str]) -> 
 
 @task.command("events")
 @click.argument("workspace_id")
-@click.argument("task_id", required=False)
+@click.argument("task_id")
 @click.option("--since-sequence", default=0, type=int, show_default=True)
 @click.option("--subtree/--no-subtree", default=False, show_default=True)
 @click.pass_context
 def task_events(
     ctx: click.Context,
     workspace_id: str,
-    task_id: Optional[str],
+    task_id: str,
     since_sequence: int,
     subtree: bool,
 ) -> None:
-    """List Task mailbox events. Omit TASK_ID to use the resident consumer."""
+    """List Task mailbox events for ``task:<task_id>``."""
     try:
         with cli_main.get_client(ctx) as client:
             data = client.get_task_events(
@@ -771,7 +771,7 @@ def task_events(
 
 @task.command("wait")
 @click.argument("workspace_id")
-@click.argument("task_id", required=False)
+@click.argument("task_id")
 @click.option("--since-sequence", default=0, type=int, show_default=True)
 @click.option("--subtree/--no-subtree", default=False, show_default=True)
 @click.option("--timeout-seconds", default=30.0, type=float, show_default=True)
@@ -785,13 +785,13 @@ def task_events(
 def task_wait(
     ctx: click.Context,
     workspace_id: str,
-    task_id: Optional[str],
+    task_id: str,
     since_sequence: int,
     subtree: bool,
     timeout_seconds: float,
     ack: bool,
 ) -> None:
-    """Wait on the Task mailbox. Omit TASK_ID for the resident consumer."""
+    """Wait on the Task mailbox for ``task:<task_id>``."""
     as_json = cli_main.as_json(ctx)
     try:
         with cli_main.get_client(ctx) as client:
@@ -818,7 +818,7 @@ def task_wait(
     max_sequence = max(sequences)
     try:
         with cli_main.get_client(ctx) as client:
-            client.ack_task_events(workspace_id, max_sequence, task_id=task_id)
+            client.ack_task_events(workspace_id, task_id, max_sequence)
     except HubError as e:
         click.echo(ACK_FAILED_NOTE, err=True)
         raise click.ClickException(str(e)) from e
@@ -831,35 +831,21 @@ def task_wait(
 @task.command("ack")
 @click.argument("workspace_id")
 @click.argument("task_id")
-@click.argument("sequence", required=False, type=int)
+@click.argument("sequence", type=int)
 @click.pass_context
 def task_ack(
     ctx: click.Context,
     workspace_id: str,
     task_id: str,
-    sequence: Optional[int],
+    sequence: int,
 ) -> None:
-    """ACK a Task cursor, or the resident cursor when SEQUENCE is the only id."""
-    resolved_task_id: Optional[str]
-    resolved_sequence: int
-    if sequence is None:
-        try:
-            resolved_sequence = int(task_id)
-        except ValueError as exc:
-            raise click.ClickException(
-                "Usage: task ack WORKSPACE_ID TASK_ID SEQUENCE, "
-                "or task ack WORKSPACE_ID SEQUENCE for the resident cursor"
-            ) from exc
-        resolved_task_id = None
-    else:
-        resolved_task_id = task_id
-        resolved_sequence = sequence
+    """ACK ``task:<task_id>`` at SEQUENCE."""
     try:
         with cli_main.get_client(ctx) as client:
             data = client.ack_task_events(
                 workspace_id,
-                resolved_sequence,
-                task_id=resolved_task_id,
+                task_id,
+                sequence,
             )
     except HubError as e:
         raise click.ClickException(str(e)) from e

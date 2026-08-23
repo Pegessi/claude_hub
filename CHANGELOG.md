@@ -9,23 +9,29 @@
 
 - Make **Task Graph / TaskMailbox** the canonical coordination plane per
   workspace: `parent_task_id` / `root_task_id` / `path`, append-only Task events,
-  `task_call_index`, per-Task `consumer_ack_sequence`, workspace
-  `resident_ack_sequence` on `workspace:{workspace_id}:resident`.
+  `task_call_index`, per-Task `consumer_ack_sequence`. TaskMailbox consumers are
+  `task:<task_id>` only.
 - Add Task-first REST and `claude-hub task` (`tree`, `events`, `wait`, `ack`,
-  `followup`, `abort`, resident consumer). These routes do not write AgentRun
-  lifecycle state.
-- Keep `/api/agent-tree/*` as a **compat projection** for legacy run ids
-  (`resident_root`, `Task.agent_run_id`). Ordinary Tasks project to `task.id`;
-  runtime resolution uses canonical `Task.agent_run_id` only.
+  `followup`, `abort`). These routes do not write AgentRun lifecycle state.
+- Keep `/api/agent-tree/*` as a **compat projection** for legacy linked run ids
+  (`Task.agent_run_id`). Ordinary Tasks project to `task.id`; runtime resolution
+  uses canonical `Task.agent_run_id` only. Legacy run blobs are load-only;
+  public APIs fail closed.
+- Worker and reviewer are ordinary Agents assigned on Tasks (`session_id`,
+  `review_session_id`, `target_session_id` on start). The optional Resident agent
+  is an independent long-running Agent — not a Task root, mailbox consumer, or
+  Agent Tree supervisor.
 - Fail-closed session assignment on report intake; unassigned Tasks cannot be
   claimed by the first report.
 - Cold-load migration (`migrate_pre_unification_graph`) for missing parent edges
-  and ACK cursors; explicit `resident_ack_sequence=0` stays authoritative.
+  and per-Task ACK cursors. Deprecated `workspace:{workspace_id}:resident`
+  consumer keys are migration-only and rejected at runtime.
 - **Rollback:** restore pre-migration workspace `state.json` + `index.json`
   backups before running an older binary — otherwise TaskMailbox events, cursors,
   and graph fields are dropped on first save.
 - UI: board `related_task_id` remains session-affinity/context reuse (not
-  `parent_task_id`); Task Graph tree UI is follow-up `487c630c`.
+  `parent_task_id`). Cancelled legacy plan `487c630c` (Resident Root UI) is not
+  an active follow-up.
 - Docs: rewrite `docs/AGENT_TREE.md` mental model (Workspace → Task Graph →
   session assignment); `claude-hub task` primary, `agent-tree` compat only.
 

@@ -31,7 +31,8 @@ from claude_hub.models.agent_tree import (
     ManagedExecutorConfig,
 )
 from claude_hub.models.task_mailbox import TaskActorRole, TaskEvent, TaskEventType
-from claude_hub.services.task_graph import make_resident_consumer_key, make_task_consumer_key
+from claude_hub.services.task_graph import make_task_consumer_key
+from claude_hub.services.task_migration import legacy_resident_consumer_key
 from claude_hub.services.workspace_manager import WorkspaceManager
 
 _wm = import_module("claude_hub.services.workspace_manager")
@@ -312,9 +313,8 @@ def test_pre_unification_state_json_migrates_parent_ack_and_events(
     assert child.path == f"{parent.id}/{child.id}"
     assert ordinary.parent_task_id is None
     assert ordinary.path == ordinary.id
-    assert parent.consumer_ack_sequence == 4
+    assert parent.consumer_ack_sequence == 11
     assert child.consumer_ack_sequence == 7
-    assert fresh.workspaces[ws_id].resident_ack_sequence == 11
     assert child.pending_call_ids == []
     assert child.processing_call_ids == ["proc-1"]
     assert child.uncertain_call_ids == ["unc-1"]
@@ -327,7 +327,7 @@ def test_pre_unification_state_json_migrates_parent_ack_and_events(
     ]
     started = mailbox[0]
     assert started.sequence == 4
-    assert started.consumer_key == make_resident_consumer_key(ws_id)
+    assert started.consumer_key == make_task_consumer_key(parent.id)
     assert started.compat_run_id == "run-child"
     assert started.fingerprint == "legacy-started-fp"
     bridged_event = mailbox[1]
@@ -342,7 +342,7 @@ def test_pre_unification_state_json_migrates_parent_ack_and_events(
     assert backfilled.actor_session_id == "sess-gone"
     assert backfilled.actor_role == TaskActorRole.WORKER
     assert backfilled.review_cycle == 2
-    assert backfilled.consumer_key == make_resident_consumer_key(ws_id)
+    assert backfilled.consumer_key == make_task_consumer_key(ordinary.id)
     assert backfilled.report_id == "rep-ordinary"
     assert fresh.task_mailbox._next_seq[ws_id] == 7
     disk = json.loads(fresh._workspace_state_file(ws_id).read_text(encoding="utf-8"))
@@ -366,9 +366,8 @@ def test_pre_unification_state_json_migrates_parent_ack_and_events(
     again = WorkspaceManager()
     assert again.tasks["task-linked-child"].parent_task_id == parent.id
     assert again.tasks["task-linked-child"].path == f"{parent.id}/{child.id}"
-    assert again.tasks["task-linked-parent"].consumer_ack_sequence == 4
+    assert again.tasks["task-linked-parent"].consumer_ack_sequence == 11
     assert again.tasks["task-linked-child"].consumer_ack_sequence == 7
-    assert again.workspaces[ws_id].resident_ack_sequence == 11
     assert [item.call_id for item in again.task_mailbox._events[ws_id]] == [
         item.call_id for item in mailbox
     ]
@@ -454,7 +453,7 @@ def test_triple_source_report_does_not_duplicate_or_advance_seq(
         type=TaskEventType.REPORT,
         action="report",
         target="task-ordinary",
-        consumer_key=make_resident_consumer_key(ws_id),
+        consumer_key=legacy_resident_consumer_key(ws_id),
         payload={"report_id": "rep-triple"},
         created_at=stamp,
         report_id="rep-triple",
@@ -560,7 +559,7 @@ def test_same_report_call_id_alias_ignores_action_fingerprint(
         type=TaskEventType.REPORT,
         action="report",
         target="task-ordinary",
-        consumer_key=make_resident_consumer_key(ws_id),
+        consumer_key=legacy_resident_consumer_key(ws_id),
         payload={"report_id": "rep-alias"},
         created_at=stamp,
         report_id="rep-alias",
@@ -621,7 +620,7 @@ def test_same_report_call_id_mismatched_task_fails_closed(
         type=TaskEventType.REPORT,
         action="report",
         target="task-ordinary",
-        consumer_key=make_resident_consumer_key(ws_id),
+        consumer_key=legacy_resident_consumer_key(ws_id),
         payload={"report_id": "rep-mismatch"},
         created_at=stamp,
         report_id="rep-mismatch",
@@ -906,178 +905,3 @@ def test_persisted_task_parent_cycle_fails_closed(
     )
     with pytest.raises(ValueError, match="cycle"):
         WorkspaceManager()
-
-
-def test_full_state_json_merges_projected_and_unprojected_resident_events(
-    manager: WorkspaceManager, tmp_path: Path
-) -> None:
-    ws_id = _make_workspace(manager, tmp_path)
-    stamp = datetime(2026, 2, 1, 0, 0, 0)
-    resident = AgentRun(
-        id="run-resident",
-        workspace_id=ws_id,
-        parent_id=None,
-        path="run-resident",
-        supervisor_id=None,
-        executor_kind=ExecutorKind.RESIDENT_ROOT,
-        status=AgentRunStatus.RUNNING,
-        ack_sequence=0,
-        created_at=stamp,
-        updated_at=stamp,
-        **_resident_contract(),
-    )
-    child = _managed_run(
-        ws_id,
-        "run-child",
-        parent_id="run-resident",
-        context_ref="task-linked",
-        stamp=stamp,
-    )
-    linked = AgentEvent(
-        sequence=4,
-        call_id="linked-started",
-        agent_run_id="run-child",
-        type=AgentEventType.STARTED,
-        author="run-child",
-        recipient="run-resident",
-        action="spawn:started",
-        target="run-child",
-        fingerprint="linked-fp",
-        payload={"task_id": "task-linked"},
-        created_at=stamp,
-    )
-    orphan = {
-        "sequence": 6,
-        "call_id": "resident-null",
-        "agent_run_id": "run-resident",
-        "type": AgentEventType.STARTED.value,
-        "author": "run-resident",
-        "recipient": None,
-        "action": "emit",
-        "target": "run-resident",
-        "fingerprint": "resident-null-fp",
-        "payload": {},
-        "created_at": stamp.isoformat(),
-    }
-    _write_state(
-        manager,
-        ws_id,
-        {
-            "tasks": [
-                _raw_task(
-                    task_id="task-linked",
-                    workspace_id=ws_id,
-                    title="linked",
-                    agent_run_id="run-child",
-                )
-            ],
-            "sessions": [],
-            "reports": [],
-            "agent_runs": [resident.model_dump(mode="json"), child.model_dump(mode="json")],
-            "agent_events": [linked.model_dump(mode="json"), orphan],
-        },
-    )
-
-    fresh = WorkspaceManager()
-    assert ws_id in fresh.task_mailbox._events
-    mailbox_ids = [item.call_id for item in fresh.task_mailbox._events[ws_id]]
-    assert "linked-started" in mailbox_ids
-    assert "resident-null" not in mailbox_ids
-    visible = fresh.agent_tree.get_events(ws_id, "run-resident", subtree=False)
-    assert [item.call_id for item in visible] == ["linked-started", "resident-null"]
-    assert visible[0].sequence == 4
-    assert visible[1].sequence == 6
-    assert visible[1].recipient == "run-resident"
-    assert [item.call_id for item in visible] == list(
-        dict.fromkeys(item.call_id for item in visible)
-    )
-
-    fresh.agent_tree.ack(ws_id, "run-resident", visible[-1].sequence)
-    assert fresh.agent_tree.get_events(ws_id, "run-resident", subtree=False) == []
-
-    again = WorkspaceManager()
-    assert again.workspaces[ws_id].resident_ack_sequence == 6
-    assert again.agent_tree.get_events(ws_id, "run-resident", subtree=False) == []
-    assert {item.call_id for item in again.agent_tree._events[ws_id]} == {
-        "linked-started",
-        "resident-null",
-    }
-
-
-def test_resident_ack_lifts_from_resident_root_when_index_field_missing(
-    manager: WorkspaceManager, tmp_path: Path
-) -> None:
-    ws_id = _make_workspace(manager, tmp_path, name="Missing Resident ACK")
-    stamp = datetime(2026, 3, 1, 0, 0, 0)
-    resident = AgentRun(
-        id="run-resident",
-        workspace_id=ws_id,
-        parent_id=None,
-        path="run-resident",
-        supervisor_id=None,
-        executor_kind=ExecutorKind.RESIDENT_ROOT,
-        status=AgentRunStatus.RUNNING,
-        ack_sequence=11,
-        created_at=stamp,
-        updated_at=stamp,
-        **_resident_contract(),
-    )
-    _write_state(
-        manager,
-        ws_id,
-        {
-            "tasks": [],
-            "sessions": [],
-            "reports": [],
-            "agent_runs": [resident.model_dump(mode="json")],
-            "agent_events": [],
-        },
-    )
-    _omit_index_resident_ack(manager, ws_id)
-
-    fresh = WorkspaceManager()
-    assert fresh.workspaces[ws_id].resident_ack_sequence == 11
-
-    again = WorkspaceManager()
-    assert again.workspaces[ws_id].resident_ack_sequence == 11
-
-
-def test_explicit_resident_ack_zero_is_authoritative_on_cold_reload(
-    manager: WorkspaceManager, tmp_path: Path
-) -> None:
-    ws_id = _make_workspace(manager, tmp_path, name="Explicit Resident Zero")
-    stamp = datetime(2026, 3, 2, 0, 0, 0)
-    resident = AgentRun(
-        id="run-resident",
-        workspace_id=ws_id,
-        parent_id=None,
-        path="run-resident",
-        supervisor_id=None,
-        executor_kind=ExecutorKind.RESIDENT_ROOT,
-        status=AgentRunStatus.RUNNING,
-        ack_sequence=11,
-        created_at=stamp,
-        updated_at=stamp,
-        **_resident_contract(),
-    )
-    _write_state(
-        manager,
-        ws_id,
-        {
-            "tasks": [],
-            "sessions": [],
-            "reports": [],
-            "agent_runs": [resident.model_dump(mode="json")],
-            "agent_events": [],
-        },
-    )
-    index = json.loads(_wm.INDEX_FILE.read_text(encoding="utf-8"))
-    workspace_item = next(item for item in index["workspaces"] if item["id"] == ws_id)
-    assert "resident_ack_sequence" in workspace_item
-    assert workspace_item["resident_ack_sequence"] == 0
-
-    fresh = WorkspaceManager()
-    assert fresh.workspaces[ws_id].resident_ack_sequence == 0
-
-    again = WorkspaceManager()
-    assert again.workspaces[ws_id].resident_ack_sequence == 0

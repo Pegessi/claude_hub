@@ -287,7 +287,7 @@ def test_resident_completed_task_trips_gate(manager: WorkspaceManager) -> None:
 
 
 def test_resident_activity_since_none_with_outcome(manager: WorkspaceManager) -> None:
-    """since=None => any existing outcome/report counts as activity."""
+    """since=None => any existing outcome or task-linked report counts as activity."""
     now = datetime.now()
     workspace = _due_workspace(None)
     # No outcome yet => no activity.
@@ -296,8 +296,8 @@ def test_resident_activity_since_none_with_outcome(manager: WorkspaceManager) ->
     # An outcome on a task => activity.
     manager.tasks["task-1"] = _activity_task(workspace, updated_at=now, completed_at=now)
     assert manager._workspace_activity_since(workspace.id, None) is True
-    # A report also counts.
-    del manager.tasks["task-1"]
+    # A report linked to an ordinary task also counts (task must exist).
+    manager.tasks["task-1"] = _activity_task(workspace, updated_at=now)
     manager.reports["rep-1"] = AgentReport(
         id="rep-1",
         workspace_id=workspace.id,
@@ -310,19 +310,17 @@ def test_resident_activity_since_none_with_outcome(manager: WorkspaceManager) ->
     assert manager._workspace_activity_since(workspace.id, None) is True
 
 
-def test_resident_own_report_not_activity(manager: WorkspaceManager) -> None:
-    """A report whose session_id == the resident's own session must NOT count.
-
-    Defense-in-depth against a future prompt that makes the resident post
-    reports: such a report cannot re-arm the activity fast path.
-    """
+def test_unlinked_reports_do_not_count_and_task_linked_report_does(
+    manager: WorkspaceManager,
+) -> None:
+    """Reports without a resolvable ordinary task_id do not count as activity."""
     now = datetime.now()
     last_run = now - timedelta(seconds=_wm.RESIDENT_ACTIVITY_DEBOUNCE_SECONDS + 60)
     workspace = _due_workspace(last_run).model_copy(
         update={"resident_agent_session_id": "res-agent-1"}
     )
     manager.workspaces[workspace.id] = workspace
-    # Report posted by the resident's own session after last_run => ignored.
+    # task_id=None: resident session report => not canonical task work.
     manager.reports["rep-self"] = AgentReport(
         id="rep-self",
         workspace_id=workspace.id,
@@ -334,7 +332,7 @@ def test_resident_own_report_not_activity(manager: WorkspaceManager) -> None:
     )
     assert manager._workspace_activity_since(workspace.id, last_run) is False
     assert manager._resident_agent_due(workspace, now) is False
-    # A report from a real worker session DOES count.
+    # task_id=None: ordinary worker session report => same rule, still no activity.
     manager.reports["rep-worker"] = AgentReport(
         id="rep-worker",
         workspace_id=workspace.id,
@@ -344,13 +342,27 @@ def test_resident_own_report_not_activity(manager: WorkspaceManager) -> None:
         message="work",
         created_at=last_run + timedelta(seconds=20),
     )
+    assert manager._workspace_activity_since(workspace.id, last_run) is False
+    assert manager._resident_agent_due(workspace, now) is False
+    # Linked to an ordinary task => counts regardless of session role.
+    manager.tasks["task-1"] = _activity_task(workspace, updated_at=last_run + timedelta(seconds=5))
+    manager.reports["rep-linked"] = AgentReport(
+        id="rep-linked",
+        workspace_id=workspace.id,
+        task_id="task-1",
+        session_id="worker-1",
+        state=AgentReportState.WORKING,
+        message="linked",
+        created_at=last_run + timedelta(seconds=30),
+    )
     assert manager._workspace_activity_since(workspace.id, last_run) is True
     assert manager._resident_agent_due(workspace, now) is True
 
 
-def test_resident_own_proposed_task_not_activity(manager: WorkspaceManager) -> None:
-    """Defense-in-depth: a task whose session_id == the resident's session is
-    excluded from the activity scan even if it later gains an outcome."""
+def test_resident_session_assigned_to_task_counts_like_any_worker(
+    manager: WorkspaceManager,
+) -> None:
+    """A resident session explicitly assigned to an ordinary task counts like any worker."""
     now = datetime.now()
     last_run = now - timedelta(seconds=_wm.RESIDENT_ACTIVITY_DEBOUNCE_SECONDS + 60)
     workspace = _due_workspace(last_run).model_copy(
@@ -363,8 +375,29 @@ def test_resident_own_proposed_task_not_activity(manager: WorkspaceManager) -> N
         completed_at=last_run + timedelta(seconds=10),
         session_id="res-agent-1",
     )
+    assert manager._workspace_activity_since(workspace.id, last_run) is True
+    assert manager._resident_agent_due(workspace, now) is True
+
+
+def test_workspace_activity_since_does_not_read_agent_tree(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    """Activity scan must not consult AgentTree runs/events/subtrees."""
+
+    def _forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("_workspace_activity_since must not read agent_tree")
+
+    tree = manager.agent_tree
+    monkeypatch.setattr(tree, "get_events", _forbidden)
+    monkeypatch.setattr(tree, "list_runs", _forbidden)
+    monkeypatch.setattr(tree, "get_run_by_context_ref", _forbidden)
+
+    now = datetime.now()
+    last_run = now - timedelta(minutes=5)
+    workspace = _due_workspace(last_run)
+    # Fresh TODO only: no outcome timestamps, no task-linked reports.
+    manager.tasks["task-1"] = _activity_task(workspace, updated_at=last_run + timedelta(seconds=10))
     assert manager._workspace_activity_since(workspace.id, last_run) is False
-    assert manager._resident_agent_due(workspace, now) is False
 
 
 def test_resident_backstop_fires_without_activity(manager: WorkspaceManager) -> None:
@@ -1438,11 +1471,35 @@ def test_create_update_workspace_master_mode_persists(
     assert reloaded2.workspaces[default_ws.id].resident_agent_master_mode is True
 
 
+def _assert_master_prompt_uses_task_graph_only(prompt: str) -> None:
+    """Master orchestrator prompt must teach Task REST, not legacy run-tree APIs."""
+    for forbidden in (
+        "/api/agent-tree",
+        "resident_root",
+        "AgentRun",
+        "root run",
+        "run_id",
+    ):
+        assert forbidden not in prompt, forbidden
+    for required in (
+        "target_session_id",
+        "/tasks/",
+        "/start",
+        "/events",
+        "/wait",
+        "/ack",
+        "/followup",
+        "/continue",
+        '"status":"done"',
+        "reviewed",
+    ):
+        assert required in prompt, required
+
+
 def test_build_resident_prompt_master_off_is_legacy(
     manager: WorkspaceManager, tmp_path: Path
 ) -> None:
-    """master OFF returns the existing read-only maintenance prompt (propose/TODO +
-    Hard constraints) and does NOT mention self-provisioning a worktree."""
+    """master OFF returns the read-only maintenance prompt (propose/TODO only)."""
     workspace = _make_workspace(manager, tmp_path)
     assert workspace.resident_agent_master_mode is False
     prompt = _wm.build_resident_agent_prompt(workspace, "http://localhost:9999", "sid")
@@ -1450,23 +1507,28 @@ def test_build_resident_prompt_master_off_is_legacy(
     assert "PROPOSE new tasks" in prompt
     assert "TODO status only" in prompt
     assert "Hard constraints" in prompt
-    # Proposed tasks are tagged as agent-created so the UI can distinguish them.
     assert '"origin":"resident"' in prompt
-    # No worktree self-provisioning in legacy mode.
     assert "git worktree add" not in prompt
-    # And no orchestrator-mode dispatch machinery leaks into the read-only prompt.
-    assert "target_session_id" not in prompt
-    assert "task_mode" not in prompt
+    # Proposal-only mode must not leak orchestration / Task Graph machinery.
+    for forbidden in (
+        "## Task Graph",
+        "target_session_id",
+        "task_mode",
+        "/start",
+        "/events",
+        "/wait",
+        "/ack",
+        "/api/agent-tree",
+        "resident_root",
+        "AgentRun",
+    ):
+        assert forbidden not in prompt, forbidden
 
 
 def test_build_resident_prompt_master_on_is_orchestrator(
     manager: WorkspaceManager, tmp_path: Path
 ) -> None:
-    """master ON returns the orchestrator prompt: read the board, create tasks
-    (default reviewed mode), dispatch them to existing orchestrator workers via
-    the agent tree spawn action (session_id), and accept the work itself once
-    review has passed (PATCH status=done) — never writing code or provisioning
-    worker agents."""
+    """master ON returns the orchestrator prompt via ordinary Task REST only."""
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)
     workspace = manager.create_workspace(
@@ -1481,39 +1543,20 @@ def test_build_resident_prompt_master_on_is_orchestrator(
     assert "RESIDENT MASTER agent" in prompt
     assert "/board" in prompt
     assert "/tasks" in prompt
-    # Master mode dispatches via the agent tree spawn action with session_id
-    # for explicit worker routing (not the legacy target_session_id field).
-    assert "session_id" in prompt
-    assert "target_session_id" not in prompt
     assert "orchestrator" in prompt
     assert "NEVER create or delete orchestrator worker sessions" in prompt
-    assert "PATCH" in prompt
-    assert '"status":"done"' in prompt
-    assert "no worker agents available" in prompt
-    # Tasks use the default reviewed mode (a reviewer agent vets the work); the
-    # resident does the final acceptance, so it must NOT force direct mode.
+    assert "do NOT create one" in prompt
     assert '"task_mode":"direct"' not in prompt
-    assert "reviewed" in prompt
-    # Acceptance is gated on the child run emitting a completed event (review
-    # passed), not on the legacy human_acceptance_requested_at signal.
-    assert "completed" in prompt
-    # Degrade-to-proposal-only guardrail when there is no orchestrator worker.
-    assert "MUST NOT create one" in prompt
-    assert "never auto-creates a default" in prompt
-    # Reviewer auto-spawn by the backend is explicitly allowed (not forbidden).
-    assert "allowed" in prompt
-    # Session-scoped heartbeat endpoint, with the session id interpolated.
     assert "sessions/sid/reports" in prompt
-    # No worktree / self-provisioning language in orchestrator mode.
     assert "git worktree add" not in prompt
     assert "work ONLY" not in prompt
+    _assert_master_prompt_uses_task_graph_only(prompt)
 
 
 def test_run_resident_agent_master_mode_reuse_sends_heartbeat_prompt(
     manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    """Reuse path in master mode: the single self-drive prompt is the master prompt
-    and references the session-scoped report endpoint for THIS session."""
+    """Reuse path in master mode sends the Task-REST orchestrator prompt."""
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)
     workspace = manager.create_workspace(
@@ -1550,12 +1593,8 @@ def test_run_resident_agent_master_mode_reuse_sends_heartbeat_prompt(
     assert sends[0][0] == session.id
     prompt = sends[0][1]
     assert "RESIDENT MASTER agent" in prompt
-    # Master mode dispatches via the agent tree spawn action with session_id.
-    assert "session_id" in prompt
-    assert "target_session_id" not in prompt
-    # Acceptance is gated on the child run's completed event.
-    assert "completed" in prompt
     assert f"sessions/{session.id}/reports" in prompt
+    _assert_master_prompt_uses_task_graph_only(prompt)
 
 
 def test_update_workspace_master_mode_keeps_resident_session(

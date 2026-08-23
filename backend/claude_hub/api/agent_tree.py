@@ -1,6 +1,8 @@
-"""Agent Tree + Durable Mailbox API endpoints.
+"""Deprecated AgentRun compatibility API endpoints.
 
-Exposes the unified agent-to-agent coordination layer:
+Canonical orchestration uses ``/api/workspaces/{workspace_id}/tasks/*``
+(Task create/start/wait/ack/followup/abort). This router exposes legacy
+AgentRun projection endpoints for cold replay and pre-migration callers:
 - ``POST /agent-tree/spawn`` — create a child run and dispatch its task.
 - ``POST /agent-tree/send`` — append a message to a run's mailbox.
 - ``POST /agent-tree/followup`` — append a message and resume the run's turn.
@@ -11,9 +13,8 @@ Exposes the unified agent-to-agent coordination layer:
 - ``GET  /agent-tree/runs/{run_id}/events`` — replay a run's event stream.
 
 Authority: every mutating action (spawn, send, followup, interrupt) requires
-the caller's session to own the ``author_id`` run. A run is owned by a session
-if ``run.context_ref == session_id``. The resident root run is owned by the
-resident session.
+the caller's session to own the ``author_id`` run. Legacy ``resident_root`` runs
+are load-only and are not accessible via this API.
 """
 
 from __future__ import annotations
@@ -72,11 +73,13 @@ def _session_owns_run(manager: "AgentTreeManager", run: "AgentRun", session_id: 
     """Return True if ``session_id`` owns ``run`` as its executor.
 
     - ``managed_task`` runs: the referenced task's ``session_id`` matches.
-    - ``resident_root`` / ``native_subagent`` / ``external_job``:
-      ``run.context_ref`` matches.
+    - ``native_subagent`` / ``external_job``: ``run.context_ref`` matches.
+    - ``resident_root``: always False (legacy load-only; fail closed).
     """
     from ..models.agent_tree import ExecutorKind
 
+    if run.executor_kind == ExecutorKind.RESIDENT_ROOT:
+        return False
     if run.executor_kind == ExecutorKind.MANAGED_TASK:
         wm = manager._wm
         task = wm.tasks.get(run.context_ref) if run.context_ref else None

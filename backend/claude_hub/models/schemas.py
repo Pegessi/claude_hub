@@ -551,10 +551,6 @@ class Workspace(BaseModel):
     resident_agent_remote_profile_id: Optional[str] = None
     resident_agent_cwd: Optional[str] = None
     resident_agent_remote_reconnect: bool = True
-    # Durable mailbox consumer for the workspace Resident. Keyed by workspace
-    # identity, never by the replaceable resident ManagedSession id.
-    resident_consumer_key: Optional[str] = None
-    resident_ack_sequence: int = 0
     created_at: datetime
     updated_at: datetime
 

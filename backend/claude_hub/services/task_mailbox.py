@@ -18,7 +18,6 @@ from .directed_wait import DirectedWaitCoordinator
 from .task_graph import (
     TASK_CONSUMER_PREFIX,
     compat_run_id_for_task,
-    make_resident_consumer_key,
     make_task_consumer_key,
     task_supervisor_consumer_key,
     tasks_in_subtree,
@@ -107,7 +106,7 @@ def project_task_event_to_agent_event(
 
 
 class TaskMailbox:
-    """Workspace-scoped Task event stream and Task/Resident consumer cursors."""
+    """Workspace-scoped Task event stream and ``task:<task_id>`` consumer cursors."""
 
     def __init__(self, workspace_manager: Any) -> None:
         self._wm = workspace_manager
@@ -417,37 +416,22 @@ class TaskMailbox:
         raise TaskCallIdConflict(f"call_id {call_id!r} already recorded in Agent Tree compat index")
 
     def consumer_cursor(self, workspace_id: str, consumer_key: str) -> int:
-        if consumer_key.startswith(TASK_CONSUMER_PREFIX):
-            task_id = consumer_key[len(TASK_CONSUMER_PREFIX) :]
-            task = self._wm.tasks.get(task_id)
-            if task is None or task.workspace_id != workspace_id:
-                raise KeyError(task_id)
-            return int(task.consumer_ack_sequence)
-        expected = make_resident_consumer_key(workspace_id)
-        if consumer_key != expected:
-            raise ValueError(f"Unknown mailbox consumer key {consumer_key!r}")
-        workspace = self._wm.workspaces.get(workspace_id)
-        if workspace is None:
-            raise KeyError(workspace_id)
-        return int(workspace.resident_ack_sequence)
+        if not consumer_key.startswith(TASK_CONSUMER_PREFIX):
+            raise ValueError(f"Mailbox consumer must be task:<task_id>; got {consumer_key!r}")
+        task_id = consumer_key[len(TASK_CONSUMER_PREFIX) :]
+        task = self._wm.tasks.get(task_id)
+        if task is None or task.workspace_id != workspace_id:
+            raise KeyError(task_id)
+        return int(task.consumer_ack_sequence)
 
     def _set_consumer_cursor(self, workspace_id: str, consumer_key: str, sequence: int) -> None:
-        if consumer_key.startswith(TASK_CONSUMER_PREFIX):
-            task_id = consumer_key[len(TASK_CONSUMER_PREFIX) :]
-            task = self._wm.tasks.get(task_id)
-            if task is None or task.workspace_id != workspace_id:
-                raise KeyError(task_id)
-            self._wm.tasks[task_id] = task.model_copy(update={"consumer_ack_sequence": sequence})
-            return
-        expected = make_resident_consumer_key(workspace_id)
-        if consumer_key != expected:
-            raise ValueError(f"Unknown mailbox consumer key {consumer_key!r}")
-        workspace = self._wm.workspaces.get(workspace_id)
-        if workspace is None:
-            raise KeyError(workspace_id)
-        self._wm.workspaces[workspace_id] = workspace.model_copy(
-            update={"resident_ack_sequence": sequence}
-        )
+        if not consumer_key.startswith(TASK_CONSUMER_PREFIX):
+            raise ValueError(f"Mailbox consumer must be task:<task_id>; got {consumer_key!r}")
+        task_id = consumer_key[len(TASK_CONSUMER_PREFIX) :]
+        task = self._wm.tasks.get(task_id)
+        if task is None or task.workspace_id != workspace_id:
+            raise KeyError(task_id)
+        self._wm.tasks[task_id] = task.model_copy(update={"consumer_ack_sequence": sequence})
 
     def _compat_run_id_for_linked_task(self, workspace_id: str, task: WorkspaceTask) -> str:
         """Stable event author id. Unique ``context_ref`` is a read-only hint."""
@@ -646,18 +630,8 @@ class TaskMailbox:
             if consumer_task is not None and consumer_task.workspace_id == task.workspace_id:
                 _wake_run(compat_run_id_for_task(consumer_task))
 
-        resident_key = make_resident_consumer_key(task.workspace_id)
-        if event.consumer_key == resident_key or task.parent_task_id is None:
-            for run in tree._runs.values():
-                if (
-                    run.workspace_id == task.workspace_id
-                    and run.executor_kind == ExecutorKind.RESIDENT_ROOT
-                ):
-                    _wake_run(run.id)
-                    break
-
     def _wake_task_consumers(self, event: TaskEvent, task: WorkspaceTask) -> None:
-        """Wake Task/Resident waiters. Never requires an AgentRun."""
+        """Wake Task waiters. Never requires an AgentRun or Resident consumer."""
 
         self._waiters.wake(event.consumer_key)
         ancestor_id = task.parent_task_id
@@ -669,11 +643,6 @@ class TaskMailbox:
                 break
             self._waiters.wake_if_subtree(make_task_consumer_key(ancestor.id))
             ancestor_id = ancestor.parent_task_id
-        resident_key = make_resident_consumer_key(task.workspace_id)
-        if event.consumer_key == resident_key:
-            self._waiters.wake(resident_key)
-        else:
-            self._waiters.wake_if_subtree(resident_key)
 
     def wait(
         self,
@@ -711,7 +680,7 @@ class TaskMailbox:
         subtree: bool = False,
         timeout_seconds: float = 30.0,
     ) -> List[TaskEvent]:
-        """Directed long-poll for a Task or Resident consumer. No AgentRun."""
+        """Directed long-poll for a Task consumer. No AgentRun."""
 
         self.consumer_cursor(workspace_id, consumer_key)
         return await self._waiters.wait(
@@ -727,21 +696,16 @@ class TaskMailbox:
         )
 
     def _visible_task_ids(self, workspace_id: str, consumer_key: str) -> set[str]:
-        if consumer_key.startswith(TASK_CONSUMER_PREFIX):
-            task_id = consumer_key[len(TASK_CONSUMER_PREFIX) :]
-            task = self._wm.tasks.get(task_id)
-            if task is None or task.workspace_id != workspace_id:
-                raise KeyError(task_id)
-            return {
-                item.id for item in tasks_in_subtree(self._wm.tasks.values(), workspace_id, task)
-            }
-        expected = make_resident_consumer_key(workspace_id)
-        if consumer_key != expected:
-            raise ValueError(f"Unknown mailbox consumer key {consumer_key!r}")
-        return {item.id for item in self._wm.tasks.values() if item.workspace_id == workspace_id}
+        if not consumer_key.startswith(TASK_CONSUMER_PREFIX):
+            raise ValueError(f"Mailbox consumer must be task:<task_id>; got {consumer_key!r}")
+        task_id = consumer_key[len(TASK_CONSUMER_PREFIX) :]
+        task = self._wm.tasks.get(task_id)
+        if task is None or task.workspace_id != workspace_id:
+            raise KeyError(task_id)
+        return {item.id for item in tasks_in_subtree(self._wm.tasks.values(), workspace_id, task)}
 
     def ack(self, workspace_id: str, consumer_key: str, sequence: int, persist: bool = True) -> int:
-        """Advance a Task or Resident consumer cursor. Never writes AgentRun.ack."""
+        """Advance a Task consumer cursor. Never writes AgentRun.ack or resident index."""
 
         current = self.consumer_cursor(workspace_id, consumer_key)
         workspace_max = self._workspace_max_sequence(workspace_id)
@@ -930,21 +894,19 @@ class TaskMailbox:
         if task is not None:
             return make_task_consumer_key(task.id)
         run = self._wm.agent_tree._runs.get(recipient)
-        if (
-            run is not None
-            and run.workspace_id == workspace_id
-            and run.executor_kind == ExecutorKind.RESIDENT_ROOT
-        ):
-            return make_resident_consumer_key(workspace_id)
-        resident_key = make_resident_consumer_key(workspace_id)
-        if recipient == resident_key:
-            return resident_key
+        if run is not None and run.workspace_id == workspace_id:
+            if run.executor_kind == ExecutorKind.RESIDENT_ROOT:
+                if projected is not None:
+                    return task_supervisor_consumer_key(projected)
+                return None
+            if projected is not None:
+                linked = linked_run_for_task(projected, self._wm.agent_tree._runs)
+                if linked is not None and recipient == linked.parent_id:
+                    return task_supervisor_consumer_key(projected)
         if projected is not None:
             linked = linked_run_for_task(projected, self._wm.agent_tree._runs)
             if linked is not None and recipient == linked.parent_id:
-                if projected.parent_task_id:
-                    return make_task_consumer_key(projected.parent_task_id)
-                return resident_key
+                return task_supervisor_consumer_key(projected)
         return None
 
     def _project_legacy_agent_events(self, workspace_id: str) -> None:
@@ -1140,7 +1102,4 @@ class TaskMailbox:
                 return session_id, TaskActorRole(role_raw)
             except ValueError:
                 pass
-        run = self._wm.agent_tree._runs.get(event.author)
-        if run is not None and run.executor_kind == ExecutorKind.RESIDENT_ROOT:
-            return session_id, TaskActorRole.SUPERVISOR
         return session_id, TaskActorRole.WORKER

@@ -18,7 +18,7 @@ from pytest import MonkeyPatch
 from claude_hub.auth.dependencies import get_current_user
 from claude_hub.main import app
 from claude_hub.models import User
-from claude_hub.services.task_graph import make_resident_consumer_key, make_task_consumer_key
+from claude_hub.services.task_graph import make_task_consumer_key
 from claude_hub.services.workspace_manager import WorkspaceManager, workspace_manager
 
 _wm = import_module("claude_hub.services.workspace_manager")
@@ -218,13 +218,6 @@ def test_parent_child_subtree_and_wait_ack_cold_cursor(
     assert [item["call_id"] for item in parent_subtree.json()] == ["fu-child"]
     sequence = parent_subtree.json()[0]["sequence"]
 
-    resident = client.get(
-        f"/api/workspaces/{workspace_id}/resident/events",
-        params={"subtree": True},
-    )
-    assert resident.status_code == 200
-    assert [item["call_id"] for item in resident.json()] == ["fu-child"]
-
     ack = client.post(
         f"/api/workspaces/{workspace_id}/tasks/{parent['id']}/ack",
         json={"sequence": sequence},
@@ -233,7 +226,6 @@ def test_parent_child_subtree_and_wait_ack_cold_cursor(
     assert ack.json()["consumer_ack_sequence"] == sequence
     assert manager.tasks[parent["id"]].consumer_ack_sequence == sequence
     assert manager.tasks[child["id"]].consumer_ack_sequence == 0
-    assert manager.workspaces[workspace_id].resident_ack_sequence == 0
 
     empty = client.post(
         f"/api/workspaces/{workspace_id}/tasks/{parent['id']}/wait",
@@ -316,39 +308,55 @@ def test_cross_workspace_task_paths_rejected(
     assert manager.agent_tree._runs == {}
 
 
-def test_resident_ack_advances_workspace_cursor_only(
+def test_root_task_ack_advances_task_cursor_only(
     persist_api: tuple[WorkspaceManager, Path], tmp_path: Path
 ) -> None:
     manager, _ = persist_api
     client = _client()
-    workspace_id = _create_workspace(client, tmp_path, "resident")
+    workspace_id = _create_workspace(client, tmp_path, "root-task")
     task = _create_task(client, workspace_id, "rootish")
     followup = client.post(
         f"/api/workspaces/{workspace_id}/tasks/{task['id']}/followup",
-        json={"message": "for resident", "call_id": "fu-res"},
+        json={"message": "for root inbox", "call_id": "fu-root"},
     )
     assert followup.status_code == 200
     sequence = followup.json()["sequence"]
 
     waited = client.post(
-        f"/api/workspaces/{workspace_id}/resident/wait",
+        f"/api/workspaces/{workspace_id}/tasks/{task['id']}/wait",
         params={"subtree": True},
     )
-    assert [item["call_id"] for item in waited.json()] == ["fu-res"]
+    assert [item["call_id"] for item in waited.json()] == ["fu-root"]
     acked = client.post(
-        f"/api/workspaces/{workspace_id}/resident/ack",
+        f"/api/workspaces/{workspace_id}/tasks/{task['id']}/ack",
         json={"sequence": sequence},
     )
     assert acked.status_code == 200
-    assert acked.json()["resident_ack_sequence"] == sequence
-    assert acked.json()["resident_consumer_key"] == make_resident_consumer_key(workspace_id)
-    assert manager.tasks[task["id"]].consumer_ack_sequence == 0
+    assert acked.json()["consumer_ack_sequence"] == sequence
+    assert manager.tasks[task["id"]].consumer_ack_sequence == sequence
     assert manager.agent_tree._runs == {}
     empty = client.post(
-        f"/api/workspaces/{workspace_id}/resident/wait",
+        f"/api/workspaces/{workspace_id}/tasks/{task['id']}/wait",
         params={"subtree": True, "timeout_seconds": 0},
     )
     assert empty.json() == []
+
+
+def test_legacy_resident_mailbox_routes_are_gone(
+    persist_api: tuple[WorkspaceManager, Path], tmp_path: Path
+) -> None:
+    client = _client()
+    workspace_id = _create_workspace(client, tmp_path, "legacy-resident")
+    for method, path in (
+        ("get", f"/api/workspaces/{workspace_id}/resident/events"),
+        ("post", f"/api/workspaces/{workspace_id}/resident/wait"),
+        ("post", f"/api/workspaces/{workspace_id}/resident/ack"),
+    ):
+        if method == "get":
+            response = client.get(path)
+        else:
+            response = client.post(path, json={"sequence": 1})
+        assert response.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -392,41 +400,41 @@ async def test_public_wait_wakes_on_pre_append_followup(
 
 
 @pytest.mark.asyncio
-async def test_resident_wait_wakes_on_pre_append_followup(
+async def test_root_task_subtree_wait_wakes_on_pre_append_followup(
     persist_api: tuple[WorkspaceManager, Path], tmp_path: Path
 ) -> None:
     manager, _ = persist_api
     runs_before = _runs_dump(manager)
     client = _client()
-    workspace_id = _create_workspace(client, tmp_path, "resident-wake")
+    workspace_id = _create_workspace(client, tmp_path, "root-wake")
     task = _create_task(client, workspace_id, "rootish")
-    resident_key = make_resident_consumer_key(workspace_id)
+    consumer = make_task_consumer_key(task["id"])
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as async_client:
         wait_task = asyncio.create_task(
             async_client.post(
-                f"/api/workspaces/{workspace_id}/resident/wait",
+                f"/api/workspaces/{workspace_id}/tasks/{task['id']}/wait",
                 params={"timeout_seconds": 2, "subtree": True, "since_sequence": 0},
             )
         )
         for _ in range(50):
-            if resident_key in manager.task_mailbox._waiters.events:
+            if consumer in manager.task_mailbox._waiters.events:
                 break
             await asyncio.sleep(0.02)
         else:
             wait_task.cancel()
-            pytest.fail("Resident wait did not register a consumer Event")
+            pytest.fail("Root task subtree wait did not register a consumer Event")
         await asyncio.sleep(0.02)
         followup = await async_client.post(
             f"/api/workspaces/{workspace_id}/tasks/{task['id']}/followup",
-            json={"message": "wake resident", "call_id": "wake-resident"},
+            json={"message": "wake root", "call_id": "wake-root"},
         )
         assert followup.status_code == 200, followup.text
         waited = await wait_task
 
     assert waited.status_code == 200, waited.text
-    assert [item["call_id"] for item in waited.json()] == ["wake-resident"]
+    assert [item["call_id"] for item in waited.json()] == ["wake-root"]
     assert _runs_dump(manager) == runs_before
 
 
@@ -447,11 +455,5 @@ def test_public_wait_timeout_returns_empty(
     assert response.status_code == 200
     assert response.json() == []
     assert elapsed >= 0.1
-    resident = client.post(
-        f"/api/workspaces/{workspace_id}/resident/wait",
-        params={"timeout_seconds": 0, "subtree": True},
-    )
-    assert resident.status_code == 200
-    assert resident.json() == []
     assert _runs_dump(manager) == runs_before
     assert manager.agent_tree._runs == {}

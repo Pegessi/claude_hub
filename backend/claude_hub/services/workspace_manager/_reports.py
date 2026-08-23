@@ -874,13 +874,9 @@ class _ReportsMixin:
         # receiver's ACK is authoritative.
         #
         # Unknown call_ids (not in pending or processing) are ignored to
-        # prevent future-ID poisoning.
-        #
-        # For Resident sessions (task_id is None) we still process
-        # ``acked_call_ids``: the resident's event-batch delivery call_id
-        # must be ACKed so the root run's ack_sequence cursor advances.
-        # The implicit ``dispatch:{task_id}`` ACK only applies to task-bound
-        # sessions.
+        # prevent future-ID poisoning. ACK authorization follows ordinary
+        # Task assignment only; sessions without a linked Task cannot ACK
+        # via legacy run context_ref shortcuts.
         # ------------------------------------------------------------------
         ack_set: set[str] = set(payload.acked_call_ids)
         if task_id and task_id in self.tasks:
@@ -1042,8 +1038,6 @@ class _ReportsMixin:
             wake_target = self._emit_followup_delivered_if_followup(workspace_id, call_id)
             if wake_target is not None:
                 wake_targets.add(wake_target)
-            # resident event-batch delivery: advance ack_sequence cursor.
-            self._advance_resident_ack_on_delivery(call_id)
 
         # ---- Session/task delivered mutation (in-memory only) ----
         #
@@ -1187,11 +1181,9 @@ class _ReportsMixin:
         if target_run is None:
             return False
 
-        # The target run's context_ref is either a task id (for managed task
-        # runs) or a session id (for the resident root run).
+        # Managed task runs bind context_ref to a Task id.
         target_context_ref = target_run.context_ref
 
-        # Case 1: managed task run — context_ref is the task id.
         if target_context_ref and target_context_ref in self.tasks:
             target_task_id = target_context_ref
             if task_id and target_task_id != task_id:
@@ -1205,63 +1197,7 @@ class _ReportsMixin:
                     return False
             return True
 
-        # Case 2: resident root run — context_ref is the resident session id.
-        # Bind the ACK to the exact resident session: the reporting session
-        # must be the one the resident run is linked to.
-        if target_context_ref and target_context_ref == session_id:
-            return True
-
-        # Case 3: context_ref is neither a known task nor the reporting
-        # session — fail closed.
         return False
-
-    def _advance_resident_ack_on_delivery(self, call_id: str) -> None:
-        """If ``call_id`` is a resident event-batch delivery, advance ack_sequence.
-
-        The resident's child-event batch is delivered with a call_id that
-        has a call record with action="resident_delivery". The record's
-        event payload stores the ``max_sequence`` of the delivered events.
-        When the resident worker ACKs that call_id, we advance the resident
-        root run's ``ack_sequence`` cursor to ``max_sequence``.
-
-        This ensures the cursor only advances AFTER the resident worker
-        proves it processed the events — not when the Hub sends the prompt.
-
-        Fail-closed: any exception (including ``agent_tree.ack`` persistence
-        failures) propagates to the caller. Because this runs BEFORE the
-        session/task delivered-state mutation, a failure here simply prevents
-        the delivered commit — the call_id stays in processing (with payload
-        intact) and the ACK can be retried.
-        """
-        # Find the workspace for this call_id by scanning call records.
-        workspace_id = None
-        for ws_id, records in self.agent_tree._call_index.items():
-            if call_id in records:
-                workspace_id = ws_id
-                break
-        if workspace_id is None:
-            return
-
-        record = self.agent_tree._call_record(workspace_id, call_id)
-        if record is None:
-            return
-        if record.get("action") != "resident_delivery":
-            return
-
-        event = record.get("event")
-        if event is None:
-            return
-        max_sequence = (event.payload or {}).get("max_sequence")
-        if max_sequence is None:
-            return
-
-        target_run_id = record.get("target")
-        if not target_run_id:
-            return
-        # Defer persistence to create_report's single outer commit so the
-        # cursor, report, delivery transition, and lifecycle events cannot
-        # become partially durable.
-        self.agent_tree.ack(workspace_id, target_run_id, max_sequence, persist=False)
 
     def _emit_followup_delivered_if_followup(
         self, workspace_id: Optional[str], call_id: str

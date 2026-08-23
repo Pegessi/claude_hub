@@ -20,8 +20,9 @@ from claude_hub.models.agent_tree import (
 )
 from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
 from claude_hub.services.agent_tree import _request_fingerprint
-from claude_hub.services.task_graph import make_resident_consumer_key, make_task_consumer_key
+from claude_hub.services.task_graph import make_task_consumer_key
 from claude_hub.services.task_mailbox import compat_run_id_for_task
+from claude_hub.services.task_migration import legacy_resident_consumer_key
 from claude_hub.services.workspace_manager import WorkspaceManager
 
 _wm = import_module("claude_hub.services.workspace_manager")
@@ -225,7 +226,7 @@ def test_legacy_agent_event_projects_without_mutating_agent_run(
     assert event.task_id == linked.id
     assert event.review_cycle == 3
     assert event.compat_run_id == "run-child"
-    assert event.consumer_key == make_resident_consumer_key(ws_id)
+    assert event.consumer_key == make_task_consumer_key(linked.id)
     assert event.report_id == "old-report"
 
     again = WorkspaceManager()
@@ -237,7 +238,7 @@ def test_legacy_agent_event_projects_without_mutating_agent_run(
     assert again.agent_tree._runs[child_run.id].ack_sequence == 1
     assert again.agent_tree._runs[child_run.id].context_ref == linked.id
 
-    resident_key = make_resident_consumer_key(ws_id)
+    task_key = make_task_consumer_key(linked.id)
     follow, created = fresh.task_mailbox.append_event(
         workspace_id=ws_id,
         task_id=linked.id,
@@ -245,16 +246,16 @@ def test_legacy_agent_event_projects_without_mutating_agent_run(
         event_type=TaskEventType.REVIEW_PASSED,
         call_id="review-1",
         action="review",
-        consumer_key=resident_key,
+        consumer_key=task_key,
         actor_session_id="sess-reviewer",
         review_cycle=3,
     )
     assert created is True
     assert follow.sequence == 5
-    visible = fresh.task_mailbox.wait(ws_id, resident_key)
+    visible = fresh.task_mailbox.wait(ws_id, task_key, subtree=True)
     assert [item.call_id for item in visible] == ["legacy-call", "review-1"]
-    fresh.task_mailbox.ack(ws_id, resident_key, visible[-1].sequence)
-    assert fresh.workspaces[ws_id].resident_ack_sequence == 5
+    fresh.task_mailbox.ack(ws_id, task_key, visible[-1].sequence)
+    assert fresh.tasks[linked.id].consumer_ack_sequence == 5
     assert fresh.agent_tree._runs[child_run.id].ack_sequence == 1
 
 
@@ -621,3 +622,16 @@ def test_append_does_not_duplicate_agent_tree_call_id(
     assert manager.task_mailbox._events.get(ws_id, []) == []
     assert manager.task_mailbox._next_seq.get(ws_id, 1) == 1
     assert manager.agent_tree._runs["run-ordinary"].ack_sequence == 7
+
+
+def test_mailbox_rejects_legacy_resident_consumer_key(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    ws_id = _make_workspace(manager, tmp_path)
+    resident_key = legacy_resident_consumer_key(ws_id)
+    with pytest.raises(ValueError, match="task:<task_id>"):
+        manager.task_mailbox.consumer_cursor(ws_id, resident_key)
+    with pytest.raises(ValueError, match="task:<task_id>"):
+        manager.task_mailbox.wait(ws_id, resident_key)
+    with pytest.raises(ValueError, match="task:<task_id>"):
+        manager.task_mailbox.ack(ws_id, resident_key, 1)

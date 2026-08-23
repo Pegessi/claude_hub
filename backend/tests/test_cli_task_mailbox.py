@@ -102,7 +102,9 @@ def test_tree_events_hit_workspace_task_paths(monkeypatch: pytest.MonkeyPatch) -
         cli,
         ["--json", "task", "events", "ws1", "task-1", "--since-sequence", "2", "--subtree"],
     )
-    resident = runner.invoke(cli, ["--json", "task", "events", "ws1", "--since-sequence", "0"])
+    resident = runner.invoke(
+        cli, ["--json", "task", "events", "ws1", "task-1", "--since-sequence", "0"]
+    )
     assert tree.exit_code == 0, tree.output
     assert events.exit_code == 0, events.output
     assert resident.exit_code == 0, resident.output
@@ -110,7 +112,7 @@ def test_tree_events_hit_workspace_task_paths(monkeypatch: pytest.MonkeyPatch) -
     assert captured[1].url.path == "/api/workspaces/ws1/tasks/task-1/events"
     assert _query(captured[1])["since_sequence"] == ["2"]
     assert _query(captured[1])["subtree"] == ["true"]
-    assert captured[2].url.path == "/api/workspaces/ws1/resident/events"
+    assert captured[2].url.path == "/api/workspaces/ws1/tasks/task-1/events"
     for request in captured:
         assert "/api/agent-tree" not in request.url.path
 
@@ -205,20 +207,16 @@ def test_empty_wait_ack_does_not_ack(monkeypatch: pytest.MonkeyPatch) -> None:
     assert [item.url.path for item in captured] == ["/api/workspaces/ws1/tasks/task-1/wait"]
 
 
-def test_ack_task_and_resident_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ack_task_path(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={**SAMPLE_TASK, "consumer_ack_sequence": 7})
 
     captured = patch_get_client(monkeypatch, handler)
     runner = CliRunner()
     task_ack = runner.invoke(cli, ["--json", "task", "ack", "ws1", "task-1", "7"])
-    resident = runner.invoke(cli, ["--json", "task", "ack", "ws1", "4"])
     assert task_ack.exit_code == 0, task_ack.output
-    assert resident.exit_code == 0, resident.output
     assert captured[0].url.path == "/api/workspaces/ws1/tasks/task-1/ack"
     assert _json(captured[0]) == {"sequence": 7}
-    assert captured[1].url.path == "/api/workspaces/ws1/resident/ack"
-    assert _json(captured[1]) == {"sequence": 4}
     for request in captured:
         assert "/api/agent-tree" not in request.url.path
 
@@ -247,32 +245,32 @@ def test_wait_sends_timeout_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "/api/agent-tree" not in captured[0].url.path
 
 
-def test_resident_wait_sends_timeout_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_task_wait_sends_timeout_seconds_alt(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=[])
 
     captured = patch_get_client(monkeypatch, handler)
     result = CliRunner().invoke(
         cli,
-        ["--json", "task", "wait", "ws1", "--timeout-seconds", "0.2"],
+        ["--json", "task", "wait", "ws1", "task-1", "--timeout-seconds", "0.2"],
     )
     assert result.exit_code == 0, result.output
-    assert captured[0].url.path == "/api/workspaces/ws1/resident/wait"
+    assert captured[0].url.path == "/api/workspaces/ws1/tasks/task-1/wait"
     assert _query(captured[0])["timeout_seconds"] == ["0.2"]
 
 
-def test_resident_wait_ack_order(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_task_wait_ack_order(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/wait"):
             return httpx.Response(200, json=[SAMPLE_EVENT])
-        return httpx.Response(200, json={"id": "ws1", "resident_ack_sequence": 4})
+        return httpx.Response(200, json={**SAMPLE_TASK, "consumer_ack_sequence": 4})
 
     captured = patch_get_client(monkeypatch, handler)
-    result = CliRunner().invoke(cli, ["--json", "task", "wait", "ws1", "--ack"])
+    result = CliRunner().invoke(cli, ["--json", "task", "wait", "ws1", "task-1", "--ack"])
     assert result.exit_code == 0, result.output
     assert [item.url.path for item in captured] == [
-        "/api/workspaces/ws1/resident/wait",
-        "/api/workspaces/ws1/resident/ack",
+        "/api/workspaces/ws1/tasks/task-1/wait",
+        "/api/workspaces/ws1/tasks/task-1/ack",
     ]
     assert json.loads(result.stdout) == [SAMPLE_EVENT]
     assert json.loads(result.stderr) == {"acked_sequence": 4}

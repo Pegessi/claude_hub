@@ -11,6 +11,22 @@ from .task_graph import validate_parent_task
 
 logger = logging.getLogger(__name__)
 
+LEGACY_RESIDENT_CONSUMER_TEMPLATE = "workspace:{workspace_id}:resident"
+
+
+def legacy_resident_consumer_key(workspace_id: str) -> str:
+    """Load/migration-only resident consumer key. Not a runtime mailbox identity."""
+
+    if not workspace_id:
+        raise ValueError("Legacy resident consumer key requires a workspace id")
+    return LEGACY_RESIDENT_CONSUMER_TEMPLATE.format(workspace_id=workspace_id)
+
+
+def is_legacy_resident_consumer_key(consumer_key: str, workspace_id: str) -> bool:
+    """True for deprecated ``workspace:{id}:resident`` keys (load-only compat)."""
+
+    return consumer_key == legacy_resident_consumer_key(workspace_id)
+
 
 def linked_run_for_task(
     task: WorkspaceTask,
@@ -71,6 +87,7 @@ def migrate_pre_unification_graph(
     missing_parent_ids: Iterable[str],
     missing_ack_ids: Iterable[str] = (),
     missing_resident_ack: bool = False,
+    legacy_resident_ack: int = 0,
 ) -> Workspace:
     """Inherit missing parents from AgentRun and lift ACK cursors.
 
@@ -138,13 +155,13 @@ def migrate_pre_unification_graph(
         tasks[hinted.id] = hinted.model_copy(update={"agent_run_id": run.id})
 
     missing_acks = {task_id for task_id in missing_ack_ids}
-    resident_ack = int(workspace.resident_ack_sequence)
+    lifted_resident_ack = int(legacy_resident_ack)
     for run in runs.values():
         if run.workspace_id != workspace_id:
             continue
         if run.executor_kind == ExecutorKind.RESIDENT_ROOT:
             if missing_resident_ack:
-                resident_ack = max(resident_ack, int(run.ack_sequence))
+                lifted_resident_ack = max(lifted_resident_ack, int(run.ack_sequence))
             continue
         if run.executor_kind != ExecutorKind.MANAGED_TASK:
             continue
@@ -157,4 +174,13 @@ def migrate_pre_unification_graph(
                 "consumer_ack_sequence": max(int(live.consumer_ack_sequence), int(run.ack_sequence))
             }
         )
-    return workspace.model_copy(update={"resident_ack_sequence": resident_ack})
+
+    if lifted_resident_ack > 0:
+        from .task_graph import top_level_tasks
+
+        for root in top_level_tasks(tasks.values(), workspace_id):
+            lifted = max(int(root.consumer_ack_sequence), lifted_resident_ack)
+            if lifted != root.consumer_ack_sequence:
+                tasks[root.id] = root.model_copy(update={"consumer_ack_sequence": lifted})
+
+    return workspace

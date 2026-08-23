@@ -29,6 +29,7 @@ from claude_hub.models import (
 )
 from claude_hub.models.agent_tree import (
     AgentEventType,
+    AgentRun,
     AgentRunStatus,
     ExecutorKind,
     FollowupRequest,
@@ -322,7 +323,7 @@ async def test_report_rollback_preserves_concurrent_agent_tree_write(
     manager.sessions[session.id] = session.model_copy(update={"title": "stale title"})
     root = manager.agent_tree.create_root_run(
         workspace_id=workspace_id,
-        executor_kind=ExecutorKind.RESIDENT_ROOT,
+        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
     )
     concurrent_call_id = "concurrent-tree-write-during-rename"
     rename_started = asyncio.Event()
@@ -401,7 +402,7 @@ async def test_report_rollback_serializes_agent_tree_spawn(
     manager.sessions[session.id] = session.model_copy(update={"title": "stale title"})
     root = manager.agent_tree.create_root_run(
         workspace_id=workspace_id,
-        executor_kind=ExecutorKind.RESIDENT_ROOT,
+        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
     )
     spawn_call_id = "serialized-spawn-during-report-rollback"
     rename_started = asyncio.Event()
@@ -1000,3 +1001,77 @@ async def test_goal_packet_supplement_retry_reuses_cycle_and_call_id(
     second_message = send.await_args.args[1]
     assert manager.tasks[task.id].review_cycle == 3
     assert second_message == first_message
+
+
+def test_resident_ack_helper_removed_from_report_intake() -> None:
+    """Resident-specific ACK cursor advancement must not exist on the manager."""
+    assert not hasattr(WorkspaceManager, "_advance_resident_ack_on_delivery")
+
+
+@pytest.mark.asyncio
+async def test_resident_root_context_ref_does_not_authorize_taskless_ack(
+    manager_and_workspace: tuple[WorkspaceManager, str],
+) -> None:
+    """Legacy resident_root context_ref must not authorize task_id=None ACKs."""
+    manager, workspace_id = manager_and_workspace
+    now = datetime.utcnow()
+    session_id = "resident-session"
+    manager.sessions[session_id] = ManagedSession(
+        id=session_id,
+        workspace_id=workspace_id,
+        tab_id="tab-resident",
+        role=WorkspaceSessionRole.RESIDENT,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="Resident",
+        workspace_path="/tmp",
+        tmux_session="tmux-resident",
+        target=ExecutionTarget.LOCAL,
+        task_id=None,
+        current_task_id=None,
+        created_at=now,
+        updated_at=now,
+    )
+    root_run = AgentRun(
+        id="run-resident-root",
+        workspace_id=workspace_id,
+        parent_id=None,
+        path="run-resident-root",
+        supervisor_id=None,
+        executor_kind=ExecutorKind.RESIDENT_ROOT,
+        status=AgentRunStatus.RUNNING,
+        context_ref=session_id,
+        ack_sequence=0,
+        created_at=now,
+        updated_at=now,
+    )
+    manager.agent_tree._runs[root_run.id] = root_run
+    call_id = "resident-delivery-batch-1"
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={
+            "processing_call_ids": [call_id],
+            "pending_messages": {call_id: "batch"},
+        }
+    )
+    manager.agent_tree._call_index.setdefault(workspace_id, {})[call_id] = {
+        "action": "resident_delivery",
+        "target": root_run.id,
+        "event": None,
+    }
+
+    await manager.create_report(
+        session_id,
+        AgentReportCreate(
+            task_id=None,
+            state=AgentReportState.WORKING,
+            message="attempt resident root ack",
+            acked_call_ids=[call_id],
+        ),
+    )
+
+    session = manager.sessions[session_id]
+    assert call_id in session.processing_call_ids
+    assert call_id not in session.delivered_call_ids
+    assert manager.agent_tree._runs[root_run.id].ack_sequence == 0
+    assert manager._verify_call_target(call_id, None, session_id) is False

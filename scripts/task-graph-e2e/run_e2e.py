@@ -33,7 +33,9 @@ REPORT_WAIT_SECONDS = float(os.environ.get("CLAUDE_HUB_E2E_REPORT_WAIT", "360"))
 BACKEND = Path(os.environ["CLAUDE_HUB_E2E_BACKEND"])
 
 _WORKSPACE_POST_PREFIX = "/api/workspaces"
-_VERDICT_EVENT_TYPES = frozenset({"review_passed", "review_failed", "review_needs_input"})
+_VERDICT_EVENT_TYPES = frozenset(
+    {"review_passed", "review_failed", "review_needs_input"}
+)
 _VERDICT_TYPES = frozenset({"review_passed", "review_failed", "review_needs_input"})
 _TERMINAL_REPORT_STATES = _VERDICT_TYPES
 
@@ -166,7 +168,9 @@ def _is_verdict(event: dict, child_id: str, reviewer_session_id: str) -> bool:
     return False
 
 
-def _is_verdict_task_event(event: dict, child_id: str, reviewer_session_id: str) -> bool:
+def _is_verdict_task_event(
+    event: dict, child_id: str, reviewer_session_id: str
+) -> bool:
     return _is_verdict(event, child_id, reviewer_session_id)
 
 
@@ -193,7 +197,9 @@ def _filter_target_events(
 ) -> list[dict]:
     matched: list[dict] = []
     for event in events:
-        if _classify_target_event(event, child_id, worker_session_id, reviewer_session_id):
+        if _classify_target_event(
+            event, child_id, worker_session_id, reviewer_session_id
+        ):
             matched.append(event)
     return sorted(matched, key=lambda item: int(item["sequence"]))
 
@@ -202,7 +208,9 @@ def _assert_target_event_fields(event: dict, label: str) -> None:
     assert event.get("task_id"), f"{label} missing task_id: {event}"
     assert event.get("actor_session_id"), f"{label} missing actor_session_id: {event}"
     assert event.get("actor_role"), f"{label} missing actor_role: {event}"
-    assert event.get("review_cycle") is not None, f"{label} missing review_cycle: {event}"
+    assert (
+        event.get("review_cycle") is not None
+    ), f"{label} missing review_cycle: {event}"
     assert event.get("sequence") is not None, f"{label} missing sequence: {event}"
     assert event.get("call_id"), f"{label} missing call_id: {event}"
 
@@ -222,7 +230,9 @@ def _assert_no_same_cycle_review_started_after_verdict(
             verdict_seq = int(event["sequence"])
             verdict_cycle = event.get("review_cycle")
             break
-    assert verdict_seq is not None, "missing terminal verdict TaskEvent in pre-reload set"
+    assert (
+        verdict_seq is not None
+    ), "missing terminal verdict TaskEvent in pre-reload set"
     for event in ordered:
         seq = int(event["sequence"])
         if seq <= verdict_seq:
@@ -237,7 +247,9 @@ def _assert_no_same_cycle_review_started_after_verdict(
             )
 
 
-def _assert_unique_target_sequences_and_call_ids(events: list[dict], *, label: str) -> None:
+def _assert_unique_target_sequences_and_call_ids(
+    events: list[dict], *, label: str
+) -> None:
     sequences: set[int] = set()
     call_ids: set[str] = set()
     for event in events:
@@ -256,19 +268,25 @@ def _assert_three_target_categories(
     worker_session_id: str,
     reviewer_session_id: str,
 ) -> dict[str, list[dict]]:
-    targets = _filter_target_events(events, child_id, worker_session_id, reviewer_session_id)
+    targets = _filter_target_events(
+        events, child_id, worker_session_id, reviewer_session_id
+    )
     by_kind: dict[str, list[dict]] = {
         "worker_report": [],
         "review_started": [],
         "verdict": [],
     }
     for event in targets:
-        kind = _classify_target_event(event, child_id, worker_session_id, reviewer_session_id)
+        kind = _classify_target_event(
+            event, child_id, worker_session_id, reviewer_session_id
+        )
         assert kind is not None
         by_kind[kind].append(event)
         _assert_target_event_fields(event, kind)
     missing = [kind for kind, rows in by_kind.items() if not rows]
-    assert not missing, f"parent subtree missing target categories: {missing}; events={targets!r}"
+    assert (
+        not missing
+    ), f"parent subtree missing target categories: {missing}; events={targets!r}"
     return by_kind
 
 
@@ -312,7 +330,9 @@ def _original_target_registry(events: list[dict]) -> dict[str, Any]:
         call_id = event.get("call_id")
         sequence = int(event["sequence"])
         assert call_id, f"original target missing call_id: {event!r}"
-        assert call_id not in by_call_id, f"duplicate original call_id before reload: {call_id!r}"
+        assert (
+            call_id not in by_call_id
+        ), f"duplicate original call_id before reload: {call_id!r}"
         by_call_id[str(call_id)] = _target_event_snapshot(event)
         by_sequence[sequence] = str(call_id)
     max_sequence = max(by_sequence) if by_sequence else 0
@@ -354,7 +374,9 @@ def _assert_original_targets_persisted(
             extras.append(_reload_extra_record(event))
 
     missing = original_call_ids - seen_original
-    assert not missing, f"{label}: original call_ids missing after reload: {sorted(missing)!r}"
+    assert (
+        not missing
+    ), f"{label}: original call_ids missing after reload: {sorted(missing)!r}"
     return extras
 
 
@@ -411,21 +433,28 @@ def _board_task(workspace_id: str, task_id: str) -> dict | None:
 
 def _session_report(task_id: str, session_id: str, reports: list[dict]) -> dict | None:
     owned = [
-        r for r in reports if r.get("session_id") == session_id and (r.get("call_id") or "").strip()
+        r
+        for r in reports
+        if r.get("session_id") == session_id and (r.get("call_id") or "").strip()
     ]
     return owned[-1] if owned else None
 
 
-def _reviewer_report(workspace_id: str, child_id: str, reviewer_session_id: str) -> dict | None:
+def _reviewer_report(
+    workspace_id: str, child_id: str, reviewer_session_id: str
+) -> dict | None:
     """Return the latest reviewer report only when state is a terminal verdict."""
 
     _, reports = http("GET", f"/api/workspaces/{workspace_id}/tasks/{child_id}/reports")
     owned = [
         r
         for r in (reports if isinstance(reports, list) else [])
-        if r.get("session_id") == reviewer_session_id and (r.get("call_id") or "").strip()
+        if r.get("session_id") == reviewer_session_id
+        and (r.get("call_id") or "").strip()
     ]
-    terminal = [r for r in owned if str(r.get("state") or "").lower() in _TERMINAL_REPORT_STATES]
+    terminal = [
+        r for r in owned if str(r.get("state") or "").lower() in _TERMINAL_REPORT_STATES
+    ]
     return terminal[-1] if terminal else None
 
 
@@ -543,7 +572,8 @@ def main() -> int:
         if evidence["credential_overlay_exists_after_install"]:
             raise RuntimeError("harness must not persist e2e_launch_env.json")
         evidence["launch_env_has_auth"] = bool(
-            launch_env.get("ANTHROPIC_AUTH_TOKEN") or launch_env.get("ANTHROPIC_API_KEY")
+            launch_env.get("ANTHROPIC_AUTH_TOKEN")
+            or launch_env.get("ANTHROPIC_API_KEY")
         )
 
         if not (base.REPO / ".git").exists():
@@ -565,9 +595,6 @@ def main() -> int:
         )
         workspace_id = workspace["id"]
         evidence["workspace_id"] = workspace_id
-        resident_key = tg.make_resident_consumer_key(workspace_id)
-        evidence["resident_consumer_key"] = resident_key
-        assert resident_key == f"workspace:{workspace_id}:resident"
 
         parent = task_cli(
             "create",
@@ -583,7 +610,9 @@ def main() -> int:
         )
         parent_id = parent["id"]
         evidence["parent_task_id"] = parent_id
-        evidence["parent_consumer_key"] = tg.make_task_consumer_key(parent_id)
+        parent_consumer_key = tg.make_task_consumer_key(parent_id)
+        evidence["parent_consumer_key"] = parent_consumer_key
+        assert parent_consumer_key == f"task:{parent_id}"
 
         worker_call_id = "e2e-worker-report-1"
         child = task_cli(
@@ -608,7 +637,9 @@ def main() -> int:
         )
         child_id = child["id"]
         evidence["child_task_id"] = child_id
-        evidence["child_consumer_key"] = tg.make_task_consumer_key(child_id)
+        child_consumer_key = tg.make_task_consumer_key(child_id)
+        evidence["child_consumer_key"] = child_consumer_key
+        assert child_consumer_key == f"task:{child_id}"
         assert child.get("parent_task_id") == parent_id
 
         started = task_cli(
@@ -627,7 +658,9 @@ def main() -> int:
                 return None
             session_id = task["session_id"]
             _, board = http("GET", f"/api/workspaces/{workspace_id}/board")
-            session = next((s for s in board.get("sessions", []) if s["id"] == session_id), None)
+            session = next(
+                (s for s in board.get("sessions", []) if s["id"] == session_id), None
+            )
             if not session:
                 return None
             return {"task": task, "session": session}
@@ -641,7 +674,9 @@ def main() -> int:
             known_tmux.append(worker_session["tmux_session"])
 
         def _worker_report():
-            _, reports = http("GET", f"/api/workspaces/{workspace_id}/tasks/{child_id}/reports")
+            _, reports = http(
+                "GET", f"/api/workspaces/{workspace_id}/tasks/{child_id}/reports"
+            )
             report = _session_report(child_id, worker_session_id, reports)
             if report and "e2e_child_report" in (report.get("message") or "").lower():
                 return report
@@ -665,7 +700,9 @@ def main() -> int:
                 return None
             reviewer_id = task["review_session_id"]
             _, board = http("GET", f"/api/workspaces/{workspace_id}/board")
-            session = next((s for s in board.get("sessions", []) if s["id"] == reviewer_id), None)
+            session = next(
+                (s for s in board.get("sessions", []) if s["id"] == reviewer_id), None
+            )
             if not session:
                 return None
             return {"task": task, "session": session}
@@ -683,7 +720,18 @@ def main() -> int:
         assert child_id in evidence["parent_subtree_ids"]
 
         parent_board = _board_task(workspace_id, parent_id)
+        child_board = _board_task(workspace_id, child_id)
         cursor = int(parent_board.get("consumer_ack_sequence") or 0)
+        evidence["parent_consumer_ack_cursor"] = cursor
+        evidence["child_consumer_ack_cursor"] = int(
+            (child_board or {}).get("consumer_ack_sequence") or 0
+        )
+        evidence["consumer_key_source"] = {
+            "parent": "tg.make_task_consumer_key(parent_task_id)",
+            "child": "tg.make_task_consumer_key(child_task_id)",
+            "wait_ack_cursor_task": parent_id,
+            "note": "TaskEvent API does not expose consumer_key; cursors bind task:<task_id>",
+        }
 
         target_events: list[dict] = []
         target_by_kind: dict[str, list[dict]] = {}
@@ -698,7 +746,9 @@ def main() -> int:
                 worker_session_id,
                 reviewer_session_id,
             )
-            reviewer_report = _reviewer_report(workspace_id, child_id, reviewer_session_id)
+            reviewer_report = _reviewer_report(
+                workspace_id, child_id, reviewer_session_id
+            )
             if ready is not None and _is_terminal_reviewer_report(reviewer_report):
                 target_events, target_by_kind = ready
                 verdict_event = next(
@@ -714,9 +764,13 @@ def main() -> int:
                 break
             time.sleep(2.0)
         else:
-            latest_events = _get_parent_events_api(workspace_id, parent_id, since_sequence=cursor)
+            latest_events = _get_parent_events_api(
+                workspace_id, parent_id, since_sequence=cursor
+            )
             evidence["mailbox_events_at_timeout"] = _target_snapshots(latest_events)
-            latest_report = _reviewer_report(workspace_id, child_id, reviewer_session_id)
+            latest_report = _reviewer_report(
+                workspace_id, child_id, reviewer_session_id
+            )
             if latest_report:
                 evidence["reviewer_report_at_timeout"] = {
                     "id": latest_report.get("id"),
@@ -728,8 +782,12 @@ def main() -> int:
                     "GET",
                     f"/api/workspaces/{workspace_id}/tasks/{child_id}/reports",
                 )
-                reports_list = reports_payload if isinstance(reports_payload, list) else []
-                non_terminal = _session_report(child_id, reviewer_session_id, reports_list)
+                reports_list = (
+                    reports_payload if isinstance(reports_payload, list) else []
+                )
+                non_terminal = _session_report(
+                    child_id, reviewer_session_id, reports_list
+                )
                 if non_terminal:
                     evidence["reviewer_non_terminal_report_at_timeout"] = {
                         "id": non_terminal.get("id"),
@@ -746,7 +804,9 @@ def main() -> int:
             for kind, events in target_by_kind.items()
         }
 
-        _assert_unique_target_sequences_and_call_ids(target_events, label="pre-reload targets")
+        _assert_unique_target_sequences_and_call_ids(
+            target_events, label="pre-reload targets"
+        )
         _assert_no_same_cycle_review_started_after_verdict(
             target_events,
             child_id,
@@ -756,7 +816,10 @@ def main() -> int:
         evidence["reviewer_report_id"] = reviewer_report["id"]
         evidence["reviewer_report_state"] = reviewer_report.get("state")
         evidence["reviewer_report_decision"] = reviewer_report.get("review_decision")
-        assert str(evidence["reviewer_report_state"] or "").lower() in _TERMINAL_REPORT_STATES
+        assert (
+            str(evidence["reviewer_report_state"] or "").lower()
+            in _TERMINAL_REPORT_STATES
+        )
         assert str(evidence["reviewer_report_state"] or "").lower() != "review_started"
 
         waited = task_cli(
@@ -789,18 +852,22 @@ def main() -> int:
             for kind, events in target_by_kind.items()
         }
 
-        parent_detail = task_cli("get", parent_id, "--workspace-id", workspace_id, "--no-reports")
-        child_detail = task_cli("get", child_id, "--workspace-id", workspace_id, "--no-reports")
+        parent_detail = task_cli(
+            "get", parent_id, "--workspace-id", workspace_id, "--no-reports"
+        )
+        child_detail = task_cli(
+            "get", child_id, "--workspace-id", workspace_id, "--no-reports"
+        )
         evidence["parent_compat_run_id_before_reload"] = _compat_run_id(parent_detail)
         evidence["child_compat_run_id_before_reload"] = _compat_run_id(child_detail)
         parent_model = WorkspaceTask.model_validate(parent_detail)
         child_model = WorkspaceTask.model_validate(child_detail)
-        assert evidence["parent_compat_run_id_before_reload"] == tg.compat_run_id_for_task(
-            parent_model
-        )
-        assert evidence["child_compat_run_id_before_reload"] == tg.compat_run_id_for_task(
-            child_model
-        )
+        assert evidence[
+            "parent_compat_run_id_before_reload"
+        ] == tg.compat_run_id_for_task(parent_model)
+        assert evidence[
+            "child_compat_run_id_before_reload"
+        ] == tg.compat_run_id_for_task(child_model)
 
         # Freeze the original target set at verdict time (seq 1..3). Do not re-fetch
         # before reload — late mailbox rows (e.g. reaper follow-ups) may arrive in between.
@@ -814,14 +881,18 @@ def main() -> int:
         }
         evidence["target_events_before_reload"] = original_registry["snapshots"]
 
-        all_events_before_reload = _get_parent_events_api(workspace_id, parent_id, since_sequence=0)
+        all_events_before_reload = _get_parent_events_api(
+            workspace_id, parent_id, since_sequence=0
+        )
         target_before_reload = _filter_target_events(
             all_events_before_reload,
             child_id,
             worker_session_id,
             reviewer_session_id,
         )
-        evidence["target_events_observed_before_reload"] = _target_snapshots(target_before_reload)
+        evidence["target_events_observed_before_reload"] = _target_snapshots(
+            target_before_reload
+        )
         _assert_unique_target_sequences_and_call_ids(
             target_before_reload,
             label="all pre-reload subtree targets",
@@ -832,14 +903,20 @@ def main() -> int:
             reviewer_session_id,
         )
 
-        state_file = base.E2E_ROOT / ".claude_hub" / "workspaces" / workspace_id / "state.json"
+        state_file = (
+            base.E2E_ROOT / ".claude_hub" / "workspaces" / workspace_id / "state.json"
+        )
         snapshot = json.loads(state_file.read_text())
-        evidence["task_event_count_before_reload"] = len(snapshot.get("task_events") or [])
+        evidence["task_event_count_before_reload"] = len(
+            snapshot.get("task_events") or []
+        )
 
         backend = _cold_restart(backend, launch_env)
         evidence["backend_pid_after_reload"] = backend.pid
 
-        all_events_after_reload = _get_parent_events_api(workspace_id, parent_id, since_sequence=0)
+        all_events_after_reload = _get_parent_events_api(
+            workspace_id, parent_id, since_sequence=0
+        )
         target_after_reload = _filter_target_events(
             all_events_after_reload,
             child_id,
@@ -861,15 +938,21 @@ def main() -> int:
             if str(event.get("call_id") or "") in original_registry["by_call_id"]
         ]
         evidence["reload_extras_after_first_cold"] = reload_extras
-        evidence["reload_extras_after_first_cold_sources"] = _confirm_reload_extra_sources(
-            workspace_id,
-            child_id,
-            reload_extras,
+        evidence["reload_extras_after_first_cold_sources"] = (
+            _confirm_reload_extra_sources(
+                workspace_id,
+                child_id,
+                reload_extras,
+            )
         )
         evidence["target_events_after_reload"] = _target_snapshots(target_after_reload)
 
-        parent_after = task_cli("get", parent_id, "--workspace-id", workspace_id, "--no-reports")
-        child_after = task_cli("get", child_id, "--workspace-id", workspace_id, "--no-reports")
+        parent_after = task_cli(
+            "get", parent_id, "--workspace-id", workspace_id, "--no-reports"
+        )
+        child_after = task_cli(
+            "get", child_id, "--workspace-id", workspace_id, "--no-reports"
+        )
         evidence["parent_compat_run_id_after_reload"] = _compat_run_id(parent_after)
         evidence["child_compat_run_id_after_reload"] = _compat_run_id(child_after)
         assert parent_after.get("id") == parent_id
@@ -882,7 +965,6 @@ def main() -> int:
             evidence["child_compat_run_id_after_reload"]
             == evidence["child_compat_run_id_before_reload"]
         )
-        assert tg.make_resident_consumer_key(workspace_id) == resident_key
 
         ack_seq = int(original_registry["max_sequence"])
         acked = task_cli("ack", workspace_id, parent_id, str(ack_seq))
@@ -896,11 +978,21 @@ def main() -> int:
         parent_after_ack = task_cli(
             "get", parent_id, "--workspace-id", workspace_id, "--no-reports"
         )
-        child_after_ack = task_cli("get", child_id, "--workspace-id", workspace_id, "--no-reports")
-        evidence["parent_ack_after_reload"] = parent_after_ack.get("consumer_ack_sequence")
-        evidence["child_ack_after_reload"] = child_after_ack.get("consumer_ack_sequence")
-        evidence["parent_compat_run_id_after_ack_reload"] = _compat_run_id(parent_after_ack)
-        evidence["child_compat_run_id_after_ack_reload"] = _compat_run_id(child_after_ack)
+        child_after_ack = task_cli(
+            "get", child_id, "--workspace-id", workspace_id, "--no-reports"
+        )
+        evidence["parent_ack_after_reload"] = parent_after_ack.get(
+            "consumer_ack_sequence"
+        )
+        evidence["child_ack_after_reload"] = child_after_ack.get(
+            "consumer_ack_sequence"
+        )
+        evidence["parent_compat_run_id_after_ack_reload"] = _compat_run_id(
+            parent_after_ack
+        )
+        evidence["child_compat_run_id_after_ack_reload"] = _compat_run_id(
+            child_after_ack
+        )
         assert parent_after_ack.get("consumer_ack_sequence") == ack_seq
         assert (
             evidence["parent_compat_run_id_after_ack_reload"]
@@ -948,10 +1040,12 @@ def main() -> int:
         evidence["wait_after_ack_reload"] = replay_records
         evidence["wait_after_ack_reload_extras"] = post_ack_extras
         if post_ack_extras:
-            evidence["wait_after_ack_reload_extra_sources"] = _confirm_reload_extra_sources(
-                workspace_id,
-                child_id,
-                post_ack_extras,
+            evidence["wait_after_ack_reload_extra_sources"] = (
+                _confirm_reload_extra_sources(
+                    workspace_id,
+                    child_id,
+                    post_ack_extras,
+                )
             )
         evidence["wait_after_reload"] = [
             {"call_id": item.get("call_id"), "sequence": item.get("sequence")}
@@ -974,15 +1068,19 @@ def main() -> int:
                     evidence["delete_workspace_error"] = str(exc)
         finally:
             base.stop_backend(backend)
-            evidence["killed_tmux"] = base.kill_e2e_tmux(known_tmux or evidence.get("known_tmux"))
+            evidence["killed_tmux"] = base.kill_e2e_tmux(
+                known_tmux or evidence.get("known_tmux")
+            )
             home_path = base.E2E_ROOT
             repo_path = base.REPO
             evidence["HOME_EXISTS_before_cleanup"] = home_path.exists()
             evidence["REPO_EXISTS_before_cleanup"] = repo_path.exists()
             if home_path.exists():
-                evidence["credential_cleanup"] = base.unlink_credential_overlay(home_path)
-                evidence["remaining_credential_artifacts"] = base.remaining_credential_artifacts(
+                evidence["credential_cleanup"] = base.unlink_credential_overlay(
                     home_path
+                )
+                evidence["remaining_credential_artifacts"] = (
+                    base.remaining_credential_artifacts(home_path)
                 )
                 shutil.rmtree(home_path, ignore_errors=True)
             if repo_path.exists():

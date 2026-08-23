@@ -14,13 +14,18 @@ class _NormalizeMixin:
         normalized.setdefault("remote_profile_id", None)
         normalized.setdefault("remote_cwd", None)
         normalized.setdefault("remote_reconnect", True)
-        workspace_id = str(normalized.get("id") or "")
-        if not normalized.get("resident_consumer_key") and workspace_id:
-            from claude_hub.services.task_graph import make_resident_consumer_key
-
-            normalized["resident_consumer_key"] = make_resident_consumer_key(workspace_id)
-        normalized.setdefault("resident_ack_sequence", 0)
+        # Legacy resident mailbox fields: read only at migration entry; never canonical.
+        normalized.pop("resident_consumer_key", None)
+        normalized.pop("resident_ack_sequence", None)
         return normalized
+
+    def _workspace_index_item(self, workspace: Workspace) -> dict[str, Any]:
+        """Serialize workspace index row without canonical resident mailbox fields."""
+
+        payload = workspace.model_dump(mode="json")
+        payload.pop("resident_consumer_key", None)
+        payload.pop("resident_ack_sequence", None)
+        return payload
 
     def _normalize_task_item(self, item: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(item)

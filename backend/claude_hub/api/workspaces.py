@@ -144,59 +144,6 @@ async def run_resident_now(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.get("/{workspace_id}/resident/events", response_model=List[TaskEvent])
-async def list_resident_mailbox_events(
-    workspace_id: str,
-    since_sequence: int = Query(0, ge=0),
-    subtree: bool = Query(False),
-    current_user: User = Depends(get_current_user),
-) -> List[TaskEvent]:
-    """TaskMailbox events for the stable workspace resident consumer."""
-    try:
-        return workspace_manager.list_task_mailbox_events(
-            workspace_id,
-            since_sequence=since_sequence,
-            subtree=subtree,
-        )
-    except (KeyError, ValueError, RuntimeError) as exc:
-        raise _task_public_http(exc) from exc
-
-
-@router.post("/{workspace_id}/resident/wait", response_model=List[TaskEvent])
-async def wait_resident_mailbox_events(
-    workspace_id: str,
-    since_sequence: int = Query(0, ge=0),
-    subtree: bool = Query(False),
-    timeout_seconds: float = Query(30.0, ge=0),
-    current_user: User = Depends(get_current_user),
-) -> List[TaskEvent]:
-    """Directed long-poll on the workspace resident consumer. No AgentRun."""
-    try:
-        return await workspace_manager.wait_task_mailbox_events(
-            workspace_id,
-            since_sequence=since_sequence,
-            subtree=subtree,
-            timeout_seconds=timeout_seconds,
-        )
-    except (KeyError, ValueError, RuntimeError) as exc:
-        raise _task_public_http(exc) from exc
-
-
-@router.post("/{workspace_id}/resident/ack", response_model=Workspace)
-async def ack_resident_mailbox(
-    workspace_id: str,
-    payload: TaskMailboxAckRequest,
-    current_user: User = Depends(get_current_user),
-) -> Workspace:
-    """Advance Workspace.resident_ack_sequence. Never writes AgentRun."""
-    try:
-        result = workspace_manager.ack_task_mailbox(workspace_id, payload.sequence)
-    except (KeyError, ValueError, RuntimeError) as exc:
-        raise _task_public_http(exc) from exc
-    assert isinstance(result, Workspace)
-    return result
-
-
 @router.delete("/{workspace_id}", status_code=204)
 async def delete_workspace(
     workspace_id: str,

@@ -36,6 +36,7 @@ from claude_hub.services.agent_tree_adapters import (
     ManagedTaskAdapter,
     NativeSubagentAdapter,
 )
+from claude_hub.services.task_graph import make_task_consumer_key
 from claude_hub.services.task_mailbox import TaskMailbox
 from claude_hub.services.ttyd_manager import TTYDProcess
 
@@ -50,7 +51,6 @@ class _FakeWorkspaceManager:
                 remote_cwd=None,
                 remote_reconnect=True,
                 resident_agent_session_id=None,
-                resident_ack_sequence=0,
             )
         }
         self.tasks: dict[str, WorkspaceTask] = {}
@@ -60,6 +60,58 @@ class _FakeWorkspaceManager:
         self.start_payloads = []
         self.save_calls = 0
         self.task_mailbox = TaskMailbox(self)  # type: ignore[arg-type]
+        self.agent_tree = SimpleNamespace(_runs={})
+        self._seed_managed_spawn_parent()
+
+    def _seed_managed_spawn_parent(self) -> None:
+        """Default parent run/Task graph for managed child spawns (parent_id='root')."""
+
+        now = datetime.utcnow()
+        parent_run = AgentRun(
+            id="root",
+            workspace_id="workspace-1",
+            parent_id=None,
+            path="root",
+            supervisor_id=None,
+            executor_kind=ExecutorKind.MANAGED_TASK,
+            status=AgentRunStatus.RUNNING,
+            title="parent",
+            created_at=now,
+            updated_at=now,
+        )
+        self.agent_tree._runs["root"] = parent_run
+        parent_task = WorkspaceTask(
+            id="task-parent",
+            workspace_id="workspace-1",
+            title="parent",
+            prompt="supervise",
+            agent_type=AgentType.CLAUDE,
+            status=WorkspaceTaskStatus.WORKING,
+            agent_run_id=parent_run.id,
+            root_task_id="task-parent",
+            path="task-parent",
+            created_at=now,
+            updated_at=now,
+        )
+        worker_id = "parent-worker-session"
+        self.sessions[worker_id] = ManagedSession(
+            id=worker_id,
+            workspace_id="workspace-1",
+            tab_id="tab-parent-worker",
+            role=WorkspaceSessionRole.WORKER,
+            agent_type=AgentType.CLAUDE,
+            status=ManagedSessionStatus.WORKING,
+            runtime_status=AgentRuntimeStatus.WORKING,
+            title="parent worker",
+            workspace_path=str(self.workspace_path),
+            tmux_session="tmux-parent-worker",
+            target=ExecutionTarget.LOCAL,
+            task_id=parent_task.id,
+            current_task_id=parent_task.id,
+            created_at=now,
+            updated_at=now,
+        )
+        self.tasks[parent_task.id] = parent_task.model_copy(update={"session_id": worker_id})
 
     def _save_state(self) -> None:
         self.save_calls += 1
@@ -105,6 +157,14 @@ class _FakeWorkspaceManager:
         ordinal = len(self.tasks) + 1
         task_id = f"task-{ordinal}"
         now = datetime.utcnow()
+        parent_task_id = getattr(payload, "parent_task_id", None)
+        path = task_id
+        root_task_id = task_id
+        if parent_task_id:
+            parent = self.tasks.get(parent_task_id)
+            if parent is not None:
+                path = f"{parent.path}/{task_id}"
+                root_task_id = parent.root_task_id or parent.id
         task = WorkspaceTask(
             id=task_id,
             workspace_id=workspace_id,
@@ -115,6 +175,9 @@ class _FakeWorkspaceManager:
             status=WorkspaceTaskStatus.TODO,
             session_id=payload.session_id,
             agent_run_id=payload.agent_run_id,
+            parent_task_id=parent_task_id,
+            root_task_id=root_task_id,
+            path=path,
             created_at=now,
             updated_at=now,
         )
@@ -134,7 +197,27 @@ class _FakeWorkspaceManager:
         return self.tasks[task_id]
 
     def _managed_spawn_parent_assignment(self, run: AgentRun) -> tuple[str | None, str | None]:
-        return None, None
+        if not run.parent_id:
+            return None, None
+        parent_run = self.agent_tree._runs.get(run.parent_id)
+        if parent_run is None:
+            raise KeyError(run.parent_id)
+        parent_task = next(
+            (
+                task
+                for task in self.tasks.values()
+                if task.workspace_id == run.workspace_id and task.agent_run_id == parent_run.id
+            ),
+            None,
+        )
+        if parent_task is None:
+            raise ValueError(f"Parent run {run.parent_id} has no linked Task")
+        session = self.sessions.get(parent_task.session_id or "")
+        if session is None or session.workspace_id != run.workspace_id:
+            raise ValueError("Managed spawn parent has no live session assignment")
+        if parent_task.id not in {session.current_task_id, session.task_id}:
+            raise ValueError("Supervisor session is not assigned to the parent Task")
+        return parent_task.id, session.id
 
     def _resolve_task_for_compat_run(self, workspace_id: str, run: AgentRun) -> WorkspaceTask:
         linked = [
@@ -241,9 +324,13 @@ async def test_compatible_session_is_reused_but_different_model_gets_new_session
     await adapter.spawn(same, "two")
     await adapter.spawn(different, "three")
 
-    assert len(wm.sessions) == 2
-    assert wm.tasks["task-1"].session_id == wm.tasks["task-2"].session_id
-    assert wm.tasks["task-3"].session_id != wm.tasks["task-1"].session_id
+    task_a = next(t for t in wm.tasks.values() if t.agent_run_id == "codex-a")
+    task_b = next(t for t in wm.tasks.values() if t.agent_run_id == "codex-b")
+    task_c = next(t for t in wm.tasks.values() if t.agent_run_id == "codex-c")
+
+    assert len(wm.sessions) == 3  # parent WORKER + two child executor pool sessions
+    assert task_a.session_id == task_b.session_id
+    assert task_c.session_id != task_a.session_id
 
 
 @pytest.mark.asyncio
@@ -408,27 +495,47 @@ def test_codex_model_is_in_real_cli_launch_command(tmp_path: Path) -> None:
 
 def _wire_fake_manager_for_agent_tree_spawn(
     wm: _FakeWorkspaceManager, manager: AgentTreeManager
-) -> None:
-    """Resident parent spawn + TaskMailbox staging need these fake hooks."""
+) -> AgentRun:
+    """Parent managed run + Task + supervisor session for child spawn tests."""
     now = datetime.utcnow()
-    resident_id = "resident-session"
-    wm.workspaces["workspace-1"].resident_agent_session_id = resident_id
-    wm.sessions[resident_id] = ManagedSession(
-        id=resident_id,
+    parent_run = manager.create_root_run(
         workspace_id="workspace-1",
-        tab_id="tab-resident",
-        role=WorkspaceSessionRole.RESIDENT,
+        executor_kind=ExecutorKind.MANAGED_TASK,
+        title="parent",
+    )
+    parent_task = WorkspaceTask(
+        id="task-parent",
+        workspace_id="workspace-1",
+        title="parent",
+        prompt="supervise",
         agent_type=AgentType.CLAUDE,
-        status=ManagedSessionStatus.IDLE,
-        runtime_status=AgentRuntimeStatus.IDLE,
-        title="resident",
-        workspace_path=str(wm.workspace_path),
-        tmux_session="tmux-resident",
-        target=ExecutionTarget.LOCAL,
+        status=WorkspaceTaskStatus.WORKING,
+        agent_run_id=parent_run.id,
         created_at=now,
         updated_at=now,
     )
+    supervisor_id = "supervisor-session"
+    wm.sessions[supervisor_id] = ManagedSession(
+        id=supervisor_id,
+        workspace_id="workspace-1",
+        tab_id="tab-supervisor",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.WORKING,
+        runtime_status=AgentRuntimeStatus.WORKING,
+        title="parent worker",
+        workspace_path=str(wm.workspace_path),
+        tmux_session="tmux-supervisor",
+        target=ExecutionTarget.LOCAL,
+        task_id=parent_task.id,
+        current_task_id=parent_task.id,
+        created_at=now,
+        updated_at=now,
+    )
+    parent_task = parent_task.model_copy(update={"session_id": supervisor_id})
+    wm.tasks[parent_task.id] = parent_task
     wm.agent_tree = manager  # type: ignore[attr-defined]
+    return parent_run
 
 
 @pytest.mark.asyncio
@@ -437,14 +544,7 @@ async def test_manager_spawn_persists_and_reloads_real_executor_contract(
 ) -> None:
     wm = _FakeWorkspaceManager(tmp_path)
     manager = AgentTreeManager(wm)  # type: ignore[arg-type]
-    _wire_fake_manager_for_agent_tree_spawn(wm, manager)
-    root = manager.create_root_run(
-        workspace_id="workspace-1",
-        executor_kind=ExecutorKind.RESIDENT_ROOT,
-        title="resident",
-    )
-    assert root.executor_capabilities is not None
-    assert root.executor_capabilities.available is True
+    root = _wire_fake_manager_for_agent_tree_spawn(wm, manager)
 
     child = await manager.spawn(
         SpawnRequest(
@@ -507,6 +607,9 @@ async def test_manager_spawn_persists_and_reloads_real_executor_contract(
         if item.call_id == progress_call_id
     ]
     assert len(progress_task_events) == 1
+    progress_seq = progress_task_events[0].sequence
+    parent_consumer = make_task_consumer_key("task-parent")
+    assert progress_task_events[0].consumer_key == parent_consumer
     manager.emit_event(
         workspace_id="workspace-1",
         agent_run_id=child.id,
@@ -526,16 +629,6 @@ async def test_manager_spawn_persists_and_reloads_real_executor_contract(
         )
         == 1
     )
-    waited = await manager.wait(
-        WaitRequest(
-            workspace_id="workspace-1",
-            recipient_id=root.id,
-            since_sequence=cursor,
-            subtree=True,
-            timeout_seconds=0,
-        )
-    )
-    assert [event.call_id for event in waited] == [progress_call_id]
 
     persisted = {
         **manager.to_dict("workspace-1"),
@@ -553,17 +646,11 @@ async def test_manager_spawn_persists_and_reloads_real_executor_contract(
     assert restored_child is not None
     assert restored_child.executor_config == child.executor_config
     assert restored_child.executor_capabilities == child.executor_capabilities
-    assert progress_call_id in {
-        event.call_id
-        for event in restored.get_events("workspace-1", root.id, since_sequence=0, subtree=True)
-    }
-    cold_waited = await restored.wait(
-        WaitRequest(
-            workspace_id="workspace-1",
-            recipient_id=root.id,
-            since_sequence=cursor,
-            subtree=True,
-            timeout_seconds=0,
-        )
-    )
-    assert [event.call_id for event in cold_waited] == [progress_call_id]
+    reloaded_progress = [
+        item
+        for item in restored_wm.task_mailbox._events.get("workspace-1", [])
+        if item.call_id == progress_call_id
+    ]
+    assert len(reloaded_progress) == 1
+    assert reloaded_progress[0].sequence == progress_seq
+    assert reloaded_progress[0].consumer_key == parent_consumer

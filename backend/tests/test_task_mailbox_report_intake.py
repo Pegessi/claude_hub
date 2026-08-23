@@ -151,7 +151,6 @@ async def test_ordinary_worker_report_writes_task_event(
 ) -> None:
     manager, workspace_id = manager_and_workspace
     task, session = _task_session(manager, workspace_id)
-    baseline_resident = manager.workspaces[workspace_id].resident_ack_sequence
     payload = AgentReportCreate(
         task_id=task.id,
         state=AgentReportState.WORKING,
@@ -172,7 +171,6 @@ async def test_ordinary_worker_report_writes_task_event(
     assert event.type == TaskEventType.PROGRESS
     assert manager.agent_tree._runs == {}
     assert manager.agent_tree._events.get(workspace_id, []) == []
-    assert manager.workspaces[workspace_id].resident_ack_sequence == baseline_resident
     assert manager.tasks[task.id].consumer_ack_sequence == 0
 
     retry = await manager.create_report(session.id, payload)

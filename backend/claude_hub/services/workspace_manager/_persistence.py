@@ -98,7 +98,7 @@ class _PersistenceMixin:
 
         _wm.STATE_ROOT.mkdir(parents=True, exist_ok=True)
         index_payload = {
-            "workspaces": [item.model_dump(mode="json") for item in self.workspaces.values()]
+            "workspaces": [self._workspace_index_item(item) for item in self.workspaces.values()]
         }
         self._atomic_write_text(INDEX_FILE, json.dumps(index_payload, indent=2))
 
