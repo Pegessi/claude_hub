@@ -852,6 +852,10 @@ def main() -> int:
             worker_session_id,
             reviewer_session_id,
         )
+        _assert_unique_target_sequences_and_call_ids(
+            target_after_reload,
+            label="first-cold-reload-targets",
+        )
         reload_extras = _assert_original_targets_persisted(
             original_registry,
             target_after_reload,
