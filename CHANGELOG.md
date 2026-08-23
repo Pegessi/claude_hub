@@ -85,24 +85,24 @@
     Scroll-to-bottom is not measured because the feature branch no longer
     dispatches a forced scroll-to-bottom on mode return (xterm.js
     preserves the user's scroll position).
-  - **Causal benchmark results** (feature `dec8ac8` vs main `16404fe`,
-    3 runs each, isolated matching backends/frontends — feature frontend
-    proxies to feature backend on :8173, main frontend proxies to main
-    backend on :8174; same causal fit-call counter signal on both branches):
+  - **Causal benchmark results** (feature `cb57ac6` vs main `16404fe`,
+    8 runs each, isolated matching backends/frontends — feature frontend
+    proxies to feature backend on :8175, main frontend proxies to main
+    backend on :8173; same causal fit-call counter signal on both branches):
 
     | Layout | Pane | Feature first-fit median | Main first-fit median | Delta |
     | --- | --- | --- | --- | --- |
-    | 1x1 | single | 173.6 ms | 256.7 ms | feature −83.1 ms (−32.4%) |
-    | 2x1 | pane 1 | 162.4 ms | 239.8 ms | feature −77.4 ms (−32.3%) |
-    | 2x1 | pane 2 | 162.4 ms | 239.8 ms | feature −77.4 ms (−32.3%) |
+    | 1x1 | single | 198.0 ms | 227.0 ms | feature −29.0 ms (−12.8%) |
+    | 2x1 | pane 1 | 205.6 ms | 252.5 ms | feature −46.9 ms (−18.6%) |
+    | 2x1 | pane 2 | 205.6 ms | 252.5 ms | feature −46.9 ms (−18.6%) |
 
     Feature-only nonce-ack median (request-correlation, `__claudeHubLastFitNonce`
-    matched against the dispatched nonce): 173.6 ms (1x1), 162.4 ms (2x1) —
+    matched against the dispatched nonce): 198.0 ms (1x1), 205.6 ms (2x1) —
     equal to first-fit because the nonce is recorded when the fit completes.
 
     Raw per-run output retained in `docs/benchmark-artifacts/`:
-    `feature_dec8ac8_runs.txt`, `main_runs.txt`, and the full JSON dumps
-    `feature_dec8ac8_full.json`, `main_full.json`.
+    `feature_cb57ac6_runs.txt`, `main_runs.txt`, and the full JSON dumps
+    `feature_cb57ac6_full.json`, `main_full.json`.
 
     Both branches settle (`settled=true`) with the fit-call count
     increasing past the pre-switch baseline, confirming the causal
@@ -113,8 +113,8 @@
     first `fit()` call on each visible terminal pane. It does **not**
     measure visible-content-ready time (the moment the terminal's text
     buffer is fully painted after the fit). Feature is faster than main
-    in first-fit time across all layouts (1x1: −32.4%, 2x1 both panes:
-    −32.3%). The first-fit speedup comes from two changes: (1) the
+    in first-fit time across all layouts (1x1: −12.8%, 2x1 both panes:
+    −18.6%). The first-fit speedup comes from two changes: (1) the
     terminal shell keeps its layout box alive (`visibility: hidden` +
     `position: absolute`) instead of collapsing to zero size
     (`display: none`), so xterm.js does not start from a zero-size
@@ -128,8 +128,9 @@
     removes the buffering block (fit is safe during replay — xterm.js
     handles resizes while the buffer is being written) and switches
     polling from `setTimeout(100ms)` to `requestAnimationFrame`, so
-    pane 2 now fits at the same time as pane 1. No remaining slowness
-    was observed in 3 runs of both 1x1 and 2x1 layouts.
+    pane 2 now fits at the same time as pane 1. The first-fit time
+    improvement is measured by the causal fit-call counter benchmark;
+    visible-content-ready time is not measured.
 
 ### fix: filter subagent sessions and cache codex session listing
 

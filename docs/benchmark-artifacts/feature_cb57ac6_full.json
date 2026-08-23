@@ -1,0 +1,56 @@
+{
+  "1x1": {
+    "elapsed_ms": 169.5,
+    "settled": {
+      "6f822a86-9558-449b-a1c3-3a7abf89fdab": true
+    },
+    "first_fit_times_ms": {
+      "6f822a86-9558-449b-a1c3-3a7abf89fdab": 168.8
+    },
+    "nonce_ack_times_ms": {
+      "6f822a86-9558-449b-a1c3-3a7abf89fdab": 168.8
+    },
+    "tab_ids": [
+      "6f822a86-9558-449b-a1c3-3a7abf89fdab"
+    ],
+    "expected_nonces": {
+      "6f822a86-9558-449b-a1c3-3a7abf89fdab": {
+        "fit": "mt52iec8-gcjmqdoy"
+      }
+    },
+    "baseline_fit_counts": {
+      "6f822a86-9558-449b-a1c3-3a7abf89fdab": 0
+    }
+  },
+  "2x1": {
+    "elapsed_ms": 220.6,
+    "settled": {
+      "6f822a86-9558-449b-a1c3-3a7abf89fdab": true,
+      "22331dec-e000-401d-8418-bbc41b0b1c98": true
+    },
+    "first_fit_times_ms": {
+      "6f822a86-9558-449b-a1c3-3a7abf89fdab": 218.3,
+      "22331dec-e000-401d-8418-bbc41b0b1c98": 218.3
+    },
+    "nonce_ack_times_ms": {
+      "6f822a86-9558-449b-a1c3-3a7abf89fdab": 218.3,
+      "22331dec-e000-401d-8418-bbc41b0b1c98": 218.3
+    },
+    "tab_ids": [
+      "6f822a86-9558-449b-a1c3-3a7abf89fdab",
+      "22331dec-e000-401d-8418-bbc41b0b1c98"
+    ],
+    "expected_nonces": {
+      "6f822a86-9558-449b-a1c3-3a7abf89fdab": {
+        "fit": "mt52igm4-3vqdbtsc"
+      },
+      "22331dec-e000-401d-8418-bbc41b0b1c98": {
+        "fit": "mt52igm4-o30pmp38"
+      }
+    },
+    "baseline_fit_counts": {
+      "6f822a86-9558-449b-a1c3-3a7abf89fdab": 7,
+      "22331dec-e000-401d-8418-bbc41b0b1c98": 0
+    }
+  }
+}
