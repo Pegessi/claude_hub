@@ -394,15 +394,23 @@ class _MonitorMixin:
             # human). This catches pre-existing stranded GP-approval /
             # GP-rejected / impl-review-failed tasks as well as any future
             # strandings from cold-resume races.
+            round_has_verdict = state_policy.current_round_has_verdict(
+                task.review_cycle, task.reviewed_cycle
+            )
             sealed_verdict_state = self._sealed_cycle_verdict_state(task.id, task.review_cycle)
             sealed_round_awaiting_continue = (
                 is_worker
-                and state_policy.current_round_has_verdict(task.review_cycle, task.reviewed_cycle)
+                and round_has_verdict
                 and task.human_acceptance_requested_at is None
                 and not self._task_has_post_cycle_report(task.id, task.review_cycle)
                 and sealed_verdict_state
                 in {AgentReportState.REVIEW_PASSED, AgentReportState.REVIEW_FAILED}
             )
+            # Sealed current round: reviewer duty is complete — never auto-continue
+            # the reviewer (avoids duplicate review_started / verdict noise).
+            # Worker sealed-verdict recovery remains via sealed_round_awaiting_continue.
+            if is_reviewer and round_has_verdict:
+                return None
             if not is_reviewer and not sealed_round_awaiting_continue:
                 return None
         else:
@@ -695,7 +703,13 @@ class _MonitorMixin:
         # The agent's context may have been cleared since it learned the report
         # endpoint from its bootstrap/assignment prompt. Restate the endpoint so
         # a cleared agent always has a curl target to POST its report to.
-        message = f"{message}\n\n{self._report_endpoint_curl(session, task.id)}"
+        # Durable attempt is the reminder being sent (attempts+1) so a retry of
+        # this paste keeps the same call_id; a later reminder gets a new one.
+        reminder_attempt = attempts + 1
+        message = (
+            f"{message}\n\n"
+            f"{self._report_endpoint_curl(session, task.id, purpose='monitor-reminder', attempt=reminder_attempt)}"
+        )
         await self._send_tmux_message(session.tmux_session, message)
         attempts += 1
         logger.info(
@@ -789,20 +803,30 @@ class _MonitorMixin:
             trigger_report = self._latest_report_for_task(task.id)
             if trigger_report:
                 prompt = self._build_hard_recovery_reviewer_prompt(
-                    workspace, task, session, trigger_report, interruption_reason
+                    workspace,
+                    task,
+                    session,
+                    trigger_report,
+                    interruption_reason,
+                    recovery_attempt=new_hard_attempts,
                 )
             else:
                 # Should not happen (reviewer only exists when there is a trigger report),
-                # but fall back to a simpler message.
-                prompt = (
-                    f"{HARD_RECOVERY_REVIEWER_MESSAGE}\n\n"
-                    f"Error detected: {interruption_reason}\n\n"
-                    f"Task ID: {task.id}\nTask title: {task.title}\n\n"
-                    f"{self._report_endpoint_curl(session, task.id)}"
+                # but fall back to a simpler message that still uses the same
+                # verdict-specific durable recovery call_ids.
+                prompt = self._build_hard_recovery_reviewer_fallback_prompt(
+                    task,
+                    session,
+                    interruption_reason,
+                    recovery_attempt=new_hard_attempts,
                 )
         else:
             prompt = self._build_hard_recovery_worker_prompt(
-                workspace, task, session, interruption_reason
+                workspace,
+                task,
+                session,
+                interruption_reason,
+                recovery_attempt=new_hard_attempts,
             )
 
         await self.send_session_message(session.id, prompt)
@@ -1088,9 +1112,11 @@ class _MonitorMixin:
         task: WorkspaceTask,
         *,
         updated_at: datetime,
-    ) -> None:
+        delete_tabs: bool = True,
+    ) -> list[str]:
         """Release persistent reviewers and delete task-scoped temporary reviewers."""
 
+        ephemeral_tab_ids: list[str] = []
         session_ids: set[str] = set()
         if task.review_session_id:
             session_ids.add(task.review_session_id)
@@ -1107,14 +1133,17 @@ class _MonitorMixin:
                 continue
             if session.ephemeral:
                 self.sessions.pop(session.id, None)
-                try:
-                    await ttyd_manager.delete_tab(session.tab_id)
-                except Exception:
-                    logger.exception(
-                        "Failed to delete temporary reviewer tab session_id=%s tab_id=%s",
-                        session.id,
-                        session.tab_id,
-                    )
+                if delete_tabs:
+                    try:
+                        await ttyd_manager.delete_tab(session.tab_id)
+                    except Exception:
+                        logger.exception(
+                            "Failed to delete temporary reviewer tab session_id=%s tab_id=%s",
+                            session.id,
+                            session.tab_id,
+                        )
+                else:
+                    ephemeral_tab_ids.append(session.tab_id)
                 continue
             self.sessions[session.id] = session.model_copy(
                 update={
@@ -1132,6 +1161,7 @@ class _MonitorMixin:
                     "last_activity_at": updated_at,
                 }
             )
+        return ephemeral_tab_ids
 
     def _assign_current_task(self, session_id: str, task_id: str) -> None:
         session = self.sessions.get(session_id)

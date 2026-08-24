@@ -29,6 +29,18 @@ class _DispatchMixin:
         if task.status == WorkspaceTaskStatus.DONE:
             raise RuntimeError("Done tasks cannot be started")
 
+        # Idempotency: if the task was already started (QUEUED or WORKING),
+        # do not re-dispatch. A crash between the dispatch side effect and
+        # the state persist could leave a stale TODO status on disk; in that
+        # case a retry would call start_task again. To avoid duplicate
+        # dispatch, we check the task's session_id: if it is set, the task
+        # was already assigned to a worker and we only ensure the dispatch
+        # runs (dispatch_workspace is idempotent).
+        if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
+            if task.session_id:
+                await self.dispatch_workspace(workspace.id)
+            return self.tasks[task_id]
+
         logger.info(
             "Starting workspace task id=%s workspace_id=%s title=%r payload_target_session_id=%s "
             "payload_related_task_id=%s stored_related_task_id=%s current_session_id=%s status=%s",
@@ -64,6 +76,13 @@ class _DispatchMixin:
             "dispatch_pending": False,
             "manual_aborted_at": None,
             "manual_abort_reason": None,
+            # Each (re-)dispatch gets a fresh attempt ordinal so the dispatch
+            # call_id (dispatch:{task.id}:{dispatch_attempt}) is unique per
+            # attempt. Followups may carry a different assignment prompt; a
+            # new call_id keeps them compatible with the immutable-call_id
+            # payload invariant. Crash recovery reuses the stored attempt, so
+            # the same call_id no-ops correctly.
+            "dispatch_attempt": task.dispatch_attempt + 1,
         }
         if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
             run = task.autonomous_run or self._default_autonomous_run(
@@ -357,6 +376,7 @@ class _DispatchMixin:
         self,
         task_id: str,
         payload: ContinueTaskRequest | None = None,
+        call_id: str | None = None,
     ) -> WorkspaceTask:
         payload = payload or ContinueTaskRequest()
         task = self.tasks.get(task_id)
@@ -452,7 +472,10 @@ class _DispatchMixin:
             created_at=now,
         )
         self.reports[continue_report.id] = continue_report
+        bridge_wake_target = self._bridge_report_to_agent_event(continue_report, session)
         self._save_state()
+        if bridge_wake_target is not None:
+            self._wake_report_intake_runs({bridge_wake_target})
 
         # Send the continue prompt; on tmux submit failure mark the dispatch
         # as stalled so the monitor stall-detector and auto-continue can
@@ -464,6 +487,7 @@ class _DispatchMixin:
             await self.send_session_message(
                 session.id,
                 self._build_continue_prompt(self.tasks[task.id], payload, session),
+                call_id=call_id,
             )
         except Exception as exc:
             logger.exception(
@@ -565,136 +589,6 @@ class _DispatchMixin:
         await self._request_task_review(task, report)
         return self.tasks[task.id]
 
-    async def abort_task(
-        self,
-        task_id: str,
-        payload: ManualTaskControlRequest,
-    ) -> WorkspaceTask:
-        task = self.tasks.get(task_id)
-        if not task:
-            raise KeyError(task_id)
-        if task.status not in {
-            WorkspaceTaskStatus.QUEUED,
-            WorkspaceTaskStatus.WORKING,
-            WorkspaceTaskStatus.REVIEW,
-        }:
-            raise RuntimeError("Only queued, working, or review tasks can be manually aborted")
-
-        reason = payload.reason.strip()
-        if not reason:
-            raise RuntimeError("Manual abort requires a reason")
-
-        now = _wm._now()
-        report_session_id = task.session_id or task.review_session_id or "manual-control"
-        report = AgentReport(
-            id=str(uuid.uuid4()),
-            workspace_id=task.workspace_id,
-            task_id=task.id,
-            session_id=report_session_id,
-            state=AgentReportState.BLOCKED,
-            message=f"Task manually aborted by operator: {reason}",
-            message_en=f"Task manually aborted by operator: {reason}",
-            message_zh=f"操作员已手动终止任务：{reason}",
-            changed_files=[],
-            validation=None,
-            risks="Task state was manually recovered; prior worker/reviewer output may be incomplete.",
-            review_decision=ReviewDecision.SKIP,
-            review_reason="Manual abort is an exceptional recovery action, not task completion.",
-            risk_level="manual_control",
-            review_cycle=task.review_cycle,
-            created_at=now,
-        )
-        self.reports[report.id] = report
-        task_before_release = task
-        is_feedback_summary = task.system_internal and task.internal_kind == "feedback_reaper"
-
-        # Collect sessions to interrupt before we clear the session IDs on the
-        # task object.  Only sessions actually assigned to THIS task are targeted
-        # (worker via task.session_id, reviewers via task.review_session_id plus
-        # stale REVIEWER-role sessions still pointing at this task) — we never
-        # interrupt unrelated/idle sessions.  Interrupts are sent concurrently
-        # and are best-effort: failures are logged inside _interrupt_session and
-        # do not block the bookkeeping abort.
-        sessions_to_interrupt: list[ManagedSession] = []
-        if task_before_release.session_id:
-            worker_session = self.sessions.get(task_before_release.session_id)
-            if worker_session and (
-                worker_session.task_id == task.id or worker_session.current_task_id == task.id
-            ):
-                sessions_to_interrupt.append(worker_session)
-        reviewer_ids: set[str] = set()
-        if task_before_release.review_session_id:
-            reviewer_ids.add(task_before_release.review_session_id)
-        reviewer_ids.update(
-            s.id
-            for s in self.sessions.values()
-            if s.role == WorkspaceSessionRole.REVIEWER
-            and (s.task_id == task.id or s.current_task_id == task.id)
-        )
-        for sid in reviewer_ids:
-            reviewer_session = self.sessions.get(sid)
-            if (
-                reviewer_session
-                and reviewer_session.role == WorkspaceSessionRole.REVIEWER
-                and (
-                    reviewer_session.task_id == task.id
-                    or reviewer_session.current_task_id == task.id
-                )
-            ):
-                sessions_to_interrupt.append(reviewer_session)
-        if sessions_to_interrupt:
-            await asyncio.gather(*(self._interrupt_session(s) for s in sessions_to_interrupt))
-
-        self.tasks[task.id] = task.model_copy(
-            update={
-                "status": (
-                    WorkspaceTaskStatus.DONE if is_feedback_summary else WorkspaceTaskStatus.TODO
-                ),
-                "session_id": None,
-                "clear_context": None,
-                "dispatch_reason": f"Manually aborted: {reason}",
-                "dispatch_pending": False,
-                "review_session_id": None,
-                "review_requested_at": None,
-                "review_completed_at": None,
-                "review_skipped_at": now if is_feedback_summary else None,
-                "review_skip_reason": (
-                    "Feedback Reaper was manually aborted; pending input was released."
-                    if is_feedback_summary
-                    else None
-                ),
-                "manual_aborted_at": now,
-                "manual_abort_reason": reason,
-                "human_acceptance_requested_at": None,
-                "human_accepted_at": None,
-                "queued_at": None,
-                "started_at": None,
-                "reviewed_at": None,
-                "completed_at": now if is_feedback_summary else None,
-                "updated_at": now,
-            }
-        )
-        if is_feedback_summary:
-            try:
-                self._feedback_store().abandon_summary_run(
-                    task.workspace_id,
-                    task.id,
-                    reason="manually_aborted",
-                    now=now,
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to abandon Feedback Reaper summary run during manual abort "
-                    "workspace_id=%s task_id=%s",
-                    task.workspace_id,
-                    task.id,
-                )
-        self._release_task_session(task_before_release)
-        await self._cleanup_reviewer_for_terminal_task(task_before_release, updated_at=now)
-        self._save_state()
-        await self.dispatch_workspace(task.workspace_id)
-        return self.tasks[task.id]
-
     async def dispatch_workspace(
         self,
         workspace_id: str,
@@ -732,6 +626,15 @@ class _DispatchMixin:
         # reviewer tabs (visible in the tab bar but absent from Manage Agents)
         # do not accumulate.
         await self._prune_orphan_workspace_tabs(workspace_id)
+        # Recover sessions that claimed a QUEUED task but crashed before the
+        # assignment prompt was fully persisted as WORKING. The session's
+        # task_id was persisted before the send (see _dispatch_task_to_session),
+        # so _can_dispatch_to blocks re-dispatch to another session. Here we
+        # re-send the assignment prompt; the dispatch call_id ensures
+        # sender-side dedup: if the call_id is already in processing_call_ids
+        # (sent to tmux), it is not re-sent; if it is still in
+        # pending_call_ids, the pump sends it to the tmux inbox exactly once.
+        await self._recover_queued_task_ownership(workspace_id)
         for session in self._workspace_agents(workspace_id, include_stopped=True):
             if not self._can_dispatch_to(session):
                 logger.info(
@@ -851,6 +754,118 @@ class _DispatchMixin:
             return None
         return sorted(candidates, key=_sort_time)[0]
 
+    async def _recover_queued_task_ownership(self, workspace_id: str) -> None:
+        """Re-send the assignment prompt for sessions that claimed a QUEUED
+        task but crashed before the dispatch completed.
+
+        ``_dispatch_task_to_session`` persists ``session.task_id`` before
+        sending the prompt. A crash between that persist and the
+        ``task.status = WORKING`` persist leaves the session holding a
+        QUEUED task. ``_can_dispatch_to`` returns False for such sessions
+        (they own a non-DONE task), so the normal dispatch loop skips them.
+        This method re-sends the assignment prompt. The dispatch call_id
+        (``f"dispatch:{task.id}:{task.dispatch_attempt}"``) gives
+        sender-side dedup: if the call_id is already in
+        ``processing_call_ids`` (sent to tmux) or ``delivered_call_ids``
+        (ACKed by the worker via a report), ``send_session_message`` skips
+        the re-send. If it is still in ``pending_call_ids``, the pump sends
+        it to the tmux inbox exactly once.
+        """
+        for session in self._workspace_agents(workspace_id, include_stopped=True):
+            if session.status == ManagedSessionStatus.STOPPED:
+                continue
+            task_id = session.task_id or session.current_task_id
+            if not task_id:
+                continue
+            task = self.tasks.get(task_id)
+            if not task or task.status != WorkspaceTaskStatus.QUEUED:
+                continue
+            logger.info(
+                "Recovering queued task ownership: session_id=%s holds QUEUED task_id=%s; "
+                "re-sending assignment prompt",
+                session.id,
+                task_id,
+            )
+            workspace = self.workspaces.get(task.workspace_id)
+            if not workspace:
+                continue
+            lesson_context = self._lesson_context_payload(
+                workspace,
+                f"{task.title}\n{task.prompt}",
+            )
+            dispatch_call_id = f"dispatch:{task.id}:{task.dispatch_attempt}"
+            try:
+                await self._send_dispatch_message(
+                    session.id,
+                    dispatch_call_id,
+                    self._build_task_assignment_prompt(
+                        workspace,
+                        task,
+                        session,
+                        lesson_context=lesson_context,
+                    ),
+                )
+            except DeliveryUncertain:
+                # The previous dispatch attempt ended in an ambiguous tmux
+                # failure (call_id in uncertain_call_ids). Per the fail-closed
+                # contract, the system MUST NOT auto-retry an uncertain
+                # dispatch — only the explicit operator retry endpoint may
+                # move it back to pending. Leave the task QUEUED and the
+                # call_id uncertain; the operator must retry explicitly.
+                logger.warning(
+                    "Recovering queued task ownership: dispatch call_id=%s for "
+                    "session_id=%s task_id=%s is uncertain; system will NOT "
+                    "auto-retry. Operator retry required.",
+                    dispatch_call_id,
+                    session.id,
+                    task_id,
+                )
+                continue
+            now = _wm._now()
+            self.tasks[task.id] = task.model_copy(
+                update={
+                    "status": WorkspaceTaskStatus.WORKING,
+                    "started_at": task.started_at or now,
+                    "updated_at": now,
+                }
+            )
+            self._save_state()
+
+    async def _send_dispatch_message(
+        self,
+        session_id: str,
+        dispatch_call_id: str,
+        prompt: str,
+    ) -> None:
+        """Send a task dispatch prompt.
+
+        The dispatch call_id is ``f"dispatch:{task.id}:{dispatch_attempt}"``.
+
+        Recovery contract: the assignment prompt passed here may be rebuilt
+        from current state (lesson context can drift across cycles). We MUST
+        NOT overwrite or re-fingerprint a persisted envelope — the original
+        stored payload is the source of truth until the worker ACKs it.
+
+        Therefore we first call :meth:`resume_existing_call`, which operates
+        on the persisted envelope only:
+
+        * ``pending``    — pump the stored payload to tmux.
+        * ``processing`` — no-op (already in flight).
+        * ``delivered``  — no-op (already ACKed).
+        * ``uncertain``  — raise :class:`DeliveryUncertain` (fail-closed;
+          system never auto-retries an ambiguous delivery).
+        * ``absent``     — return ``False``; we then persist the newly built
+          prompt via :meth:`send_session_message`.
+
+        Only when the call_id is absent do we commit the rebuilt prompt as a
+        fresh delivery.
+        """
+        resumed = await self.resume_existing_call(session_id, dispatch_call_id)
+        if resumed:
+            return
+        # call_id absent: persist the newly built prompt as a fresh delivery.
+        await self.send_session_message(session_id, prompt, call_id=dispatch_call_id)
+
     async def _dispatch_task_to_session(
         self,
         task: WorkspaceTask,
@@ -877,27 +892,24 @@ class _DispatchMixin:
             task.dispatch_reason,
         )
         now = _wm._now()
-        lesson_context = self._lesson_context_payload(
-            workspace,
-            f"{task.title}\n{task.prompt}",
-        )
-        await self.send_session_message(
-            session.id,
-            self._build_task_assignment_prompt(
-                workspace,
-                task,
-                session,
-                lesson_context=lesson_context,
-            ),
-        )
 
-        self.tasks[task.id] = task.model_copy(
-            update={
-                "status": WorkspaceTaskStatus.WORKING,
-                "started_at": now,
-                "updated_at": now,
-            }
-        )
+        # ------------------------------------------------------------------
+        # Crash-idempotent dispatch: claim the task for the session BEFORE
+        # sending the prompt.
+        #
+        # The dispatch call_id is f"dispatch:{task.id}:{task.dispatch_attempt}".
+        # We persist session.task_id = task.id (and save) before the send so
+        # that a crash between the send side-effect and the WORKING persist
+        # does NOT let the monitor re-dispatch the task to a different
+        # session. On recovery, _recover_queued_task_ownership detects that
+        # the session holds a QUEUED task and re-sends the assignment prompt.
+        # The call_id ensures sender-side dedup: if the call_id is already
+        # in processing_call_ids (sent to tmux) or delivered_call_ids
+        # (ACKed by the worker via a report), send_session_message skips
+        # the re-send. If it is still in pending_call_ids, the pump sends
+        # it to the tmux inbox exactly once.
+        # ------------------------------------------------------------------
+        dispatch_call_id = f"dispatch:{task.id}:{task.dispatch_attempt}"
         self.sessions[session.id] = session.model_copy(
             update={
                 "task_id": task.id,
@@ -913,6 +925,32 @@ class _DispatchMixin:
                 "prompt_retry_task_id": None,
                 "prompt_retry_attempted_at": None,
                 "last_activity_at": now,
+                "updated_at": now,
+            }
+        )
+        self._save_state()
+        session = self.sessions[session.id]
+
+        lesson_context = self._lesson_context_payload(
+            workspace,
+            f"{task.title}\n{task.prompt}",
+        )
+        dispatch_call_id = f"dispatch:{task.id}:{task.dispatch_attempt}"
+        await self._send_dispatch_message(
+            session.id,
+            dispatch_call_id,
+            self._build_task_assignment_prompt(
+                workspace,
+                task,
+                session,
+                lesson_context=lesson_context,
+            ),
+        )
+
+        self.tasks[task.id] = task.model_copy(
+            update={
+                "status": WorkspaceTaskStatus.WORKING,
+                "started_at": now,
                 "updated_at": now,
             }
         )

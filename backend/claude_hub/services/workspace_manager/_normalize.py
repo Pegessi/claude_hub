@@ -14,7 +14,18 @@ class _NormalizeMixin:
         normalized.setdefault("remote_profile_id", None)
         normalized.setdefault("remote_cwd", None)
         normalized.setdefault("remote_reconnect", True)
+        # Legacy resident mailbox fields: read only at migration entry; never canonical.
+        normalized.pop("resident_consumer_key", None)
+        normalized.pop("resident_ack_sequence", None)
         return normalized
+
+    def _workspace_index_item(self, workspace: Workspace) -> dict[str, Any]:
+        """Serialize workspace index row without canonical resident mailbox fields."""
+
+        payload = workspace.model_dump(mode="json")
+        payload.pop("resident_consumer_key", None)
+        payload.pop("resident_ack_sequence", None)
+        return payload
 
     def _normalize_task_item(self, item: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(item)
@@ -28,6 +39,16 @@ class _NormalizeMixin:
         if normalized.get("origin") not in {"human", "resident"}:
             normalized["origin"] = WorkspaceTaskOrigin.HUMAN.value
         normalized.setdefault("related_task_id", None)
+        normalized.setdefault("parent_task_id", None)
+        task_id = str(normalized.get("id") or "")
+        if not normalized.get("parent_task_id"):
+            normalized["parent_task_id"] = None
+            if task_id:
+                normalized.setdefault("root_task_id", task_id)
+                normalized.setdefault("path", task_id)
+        normalized.setdefault("root_task_id", normalized.get("root_task_id") or task_id or None)
+        normalized.setdefault("path", normalized.get("path") or task_id or "")
+        normalized.setdefault("consumer_ack_sequence", 0)
         normalized.setdefault("attachments", [])
         normalized["review_profiles"] = self._normalize_review_profiles(
             normalized.get("review_profiles")
@@ -50,6 +71,14 @@ class _NormalizeMixin:
         has_verdict = normalized.get("review_completed_at") is not None
         normalized.setdefault("reviewed_cycle", 1 if has_verdict else 0)
         normalized.setdefault("review_cycle", max(1, normalized["reviewed_cycle"]))
+        if has_verdict:
+            review_cycle = int(normalized["review_cycle"])
+            reviewed_cycle = int(normalized["reviewed_cycle"])
+            if reviewed_cycle < review_cycle:
+                # Production seq4 root cause: persisted reviewed_cycle=0 with a
+                # verdict timestamp bypasses the reaper's sealed-round guard on
+                # cold load because setdefault does not repair explicit zeros.
+                normalized["reviewed_cycle"] = review_cycle
         normalized.setdefault("review_requested_at", None)
         normalized.setdefault("review_completed_at", None)
         normalized.setdefault("review_skipped_at", None)

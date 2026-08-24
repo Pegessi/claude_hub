@@ -2,6 +2,7 @@
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
+from ..task_graph import reparent_task
 from ._constants import *  # noqa: F401,F403
 
 
@@ -35,6 +36,7 @@ class _TaskUpdatesMixin:
                 payload.related_task_id is not None,
                 payload.clear_context is not None,
                 payload.session_id is not None,
+                payload.parent_task_id is not None,
             ]
         )
 
@@ -96,6 +98,11 @@ class _TaskUpdatesMixin:
                 raise ValueError("A task cannot be related to itself")
             update["related_task_id"] = related_id
 
+        staged_reparent: dict[str, dict[str, Any]] = {}
+        if payload.parent_task_id is not None:
+            staged_reparent = reparent_task(self.tasks, task, payload.parent_task_id or None)
+            update.update(staged_reparent.pop(task.id))
+
         # Handle clear_context for todo tasks
         if payload.clear_context is not None:
             update["clear_context"] = payload.clear_context
@@ -154,7 +161,11 @@ class _TaskUpdatesMixin:
                 update["completed_at"] = now
                 update["human_accepted_at"] = now
 
+        previous_tasks = {task.id: task}
+        previous_tasks.update({task_id: self.tasks[task_id] for task_id in staged_reparent})
         self.tasks[task.id] = task.model_copy(update=update)
+        for task_id, fields in staged_reparent.items():
+            self.tasks[task_id] = previous_tasks[task_id].model_copy(update=fields)
         if status == WorkspaceTaskStatus.DONE:
             self._write_task_record(self.tasks[task.id])
             self._release_task_session(self.tasks[task.id])
@@ -194,7 +205,11 @@ class _TaskUpdatesMixin:
                 self.reports[review_report.id] = review_report
                 await self._request_task_review(self.tasks[task.id], review_report)
 
-        self._save_state()
+        try:
+            self._save_state()
+        except Exception:
+            self.tasks.update(previous_tasks)
+            raise
         if status is not None:
             await self.dispatch_workspace(task.workspace_id)
         return self.tasks[task.id]

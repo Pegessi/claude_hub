@@ -138,6 +138,19 @@ def stub_workspace_terminal(
         if sent_messages is not None:
             sent_messages.append((tmux_session, message))
 
+    async def fake_send_tmux_message_with_receipt(
+        tmux_session: str, message: str, call_id: str
+    ) -> None:
+        # Test stub: no real tmux receipt store. Behave like the legacy
+        # send (always paste) so existing tests that mock _send_tmux_message
+        # continue to work. Tests that exercise receipt semantics override
+        # this stub with a fake receipt store.
+        await fake_send_tmux_message(tmux_session, message)
+
+    async def fake_query_tmux_receipt(tmux_session: str, call_id: str) -> bool:
+        # Default: receipt absent (the paste never ran).
+        return False
+
     async def fake_update_tab(
         tab_id_to_update: str, name: Optional[str] = None, **_: object
     ) -> TerminalTab:
@@ -166,6 +179,30 @@ def stub_workspace_terminal(
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
     monkeypatch.setattr(workspace_module.ttyd_manager, "update_tab", fake_update_tab)
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        fake_send_tmux_message_with_receipt,
+    )
+    monkeypatch.setattr(
+        workspace_manager,
+        "_query_tmux_receipt",
+        fake_query_tmux_receipt,
+    )
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -2066,6 +2103,20 @@ def test_completed_report_creates_temporary_reviewer(
     monkeypatch.setattr(workspace_module.ttyd_manager, "delete_tab", fake_delete_tab)
     monkeypatch.setattr(workspace_module.ttyd_manager, "update_tab", fake_update_tab)
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -2718,6 +2769,20 @@ def test_agent_review_gate_states_trigger_reviewer(
 
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -3437,7 +3502,17 @@ def test_feedback_summary_dispatch_failure_is_visible_retryable_and_delete_safe(
             raise RuntimeError("context request rejected")
         sent_messages.append((tmux_session, message))
 
+    async def fail_first_assignment_with_receipt(
+        tmux_session: str, message: str, call_id: str
+    ) -> None:
+        await fail_first_assignment(tmux_session, message)
+
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fail_first_assignment)
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        fail_first_assignment_with_receipt,
+    )
 
     client = TestClient(app)
     workspace = client.post(
@@ -4291,6 +4366,20 @@ def test_review_passed_keeps_task_in_review(
 
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -4409,6 +4498,20 @@ def test_review_failed_returns_feedback_to_original_agent(
 
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -4608,6 +4711,20 @@ def test_start_task_dispatches_to_resident_agent(
         fake_set_tab_workspace_metadata,
     )
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -5254,13 +5371,21 @@ def test_dispatch_holds_agent_during_in_flight_review(
     assert workspace_manager.sessions[busy_agent["id"]].current_task_id == first_task["id"]
 
 
-def test_report_with_task_renames_non_orchestrator_session(
+def test_report_with_task_renames_assigned_non_orchestrator_session(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Report intake renames an assigned worker even when the session is not the orchestrator.
+
+    Task assignment is explicit: ``task.session_id`` must name the reporting worker
+    before intake (implicit claim via the first report is rejected). The session may
+    still carry a stale tab title and ``current_task_id=None`` until report intake
+    runs ``_rename_session_for_task``.
+    """
     repo = tmp_path / "repo"
     repo.mkdir()
     renamed_tabs: list[tuple[str, str | None]] = []
+    worker_session_id = "review-reviewer-1"
 
     async def fake_update_tab(tab_id: str, name: Optional[str] = None, **_: object) -> TerminalTab:
         renamed_tabs.append((tab_id, name))
@@ -5295,18 +5420,20 @@ def test_report_with_task_renames_non_orchestrator_session(
             "session_prefix": "review",
         },
     )
+    workspace_id = workspace_response.json()["id"]
     task_response = client.post(
-        f"/api/workspaces/{workspace_response.json()['id']}/tasks",
+        f"/api/workspaces/{workspace_id}/tasks",
         json={
             "title": "Review assigned task",
             "prompt": "Review this change",
             "agent_type": "codex",
         },
     )
+    task_id = task_response.json()["id"]
     now = datetime.now()
-    workspace_manager.sessions["review-reviewer-1"] = ManagedSession(
-        id="review-reviewer-1",
-        workspace_id=workspace_response.json()["id"],
+    workspace_manager.sessions[worker_session_id] = ManagedSession(
+        id=worker_session_id,
+        workspace_id=workspace_id,
         task_id=None,
         tab_id="tab-reviewer",
         role=WorkspaceSessionRole.WORKER,
@@ -5328,21 +5455,28 @@ def test_report_with_task_renames_non_orchestrator_session(
         created_at=now,
         updated_at=now,
     )
+    workspace_manager.tasks[task_id] = workspace_manager.tasks[task_id].model_copy(
+        update={"session_id": worker_session_id}
+    )
+    pre_report_session = workspace_manager.sessions[worker_session_id]
+    assert pre_report_session.current_task_id is None
+    assert pre_report_session.title == "Reviewer 1"
+    assert workspace_manager.tasks[task_id].session_id == worker_session_id
 
     report_response = client.post(
-        "/api/workspaces/sessions/review-reviewer-1/reports",
+        f"/api/workspaces/sessions/{worker_session_id}/reports",
         json={
-            "task_id": task_response.json()["id"],
+            "task_id": task_id,
             "state": "started",
             "message": "Started review",
         },
     )
 
     assert report_response.status_code == 201
-    session = workspace_manager.sessions["review-reviewer-1"]
+    session = workspace_manager.sessions[worker_session_id]
     assert session.role == WorkspaceSessionRole.WORKER
     assert session.title == "Review assigned task"
-    assert session.current_task_id == task_response.json()["id"]
+    assert session.current_task_id == task_id
     assert renamed_tabs == [("tab-reviewer", "Review assigned task")]
 
 
@@ -5400,6 +5534,20 @@ def test_start_task_prefers_related_task_agent(
 
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -5517,6 +5665,20 @@ def test_related_task_clear_context_checkbox_sends_clear(
 
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -5628,6 +5790,20 @@ def test_start_task_skips_offline_related_task_agent(
 
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -5912,6 +6088,20 @@ def test_dispatch_workspace_serializes_concurrent_dispatches(
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
     monkeypatch.setattr(workspace_module.ttyd_manager, "update_tab", fake_update_tab)
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -6077,6 +6267,20 @@ def test_background_monitor_auto_continues_interrupted_idle_working_agent(
         fake_list_statuses,
     )
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -6199,6 +6403,20 @@ def test_non_interrupted_idle_working_agent_is_not_auto_continued(
         fake_list_statuses,
     )
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -6327,6 +6545,20 @@ def test_completed_idle_working_agent_is_prompted_to_report(
         fake_list_statuses,
     )
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -6454,6 +6686,20 @@ def test_idle_working_agent_with_review_in_flight_is_not_prompted(
         fake_list_statuses,
     )
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -6596,6 +6842,20 @@ def test_bound_reviewer_on_reopened_task_is_not_auto_prompted(
         fake_list_statuses,
     )
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -7521,6 +7781,20 @@ def test_interrupted_idle_working_agent_auto_continue_stops_after_limit(
         fake_list_statuses,
     )
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -7645,6 +7919,20 @@ def test_review_passed_task_stays_in_review_when_agent_runtime_is_working(
         fake_list_statuses,
     )
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -7788,6 +8076,20 @@ def test_review_passed_task_does_not_reopen_when_agent_has_new_activity(
         fake_list_statuses,
     )
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -7913,6 +8215,20 @@ def test_review_passed_reconciles_stale_working_task(
         fake_list_statuses,
     )
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -8181,6 +8497,20 @@ def _stub_workspace_terminal_for_late_reports(monkeypatch: MonkeyPatch, repo: Pa
         fake_list_statuses,
     )
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -8453,6 +8783,20 @@ def test_fresh_ready_report_is_not_immediately_reopened_by_runtime_working(
         fake_list_statuses,
     )
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -8576,6 +8920,20 @@ def test_completed_review_passed_task_stays_in_review_despite_runtime_activity(
         fake_list_statuses,
     )
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -8694,6 +9052,20 @@ def test_continue_task_marks_working_before_send_verification_failure(
         fake_list_statuses,
     )
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -8857,6 +9229,20 @@ def test_remote_workspace_default_agent_uses_local_tab(
 
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -8968,6 +9354,20 @@ def test_remote_workspace_explicit_remote_agent_uses_remote_tab_and_forwarded_re
 
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -9086,6 +9486,20 @@ def test_create_agent_can_override_target_and_yolo_mode(
 
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -9190,6 +9604,20 @@ def test_start_task_does_not_dispatch_to_stopped_resident_agent(
 
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -9290,6 +9718,20 @@ def test_delete_task_removes_reports_and_unlinks_session(
 
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -9387,6 +9829,20 @@ def test_done_task_writes_delete_safe_task_record(
 
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
+
+    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
+        await fake_send_tmux_message(tmux_session, message)
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        _fake_send_with_receipt,
+    )
+
+    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
     monkeypatch.setattr(
         workspace_manager,
         "_ensure_session_ready_for_send",
@@ -10755,6 +11211,105 @@ def test_monitor_does_not_auto_continue_review_needs_input_parking(
     # Must stay REVIEW — review_needs_input requires human judgment.
     assert still_parked.status == WorkspaceTaskStatus.REVIEW
     assert sent_messages == []
+
+
+def test_monitor_does_not_auto_continue_reviewer_after_sealed_terminal_verdict(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Sealed round with terminal verdict: reviewer must stay idle; worker recovery only.
+
+    Regression for monitor auto-continuing the reviewer after review_passed,
+    which re-posted review_started and polluted the TaskMailbox stream.
+    """
+    (
+        _,
+        workspace,
+        task,
+        started,
+        worker,
+        sent_messages,
+        status_samples,
+    ) = _seed_sealed_round(
+        monkeypatch,
+        tmp_path,
+        tab_id="no-reviewer-sealed-tab",
+        port=12610,
+        prefix="norevseal",
+        workspace_name="NoReviewerSealed",
+        task_title="norevseal",
+        prompt="x",
+        verdict_state=AgentReportState.REVIEW_PASSED,
+        packet_status=GoalPacketStatus.APPROVED,
+    )
+    reviewer_id = workspace_manager.tasks[task["id"]].review_session_id
+    reviewer = workspace_manager.sessions[reviewer_id]
+    workspace_manager.sessions[reviewer_id] = reviewer.model_copy(
+        update={
+            "status": ManagedSessionStatus.IDLE,
+            "runtime_status": AgentRuntimeStatus.IDLE,
+            "current_task_id": task["id"],
+            "auto_continue_task_id": None,
+            "auto_continue_attempts": 0,
+            "last_activity_at": datetime.now() - timedelta(seconds=120),
+        }
+    )
+
+    async def fake_capture(tmux: str) -> str:
+        # Completion-shaped output that would trigger reviewer report-missing
+        # auto-continue if the sealed-round guard were absent.
+        return "\n".join(
+            [
+                "Review complete.",
+                "Validation: criteria met.",
+                "Risks: none.",
+                "",
+                "› ",
+            ]
+        )
+
+    monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture)
+
+    sampled_at = datetime.now()
+    reviewer_tmux = f"claude-hub-{reviewer.tab_id}"
+    status_samples[:] = [
+        TerminalAgentStatus(
+            tab_id=reviewer.tab_id,
+            tab_name="r",
+            agent_type=AgentType.CODEX,
+            status=AgentRuntimeStatus.IDLE,
+            status_text="Idle",
+            detail="reviewer idle after verdict",
+            tmux_session=reviewer_tmux,
+            last_changed_at=sampled_at - timedelta(seconds=120),
+            sampled_at=sampled_at,
+        ),
+        TerminalAgentStatus(
+            tab_id=worker.tab_id,
+            tab_name="w",
+            agent_type=AgentType.CLAUDE,
+            status=AgentRuntimeStatus.IDLE,
+            status_text="Idle",
+            detail="worker idle",
+            tmux_session=f"claude-hub-{worker.tab_id}",
+            last_changed_at=sampled_at - timedelta(seconds=120),
+            sampled_at=sampled_at,
+        ),
+    ]
+
+    asyncio.run(
+        workspace_manager._refresh_session_statuses(workspace["id"], run_auto_continue=True)
+    )
+
+    reviewer_after = workspace_manager.sessions[reviewer_id]
+    recovered = workspace_manager.tasks[task["id"]]
+    reviewer_prompts = [msg for tmux, msg in sent_messages if tmux == reviewer_tmux]
+
+    assert reviewer_prompts == [], "reviewer must not be auto-continued after sealed verdict"
+    assert reviewer_after.auto_continue_attempts == 0
+    assert (
+        recovered.status == WorkspaceTaskStatus.WORKING
+    ), f"worker sealed recovery must still run, got {recovered.status}"
 
 
 def test_monitor_recovers_sealed_gp_rejected_verdict(

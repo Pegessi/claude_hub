@@ -595,6 +595,8 @@ class WorkspaceTaskCreate(BaseModel):
     autonomy_policy: Optional[AutonomyPolicy] = None
     session_id: Optional[str] = None
     clear_context: Optional[bool] = None
+    # Task Graph parent. Independent of related_task_id (session-affinity).
+    parent_task_id: Optional[str] = None
 
 
 class WorkspaceAttachmentCreate(BaseModel):
@@ -633,6 +635,7 @@ class WorkspaceTaskUpdate(BaseModel):
     related_task_id: Optional[str] = None
     clear_context: Optional[bool] = None
     session_id: Optional[str] = None
+    parent_task_id: Optional[str] = None
 
 
 class WorkspaceTask(BaseModel):
@@ -655,6 +658,42 @@ class WorkspaceTask(BaseModel):
     session_id: Optional[str] = None
     related_task_id: Optional[str] = None
     clear_context: Optional[bool] = None
+    # Task Graph: parent/root/path. related_task_id stays a dispatch hint.
+    parent_task_id: Optional[str] = None
+    root_task_id: Optional[str] = None
+    path: str = ""
+    # Consumer cursor for this Task when it waits on its subtree. Not a Session field.
+    consumer_ack_sequence: int = 0
+    # Call ids of followup messages already ACKed (processed) by the worker.
+    # Used for sender-side dedup: a followup with a call_id already in this
+    # list is a no-op. Persisted with the task so delivery survives restarts.
+    # NOTE: delivered_call_ids == "processed by the worker", not "sent by the
+    # Hub". A call_id stays in pending_call_ids until the worker ACKs it.
+    delivered_call_ids: List[str] = Field(default_factory=list)
+    # Call ids persisted in the outbox (sender side) whose message sits in the
+    # session's pending_messages inbox awaiting pump delivery. The sender only
+    # ever appends here; it never sends to tmux directly. On restart, every
+    # call_id here is re-deliverable.
+    pending_call_ids: List[str] = Field(default_factory=list)
+    # Call ids the receiver pump has moved to ``in-flight``: the intent to
+    # deliver was persisted (call_id moved out of pending_call_ids) and the
+    # pump is about to send / has sent the message to tmux, but the worker
+    # has not yet ACKed it. The Hub CANNOT prove the message reached the tmux
+    # input buffer (tmux stdin is not a durable, verifiable receiver), so a
+    # call_id here is "maybe delivered, not yet confirmed". On cold restart
+    # these move to ``uncertain_call_ids`` (fail-closed: not re-sent, not
+    # silently marked delivered).
+    processing_call_ids: List[str] = Field(default_factory=list)
+    # Call ids whose delivery state is **uncertain**: they were in
+    # ``processing_call_ids`` (in-flight) when the Hub crashed or the tmux
+    # session disappeared. We cannot prove the message was NOT delivered to
+    # the worker's tmux input buffer, so we fail closed: do NOT auto-resend
+    # (could duplicate) and do NOT silently mark delivered (could lose). The
+    # call_id stays here until either (a) the worker ACKs it (moves to
+    # delivered), or (b) an explicit human/operator retry moves it back to
+    # pending_call_ids for re-delivery. A ``delivery:uncertain`` event is
+    # emitted to the supervisor so the condition is visible.
+    uncertain_call_ids: List[str] = Field(default_factory=list)
     dispatch_reason: Optional[str] = None
     dispatch_pending: bool = False
     system_internal: bool = False
@@ -662,6 +701,13 @@ class WorkspaceTask(BaseModel):
     feedback_lesson_ids: List[str] = Field(default_factory=list)
     review_session_id: Optional[str] = None
     review_attempts: int = 0
+    # Monotonic counter incremented each time the task is (re-)dispatched to a
+    # worker via start_task. Used to build a per-attempt dispatch call_id
+    # (``dispatch:{task.id}:{dispatch_attempt}``) so that followups — which
+    # may carry a different assignment prompt — do not collide with the
+    # immutable-call_id payload invariant. Crash recovery reuses the stored
+    # attempt, so the same call_id no-ops correctly.
+    dispatch_attempt: int = 0
     # Review-cycle ordinals. ``review_cycle`` is the current work round (a task is
     # born in round 1; each reopen-to-worker opens the next round).
     # ``reviewed_cycle`` is the round number of the most recently applied reviewer
@@ -725,6 +771,111 @@ class ManagedSession(BaseModel):
     # a review prompt for. Drives the cross-task /clear decision independently of
     # any task's mutable review_session_id (which abort/skip/stale-release null).
     last_review_task_id: Optional[str] = None
+    # Executor-boundary call_id tracking for at-least-once / fail-closed
+    # delivery to the tmux inbox. The Hub does NOT own a verifiable durable
+    # receiver: tmux stdin can accept bytes that are then lost if the agent
+    # process dies, and the Hub cannot read back what the model consumed.
+    # Therefore we cannot guarantee exactly-once; we guarantee fail-closed:
+    # a message is either pending, in-flight (maybe sent), uncertain (crash
+    # while in-flight), or delivered (worker ACKed).
+    #
+    # Lifecycle (see _messaging.py and _reports.py):
+    #
+    #   pending_call_ids ──persist intent──▶ processing_call_ids ──ACK──▶ delivered_call_ids
+    #         │                                      │
+    #         │         send failed                  │  crash / tmux gone
+    #         └──────────────────────────────────────┤
+    #                                                ▼
+    #                                       uncertain_call_ids
+    #                                       (fail-closed: not re-sent,
+    #                                        not silently delivered;
+    #                                        emit delivery:uncertain)
+    #
+    # pending_call_ids: call_ids persisted in the outbox (sender side) whose
+    #   message sits in ``pending_messages`` awaiting delivery. The sender
+    #   (``send_session_message``) only ever appends here; it never sends to
+    #   tmux directly. On restart, every call_id here is pumped.
+    # processing_call_ids: call_ids the pump has moved to in-flight: the
+    #   intent was persisted (call_id moved out of pending) and the pump is
+    #   sending / has sent the message to tmux, but the worker has not ACKed.
+    #   The Hub CANNOT prove the message reached the tmux input buffer, so
+    #   this is "maybe delivered". On send failure the call_id rolls back to
+    #   pending. On crash while here, it moves to uncertain.
+    # uncertain_call_ids: call_ids whose delivery state is unknown (crash
+    #   while in-flight, or tmux session gone). Fail-closed: we do NOT
+    #   auto-resend (could duplicate) and do NOT silently mark delivered
+    #   (could lose). A ``delivery:uncertain`` event is emitted to the
+    #   supervisor. Moves to delivered on worker ACK, or back to pending on
+    #   explicit operator retry.
+    # delivered_call_ids: call_ids the worker has ACKed (processed) via
+    #   ``acked_call_ids`` in a report. Only the worker's ACK moves a call_id
+    #   here. ``send_session_message`` skips any call_id already here.
+    #
+    # NOTE: delivered_call_ids == "processed by the worker", not "sent by the
+    # Hub". The Hub never moves a call_id to delivered_call_ids on its own;
+    # only an ACK from the worker does.
+    pending_call_ids: List[str] = Field(default_factory=list)
+    processing_call_ids: List[str] = Field(default_factory=list)
+    # Call ids whose delivery state is **uncertain**: they were in
+    # ``processing_call_ids`` (in-flight) when the Hub crashed or the tmux
+    # session disappeared. Fail-closed: not auto-resent (could duplicate),
+    # not silently marked delivered (could lose). Moves to delivered on
+    # worker ACK, or back to pending on explicit retry.
+    uncertain_call_ids: List[str] = Field(default_factory=list)
+    delivered_call_ids: List[str] = Field(default_factory=list)
+    # Per-call_id claim timestamps. Keyed by call_id, value is the UTC datetime
+    # when the receiver pump moved the call_id from pending to processing.
+    # Used by ``_expire_processing_leases`` to decide whether a claimed but
+    # unACKed call_id should be moved back to pending for re-delivery (only
+    # for STOPPED sessions whose tmux inbox is gone).
+    processing_call_ids_at: Dict[str, datetime] = Field(default_factory=dict)
+    # Durable inbox: call_id → message body. Populated by
+    # ``send_session_message``; consumed (and deleted) by the receiver pump
+    # after a successful claim. Persisted so a crash between outbox write and
+    # pump claim does not lose the message.
+    pending_messages: Dict[str, str] = Field(default_factory=dict)
+    # Durable inbox attachments: call_id → list of persisted attachments.
+    # Populated by ``send_session_message`` when a call_id send carries
+    # attachments; consumed (and deleted) by the receiver pump alongside the
+    # message body. Kept in lockstep with ``pending_messages`` so a reload
+    # preserves both the message and its attachments.
+    pending_attachments: Dict[str, list[WorkspaceAttachment]] = Field(default_factory=dict)
+    # Durable call payload fingerprints: call_id → sha256 hex digest of the
+    # canonical (message, attachments) payload. Computed on send and kept
+    # forever (even after ACK) so that:
+    #   * same call_id + same payload is idempotent (no-op) at any state
+    #     (pending / processing / delivered / uncertain).
+    #   * same call_id + different payload is rejected (ValueError) without
+    #     mutation — a call_id identifies a single durable delivery.
+    # The fingerprint covers the message text and, for each attachment, the
+    # filename, normalized mime type, and sha256 digest of the decoded
+    # bytes. Same-size-but-different-content attachments are therefore
+    # detected as conflicting. Raw bytes are NOT stored in the fingerprint
+    # (only the digest), so the JSON state stays small.
+    call_payload_fingerprints: Dict[str, str] = Field(default_factory=dict)
+    # Report intake idempotency: call_id → report_id. Populated by
+    # ``create_report`` when the payload carries a call_id. Lets a retry
+    # after an error-response (report was durably committed but the
+    # response failed) return the existing report instead of duplicating.
+    # Kept forever (like call_payload_fingerprints) so same call_id + same
+    # fingerprint is always idempotent; same call_id + different fingerprint
+    # raises ValueError.
+    report_call_ids: Dict[str, str] = Field(default_factory=dict)
+    # Durable canonical report fingerprints: call_id → sha256 hex digest of
+    # the report's content (including the exact Goal Packet). Computed on
+    # first report creation and persisted so that:
+    #   * a retry with the same call_id compares against the stored
+    #     fingerprint directly (no reliance on recomputing from the
+    #     persisted report, which could drift if the model changes),
+    #   * same call_id + same fingerprint returns the existing report,
+    #   * same call_id + different fingerprint raises ReportCallIdConflict.
+    # The fingerprint covers every content field (state, message,
+    # changed_files, validation, risks, acceptance_check, goal_packet,
+    # evaluation_report, review_profiles, profile_results, artifact_refs,
+    # confidence, requires_human_judgment, review_decision, review_reason,
+    # risk_level, acked_call_ids) and excludes only bookkeeping fields
+    # (id, workspace_id, session_id, created_at, review_cycle, call_id).
+    report_call_fingerprints: Dict[str, str] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
     last_activity_at: Optional[datetime] = None
@@ -738,6 +889,15 @@ class AgentReportCreate(BaseModel):
     message_en: Optional[str] = None
     message_zh: Optional[str] = None
     task_id: Optional[str] = None
+    # Idempotency key for report intake. When provided, a second report with
+    # the same call_id (and identical payload fingerprint) returns the
+    # previously-persisted report instead of creating a duplicate. This makes
+    # report/result intake safe under error-after-commit retries: if the Hub
+    # durably persists the report but fails before returning the response
+    # (e.g. a late exception in _after_report_recorded or the TaskMailbox
+    # bridge), the client's retry with the same call_id is a no-op that
+    # returns the existing report, task transition, and bridged event.
+    call_id: Optional[str] = None
     changed_files: List[str] = Field(default_factory=list)
     validation: Optional[str] = None
     risks: Optional[str] = None
@@ -752,6 +912,35 @@ class AgentReportCreate(BaseModel):
     review_decision: ReviewDecision = ReviewDecision.AUTO
     review_reason: Optional[str] = None
     risk_level: Optional[str] = None
+    # Call-specific ACK: the call_ids this report acknowledges as **processed**
+    # by the worker. Only call_ids currently in the task/session
+    # pending_call_ids or processing_call_ids are moved to delivered_call_ids.
+    # Unknown or future call_ids (not in pending or processing) are silently
+    # ignored — this prevents a malicious or buggy report from poisoning the
+    # delivered set and suppressing a real future delivery.
+    #
+    # Production contract:
+    # - The dispatch call_id (f"dispatch:{task_id}:{dispatch_attempt}") is
+    #   ACKed automatically by the Hub on every report submission; the worker
+    #   does NOT need to list it. (Legacy dispatch:{task_id} ACKs are still
+    #   accepted for backward compatibility.)
+    # - For any other call_id the worker has processed (e.g. a followup
+    #   message carrying [call_id:<id>]), the worker MUST include it in
+    #   acked_call_ids so the Hub can move it to delivered_call_ids and
+    #   release it. The worker ACK is the durable commit to delivered.
+    # - A call_id not listed in acked_call_ids stays in processing_call_ids.
+    #   The Hub does NOT guarantee exactly-once delivery: a processing
+    #   call_id is not re-sent to a LIVE tmux session (at-most-once paste
+    #   per call_id per tmux session lifetime, enforced by the tmux
+    #   @receipt_<sha16(call_id)> session option). On cold restart the
+    #   monitor reconciles processing call_ids against the tmux receipt:
+    #     * receipt present on a LIVE session -> keep processing (no repaste).
+    #     * receipt absent on a LIVE session -> move back to pending for one
+    #       re-delivery (the paste definitely did not happen).
+    #     * session STOPPED/gone/unqueryable -> move to uncertain (fail
+    #       closed; explicit operator retry required via
+    #       retry_uncertain_delivery).
+    acked_call_ids: List[str] = Field(default_factory=list)
 
 
 class AgentReport(BaseModel):
@@ -761,6 +950,10 @@ class AgentReport(BaseModel):
     workspace_id: str
     task_id: Optional[str] = None
     session_id: str
+    # Idempotency key for report intake. Mirrors AgentReportCreate.call_id.
+    # When set, a retry with the same call_id returns this report instead of
+    # creating a duplicate. See AgentReportCreate.call_id for the contract.
+    call_id: Optional[str] = None
     state: AgentReportState
     message: str
     message_en: Optional[str] = None
@@ -778,6 +971,9 @@ class AgentReport(BaseModel):
     review_decision: ReviewDecision = ReviewDecision.AUTO
     review_reason: Optional[str] = None
     risk_level: Optional[str] = None
+    # Call-specific ACK: the call_ids this report acknowledges as processed
+    # by the worker. Mirrors AgentReportCreate.acked_call_ids.
+    acked_call_ids: List[str] = Field(default_factory=list)
     # The owning task's ``review_cycle`` at the moment this report was created.
     # Used to rank gate/verdict reports against the task's ``reviewed_cycle``.
     # Defaults to 0 so legacy on-disk reports rank below any post-migration round.
@@ -1041,6 +1237,19 @@ class ContinueTaskRequest(BaseModel):
     attachments: List[WorkspaceAttachmentCreate] = Field(default_factory=list)
 
 
+class TaskFollowupRequest(BaseModel):
+    """Task-first follow-up. ``call_id`` is optional; the API mints one if omitted."""
+
+    message: str = Field(..., min_length=1)
+    call_id: Optional[str] = Field(default=None, min_length=1)
+
+
+class TaskMailboxAckRequest(BaseModel):
+    """Advance a Task-owned mailbox cursor (``consumer_ack_sequence``)."""
+
+    sequence: int = Field(..., ge=0)
+
+
 class RequestTaskReviewRequest(BaseModel):
     """Payload for manually requesting reviewer checks."""
 
@@ -1051,6 +1260,7 @@ class ManualTaskControlRequest(BaseModel):
     """Payload for exceptional manual task state control."""
 
     reason: str
+    call_id: Optional[str] = None
 
 
 class DispatchDecisionRequest(BaseModel):
@@ -1066,6 +1276,21 @@ class SendSessionMessageRequest(BaseModel):
 
     message: str
     attachments: List[WorkspaceAttachmentCreate] = Field(default_factory=list)
+
+
+class RetryUncertainDeliveryRequest(BaseModel):
+    """Payload for retrying an uncertain delivery.
+
+    An operator explicitly requests that a call_id currently in
+    ``uncertain_call_ids`` be moved back to ``pending_call_ids`` so the
+    normal pump path can re-deliver it. The original payload is preserved.
+
+    The actor identity is NOT client-supplied; it is derived from the
+    authenticated ``current_user`` so the audit trail cannot be forged.
+    """
+
+    call_id: str
+    reason: str
 
 
 class User(BaseModel):

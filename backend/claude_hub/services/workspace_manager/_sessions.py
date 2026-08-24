@@ -2,6 +2,7 @@
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
+from ..task_graph import TaskHasDescendantsError, task_has_descendants
 from ._constants import *  # noqa: F401,F403
 
 
@@ -14,10 +15,19 @@ class _SessionsMixin:
         task = self.tasks.get(task_id)
         if not task:
             raise KeyError(task_id)
+        if task_has_descendants(self.tasks, task.workspace_id, task):
+            raise TaskHasDescendantsError(
+                f"Cannot delete task {task_id}: it has child tasks. "
+                "Delete or reparent descendants first."
+            )
+
+        workspace_id = task.workspace_id
+        snapshot = self._snapshot_report_intake_workspace(workspace_id)
+
         if task.system_internal and task.internal_kind == "feedback_reaper":
             try:
                 self._feedback_store().abandon_summary_run(
-                    task.workspace_id,
+                    workspace_id,
                     task.id,
                     reason="task_deleted",
                     now=_wm._now(),
@@ -26,11 +36,13 @@ class _SessionsMixin:
                 logger.exception(
                     "Failed to abandon Feedback Reaper summary run during task deletion "
                     "workspace_id=%s task_id=%s",
-                    task.workspace_id,
+                    workspace_id,
                     task.id,
                 )
-        self.tasks.pop(task_id, None)
 
+        self.task_mailbox.purge_task_events(workspace_id, task.id)
+
+        self.tasks.pop(task_id, None)
         self.reports = {
             report_id: report
             for report_id, report in self.reports.items()
@@ -53,7 +65,12 @@ class _SessionsMixin:
                         "updated_at": _wm._now(),
                     }
                 )
-        self._save_state()
+
+        try:
+            self._save_state()
+        except Exception:
+            self._restore_report_intake_workspace(workspace_id, snapshot)
+            raise
 
     async def ensure_workspace_agent(
         self,
@@ -78,7 +95,7 @@ class _SessionsMixin:
                 self._sync_session_tab_metadata(existing)
                 return existing
         elif payload.role == WorkspaceSessionRole.REVIEWER and payload.reuse_existing:
-            existing = self._first_available_reviewer(workspace.id)
+            existing = self._first_available_reviewer(workspace)
             if existing:
                 self._sync_session_tab_metadata(existing)
                 return existing
