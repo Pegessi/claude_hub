@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
+from claude_hub.auth.dependencies import get_current_user
 from claude_hub.main import app
 from claude_hub.models import (
     AgentReport,
@@ -17,11 +18,10 @@ from claude_hub.models import (
     AgentType,
     ExecutionTarget,
     ReviewDecision,
+    User,
     WorkspaceCreate,
     WorkspaceTaskCreate,
 )
-from claude_hub.auth.dependencies import get_current_user
-from claude_hub.models import User
 from claude_hub.models.agent_tree import AgentRun, AgentRunStatus, ExecutorKind
 from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
 from claude_hub.services.task_graph import TaskHasDescendantsError, make_task_consumer_key
@@ -90,6 +90,7 @@ def _append_task_event(manager: WorkspaceManager, task, *, call_id: str) -> None
         payload={"note": call_id},
         persist=True,
     )
+
 
 def _make_report(*, workspace_id: str, task_id: str, report_id: str) -> AgentReport:
     return AgentReport(
@@ -185,9 +186,7 @@ def test_delete_leaf_task_removes_reports_events_call_index_and_compat_runs(
     assert all(event.task_id != leaf.id for event in manager.task_mailbox._events.get(ws_id, []))
 
 
-def test_delete_leaf_task_survives_cold_reload(
-    manager: WorkspaceManager, tmp_path: Path
-) -> None:
+def test_delete_leaf_task_survives_cold_reload(manager: WorkspaceManager, tmp_path: Path) -> None:
     ws_id = _make_workspace(manager, tmp_path)
     parent = _create_task(manager, ws_id, "parent")
     leaf = _create_task(manager, ws_id, "leaf", parent_task_id=parent.id)
@@ -255,7 +254,8 @@ def test_delete_leaf_task_does_not_affect_other_workspace(
 
 
 def test_delete_task_api_returns_409_for_parent_with_child(
-    state_root: Path, tmp_path: Path,
+    state_root: Path,
+    tmp_path: Path,
 ) -> None:
     ws_id = _make_workspace(workspace_manager, tmp_path, "API WS")
     parent = _create_task(workspace_manager, ws_id, "parent")

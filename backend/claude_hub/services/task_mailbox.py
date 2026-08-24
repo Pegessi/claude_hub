@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple, cast
 from ..models import AgentReport, WorkspaceTask
 from ..models.agent_tree import AgentEvent, AgentEventType, AgentRun, ExecutorKind
 from ..models.task_mailbox import TaskActorRole, TaskEvent, TaskEventType
+from . import workspace_state_policy as state_policy
 from .agent_tree import _request_fingerprint
 from .directed_wait import DirectedWaitCoordinator
 from .task_graph import (
@@ -23,7 +24,6 @@ from .task_graph import (
     tasks_in_subtree,
 )
 from .task_migration import linked_run_for_task, task_for_run
-from . import workspace_state_policy as state_policy
 
 logger = logging.getLogger(__name__)
 
@@ -750,9 +750,7 @@ class TaskMailbox:
         """Remove durable Task events and call-index entries for one Task."""
 
         remaining = [
-            event
-            for event in self._events.get(workspace_id, [])
-            if event.task_id != task_id
+            event for event in self._events.get(workspace_id, []) if event.task_id != task_id
         ]
         self._events[workspace_id] = remaining
         self._rebuild_call_index(workspace_id)

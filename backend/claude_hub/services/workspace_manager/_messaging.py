@@ -852,9 +852,7 @@ class _MessagingMixin:
             return
 
         actor_role = (
-            TaskActorRole.REVIEWER
-            if session_id == task.review_session_id
-            else TaskActorRole.WORKER
+            TaskActorRole.REVIEWER if session_id == task.review_session_id else TaskActorRole.WORKER
         )
         uncertain_call_id = f"delivery:uncertain:{call_id}"
         try:
