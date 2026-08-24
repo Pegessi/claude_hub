@@ -5,6 +5,16 @@
 
 ## Unreleased
 
+### fix: Task Graph E2E harness native git provenance for exact-artifact gates
+
+- Add ``scripts/task-graph-e2e/git_provenance.py``: read real
+  branch/HEAD/dirty from delivery repo, forbid env spoofing, require clean
+  worktree at harness start, assert pre/post SHA unchanged before writing
+  ``evidence.json``.
+- Wire provenance into ``run_e2e.py`` finally block; export
+  ``CLAUDE_HUB_E2E_SOURCE_ROOT`` from ``run.sh``.
+- Add ``backend/tests/test_task_graph_e2e_git_provenance.py`` contract tests.
+
 ### fix: seal review rounds on cold load and harden Task Graph blockers
 
 - **P1-1:** Leaf-only Task delete with **409** when descendants exist; atomic
