@@ -664,7 +664,7 @@
               aria-label="Close task detail"
               @click="closeTaskDetail"
             >
-              x
+              ×
             </button>
           </div>
 
@@ -5662,22 +5662,23 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 16px 18px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--ch-color-border-muted);
   background: var(--ch-color-surface-raised);
 }
 
 .workspace-header h1 {
-  font-size: 18px;
+  font-size: 16px;
   line-height: 1.2;
-  margin: 0 0 4px;
+  margin: 0 0 2px;
   color: var(--ch-color-text-strong);
+  font-weight: 600;
 }
 
 .workspace-header p {
   margin: 0;
   color: var(--ch-color-text-muted);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .workspace-title-block {
@@ -5704,6 +5705,27 @@ onUnmounted(() => {
 .workspace-actions {
   justify-content: flex-end;
   flex-wrap: wrap;
+}
+
+/* Secondary workspace actions use a quiet ghost style so they don't compete
+   with the primary "Add Task" button. */
+.workspace-desktop-action {
+  border-color: transparent;
+  background: transparent;
+  color: var(--ch-color-text-muted);
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.workspace-desktop-action:hover {
+  border-color: var(--ch-color-border-muted);
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+}
+
+.workspace-select-shell {
+  position: relative;
 }
 
 .workspace-mobile-menu {
@@ -6395,8 +6417,10 @@ onUnmounted(() => {
 
 .workspace-select {
   width: 100%;
-  min-width: 220px;
+  min-width: 160px;
   padding-right: 32px;
+  height: 30px;
+  font-size: 12px;
 }
 
 .workspace-select-shell[data-loading='true'] .workspace-select {
@@ -6661,6 +6685,7 @@ onUnmounted(() => {
   gap: 12px;
   overflow: auto;
   padding: 14px;
+  background: var(--ch-color-surface-sunken);
 }
 
 /* Graceful loading skeleton shown over the board during a workspace switch
@@ -6674,7 +6699,7 @@ onUnmounted(() => {
   grid-template-columns: repeat(5, minmax(220px, 1fr));
   gap: 12px;
   padding: 14px;
-  background: var(--ch-color-surface);
+  background: var(--ch-color-surface-sunken);
   overflow: hidden;
 }
 
@@ -6783,6 +6808,7 @@ onUnmounted(() => {
   border: 1px solid var(--ch-color-border-muted);
   border-radius: var(--ch-radius-lg);
   background: var(--ch-color-surface-raised);
+  box-shadow: var(--ch-shadow-card);
   overflow: hidden;
 }
 
@@ -6830,7 +6856,7 @@ onUnmounted(() => {
   border: 1px solid var(--ch-color-border-muted);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface);
-  padding: 10px 10px 10px 12px;
+  padding: 8px 8px 8px 12px;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
   transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), transform var(--ch-motion-fast);
@@ -7024,7 +7050,7 @@ onUnmounted(() => {
 }
 
 .review-badge--active .review-badge-dot {
-  animation: review-badge-pulse 1.4s ease-in-out infinite;
+  opacity: 1;
 }
 
 .review-badge--pending {
@@ -7037,11 +7063,6 @@ onUnmounted(() => {
   background: color-mix(in srgb, var(--ch-color-attention-strong) 18%, transparent);
   border-color: color-mix(in srgb, var(--ch-color-attention-strong) 45%, transparent);
   color: var(--ch-color-attention-strong);
-}
-
-@keyframes review-badge-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.45; transform: scale(0.7); }
 }
 
 .status-dot {
@@ -7132,7 +7153,7 @@ onUnmounted(() => {
 
 .task-actions {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
   gap: 6px;
 }
 
@@ -7164,7 +7185,7 @@ onUnmounted(() => {
 }
 
 .task-actions button {
-  height: 30px;
+  height: 26px;
 }
 
 .task-actions button:focus-visible,
@@ -7250,10 +7271,11 @@ onUnmounted(() => {
 .detail-eyebrow,
 .detail-section-title {
   display: block;
-  color: var(--ch-color-accent);
+  color: var(--ch-color-text-muted);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
   text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .detail-section-title--with-controls,
@@ -7352,18 +7374,32 @@ onUnmounted(() => {
   transition: border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), background var(--ch-motion-fast);
 }
 
+/* Collapsed sections keep minimal chrome: no border, no background, just the
+   summary row acting as a quiet divider. */
+.detail-section--collapsible:not([open]) {
+  border-color: transparent;
+  background: transparent;
+  padding: 0;
+}
+
 .detail-section--collapsible > summary {
   cursor: pointer;
+  padding: 8px 2px;
+  list-style: none;
+}
+
+.detail-section--collapsible > summary::-webkit-details-marker {
+  display: none;
 }
 
 .detail-section--collapsible[open] {
-  border-color: var(--ch-color-accent);
+  border-color: var(--ch-color-border-strong);
   background: var(--ch-color-surface-raised);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ch-color-accent) 35%, transparent);
 }
 
 .detail-section--collapsible[open] > summary {
   margin-bottom: 10px;
+  padding: 0;
 }
 
 .detail-section-controls {
