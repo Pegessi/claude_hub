@@ -276,7 +276,7 @@ async def wait_task_mailbox_events(
     timeout_seconds: float = Query(30.0, ge=0),
     current_user: User = Depends(get_current_user),
 ) -> List[TaskEvent]:
-    """Directed long-poll for ``task:<task_id>``. No AgentRun."""
+    """Directed long-poll for ``task:<task_id>`` TaskMailbox events."""
     try:
         return await workspace_manager.wait_task_mailbox_events(
             workspace_id,
@@ -296,7 +296,7 @@ async def ack_task_mailbox(
     payload: TaskMailboxAckRequest,
     current_user: User = Depends(get_current_user),
 ) -> WorkspaceTask:
-    """Advance Task.consumer_ack_sequence. Never writes AgentRun."""
+    """Advance ``Task.consumer_ack_sequence`` for a TaskMailbox consumer."""
     try:
         result = workspace_manager.ack_task_mailbox(
             workspace_id,
@@ -316,7 +316,7 @@ async def followup_workspace_task(
     payload: TaskFollowupRequest,
     current_user: User = Depends(get_current_user),
 ) -> TaskEvent:
-    """Write a TaskMailbox followup. Does not go through /api/agent-tree."""
+    """Write a TaskMailbox followup on the Task Graph REST surface."""
     call_id = payload.call_id or str(uuid.uuid4())
     try:
         return await workspace_manager.followup_task(

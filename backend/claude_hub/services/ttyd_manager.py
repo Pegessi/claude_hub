@@ -1138,7 +1138,7 @@ asyncio.run(_main())
         return f" --model {shlex.quote(model)}"
 
     def _codex_model_arg(self) -> str:
-        """Return the explicit model selected by an Agent Tree executor.
+        """Return the explicit model selected by a managed-session executor launch contract.
 
         ``CODEX_MODEL`` is an internal launch-contract variable, not a Codex
         authentication/config variable.  Keeping the value in the persisted

@@ -333,7 +333,7 @@ class HubClient:
         since_sequence: int = 0,
         subtree: bool = False,
     ) -> Any:
-        """GET Task mailbox events. Never /api/agent-tree."""
+        """GET Task mailbox events for ``task:<task_id>``."""
         params: Dict[str, Any] = {
             "since_sequence": since_sequence,
             "subtree": subtree,
@@ -352,7 +352,7 @@ class HubClient:
         subtree: bool = False,
         timeout_seconds: float = 30.0,
     ) -> Any:
-        """POST Task mailbox wait. Never /api/agent-tree."""
+        """POST Task mailbox wait (directed long-poll)."""
         params: Dict[str, Any] = {
             "since_sequence": since_sequence,
             "subtree": subtree,
@@ -371,7 +371,7 @@ class HubClient:
         task_id: str,
         sequence: int,
     ) -> Any:
-        """POST Task mailbox ACK. Never /api/agent-tree."""
+        """POST Task mailbox ACK (advance consumer cursor)."""
         body = {"sequence": sequence}
         return self._request(
             "POST",

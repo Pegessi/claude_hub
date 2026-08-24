@@ -416,7 +416,7 @@ class TaskMailbox:
         self._wake_task_consumers(event, task)
 
     def _wake_task_consumers(self, event: TaskEvent, task: WorkspaceTask) -> None:
-        """Wake Task waiters. Never requires an AgentRun or Resident consumer."""
+        """Wake Task waiters for the event consumer and optional subtree ancestors."""
 
         self._waiters.wake(event.consumer_key)
         ancestor_id = task.parent_task_id
@@ -465,7 +465,7 @@ class TaskMailbox:
         subtree: bool = False,
         timeout_seconds: float = 30.0,
     ) -> List[TaskEvent]:
-        """Directed long-poll for a Task consumer. No AgentRun."""
+        """Directed long-poll for a Task consumer (``task:<task_id>``)."""
 
         self.consumer_cursor(workspace_id, consumer_key)
         return await self._waiters.wait(
@@ -490,7 +490,7 @@ class TaskMailbox:
         return {item.id for item in tasks_in_subtree(self._wm.tasks.values(), workspace_id, task)}
 
     def ack(self, workspace_id: str, consumer_key: str, sequence: int, persist: bool = True) -> int:
-        """Advance a Task consumer cursor. Never writes AgentRun.ack or resident index."""
+        """Advance a Task consumer cursor (``consumer_ack_sequence``)."""
 
         current = self.consumer_cursor(workspace_id, consumer_key)
         workspace_max = self._workspace_max_sequence(workspace_id)

@@ -872,7 +872,7 @@ def task_followup(
     message: str,
     call_id: Optional[str],
 ) -> None:
-    """POST Task followup with a durable call_id. Does not write AgentRun."""
+    """POST Task followup with a durable call_id on the Task Graph surface."""
     resolved = _resolve_call_id(call_id)
     _echo_call_id(resolved)
     try:
