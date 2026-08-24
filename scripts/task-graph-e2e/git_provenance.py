@@ -20,6 +20,8 @@ REQUIRED_TOP_LEVEL_EVIDENCE_KEYS = (
     "source_root",
     "git_provenance_pre",
     "git_provenance_post",
+    "git_provenance_start",
+    "git_provenance_end",
     "git_provenance_unchanged",
 )
 
@@ -101,5 +103,7 @@ def finalize_git_provenance_evidence(
         "source_root": pre["source_root"],
         "git_provenance_pre": pre,
         "git_provenance_post": post,
+        "git_provenance_start": pre,
+        "git_provenance_end": post,
         "git_provenance_unchanged": True,
     }
