@@ -22,10 +22,8 @@ from claude_hub.models import (
     WorkspaceCreate,
     WorkspaceTaskCreate,
 )
-from claude_hub.models.agent_tree import AgentRun, AgentRunStatus, ExecutorKind
 from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
 from claude_hub.services.task_graph import TaskHasDescendantsError, make_task_consumer_key
-from claude_hub.services.task_mailbox import compat_run_id_for_task
 from claude_hub.services.workspace_manager import WorkspaceManager, workspace_manager
 
 _wm = import_module("claude_hub.services.workspace_manager")
@@ -62,7 +60,6 @@ def _create_task(
     title: str,
     *,
     parent_task_id: str | None = None,
-    agent_run_id: str | None = None,
 ):
     return manager.create_task(
         workspace_id,
@@ -71,7 +68,6 @@ def _create_task(
             prompt=f"do {title}",
             agent_type=AgentType.CLAUDE,
             parent_task_id=parent_task_id,
-            agent_run_id=agent_run_id,
         ),
     )
 
@@ -131,42 +127,13 @@ def test_delete_task_with_descendants_raises_and_leaves_state_unchanged(
     assert {key: value.model_dump() for key, value in manager.reports.items()} == before_reports
 
 
-def test_delete_leaf_task_removes_reports_events_call_index_and_compat_runs(
+def test_delete_leaf_task_removes_reports_events_and_call_index(
     manager: WorkspaceManager, tmp_path: Path
 ) -> None:
     ws_id = _make_workspace(manager, tmp_path)
     parent = _create_task(manager, ws_id, "parent")
     sibling = _create_task(manager, ws_id, "sibling", parent_task_id=parent.id)
-    leaf = _create_task(
-        manager,
-        ws_id,
-        "leaf",
-        parent_task_id=parent.id,
-        agent_run_id="run-linked-leaf",
-    )
-    run_id = compat_run_id_for_task(leaf)
-    manager.agent_tree._runs[run_id] = AgentRun(
-        id=run_id,
-        workspace_id=ws_id,
-        parent_id=None,
-        path=run_id,
-        supervisor_id=None,
-        executor_kind=ExecutorKind.MANAGED_TASK,
-        title=leaf.title,
-        context_ref=leaf.id,
-        status=AgentRunStatus.RUNNING,
-    )
-    manager.agent_tree._runs["run-linked-leaf"] = AgentRun(
-        id="run-linked-leaf",
-        workspace_id=ws_id,
-        parent_id=None,
-        path="run-linked-leaf",
-        supervisor_id=None,
-        executor_kind=ExecutorKind.MANAGED_TASK,
-        title=leaf.title,
-        context_ref=leaf.id,
-        status=AgentRunStatus.RUNNING,
-    )
+    leaf = _create_task(manager, ws_id, "leaf", parent_task_id=parent.id)
     _append_task_event(manager, leaf, call_id="leaf-progress-1")
     _append_task_event(manager, sibling, call_id="sibling-progress-1")
     report = _make_report(workspace_id=ws_id, task_id=leaf.id, report_id="report-leaf-1")
@@ -177,8 +144,6 @@ def test_delete_leaf_task_removes_reports_events_call_index_and_compat_runs(
 
     assert leaf.id not in manager.tasks
     assert report.id not in manager.reports
-    assert run_id not in manager.agent_tree._runs
-    assert "run-linked-leaf" not in manager.agent_tree._runs
     assert parent.id in manager.tasks
     assert sibling.id in manager.tasks
     assert "leaf-progress-1" not in manager.task_mailbox._call_index.get(ws_id, {})
@@ -280,28 +245,3 @@ def test_delete_task_api_returns_409_for_parent_with_child(
     assert response.status_code == 409
     assert "child tasks" in response.json()["detail"].lower()
     assert parent.id in workspace_manager.tasks
-
-
-@pytest.mark.asyncio
-async def test_recover_pending_runs_skips_legacy_resident_root(
-    manager: WorkspaceManager, tmp_path: Path
-) -> None:
-    ws_id = _make_workspace(manager, tmp_path, "Resident Skip")
-    run_id = "legacy-resident-pending"
-    manager.agent_tree._runs[run_id] = AgentRun(
-        id=run_id,
-        workspace_id=ws_id,
-        parent_id=None,
-        path=run_id,
-        supervisor_id=None,
-        executor_kind=ExecutorKind.RESIDENT_ROOT,
-        title="legacy",
-        context_ref="resident-session",
-        status=AgentRunStatus.PENDING,
-    )
-    manager._save_state()
-
-    await manager.agent_tree.recover_pending_runs(ws_id)
-
-    assert manager.agent_tree._runs[run_id].status == AgentRunStatus.PENDING
-    assert not manager.agent_tree._events.get(ws_id, [])

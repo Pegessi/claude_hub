@@ -25,13 +25,6 @@ from claude_hub.models import (
     WorkspaceTask,
     WorkspaceTaskStatus,
 )
-from claude_hub.models.agent_tree import (
-    AgentEvent,
-    AgentEventType,
-    AgentRun,
-    AgentRunStatus,
-    ExecutorKind,
-)
 from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
 from claude_hub.services.workspace_manager import WorkspaceManager
 
@@ -74,7 +67,6 @@ def _task_session(
     role: WorkspaceSessionRole = WorkspaceSessionRole.WORKER,
     status: WorkspaceTaskStatus = WorkspaceTaskStatus.WORKING,
     review_cycle: int = 1,
-    agent_run_id: str | None = None,
 ) -> tuple[WorkspaceTask, ManagedSession]:
     now = datetime.utcnow()
     task = WorkspaceTask(
@@ -88,7 +80,6 @@ def _task_session(
         review_session_id=session_id if role == WorkspaceSessionRole.REVIEWER else None,
         review_cycle=review_cycle,
         review_requested_at=now if role == WorkspaceSessionRole.REVIEWER else None,
-        agent_run_id=agent_run_id,
         created_at=now,
         updated_at=now,
     )
@@ -114,26 +105,17 @@ def _task_session(
     return task, session
 
 
-def _seed_linked_run(
-    manager: WorkspaceManager,
-    workspace_id: str,
-    task: WorkspaceTask,
-    run_id: str = "run-child",
-) -> AgentRun:
-    run = AgentRun(
-        id=run_id,
-        workspace_id=workspace_id,
-        parent_id="run-root",
-        path="run-root/run-child",
-        supervisor_id="run-root",
-        executor_kind=ExecutorKind.MANAGED_TASK,
-        status=AgentRunStatus.RUNNING,
-        context_ref=task.id,
-        ack_sequence=4,
-    )
-    manager.agent_tree._runs[run.id] = run
-    manager.tasks[task.id] = task.model_copy(update={"agent_run_id": run.id})
-    return run
+_LEGACY_EMIT_TARGET = "legacy-run-child"
+
+
+def _task_field_snapshot(task: WorkspaceTask) -> dict[str, object]:
+    return {
+        "status": task.status,
+        "session_id": task.session_id,
+        "review_cycle": task.review_cycle,
+        "consumer_ack_sequence": task.consumer_ack_sequence,
+        "prompt": task.prompt,
+    }
 
 
 def _mailbox_events(manager: WorkspaceManager, workspace_id: str) -> list:
@@ -169,8 +151,6 @@ async def test_ordinary_worker_report_writes_task_event(
     assert event.review_cycle == 1
     assert event.report_id == report.id
     assert event.type == TaskEventType.PROGRESS
-    assert manager.agent_tree._runs == {}
-    assert manager.agent_tree._events.get(workspace_id, []) == []
     assert manager.tasks[task.id].consumer_ack_sequence == 0
 
     retry = await manager.create_report(session.id, payload)
@@ -180,7 +160,6 @@ async def test_ordinary_worker_report_writes_task_event(
 
     fresh = WorkspaceManager()
     assert [item.sequence for item in _report_events(fresh, workspace_id, report.id)] == [1]
-    assert fresh.agent_tree._runs == {}
     cold_retry = await fresh.create_report(session.id, payload)
     assert cold_retry.id == report.id
     assert [item.sequence for item in _report_events(fresh, workspace_id, report.id)] == [1]
@@ -195,7 +174,8 @@ async def test_linked_worker_report_writes_task_event_without_agent_run_mutation
     task, session = _task_session(
         manager, workspace_id, task_id="task-linked", session_id="session-linked"
     )
-    run = _seed_linked_run(manager, workspace_id, task)
+    manager.tasks[task.id] = task.model_copy(update={"parent_task_id": "task-parent-root"})
+    task_before = _task_field_snapshot(manager.tasks[task.id])
     payload = AgentReportCreate(
         task_id=task.id,
         state=AgentReportState.WORKING,
@@ -212,13 +192,8 @@ async def test_linked_worker_report_writes_task_event_without_agent_run_mutation
     assert event.actor_session_id == session.id
     assert event.review_cycle == 1
     assert event.report_id == report.id
-    assert event.compat_run_id == run.id
-
-    live_run = manager.agent_tree._runs[run.id]
-    assert live_run.status == AgentRunStatus.RUNNING
-    assert live_run.ack_sequence == 4
-    assert live_run.context_ref == task.id
-    assert manager.agent_tree._events.get(workspace_id, []) == []
+    assert _task_field_snapshot(manager.tasks[task.id]) == task_before
+    assert len(_mailbox_events(manager, workspace_id)) == 1
 
     retry = await manager.create_report(session.id, payload)
     assert retry.id == report.id
@@ -228,11 +203,7 @@ async def test_linked_worker_report_writes_task_event_without_agent_run_mutation
     loaded = _report_events(fresh, workspace_id, report.id)
     assert len(loaded) == 1
     assert loaded[0].sequence == event.sequence
-    assert loaded[0].compat_run_id == run.id
-    loaded_run = fresh.agent_tree._runs[run.id]
-    assert loaded_run.status == AgentRunStatus.RUNNING
-    assert loaded_run.ack_sequence == 4
-    assert loaded_run.context_ref == task.id
+    assert _task_field_snapshot(fresh.tasks[task.id]) == task_before
 
 
 @pytest.mark.asyncio
@@ -344,7 +315,6 @@ async def test_reviewer_started_passed_failed_persist_actor_fields(
     assert failed_event.actor_session_id == failed_reviewer.id
     assert failed_event.review_cycle == 2
     assert failed_event.report_id == failed.id
-    assert manager.agent_tree._runs == {}
 
 
 @pytest.mark.asyncio
@@ -392,7 +362,6 @@ async def test_precommit_save_failure_rolls_back_mailbox_and_same_call_retry(
     assert manager.task_mailbox._call_record(workspace_id, f"report:{staged_report_id}") is None
     assert _mailbox_events(manager, workspace_id) == []
     assert manager.tasks[task.id].consumer_ack_sequence == 0
-    assert manager.agent_tree._runs == {}
 
     cold = WorkspaceManager()
     assert cold.task_mailbox._events.get(workspace_id, []) == []
@@ -422,24 +391,26 @@ def _append_legacy_raw_emit(
     manager: WorkspaceManager,
     *,
     workspace_id: str,
-    run: AgentRun,
+    task: WorkspaceTask,
+    session: ManagedSession,
+    legacy_target: str,
     call_id: str,
-    fingerprint: str,
     payload: dict[str, object] | None = None,
-    event_type: AgentEventType = AgentEventType.PROGRESS,
-) -> AgentEvent:
-    recipient = run.supervisor_id or run.id
-    event, _is_new = manager.agent_tree._append_event(
+    event_type: TaskEventType = TaskEventType.PROGRESS,
+    report_id: str | None = None,
+):
+    event, _is_new = manager.task_mailbox.append_event(
         workspace_id=workspace_id,
-        agent_run_id=run.id,
+        task_id=task.id,
+        actor_role=TaskActorRole.WORKER,
         event_type=event_type,
-        author=run.id,
-        recipient=recipient,
         call_id=call_id,
         action="emit",
-        target=run.id,
-        fingerprint=fingerprint,
+        target=legacy_target,
+        actor_session_id=session.id,
+        review_cycle=task.review_cycle,
         payload=payload or {},
+        report_id=report_id,
         persist=False,
     )
     return event
@@ -454,13 +425,10 @@ def _seed_legacy_emit_report(
     report_id: str,
     producer_call_id: str,
     message: str = "legacy emit progress",
-) -> tuple[AgentReport, AgentReportCreate, AgentRun]:
-    """Persist a pre-unification report plus raw ``report:<id>`` AgentEvent blob."""
+    legacy_target: str = _LEGACY_EMIT_TARGET,
+) -> tuple[AgentReport, AgentReportCreate, str]:
+    """Persist a pre-unification report plus raw ``report:<id>`` TaskMailbox emit blob."""
 
-    run = manager.agent_tree._runs.get(task.agent_run_id or "")
-    if run is None:
-        run = _seed_linked_run(manager, workspace_id, task)
-        task = manager.tasks[task.id]
     payload = AgentReportCreate(
         task_id=task.id,
         state=AgentReportState.WORKING,
@@ -490,17 +458,19 @@ def _seed_legacy_emit_report(
     _append_legacy_raw_emit(
         manager,
         workspace_id=workspace_id,
-        run=run,
+        task=task,
+        session=session,
+        legacy_target=legacy_target,
         call_id=f"report:{report.id}",
-        fingerprint=f"legacy-report-{report.id}-fp",
         payload={
             "message": report.message,
             "report_id": report.id,
             "report_state": report.state.value,
             "task_id": report.task_id,
         },
+        report_id=report.id,
     )
-    return report, payload, manager.agent_tree._runs[run.id]
+    return report, payload, legacy_target
 
 
 @pytest.mark.asyncio
@@ -511,7 +481,7 @@ async def test_legacy_emit_report_alias_reused_on_cold_create_report_retry(
     task, session = _task_session(
         manager, workspace_id, task_id="task-legacy-alias", session_id="session-legacy-alias"
     )
-    report, payload, run = _seed_legacy_emit_report(
+    report, payload, legacy_target = _seed_legacy_emit_report(
         manager,
         workspace_id,
         task,
@@ -521,14 +491,13 @@ async def test_legacy_emit_report_alias_reused_on_cold_create_report_retry(
     )
     legacy = next(
         item
-        for item in manager.agent_tree._events[workspace_id]
+        for item in _mailbox_events(manager, workspace_id)
         if item.call_id == f"report:{report.id}"
     )
     assert legacy.action == "emit"
-    assert legacy.target == run.id
+    assert legacy.target == legacy_target
     assert legacy.fingerprint
-    live_run = manager.agent_tree._runs[run.id]
-    assert live_run.status == AgentRunStatus.RUNNING
+    task_before = _task_field_snapshot(manager.tasks[task.id])
     manager._save_state()
 
     cold = WorkspaceManager()
@@ -536,41 +505,24 @@ async def test_legacy_emit_report_alias_reused_on_cold_create_report_retry(
     assert len(projected) == 1
     assert projected[0].sequence == legacy.sequence
     assert projected[0].action == "emit"
-    assert projected[0].target == run.id
+    assert projected[0].target == legacy_target
     assert projected[0].fingerprint == legacy.fingerprint
     assert projected[0].task_id == task.id
     assert projected[0].report_id == report.id
-    loaded_run = cold.agent_tree._runs[run.id]
-    run_before = (
-        loaded_run.status,
-        loaded_run.ack_sequence,
-        loaded_run.context_ref,
-        loaded_run.last_task_message,
-    )
-    assert loaded_run.status == AgentRunStatus.RUNNING
-    assert loaded_run.ack_sequence == 4
-    assert loaded_run.context_ref == task.id
+    assert _task_field_snapshot(cold.tasks[task.id]) == task_before
 
     retry = await cold.create_report(session.id, payload)
     assert retry.id == report.id
     after = _report_events(cold, workspace_id, report.id)
     assert [item.sequence for item in after] == [legacy.sequence]
     assert after[0].action == "emit"
-    assert after[0].target == run.id
+    assert after[0].target == legacy_target
     assert after[0].fingerprint == legacy.fingerprint
     assert after[0].task_id == task.id
     assert after[0].report_id == report.id
     assert len(_mailbox_events(cold, workspace_id)) == 1
-    assert [item.call_id for item in cold.agent_tree._events.get(workspace_id, [])] == [
-        f"report:{report.id}"
-    ]
-    live_after = cold.agent_tree._runs[run.id]
-    assert (
-        live_after.status,
-        live_after.ack_sequence,
-        live_after.context_ref,
-        live_after.last_task_message,
-    ) == run_before
+    assert [item.call_id for item in _mailbox_events(cold, workspace_id)] == [f"report:{report.id}"]
+    assert _task_field_snapshot(cold.tasks[task.id]) == task_before
 
 
 @pytest.mark.asyncio
@@ -587,7 +539,7 @@ async def test_legacy_emit_call_id_conflicts_when_not_canonical_report_alias(
         task_id="task-legacy-other",
         session_id="session-legacy-other",
     )
-    report, _payload, run = _seed_legacy_emit_report(
+    report, _payload, legacy_target = _seed_legacy_emit_report(
         manager,
         workspace_id,
         task,
@@ -598,13 +550,15 @@ async def test_legacy_emit_call_id_conflicts_when_not_canonical_report_alias(
     ordinary = _append_legacy_raw_emit(
         manager,
         workspace_id=workspace_id,
-        run=run,
+        task=task,
+        session=session,
+        legacy_target=legacy_target,
         call_id="ordinary-emit-shared",
-        fingerprint="legacy-ordinary-emit-shared-fp",
         payload={"note": "not a report bridge", "task_id": task.id},
     )
     assert ordinary.action == "emit"
-    assert ordinary.target == run.id
+    assert ordinary.target == legacy_target
+    task_before = _task_field_snapshot(manager.tasks[task.id])
     manager._save_state()
 
     cold = WorkspaceManager()
@@ -644,13 +598,12 @@ async def test_legacy_emit_call_id_conflicts_when_not_canonical_report_alias(
     assert [item.sequence for item in _report_events(cold, workspace_id, report.id)] == [
         next(
             item.sequence
-            for item in cold.agent_tree._events[workspace_id]
+            for item in _mailbox_events(cold, workspace_id)
             if item.call_id == f"report:{report.id}"
         )
     ]
     assert len(_report_events(cold, workspace_id, report.id)) == 1
-    assert cold.agent_tree._runs[run.id].ack_sequence == 4
-    assert cold.agent_tree._runs[run.id].context_ref == task.id
+    assert _task_field_snapshot(cold.tasks[task.id]) == task_before
 
 
 @pytest.mark.asyncio
@@ -661,7 +614,7 @@ async def test_legacy_emit_report_alias_rejects_tampered_failed_payload(
     task, session = _task_session(
         manager, workspace_id, task_id="task-legacy-tamper", session_id="session-legacy-tamper"
     )
-    report, _payload, run = _seed_legacy_emit_report(
+    report, _payload, legacy_target = _seed_legacy_emit_report(
         manager,
         workspace_id,
         task,
@@ -669,6 +622,7 @@ async def test_legacy_emit_report_alias_rejects_tampered_failed_payload(
         report_id="rep-legacy-tamper",
         producer_call_id=f"{task.id}-working-progress-cycle-1-1",
     )
+    task_before = _task_field_snapshot(manager.tasks[task.id])
     manager._save_state()
 
     cold = WorkspaceManager()
@@ -701,8 +655,7 @@ async def test_legacy_emit_report_alias_rejects_tampered_failed_payload(
     assert after[0].sequence == projected[0].sequence
     assert after[0].type == TaskEventType.PROGRESS
     assert after[0].payload.get("message") == report.message
-    assert cold.agent_tree._runs[run.id].ack_sequence == 4
-    assert cold.agent_tree._runs[run.id].context_ref == task.id
+    assert _task_field_snapshot(cold.tasks[task.id]) == task_before
 
 
 def _cold_canonical_report_payload(
@@ -723,7 +676,7 @@ async def test_legacy_emit_report_alias_rejects_extra_payload_key(
     task, session = _task_session(
         manager, workspace_id, task_id="task-legacy-extra", session_id="session-legacy-extra"
     )
-    report, _payload, run = _seed_legacy_emit_report(
+    report, _payload, legacy_target = _seed_legacy_emit_report(
         manager,
         workspace_id,
         task,
@@ -731,6 +684,7 @@ async def test_legacy_emit_report_alias_rejects_extra_payload_key(
         report_id="rep-legacy-extra",
         producer_call_id=f"{task.id}-working-progress-cycle-1-1",
     )
+    task_before = _task_field_snapshot(manager.tasks[task.id])
     manager._save_state()
 
     cold = WorkspaceManager()
@@ -756,7 +710,7 @@ async def test_legacy_emit_report_alias_rejects_extra_payload_key(
     assert after[0].type == TaskEventType.PROGRESS
     assert after[0].sequence == 1
     assert "tampered_extra" not in after[0].payload
-    assert cold.agent_tree._runs[run.id].ack_sequence == 4
+    assert _task_field_snapshot(cold.tasks[task.id]) == task_before
 
 
 @pytest.mark.asyncio
@@ -767,7 +721,7 @@ async def test_legacy_emit_report_alias_rejects_missing_payload_key(
     task, session = _task_session(
         manager, workspace_id, task_id="task-legacy-missing", session_id="session-legacy-missing"
     )
-    report, _payload, run = _seed_legacy_emit_report(
+    report, _payload, legacy_target = _seed_legacy_emit_report(
         manager,
         workspace_id,
         task,
@@ -775,6 +729,7 @@ async def test_legacy_emit_report_alias_rejects_missing_payload_key(
         report_id="rep-legacy-missing",
         producer_call_id=f"{task.id}-working-progress-cycle-1-1",
     )
+    task_before = _task_field_snapshot(manager.tasks[task.id])
     manager._save_state()
 
     cold = WorkspaceManager()
@@ -797,7 +752,7 @@ async def test_legacy_emit_report_alias_rejects_missing_payload_key(
     assert len(after) == 1
     assert after[0].type == TaskEventType.PROGRESS
     assert after[0].sequence == 1
-    assert cold.agent_tree._runs[run.id].ack_sequence == 4
+    assert _task_field_snapshot(cold.tasks[task.id]) == task_before
 
 
 def _report_side_effect_snapshot(

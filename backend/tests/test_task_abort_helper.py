@@ -24,30 +24,10 @@ from claude_hub.models import (
     WorkspaceTask,
     WorkspaceTaskStatus,
 )
-from claude_hub.models.agent_tree import (
-    AgentRun,
-    AgentRunStatus,
-    ExecutorCapabilities,
-    ExecutorKind,
-    InterruptRequest,
-    ListRunsRequest,
-    ManagedExecutorConfig,
-)
 from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
 from claude_hub.services.workspace_manager import WorkspaceManager
 
 _wm = import_module("claude_hub.services.workspace_manager")
-
-_RUN_STAMP = datetime(2026, 8, 23, 3, 0, 0)
-_RUN_CAPS = ExecutorCapabilities(
-    available=True,
-    supports_spawn=True,
-    supports_send=True,
-    supports_followup=True,
-    supports_interrupt=True,
-    durable_status=True,
-)
-_RUN_CONFIG = ManagedExecutorConfig(agent_type=AgentType.CLAUDE, solo_mode=True)
 
 
 @pytest.fixture()
@@ -123,7 +103,6 @@ def _working_task(
     status: WorkspaceTaskStatus = WorkspaceTaskStatus.WORKING,
     review_cycle: int = 2,
     session_id: str = "session-worker",
-    agent_run_id: str | None = None,
     system_internal: bool = False,
     internal_kind: str | None = None,
 ) -> WorkspaceTask:
@@ -137,7 +116,6 @@ def _working_task(
         status=status,
         session_id=session_id,
         review_cycle=review_cycle,
-        agent_run_id=agent_run_id,
         system_internal=system_internal,
         internal_kind=internal_kind,
         created_at=now,
@@ -149,102 +127,12 @@ def _working_task(
     return manager.tasks[task.id]
 
 
-def _seed_linked_managed_runs(
-    manager: WorkspaceManager,
-    workspace_id: str,
-    task: WorkspaceTask,
-) -> tuple[AgentRun, AgentRun]:
-    parent_task_id = "task-parent-root"
-    _session(
-        manager,
-        workspace_id,
-        session_id="session-resident",
-        task_id=parent_task_id,
-        role=WorkspaceSessionRole.RESIDENT,
-    )
-    root = AgentRun(
-        id="run-root",
-        workspace_id=workspace_id,
-        parent_id=None,
-        path="run-root",
-        supervisor_id=None,
-        executor_kind=ExecutorKind.MANAGED_TASK,
-        executor_config=_RUN_CONFIG,
-        executor_capabilities=_RUN_CAPS,
-        status=AgentRunStatus.RUNNING,
-        context_ref=parent_task_id,
-        ack_sequence=1,
-        last_task_message="root-old",
-        title="managed-parent",
-        created_at=_RUN_STAMP,
-        updated_at=_RUN_STAMP,
-    )
-    manager.tasks[parent_task_id] = WorkspaceTask(
-        id=parent_task_id,
-        workspace_id=workspace_id,
-        title="managed-parent",
-        prompt="supervise",
-        agent_type=AgentType.CLAUDE,
-        status=WorkspaceTaskStatus.WORKING,
-        session_id="session-resident",
-        agent_run_id=root.id,
-        root_task_id=parent_task_id,
-        path=parent_task_id,
-        created_at=_RUN_STAMP,
-        updated_at=_RUN_STAMP,
-    )
-    child = AgentRun(
-        id="run-child",
-        workspace_id=workspace_id,
-        parent_id=root.id,
-        path="run-root/run-child",
-        supervisor_id=root.id,
-        executor_kind=ExecutorKind.MANAGED_TASK,
-        executor_config=_RUN_CONFIG,
-        executor_capabilities=_RUN_CAPS,
-        status=AgentRunStatus.WAITING,
-        context_ref=task.id,
-        ack_sequence=4,
-        last_task_message="child-old",
-        title="managed-child",
-        created_at=_RUN_STAMP,
-        updated_at=_RUN_STAMP,
-    )
-    manager.agent_tree._runs[root.id] = root
-    manager.agent_tree._runs[child.id] = child
-    current = manager.tasks[task.id]
-    manager.tasks[current.id] = current.model_copy(update={"agent_run_id": child.id})
-    return manager.agent_tree._runs[root.id], manager.agent_tree._runs[child.id]
-
-
 def _mailbox_events(manager: WorkspaceManager, workspace_id: str) -> list:
     return list(manager.task_mailbox._events.get(workspace_id, []))
 
 
-def _run_bytes(run: AgentRun) -> dict[str, object]:
-    return run.model_dump(mode="json")
-
-
-def _tree_bytes(manager: WorkspaceManager, workspace_id: str) -> dict[str, object]:
-    tree = manager.agent_tree
-    return {
-        "events": [item.model_dump() for item in tree._events.get(workspace_id, [])],
-        "call_index": {
-            key: {
-                "action": value.get("action"),
-                "target": value.get("target"),
-                "fingerprint": value.get("fingerprint"),
-                "event_call_id": getattr(value.get("event"), "call_id", None),
-            }
-            for key, value in tree._call_index.get(workspace_id, {}).items()
-        },
-        "next_seq": tree._next_seq.get(workspace_id),
-    }
-
-
 def _workspace_fact_snapshot(manager: WorkspaceManager, workspace_id: str) -> dict[str, object]:
     mailbox = manager.task_mailbox
-    tree = manager.agent_tree
     return {
         "reports": {
             key: value.model_dump(mode="json")
@@ -266,12 +154,6 @@ def _workspace_fact_snapshot(manager: WorkspaceManager, workspace_id: str) -> di
         ],
         "mailbox_call_ids": sorted(mailbox._call_index.get(workspace_id, {})),
         "mailbox_next": mailbox._next_seq.get(workspace_id),
-        "tree": _tree_bytes(manager, workspace_id),
-        "runs": {
-            key: _run_bytes(value)
-            for key, value in tree._runs.items()
-            if value.workspace_id == workspace_id
-        },
     }
 
 
@@ -279,14 +161,6 @@ def _abort_kwargs(**overrides: object) -> dict[str, object]:
     payload: dict[str, object] = {"actor_role": TaskActorRole.HUMAN}
     payload.update(overrides)
     return payload
-
-
-def _supervisor_abort_kwargs(root_id: str) -> dict[str, object]:
-    return {
-        "actor_session_id": "session-resident",
-        "actor_role": TaskActorRole.SUPERVISOR,
-        "compat_author_run_id": root_id,
-    }
 
 
 def _assert_single_abort_link(
@@ -304,10 +178,6 @@ def _assert_single_abort_link(
     assert report is not None
     assert report.task_id == task_id
     assert report.id == event.report_id
-    manager.task_mailbox._project_legacy_agent_events(workspace_id)
-    replayed = [item for item in _mailbox_events(manager, workspace_id) if item.task_id == task_id]
-    assert [item.type for item in replayed] == [TaskEventType.ABORT]
-    assert replayed[0].report_id == event.report_id
 
 
 def _install_side_effect_spies(
@@ -620,151 +490,6 @@ async def test_abort_task_session_interrupt_failure_keeps_commit(
 
 
 @pytest.mark.asyncio
-async def test_abort_task_legacy_linked_keeps_agent_run_bytes_stable(
-    manager_and_workspace: tuple[WorkspaceManager, str],
-    monkeypatch: MonkeyPatch,
-) -> None:
-    manager, workspace_id = manager_and_workspace
-    task = _working_task(manager, workspace_id, task_id="task-linked-abort")
-    root, child = _seed_linked_managed_runs(manager, workspace_id, task)
-    run_bytes = {root.id: _run_bytes(root), child.id: _run_bytes(child)}
-    tree_bytes = _tree_bytes(manager, workspace_id)
-    _install_side_effect_spies(manager, monkeypatch)
-
-    aborted = await manager.abort_task(
-        task.id,
-        ManualTaskControlRequest(reason="stop the work", call_id="abort-linked-1"),
-        workspace_id=workspace_id,
-        **_supervisor_abort_kwargs(root.id),
-    )
-    assert aborted.status == WorkspaceTaskStatus.TODO
-    event = _mailbox_events(manager, workspace_id)[0]
-    assert event.actor_role == TaskActorRole.SUPERVISOR
-    assert event.actor_session_id == "session-resident"
-    assert event.review_cycle == 2
-    assert event.compat_run_id == child.id
-    assert event.payload.get("compat_author_run_id") == root.id
-    _assert_single_abort_link(manager, workspace_id, task.id, "abort-linked-1")
-    projected = manager.agent_tree.get_run(child.id)
-    assert projected is not None
-    assert projected.status == AgentRunStatus.INTERRUPTED
-    listed = manager.agent_tree.list_runs(ListRunsRequest(workspace_id=workspace_id))
-    assert [item.status for item in listed if item.id == child.id] == [AgentRunStatus.INTERRUPTED]
-    assert manager.agent_tree._runs[child.id].status == AgentRunStatus.WAITING
-    assert _run_bytes(manager.agent_tree._runs[root.id]) == run_bytes[root.id]
-    assert _run_bytes(manager.agent_tree._runs[child.id]) == run_bytes[child.id]
-    assert _tree_bytes(manager, workspace_id) == tree_bytes
-
-
-@pytest.mark.asyncio
-async def test_agent_tree_interrupt_managed_task_is_task_abort_only(
-    manager_and_workspace: tuple[WorkspaceManager, str],
-    monkeypatch: MonkeyPatch,
-) -> None:
-    manager, workspace_id = manager_and_workspace
-    task = _working_task(manager, workspace_id, task_id="task-compat-abort")
-    root, child = _seed_linked_managed_runs(manager, workspace_id, task)
-    run_bytes = {root.id: _run_bytes(root), child.id: _run_bytes(child)}
-    tree_bytes = _tree_bytes(manager, workspace_id)
-    append_calls: list[str] = []
-    status_calls: list[str] = []
-    real_append = manager.agent_tree._append_event
-    real_update = manager.agent_tree._update_run_status
-
-    def _counting_append(*args: object, **kwargs: object) -> object:
-        append_calls.append(str(kwargs.get("event_type") or args[2] if args else ""))
-        return real_append(*args, **kwargs)
-
-    def _counting_update(run_id: str, status: object, **kwargs: object) -> object:
-        status_calls.append(f"{run_id}:{status}")
-        return real_update(run_id, status, **kwargs)
-
-    monkeypatch.setattr(manager.agent_tree, "_append_event", _counting_append)
-    monkeypatch.setattr(manager.agent_tree, "_update_run_status", _counting_update)
-    spies = _install_side_effect_spies(manager, monkeypatch)
-
-    interrupted = await manager.agent_tree.interrupt(
-        InterruptRequest(
-            workspace_id=workspace_id,
-            run_id=child.id,
-            call_id="abort-compat-1",
-            reason="stop the work",
-        )
-    )
-    assert interrupted.status == AgentRunStatus.INTERRUPTED
-    assert manager.tasks[task.id].status == WorkspaceTaskStatus.TODO
-    events = _mailbox_events(manager, workspace_id)
-    assert [item.call_id for item in events] == ["abort-compat-1"]
-    assert events[0].type == TaskEventType.ABORT
-    assert events[0].actor_role == TaskActorRole.SUPERVISOR
-    assert events[0].actor_session_id == "session-resident"
-    assert events[0].review_cycle == 2
-    assert events[0].payload.get("compat_author_run_id") == root.id
-    _assert_single_abort_link(manager, workspace_id, task.id, "abort-compat-1")
-    assert append_calls == []
-    assert status_calls == []
-    assert manager.agent_tree._runs[child.id].status == AgentRunStatus.WAITING
-    assert _run_bytes(manager.agent_tree._runs[root.id]) == run_bytes[root.id]
-    assert _run_bytes(manager.agent_tree._runs[child.id]) == run_bytes[child.id]
-    assert _tree_bytes(manager, workspace_id) == tree_bytes
-    assert spies["interrupted"] == ["session-worker"]
-
-    spies["interrupted"].clear()
-    retry = await manager.agent_tree.interrupt(
-        InterruptRequest(
-            workspace_id=workspace_id,
-            run_id=child.id,
-            call_id="abort-compat-1",
-            reason="stop the work",
-        )
-    )
-    assert retry.status == AgentRunStatus.INTERRUPTED
-    assert [item.call_id for item in _mailbox_events(manager, workspace_id)] == ["abort-compat-1"]
-    assert spies["interrupted"] == []
-    assert append_calls == []
-    assert status_calls == []
-    assert manager.agent_tree._runs[child.id].status == AgentRunStatus.WAITING
-
-
-@pytest.mark.asyncio
-async def test_abort_cross_api_same_call_id_replay(
-    manager_and_workspace: tuple[WorkspaceManager, str],
-    monkeypatch: MonkeyPatch,
-) -> None:
-    manager, workspace_id = manager_and_workspace
-    task = _working_task(manager, workspace_id, task_id="task-cross-api")
-    root, child = _seed_linked_managed_runs(manager, workspace_id, task)
-    spies = _install_side_effect_spies(manager, monkeypatch)
-
-    await manager.abort_task(
-        task.id,
-        ManualTaskControlRequest(reason="stop the work", call_id="abort-cross-1"),
-        workspace_id=workspace_id,
-        **_supervisor_abort_kwargs(root.id),
-    )
-    report_ids = {item.id for item in manager.reports.values() if item.task_id == task.id}
-    spies["interrupted"].clear()
-
-    retry = await manager.agent_tree.interrupt(
-        InterruptRequest(
-            workspace_id=workspace_id,
-            run_id=child.id,
-            call_id="abort-cross-1",
-            reason="stop the work",
-        )
-    )
-    assert retry.status == AgentRunStatus.INTERRUPTED
-    assert manager.tasks[task.id].status == WorkspaceTaskStatus.TODO
-    assert [item.call_id for item in _mailbox_events(manager, workspace_id)] == ["abort-cross-1"]
-    assert _mailbox_events(manager, workspace_id)[0].payload.get("compat_author_run_id") == root.id
-    assert {item.id for item in manager.reports.values() if item.task_id == task.id} == report_ids
-    _assert_single_abort_link(manager, workspace_id, task.id, "abort-cross-1")
-    assert spies["interrupted"] == []
-    assert manager.agent_tree._events.get(workspace_id, []) == []
-    assert manager.agent_tree._runs[child.id].status == AgentRunStatus.WAITING
-
-
-@pytest.mark.asyncio
 async def test_abort_queued_review_and_feedback_reaper(
     manager_and_workspace: tuple[WorkspaceManager, str],
     monkeypatch: MonkeyPatch,
@@ -853,7 +578,7 @@ async def test_abort_foreign_call_id_conflict_restores_snapshot(
     manager, workspace_id = manager_and_workspace
     task = _working_task(manager, workspace_id, task_id="task-abort-foreign")
     spies = _install_side_effect_spies(manager, monkeypatch)
-    manager.agent_tree._call_index[workspace_id] = {
+    manager.task_mailbox._call_index[workspace_id] = {
         "abort-foreign-1": {
             "action": "followup",
             "target": "run-other",

@@ -16,7 +16,7 @@ resident agents, sending follow-up instructions, and reviewing progress reports.
 - Keep resident Claude or Codex agents running in persistent terminal tabs.
 - Add tasks with optional pasted image attachments.
 - Dispatch tasks to a specific agent or let the workspace choose the available agent.
-- Use the Task Graph / TaskMailbox ([docs/AGENT_TREE.md](docs/AGENT_TREE.md)) so
+- Use the Task Graph / TaskMailbox ([docs/TASK_GRAPH.md](docs/TASK_GRAPH.md)) so
   parent Tasks wait/ACK subtree events on `task:<task_id>` cursors
   (`claude-hub task tree/events/wait/ack/followup/start`). Worker and reviewer
   agents are ordinary Task session assignments; the optional Resident is an
@@ -274,7 +274,7 @@ rules). **No change — even a small one — should be made directly on `main`.*
 
 ## Reference Docs
 
-- [docs/AGENT_TREE.md](docs/AGENT_TREE.md): Task Graph / TaskMailbox agent guide
+- [docs/TASK_GRAPH.md](docs/TASK_GRAPH.md): Task Graph / TaskMailbox agent guide
   (`claude-hub task` primary; `claude-hub agent-tree` legacy compat only)
 - [CLAUDE.md](CLAUDE.md): project conventions and development workflow
 - [CHANGELOG.md](CHANGELOG.md): merge-level change history

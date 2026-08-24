@@ -24,14 +24,6 @@ from claude_hub.models import (
     WorkspaceTask,
     WorkspaceTaskStatus,
 )
-from claude_hub.models.agent_tree import (
-    AgentRun,
-    AgentRunStatus,
-    ExecutorCapabilities,
-    ExecutorKind,
-    FollowupRequest,
-    ManagedExecutorConfig,
-)
 from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
 from claude_hub.services.workspace_manager import WorkspaceManager
 from claude_hub.services.workspace_manager._constants import DeliveryUncertain
@@ -134,8 +126,6 @@ async def test_followup_existing_task_routes_to_current_session_id(
     await manager._followup_existing_task(task.id, "please also do Y", call_id="fu-route-1")
 
     assert sent == [("session-new", "please also do Y", "fu-route-1")]
-    assert manager.agent_tree._runs == {}
-    assert manager.agent_tree._events.get(workspace_id, []) == []
 
 
 def _ordinary_working_task(
@@ -446,665 +436,6 @@ async def test_followup_task_post_commit_transport_failure_keeps_intent(
     assert [item.call_id for item in _mailbox_events(fresh, workspace_id)] == [call_id]
 
 
-_RUN_STAMP = datetime(2026, 8, 22, 18, 0, 0)
-_RUN_CAPS = ExecutorCapabilities(
-    available=True,
-    supports_spawn=True,
-    supports_send=True,
-    supports_followup=True,
-    supports_interrupt=True,
-    durable_status=True,
-)
-_RUN_CONFIG = ManagedExecutorConfig(agent_type=AgentType.CLAUDE, solo_mode=True)
-
-
-def _seed_linked_managed_runs(
-    manager: WorkspaceManager,
-    workspace_id: str,
-    task: WorkspaceTask,
-) -> tuple[AgentRun, AgentRun]:
-    parent_task_id = "task-parent-root"
-    _session(
-        manager,
-        workspace_id,
-        session_id="session-resident",
-        task_id=parent_task_id,
-        role=WorkspaceSessionRole.RESIDENT,
-    )
-    root = AgentRun(
-        id="run-root",
-        workspace_id=workspace_id,
-        parent_id=None,
-        path="run-root",
-        supervisor_id=None,
-        executor_kind=ExecutorKind.MANAGED_TASK,
-        executor_config=_RUN_CONFIG,
-        executor_capabilities=_RUN_CAPS,
-        status=AgentRunStatus.RUNNING,
-        context_ref=parent_task_id,
-        ack_sequence=1,
-        last_task_message="root-old",
-        title="managed-parent",
-        created_at=_RUN_STAMP,
-        updated_at=_RUN_STAMP,
-    )
-    manager.tasks[parent_task_id] = WorkspaceTask(
-        id=parent_task_id,
-        workspace_id=workspace_id,
-        title="managed-parent",
-        prompt="supervise",
-        agent_type=AgentType.CLAUDE,
-        status=WorkspaceTaskStatus.WORKING,
-        session_id="session-resident",
-        agent_run_id=root.id,
-        root_task_id=parent_task_id,
-        path=parent_task_id,
-        created_at=_RUN_STAMP,
-        updated_at=_RUN_STAMP,
-    )
-    child = AgentRun(
-        id="run-child",
-        workspace_id=workspace_id,
-        parent_id=root.id,
-        path="run-root/run-child",
-        supervisor_id=root.id,
-        executor_kind=ExecutorKind.MANAGED_TASK,
-        executor_config=_RUN_CONFIG,
-        executor_capabilities=_RUN_CAPS,
-        status=AgentRunStatus.WAITING,
-        context_ref=task.id,
-        ack_sequence=4,
-        last_task_message="child-old",
-        title="managed-child",
-        created_at=_RUN_STAMP,
-        updated_at=_RUN_STAMP,
-    )
-    manager.agent_tree._runs[root.id] = root
-    manager.agent_tree._runs[child.id] = child
-    current = manager.tasks[task.id]
-    manager.tasks[current.id] = current.model_copy(update={"agent_run_id": child.id})
-    return manager.agent_tree._runs[root.id], manager.agent_tree._runs[child.id]
-
-
-def _run_bytes(run: AgentRun) -> dict[str, object]:
-    return run.model_dump(mode="json")
-
-
-def _tree_bytes(manager: WorkspaceManager, workspace_id: str) -> dict[str, object]:
-    tree = manager.agent_tree
-    return {
-        "events": [item.model_dump() for item in tree._events.get(workspace_id, [])],
-        "call_index": {
-            key: {
-                "action": value.get("action"),
-                "target": value.get("target"),
-                "fingerprint": value.get("fingerprint"),
-                "event_call_id": getattr(value.get("event"), "call_id", None),
-            }
-            for key, value in tree._call_index.get(workspace_id, {}).items()
-        },
-    }
-
-
-def _followup_request(
-    workspace_id: str,
-    *,
-    recipient_id: str,
-    author_id: str,
-    message: str,
-    call_id: str,
-    correlation_id: str | None = None,
-) -> FollowupRequest:
-    return FollowupRequest(
-        workspace_id=workspace_id,
-        recipient_id=recipient_id,
-        author_id=author_id,
-        message=message,
-        call_id=call_id,
-        correlation_id=correlation_id,
-    )
-
-
-@pytest.mark.asyncio
-async def test_agent_tree_followup_managed_task_is_task_canonical_only(
-    manager_and_workspace: tuple[WorkspaceManager, str],
-    monkeypatch: MonkeyPatch,
-) -> None:
-    manager, workspace_id = manager_and_workspace
-    task = _ordinary_working_task(manager, workspace_id)
-    root, child = _seed_linked_managed_runs(manager, workspace_id, task)
-    call_id = "fu-ac2-gate"
-    message = "please also do Y"
-    run_bytes = {
-        root.id: _run_bytes(root),
-        child.id: _run_bytes(child),
-    }
-    tree_bytes = _tree_bytes(manager, workspace_id)
-    pending_before = list(manager.tasks[task.id].pending_call_ids)
-    sent: list[tuple[str, str, str | None]] = []
-
-    async def _fake_send(session_id: str, text: str, call_id: str | None = None) -> None:
-        sent.append((session_id, text, call_id))
-
-    real_save = manager._save_state
-    monkeypatch.setattr(manager, "send_session_message", _fake_send)
-    monkeypatch.setattr(
-        manager,
-        "_save_state",
-        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")),
-    )
-
-    with pytest.raises(OSError, match="disk full"):
-        await manager.agent_tree.followup(
-            _followup_request(
-                workspace_id,
-                recipient_id=child.id,
-                author_id=root.id,
-                message=message,
-                call_id=call_id,
-            )
-        )
-
-    assert _mailbox_events(manager, workspace_id) == []
-    assert workspace_id not in manager.task_mailbox._call_index
-    assert workspace_id not in manager.task_mailbox._next_seq
-    assert list(manager.tasks[task.id].pending_call_ids) == pending_before
-    assert _run_bytes(manager.agent_tree._runs[root.id]) == run_bytes[root.id]
-    assert _run_bytes(manager.agent_tree._runs[child.id]) == run_bytes[child.id]
-    assert _tree_bytes(manager, workspace_id) == tree_bytes
-    assert sent == []
-
-    monkeypatch.setattr(manager, "_save_state", real_save)
-
-    projected = await manager.agent_tree.followup(
-        _followup_request(
-            workspace_id,
-            recipient_id=child.id,
-            author_id=root.id,
-            message=message,
-            call_id=call_id,
-        )
-    )
-    events = _mailbox_events(manager, workspace_id)
-    assert len(events) == 1
-    event = events[0]
-    assert event.type == TaskEventType.FOLLOWUP
-    assert event.call_id == call_id
-    assert event.task_id == task.id
-    assert event.actor_role == TaskActorRole.SUPERVISOR
-    assert event.actor_session_id == "session-resident"
-    assert event.payload.get("message") == message
-    assert event.payload.get("compat_author_run_id") == root.id
-    assert event.payload.get("correlation_id") is None
-    assert projected.call_id == call_id
-    assert projected.payload.get("followup") is True
-    assert call_id not in manager.agent_tree._call_index.get(workspace_id, {})
-    assert all(item.call_id != call_id for item in manager.agent_tree._events.get(workspace_id, []))
-    assert _run_bytes(manager.agent_tree._runs[root.id]) == run_bytes[root.id]
-    assert _run_bytes(manager.agent_tree._runs[child.id]) == run_bytes[child.id]
-    assert _tree_bytes(manager, workspace_id) == tree_bytes
-    assert sent == [("session-new", message, call_id)]
-
-    fresh = WorkspaceManager()
-    assert _run_bytes(fresh.agent_tree._runs[root.id]) == run_bytes[root.id]
-    assert _run_bytes(fresh.agent_tree._runs[child.id]) == run_bytes[child.id]
-    assert _tree_bytes(fresh, workspace_id) == tree_bytes
-    cold_events = _mailbox_events(fresh, workspace_id)
-    assert [item.sequence for item in cold_events] == [event.sequence]
-    assert cold_events[0].type == TaskEventType.FOLLOWUP
-    sent.clear()
-    monkeypatch.setattr(fresh, "send_session_message", _fake_send)
-    cold = await fresh.agent_tree.followup(
-        _followup_request(
-            workspace_id,
-            recipient_id=child.id,
-            author_id=root.id,
-            message=message,
-            call_id=call_id,
-        )
-    )
-    assert cold.sequence == event.sequence
-    assert [item.call_id for item in _mailbox_events(fresh, workspace_id)] == [call_id]
-    assert _run_bytes(fresh.agent_tree._runs[root.id]) == run_bytes[root.id]
-    assert _run_bytes(fresh.agent_tree._runs[child.id]) == run_bytes[child.id]
-    assert _tree_bytes(fresh, workspace_id) == tree_bytes
-    assert sent == [("session-new", message, call_id)]
-
-    deleted_run_bytes = {
-        root.id: _run_bytes(fresh.agent_tree._runs[root.id]),
-        child.id: _run_bytes(fresh.agent_tree._runs[child.id]),
-    }
-    deleted_tree_bytes = _tree_bytes(fresh, workspace_id)
-    del fresh.tasks[task.id]
-    with pytest.raises(KeyError):
-        await fresh.agent_tree.followup(
-            _followup_request(
-                workspace_id,
-                recipient_id=child.id,
-                author_id=root.id,
-                message="recreate must not write context_ref",
-                call_id="fu-ac2-missing-task",
-            )
-        )
-    assert task.id not in fresh.tasks
-    assert _run_bytes(fresh.agent_tree._runs[root.id]) == deleted_run_bytes[root.id]
-    assert _run_bytes(fresh.agent_tree._runs[child.id]) == deleted_run_bytes[child.id]
-    assert _tree_bytes(fresh, workspace_id) == deleted_tree_bytes
-    assert [item.call_id for item in _mailbox_events(fresh, workspace_id)] == [call_id]
-
-
-@pytest.mark.asyncio
-async def test_agent_tree_followup_managed_task_fingerprint_keeps_author_and_correlation(
-    manager_and_workspace: tuple[WorkspaceManager, str],
-    monkeypatch: MonkeyPatch,
-) -> None:
-    manager, workspace_id = manager_and_workspace
-    task = _ordinary_working_task(manager, workspace_id)
-    root, child = _seed_linked_managed_runs(manager, workspace_id, task)
-    call_id = "fu-ac2-fingerprint"
-    message = "please also do Y"
-    tree_bytes = _tree_bytes(manager, workspace_id)
-    run_bytes = {
-        root.id: _run_bytes(root),
-        child.id: _run_bytes(child),
-    }
-    sent: list[tuple[str, str, str | None]] = []
-
-    async def _fake_send(session_id: str, text: str, call_id: str | None = None) -> None:
-        sent.append((session_id, text, call_id))
-
-    monkeypatch.setattr(manager, "send_session_message", _fake_send)
-
-    first = await manager.agent_tree.followup(
-        _followup_request(
-            workspace_id,
-            recipient_id=child.id,
-            author_id=root.id,
-            message=message,
-            call_id=call_id,
-            correlation_id="corr-a",
-        )
-    )
-    events = _mailbox_events(manager, workspace_id)
-    assert len(events) == 1
-    assert events[0].payload.get("compat_author_run_id") == root.id
-    assert events[0].payload.get("correlation_id") == "corr-a"
-    assert events[0].actor_session_id == "session-resident"
-    assert _tree_bytes(manager, workspace_id) == tree_bytes
-    assert _run_bytes(manager.agent_tree._runs[root.id]) == run_bytes[root.id]
-    assert _run_bytes(manager.agent_tree._runs[child.id]) == run_bytes[child.id]
-
-    with pytest.raises(ValueError):
-        await manager.agent_tree.followup(
-            _followup_request(
-                workspace_id,
-                recipient_id=child.id,
-                author_id=root.id,
-                message=message,
-                call_id=call_id,
-                correlation_id="corr-b",
-            )
-        )
-    with pytest.raises(ValueError):
-        await manager.agent_tree.followup(
-            _followup_request(
-                workspace_id,
-                recipient_id=child.id,
-                author_id=child.id,
-                message=message,
-                call_id=call_id,
-                correlation_id="corr-a",
-            )
-        )
-    assert [item.call_id for item in _mailbox_events(manager, workspace_id)] == [call_id]
-    assert _tree_bytes(manager, workspace_id) == tree_bytes
-    assert _run_bytes(manager.agent_tree._runs[root.id]) == run_bytes[root.id]
-    assert _run_bytes(manager.agent_tree._runs[child.id]) == run_bytes[child.id]
-    assert manager.agent_tree._events.get(workspace_id, []) == []
-    assert manager.agent_tree._call_index.get(workspace_id, {}) == {}
-
-    fresh = WorkspaceManager()
-    assert _run_bytes(fresh.agent_tree._runs[root.id]) == run_bytes[root.id]
-    assert _run_bytes(fresh.agent_tree._runs[child.id]) == run_bytes[child.id]
-    assert _tree_bytes(fresh, workspace_id) == tree_bytes
-    monkeypatch.setattr(fresh, "send_session_message", _fake_send)
-    retry = await fresh.agent_tree.followup(
-        _followup_request(
-            workspace_id,
-            recipient_id=child.id,
-            author_id=root.id,
-            message=message,
-            call_id=call_id,
-            correlation_id="corr-a",
-        )
-    )
-    assert retry.sequence == first.sequence
-    assert [item.call_id for item in _mailbox_events(fresh, workspace_id)] == [call_id]
-    assert _tree_bytes(fresh, workspace_id) == tree_bytes
-    assert _run_bytes(fresh.agent_tree._runs[root.id]) == run_bytes[root.id]
-    assert _run_bytes(fresh.agent_tree._runs[child.id]) == run_bytes[child.id]
-
-
-@pytest.mark.asyncio
-async def test_agent_tree_followup_resolves_actor_session_from_author_task(
-    manager_and_workspace: tuple[WorkspaceManager, str],
-    monkeypatch: MonkeyPatch,
-) -> None:
-    manager, workspace_id = manager_and_workspace
-    child_task = _ordinary_working_task(manager, workspace_id, task_id="task-child")
-    now = datetime.utcnow()
-    author_task = WorkspaceTask(
-        id="task-author",
-        workspace_id=workspace_id,
-        title="author task",
-        prompt="supervise",
-        agent_type=AgentType.CLAUDE,
-        status=WorkspaceTaskStatus.WORKING,
-        session_id="session-author",
-        created_at=now,
-        updated_at=now,
-    )
-    manager.tasks[author_task.id] = author_task
-    _session(manager, workspace_id, session_id="session-author", task_id=author_task.id)
-    author = AgentRun(
-        id="run-author",
-        workspace_id=workspace_id,
-        parent_id="run-grand",
-        path="run-grand/run-author",
-        supervisor_id="run-grand",
-        executor_kind=ExecutorKind.MANAGED_TASK,
-        executor_config=_RUN_CONFIG,
-        executor_capabilities=_RUN_CAPS,
-        status=AgentRunStatus.RUNNING,
-        context_ref=author_task.id,
-        title="author",
-        created_at=_RUN_STAMP,
-        updated_at=_RUN_STAMP,
-    )
-    child = AgentRun(
-        id="run-child-from-author-task",
-        workspace_id=workspace_id,
-        parent_id=author.id,
-        path="run-grand/run-author/run-child-from-author-task",
-        supervisor_id=author.id,
-        executor_kind=ExecutorKind.MANAGED_TASK,
-        executor_config=_RUN_CONFIG,
-        executor_capabilities=_RUN_CAPS,
-        status=AgentRunStatus.RUNNING,
-        context_ref=child_task.id,
-        title="child",
-        created_at=_RUN_STAMP,
-        updated_at=_RUN_STAMP,
-    )
-    manager.agent_tree._runs[author.id] = author
-    manager.agent_tree._runs[child.id] = child
-    manager.tasks[child_task.id] = child_task.model_copy(update={"agent_run_id": child.id})
-    manager.tasks[author_task.id] = author_task.model_copy(update={"agent_run_id": author.id})
-    monkeypatch.setattr(manager, "send_session_message", AsyncMock())
-
-    await manager.agent_tree.followup(
-        _followup_request(
-            workspace_id,
-            recipient_id=child.id,
-            author_id=author.id,
-            message="from author task session",
-            call_id="fu-actor-from-task",
-        )
-    )
-    events = _mailbox_events(manager, workspace_id)
-    assert len(events) == 1
-    assert events[0].actor_session_id == "session-author"
-    assert manager.agent_tree._events.get(workspace_id, []) == []
-
-
-@pytest.mark.asyncio
-async def test_agent_tree_followup_ignores_stale_context_ref_when_task_is_linked(
-    manager_and_workspace: tuple[WorkspaceManager, str],
-    monkeypatch: MonkeyPatch,
-) -> None:
-    manager, workspace_id = manager_and_workspace
-    wrong = _ordinary_working_task(manager, workspace_id, task_id="task-wrong")
-    linked = _ordinary_working_task(manager, workspace_id, task_id="task-linked")
-    root, child = _seed_linked_managed_runs(manager, workspace_id, linked)
-    manager.tasks[linked.id] = manager.tasks[linked.id].model_copy(
-        update={"agent_run_id": child.id}
-    )
-    manager.agent_tree._runs[child.id] = child.model_copy(update={"context_ref": wrong.id})
-    child = manager.agent_tree._runs[child.id]
-    run_bytes = {
-        root.id: _run_bytes(root),
-        child.id: _run_bytes(child),
-    }
-    tree_bytes = _tree_bytes(manager, workspace_id)
-    monkeypatch.setattr(manager, "send_session_message", AsyncMock())
-
-    await manager.agent_tree.followup(
-        _followup_request(
-            workspace_id,
-            recipient_id=child.id,
-            author_id=root.id,
-            message="must hit linked task",
-            call_id="fu-stale-context-ref",
-        )
-    )
-    events = _mailbox_events(manager, workspace_id)
-    assert len(events) == 1
-    assert events[0].task_id == linked.id
-    assert events[0].task_id != wrong.id
-    assert _run_bytes(manager.agent_tree._runs[root.id]) == run_bytes[root.id]
-    assert _run_bytes(manager.agent_tree._runs[child.id]) == run_bytes[child.id]
-    assert _tree_bytes(manager, workspace_id) == tree_bytes
-
-
-@pytest.mark.asyncio
-async def test_agent_tree_followup_rejects_conflict_context_ref_without_linked_task(
-    manager_and_workspace: tuple[WorkspaceManager, str],
-    monkeypatch: MonkeyPatch,
-) -> None:
-    manager, workspace_id = manager_and_workspace
-    wrong = _ordinary_working_task(manager, workspace_id, task_id="task-orphan-wrong")
-    root, child = _seed_linked_managed_runs(manager, workspace_id, wrong)
-    manager.tasks[wrong.id] = manager.tasks[wrong.id].model_copy(update={"agent_run_id": None})
-    manager.agent_tree._runs[child.id] = child.model_copy(update={"context_ref": wrong.id})
-    child = manager.agent_tree._runs[child.id]
-    run_bytes = {
-        root.id: _run_bytes(root),
-        child.id: _run_bytes(child),
-    }
-    tree_bytes = _tree_bytes(manager, workspace_id)
-    sent: list[tuple[str, str, str | None]] = []
-
-    async def _fake_send(session_id: str, text: str, call_id: str | None = None) -> None:
-        sent.append((session_id, text, call_id))
-
-    monkeypatch.setattr(manager, "send_session_message", _fake_send)
-
-    with pytest.raises(KeyError):
-        await manager.agent_tree.followup(
-            _followup_request(
-                workspace_id,
-                recipient_id=child.id,
-                author_id=root.id,
-                message="must not retarget ordinary task",
-                call_id="fu-conflict-context-ref",
-            )
-        )
-
-    assert _mailbox_events(manager, workspace_id) == []
-    assert workspace_id not in manager.task_mailbox._call_index
-    assert sent == []
-    assert _run_bytes(manager.agent_tree._runs[root.id]) == run_bytes[root.id]
-    assert _run_bytes(manager.agent_tree._runs[child.id]) == run_bytes[child.id]
-    assert _tree_bytes(manager, workspace_id) == tree_bytes
-    assert child.context_ref == wrong.id
-    assert manager.tasks[wrong.id].agent_run_id is None
-
-
-@pytest.mark.asyncio
-async def test_followup_actor_session_ignores_stale_author_context_ref(
-    manager_and_workspace: tuple[WorkspaceManager, str],
-    monkeypatch: MonkeyPatch,
-) -> None:
-    manager, workspace_id = manager_and_workspace
-    child_task = _ordinary_working_task(manager, workspace_id, task_id="task-child-actor")
-    now = datetime.utcnow()
-    wrong_task = WorkspaceTask(
-        id="task-author-wrong",
-        workspace_id=workspace_id,
-        title="wrong author task",
-        prompt="not the author",
-        agent_type=AgentType.CLAUDE,
-        status=WorkspaceTaskStatus.WORKING,
-        session_id="session-wrong",
-        created_at=now,
-        updated_at=now,
-    )
-    linked_author_task = WorkspaceTask(
-        id="task-author-linked",
-        workspace_id=workspace_id,
-        title="linked author task",
-        prompt="supervise",
-        agent_type=AgentType.CLAUDE,
-        status=WorkspaceTaskStatus.WORKING,
-        session_id="session-linked-author",
-        created_at=now,
-        updated_at=now,
-    )
-    manager.tasks[wrong_task.id] = wrong_task
-    manager.tasks[linked_author_task.id] = linked_author_task
-    _session(manager, workspace_id, session_id="session-wrong", task_id=wrong_task.id)
-    _session(
-        manager, workspace_id, session_id="session-linked-author", task_id=linked_author_task.id
-    )
-    author = AgentRun(
-        id="run-author-stale-ref",
-        workspace_id=workspace_id,
-        parent_id="run-grand",
-        path="run-grand/run-author-stale-ref",
-        supervisor_id="run-grand",
-        executor_kind=ExecutorKind.MANAGED_TASK,
-        executor_config=_RUN_CONFIG,
-        executor_capabilities=_RUN_CAPS,
-        status=AgentRunStatus.RUNNING,
-        context_ref="session-wrong",
-        title="author-stale",
-        created_at=_RUN_STAMP,
-        updated_at=_RUN_STAMP,
-    )
-    child = AgentRun(
-        id="run-child-actor-stale",
-        workspace_id=workspace_id,
-        parent_id=author.id,
-        path="run-grand/run-author-stale-ref/run-child-actor-stale",
-        supervisor_id=author.id,
-        executor_kind=ExecutorKind.MANAGED_TASK,
-        executor_config=_RUN_CONFIG,
-        executor_capabilities=_RUN_CAPS,
-        status=AgentRunStatus.RUNNING,
-        context_ref=child_task.id,
-        title="child",
-        created_at=_RUN_STAMP,
-        updated_at=_RUN_STAMP,
-    )
-    manager.agent_tree._runs[author.id] = author
-    manager.agent_tree._runs[child.id] = child
-    manager.tasks[child_task.id] = child_task.model_copy(update={"agent_run_id": child.id})
-    manager.tasks[linked_author_task.id] = linked_author_task.model_copy(
-        update={"agent_run_id": author.id}
-    )
-    run_bytes = {
-        author.id: _run_bytes(author),
-        child.id: _run_bytes(child),
-    }
-    tree_bytes = _tree_bytes(manager, workspace_id)
-    monkeypatch.setattr(manager, "send_session_message", AsyncMock())
-
-    await manager.agent_tree.followup(
-        _followup_request(
-            workspace_id,
-            recipient_id=child.id,
-            author_id=author.id,
-            message="actor session from linked author task",
-            call_id="fu-actor-stale-ref",
-        )
-    )
-    events = _mailbox_events(manager, workspace_id)
-    assert len(events) == 1
-    assert events[0].actor_session_id == "session-linked-author"
-    assert events[0].actor_session_id != "session-wrong"
-    assert _run_bytes(manager.agent_tree._runs[author.id]) == run_bytes[author.id]
-    assert _run_bytes(manager.agent_tree._runs[child.id]) == run_bytes[child.id]
-    assert _tree_bytes(manager, workspace_id) == tree_bytes
-
-    manager.agent_tree._runs[author.id] = author.model_copy(update={"context_ref": wrong_task.id})
-    author = manager.agent_tree._runs[author.id]
-    run_bytes[author.id] = _run_bytes(author)
-    await manager.agent_tree.followup(
-        _followup_request(
-            workspace_id,
-            recipient_id=child.id,
-            author_id=author.id,
-            message="actor session still from linked author task",
-            call_id="fu-actor-stale-task-ref",
-        )
-    )
-    second = [
-        item
-        for item in _mailbox_events(manager, workspace_id)
-        if item.call_id == "fu-actor-stale-task-ref"
-    ]
-    assert len(second) == 1
-    assert second[0].actor_session_id == "session-linked-author"
-    assert _run_bytes(manager.agent_tree._runs[author.id]) == run_bytes[author.id]
-    assert _tree_bytes(manager, workspace_id) == tree_bytes
-
-
-@pytest.mark.asyncio
-async def test_followup_rejects_ambiguous_linked_tasks_even_when_context_ref_selects_one(
-    manager_and_workspace: tuple[WorkspaceManager, str],
-    monkeypatch: MonkeyPatch,
-) -> None:
-    manager, workspace_id = manager_and_workspace
-    first = _ordinary_working_task(manager, workspace_id, task_id="task-linked-a")
-    second = _ordinary_working_task(manager, workspace_id, task_id="task-linked-b")
-    root, child = _seed_linked_managed_runs(manager, workspace_id, first)
-    manager.tasks[first.id] = manager.tasks[first.id].model_copy(update={"agent_run_id": child.id})
-    manager.tasks[second.id] = manager.tasks[second.id].model_copy(
-        update={"agent_run_id": child.id}
-    )
-    manager.agent_tree._runs[child.id] = child.model_copy(update={"context_ref": first.id})
-    child = manager.agent_tree._runs[child.id]
-    run_bytes = {
-        root.id: _run_bytes(root),
-        child.id: _run_bytes(child),
-    }
-    tree_bytes = _tree_bytes(manager, workspace_id)
-    sent: list[tuple[str, str, str | None]] = []
-
-    async def _fake_send(session_id: str, text: str, call_id: str | None = None) -> None:
-        sent.append((session_id, text, call_id))
-
-    monkeypatch.setattr(manager, "send_session_message", _fake_send)
-
-    with pytest.raises(ValueError, match="canonical Task.agent_run_id linkage must be unique"):
-        await manager.agent_tree.followup(
-            _followup_request(
-                workspace_id,
-                recipient_id=child.id,
-                author_id=root.id,
-                message="ambiguous linked tasks",
-                call_id="fu-ambiguous-linked",
-            )
-        )
-
-    assert _mailbox_events(manager, workspace_id) == []
-    assert workspace_id not in manager.task_mailbox._call_index
-    assert sent == []
-    assert _run_bytes(manager.agent_tree._runs[root.id]) == run_bytes[root.id]
-    assert _run_bytes(manager.agent_tree._runs[child.id]) == run_bytes[child.id]
-    assert _tree_bytes(manager, workspace_id) == tree_bytes
-
-
 def _set_task_status(
     manager: WorkspaceManager,
     task_id: str,
@@ -1146,9 +477,6 @@ async def test_followup_task_todo_and_queued_marker_persists_before_retry(
     queued = _ordinary_working_task(manager, workspace_id, task_id="task-queued")
     _set_task_status(manager, todo.id, WorkspaceTaskStatus.TODO, session_id=None)
     _set_task_status(manager, queued.id, WorkspaceTaskStatus.QUEUED, session_id=None)
-    root, child = _seed_linked_managed_runs(manager, workspace_id, todo)
-    run_bytes = {root.id: _run_bytes(root), child.id: _run_bytes(child)}
-    tree_bytes = _tree_bytes(manager, workspace_id)
     started: list[str] = []
     first_save: list[tuple[str, list[str], list[str]]] = []
     real_save = manager._save_state
@@ -1209,9 +537,6 @@ async def test_followup_task_todo_and_queued_marker_persists_before_retry(
         "fu-queued",
     ]
     assert [item.sequence for item in _mailbox_events(fresh, workspace_id)] == [1, 2]
-    assert _run_bytes(fresh.agent_tree._runs[root.id]) == run_bytes[root.id]
-    assert _run_bytes(fresh.agent_tree._runs[child.id]) == run_bytes[child.id]
-    assert _tree_bytes(fresh, workspace_id) == tree_bytes
 
 
 @pytest.mark.asyncio
@@ -1222,10 +547,7 @@ async def test_followup_task_todo_precommit_save_fault_rolls_back_prompt(
     manager, workspace_id = manager_and_workspace
     todo = _ordinary_working_task(manager, workspace_id, task_id="task-todo-rollback")
     _set_task_status(manager, todo.id, WorkspaceTaskStatus.TODO, session_id=None)
-    root, child = _seed_linked_managed_runs(manager, workspace_id, todo)
     before = _task_snapshot(manager, todo.id)
-    run_bytes = {root.id: _run_bytes(root), child.id: _run_bytes(child)}
-    tree_bytes = _tree_bytes(manager, workspace_id)
     mailbox = manager.task_mailbox
     started: list[str] = []
 
@@ -1255,9 +577,6 @@ async def test_followup_task_todo_precommit_save_fault_rolls_back_prompt(
     assert workspace_id not in mailbox._call_index
     assert workspace_id not in mailbox._next_seq
     assert _task_snapshot(manager, todo.id) == before
-    assert _run_bytes(manager.agent_tree._runs[root.id]) == run_bytes[root.id]
-    assert _run_bytes(manager.agent_tree._runs[child.id]) == run_bytes[child.id]
-    assert _tree_bytes(manager, workspace_id) == tree_bytes
 
 
 @pytest.mark.asyncio
@@ -1268,10 +587,7 @@ async def test_followup_task_done_is_rejected_with_zero_writes(
     manager, workspace_id = manager_and_workspace
     done = _ordinary_working_task(manager, workspace_id, task_id="task-done")
     _set_task_status(manager, done.id, WorkspaceTaskStatus.DONE)
-    root, child = _seed_linked_managed_runs(manager, workspace_id, done)
     before = _task_snapshot(manager, done.id)
-    run_bytes = {root.id: _run_bytes(root), child.id: _run_bytes(child)}
-    tree_bytes = _tree_bytes(manager, workspace_id)
     mailbox = manager.task_mailbox
     sent: list[tuple[str, str, str | None]] = []
     started: list[str] = []
@@ -1308,9 +624,6 @@ async def test_followup_task_done_is_rejected_with_zero_writes(
     assert workspace_id not in mailbox._call_index
     assert workspace_id not in mailbox._next_seq
     assert _task_snapshot(manager, done.id) == before
-    assert _run_bytes(manager.agent_tree._runs[root.id]) == run_bytes[root.id]
-    assert _run_bytes(manager.agent_tree._runs[child.id]) == run_bytes[child.id]
-    assert _tree_bytes(manager, workspace_id) == tree_bytes
 
 
 @pytest.mark.asyncio
@@ -1325,9 +638,6 @@ async def test_followup_task_review_real_continue_and_cold_retry(
     manager.sessions["session-new"] = session.model_copy(
         update={"role": WorkspaceSessionRole.ORCHESTRATOR, "task_id": review.id}
     )
-    root, child = _seed_linked_managed_runs(manager, workspace_id, review)
-    run_bytes = {root.id: _run_bytes(root), child.id: _run_bytes(child)}
-    tree_bytes = _tree_bytes(manager, workspace_id)
     continue_calls: list[str] = []
     real_continue = manager.continue_task
 
@@ -1352,10 +662,6 @@ async def test_followup_task_review_real_continue_and_cold_retry(
     assert len(continue_reports) == 1
     expected_ids = ["fu-review", f"report:{continue_reports[0].id}"]
     assert [item.call_id for item in _mailbox_events(manager, workspace_id)] == expected_ids
-    assert _run_bytes(manager.agent_tree._runs[root.id]) == run_bytes[root.id]
-    assert _run_bytes(manager.agent_tree._runs[child.id]) == run_bytes[child.id]
-    assert _tree_bytes(manager, workspace_id) == tree_bytes
-
     fresh = WorkspaceManager()
     assert fresh.tasks[review.id].status == WorkspaceTaskStatus.WORKING
     assert [item.call_id for item in _mailbox_events(fresh, workspace_id)] == expected_ids
@@ -1383,9 +689,6 @@ async def test_followup_task_review_real_continue_and_cold_retry(
     assert [item.call_id for item in _mailbox_events(fresh, workspace_id)] == expected_ids
     assert len(_continue_reports(fresh, review.id)) == 1
     assert _continue_reports(fresh, review.id)[0].id == continue_reports[0].id
-    assert _run_bytes(fresh.agent_tree._runs[root.id]) == run_bytes[root.id]
-    assert _run_bytes(fresh.agent_tree._runs[child.id]) == run_bytes[child.id]
-    assert _tree_bytes(fresh, workspace_id) == tree_bytes
 
 
 @pytest.mark.asyncio
@@ -1400,9 +703,6 @@ async def test_direct_continue_task_bridges_report_event_live_and_cold(
     manager.sessions["session-new"] = session.model_copy(
         update={"role": WorkspaceSessionRole.ORCHESTRATOR, "task_id": review.id}
     )
-    root, child = _seed_linked_managed_runs(manager, workspace_id, review)
-    run_bytes = {root.id: _run_bytes(root), child.id: _run_bytes(child)}
-    tree_bytes = _tree_bytes(manager, workspace_id)
     monkeypatch.setattr(manager, "send_session_message", AsyncMock())
 
     await manager.continue_task(review.id)
@@ -1411,18 +711,10 @@ async def test_direct_continue_task_bridges_report_event_live_and_cold(
     report_call = f"report:{reports[0].id}"
     assert [item.call_id for item in _mailbox_events(manager, workspace_id)] == [report_call]
     assert manager.tasks[review.id].status == WorkspaceTaskStatus.WORKING
-    assert _run_bytes(manager.agent_tree._runs[root.id]) == run_bytes[root.id]
-    assert _run_bytes(manager.agent_tree._runs[child.id]) == run_bytes[child.id]
-    assert _tree_bytes(manager, workspace_id) == tree_bytes
-
     fresh = WorkspaceManager()
     assert [item.call_id for item in _mailbox_events(fresh, workspace_id)] == [report_call]
     assert len(_continue_reports(fresh, review.id)) == 1
     assert _continue_reports(fresh, review.id)[0].id == reports[0].id
-    assert _run_bytes(fresh.agent_tree._runs[root.id]) == run_bytes[root.id]
-    assert _run_bytes(fresh.agent_tree._runs[child.id]) == run_bytes[child.id]
-    assert _tree_bytes(fresh, workspace_id) == tree_bytes
-
     with pytest.raises(RuntimeError, match="Only review tasks can continue"):
         await fresh.continue_task(review.id)
     assert [item.call_id for item in _mailbox_events(fresh, workspace_id)] == [report_call]
@@ -1448,9 +740,6 @@ async def test_followup_task_outbox_states_same_process_and_cold_retry(
     _set_task_status(
         manager, uncertain.id, WorkspaceTaskStatus.WORKING, uncertain_call_ids=["fu-unc"]
     )
-    root, child = _seed_linked_managed_runs(manager, workspace_id, pending)
-    run_bytes = {root.id: _run_bytes(root), child.id: _run_bytes(child)}
-    tree_bytes = _tree_bytes(manager, workspace_id)
     transport: list[object] = []
 
     async def _count_receipt(*args: object, **kwargs: object) -> None:
@@ -1506,10 +795,6 @@ async def test_followup_task_outbox_states_same_process_and_cold_retry(
         "fu-unc",
         "fu-pend",
     ]
-    assert _run_bytes(manager.agent_tree._runs[root.id]) == run_bytes[root.id]
-    assert _run_bytes(manager.agent_tree._runs[child.id]) == run_bytes[child.id]
-    assert _tree_bytes(manager, workspace_id) == tree_bytes
-
     fresh = WorkspaceManager()
     transport.clear()
     monkeypatch.setattr(fresh, "_send_tmux_message_with_receipt", _count_receipt)
@@ -1551,9 +836,6 @@ async def test_followup_task_outbox_states_same_process_and_cold_retry(
     assert fresh.tasks[delivered.id].delivered_call_ids == ["fu-del"]
     assert fresh.tasks[processing.id].processing_call_ids == ["fu-proc"]
     assert fresh.tasks[uncertain.id].uncertain_call_ids == ["fu-unc"]
-    assert _run_bytes(fresh.agent_tree._runs[root.id]) == run_bytes[root.id]
-    assert _run_bytes(fresh.agent_tree._runs[child.id]) == run_bytes[child.id]
-    assert _tree_bytes(fresh, workspace_id) == tree_bytes
 
 
 def _assign_worker(
@@ -1572,7 +854,6 @@ def _assign_worker(
 
 def _workspace_fact_snapshot(manager: WorkspaceManager, workspace_id: str) -> dict[str, object]:
     mailbox = manager.task_mailbox
-    tree = manager.agent_tree
     return {
         "reports": {
             key: value.model_dump(mode="json")
@@ -1594,12 +875,6 @@ def _workspace_fact_snapshot(manager: WorkspaceManager, workspace_id: str) -> di
         ],
         "mailbox_call_ids": sorted(mailbox._call_index.get(workspace_id, {})),
         "mailbox_next": mailbox._next_seq.get(workspace_id),
-        "tree": _tree_bytes(manager, workspace_id),
-        "runs": {
-            key: _run_bytes(value)
-            for key, value in tree._runs.items()
-            if value.workspace_id == workspace_id
-        },
     }
 
 
@@ -1677,13 +952,13 @@ async def test_todo_followup_ack_is_task_first_after_worker_assignment(
     assert cold.sessions[wrong.id].task_id == "task-other"
 
 
-def test_resolve_followup_actor_session_from_linked_task_assignment(
+def test_resolve_actor_session_from_supervisor_task_id(
     manager_and_workspace: tuple[WorkspaceManager, str],
 ) -> None:
-    """Worker/reviewer session comes only from Task.agent_run_id linkage."""
+    """Supervisor actor session resolves from Task assignment via author_ref."""
     manager, workspace_id = manager_and_workspace
     now = datetime.utcnow()
-    worker_task = WorkspaceTask(
+    supervisor_task = WorkspaceTask(
         id="task-supervisor",
         workspace_id=workspace_id,
         title="supervisor",
@@ -1691,68 +966,20 @@ def test_resolve_followup_actor_session_from_linked_task_assignment(
         agent_type=AgentType.CLAUDE,
         status=WorkspaceTaskStatus.WORKING,
         session_id="session-supervisor",
-        agent_run_id="run-supervisor",
         created_at=now,
         updated_at=now,
     )
-    manager.tasks[worker_task.id] = worker_task
+    manager.tasks[supervisor_task.id] = supervisor_task
     _session(
         manager,
         workspace_id,
         session_id="session-supervisor",
-        task_id=worker_task.id,
+        task_id=supervisor_task.id,
         role=WorkspaceSessionRole.ORCHESTRATOR,
     )
-    author = AgentRun(
-        id="run-supervisor",
-        workspace_id=workspace_id,
-        parent_id=None,
-        path="run-supervisor",
-        supervisor_id=None,
-        executor_kind=ExecutorKind.MANAGED_TASK,
-        status=AgentRunStatus.RUNNING,
-        context_ref="stale-unrelated-ref",
-        created_at=now,
-        updated_at=now,
+    assert (
+        manager._resolve_actor_session_from_author_ref(workspace_id, supervisor_task.id)
+        == "session-supervisor"
     )
-    assert manager._resolve_followup_actor_session_id(workspace_id, author) == "session-supervisor"
-
-
-def test_resolve_followup_actor_session_ignores_resident_root_context_ref(
-    manager_and_workspace: tuple[WorkspaceManager, str],
-) -> None:
-    """Legacy RESIDENT_ROOT context_ref must not map to the live Resident session."""
-    manager, workspace_id = manager_and_workspace
-    now = datetime.utcnow()
-    resident_session_id = "session-resident-live"
-    manager.sessions[resident_session_id] = ManagedSession(
-        id=resident_session_id,
-        workspace_id=workspace_id,
-        tab_id="tab-resident",
-        role=WorkspaceSessionRole.RESIDENT,
-        agent_type=AgentType.CLAUDE,
-        status=ManagedSessionStatus.IDLE,
-        runtime_status=AgentRuntimeStatus.IDLE,
-        title="resident",
-        workspace_path="/tmp",
-        tmux_session="tmux-resident",
-        target=ExecutionTarget.LOCAL,
-        created_at=now,
-        updated_at=now,
-    )
-    manager.workspaces[workspace_id] = manager.workspaces[workspace_id].model_copy(
-        update={"resident_agent_session_id": resident_session_id}
-    )
-    author = AgentRun(
-        id="run-resident-root",
-        workspace_id=workspace_id,
-        parent_id=None,
-        path="run-resident-root",
-        supervisor_id=None,
-        executor_kind=ExecutorKind.RESIDENT_ROOT,
-        status=AgentRunStatus.RUNNING,
-        context_ref=resident_session_id,
-        created_at=now,
-        updated_at=now,
-    )
-    assert manager._resolve_followup_actor_session_id(workspace_id, author) is None
+    assert manager._resolve_actor_session_from_author_ref(workspace_id, None) is None
+    assert manager._resolve_actor_session_from_author_ref(workspace_id, "missing-task") is None

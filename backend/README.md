@@ -5,7 +5,7 @@ FastAPI backend for Claude Hub's persistent terminal and Agent Workspace flows.
 ## Task Graph / TaskMailbox (primary)
 
 Agents orchestrating work via durable Task events should read
-[docs/AGENT_TREE.md](../docs/AGENT_TREE.md). Use `claude-hub task`
+[docs/TASK_GRAPH.md](../docs/TASK_GRAPH.md). Use `claude-hub task`
 (tree/events/wait/ack/followup/start) and
 `/api/workspaces/{id}/tasks/*`. Worker and reviewer agents are Task session assignments
 (`session_id`, `review_session_id`, `target_session_id` on start).

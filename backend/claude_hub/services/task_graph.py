@@ -14,6 +14,21 @@ from ..models import WorkspaceTask
 logger = logging.getLogger(__name__)
 
 TASK_CONSUMER_PREFIX = "task:"
+LEGACY_RESIDENT_CONSUMER_TEMPLATE = "workspace:{workspace_id}:resident"
+
+
+def legacy_resident_consumer_key(workspace_id: str) -> str:
+    """Load/migration-only resident consumer key. Not a runtime mailbox identity."""
+
+    if not workspace_id:
+        raise ValueError("Legacy resident consumer key requires a workspace id")
+    return LEGACY_RESIDENT_CONSUMER_TEMPLATE.format(workspace_id=workspace_id)
+
+
+def is_legacy_resident_consumer_key(consumer_key: str, workspace_id: str) -> bool:
+    """True for deprecated ``workspace:{id}:resident`` keys (load-only compat)."""
+
+    return consumer_key == legacy_resident_consumer_key(workspace_id)
 
 
 class TaskHasDescendantsError(ValueError):
@@ -32,30 +47,6 @@ def task_has_descendants(
         other.workspace_id == workspace_id and other.id != task.id and other.path.startswith(prefix)
         for other in tasks.values()
     )
-
-
-def compat_run_id_for_task(task: WorkspaceTask) -> str:
-    """Stable compat projection id: linked run.id or the Task id itself."""
-
-    return task.agent_run_id or task.id
-
-
-def compat_path_for_task(tasks: Dict[str, WorkspaceTask], task: WorkspaceTask) -> str:
-    """Walk ``parent_task_id`` and map every ancestor through the compat id."""
-
-    parts = [compat_run_id_for_task(task)]
-    parent_id = task.parent_task_id
-    seen = {task.id}
-    while parent_id:
-        if parent_id in seen:
-            raise ValueError(f"Task parent cycle involving {task.id}")
-        parent = tasks.get(parent_id)
-        if parent is None or parent.workspace_id != task.workspace_id:
-            raise KeyError(parent_id)
-        parts.append(compat_run_id_for_task(parent))
-        seen.add(parent.id)
-        parent_id = parent.parent_task_id
-    return "/".join(reversed(parts))
 
 
 def make_task_consumer_key(task_id: str) -> str:

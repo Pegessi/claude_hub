@@ -2,16 +2,9 @@
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
-from ...models.agent_tree import (
-    AgentEvent,
-    AgentEventType,
-    AgentRun,
-    AgentRunStatus,
-)
 from ...models.task_mailbox import TaskActorRole, TaskEvent, TaskEventType
-from ..agent_tree import _request_fingerprint
+from ..request_fingerprint import request_fingerprint
 from ..task_graph import (
-    compat_run_id_for_task,
     make_task_consumer_key,
     resolve_task_tree_fields,
     task_inbox_consumer_key,
@@ -99,7 +92,6 @@ class _TasksMixin:
             root_task_id=root_task_id,
             path=task_path,
             consumer_ack_sequence=0,
-            agent_run_id=payload.agent_run_id,
             system_internal=system_internal,
             internal_kind=internal_kind,
             created_at=now,
@@ -619,30 +611,18 @@ class _TasksMixin:
         self.tasks[task_id] = current.model_copy(update={"prompt": f"{current.prompt}\n\n{block}"})
         return True
 
-    def _resolve_followup_actor_session_id(
+    def _resolve_actor_session_from_author_ref(
         self,
         workspace_id: str,
-        author: Optional[AgentRun],
+        author_ref: Optional[str],
     ) -> Optional[str]:
-        """Resolve a real Session id from Task assignment linked to the author run."""
+        """Resolve a Session id from a supervisor task id or legacy author ref."""
 
-        if author is None or author.workspace_id != workspace_id:
+        if not author_ref:
             return None
-        linked_session_ids = [
-            item.session_id
-            for item in self.tasks.values()
-            if item.workspace_id == workspace_id
-            and item.agent_run_id == author.id
-            and item.session_id
-        ]
-        unique = list(dict.fromkeys(linked_session_ids))
-        if len(unique) == 1:
-            return unique[0]
-        if len(unique) > 1:
-            raise ValueError(
-                f"Author run {author.id} links to multiple Task sessions; "
-                "cannot choose actor_session_id"
-            )
+        direct = self.tasks.get(author_ref)
+        if direct is not None and direct.workspace_id == workspace_id and direct.session_id:
+            return direct.session_id
         return None
 
     def _canonical_followup_payload(
@@ -695,9 +675,8 @@ class _TasksMixin:
 
             resolved_actor_session_id = actor_session_id
             if resolved_actor_session_id is None and compat_author_run_id:
-                author = self.agent_tree._runs.get(compat_author_run_id)
-                resolved_actor_session_id = self._resolve_followup_actor_session_id(
-                    workspace_id, author
+                resolved_actor_session_id = self._resolve_actor_session_from_author_ref(
+                    workspace_id, compat_author_run_id
                 )
             existing = self.task_mailbox._call_record(workspace_id, call_id)
             existing_event = existing["event"] if existing is not None else None
@@ -738,86 +717,6 @@ class _TasksMixin:
             self.task_mailbox._wake_compat_waiters(event)
             await self._followup_existing_task(task.id, message, call_id)
             return event
-
-    def _linked_compat_run_ids(self, task: WorkspaceTask) -> set[str]:
-        """Compat AgentRun ids owned by a Task being deleted."""
-
-        run_ids: set[str] = {compat_run_id_for_task(task)}
-        if task.agent_run_id:
-            run_ids.add(task.agent_run_id)
-        for run in self.agent_tree._runs.values():
-            if run.workspace_id != task.workspace_id:
-                continue
-            if run.context_ref == task.id:
-                run_ids.add(run.id)
-        return run_ids
-
-    def _tasks_linked_to_compat_run(self, workspace_id: str, run: AgentRun) -> list[WorkspaceTask]:
-        """Task-as-source candidates. ``Task.agent_run_id`` wins, then compat id."""
-        linked = [
-            task
-            for task in self.tasks.values()
-            if task.workspace_id == workspace_id and task.agent_run_id == run.id
-        ]
-        if linked:
-            return linked
-        by_compat = [
-            task
-            for task in self.tasks.values()
-            if task.workspace_id == workspace_id
-            and task.agent_run_id is None
-            and compat_run_id_for_task(task) == run.id
-        ]
-        if by_compat:
-            return by_compat
-        return []
-
-    def _managed_spawn_parent_assignment(self, run: AgentRun) -> tuple[str | None, str | None]:
-        """Reuse Agent Tree's spawn parent/assignment parse. No extra policy."""
-
-        return self.agent_tree._managed_spawn_parent_assignment(run)
-
-    def _resolve_task_for_compat_run(self, workspace_id: str, run: AgentRun) -> WorkspaceTask:
-        """Resolve the Task backing a compat AgentRun. Never creates a Task.
-
-        Canonical linkage only: ``Task.agent_run_id == run.id``, else a unique
-        ordinary Task whose compat id equals ``run.id``. ``run.context_ref``
-        is not consulted at runtime; cold load may backfill ``agent_run_id``
-        once via ``task_migration`` when canonical linkage is still absent.
-        """
-        linked = self._tasks_linked_to_compat_run(workspace_id, run)
-        if not linked:
-            raise KeyError(run.id)
-        if len(linked) > 1:
-            raise ValueError(
-                f"Run {run.id} links to {len(linked)} Tasks; "
-                "canonical Task.agent_run_id linkage must be unique"
-            )
-        return linked[0]
-
-    def _project_followup_task_event(
-        self,
-        event: TaskEvent,
-        *,
-        author_id: str,
-        recipient_id: str,
-        correlation_id: Optional[str] = None,
-    ) -> AgentEvent:
-        """In-memory AgentEvent view. Never appended to Agent Tree storage."""
-        return AgentEvent(
-            sequence=event.sequence,
-            call_id=event.call_id,
-            correlation_id=correlation_id,
-            agent_run_id=event.compat_run_id or recipient_id,
-            type=AgentEventType.MESSAGE,
-            author=author_id,
-            recipient=recipient_id,
-            action=event.action,
-            target=recipient_id,
-            fingerprint=event.fingerprint,
-            payload={"message": event.payload.get("message"), "followup": True},
-            created_at=event.created_at,
-        )
 
     def _canonical_abort_payload(
         self,
@@ -862,7 +761,7 @@ class _TasksMixin:
         report_id: Optional[str],
     ) -> str:
         consumer_key = task_inbox_consumer_key(task)
-        return _request_fingerprint(
+        return request_fingerprint(
             "abort",
             {
                 "task_id": task.id,
@@ -891,35 +790,10 @@ class _TasksMixin:
             return session.id
         if actor_role != TaskActorRole.SUPERVISOR:
             return None
-        author = self.agent_tree._runs.get(compat_author_run_id) if compat_author_run_id else None
-        resolved = self._resolve_followup_actor_session_id(workspace_id, author)
+        resolved = self._resolve_actor_session_from_author_ref(workspace_id, compat_author_run_id)
         if resolved is None:
             raise ValueError("supervisor abort requires a real actor session")
         return resolved
-
-    def _projected_task_status(self, task: WorkspaceTask) -> AgentRunStatus:
-        """Non-durable AgentRun status derived from Task + abort facts."""
-
-        if task.manual_aborted_at is not None:
-            return AgentRunStatus.INTERRUPTED
-        if task.status == WorkspaceTaskStatus.REVIEW and task.review_completed_at is not None:
-            return AgentRunStatus.COMPLETED
-        mapping = {
-            WorkspaceTaskStatus.TODO: AgentRunStatus.PENDING,
-            WorkspaceTaskStatus.QUEUED: AgentRunStatus.PENDING,
-            WorkspaceTaskStatus.WORKING: AgentRunStatus.RUNNING,
-            WorkspaceTaskStatus.REVIEW: AgentRunStatus.WAITING,
-            WorkspaceTaskStatus.DONE: AgentRunStatus.COMPLETED,
-        }
-        return mapping.get(task.status, AgentRunStatus.PENDING)
-
-    def _projected_agent_run_status(self, run: AgentRun) -> AgentRunStatus:
-        """Non-durable AgentRun status derived from Task + abort facts."""
-        try:
-            task = self._resolve_task_for_compat_run(run.workspace_id, run)
-        except (KeyError, ValueError):
-            return run.status
-        return self._projected_task_status(task)
 
     def _preflight_abort_call(
         self,

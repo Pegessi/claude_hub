@@ -8,7 +8,7 @@ from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
 
-from claude_hub.services.task_migration import (
+from claude_hub.services.task_graph import (
     LEGACY_RESIDENT_CONSUMER_TEMPLATE,
     legacy_resident_consumer_key,
 )
@@ -18,7 +18,7 @@ from claude_hub.services.workspace_manager._workspaces import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-GUIDE = REPO_ROOT / "docs" / "AGENT_TREE.md"
+GUIDE = REPO_ROOT / "docs" / "TASK_GRAPH.md"
 
 CHANGELOG = REPO_ROOT / "CHANGELOG.md"
 
@@ -69,7 +69,7 @@ def _assert_shared_task_first_floor(text: str) -> None:
 
 
 def _assert_root_readme_task_first(text: str) -> None:
-    assert "docs/AGENT_TREE.md" in text
+    assert "docs/TASK_GRAPH.md" in text
     assert "task:<task_id>" in text
     _assert_readme_covers_task_cli_subcommands(text)
     assert "Task session assignments" in text
@@ -85,7 +85,7 @@ def _assert_root_readme_task_first(text: str) -> None:
 
 
 def _assert_backend_readme_task_first(text: str) -> None:
-    assert "../docs/AGENT_TREE.md" in text
+    assert "../docs/TASK_GRAPH.md" in text
     assert "## Task Graph / TaskMailbox (primary)" in text
     _assert_readme_covers_task_cli_subcommands(text)
     assert "/api/workspaces/{id}/tasks/*" in text
@@ -199,10 +199,6 @@ def test_guide_single_task_graph_model_no_resident_mailbox() -> None:
 
 def test_model_and_docs_reject_resident_root_supervisor_wording() -> None:
     """Lock Task Graph canonical wording; RESIDENT_ROOT is legacy load-only only."""
-    model_src = (REPO_ROOT / "backend/claude_hub/models/agent_tree.py").read_text(encoding="utf-8")
-    assert "resident agent itself (the root supervisor)" not in model_src
-    assert "legacy load-only" in model_src.lower()
-
     text = GUIDE.read_text(encoding="utf-8")
     assert "## Deprecated AgentRun compatibility spawn" in text
     assert "## Spawn\n" not in text
@@ -214,7 +210,7 @@ def test_model_and_docs_reject_resident_root_supervisor_wording() -> None:
         assert needle in text, needle
 
 
-def test_agent_tree_guide_covers_required_agent_contract() -> None:
+def test_task_graph_guide_covers_required_agent_contract() -> None:
     text = GUIDE.read_text(encoding="utf-8")
     assert 320 <= text.count("\n") + 1 <= 420
     for needle in (
@@ -276,7 +272,7 @@ def test_agent_tree_guide_covers_required_agent_contract() -> None:
 
 
 def test_task_graph_guide_forbids_dual_control_plane_wording() -> None:
-    """Lock Task Graph as canonical; agent-tree is compat projection only."""
+    """Lock Task Graph as canonical; agent-tree orchestration removed from entry docs."""
     text = GUIDE.read_text(encoding="utf-8")
     lowered = text.lower()
     agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
@@ -288,7 +284,8 @@ def test_task_graph_guide_forbids_dual_control_plane_wording() -> None:
     assert "task graph (primary)" in lowered or "task graph (canonical)" in lowered
     assert "task graph / taskmailbox" in agents.lower()
     assert "primary: `claude-hub task`" in agents
-    assert "agent-tree` compat only" in agents
+    assert "docs/TASK_GRAPH.md" in agents
+    assert "claude-hub agent-tree" not in agents.lower()
     assert agents == claude
 
 
@@ -332,11 +329,11 @@ def test_readmes_and_agent_entry_link_the_guide() -> None:
     backend_readme = (REPO_ROOT / "backend" / "README.md").read_text(encoding="utf-8")
     agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
     claude = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
-    assert "docs/AGENT_TREE.md" in root_readme
-    assert "../docs/AGENT_TREE.md" in backend_readme
+    assert "docs/TASK_GRAPH.md" in root_readme
+    assert "../docs/TASK_GRAPH.md" in backend_readme
     assert "Task Graph / TaskMailbox" in root_readme
     assert "claude-hub task` primary" in root_readme
-    assert "docs/AGENT_TREE.md" in agents
+    assert "docs/TASK_GRAPH.md" in agents
     assert "Task Graph / TaskMailbox" in agents
     assert "primary: `claude-hub task`" in agents
     assert agents == claude
