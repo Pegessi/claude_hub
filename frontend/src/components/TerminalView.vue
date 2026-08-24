@@ -14,7 +14,56 @@
       allowfullscreen
       scrolling="yes"
       @load="onIframeLoad($event, cachedTabId)"
+      @error="onIframeError($event, cachedTabId)"
     />
+    <!-- Connecting / timeout / error overlay: shown only while the active tab's
+         iframe has not yet loaded. Pure chrome — never covers the xterm canvas
+         once loaded, and does not alter terminal palette or rendering.
+         - connecting: spinner + "Connecting…"            (role=status, polite)
+         - timeout:    "Taking longer than expected" + Retry (role=alert, assertive)
+         - error:      "Terminal failed to connect" + Retry  (role=alert, assertive) -->
+    <div
+      v-if="activeTabState !== 'loaded'"
+      class="terminal-connecting-overlay"
+      :role="activeTabState === 'connecting' ? 'status' : 'alert'"
+      :aria-live="activeTabState === 'connecting' ? 'polite' : 'assertive'"
+    >
+      <template v-if="activeTabState === 'connecting'">
+        <span
+          class="terminal-connecting-spinner"
+          aria-hidden="true"
+        />
+        <span class="terminal-connecting-text">Connecting…</span>
+      </template>
+      <template v-else-if="activeTabState === 'timeout'">
+        <span
+          class="terminal-error-icon"
+          aria-hidden="true"
+        >⏳</span>
+        <span class="terminal-connecting-text">Taking longer than expected</span>
+        <button
+          type="button"
+          class="terminal-retry-button"
+          @click="retryTab(tabId)"
+        >
+          Retry
+        </button>
+      </template>
+      <template v-else>
+        <span
+          class="terminal-error-icon"
+          aria-hidden="true"
+        >⚠</span>
+        <span class="terminal-connecting-text">Terminal failed to connect</span>
+        <button
+          type="button"
+          class="terminal-retry-button"
+          @click="retryTab(tabId)"
+        >
+          Retry
+        </button>
+      </template>
+    </div>
   </div>
 </template>
 
@@ -23,6 +72,7 @@ import { onMounted, onUnmounted, ref, watch, computed, ComponentPublicInstance, 
 import { storeToRefs } from 'pinia'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
+import { useTerminalConnecting, getConnectingState } from '@/composables/useTerminalConnecting'
 import type { AgentType, AgentRuntimeStatus } from '@/types'
 
 const props = defineProps<{
@@ -368,6 +418,24 @@ type IframeWithSabCache = HTMLIFrameElement & { __sabDrainScript?: HTMLScriptEle
 const iframeRefs: Record<string, HTMLIFrameElement | null> = {}
 const cachedTabIds = ref<string[]>([])
 const terminalContainer = ref<HTMLElement | null>(null)
+// Connecting-state management (loaded/error sets + bounded timeout + retry).
+// Extracted into a composable so the state machine is unit-testable. The
+// reload callback re-assigns the target iframe's src; the composable never
+// touches the DOM directly. xterm canvas / palette are never affected.
+const {
+  loadedTabIds,
+  timeoutTabIds,
+  errorTabIds,
+  startConnectingTimer,
+  resetTabConnectingState,
+  markLoaded,
+  markError,
+  retryTab,
+  clearAllTimers,
+} = useTerminalConnecting((tabId: string) => {
+  const iframe = iframeRefs[tabId]
+  if (iframe) iframe.src = terminalIframeSrc(tabId)
+})
 const appStore = useAppStore()
 const terminalStore = useTerminalStore()
 const { colorScheme } = storeToRefs(appStore)
@@ -384,6 +452,16 @@ const lastAgentStatus = ref<AgentRuntimeStatus | null>(null)
 // props.tabId is relevant since this TerminalView only displays props.tabId.
 const currentAgentStatus = computed<AgentRuntimeStatus | null>(
   () => agentStatuses.value.find(s => s.tab_id === props.tabId)?.status ?? null
+)
+
+// The active tab's connecting state drives the overlay chrome:
+//   - 'connecting': iframe not yet loaded and not timed out → spinner + "Connecting…"
+//   - 'timeout':    iframe load exceeded CONNECTING_TIMEOUT_MS → "Taking longer than expected" + Retry
+//   - 'error':      iframe fired an error event → "Terminal failed to connect" + Retry
+//   - 'loaded':     iframe fired load → overlay hidden, canvas visible
+// Does not affect xterm rendering.
+const activeTabState = computed<'connecting' | 'timeout' | 'error' | 'loaded'>(() =>
+  getConnectingState(props.tabId, loadedTabIds.value, timeoutTabIds.value, errorTabIds.value),
 )
 let terminalResizeObserver: ResizeObserver | null = null
 let keyboardResizeSettleTimer: number | null = null
@@ -432,11 +510,22 @@ function cacheTabId(tabId: string) {
   if (!tabId) return
   // Split layouts must not keep hidden iframe clients attached to tmux.
   if (layoutType.value !== '1x1') {
+    const evicted = cachedTabIds.value.filter(id => id !== tabId)
+    evicted.forEach(id => resetTabConnectingState(id))
     cachedTabIds.value = [tabId]
+    startConnectingTimer(tabId)
     return
   }
   const cachedWithoutCurrent = cachedTabIds.value.filter(id => id !== tabId)
-  cachedTabIds.value = [...cachedWithoutCurrent, tabId].slice(-MAX_SINGLE_PANE_CACHED_TERMINALS)
+  const next = [...cachedWithoutCurrent, tabId].slice(-MAX_SINGLE_PANE_CACHED_TERMINALS)
+  // Evict connecting/loaded/error state for tabs no longer cached so a future
+  // re-add shows the connecting overlay again from a clean slate.
+  const evicted = cachedTabIds.value.filter(id => !next.includes(id))
+  evicted.forEach(id => resetTabConnectingState(id))
+  cachedTabIds.value = next
+  // (Re)start the connecting timer for the tab we just cached. If it was
+  // already cached and loaded, the timer is a no-op (cleared on load).
+  startConnectingTimer(tabId)
 }
 
 watch(
@@ -832,6 +921,9 @@ function onIframeLoad(event: Event, tabId: string) {
   if (!iframe || !iframe.contentDocument) return
 
   registerIframe(iframe, tabId)
+  // Load succeeded: cancel the connecting timeout, mark loaded, clear any
+  // prior error state so the overlay is hidden.
+  markLoaded(tabId)
 
   try {
     // Fast input path: allocate a SAB + Atomics ring buffer shared between
@@ -1312,6 +1404,13 @@ ${buildIframeSabScript(tabId)}
   }
 }
 
+/** Iframe error handler: the browser failed to load the terminal document.
+ *  This is a hard failure (distinct from a slow/timeout load), so we mark the
+ *  tab as errored and show the "Terminal failed to connect" state. */
+function onIframeError(_event: Event, tabId: string) {
+  markError(tabId)
+}
+
 watch(colorScheme, () => {
   // Reset cached theme key so the change propagates.
   lastThemeKey = null
@@ -1451,6 +1550,9 @@ onUnmounted(() => {
   pendingKeyboardResizeAll = false
   pendingKeyboardResizeTabIds.clear()
   lastThemeKey = null
+  // Cancel all pending connecting timeouts so they can't fire after unmount
+  // and mutate state that's no longer rendered.
+  clearAllTimers()
 })
 </script>
 
@@ -1480,5 +1582,82 @@ onUnmounted(() => {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
+}
+
+/* Connecting / error overlay: shown until the active iframe loads. Sits above
+   the iframe but below any pane chrome. pointer-events is auto because the
+   iframe underneath is not yet loaded (nothing to steal clicks from), and the
+   error state's Retry button must be clickable. */
+.terminal-connecting-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: var(--ch-color-app-bg);
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+  pointer-events: auto;
+  user-select: none;
+}
+
+.terminal-connecting-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--ch-color-border-strong);
+  border-top-color: var(--ch-color-accent);
+  border-radius: 999px;
+  animation: terminal-connecting-spin 650ms linear infinite;
+}
+
+.terminal-error-icon {
+  font-size: 18px;
+  line-height: 1;
+  color: var(--ch-color-warning-strong, var(--ch-color-accent));
+}
+
+.terminal-connecting-text {
+  letter-spacing: 0.02em;
+}
+
+.terminal-retry-button {
+  margin-top: 2px;
+  height: 28px;
+  padding: 0 14px;
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast);
+}
+
+.terminal-retry-button:hover {
+  border-color: var(--ch-color-border-hover);
+  background: var(--ch-color-surface-control-hover);
+}
+
+.terminal-retry-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+  border-color: var(--ch-color-accent);
+}
+
+@keyframes terminal-connecting-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-connecting-spinner {
+    animation: none;
+    border-top-color: var(--ch-color-border-strong);
+  }
 }
 </style>
