@@ -5,6 +5,14 @@
 
 ## Unreleased
 
+### fix: per-event AgentReport resolution in Task Graph strict E2E
+
+- Add ``scripts/task-graph-e2e/report_resolution.py`` to resolve seq1/2/3
+  TaskEvent ``report_id`` values against the task reports API with matching
+  ``task_id``, ``session_id``, and ``state``; emit
+  ``target_event_report_resolution`` evidence before and after first cold reload.
+- Add ``backend/tests/test_task_graph_e2e_report_resolution.py``.
+
 ### fix: Task Graph E2E harness native git provenance for exact-artifact gates
 
 - Add ``scripts/task-graph-e2e/git_provenance.py``: read real
