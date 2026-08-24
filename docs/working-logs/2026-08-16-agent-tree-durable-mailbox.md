@@ -1,11 +1,12 @@
 # Agent Tree + Durable Mailbox — Unified Agent-to-Agent Coordination
 
-> **Current public boundary (2026-08-22).** Agent-facing recipes live in
-> [`docs/AGENT_TREE.md`](../AGENT_TREE.md). Public spawn is `managed_task`
-> only (Claude / Codex / Cursor). `native_subagent` and `external_job` are
-> unavailable placeholders: public spawn returns HTTP 422. This file is
-> historical evidence. Early sections that mention those kinds as live
-> executors are design notes, not a public API.
+> **REMOVED / HISTORICAL ONLY (Agent Tree era).** The `/api/agent-tree/*` REST
+> routes, `claude-hub agent-tree` CLI, runtime `AgentRun` / `resident_root`
+> orchestration, and the former `docs/AGENT_TREE.md` agent guide were
+> **removed** from the product. **Current entry:**
+> [`docs/TASK_GRAPH.md`](../TASK_GRAPH.md). Everything below this banner is
+> preserved design history and migration evidence only — API paths, CLI recipes,
+> and spawn/wait/ack examples in the body are **not callable**.
 
 ## Overview
 

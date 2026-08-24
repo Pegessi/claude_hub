@@ -163,6 +163,18 @@ def _assert_master_prompt_uses_task_rest_only(prompt: str) -> None:
         assert required in prompt, required
 
 
+def test_working_log_banner_marks_agent_tree_historical_only() -> None:
+    path = REPO_ROOT / "docs" / "working-logs" / "2026-08-16-agent-tree-durable-mailbox.md"
+    text = path.read_text(encoding="utf-8")
+    banner = text.split("\n", 10)[0:8]
+    banner_text = "\n".join(banner)
+    assert "REMOVED" in banner_text
+    assert "HISTORICAL ONLY" in banner_text
+    assert "../TASK_GRAPH.md" in banner_text
+    assert "[`docs/AGENT_TREE.md`]" not in banner_text
+    assert "Current public boundary" not in banner_text
+
+
 def test_changelog_documents_legacy_consumer_migration_only() -> None:
     """Deprecated resident consumer key is changelog/migration-only, not operational."""
     guide = GUIDE.read_text(encoding="utf-8")
