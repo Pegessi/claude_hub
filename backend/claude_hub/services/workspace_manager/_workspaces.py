@@ -24,7 +24,11 @@ def _render_periodic_tasks_block(workspace: "Workspace") -> str:
     )
 
 
-def build_resident_agent_prompt(workspace: "Workspace", base_url: str, session_id: str) -> str:
+def build_resident_agent_prompt(
+    workspace: "Workspace",
+    base_url: str,
+    session_id: str,
+) -> str:
     """Build the self-drive prompt for a workspace's resident agent.
 
     The resident agent is a standing, self-driven Claude session that wakes on a
@@ -41,6 +45,10 @@ def build_resident_agent_prompt(workspace: "Workspace", base_url: str, session_i
     has passed (PATCH ``status=done``) or sends the work back via ``continue``.
     It NEVER writes code and NEVER creates or deletes orchestrator worker
     sessions (the backend may still spin up an ephemeral reviewer on its own).
+
+    The resident is an independent periodic workspace agent. It drives work via
+    ordinary Task REST (``POST /tasks``, reports, lessons), decoupled from the
+    Task Graph supervisor tree.
     """
     directive = (workspace.resident_agent_directive or "").strip()
     directive_block = (
@@ -51,8 +59,9 @@ def build_resident_agent_prompt(workspace: "Workspace", base_url: str, session_i
     periodic_block = _render_periodic_tasks_block(workspace)
     ws = workspace.id
     if workspace.resident_agent_master_mode:
+        task_graph_block = _build_task_graph_block(base_url, ws)
         return _build_resident_master_prompt(
-            workspace, base_url, session_id, directive_block, periodic_block
+            workspace, base_url, session_id, directive_block, periodic_block, task_graph_block
         )
     return (
         "You are this workspace's RESIDENT self-driven maintenance agent. You wake up "
@@ -90,24 +99,53 @@ def build_resident_agent_prompt(workspace: "Workspace", base_url: str, session_i
     )
 
 
+def _build_task_graph_block(base_url: str, workspace_id: str) -> str:
+    """Task Graph REST/CLI instructions for the resident prompt."""
+
+    ws = workspace_id
+    return (
+        "## Task Graph\n"
+        "Orchestrate via workspace Tasks only. Every events/wait/ack call requires "
+        "an explicit TASK_ID (`task:<task_id>` consumer). Prefer `claude-hub task` "
+        "when shell access is available.\n"
+        f"Task tree: {INTERNAL_API_CURL} '{base_url}/api/workspaces/{ws}/tasks/tree'\n"
+        f"Create task: {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/{ws}/tasks "
+        "-H 'Content-Type: application/json' "
+        '-d \'{"title":"...","prompt":"...","parent_task_id":"<PARENT_TASK_ID>",'
+        '"origin":"resident","task_mode":"reviewed"}\'\n'
+        f"Start task: {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/tasks/<TASK_ID>/start "
+        "-H 'Content-Type: application/json' "
+        '-d \'{"target_session_id":"<ORCHESTRATOR_SESSION_ID>"}\'\n'
+        f"Events: {INTERNAL_API_CURL} "
+        f"'{base_url}/api/workspaces/{ws}/tasks/<TASK_ID>/events?since_sequence=0&subtree=true'\n"
+        f"Wait: {INTERNAL_API_CURL} -X POST "
+        f"{base_url}/api/workspaces/{ws}/tasks/<TASK_ID>/wait?subtree=true&timeout_seconds=30\n"
+        f"Ack: {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/{ws}/tasks/<TASK_ID>/ack "
+        "-H 'Content-Type: application/json' -d '{\"sequence\":<MAX_SEQ>}'\n"
+        f"Followup: {INTERNAL_API_CURL} -X POST "
+        f"{base_url}/api/workspaces/{ws}/tasks/<TASK_ID>/followup "
+        "-H 'Content-Type: application/json' "
+        '-d \'{"message":"...","call_id":"<unique-call-id>"}\'\n'
+        f"Continue: {INTERNAL_API_CURL} -X POST "
+        f"{base_url}/api/workspaces/tasks/<TASK_ID>/continue "
+        "-H 'Content-Type: application/json' -d '{\"message\":\"...\"}'\n"
+        f"Accept (review passed): {INTERNAL_API_CURL} -X PATCH "
+        f"{base_url}/api/workspaces/tasks/<TASK_ID> "
+        "-H 'Content-Type: application/json' -d '{\"status\":\"done\"}'\n"
+        "CLI equivalents: `claude-hub task tree|create|start|events|wait|ack|"
+        "followup|continue|accept|review`.\n"
+    )
+
+
 def _build_resident_master_prompt(
     workspace: "Workspace",
     base_url: str,
     session_id: str,
     directive_block: str,
     periodic_block: str = "",
+    task_graph_block: str = "",
 ) -> str:
-    """Master-mode resident prompt: an autonomous ORCHESTRATOR / product-owner.
-
-    Each cycle the resident reads the board, creates a small number of tasks
-    (default ``reviewed`` mode — a reviewer agent vets the work), dispatches them
-    to EXISTING orchestrator worker sessions via an explicit
-    ``target_session_id``, and performs the final acceptance itself once review
-    has passed (PATCH ``status=done``) or sends the work back via ``continue``.
-    It NEVER writes code and NEVER creates or deletes orchestrator worker
-    sessions (the backend may auto-spawn an ephemeral reviewer to vet a task —
-    that is allowed; the resident just never provisions worker agents itself).
-    """
+    """Master-mode resident prompt: autonomous ORCHESTRATOR via Task Graph only."""
     ws = workspace.id
     reports_endpoint = f"{base_url}/api/workspaces/sessions/{session_id}/reports"
     return (
@@ -118,95 +156,85 @@ def _build_resident_master_prompt(
         f"Workspace id: {ws}\n"
         f"API base URL: {base_url}\n"
         f"This resident session id: {session_id}\n\n"
+        f"{task_graph_block}\n\n"
         f"{directive_block}\n\n"
         f"{periodic_block}"
         "## Each cycle, in order\n\n"
         "1. Read the board to understand current state:\n"
         f"     {INTERNAL_API_CURL} {base_url}/api/workspaces/{ws}/board\n"
-        "   Inspect `tasks` (id, title, status, session_id, task_mode) and `sessions` (id, role, "
-        "status, runtime_status). Review recent task outcomes and the user directive to decide "
-        "what the workspace still needs next. Iterate on the requirements — refine the goal, do "
-        "not just repeat finished work. If a recurring-tasks checklist was provided above, treat "
-        "those items as standing objectives to advance every cycle.\n\n"
-        "2. Find the EXISTING worker agents you may dispatch to. A usable worker is a session "
+        "   Inspect `tasks` (id, title, status, session_id, task_mode, parent_task_id) and "
+        "`sessions` (id, role, status, runtime_status). Review recent task outcomes and the "
+        "user directive to decide what the workspace still needs next.\n\n"
+        "2. Find EXISTING worker agents you may dispatch to. A usable worker is a session "
         'with `role == "orchestrator"` whose `status` is not stopped and whose `runtime_status` '
         "is idle or working (NOT offline and NOT attention).\n"
-        "   - If there are NO such orchestrator sessions, you MUST NOT create one and you MUST "
-        "NOT start any task. Instead, degrade to proposal-only: create any tasks you think are "
-        "needed in TODO status (step 3, but WITHOUT the start call) and say so in your heartbeat "
-        '("no worker agents available — proposed N tasks for the user to start"). Then skip to '
-        "step 6.\n\n"
-        "3. Create the tasks you deem necessary this cycle. Create AT MOST 3 "
-        "tasks per cycle to avoid a runaway backlog:\n"
+        "   - If there are NO such orchestrator sessions, do NOT create one. Degrade to "
+        "proposal-only: create tasks in TODO status (step 3 without start) and note it in the "
+        "heartbeat. Then skip to step 6.\n\n"
+        "3. Create and dispatch tasks (AT MOST 3 per cycle). Create child Tasks under an "
+        "explicit parent when coordinating a subtree:\n"
         f"     {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/{ws}/tasks "
         "-H 'Content-Type: application/json' "
-        '-d \'{"title":"...","prompt":"detailed instructions for the worker",'
-        '"origin":"resident"}\'\n'
-        '   Always include "origin":"resident" so the UI tags the task as '
-        "agent-created (distinguishing it from human-created tasks). "
-        "Leave task_mode at its default (reviewed): when the worker finishes, a "
-        "reviewer agent vets the work before it returns to you for final acceptance. "
-        "The backend reuses an idle reviewer or briefly spins one up on its own — that "
-        "is fine and is NOT you creating an agent. Record each new task id from the "
-        "response.\n\n"
-        "4. Dispatch each task you just created onto an EXISTING orchestrator worker from step 2 "
-        "(prefer an idle one; queuing behind a busy orchestrator is fine). Always pass an "
-        "explicit target_session_id so the backend never auto-creates an agent:\n"
-        f"     {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/tasks/<task_id>/start "
+        '-d \'{"title":"...","prompt":"detailed instructions","parent_task_id":"<PARENT_TASK_ID>",'
+        '"origin":"resident","task_mode":"reviewed"}\'\n'
+        "   Start each task on an existing orchestrator session (mandatory "
+        "`target_session_id`; never rely on Hub auto-spawn):\n"
+        f"     {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/tasks/<CHILD_TASK_ID>/start "
         "-H 'Content-Type: application/json' "
-        '-d \'{"target_session_id":"<existing-orchestrator-session-id>"}\'\n'
-        '   target_session_id MUST be a session whose role is "orchestrator". NEVER target the '
-        "resident, dispatcher, or reviewer sessions. If the start call returns an error (e.g. the "
-        "agent went offline), leave the task in TODO and note it in the heartbeat — do NOT retry "
-        "against a different role and do NOT create an agent.\n\n"
-        "5. Accept reviewed work. Re-read the board and, for each task YOU created (this cycle "
-        "or a previous one — track their ids; do NOT touch human-created tasks), wait until "
-        'review has finished: that is when `status == "review" AND '
-        "`human_acceptance_requested_at` is set AND `human_accepted_at` is null. (While the "
-        "reviewer is still working the task is in review with no `human_acceptance_requested_at` "
-        "yet — leave it alone and check again next cycle.) When a task reaches that "
-        "awaiting-acceptance state, read the worker's latest report/output and the reviewer's "
-        "verdict for that task, then validate it against what you asked for:\n"
-        "   - If satisfactory, accept it:\n"
-        f"       {INTERNAL_API_CURL} -X PATCH {base_url}/api/workspaces/tasks/<task_id> "
+        '-d \'{"target_session_id":"<ORCHESTRATOR_SESSION_ID>"}\'\n'
+        "   Save each `<CHILD_TASK_ID>` for tracking. If start returns an error (agent offline), "
+        "leave the task undone and note it in the heartbeat.\n\n"
+        "4. Observe child progress via TaskMailbox on the supervisor Task "
+        "(`task:<PARENT_TASK_ID>` consumer). Use Task events/wait/ack with explicit TASK_ID:\n"
+        f"     {INTERNAL_API_CURL} '{base_url}/api/workspaces/{ws}/tasks/<PARENT_TASK_ID>/events?"
+        "since_sequence=0&subtree=true'\n"
+        f"     {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/{ws}/tasks/<PARENT_TASK_ID>/wait "
+        "?subtree=true&timeout_seconds=5\n"
+        f"     {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/{ws}/tasks/<PARENT_TASK_ID>/ack "
+        "-H 'Content-Type: application/json' "
+        "-d '{\"sequence\":<max_seq_seen>}'\n"
+        "   Review-passed events mean work is ready for acceptance. Failed/error events mean "
+        "the task errored. Blocked/working events may mean the worker needs input.\n\n"
+        "5. Accept reviewed work or send it back. For each child in review with a passing "
+        "verdict, validate output against your instructions:\n"
+        "   - If satisfactory, accept (moves review → done):\n"
+        f"       {INTERNAL_API_CURL} -X PATCH {base_url}/api/workspaces/tasks/<CHILD_TASK_ID> "
         "-H 'Content-Type: application/json' "
         '-d \'{"status":"done"}\'\n'
-        "   - If NOT satisfactory, send it back to the SAME worker with concrete feedback (this "
-        "does NOT spawn a new worker; it re-dispatches to the original agent):\n"
-        f"       {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/tasks/<task_id>/continue "
+        "   - If NOT satisfactory, send concrete feedback via Task followup (same worker session):\n"
+        f"       {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/{ws}/tasks/<CHILD_TASK_ID>/followup "
         "-H 'Content-Type: application/json' "
-        '-d \'{"message":"what is wrong and what to fix"}\'\n'
-        "   Only ever accept or continue tasks YOU created. Never accept or modify tasks a human "
-        "created or dispatched.\n\n"
-        "6. (Optional, as before) Maintain workspace lessons when genuinely justified:\n"
+        '-d \'{"message":"what is wrong and what to fix","call_id":"<unique-call-id>"}\'\n'
+        "   Or continue from review when appropriate:\n"
+        f"       {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/tasks/<CHILD_TASK_ID>/continue "
+        "-H 'Content-Type: application/json' "
+        '-d \'{"message":"..."}\'\n'
+        "   Only accept or continue tasks YOU created. Never modify human-driven tasks. "
+        "Only accept after review has finished.\n\n"
+        "6. (Optional) Maintain workspace lessons when genuinely justified:\n"
         f"     {INTERNAL_API_CURL} {base_url}/api/workspaces/{ws}/lessons\n"
         f"     {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/{ws}/lessons "
         "-H 'Content-Type: application/json' "
         '-d \'{"title":"...","summary":"one-line takeaway",'
         '"applies_when":["when this applies"],"do":"...","avoid":"...","tags":["tag"]}\'\n\n'
         "## Hard constraints (never violate)\n"
-        "- NEVER create or delete orchestrator worker sessions. Never call any agent-spawn "
-        "endpoint to add a worker, never DELETE a session. You may ONLY dispatch to "
-        "already-existing orchestrator sessions. If none exist, you propose tasks and stop. "
-        "(The backend may auto-spawn a short-lived REVIEWER to vet a reviewed task — that is the "
-        "backend's doing and is allowed; you never provision agents yourself.)\n"
-        "- ALWAYS pass an explicit target_session_id when starting a task, and NEVER start a task "
-        "when no orchestrator session exists (so the backend never auto-creates a default "
-        "worker agent).\n"
-        "- NEVER write code, edit files, commit, merge, push, or run destructive git commands. "
-        "You are an orchestrator; the worker agents do the implementation.\n"
-        "- Only accept/continue tasks YOU created; never touch human-driven tasks. Only accept a "
-        "task after review has finished (`human_acceptance_requested_at` is set).\n\n"
+        "- NEVER create or delete orchestrator worker sessions. Never call spawn endpoints "
+        "to add a worker, never DELETE a session. Dispatch only to existing orchestrator "
+        "sessions via Task `start` with `target_session_id`.\n"
+        "- NEVER use legacy run-tree APIs, implicit supervisor runs, or workspace-level mailbox "
+        "cursors. Task Graph REST/CLI only.\n"
+        "- NEVER write code, edit files, commit, merge, push, or run destructive git commands.\n"
+        "- Only accept/continue tasks YOU created; never touch human-driven tasks.\n\n"
         "## Heartbeat report (REQUIRED at the END of EVERY cycle)\n"
-        "Post one workspace-level heartbeat summarizing this cycle. task_id is omitted for a "
-        "workspace-level heartbeat:\n"
         f"    {INTERNAL_API_CURL} -X POST {reports_endpoint} "
         "-H 'Content-Type: application/json' "
         '-d \'{"state":"working","message":"Resident orchestrator cycle: <summary>",'
         '"message_en":"Resident orchestrator cycle: <summary>",'
-        '"message_zh":"常驻编排周期：<摘要>"}\'\n'
-        "Replace <summary> with: requirements identified, tasks created, tasks dispatched (and to "
-        "which agents), and tasks accepted this cycle (or 'no actionable work this cycle'). "
+        '"message_zh":"常驻编排周期：<摘要>",'
+        '"call_id":"resident-heartbeat-<cycle_count>"}\'\n'
+        "Replace <summary> with: requirements identified, tasks created, tasks started "
+        "(and to which agents), and tasks accepted this cycle (or 'no actionable work this cycle'). "
+        "Replace <cycle_count> with a monotonically increasing integer. "
         "Always include message_en (concise English) and message_zh (concise 中文).\n\n"
         "When this cycle's bounded orchestration pass is done and the heartbeat is posted, STOP "
         "and wait for the next wake-up."
@@ -245,6 +273,50 @@ class _WorkspacesMixin:
         while True:
             try:
                 await self._refresh_session_statuses(run_auto_continue=True)
+                # Expire stale processing call_ids for sessions whose tmux
+                # inbox is gone (STOPPED). A call_id in processing means the
+                # pump successfully sent it to tmux; for live sessions the
+                # message is already in the tmux input buffer and will be
+                # ACKed by the worker, so we must NOT re-deliver it (that
+                # would produce a duplicate turn). Only when the tmux session
+                # itself is destroyed is the input buffer lost, at which
+                # point expiry moves the stranded call_ids back to pending
+                # for re-delivery.
+                for session_id in list(self.sessions):
+                    try:
+                        self._expire_processing_leases(session_id)
+                    except Exception:
+                        logger.exception("Lease expiry failed for session %s", session_id)
+                # Receipt-based cold recovery for live sessions: query the
+                # tmux-server receipt for each processing call_id. If the
+                # receipt is absent, the paste never ran and we can safely
+                # return the call_id to pending. If the session is gone,
+                # move to uncertain.
+                for session_id in list(self.sessions):
+                    sess = self.sessions.get(session_id)
+                    if sess is None or sess.status == ManagedSessionStatus.STOPPED:
+                        continue
+                    if not sess.processing_call_ids:
+                        continue
+                    try:
+                        await self._recover_processing_via_receipt(session_id)
+                    except Exception:
+                        logger.exception(
+                            "Receipt-based processing recovery failed for session %s",
+                            session_id,
+                        )
+                # Pump any pending call_ids that were not yet delivered to
+                # tmux (e.g. the pump failed on a previous cycle, or a new
+                # message was enqueued). This is the live counterpart to the
+                # cold-recovery pump in recover_pending_runs.
+                for session_id in list(self.sessions):
+                    sess = self.sessions.get(session_id)
+                    if sess is None or not sess.pending_call_ids:
+                        continue
+                    try:
+                        await self._pump_session_messages(session_id)
+                    except Exception:
+                        logger.exception("Live pump failed for session %s", session_id)
                 for workspace_id in list(self.workspaces):
                     await self.dispatch_workspace(workspace_id, refresh_sessions=False)
                 await self._tick_resident_agents()
@@ -553,31 +625,16 @@ class _WorkspacesMixin:
         return int.from_bytes(digest[:8], "big") % interval_seconds
 
     def _workspace_activity_since(self, workspace_id: str, since: Optional[datetime]) -> bool:
-        """True when this workspace saw a real task OUTCOME or external progress.
+        """True when this workspace saw a real task OUTCOME or linked report.
 
-        "Activity" deliberately means a real *outcome* to learn from, NOT mere
-        task creation/update. For a NON ``system_internal`` task we look ONLY at
-        its terminal/progress timestamps — ``completed_at``, ``reviewed_at`` and
-        ``human_accepted_at`` — and treat the task as activity when any of those
-        is newer than ``since``. A freshly-proposed TODO task has all three set
-        to ``None``, so it does NOT trip the gate. This is what prevents the
-        resident self-retrigger loop: the resident's prompt makes it PROPOSE
-        tasks via ``POST /tasks`` (non-``system_internal`` tasks whose
-        ``created_at``/``updated_at`` are newer than the just-stamped
-        ``last_run``); gating on outcomes rather than creations means those
-        proposals never re-arm the activity fast-path.
-
-        A non-resident report created after ``since`` also counts as activity:
-        worker agents post reports (the resident's prompt uses ``/tasks`` and
-        ``/lessons``, not ``/sessions/{id}/reports``), so a fresh report is
-        genuine progress. As defense-in-depth we still exclude reports and tasks
-        whose ``session_id`` matches the workspace's
-        ``resident_agent_session_id`` in case a future prompt makes the resident
-        emit them. ``system_internal`` tasks are excluded entirely. When
-        ``since`` is ``None`` any existing outcome/report counts.
+        Activity means terminal/progress timestamps on non-``system_internal``
+        tasks (``completed_at``, ``reviewed_at``, ``human_accepted_at``) or a
+        report whose ``task_id`` resolves to such a task in this workspace.
+        Freshly-proposed TODO tasks (all outcome fields ``None``) do not count.
+        Reports with ``task_id=None``, dangling ids, or ``system_internal`` tasks
+        do not count. When ``since`` is ``None`` any qualifying outcome/report
+        counts.
         """
-        workspace = self.workspaces.get(workspace_id)
-        resident_session_id = workspace.resident_agent_session_id if workspace is not None else None
 
         def _after(value: Optional[datetime]) -> bool:
             if value is None:
@@ -587,12 +644,6 @@ class _WorkspacesMixin:
         for task in self.tasks.values():
             if task.workspace_id != workspace_id or task.system_internal:
                 continue
-            if resident_session_id is not None and task.session_id == resident_session_id:
-                # Defense-in-depth: ignore tasks owned by the resident itself so
-                # its own proposals can never count as activity.
-                continue
-            # Gate on real outcomes only (completed/reviewed/accepted), never on
-            # creation/update — a freshly-proposed TODO has these all None.
             if (
                 _after(task.completed_at)
                 or _after(task.reviewed_at)
@@ -602,12 +653,19 @@ class _WorkspacesMixin:
         for report in self.reports.values():
             if report.workspace_id != workspace_id:
                 continue
-            if resident_session_id is not None and report.session_id == resident_session_id:
-                # The resident does not post reports, but guard anyway so a
-                # future prompt change cannot let it re-trigger itself.
+            if not _after(report.created_at):
                 continue
-            if _after(report.created_at):
-                return True
+            task_id = report.task_id
+            if not task_id:
+                continue
+            linked_task = self.tasks.get(task_id)
+            if (
+                linked_task is None
+                or linked_task.workspace_id != workspace_id
+                or linked_task.system_internal
+            ):
+                continue
+            return True
         return False
 
     def _resident_agent_due(self, workspace: Workspace, now: datetime) -> bool:
@@ -719,7 +777,7 @@ class _WorkspacesMixin:
             session = existing
         else:
             reused = False
-            # reuse_existing is False on purpose: the generic reuse path only
+            # NOTE: reuse_existing is False on purpose: the generic reuse path only
             # matches ORCHESTRATOR sessions, so a resident session must be
             # tracked and reused via workspace.resident_agent_session_id here.
             # NOTE: ensure_workspace_agent already sends the bootstrap prompt,
@@ -745,7 +803,6 @@ class _WorkspacesMixin:
                     remote_reconnect=workspace.resident_agent_remote_reconnect,
                 ),
             )
-
         # Persist the session id and advance the timer BEFORE sending so that a
         # failure in send_session_message does not leave resident_agent_session_id
         # unset (which would respawn a brand-new session/tab every monitor tick)
@@ -783,10 +840,8 @@ class _WorkspacesMixin:
             if session.remote_forward_port
             else f"http://localhost:{settings.port}"
         )
-        await self.send_session_message(
-            session.id,
-            build_resident_agent_prompt(workspace, base_url, session.id),
-        )
+        prompt = build_resident_agent_prompt(workspace, base_url, session.id)
+        await self.send_session_message(session.id, prompt)
 
     async def delete_workspace(self, workspace_id: str) -> None:
         """Delete a workspace and all of its in-memory and on-disk state.

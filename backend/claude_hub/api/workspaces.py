@@ -1,5 +1,6 @@
 import hashlib
 import json
+import uuid
 from typing import Any, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -21,9 +22,12 @@ from ..models import (
     ManagedSession,
     ManualTaskControlRequest,
     RequestTaskReviewRequest,
+    RetryUncertainDeliveryRequest,
     SendSessionMessageRequest,
     SpawnWorkerRequest,
     StartTaskRequest,
+    TaskFollowupRequest,
+    TaskMailboxAckRequest,
     User,
     Workspace,
     WorkspaceArtifactPreview,
@@ -34,7 +38,12 @@ from ..models import (
     WorkspaceTaskUpdate,
     WorkspaceUpdate,
 )
+from ..models.task_mailbox import TaskEvent
 from ..services import workspace_manager
+from ..services.task_graph import TaskHasDescendantsError
+from ..services.task_mailbox import TaskCallIdConflict
+from ..services.workspace_manager._constants import DeliveryUncertain
+from ..services.workspace_manager._reports import ReportCallIdConflict
 
 router = APIRouter(prefix="/api/workspaces", tags=["workspaces"])
 
@@ -71,6 +80,18 @@ def _board_etag(board: WorkspaceBoard) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
     return f'"{digest}"'
+
+
+def _task_public_http(exc: Exception) -> HTTPException:
+    if isinstance(exc, KeyError):
+        return HTTPException(status_code=404, detail=str(exc) or "Not found")
+    if isinstance(exc, TaskCallIdConflict):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, TaskHasDescendantsError):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, (ValueError, RuntimeError)):
+        return HTTPException(status_code=400, detail=str(exc))
+    raise exc
 
 
 @router.get("", response_model=List[Workspace])
@@ -199,6 +220,113 @@ async def create_task(
         raise HTTPException(status_code=404, detail="Workspace not found") from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get("/{workspace_id}/tasks/tree", response_model=List[WorkspaceTask])
+async def list_top_level_task_tree(
+    workspace_id: str,
+    current_user: User = Depends(get_current_user),
+) -> List[WorkspaceTask]:
+    """Top-level Tasks in the workspace Task graph."""
+    try:
+        return workspace_manager.list_top_level_tasks(workspace_id)
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise _task_public_http(exc) from exc
+
+
+@router.get("/{workspace_id}/tasks/{task_id}/tree", response_model=List[WorkspaceTask])
+async def list_task_subtree(
+    workspace_id: str,
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+) -> List[WorkspaceTask]:
+    """Subtree of Tasks including ``task_id``. Validates workspace membership."""
+    try:
+        return workspace_manager.list_task_subtree(workspace_id, task_id)
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise _task_public_http(exc) from exc
+
+
+@router.get("/{workspace_id}/tasks/{task_id}/events", response_model=List[TaskEvent])
+async def list_task_mailbox_events(
+    workspace_id: str,
+    task_id: str,
+    since_sequence: int = Query(0, ge=0),
+    subtree: bool = Query(False),
+    current_user: User = Depends(get_current_user),
+) -> List[TaskEvent]:
+    """TaskMailbox events for ``task:<task_id>``. Optional subtree replay."""
+    try:
+        return workspace_manager.list_task_mailbox_events(
+            workspace_id,
+            task_id,
+            since_sequence=since_sequence,
+            subtree=subtree,
+        )
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise _task_public_http(exc) from exc
+
+
+@router.post("/{workspace_id}/tasks/{task_id}/wait", response_model=List[TaskEvent])
+async def wait_task_mailbox_events(
+    workspace_id: str,
+    task_id: str,
+    since_sequence: int = Query(0, ge=0),
+    subtree: bool = Query(False),
+    timeout_seconds: float = Query(30.0, ge=0),
+    current_user: User = Depends(get_current_user),
+) -> List[TaskEvent]:
+    """Directed long-poll for ``task:<task_id>`` TaskMailbox events."""
+    try:
+        return await workspace_manager.wait_task_mailbox_events(
+            workspace_id,
+            task_id,
+            since_sequence=since_sequence,
+            subtree=subtree,
+            timeout_seconds=timeout_seconds,
+        )
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise _task_public_http(exc) from exc
+
+
+@router.post("/{workspace_id}/tasks/{task_id}/ack", response_model=WorkspaceTask)
+async def ack_task_mailbox(
+    workspace_id: str,
+    task_id: str,
+    payload: TaskMailboxAckRequest,
+    current_user: User = Depends(get_current_user),
+) -> WorkspaceTask:
+    """Advance ``Task.consumer_ack_sequence`` for a TaskMailbox consumer."""
+    try:
+        result = workspace_manager.ack_task_mailbox(
+            workspace_id,
+            payload.sequence,
+            task_id=task_id,
+        )
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise _task_public_http(exc) from exc
+    assert isinstance(result, WorkspaceTask)
+    return result
+
+
+@router.post("/{workspace_id}/tasks/{task_id}/followup", response_model=TaskEvent)
+async def followup_workspace_task(
+    workspace_id: str,
+    task_id: str,
+    payload: TaskFollowupRequest,
+    current_user: User = Depends(get_current_user),
+) -> TaskEvent:
+    """Write a TaskMailbox followup on the Task Graph REST surface."""
+    call_id = payload.call_id or str(uuid.uuid4())
+    try:
+        return await workspace_manager.followup_task(
+            workspace_id,
+            task_id,
+            payload.message,
+            call_id,
+        )
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise _task_public_http(exc) from exc
 
 
 @router.get("/{workspace_id}/lessons", response_model=List[FeedbackLesson])
@@ -363,11 +491,13 @@ async def delete_task(
     task_id: str,
     current_user: User = Depends(get_current_user),
 ) -> None:
-    """Delete a workspace task and its reports."""
+    """Delete a leaf workspace task and its durable reports/events."""
     try:
         workspace_manager.delete_task(task_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Task not found") from e
+    except TaskHasDescendantsError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
 
 @router.post("/tasks/{task_id}/feedback/reap", response_model=FeedbackReaperRun)
@@ -456,6 +586,8 @@ async def abort_task(
         return await workspace_manager.abort_task(task_id, payload)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Task not found") from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -520,6 +652,40 @@ async def send_session_message(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+@router.post("/sessions/{managed_session_id}/retry-uncertain", status_code=204)
+async def retry_uncertain_delivery(
+    managed_session_id: str,
+    payload: RetryUncertainDeliveryRequest,
+    current_user: User = Depends(get_current_user),
+) -> None:
+    """Operator retry of an uncertain delivery.
+
+    Moves ``call_id`` from ``uncertain_call_ids`` back to
+    ``pending_call_ids`` so the normal pump path can re-deliver it. The
+    original payload is preserved. Rejects unknown, delivered, processing,
+    and cross-session call_ids.
+
+    The actor identity is derived from the authenticated ``current_user``
+    (``open_id``) so the audit trail cannot be forged by the client.
+    """
+    try:
+        await workspace_manager.retry_uncertain_delivery(
+            managed_session_id,
+            payload.call_id,
+            reason=payload.reason,
+            actor=current_user.open_id,
+        )
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except DeliveryUncertain as e:
+        # The retry hit another ambiguous tmux failure; the delivery is
+        # still uncertain. Surface a visible 400 (not a false 204) so the
+        # operator can decide whether to retry again.
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 @router.post("/sessions/{managed_session_id}/reports", response_model=AgentReport, status_code=201)
 async def create_session_report(
     managed_session_id: str,
@@ -531,5 +697,7 @@ async def create_session_report(
         return await workspace_manager.create_report(managed_session_id, payload)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Session not found") from e
+    except ReportCallIdConflict as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

@@ -63,6 +63,545 @@
   bootstrap-to-task override, inline `Task: id (title)` resume format,
   long-title truncation, and codex-boilerplate-plus-task ordering; all
   14 codex-session tests pass.
+### fix: per-event AgentReport resolution in Task Graph strict E2E
+
+- Add ``scripts/task-graph-e2e/report_resolution.py`` to resolve seq1/2/3
+  TaskEvent ``report_id`` values against the task reports API with matching
+  ``task_id``, ``session_id``, and ``state``; emit
+  ``target_event_report_resolution`` evidence before and after first cold reload.
+- Add ``backend/tests/test_task_graph_e2e_report_resolution.py``.
+
+### fix: Task Graph E2E harness native git provenance for exact-artifact gates
+
+- Add ``scripts/task-graph-e2e/git_provenance.py``: read real
+  branch/HEAD/dirty from delivery repo, forbid env spoofing, require clean
+  worktree at harness start, assert pre/post SHA unchanged before writing
+  ``evidence.json``.
+- Wire provenance into ``run_e2e.py`` finally block; export
+  ``CLAUDE_HUB_E2E_SOURCE_ROOT`` from ``run.sh``.
+- Add ``backend/tests/test_task_graph_e2e_git_provenance.py`` contract tests.
+
+### fix: seal review rounds on cold load and harden Task Graph blockers
+
+- **P1-1:** Leaf-only Task delete with **409** when descendants exist; atomic
+  cleanup of TaskMailbox events, call index, compat runs, reports, and session
+  bindings with save rollback.
+- **P1-2:** Runtime isolation for legacy `resident_root` — skip in
+  `recover_pending_runs`; delivery-uncertain events write TaskMailbox only for
+  Task-bound sessions (no workspace root AgentRun fallback).
+- **P1-3:** Repair persisted `reviewed_cycle=0` when `review_completed_at` is
+  set during task normalization so cold reload does not re-trigger the fallback
+  reaper (seq4 extras). Regression:
+  `tests/test_task_graph_cold_restart_review.py`.
+- **P2-1:** Clarify Resident agent contract in `docs/AGENT_TREE.md` — not
+  bindable to Tasks via `target_session_id`.
+- **P2-2:** Add `claude-hub task create --parent-task-id` (explicit flag wins
+  over `--payload-json`).
+
+### feat: unify Agent Tree into Workspace Task Graph
+
+- Make **Task Graph / TaskMailbox** the canonical coordination plane per
+  workspace: `parent_task_id` / `root_task_id` / `path`, append-only Task events,
+  `task_call_index`, per-Task `consumer_ack_sequence`. TaskMailbox consumers are
+  `task:<task_id>` only.
+- Add Task-first REST and `claude-hub task` (`tree`, `events`, `wait`, `ack`,
+  `followup`, `abort`). These routes do not write AgentRun lifecycle state.
+- Keep `/api/agent-tree/*` as a **compat projection** for legacy linked run ids
+  (`Task.agent_run_id`). Ordinary Tasks project to `task.id`; runtime resolution
+  uses canonical `Task.agent_run_id` only. Legacy run blobs are load-only;
+  public APIs fail closed.
+- Worker and reviewer are ordinary Agents assigned on Tasks (`session_id`,
+  `review_session_id`, `target_session_id` on start). The optional Resident agent
+  is an independent long-running Agent — not a Task root, mailbox consumer, or
+  Agent Tree supervisor.
+- Fail-closed session assignment on report intake; unassigned Tasks cannot be
+  claimed by the first report.
+- Cold-load migration (`migrate_pre_unification_graph`) for missing parent edges
+  and per-Task ACK cursors. Deprecated `workspace:{workspace_id}:resident`
+  consumer keys are migration-only and rejected at runtime.
+- **Rollback:** restore pre-migration workspace `state.json` + `index.json`
+  backups before running an older binary — otherwise TaskMailbox events, cursors,
+  and graph fields are dropped on first save.
+- UI: board `related_task_id` remains session-affinity/context reuse (not
+  `parent_task_id`). Cancelled legacy plan `487c630c` (Resident Root UI) is not
+  an active follow-up.
+- Docs: rewrite `docs/AGENT_TREE.md` mental model (Workspace → Task Graph →
+  session assignment); `claude-hub task` primary, `agent-tree` compat only.
+
+### feat: add agent-friendly Agent Tree CLI
+
+- Add `claude-hub agent-tree` over the existing `/api/agent-tree` REST
+  contract (`roots`, `runs`, `events`, `spawn`, `send`, `followup`, `wait`,
+  `ack`, `interrupt`). No new server endpoints.
+- `--call-id` is accepted only on spawn/send/followup/interrupt (`POST /ack`
+  has no `call_id`). Omitted ids are new UUIDs echoed to stderr before HTTP.
+- `wait --ack` renders and flushes the event list, then ACKs `max(sequence)`.
+  JSON stdout stays one event array; `--json` then writes
+  `{"acked_sequence": N}` to stderr. Human mode prints `acked sequence N`
+  after the table.
+- Wait HTTP timeout is attached on `build_request` (`request.extensions`);
+  httpx 0.28 `Client.send` has no `timeout` kwarg, and the client default
+  stays 30s.
+
+### docs: make Agent Tree discoverable for agents
+
+- Add `docs/AGENT_TREE.md` as the canonical backend-only agent guide (mental
+  model, 422 stubs, copy-paste REST, `executor_config`, `call_id` / 400 / 409 /
+  422 / uncertain recovery, migration/rollback).
+- Link it from root `README.md`, `backend/README.md`, and the agent entry
+  guides. Expand the Resident injected Agent Tree block with the same
+  contract. Label stale working-log claims that simulator stubs are public.
+  Cursor MUST omit `executor_config.model` (`ManagedTaskAdapter` rejects it).
+  Pinned-session spawn omits `executor_config` (Hub derives) or must match
+  the selected session; adapter-rejected managed config is HTTP 400, and
+  HTTP 422 is only unavailable executors.
+
+### feat: make Agent Tree a reliable multi-CLI subagent control plane
+
+- Make report intake and mailbox ACK advancement one workspace-scoped atomic
+  commit: report/session/task state and Agent Tree run/event/cursor state roll
+  back together on a pre-commit failure, while wakeups and other side effects
+  run only after the durable `state.json` replace succeeds.
+- Authorize and replay arbitrary-depth owned subtrees. A root can wait on and
+  interrupt grandchildren, `subtree=true` includes descendant-authored events,
+  and active subtree waiters are awakened without polling.
+- Persist managed executor selection on each run: Claude, Codex, and Cursor
+  children carry their concrete CLI, optional model, target, and capability
+  contract across restart. Explicit sessions are validated against that
+  contract; Codex/Claude models reach the real CLI environment/arguments.
+- Expose native-subagent and external-job capability metadata as unavailable
+  until a real runtime exists; public spawn rejects those simulator-only
+  executors with HTTP 422 instead of advertising a fake successful dispatch.
+- Use cycle- and purpose-scoped report call IDs for worker, reviewer,
+  recovery, reminder, and Goal Packet prompts so retries stay idempotent
+  without colliding across review cycles. Monitor soft reminders now emit
+  `monitor-reminder` IDs with durable `attempts+1` before increment;
+  reviewer fallback/recovery uses verdict-specific recovery IDs.
+- Atomic report intake now leaves the `report:<id>` bridge event durable on
+  the first commit, so a post-commit side-effect failure still has exactly
+  one report and one bridged event.
+- Report-intake rollback snapshots the workspace only after the tab-rename
+  await, so a concurrent Agent Tree persist during rename is kept when the
+  report rolls back
+  (`test_report_rollback_preserves_concurrent_agent_tree_write`).
+- Report intake and Agent Tree spawn/send/followup/interrupt/ack share one
+  per-workspace mutation lock, so a public tree write cannot persist
+  between report snapshot and rollback restore
+  (`test_report_rollback_serializes_agent_tree_spawn`).
+- Resolve existing or conflicting report call_ids before any tab rename so
+  a late retry cannot restore a reused session's assignment
+  (`test_reused_session_known_call_id_has_zero_side_effects`).
+- Canonicalize leading/trailing `call_id` whitespace before preflight and
+  persistence so a padded retry cannot rename a reused session
+  (`test_padded_call_id_retry_has_zero_side_effects_after_reassignment`).
+- Bound-session matching-call replay runs under the same snapshot/restore
+  as new reports (`test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges`).
+- Replay commit tokens always use the canonical call_id so predecessor
+  padded keys cannot restore memory after a durable save
+  (`test_predecessor_padded_call_id_post_save_failure_converges`).
+- Isolated E2E keeps Claude launch credentials in the backend process
+  environment; ttyd writes mode-0600 launch scripts and unlinks them on
+  every exit (`remaining_credential_artifacts=[]`).
+- **Validation**: listed suites 547 passed in 834.25s
+  (`test_agent_tree.py`, `test_workspaces.py`, resident/session,
+  report-atomicity including
+  `test_reused_session_known_call_id_has_zero_side_effects`,
+  `test_padded_call_id_retry_has_zero_side_effects_after_reassignment`,
+  `test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges`,
+  and `test_predecessor_padded_call_id_post_save_failure_converges`, subtree
+  reliability, executor selection, `test_ttyd_manager.py`, hard-recovery,
+  orchestrator-contract); `mypy claude_hub` checked 67 source files with
+  no issues; Black, isort, compileall, and `git diff --check` clean.
+  Isolated real-CLI E2E observes only: managed Claude POSTed
+  `E2E_CHILD_REPORT` (`0b77c71f-...`, `POST /reports` 201, bridge seq=3);
+  wait/ACK/reload kept `ack_sequence=3`. Overlay never written; launch_env
+  files were mode 0600 then unlinked; `remaining_credential_artifacts=[]`.
+  Round 4 harness injection is stale.
+- **Migration/rollback**: new fields are additive on forward load. Before
+  rollback, back up workspace `state.json` and drain writers: the first
+  old-version save drops Agent Tree and report fingerprint metadata it does
+  not know, so tree replay and retry deduplication cannot be recovered without
+  the backup.
+- **Files**: `models/agent_tree.py`, `services/agent_tree.py`,
+  `services/agent_tree_adapters.py`, `services/ttyd_manager.py`,
+  `services/workspace_manager/`, `api/agent_tree.py`, Agent Tree/report
+  reliability tests, and the Agent Tree working log.
+
+### fix: report/result intake idempotency (call_id + payload fingerprint) — no duplicate report/task-transition/bridged-event on error-after-commit retry
+
+- **What**: `create_report` now requires a stable non-empty `call_id` on every
+  report (legacy clients that omit it get a deterministic adapter call_id
+  derived from the payload fingerprint). The Hub stores a
+  `call_id → report_id` mapping and canonical fingerprint mapping on the
+  session (`ManagedSession.report_call_ids` and
+  `ManagedSession.report_call_fingerprints`). A retry with the **same** `call_id`
+  and an identical payload fingerprint returns the previously-persisted
+  report (re-running the idempotent post-commit side effects
+  `_after_report_recorded` and `_bridge_report_to_agent_event` against the
+  existing report). A retry with the **same** `call_id` but a **different**
+  payload raises `ReportCallIdConflict` (a `ValueError` subclass) which the
+  API surfaces as **HTTP 409 Conflict**. Concurrent requests with the same
+  `call_id` are serialized via a per-`(session_id, call_id)` asyncio lock so
+  only one report is created. The canonical fingerprint now includes
+  `goal_packet`, so a Goal Packet revision submitted with the same call_id
+  is correctly treated as a different payload (409) rather than silently
+  dropped as an idempotent retry. This makes report/result intake safe under
+  error-after-commit retries: if the Hub durably persists the report (and
+  the ACKed call_id's processing→delivered transition) via `_save_state`
+  but then raises in `_after_report_recorded` or the agent-tree bridge, the
+  client's retry with the same `call_id` is a no-op that returns the
+  existing report, task transition, and bridged event — exactly one of each.
+- **Why**: `create_report` persists the report via `_save_state` **before**
+  running post-commit side effects. If those side effects fail, the report
+  is durably committed but the client receives an error; a naive retry
+  creates a second report, a second task transition, and a second bridged
+  agent-tree event. Without a required `call_id`, production prompts
+  emitted no idempotency key, so retries always duplicated. Without
+  `goal_packet` in the fingerprint, a GP revision with the same call_id
+  was wrongly dropped. Without a lock, two concurrent same-call_id requests
+  both passed the existence check and created two reports. The fix mirrors
+  the existing message-delivery idempotency pattern
+  (`call_payload_fingerprints`).
+- **How**:
+  - `schemas.py`: `call_id: Optional[str]` on `AgentReportCreate` /
+    `AgentReport`; `report_call_ids: Dict[str, str]` and
+    `report_call_fingerprints: Dict[str, str]` on `ManagedSession`.
+  - `_reports.py`:
+    - `_compute_report_fingerprint` now includes `goal_packet` in the
+      canonical content fields.
+    - `create_report` requires a non-empty `call_id`; if the client omits
+      it, a deterministic `legacy:<fingerprint[:32]>` call_id is generated
+      (compatibility adapter).
+    - A per-`(session_id, call_id)` `asyncio.Lock` (`_report_call_locks`)
+      serializes the claim so concurrent same-call_id requests create at
+      most one report.
+    - On call_id reuse with a different fingerprint, raise
+      `ReportCallIdConflict(ValueError)` → HTTP 409.
+    - On call_id reuse with a matching fingerprint, return the existing
+      report and re-run the idempotent post-commit side effects.
+  - `api/workspaces.py`: catch `ReportCallIdConflict` → HTTP 409.
+  - `_prompts.py`: every report curl example (worker, reviewer, resident,
+    continue, recovery) includes a `call_id` field and instructs the agent
+    to reuse the same call_id on retry.
+- **Migration/rollback**: `report_call_ids` and
+  `report_call_fingerprints` default to `{}` on existing sessions; no forward
+  migration is needed. Older code ignores them on load but removes them on its
+  next state rewrite, so back up state and drain writers before rollback.
+  Legacy clients without `call_id` still work via the deterministic adapter.
+
+### fix: fail-closed durable mailbox (persist-intent-first → processing → ACK → delivered; ambiguous → uncertain) + tmux receipt at-most-once + Resident wait/ack + followup:delivered
+
+- **What**: the mailbox uses a Hub-owned **receiver pump** with
+  **persist-intent-before-side-effect** semantics. For each pending call_id
+  the pump: (1) persists the intent to deliver by moving the call_id from
+  `pending_call_ids` to `processing_call_ids`; (2) sends the message to
+  tmux. On a **pre-side-effect** failure (tmux write not attempted) the
+  call_id rolls back to `pending_call_ids` for retry. On an **ambiguous**
+  failure (tmux write may have succeeded) the call_id moves to
+  `uncertain_call_ids` — fail-closed: we do NOT auto-resend (could
+  duplicate) and do NOT silently mark delivered (could lose). On success
+  the call_id stays in `processing_call_ids` until the worker ACKs it via
+  `acked_call_ids`; only the worker's ACK moves it to `delivered_call_ids`
+  (the **receiver-verifiable durable receipt**). A tmux-server-side
+  **receipt** (`@receipt_<sha256(call_id)[:16]>` session option, set
+  atomically with the paste) gives cold recovery a way to distinguish
+  "paste definitely happened" (receipt present → keep processing, no
+  repaste) from "paste definitely did not happen" (receipt absent on a
+  live session → move back to pending for one re-delivery) from "cannot
+  tell" (session gone → uncertain). On cold restart, call_ids stranded in
+  `processing_call_ids` for **STOPPED** sessions (tmux inbox gone) are
+  moved to `uncertain_call_ids`; **LIVE** sessions keep their processing
+  call_ids so the monitor's receipt reconciliation can decide.
+  `send_session_message` raises `DeliveryUncertain` (a `RuntimeError`)
+  when a call_id is in `uncertain_call_ids` — fail-closed, no silent
+  auto-resume. The operator retries via the explicit
+  `retry_uncertain_delivery` endpoint, which queries the tmux receipt:
+  receipt present → move back to `processing` (no repaste, nudge Enter);
+  receipt absent on a live session → move back to `pending` for one
+  re-delivery; session gone → stays `uncertain`. The API surfaces HTTP
+  400 on `DeliveryUncertain` so the caller knows an explicit retry is
+  required. The
+  Resident loop uses `wait`/`ack` (directed cursor), and a
+  `followup:delivered` event is emitted when the worker ACKs a followup
+  call_id. REVIEWED tasks no longer emit a terminal COMPLETED event on
+  the worker's COMPLETED report — only REVIEW_PASSED does.
+- **Why**: tmux stdin is NOT a verifiable durable receiver — bytes written
+  to tmux may be consumed by the agent and then lost if the agent crashes,
+  and the Hub cannot read back what the model actually processed. The
+  previous send-first + pane-marker dedup approach relied on tmux pane
+  history to detect already-sent messages, but pane history is bounded and
+  the `[call_id:<id>]` marker can roll out of the scroll buffer, so cold
+  recovery would not see it and would re-send (duplicate delivery). The
+  fail-closed design instead treats any in-flight call_id whose outcome is
+  unknown as `uncertain`: the operator must explicitly retry, which
+  prevents both silent loss and silent duplication. The worker's ACK is
+  the only proof of receipt, so `delivered` must be gated on it.
+- **How**:
+  - `_messaging.py::send_session_message`: for call_id-scoped messages,
+    persist the body in `session.pending_messages[call_id]`, append to
+    `pending_call_ids`, then kick `_pump_session_messages`. Sender skips
+    call_ids already in `processing_call_ids`, `uncertain_call_ids`, or
+    `delivered_call_ids`. If the call_id is in `uncertain_call_ids`
+    (explicit retry), move it back to `pending_call_ids` on both session
+    and task, save, re-pump, and raise `DeliveryUncertain` if it is still
+    uncertain. After the pump, if the call_id is in `uncertain_call_ids`,
+    raise `DeliveryUncertain` so the caller surfaces the failure.
+  - `_messaging.py::_pump_session_messages`: acquires a per-session lock,
+    then for each pending call_id: (1) **persist intent**: move call_id
+    from `pending` to `processing` and save BEFORE the tmux write; (2)
+    **send**: write the message (with `[call_id:<id>]` marker) to tmux;
+    (3) **pre-side-effect failure** (exception before `_send_tmux_message`):
+    roll back to `pending`; (4) **ambiguous failure** (exception inside
+    `_send_tmux_message`): move to `uncertain_call_ids` (fail-closed, no
+    auto-retry); (5) **success**: stay in `processing` until worker ACK.
+    The message body stays in `pending_messages` until ACK.
+  - `_messaging.py::_expire_processing_leases`: for sessions whose tmux
+    inbox is gone (`STOPPED`), move `processing_call_ids` to
+    `uncertain_call_ids` (fail-closed). For live sessions, processing
+    call_ids stay in-flight (the message may already be in the tmux input
+    buffer; re-delivering would risk a duplicate turn).
+  - `_messaging.py::_mark_processing_as_uncertain`: moves call_ids from
+    `processing` to `uncertain` on both session and task, clears
+    `processing_call_ids_at`, and emits a `delivery:uncertain` event.
+    Used on ambiguous tmux send failure and cold recovery.
+  - `_messaging.py::_rollback_processing_to_pending`: moves call_ids from
+    `processing` back to `pending` on both session and task, clearing
+    `processing_call_ids_at`. Used only for proven pre-side-effect
+    failures (tmux write not attempted).
+  - `_state.py::_recover_uncertain_deliveries`: on cold start, moves
+    `processing_call_ids` to `uncertain_call_ids` **only for STOPPED
+    sessions** (tmux inbox gone, receipt unqueryable — fail-closed). LIVE
+    (`WORKING`) sessions keep their processing call_ids so the monitor's
+    `_recover_processing_via_receipt` can reconcile against the
+    tmux-server receipt (present → keep processing; absent → pending;
+    session gone → uncertain).
+  - `_constants.py::DeliveryUncertain`: `RuntimeError` subclass raised by
+    `send_session_message` when a call_id lands in `uncertain_call_ids`.
+    Caught by API endpoints (`/tasks/{id}/start`,
+    `/sessions/{id}/send`, `/lessons/summarize`) which return HTTP 400.
+  - `_reports.py::_ack_call_ids`: commit only — moves call_ids from
+    `pending`/`processing`/`uncertain` to `delivered`, removes the message
+    body from `pending_messages`. Unknown call_ids are ignored (future-ID
+    poisoning protection). The dispatch call_id
+    (`dispatch:{task_id}:{dispatch_attempt}`) is implicitly ACKed on any
+    report for that task; the legacy no-suffix form (`dispatch:{task_id}`)
+    is also accepted for backward compatibility. For each ACKed followup
+    call_id, emits a `followup:delivered` event with `delivered: true`.
+  - `_reports.py::_emit_followup_delivered_if_followup`: looks up the
+    call_id in `agent_tree._call_record`; if `action == "followup"`, emits
+    a `followup:delivered` event correlated to the original followup
+    call_id. This flips the followup outcome from `delivered: false`
+    (published at followup time) to `delivered: true` (worker ACK proof).
+  - `agent_tree.py::load_from_dict`: migrates persisted events with
+    `recipient=None` to self-address (`recipient = author`) so the directed
+    mailbox filter (`e.recipient == run_id`) still delivers them.
+  - `_reports.py::_bridge_report_to_agent_event`: for REVIEWED tasks,
+    `COMPLETED` → `PROGRESS`; `REVIEW_PASSED` → `COMPLETED`;
+    `REVIEW_FAILED` → `PROGRESS`. `agent_tree.py::emit_event` reconciles
+    run status: `ready_for_review`/`review_started`/`completed` →
+    `WAITING`; `review_failed` → `RUNNING`.
+  - `agent_tree.py::_events_for`: recipient-directed reads — a run only
+    sees events where `recipient == run_id`. `wait`/`get_events` use
+    `effective_since = max(since_sequence, run.ack_sequence)` so ACKed
+    events are never re-delivered.
+  - `_workspaces.py::_run_resident_agent`: the Resident cycle now uses
+    `agent_tree.wait(WaitRequest(...))` (timeout_seconds=1.0) to fetch
+    directed events since the cursor, then calls
+    `agent_tree.ack(workspace.id, root_run.id, max_seq)` to advance the
+    cursor to the highest delivered sequence. This makes `wait`/`ack`
+    used in production, not just tests.
+- **Honesty note**: this guarantees **at-most-once paste per call_id per
+  live tmux session lifetime** (via the tmux-server receipt) plus
+  Hub-side durable envelope/ACK (`pending_messages` +
+  `call_payload_fingerprints` + `delivered_call_ids`). It does NOT
+  guarantee exactly-once across a destroyed-and-recreated receiver tmux
+  session: if the session is killed and a new one starts with the same
+  name, the receipt is gone. Cold recovery then sees a LIVE session with
+  the receipt absent and moves the call_id back to `pending` for **one**
+  re-delivery (the paste definitely did not run in the new session).
+  Only if the session is gone / unqueryable / STOPPED does cold recovery
+  move the call_id to `uncertain` (fail-closed, operator retry). The
+  worker's ACK (`acked_call_ids` → `delivered_call_ids`) is the only
+  proof the model actually processed the message; the tmux receipt only
+  proves the bytes reached the tmux input buffer. It also does NOT
+  guarantee exactly-once of arbitrary external tool side effects the
+  model invokes — those require the call_id to be propagated as an
+  idempotency key by the model itself.
+
+### fix: delivery state-machine correctness (followup non-terminal on uncertain, persist-fail re-raise, ACK-before-delivered ordering, reconcile resumes non-failed terminals)
+
+- **What**: five correctness fixes to the fail-closed delivery state machine
+  so that ambiguous/partial failures never leave the lifecycle in a
+  terminal or silently-lost state:
+  1. `followup` raising `DeliveryUncertain` no longer marks the run
+     `FAILED` or emits a `FAILED` event. The `MESSAGE` intent was already
+     persisted before the tmux send, so the run stays non-terminal
+     (`RUNNING`) and the operator retries via `retry_uncertain_delivery`.
+  2. `emit_event`'s duplicate-`call_id` branch now re-raises `_persist`
+     failures (never returns success on a failed durable commit) and only
+     calls `_wake_for_run` after the durable commit succeeds.
+  3. ACK-vs-retry race: `_emit_followup_delivered_if_followup` runs
+     `reconcile_followup_outcome` (which appends the
+     `followup:outcome` event) **before** appending the
+     `followup:delivered` event, and does not swallow persistence
+     exceptions. After the pump, a `call_id` already present in
+     `delivered_call_ids` is never downgraded back to `uncertain`.
+  4. Transaction ordering in `_ack_call_ids`: lifecycle reconciliation
+     (outcome event + delivered event + resident ack) runs **before** the
+     session/task `delivered` mutation. Because `agent_tree._persist`
+     saves the full workspace state, reconciling first guarantees that a
+     persist failure leaves disk at `processing` with the payload intact.
+  5. `reconcile_followup_outcome` no longer guards on
+     `run.status not in _TERMINAL_STATUSES`. It always calls
+     `_update_run_status(RUNNING, persist=False)` and delegates to the
+     existing transition validator, which allows `COMPLETED`/`INTERRUPTED`
+     → `RUNNING` (resume) and refuses `FAILED` → `RUNNING` (truly
+     terminal). A `DeliveryUncertain` on a completed/interrupted run can
+     therefore be recovered by operator retry.
+- **Why**: the first pass had four state-machine holes: (a) `followup`
+  treated an ambiguous tmux send as a terminal failure even though the
+  intent was durable; (b) the duplicate-event path could return success
+  after a failed persist; (c) the ACK path could commit `delivered`
+  before the lifecycle events were durable, so a crash left a delivered
+  call_id with no outcome/delivered event; (d) `reconcile` refused to
+  resume completed/interrupted runs even though `_update_run_status`
+  explicitly allows it.
+- **How**: see `docs/working-logs/2026-08-16-agent-tree-durable-mailbox.md`
+  "Review Round 33 Fixes" for the per-file diff and regression tests.
+- **Regression tests added** (10, in `tests/test_agent_tree.py`):
+  `test_followup_delivery_uncertain_keeps_run_non_terminal`,
+  `test_reconcile_resumes_non_failed_terminal_runs` (parametrized:
+  WAITING/COMPLETED/INTERRUPTED→RUNNING, FAILED stays FAILED),
+  `test_reconcile_persist_fail_in_memory_retained_then_durable`,
+  `test_retry_uncertain_reconcile_fail_compensates_then_succeeds`,
+  `test_emit_event_duplicate_persist_fail_reraises_no_wake`,
+  `test_ack_delivered_event_persist_fail_reload_keeps_processing_and_payload`,
+  `test_ack_vs_retry_race_delivered_not_downgraded`, plus three supporting
+  cases.
+- **Validation**: `tests/test_agent_tree.py` 156 passed (rc=0),
+  `tests/test_workspaces.py` 133 passed (rc=0),
+  `tests/test_tmux_receipt_integration.py` 4 passed (rc=0),
+  `tests/test_workspace_resident_agent.py` 60 passed (rc=0). mypy clean
+  on `claude_hub/`; black/isort clean on touched files.
+
+### feat: unified Agent Tree + Durable Mailbox coordination layer
+
+- **What**: a single persistent coordination layer that converges the Resident
+  Agent and managed-task dispatch into one parent/child delegation tree with an
+  append-only event stream (durable mailbox). Exposes `spawn`, `send`,
+  `followup`, `wait`, `interrupt`, and `list_runs` actions, plus cursor-based
+  event replay.
+- **Why**: Resident previously scanned global reports to find work; managed
+  tasks had no first-class parent/child or supervisor relationship. Agents
+  couldn't address messages to a specific run or wait on directed subtree
+  events. There was no durable event log for restart replay.
+- **How**:
+  - `models/agent_tree.py`: `AgentRun` (id, path, parent, supervisor,
+    executor_kind, status, context_ref, last_task_message, ack_sequence) and
+    `AgentEvent` (monotonic sequence, call_id, correlation_id, type, author,
+    recipient, action, target, fingerprint, payload). `ExecutorKind` covers
+    `managed_task`, `native_subagent`, `external_job`. `SpawnRequest` carries
+    an optional `session_id` for routing managed tasks to a specific worker.
+  - `services/agent_tree.py`: `AgentTreeManager` owns the run tree, per-workspace
+    append-only event log, call_id idempotency index, and per-run asyncio.Event
+    waiters. `_wake_ancestors` notifies the supervisor chain so a root can
+    `wait()` on its whole subtree.
+    - **Full request fingerprints**: every action computes a SHA-256 hash of
+      the canonicalized (action + all request fields) and persists it on the
+      resulting `AgentEvent`. A call_id reused with a different payload is
+      rejected even after a process restart.
+    - **Outbox / crash recovery**: a run and its `DISPATCHED` event are
+      persisted *before* the adapter spawn is invoked. On startup,
+      `recover_pending_runs()` retries any `PENDING` run whose `context_ref`
+      is `None` (spawn lost mid-flight); the managed-task adapter reuses the
+      existing task tagged with `agent_run_id`. For interrupt, the
+      `INTERRUPTED` intent event is persisted *before* the adapter call so a
+      crash mid-interrupt leaves a durable record; recovery retries
+      `adapter.interrupt` for any run that has an `INTERRUPTED` event but is
+      not yet in `INTERRUPTED` status.
+    - **Intent / delivery / outcome protocol**: every mutating action
+      (`spawn`, `followup`, `interrupt`, `send`, `emit_event`) mutates
+      in-memory state with `persist=False` during the intent phase, calls the
+      executor adapter (delivery), then applies the outcome and calls
+      `_persist()` exactly once. An adapter failure marks the run `FAILED`
+      and persists that single outcome. A late outcome-phase persist failure
+      keeps the in-memory state that matches the executor's actual state;
+      the next successful persist (or restart reconciliation) catches up.
+      `_append_event`, `_update_run_status`, and `_set_last_message` accept
+      `persist: bool = True` to support batching.
+    - **Recovery replays all unmatched followups in sequence**:
+      `recover_pending_runs` finds every followup `MESSAGE` event that lacks
+      a matching `:outcome` event and replays them in sequence order (not
+      just the latest). Each followup is replayed with its *own* payload
+      message (not the run's `last_task_message`). The managed-task adapter
+      persists the `delivered_call_ids` receipt atomically with delivery, so
+      a crash between delivery and outcome-event persist does not cause
+      re-delivery on restart. After replaying followups, recovery still
+      reconciles the run's status via the adapter's `get_status()`.
+    - **Subtree messaging boundary**: `_validate_messaging_boundary` restricts
+      `send`/`followup` so an author may message only its supervisor, a run in
+      its own subtree, or itself. Cross-subtree (sibling) messaging is
+      rejected with `400`.
+    - **Outbound mixing fix**: a run's subtree mailbox excludes events authored
+      by the run itself (unless addressed to itself), so a supervisor does not
+      re-read its own sent messages.
+    - **Terminal status guard**: `FAILED` is truly terminal — no transitions
+      out. `INTERRUPTED` and `COMPLETED` may transition back to `RUNNING` via
+      `followup` (resume). `interrupt` is a no-op on `FAILED` runs.
+    - **ACK cursor bounds**: `ack_sequence` only moves forward and may not
+      exceed the workspace's current max sequence.
+    - **Resident root before bootstrap**: `_ensure_resident_root_run` is called
+      before `ensure_workspace_agent` so the root run exists when the
+      bootstrap prompt is built. The root run's `context_ref` is linked to the
+      resident session id after the session is created.
+    - **ack_sequence consumption**: the resident bootstrap prompt includes the
+      root run's persisted `ack_sequence` as the starting `since_sequence` for
+      `wait`, and event injection into the prompt uses
+      `since_sequence=root_run.ack_sequence` so only unprocessed events are
+      surfaced.
+    - **Quota**: `MAX_CONCURRENT_CHILDREN = 32` active (non-terminal) children
+      per parent; the 33rd spawn raises `RuntimeError`.
+  - `services/agent_tree_adapters.py`: `ManagedTaskAdapter` wraps the existing
+    task/session/report flow (spawn→create+start, followup→continue/start or
+    re-create if deleted, interrupt→abort). `ResidentRootAdapter` is a no-op
+    for spawn/send/followup (the resident picks up mailbox messages on its
+    next cycle), aborts the resident session on interrupt, and returns
+    `RUNNING` while the session exists. `NativeSubagentAdapter` and
+    `ExternalJobAdapter` are in-memory stubs that satisfy the contract.
+  - `api/agent_tree.py`: REST endpoints under `/api/agent-tree`. Every
+    mutating action (`spawn`, `send`, `followup`, `interrupt`) enforces
+    authority: the caller's session must own the `author_id` run
+    (`run.context_ref == session_id`). Local network requests (auth
+    disabled) skip the check.
+  - **Resident master mode migration**: the resident prompt now delegates work
+    via the agent tree API (`spawn` with `session_id`, `wait`, `ack`,
+    `followup`, `interrupt`) instead of scanning the task board directly.
+    `PATCH /tasks/{id} status=done` is retained for task acceptance.
+  - Persistence: runs and events are serialized into each workspace's
+    `state.json`; `load_from_dict` rebuilds the call_id index (using persisted
+    fingerprints) and next sequence counter so idempotency and monotonic
+    ordering survive restart.
+- **Verified**: 88 agent-tree tests (root run, spawn, call_id idempotency,
+  send, followup, wait immediate/blocking/timeout, interrupt, subtree scoping,
+  emit_event status update, emit_event idempotency, report→event bridge,
+  save/load round-trip with sequence continuity, concurrent spawns, concurrent
+  waits, crash recovery via `recover_pending_runs` for spawn-lost,
+  interrupt-lost, and followup-lost runs, multiple unmatched followups
+  replayed in sequence with each event's own payload message,
+  `delivered_call_ids` receipt persisted atomically so re-delivery is skipped,
+  status reconciliation runs after followup replay, late-persist-failure keeps
+  in-memory state, duplicate delivery does not re-trigger adapter,
+  `ResidentRootAdapter` behaviour, followup resume `INTERRUPTED`/`COMPLETED`→`RUNNING`
+  and `FAILED` cannot resume, API authority non-owner 403 / owner 200,
+  `ManagedTaskAdapter.followup` starts TODO task and recreates deleted task,
+  quota enforcement, terminal status guards, ACK cursor forward-only +
+  max-sequence bounds, subtree messaging boundary rejection, outbound-mixing
+  exclusion of self-authored events, legacy `followup`→`continue_task`, API
+  endpoint smoke test, non-local no-cookie requests fail closed with 403,
+  ManagedSession reads scoped to own workspace and owned subtree,
+  cross-workspace reads rejected). Resident (60), workspace (133),
+  sessions/state-policy/orchestrator-contract (238 combined) tests pass.
+  black, isort, mypy clean.
 
 ### fix: persist custom env presets to backend so they survive cross-origin access
 

@@ -122,6 +122,30 @@ def backend_bind() -> tuple[str, int]:
     return parsed.hostname or "127.0.0.1", parsed.port or 8173
 
 
+# Playwright sync E2E leaves a running asyncio loop on py3.12+, which breaks
+# pytest-asyncio's Runner.run() for every subsequent async test in the session.
+_PLAYWRIGHT_DEFER_MODULES = frozenset(
+    {
+        "tests.test_terminal_input_latency_perf",
+        "tests.test_terminal_replay",
+        "tests.test_recovery_real_ttyd",
+    }
+)
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Run Playwright terminal replay E2E last so it cannot poison async tests."""
+    deferred: list[pytest.Item] = []
+    ordered: list[pytest.Item] = []
+    for item in items:
+        module_name = getattr(getattr(item, "module", None), "__name__", "")
+        if module_name in _PLAYWRIGHT_DEFER_MODULES:
+            deferred.append(item)
+        else:
+            ordered.append(item)
+    items[:] = ordered + deferred
+
+
 # ── fixtures ─────────────────────────────────────────────────────────────
 
 

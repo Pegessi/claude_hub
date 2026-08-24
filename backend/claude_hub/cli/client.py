@@ -124,8 +124,17 @@ class HubClient:
         data: Any = None,
         files: Any = None,
         params: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
     ) -> Any:
-        resp = self.request_response(method, path, json=json, data=data, files=files, params=params)
+        resp = self.request_response(
+            method,
+            path,
+            json=json,
+            data=data,
+            files=files,
+            params=params,
+            timeout=timeout,
+        )
 
         if resp.status_code == 204 or not resp.content:
             return None
@@ -143,18 +152,22 @@ class HubClient:
         data: Any = None,
         files: Any = None,
         params: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
     ) -> httpx.Response:
         # Build the request up front so verbose logging reflects the REAL
         # outgoing URL (httpx's own base_url+path joining), and so the URL is
         # available to log even when sending raises.
-        request = self._client.build_request(
-            method,
-            path,
-            json=json,
-            data=data,
-            files=files,
-            params=params,
-        )
+        # httpx 0.28 Client.send has no timeout kwarg. Per-request timeout
+        # belongs on build_request, which stores it in request.extensions.
+        build_kwargs: Dict[str, Any] = {
+            "json": json,
+            "data": data,
+            "files": files,
+            "params": params,
+        }
+        if timeout is not None:
+            build_kwargs["timeout"] = timeout
+        request = self._client.build_request(method, path, **build_kwargs)
         if self._verbose:
             print(f"{request.method} {request.url}", file=sys.stderr)
         try:
@@ -306,6 +319,73 @@ class HubClient:
     def get_task_reports(self, workspace_id: str, task_id: str) -> Any:
         """GET /api/workspaces/{workspace_id}/tasks/{task_id}/reports."""
         return self._request("GET", f"/api/workspaces/{workspace_id}/tasks/{task_id}/reports")
+
+    def list_task_tree(self, workspace_id: str, task_id: Optional[str] = None) -> Any:
+        """GET /api/workspaces/{workspace_id}/tasks/tree or .../tasks/{task_id}/tree."""
+        if task_id:
+            return self._request("GET", f"/api/workspaces/{workspace_id}/tasks/{task_id}/tree")
+        return self._request("GET", f"/api/workspaces/{workspace_id}/tasks/tree")
+
+    def get_task_events(
+        self,
+        workspace_id: str,
+        task_id: str,
+        since_sequence: int = 0,
+        subtree: bool = False,
+    ) -> Any:
+        """GET Task mailbox events for ``task:<task_id>``."""
+        params: Dict[str, Any] = {
+            "since_sequence": since_sequence,
+            "subtree": subtree,
+        }
+        return self._request(
+            "GET",
+            f"/api/workspaces/{workspace_id}/tasks/{task_id}/events",
+            params=params,
+        )
+
+    def wait_task_events(
+        self,
+        workspace_id: str,
+        task_id: str,
+        since_sequence: int = 0,
+        subtree: bool = False,
+        timeout_seconds: float = 30.0,
+    ) -> Any:
+        """POST Task mailbox wait (directed long-poll)."""
+        params: Dict[str, Any] = {
+            "since_sequence": since_sequence,
+            "subtree": subtree,
+            "timeout_seconds": timeout_seconds,
+        }
+        return self._request(
+            "POST",
+            f"/api/workspaces/{workspace_id}/tasks/{task_id}/wait",
+            params=params,
+            timeout=timeout_seconds + 5.0,
+        )
+
+    def ack_task_events(
+        self,
+        workspace_id: str,
+        task_id: str,
+        sequence: int,
+    ) -> Any:
+        """POST Task mailbox ACK (advance consumer cursor)."""
+        body = {"sequence": sequence}
+        return self._request(
+            "POST",
+            f"/api/workspaces/{workspace_id}/tasks/{task_id}/ack",
+            json=body,
+        )
+
+    def followup_task(self, workspace_id: str, task_id: str, body: Dict[str, Any]) -> Any:
+        """POST /api/workspaces/{workspace_id}/tasks/{task_id}/followup."""
+        return self._request(
+            "POST",
+            f"/api/workspaces/{workspace_id}/tasks/{task_id}/followup",
+            json=body,
+        )
 
     # -- Agents / sessions --------------------------------------------------
 
