@@ -60,5 +60,4 @@ class TaskEvent(BaseModel):
     consumer_key: str
     payload: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.utcnow)
-    compat_run_id: Optional[str] = None
     report_id: Optional[str] = None

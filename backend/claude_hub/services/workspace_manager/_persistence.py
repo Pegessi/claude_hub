@@ -55,7 +55,6 @@ class _PersistenceMixin:
                 if item.workspace_id == workspace_id
             ],
         }
-        payload.update(self.agent_tree.to_dict(workspace_id))
         payload.update(self.task_mailbox.to_dict(workspace_id))
         return payload
 

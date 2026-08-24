@@ -38,15 +38,9 @@ def _reset_singleton() -> None:
     workspace_manager.task_mailbox._events.clear()
     workspace_manager.task_mailbox._call_index.clear()
     workspace_manager.task_mailbox._next_seq.clear()
-    workspace_manager.agent_tree._runs.clear()
-    workspace_manager.agent_tree._events.clear()
-    workspace_manager.agent_tree._call_index.clear()
     workspace_manager.task_mailbox._waiters.events.clear()
     workspace_manager.task_mailbox._waiters.locks.clear()
     workspace_manager.task_mailbox._waiters.subtree_waiters.clear()
-    workspace_manager.agent_tree._waiters.events.clear()
-    workspace_manager.agent_tree._waiters.locks.clear()
-    workspace_manager.agent_tree._waiters.subtree_waiters.clear()
 
 
 def _parent_subtree_events(manager: WorkspaceManager, workspace_id: str, parent_id: str):

@@ -6,9 +6,8 @@ import json
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
-from ...models.agent_tree import AgentEventType
 from ...models.task_mailbox import TaskActorRole, TaskEventType
-from ..agent_tree import _request_fingerprint
+from ..request_fingerprint import request_fingerprint
 from ..task_graph import task_supervisor_consumer_key
 from ._constants import *  # noqa: F401,F403
 
@@ -40,16 +39,8 @@ class ReportCallIdConflict(ValueError):
 
 class _ReportsMixin:
     def _snapshot_report_intake_workspace(self, workspace_id: str) -> dict[str, Any]:
-        """Deep snapshot every durable domain mutated by report intake.
+        """Deep snapshot every durable domain mutated by report intake."""
 
-        Report intake is a single-workspace transaction. Besides the new
-        report and the reporting session/task it can update reviewer
-        bindings, TaskMailbox events/call_index/next_seq, and the objects
-        that hold Task/Workspace consumer cursors. Agent Tree blobs stay
-        in the snapshot so leftover compat state is not dropped on restore.
-        """
-
-        tree = self.agent_tree
         mailbox = self.task_mailbox
         workspace = self.workspaces.get(workspace_id)
         return {
@@ -69,17 +60,6 @@ class _ReportsMixin:
                 if value.workspace_id == workspace_id
             },
             "workspace": workspace.model_copy(deep=True) if workspace is not None else None,
-            "runs": {
-                key: value.model_copy(deep=True)
-                for key, value in tree._runs.items()
-                if value.workspace_id == workspace_id
-            },
-            "events_present": workspace_id in tree._events,
-            "events": copy.deepcopy(tree._events.get(workspace_id, [])),
-            "call_index_present": workspace_id in tree._call_index,
-            "call_index": copy.deepcopy(tree._call_index.get(workspace_id, {})),
-            "next_seq_present": workspace_id in tree._next_seq,
-            "next_seq": tree._next_seq.get(workspace_id),
             "task_events_present": workspace_id in mailbox._events,
             "task_events": copy.deepcopy(mailbox._events.get(workspace_id, [])),
             "task_call_index_present": workspace_id in mailbox._call_index,
@@ -101,24 +81,6 @@ class _ReportsMixin:
         if snapshot.get("workspace") is not None:
             self.workspaces[workspace_id] = snapshot["workspace"]
 
-        tree = self.agent_tree
-        for key, value in list(tree._runs.items()):
-            if value.workspace_id == workspace_id:
-                tree._runs.pop(key, None)
-        tree._runs.update(snapshot["runs"])
-        if snapshot["events_present"]:
-            tree._events[workspace_id] = snapshot["events"]
-        else:
-            tree._events.pop(workspace_id, None)
-        if snapshot["call_index_present"]:
-            tree._call_index[workspace_id] = snapshot["call_index"]
-        else:
-            tree._call_index.pop(workspace_id, None)
-        if snapshot["next_seq_present"]:
-            tree._next_seq[workspace_id] = snapshot["next_seq"]
-        else:
-            tree._next_seq.pop(workspace_id, None)
-
         mailbox = self.task_mailbox
         if snapshot.get("task_events_present"):
             mailbox._events[workspace_id] = snapshot["task_events"]
@@ -134,10 +96,11 @@ class _ReportsMixin:
             mailbox._next_seq.pop(workspace_id, None)
 
     def _wake_report_intake_runs(self, wake_targets: set[tuple[str, str]]) -> None:
-        """Wake Agent Tree recipients only after the outer commit succeeds."""
+        """Wake TaskMailbox consumers after the outer commit succeeds."""
 
-        for recipient_id, author_id in wake_targets:
-            self.agent_tree._wake_for_run(recipient_id, author_id)
+        for consumer_key, _author in wake_targets:
+            if consumer_key.startswith("task:"):
+                self.task_mailbox._waiters.wake(consumer_key)
 
     def _should_route_goal_packet_for_approval(
         self,
@@ -941,9 +904,8 @@ class _ReportsMixin:
         is also present on the Session.
 
         Legacy dispatch/internal call_ids (no TaskMailbox record) still
-        require Session outbox membership plus
-        ``agent_tree._call_record`` target binding. Cross-task and
-        cross-session ACKs fail closed.
+        require Session outbox membership plus mailbox call-record target
+        binding. Cross-task and cross-session ACKs fail closed.
 
         Call_ids in ``pending_call_ids``, ``processing_call_ids``, or
         ``uncertain_call_ids`` are all eligible for ACK (the worker may have
@@ -1021,7 +983,7 @@ class _ReportsMixin:
         # ---- Agent-tree lifecycle reconciliation (BEFORE delivered mutation) ----
         #
         # reconcile_followup_outcome and the followup:delivered event append
-        # each call agent_tree._persist() -> self._save_state(), which writes
+        # each TaskMailbox persist -> self._save_state(), which writes
         # the FULL workspace state (sessions/tasks) to disk. If we ran these
         # AFTER moving the call_id to delivered (and clearing pending_messages),
         # a failure in the delivered-event append would leave disk committed
@@ -1166,112 +1128,32 @@ class _ReportsMixin:
         if workspace_id is None:
             return False
 
-        record = self.agent_tree._call_record(workspace_id, call_id)
+        record = self.task_mailbox._call_record(workspace_id, call_id)
         if record is None:
             # No call record — legacy untracked call (dispatch/internal).
-            # Verified by the caller's session_call_ids membership check.
             return True
 
-        target_run_id = record.get("target")
-        if not target_run_id:
-            # Tracked call record but missing target — fail closed.
+        target_task_id = record.get("target")
+        if not target_task_id or target_task_id not in self.tasks:
             return False
 
-        target_run = self.agent_tree._runs.get(target_run_id)
-        if target_run is None:
+        if task_id and target_task_id != task_id:
             return False
-
-        # Managed task runs bind context_ref to a Task id.
-        target_context_ref = target_run.context_ref
-
-        if target_context_ref and target_context_ref in self.tasks:
-            target_task_id = target_context_ref
-            if task_id and target_task_id != task_id:
-                return False
-            target_task = self.tasks.get(target_task_id)
-            if target_task is not None:
-                if target_task.session_id and target_task.session_id != session_id:
-                    # Cross-session ACK: the call was delivered to a
-                    # different session. Reject — the reporting session
-                    # cannot ACK a call it did not receive.
-                    return False
-            return True
-
-        return False
+        target_task = self.tasks.get(target_task_id)
+        if (
+            target_task is not None
+            and target_task.session_id
+            and target_task.session_id != session_id
+        ):
+            return False
+        return True
 
     def _emit_followup_delivered_if_followup(
         self, workspace_id: Optional[str], call_id: str
     ) -> tuple[str, str] | None:
-        """If ``call_id`` is a followup call_id, reconcile lifecycle + emit delivered.
+        """TaskMailbox followups do not emit Agent Tree delivered events."""
 
-        This runs BEFORE the session/task delivered-state mutation in
-        ``_ack_call_ids``. Both ``reconcile_followup_outcome`` and the
-        delivered-event append call ``agent_tree._persist()`` →
-        ``_save_state()``, which writes the full workspace state. Running
-        them before the delivered mutation ensures a persist failure leaves
-        disk at ``processing`` + intact payload, so the ACK is retryable.
-
-        Order:
-
-        1. ``reconcile_followup_outcome`` — emit the ``followup:outcome``
-           event (``delivered: False``) and move the run to ``RUNNING``.
-           This bridges the delivery state (processing/delivered) back to
-           the agent-tree lifecycle. Idempotent.
-        2. Append the ``followup:delivered`` event (``delivered: True``)
-           to record that the worker actually received and processed the
-           followup.
-
-        Persistence exceptions are NOT swallowed: they propagate to
-        ``_ack_call_ids`` (and then ``create_report``), which never reaches
-        the session/task delivered mutation or its final ``_save_state``.
-        The call_id stays in ``processing_call_ids`` (with
-        ``pending_messages`` payload intact) so the ACK or an operator
-        retry can re-attempt reconciliation. The tmux receipt is already
-        set, so no re-paste occurs.
-        """
-        if not workspace_id:
-            return None
-        record = self.agent_tree._call_record(workspace_id, call_id)
-        if record is None:
-            return None
-        if record.get("action") != "followup":
-            return None
-        followup_event = record["event"]
-        recipient_id = followup_event.agent_run_id
-        author_id = followup_event.author
-
-        # 1. Reconcile the followup lifecycle (outcome event + RUNNING).
-        # Must run before the delivered event so the run reflects the
-        # settled delivery state. Idempotent — no-op if the outcome
-        # event already exists.
-        self.agent_tree.reconcile_followup_outcome(
-            workspace_id=workspace_id,
-            call_id=call_id,
-            persist=False,
-            wake=False,
-        )
-
-        # 2. Emit the delivered event. Idempotent on call_id=f"{call_id}:delivered".
-        # Do NOT swallow exceptions: let _ack_call_ids roll back the
-        # session/task delivered mutation so the call_id stays retryable.
-        self.agent_tree._append_event(
-            workspace_id=workspace_id,
-            agent_run_id=recipient_id,
-            event_type=AgentEventType.PROGRESS,
-            author=recipient_id,
-            recipient=author_id,
-            call_id=f"{call_id}:delivered",
-            action="followup:delivered",
-            target=recipient_id,
-            fingerprint=_request_fingerprint(
-                "followup:delivered",
-                {"followup_call_id": call_id},
-            ),
-            payload={"delivered": True, "followup_call_id": call_id},
-            rollback_on_error=False,
-            persist=False,
-        )
-        return recipient_id, author_id
+        return None
 
     def _rollback_processing_to_pending(
         self, task_id: Optional[str], session_id: str, call_ids: list[str]
@@ -1429,10 +1311,7 @@ class _ReportsMixin:
             persist=False,
         )
 
-        run = self.agent_tree.get_run_by_context_ref(report.workspace_id, report.task_id)
-        if run is None:
-            return None
-        return run.id, run.supervisor_id or run.id
+        return task_supervisor_consumer_key(task), task_supervisor_consumer_key(task)
 
     async def _after_report_recorded(
         self,

@@ -40,8 +40,6 @@ class _SessionsMixin:
                     task.id,
                 )
 
-        run_ids = self._linked_compat_run_ids(task)
-        self.agent_tree.purge_runs(workspace_id, run_ids)
         self.task_mailbox.purge_task_events(workspace_id, task.id)
 
         self.tasks.pop(task_id, None)

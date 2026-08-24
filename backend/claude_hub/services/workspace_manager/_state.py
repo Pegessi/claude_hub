@@ -6,7 +6,11 @@ from contextvars import ContextVar
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
-from ..agent_tree import AgentTreeManager
+from ..legacy_state_migration import (
+    index_has_legacy_keys,
+    migrate_raw_workspace_state,
+    state_has_legacy_orchestration_keys,
+)
 from ..task_mailbox import TaskMailbox
 from ._constants import *  # noqa: F401,F403
 
@@ -23,12 +27,10 @@ class _StateMixin:
         # concurrent pump cycles cannot both send the same pending call_id
         # to tmux (which would duplicate the model turn).
         self._pump_locks: dict[str, asyncio.Lock] = {}
-        # Per-workspace mutation lock shared by report intake and Agent Tree
-        # writes (spawn/send/followup/interrupt/ack). A report may snapshot
-        # then restore the whole workspace; a concurrent tree persist in that
-        # window would be durable until restore erased it. Workspace scope is
-        # also the smallest simple lock that covers session/task/report and
-        # Agent Tree event/cursor state written to the same state.json.
+        # Per-workspace mutation lock shared by report intake and TaskMailbox
+        # writes. A report may snapshot then restore the whole workspace; a
+        # concurrent mailbox persist in that window would be durable until
+        # restore erased it.
         self._report_intake_locks: dict[str, asyncio.Lock] = {}
         # Ephemeral commit markers used only to distinguish a pre-commit
         # exception (restore the full report-intake snapshot) from a
@@ -43,8 +45,7 @@ class _StateMixin:
             default=None,
         )
         # Re-entrancy for workspace_mutation_lock: create_report already holds
-        # the lock when it ACKs mailbox state, and Agent Tree adapters may
-        # nest start_task / persist under spawn/followup.
+        # the lock when it ACKs mailbox state.
         self._workspace_mutation_held: ContextVar[str | None] = ContextVar(
             f"workspace_mutation_held_{id(self)}",
             default=None,
@@ -53,11 +54,6 @@ class _StateMixin:
         # Cache of resolved git worktree roots per workspace id: (timestamp, roots).
         # Used by artifact preview to resolve markdown produced inside a worktree.
         self._worktree_root_cache: dict[str, tuple[float, list[Path]]] = {}
-        # Unified agent tree + durable mailbox coordination layer. Owns the
-        # parent/child run tree, the append-only event stream, and call_id
-        # idempotency. Managed tasks are bridged into this layer via
-        # context_ref (task id) so reports surface as agent events.
-        self.agent_tree = AgentTreeManager(self)  # type: ignore[arg-type]
         self.task_mailbox = TaskMailbox(self)
         self._load_state()
 
@@ -76,7 +72,7 @@ class _StateMixin:
 
     @asynccontextmanager
     async def workspace_mutation_lock(self, workspace_id: str) -> AsyncIterator[None]:
-        """Serialize report intake with Agent Tree workspace mutations.
+        """Serialize report intake with TaskMailbox workspace mutations.
 
         Report rollback restores a workspace snapshot. spawn / send /
         followup / interrupt / ack persist the same state.json; they wait
@@ -156,36 +152,80 @@ class _StateMixin:
                 continue
             self._mark_processing_as_uncertain(session_id, list(session.processing_call_ids))
 
+    def _maybe_migrate_workspace_state_file(
+        self,
+        workspace_id: str,
+        state_file: Path,
+        index_item: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        raw = json.loads(state_file.read_text(encoding="utf-8"))
+        needs_migration = state_has_legacy_orchestration_keys(raw) or (
+            index_item is not None and index_has_legacy_keys(index_item)
+        )
+        if not needs_migration:
+            return raw
+
+        backup = state_file.with_suffix(".json.pre-migration-backup")
+        if not backup.exists():
+            backup.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+
+        index_copy = dict(index_item) if index_item is not None else None
+        result = migrate_raw_workspace_state(
+            workspace_id=workspace_id,
+            raw=raw,
+            index_item=index_copy,
+        )
+        migrated = result.state
+        self._atomic_write_text(state_file, json.dumps(migrated, indent=2))
+        if index_copy is not None and index_item is not None:
+            index_item.clear()
+            index_item.update(index_copy)
+        if result.discarded_runs or result.discarded_events:
+            logger.info(
+                "Migrated legacy Agent Tree state workspace_id=%s discarded_runs=%s "
+                "discarded_events=%s warnings=%s",
+                workspace_id,
+                result.discarded_runs,
+                result.discarded_events,
+                result.warnings,
+            )
+        return migrated
+
     def _load_nested_state(self) -> None:
         try:
             index = json.loads(INDEX_FILE.read_text(encoding="utf-8"))
-            legacy_resident_ack_by_workspace: dict[str, int] = {}
-            missing_resident_ack_ids: set[str] = set()
+            index_items: dict[str, dict[str, Any]] = {}
             self.workspaces = {}
+            index_dirty = False
             for item in index.get("workspaces", []):
                 if not isinstance(item, dict) or not item.get("id"):
                     continue
                 workspace_id = str(item["id"])
-                if "resident_ack_sequence" not in item:
-                    missing_resident_ack_ids.add(workspace_id)
-                else:
-                    legacy_resident_ack_by_workspace[workspace_id] = int(
-                        item.get("resident_ack_sequence", 0)
-                    )
+                index_items[workspace_id] = item
+                if index_has_legacy_keys(item):
+                    index_dirty = True
                 self.workspaces[workspace_id] = Workspace(**self._normalize_workspace_item(item))
+
+            migrated_any = False
             for workspace_id in self.workspaces:
                 state_file = self._workspace_state_file(workspace_id)
                 if not state_file.exists():
                     continue
-                data = json.loads(state_file.read_text(encoding="utf-8"))
-                missing_parent_ids: set[str] = set()
-                missing_ack_ids: set[str] = set()
+                index_item = index_items.get(workspace_id)
+                data = self._maybe_migrate_workspace_state_file(
+                    workspace_id,
+                    state_file,
+                    index_item,
+                )
+                if state_has_legacy_orchestration_keys(data):
+                    raise ValueError(
+                        f"Legacy Agent Tree keys remain after migration workspace_id={workspace_id}"
+                    )
+                if index_item is not None and index_has_legacy_keys(index_item):
+                    index_dirty = True
+                if state_file.with_suffix(".json.pre-migration-backup").exists():
+                    migrated_any = True
                 for item in data.get("tasks", []):
-                    if isinstance(item, dict) and item.get("id"):
-                        if "parent_task_id" not in item:
-                            missing_parent_ids.add(str(item["id"]))
-                        if "consumer_ack_sequence" not in item:
-                            missing_ack_ids.add(str(item["id"]))
                     task = WorkspaceTask(**self._normalize_task_item(item))
                     self.tasks[task.id] = task
                 for item in data.get("sessions", []):
@@ -194,21 +234,20 @@ class _StateMixin:
                 for item in data.get("reports", []):
                     report = AgentReport(**self._normalize_report_item(item))
                     self.reports[report.id] = report
-                self.agent_tree.load_from_dict(workspace_id, data)
                 from ..task_graph import materialize_loaded_task_graph
-                from ..task_migration import migrate_pre_unification_graph
 
-                self.workspaces[workspace_id] = migrate_pre_unification_graph(
-                    tasks=self.tasks,
-                    runs=self.agent_tree._runs,
-                    workspace=self.workspaces[workspace_id],
-                    missing_parent_ids=missing_parent_ids,
-                    missing_ack_ids=missing_ack_ids,
-                    missing_resident_ack=workspace_id in missing_resident_ack_ids,
-                    legacy_resident_ack=legacy_resident_ack_by_workspace.get(workspace_id, 0),
-                )
                 materialize_loaded_task_graph(self.tasks, workspace_id)
                 self.task_mailbox.load_from_dict(workspace_id, data)
+
+            if index_dirty:
+                index_payload = {
+                    "workspaces": [
+                        self._workspace_index_item(item) for item in self.workspaces.values()
+                    ]
+                }
+                self._atomic_write_text(INDEX_FILE, json.dumps(index_payload, indent=2))
+            elif migrated_any:
+                pass
         except ValueError:
             raise
         except Exception as e:

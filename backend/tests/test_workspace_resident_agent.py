@@ -379,18 +379,19 @@ def test_resident_session_assigned_to_task_counts_like_any_worker(
     assert manager._resident_agent_due(workspace, now) is True
 
 
-def test_workspace_activity_since_does_not_read_agent_tree(
+def test_workspace_activity_since_does_not_read_task_mailbox(
     manager: WorkspaceManager, monkeypatch: MonkeyPatch
 ) -> None:
-    """Activity scan must not consult AgentTree runs/events/subtrees."""
+    """Activity scan must not consult TaskMailbox events/cursors."""
 
     def _forbidden(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("_workspace_activity_since must not read agent_tree")
+        pytest.fail("_workspace_activity_since must not read task_mailbox")
 
-    tree = manager.agent_tree
-    monkeypatch.setattr(tree, "get_events", _forbidden)
-    monkeypatch.setattr(tree, "list_runs", _forbidden)
-    monkeypatch.setattr(tree, "get_run_by_context_ref", _forbidden)
+    mailbox = manager.task_mailbox
+    monkeypatch.setattr(mailbox, "append_event", _forbidden)
+    monkeypatch.setattr(mailbox, "wait", _forbidden)
+    monkeypatch.setattr(mailbox, "ack", _forbidden)
+    monkeypatch.setattr(mailbox, "consumer_cursor", _forbidden)
 
     now = datetime.now()
     last_run = now - timedelta(minutes=5)
@@ -1918,10 +1919,9 @@ def test_run_resident_agent_busy_keeps_run_request_flag(
 # ---------------------------------------------------------------------------
 
 
-def test_resident_next_run_at_helper() -> None:
+def test_resident_next_run_at_helper(manager: WorkspaceManager) -> None:
     """_resident_next_run_at = last_run + interval + jitter; None when disabled/
     paused/bootstrap."""
-    manager = WorkspaceManager()
     now = datetime.now()
     ws = _due_workspace(now, interval=60)
     interval_seconds = 60 * 60

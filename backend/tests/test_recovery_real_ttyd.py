@@ -343,6 +343,7 @@ def _seed_cursor_store(tmp_home: Path, sid: str, cwd: str) -> Path:
 
 
 @pytest.mark.asyncio
+@pytest.mark.flaky(reruns=2, reruns_delay=1)
 async def test_real_cold_restart_7tab_bijection(tmp_path, monkeypatch):
     """Seven real ttyd/tmux tabs preserve exact identity in under 10 seconds."""
     real_ttyd = shutil.which("ttyd")

@@ -27,14 +27,7 @@ from claude_hub.models import (
     WorkspaceTask,
     WorkspaceTaskStatus,
 )
-from claude_hub.models.agent_tree import (
-    AgentEventType,
-    AgentRun,
-    AgentRunStatus,
-    ExecutorKind,
-    FollowupRequest,
-    SpawnRequest,
-)
+from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
 from claude_hub.services.workspace_manager import WorkspaceManager
 from claude_hub.services.workspace_manager._reports import ReportCallIdConflict
 
@@ -54,6 +47,7 @@ def state_root(monkeypatch: MonkeyPatch, tmp_path: Path) -> Generator[Path, None
     fake_tab = MagicMock(id="tab-mock", tmux_session="tmux-mock")
     monkeypatch.setattr(_wm.ttyd_manager, "update_tab", AsyncMock(return_value=fake_tab))
     monkeypatch.setattr(_wm.WorkspaceManager, "_send_tmux_message", AsyncMock())
+    monkeypatch.setattr(_wm.WorkspaceManager, "send_session_message", AsyncMock())
     yield root
 
 
@@ -146,35 +140,16 @@ async def _install_two_processing_followups(
     task: WorkspaceTask,
     session: ManagedSession,
 ) -> tuple[list[str], str]:
-    root = manager.agent_tree.create_root_run(
-        workspace_id=workspace_id,
-        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
-    )
-    child = await manager.agent_tree.spawn(
-        SpawnRequest(
-            workspace_id=workspace_id,
-            parent_id=root.id,
-            executor_kind=ExecutorKind.NATIVE_SUBAGENT,
-            initial_message="initial",
-            call_id="spawn-report-intake",
-            context_ref=task.id,
-        )
-    )
-    # Native adapters replace context_ref with their executor handle. Bind the
-    # run to this managed task so strict ACK target verification succeeds.
-    child.context_ref = task.id
     call_ids = ["followup-report-intake-1", "followup-report-intake-2"]
     for call_id in call_ids:
-        await manager.agent_tree.followup(
-            FollowupRequest(
-                workspace_id=workspace_id,
-                recipient_id=child.id,
-                author_id=root.id,
-                message=f"process {call_id}",
-                call_id=call_id,
-            )
+        await manager.followup_task(
+            workspace_id,
+            task.id,
+            f"process {call_id}",
+            call_id,
+            actor_session_id="session-supervisor",
+            actor_role=TaskActorRole.SUPERVISOR,
         )
-
     pending_messages = {call_id: f"process {call_id}" for call_id in call_ids}
     manager.sessions[session.id] = manager.sessions[session.id].model_copy(
         update={
@@ -186,7 +161,7 @@ async def _install_two_processing_followups(
         update={"processing_call_ids": call_ids}
     )
     manager._save_state()
-    return call_ids, child.id
+    return call_ids, task.id
 
 
 @pytest.mark.asyncio
@@ -195,10 +170,10 @@ async def test_precommit_failure_rolls_back_both_acks_and_cold_retry_converges(
 ) -> None:
     manager, workspace_id = manager_and_workspace
     task, session = _task_session(manager, workspace_id)
-    call_ids, child_run_id = await _install_two_processing_followups(
+    call_ids, bound_task_id = await _install_two_processing_followups(
         manager, workspace_id, task, session
     )
-    baseline_run_status = manager.agent_tree.get_run(child_run_id).status
+    baseline_task = manager.tasks[bound_task_id].model_copy()
     state_file = manager._workspace_state_file(workspace_id)
     payload = AgentReportCreate(
         task_id=task.id,
@@ -239,35 +214,35 @@ async def test_precommit_failure_rolls_back_both_acks_and_cold_retry_converges(
     assert staged_report_id is not None
     assert staged_report_id not in manager.reports
     assert manager.task_mailbox._call_record(workspace_id, f"report:{staged_report_id}") is None
-    assert manager.agent_tree.get_run(child_run_id).status == baseline_run_status
+    assert manager.tasks[bound_task_id].model_dump() == baseline_task.model_dump()
     for call_id in call_ids:
-        # The followup API already committed its dispatch outcome. Report ACK
-        # failure must preserve that baseline event and roll back only the new
-        # delivered event / delivery-state transition.
-        assert manager.agent_tree._call_record(workspace_id, f"{call_id}:outcome") is not None
-        assert manager.agent_tree._call_record(workspace_id, f"{call_id}:delivered") is None
+        assert manager.task_mailbox._call_record(workspace_id, call_id) is not None
+        assert call_id in manager.sessions[session.id].processing_call_ids
+        assert call_id not in manager.sessions[session.id].delivered_call_ids
 
     # Same-process retry commits exactly one report and both ACK lifecycle
-    # mutations. AgentTree._persist is deliberately disabled to prove no
+    # mutations. TaskMailbox._persist is deliberately disabled to prove no
     # nested ACK persist remains inside the transaction.
-    original_persist = manager.agent_tree._persist
+    original_persist = manager.task_mailbox._persist
 
     def reject_nested_persist() -> None:
         if manager._report_intake_workspace.get() is not None:
-            raise AssertionError("nested Agent Tree persist")
+            raise AssertionError("nested TaskMailbox persist")
         original_persist()
 
-    monkeypatch.setattr(manager.agent_tree, "_persist", reject_nested_persist)
+    monkeypatch.setattr(manager.task_mailbox, "_persist", reject_nested_persist)
     committed = await manager.create_report(session.id, payload)
     assert set(call_ids) <= set(manager.sessions[session.id].delivered_call_ids)
-    assert manager.agent_tree.get_run(child_run_id).status == AgentRunStatus.RUNNING
+    assert manager.tasks[bound_task_id].status == WorkspaceTaskStatus.WORKING
+    for call_id in call_ids:
+        assert manager.task_mailbox._call_record(workspace_id, call_id) is not None
 
     # Cold reload + retry of the identical call_id/payload converges to the
-    # same report and does not duplicate outcome/delivered events.
+    # same report and does not duplicate followup bridge events.
     fresh = WorkspaceManager()
     retry = await fresh.create_report(session.id, payload)
     assert retry.id == committed.id
-    assert fresh.agent_tree.get_run(child_run_id).status == AgentRunStatus.RUNNING
+    assert fresh.tasks[bound_task_id].status == WorkspaceTaskStatus.WORKING
     assert (
         len([report for report in fresh.reports.values() if report.call_id == payload.call_id]) == 1
     )
@@ -276,22 +251,13 @@ async def test_precommit_failure_rolls_back_both_acks_and_cold_retry_converges(
             len(
                 [
                     event
-                    for event in fresh.agent_tree._events[workspace_id]
-                    if event.call_id == f"{call_id}:outcome"
+                    for event in fresh.task_mailbox._events.get(workspace_id, [])
+                    if event.call_id == call_id
                 ]
             )
             == 1
         )
-        assert (
-            len(
-                [
-                    event
-                    for event in fresh.agent_tree._events[workspace_id]
-                    if event.call_id == f"{call_id}:delivered"
-                ]
-            )
-            == 1
-        )
+        assert call_id in fresh.sessions[session.id].delivered_call_ids
     report_bridge_call_id = f"report:{committed.id}"
     assert (
         len(
@@ -306,26 +272,15 @@ async def test_precommit_failure_rolls_back_both_acks_and_cold_retry_converges(
 
 
 @pytest.mark.asyncio
-async def test_report_rollback_preserves_concurrent_agent_tree_write(
+async def test_report_rollback_preserves_concurrent_mailbox_write(
     manager_and_workspace: tuple[WorkspaceManager, str], monkeypatch: MonkeyPatch
 ) -> None:
-    """Reproduce: emit_event persist during rename await must survive rollback.
-
-    create_report used to snapshot the workspace, then await tab rename, then
-    commit. A concurrent emit_event+_persist in that await window was durable
-    until rollback restored the stale snapshot and erased it. Snapshot now
-    happens after rename. Public Agent Tree APIs are also serialized; this
-    test keeps the raw persist path so the original race stays covered.
-    """
+    """Reproduce: TaskMailbox persist during rename await must survive rollback."""
 
     manager, workspace_id = manager_and_workspace
     task, session = _task_session(manager, workspace_id)
     manager.sessions[session.id] = session.model_copy(update={"title": "stale title"})
-    root = manager.agent_tree.create_root_run(
-        workspace_id=workspace_id,
-        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
-    )
-    concurrent_call_id = "concurrent-tree-write-during-rename"
+    concurrent_call_id = "concurrent-mailbox-write-during-rename"
     rename_started = asyncio.Event()
     concurrent_done = asyncio.Event()
     fake_tab = MagicMock(id=session.tab_id, tmux_session=session.tmux_session)
@@ -343,68 +298,59 @@ async def test_report_rollback_preserves_concurrent_agent_tree_write(
 
     def fail_report_commit_once(path: Path, text: str) -> None:
         nonlocal failed
-        # The concurrent emit persists first (before concurrent_done). The
-        # next workspace save is the report commit and must fail.
         if path == state_file and concurrent_done.is_set() and not failed:
             failed = True
-            raise OSError("pre-commit fail after concurrent tree write")
+            raise OSError("pre-commit fail after concurrent mailbox write")
         original_write(path, text)
 
     monkeypatch.setattr(manager, "_atomic_write_text", fail_report_commit_once)
 
-    async def concurrent_tree_write() -> None:
+    async def concurrent_mailbox_write() -> None:
         await rename_started.wait()
-        manager.agent_tree.emit_event(
+        manager.task_mailbox.append_event(
             workspace_id=workspace_id,
-            agent_run_id=root.id,
-            event_type=AgentEventType.PROGRESS,
-            author=root.id,
-            recipient=root.id,
+            task_id=task.id,
+            actor_role=TaskActorRole.SUPERVISOR,
+            event_type=TaskEventType.MESSAGE,
             call_id=concurrent_call_id,
-            payload={"note": "must survive report rollback"},
+            action="followup",
+            target=task.id,
+            actor_session_id="session-supervisor",
+            payload={"message": "must survive report rollback"},
+            persist=True,
         )
         concurrent_done.set()
 
     payload = AgentReportCreate(
         task_id=task.id,
         state=AgentReportState.WORKING,
-        message="rollback must not erase tree",
+        message="rollback must not erase mailbox",
         call_id=f"{task.id}-working-progress-cycle-1-1",
     )
-    writer = asyncio.create_task(concurrent_tree_write())
-    with pytest.raises(OSError, match="pre-commit fail after concurrent tree write"):
+    writer = asyncio.create_task(concurrent_mailbox_write())
+    with pytest.raises(OSError, match="pre-commit fail after concurrent mailbox write"):
         await manager.create_report(session.id, payload)
     await writer
 
-    assert manager.agent_tree._call_record(workspace_id, concurrent_call_id) is not None
+    assert manager.task_mailbox._call_record(workspace_id, concurrent_call_id) is not None
     assert payload.call_id not in manager.sessions[session.id].report_call_ids
     assert not any(report.call_id == payload.call_id for report in manager.reports.values())
 
     fresh = WorkspaceManager()
-    assert fresh.agent_tree._call_record(workspace_id, concurrent_call_id) is not None
+    assert fresh.task_mailbox._call_record(workspace_id, concurrent_call_id) is not None
     assert payload.call_id not in fresh.sessions[session.id].report_call_ids
 
 
 @pytest.mark.asyncio
-async def test_report_rollback_serializes_agent_tree_spawn(
+async def test_report_rollback_serializes_concurrent_followup_task(
     manager_and_workspace: tuple[WorkspaceManager, str], monkeypatch: MonkeyPatch
 ) -> None:
-    """Public Agent Tree writes wait on the report workspace lock.
-
-    spawn/send/followup/interrupt share workspace_mutation_lock with
-    create_report. A concurrent spawn started during the rename await must
-    not persist until report rollback releases the lock; after restore the
-    spawn lands and survives.
-    """
+    """Task followup writes wait on the report workspace lock."""
 
     manager, workspace_id = manager_and_workspace
     task, session = _task_session(manager, workspace_id)
     manager.sessions[session.id] = session.model_copy(update={"title": "stale title"})
-    root = manager.agent_tree.create_root_run(
-        workspace_id=workspace_id,
-        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
-    )
-    spawn_call_id = "serialized-spawn-during-report-rollback"
+    followup_call_id = "serialized-followup-during-report-rollback"
     rename_started = asyncio.Event()
     rename_calls = 0
     fake_tab = MagicMock(id=session.tab_id, tmux_session=session.tmux_session)
@@ -415,12 +361,7 @@ async def test_report_rollback_serializes_agent_tree_spawn(
         if rename_calls == 1:
             rename_started.set()
             await asyncio.sleep(0.05)
-            assert manager.agent_tree._call_record(workspace_id, spawn_call_id) is None
-            assert not any(
-                run.parent_id == root.id
-                for run in manager.agent_tree._runs.values()
-                if run.workspace_id == workspace_id
-            )
+            assert manager.task_mailbox._call_record(workspace_id, followup_call_id) is None
         return fake_tab
 
     monkeypatch.setattr(_wm.ttyd_manager, "update_tab", slow_update_tab)
@@ -433,42 +374,40 @@ async def test_report_rollback_serializes_agent_tree_spawn(
         nonlocal failed
         if path == state_file and rename_started.is_set() and not failed:
             failed = True
-            raise OSError("pre-commit fail while spawn waits on workspace lock")
+            raise OSError("pre-commit fail while followup waits on workspace lock")
         original_write(path, text)
 
     monkeypatch.setattr(manager, "_atomic_write_text", fail_report_commit_once)
 
-    async def concurrent_spawn() -> object:
+    async def concurrent_followup() -> object:
         await rename_started.wait()
-        return await manager.agent_tree.spawn(
-            SpawnRequest(
-                workspace_id=workspace_id,
-                parent_id=root.id,
-                executor_kind=ExecutorKind.NATIVE_SUBAGENT,
-                title="serialized child",
-                initial_message="must wait for report rollback",
-                call_id=spawn_call_id,
-            )
+        return await manager.followup_task(
+            workspace_id,
+            task.id,
+            "must wait for report rollback",
+            followup_call_id,
+            actor_session_id="session-supervisor",
+            actor_role=TaskActorRole.SUPERVISOR,
         )
 
     payload = AgentReportCreate(
         task_id=task.id,
         state=AgentReportState.WORKING,
-        message="rollback must serialize tree spawn",
+        message="rollback must serialize followup",
         call_id=f"{task.id}-working-progress-cycle-1-1",
     )
-    writer = asyncio.create_task(concurrent_spawn())
-    with pytest.raises(OSError, match="pre-commit fail while spawn waits on workspace lock"):
+    writer = asyncio.create_task(concurrent_followup())
+    with pytest.raises(OSError, match="pre-commit fail while followup waits on workspace lock"):
         await manager.create_report(session.id, payload)
-    child = await writer
+    event = await writer
 
-    assert child.parent_id == root.id
-    assert manager.agent_tree._call_record(workspace_id, spawn_call_id) is not None
+    assert event.call_id == followup_call_id
+    assert manager.task_mailbox._call_record(workspace_id, followup_call_id) is not None
     assert payload.call_id not in manager.sessions[session.id].report_call_ids
     assert not any(report.call_id == payload.call_id for report in manager.reports.values())
 
     fresh = WorkspaceManager()
-    assert fresh.agent_tree._call_record(workspace_id, spawn_call_id) is not None
+    assert fresh.task_mailbox._call_record(workspace_id, followup_call_id) is not None
     assert payload.call_id not in fresh.sessions[session.id].report_call_ids
 
 
@@ -632,7 +571,7 @@ async def test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges
         acked_call_ids=call_ids,
     )
     first = await manager.create_report(session.id, payload)
-    installed, child_run_id = await _install_two_processing_followups(
+    installed, bound_task_id = await _install_two_processing_followups(
         manager, workspace_id, task, session
     )
     assert installed == call_ids
@@ -667,7 +606,7 @@ async def test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges
     assert not (set(rolled_back.delivered_call_ids) & set(call_ids))
     for call_id in call_ids:
         assert rolled_back.pending_messages[call_id] == f"process {call_id}"
-        assert manager.agent_tree._call_record(workspace_id, f"{call_id}:delivered") is None
+        assert call_id not in rolled_back.delivered_call_ids
     assert manager.task_mailbox._call_record(workspace_id, bridge_call_id) is not None
     assert _call_ids(manager).count(bridge_call_id) == 1
 
@@ -677,7 +616,7 @@ async def test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges
     assert not (set(cold_session.delivered_call_ids) & set(call_ids))
     for call_id in call_ids:
         assert cold_session.pending_messages[call_id] == f"process {call_id}"
-        assert cold.agent_tree._call_record(workspace_id, f"{call_id}:delivered") is None
+        assert call_id not in cold_session.delivered_call_ids
     assert cold.reports[first.id].id == first.id
     assert cold.task_mailbox._call_record(workspace_id, bridge_call_id) is not None
     assert _call_ids(cold).count(bridge_call_id) == 1
@@ -689,17 +628,17 @@ async def test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges
     assert not (set(committed.processing_call_ids) & set(call_ids))
     for call_id in call_ids:
         assert call_id not in committed.pending_messages
-        assert cold.agent_tree._call_record(workspace_id, f"{call_id}:delivered") is not None
+        assert call_id in committed.delivered_call_ids
     assert cold.task_mailbox._call_record(workspace_id, bridge_call_id) is not None
     assert _call_ids(cold).count(bridge_call_id) == 1
-    assert cold.agent_tree.get_run(child_run_id).status == AgentRunStatus.RUNNING
+    assert cold.tasks[bound_task_id].status == WorkspaceTaskStatus.WORKING
 
     fresh = WorkspaceManager()
     assert fresh.reports[first.id].id == first.id
     assert set(call_ids) <= set(fresh.sessions[session.id].delivered_call_ids)
     for call_id in call_ids:
         assert call_id not in fresh.sessions[session.id].pending_messages
-        assert fresh.agent_tree._call_record(workspace_id, f"{call_id}:delivered") is not None
+        assert call_id in fresh.sessions[session.id].delivered_call_ids
     assert fresh.task_mailbox._call_record(workspace_id, bridge_call_id) is not None
     assert _call_ids(fresh).count(bridge_call_id) == 1
 
@@ -723,7 +662,7 @@ async def test_predecessor_padded_call_id_post_save_failure_converges(
         acked_call_ids=call_ids,
     )
     first = await manager.create_report(session.id, payload)
-    installed, child_run_id = await _install_two_processing_followups(
+    installed, bound_task_id = await _install_two_processing_followups(
         manager, workspace_id, task, session
     )
     assert installed == call_ids
@@ -762,7 +701,7 @@ async def test_predecessor_padded_call_id_post_save_failure_converges(
     assert not (set(live_after.processing_call_ids) & set(call_ids))
     for call_id in call_ids:
         assert call_id not in live_after.pending_messages
-        assert manager.agent_tree._call_record(workspace_id, f"{call_id}:delivered") is not None
+        assert call_id in live_after.delivered_call_ids
     bridge_call_id = f"report:{first.id}"
     assert manager.task_mailbox._call_record(workspace_id, bridge_call_id) is not None
 
@@ -772,13 +711,13 @@ async def test_predecessor_padded_call_id_post_save_failure_converges(
     assert not (set(cold_session.processing_call_ids) & set(call_ids))
     for call_id in call_ids:
         assert call_id not in cold_session.pending_messages
-        assert cold.agent_tree._call_record(workspace_id, f"{call_id}:delivered") is not None
+        assert call_id in cold_session.delivered_call_ids
     assert cold.task_mailbox._call_record(workspace_id, bridge_call_id) is not None
     assert cold.reports[first.id].id == first.id
 
     retry = await cold.create_report(session.id, payload.model_copy(update={"call_id": padded}))
     assert retry.id == first.id
-    assert cold.agent_tree.get_run(child_run_id).status == AgentRunStatus.RUNNING
+    assert cold.tasks[bound_task_id].status == WorkspaceTaskStatus.WORKING
     assert [
         event.call_id
         for event in cold.task_mailbox._events.get(workspace_id, [])
@@ -1033,20 +972,6 @@ async def test_resident_root_context_ref_does_not_authorize_taskless_ack(
         created_at=now,
         updated_at=now,
     )
-    root_run = AgentRun(
-        id="run-resident-root",
-        workspace_id=workspace_id,
-        parent_id=None,
-        path="run-resident-root",
-        supervisor_id=None,
-        executor_kind=ExecutorKind.RESIDENT_ROOT,
-        status=AgentRunStatus.RUNNING,
-        context_ref=session_id,
-        ack_sequence=0,
-        created_at=now,
-        updated_at=now,
-    )
-    manager.agent_tree._runs[root_run.id] = root_run
     call_id = "resident-delivery-batch-1"
     manager.sessions[session_id] = manager.sessions[session_id].model_copy(
         update={
@@ -1054,9 +979,10 @@ async def test_resident_root_context_ref_does_not_authorize_taskless_ack(
             "pending_messages": {call_id: "batch"},
         }
     )
-    manager.agent_tree._call_index.setdefault(workspace_id, {})[call_id] = {
+    manager.task_mailbox._call_index.setdefault(workspace_id, {})[call_id] = {
         "action": "resident_delivery",
-        "target": root_run.id,
+        "target": "legacy-resident-target",
+        "fingerprint": "resident-delivery-fp",
         "event": None,
     }
 
@@ -1073,5 +999,4 @@ async def test_resident_root_context_ref_does_not_authorize_taskless_ack(
     session = manager.sessions[session_id]
     assert call_id in session.processing_call_ids
     assert call_id not in session.delivered_call_ids
-    assert manager.agent_tree._runs[root_run.id].ack_sequence == 0
     assert manager._verify_call_target(call_id, None, session_id) is False

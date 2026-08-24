@@ -595,10 +595,6 @@ class WorkspaceTaskCreate(BaseModel):
     autonomy_policy: Optional[AutonomyPolicy] = None
     session_id: Optional[str] = None
     clear_context: Optional[bool] = None
-    # Agent tree run id that owns this task. Used by ManagedTaskAdapter to
-    # recover from crashes: a retry can find the existing task instead of
-    # creating a duplicate.
-    agent_run_id: Optional[str] = None
     # Task Graph parent. Independent of related_task_id (session-affinity).
     parent_task_id: Optional[str] = None
 
@@ -668,8 +664,6 @@ class WorkspaceTask(BaseModel):
     path: str = ""
     # Consumer cursor for this Task when it waits on its subtree. Not a Session field.
     consumer_ack_sequence: int = 0
-    # Agent tree run id that owns this task (set by ManagedTaskAdapter.spawn).
-    agent_run_id: Optional[str] = None
     # Call ids of followup messages already ACKed (processed) by the worker.
     # Used for sender-side dedup: a followup with a call_id already in this
     # list is a no-op. Persisted with the task so delivery survives restarts.

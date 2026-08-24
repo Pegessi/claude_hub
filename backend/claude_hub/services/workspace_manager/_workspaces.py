@@ -270,15 +270,6 @@ class _WorkspacesMixin:
             self._monitor_task = None
 
     async def _background_monitor_loop(self) -> None:
-        # One-time agent tree crash recovery for non-managed executors:
-        # retry PENDING runs whose adapter spawn was lost. MANAGED_TASK
-        # lifecycle recovery is Task-owned via dispatch_workspace /
-        # ``_recover_queued_task_ownership``.
-        for workspace_id in list(self.workspaces):
-            try:
-                await self.agent_tree.recover_pending_runs(workspace_id)
-            except Exception:
-                logger.exception("Agent tree recovery failed for workspace %s", workspace_id)
         while True:
             try:
                 await self._refresh_session_statuses(run_auto_continue=True)

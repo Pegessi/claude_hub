@@ -1,6 +1,5 @@
 from fastapi import APIRouter
 
-from .agent_tree import router as agent_tree_router
 from .auth import router as auth_router
 from .clipboard import router as clipboard_router
 from .codex import router as codex_router
@@ -23,6 +22,5 @@ api_router.include_router(clipboard_router)
 api_router.include_router(workspaces_router)
 api_router.include_router(codex_router)
 api_router.include_router(env_presets_router)
-api_router.include_router(agent_tree_router)
 
 __all__ = ["api_router"]

@@ -34,37 +34,9 @@ def _reset_singleton() -> None:
     workspace_manager.task_mailbox._events.clear()
     workspace_manager.task_mailbox._call_index.clear()
     workspace_manager.task_mailbox._next_seq.clear()
-    workspace_manager.agent_tree._runs.clear()
-    workspace_manager.agent_tree._events.clear()
-    workspace_manager.agent_tree._call_index.clear()
     workspace_manager.task_mailbox._waiters.events.clear()
     workspace_manager.task_mailbox._waiters.locks.clear()
     workspace_manager.task_mailbox._waiters.subtree_waiters.clear()
-    workspace_manager.agent_tree._waiters.events.clear()
-    workspace_manager.agent_tree._waiters.locks.clear()
-    workspace_manager.agent_tree._waiters.subtree_waiters.clear()
-
-
-def _runs_dump(manager: WorkspaceManager) -> str:
-    return json.dumps(
-        {
-            run_id: run.model_dump(mode="json")
-            for run_id, run in sorted(manager.agent_tree._runs.items())
-        },
-        sort_keys=True,
-        default=str,
-    )
-
-
-def _agent_events_dump(manager: WorkspaceManager) -> str:
-    return json.dumps(
-        {
-            workspace_id: [event.model_dump(mode="json") for event in events]
-            for workspace_id, events in sorted(manager.agent_tree._events.items())
-        },
-        sort_keys=True,
-        default=str,
-    )
 
 
 @pytest.fixture()
@@ -133,8 +105,6 @@ def test_ordinary_task_tree_events_wait_ack_followup(
     persist_api: tuple[WorkspaceManager, Path], tmp_path: Path
 ) -> None:
     manager, _ = persist_api
-    runs_before = _runs_dump(manager)
-    events_before = _agent_events_dump(manager)
     client = _client()
     workspace_id = _create_workspace(client, tmp_path, "ordinary")
     task = _create_task(client, workspace_id, "solo")
@@ -182,16 +152,12 @@ def test_ordinary_task_tree_events_wait_ack_followup(
         params={"timeout_seconds": 0},
     )
     assert after_ack.json() == []
-    assert _runs_dump(manager) == runs_before
-    assert _agent_events_dump(manager) == events_before
-    assert manager.agent_tree._runs == {}
 
 
 def test_parent_child_subtree_and_wait_ack_cold_cursor(
     persist_api: tuple[WorkspaceManager, Path], tmp_path: Path
 ) -> None:
     manager, _ = persist_api
-    runs_before = _runs_dump(manager)
     client = _client()
     workspace_id = _create_workspace(client, tmp_path, "subtree")
     parent = _create_task(client, workspace_id, "parent")
@@ -243,15 +209,12 @@ def test_parent_child_subtree_and_wait_ack_cold_cursor(
         )
         == []
     )
-    assert fresh.agent_tree._runs == {}
-    assert _runs_dump(manager) == runs_before
 
 
 def test_followup_call_id_idempotent_and_conflict(
     persist_api: tuple[WorkspaceManager, Path], tmp_path: Path
 ) -> None:
     manager, _ = persist_api
-    runs_before = _runs_dump(manager)
     client = _client()
     workspace_id = _create_workspace(client, tmp_path, "call-id")
     task = _create_task(client, workspace_id, "solo")
@@ -274,14 +237,12 @@ def test_followup_call_id_idempotent_and_conflict(
         json={"sequence": 99},
     )
     assert bad_ack.status_code == 400
-    assert _runs_dump(manager) == runs_before
 
 
 def test_cross_workspace_task_paths_rejected(
     persist_api: tuple[WorkspaceManager, Path], tmp_path: Path
 ) -> None:
     manager, _ = persist_api
-    runs_before = _runs_dump(manager)
     client = _client()
     ws_a = _create_workspace(client, tmp_path, "ws-a")
     ws_b = _create_workspace(client, tmp_path, "ws-b")
@@ -304,8 +265,6 @@ def test_cross_workspace_task_paths_rejected(
         ).status_code
         == 404
     )
-    assert _runs_dump(manager) == runs_before
-    assert manager.agent_tree._runs == {}
 
 
 def test_root_task_ack_advances_task_cursor_only(
@@ -334,7 +293,6 @@ def test_root_task_ack_advances_task_cursor_only(
     assert acked.status_code == 200
     assert acked.json()["consumer_ack_sequence"] == sequence
     assert manager.tasks[task["id"]].consumer_ack_sequence == sequence
-    assert manager.agent_tree._runs == {}
     empty = client.post(
         f"/api/workspaces/{workspace_id}/tasks/{task['id']}/wait",
         params={"subtree": True, "timeout_seconds": 0},
@@ -364,7 +322,6 @@ async def test_public_wait_wakes_on_pre_append_followup(
     persist_api: tuple[WorkspaceManager, Path], tmp_path: Path
 ) -> None:
     manager, _ = persist_api
-    runs_before = _runs_dump(manager)
     client = _client()
     workspace_id = _create_workspace(client, tmp_path, "wait-wake")
     task = _create_task(client, workspace_id, "solo")
@@ -395,8 +352,6 @@ async def test_public_wait_wakes_on_pre_append_followup(
 
     assert waited.status_code == 200, waited.text
     assert [item["call_id"] for item in waited.json()] == ["wake-pre-append"]
-    assert _runs_dump(manager) == runs_before
-    assert manager.agent_tree._runs == {}
 
 
 @pytest.mark.asyncio
@@ -404,7 +359,6 @@ async def test_root_task_subtree_wait_wakes_on_pre_append_followup(
     persist_api: tuple[WorkspaceManager, Path], tmp_path: Path
 ) -> None:
     manager, _ = persist_api
-    runs_before = _runs_dump(manager)
     client = _client()
     workspace_id = _create_workspace(client, tmp_path, "root-wake")
     task = _create_task(client, workspace_id, "rootish")
@@ -435,14 +389,12 @@ async def test_root_task_subtree_wait_wakes_on_pre_append_followup(
 
     assert waited.status_code == 200, waited.text
     assert [item["call_id"] for item in waited.json()] == ["wake-root"]
-    assert _runs_dump(manager) == runs_before
 
 
 def test_public_wait_timeout_returns_empty(
     persist_api: tuple[WorkspaceManager, Path], tmp_path: Path
 ) -> None:
     manager, _ = persist_api
-    runs_before = _runs_dump(manager)
     client = _client()
     workspace_id = _create_workspace(client, tmp_path, "wait-timeout")
     task = _create_task(client, workspace_id, "solo")
@@ -455,5 +407,3 @@ def test_public_wait_timeout_returns_empty(
     assert response.status_code == 200
     assert response.json() == []
     assert elapsed >= 0.1
-    assert _runs_dump(manager) == runs_before
-    assert manager.agent_tree._runs == {}
