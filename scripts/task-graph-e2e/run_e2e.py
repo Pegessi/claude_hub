@@ -33,6 +33,14 @@ assert _gp_spec and _gp_spec.loader
 gp = importlib.util.module_from_spec(_gp_spec)
 _gp_spec.loader.exec_module(gp)
 
+_rr_spec = importlib.util.spec_from_file_location(
+    "task_graph_report_resolution",
+    _HARNESS_DIR / "report_resolution.py",
+)
+assert _rr_spec and _rr_spec.loader
+rr = importlib.util.module_from_spec(_rr_spec)
+_rr_spec.loader.exec_module(rr)
+
 _SUITE_ROOT = Path(
     os.environ.get(
         "CLAUDE_HUB_E2E_SUITE_ROOT",
@@ -842,6 +850,21 @@ def main() -> int:
         )
         assert str(evidence["reviewer_report_state"] or "").lower() != "review_started"
 
+        _, task_reports_payload = http(
+            "GET", f"/api/workspaces/{workspace_id}/tasks/{child_id}/reports"
+        )
+        task_reports = (
+            task_reports_payload if isinstance(task_reports_payload, list) else []
+        )
+        report_resolution = rr.assert_seq123_report_resolution(
+            target_events,
+            task_reports,
+            child_task_id=child_id,
+            worker_session_id=worker_session_id,
+            reviewer_session_id=reviewer_session_id,
+        )
+        evidence["target_event_report_resolution"] = report_resolution
+
         waited = task_cli(
             "wait",
             workspace_id,
@@ -968,6 +991,22 @@ def main() -> int:
         assert not reload_extras, (
             "unexpected TaskMailbox extras after first cold reload: "
             f"{reload_extras!r}"
+        )
+        _, task_reports_after_reload = http(
+            "GET", f"/api/workspaces/{workspace_id}/tasks/{child_id}/reports"
+        )
+        evidence["target_event_report_resolution_after_reload"] = (
+            rr.assert_seq123_report_resolution(
+                target_events,
+                (
+                    task_reports_after_reload
+                    if isinstance(task_reports_after_reload, list)
+                    else []
+                ),
+                child_task_id=child_id,
+                worker_session_id=worker_session_id,
+                reviewer_session_id=reviewer_session_id,
+            )
         )
         evidence["target_events_after_reload"] = _target_snapshots(target_after_reload)
 
