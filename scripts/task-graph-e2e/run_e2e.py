@@ -632,8 +632,8 @@ def main() -> int:
             "claude",
             "--task-mode",
             "reviewed",
-            "--payload-json",
-            json.dumps({"parent_task_id": parent_id}),
+            "--parent-task-id",
+            parent_id,
         )
         child_id = child["id"]
         evidence["child_task_id"] = child_id

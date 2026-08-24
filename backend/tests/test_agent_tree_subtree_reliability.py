@@ -399,32 +399,44 @@ async def test_subtree_replay_is_directed_and_wakes_only_opted_in_ancestors(
 async def test_uncertain_emit_failure_is_replayed_once_after_restart(
     manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
+    from claude_hub.models import WorkspaceTaskCreate
+
     workspace_id = _workspace(manager, tmp_path)
     session_id = "uncertain-session"
     call_id = "call-uncertain"
+    task = manager.create_task(
+        workspace_id,
+        WorkspaceTaskCreate(
+            title="worker task",
+            prompt="go",
+            agent_type=AgentType.CLAUDE,
+        ),
+    )
+    manager.tasks[task.id] = task.model_copy(update={"session_id": session_id})
     manager.sessions[session_id] = _session(
         session_id,
         workspace_id,
+        role=WorkspaceSessionRole.ORCHESTRATOR,
+        task_id=task.id,
+        current_task_id=task.id,
         processing_call_ids=[call_id],
         pending_messages={call_id: "payload"},
     )
-    manager.agent_tree.create_root_run(
-        workspace_id=workspace_id,
-        executor_kind=ExecutorKind.NATIVE_SUBAGENT,
-        context_ref=session_id,
-    )
     manager._save_state()
 
-    original_persist = manager.agent_tree._persist
+    original_persist = manager.task_mailbox._persist
+    calls = {"n": 0}
 
-    def fail_event_persist() -> None:
-        raise OSError("simulated event persist failure")
+    def flaky_persist() -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("simulated event persist failure")
+        return original_persist()
 
-    monkeypatch.setattr(manager.agent_tree, "_persist", fail_event_persist)
-    with pytest.raises(OSError, match="simulated event persist failure"):
-        manager._mark_processing_as_uncertain(session_id, [call_id])
+    monkeypatch.setattr(manager.task_mailbox, "_persist", flaky_persist)
+    manager._mark_processing_as_uncertain(session_id, [call_id])
     assert call_id in manager.sessions[session_id].uncertain_call_ids
-    monkeypatch.setattr(manager.agent_tree, "_persist", original_persist)
+    monkeypatch.setattr(manager.task_mailbox, "_persist", original_persist)
 
     restarted = WorkspaceManager()
     assert call_id in restarted.sessions[session_id].uncertain_call_ids
@@ -432,10 +444,16 @@ async def test_uncertain_emit_failure_is_replayed_once_after_restart(
     await restarted.agent_tree.recover_pending_runs(workspace_id)
     events = [
         event
-        for event in restarted.agent_tree._events[workspace_id]
+        for event in restarted.task_mailbox._events.get(workspace_id, [])
         if event.call_id == f"delivery:uncertain:{call_id}"
     ]
     assert len(events) == 1
+    assert events[0].task_id == task.id
+    assert not [
+        event
+        for event in restarted.agent_tree._events.get(workspace_id, [])
+        if event.call_id == f"delivery:uncertain:{call_id}"
+    ]
 
 
 def test_legacy_session_without_root_keeps_uncertain_state(

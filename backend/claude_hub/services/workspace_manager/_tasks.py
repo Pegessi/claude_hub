@@ -739,6 +739,19 @@ class _TasksMixin:
             await self._followup_existing_task(task.id, message, call_id)
             return event
 
+    def _linked_compat_run_ids(self, task: WorkspaceTask) -> set[str]:
+        """Compat AgentRun ids owned by a Task being deleted."""
+
+        run_ids: set[str] = {compat_run_id_for_task(task)}
+        if task.agent_run_id:
+            run_ids.add(task.agent_run_id)
+        for run in self.agent_tree._runs.values():
+            if run.workspace_id != task.workspace_id:
+                continue
+            if run.context_ref == task.id:
+                run_ids.add(run.id)
+        return run_ids
+
     def _tasks_linked_to_compat_run(self, workspace_id: str, run: AgentRun) -> list[WorkspaceTask]:
         """Task-as-source candidates. ``Task.agent_run_id`` wins, then compat id."""
         linked = [

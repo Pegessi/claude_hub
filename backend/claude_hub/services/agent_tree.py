@@ -2046,6 +2046,51 @@ class AgentTreeManager:
     # Persistence (durable mailbox / event stream)
     # ------------------------------------------------------------------
 
+    def purge_runs(self, workspace_id: str, run_ids: set[str]) -> None:
+        """Remove compat runs and their events; rebuild call index and next_seq."""
+
+        if not run_ids:
+            return
+        for run_id in run_ids:
+            run = self._runs.get(run_id)
+            if run is not None and run.workspace_id == workspace_id:
+                self._runs.pop(run_id, None)
+        remaining = [
+            event
+            for event in self._events.get(workspace_id, [])
+            if event.agent_run_id not in run_ids
+        ]
+        self._events[workspace_id] = remaining
+        ws_calls: Dict[str, dict] = {}
+        max_seq = 0
+        for event in remaining:
+            action = event.action or "emit"
+            target = event.target or event.agent_run_id
+            fingerprint = event.fingerprint or _request_fingerprint(
+                action,
+                {
+                    "sequence": event.sequence,
+                    "call_id": event.call_id,
+                    "agent_run_id": event.agent_run_id,
+                    "event_type": event.type.value,
+                    "author": event.author,
+                    "recipient": event.recipient,
+                },
+            )
+            ws_calls[event.call_id] = {
+                "action": action,
+                "target": target,
+                "fingerprint": fingerprint,
+                "event": event,
+            }
+            if event.sequence > max_seq:
+                max_seq = event.sequence
+        self._call_index[workspace_id] = ws_calls
+        if remaining:
+            self._next_seq[workspace_id] = max_seq + 1
+        else:
+            self._next_seq.pop(workspace_id, None)
+
     def to_dict(self, workspace_id: str) -> dict:
         """Serialize runs and events for a workspace to a JSON-safe dict."""
         runs = [
@@ -2155,9 +2200,11 @@ class AgentTreeManager:
     async def recover_pending_runs(self, workspace_id: str) -> None:
         """Recover runs that were persisted but never reached a consistent state.
 
-        ``MANAGED_TASK`` runs are skipped entirely: Task lifecycle, dispatch
-        envelopes, and queued-ownership recovery live on WorkspaceTask /
-        ``_recover_queued_task_ownership``, not on raw AgentRun mutation.
+        ``MANAGED_TASK`` and legacy ``RESIDENT_ROOT`` runs are skipped entirely:
+        Task lifecycle, dispatch envelopes, and queued-ownership recovery live on
+        WorkspaceTask / ``_recover_queued_task_ownership``, not on raw AgentRun
+        mutation. ``RESIDENT_ROOT`` blobs are load/migration-only and must never
+        be advanced or emit runtime events during recovery.
 
         After a crash, a non-managed run may be in an inconsistent state:
 
@@ -2193,7 +2240,7 @@ class AgentTreeManager:
         for run in list(self._runs.values()):
             if run.workspace_id != workspace_id:
                 continue
-            if run.executor_kind == ExecutorKind.MANAGED_TASK:
+            if run.executor_kind in {ExecutorKind.MANAGED_TASK, ExecutorKind.RESIDENT_ROOT}:
                 continue
 
             run_events = sorted(

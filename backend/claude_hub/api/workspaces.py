@@ -40,6 +40,7 @@ from ..models import (
 )
 from ..models.task_mailbox import TaskEvent
 from ..services import workspace_manager
+from ..services.task_graph import TaskHasDescendantsError
 from ..services.task_mailbox import TaskCallIdConflict
 from ..services.workspace_manager._constants import DeliveryUncertain
 from ..services.workspace_manager._reports import ReportCallIdConflict
@@ -85,6 +86,8 @@ def _task_public_http(exc: Exception) -> HTTPException:
     if isinstance(exc, KeyError):
         return HTTPException(status_code=404, detail=str(exc) or "Not found")
     if isinstance(exc, TaskCallIdConflict):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, TaskHasDescendantsError):
         return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, (ValueError, RuntimeError)):
         return HTTPException(status_code=400, detail=str(exc))
@@ -488,11 +491,13 @@ async def delete_task(
     task_id: str,
     current_user: User = Depends(get_current_user),
 ) -> None:
-    """Delete a workspace task and its reports."""
+    """Delete a leaf workspace task and its durable reports/events."""
     try:
         workspace_manager.delete_task(task_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Task not found") from e
+    except TaskHasDescendantsError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
 
 @router.post("/tasks/{task_id}/feedback/reap", response_model=FeedbackReaperRun)

@@ -71,6 +71,14 @@ class _NormalizeMixin:
         has_verdict = normalized.get("review_completed_at") is not None
         normalized.setdefault("reviewed_cycle", 1 if has_verdict else 0)
         normalized.setdefault("review_cycle", max(1, normalized["reviewed_cycle"]))
+        if has_verdict:
+            review_cycle = int(normalized["review_cycle"])
+            reviewed_cycle = int(normalized["reviewed_cycle"])
+            if reviewed_cycle < review_cycle:
+                # Production seq4 root cause: persisted reviewed_cycle=0 with a
+                # verdict timestamp bypasses the reaper's sealed-round guard on
+                # cold load because setdefault does not repair explicit zeros.
+                normalized["reviewed_cycle"] = review_cycle
         normalized.setdefault("review_requested_at", None)
         normalized.setdefault("review_completed_at", None)
         normalized.setdefault("review_skipped_at", None)

@@ -814,8 +814,8 @@ class _MessagingMixin:
 
         self._save_state()
 
-        # Emit a delivery:uncertain event for each call_id so the supervisor
-        # (resident root run) can observe the condition.
+        # Emit delivery:uncertain on TaskMailbox when the session is assigned to
+        # a Task; standalone sessions keep fail-closed state on the session only.
         for call_id in call_ids:
             self._emit_delivery_uncertain(session.workspace_id, session_id, call_id)
 
@@ -826,47 +826,66 @@ class _MessagingMixin:
         )
 
     def _emit_delivery_uncertain(self, workspace_id: str, session_id: str, call_id: str) -> None:
-        """Emit a ``delivery:uncertain`` event to the workspace's resident root run.
+        """Record ``delivery:uncertain`` on TaskMailbox for Task-assigned sessions.
 
-        This makes the fail-closed condition visible to the supervisor so an
-        operator can decide whether to retry the delivery.
+        Standalone Resident/legacy sessions without a Task assignment keep
+        fail-closed delivery state on the session (and bound task mirror) only.
+        No AgentTree or legacy ``resident_root`` supervisor events are emitted.
         """
-        from claude_hub.models.agent_tree import AgentEventType
 
-        root_run = self.agent_tree.get_run_by_context_ref(workspace_id, session_id)
-        if root_run is None:
-            # Fall back to the workspace's root run (the resident root).
-            for run in self.agent_tree._runs.values():
-                if run.workspace_id == workspace_id and run.parent_id is None:
-                    root_run = run
-                    break
-        if root_run is None:
-            # Legacy/non-Agent-Tree sessions have no supervisor mailbox.
-            # Their fail-closed state remains durable on the session/task,
-            # but there is no applicable event recipient.
+        from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
+
+        from ..task_graph import make_task_consumer_key
+
+        session = self.sessions.get(session_id)
+        if session is None or session.workspace_id != workspace_id:
             return
 
-        self.agent_tree._append_event(
-            workspace_id=workspace_id,
-            agent_run_id=root_run.id,
-            event_type=AgentEventType.PROGRESS,
-            author=root_run.id,
-            recipient=root_run.id,
-            call_id=f"delivery:uncertain:{call_id}",
-            action="delivery:uncertain",
-            target=session_id,
-            fingerprint=_request_fingerprint(
-                "delivery:uncertain",
-                {"call_id": call_id, "session_id": session_id},
-            ),
-            payload={
-                "call_id": call_id,
-                "session_id": session_id,
-                "reason": "in-flight call_id lost on session stop / crash; "
-                "cannot prove delivery. Operator retry required.",
-            },
-            rollback_on_error=False,
+        task_id = session.current_task_id or session.task_id
+        if not task_id:
+            return
+
+        task = self.tasks.get(task_id)
+        if task is None or task.workspace_id != workspace_id:
+            return
+        if session_id not in {task.session_id, task.review_session_id}:
+            return
+
+        actor_role = (
+            TaskActorRole.REVIEWER
+            if session_id == task.review_session_id
+            else TaskActorRole.WORKER
         )
+        uncertain_call_id = f"delivery:uncertain:{call_id}"
+        try:
+            self.task_mailbox.append_event(
+                workspace_id=workspace_id,
+                task_id=task.id,
+                actor_session_id=session_id,
+                actor_role=actor_role,
+                event_type=TaskEventType.PROGRESS,
+                call_id=uncertain_call_id,
+                action="delivery:uncertain",
+                target=session_id,
+                consumer_key=make_task_consumer_key(task.id),
+                payload={
+                    "call_id": call_id,
+                    "session_id": session_id,
+                    "reason": "in-flight call_id lost on session stop / crash; "
+                    "cannot prove delivery. Operator retry required.",
+                },
+                persist=True,
+                wake=False,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to append delivery:uncertain Task event workspace_id=%s "
+                "session_id=%s call_id=%s task_id=%s",
+                workspace_id,
+                session_id,
+                call_id,
+                task.id,
+            )
 
     async def retry_uncertain_delivery(
         self,
