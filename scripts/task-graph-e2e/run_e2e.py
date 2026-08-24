@@ -18,8 +18,11 @@ from pathlib import Path
 from typing import Any
 
 E2E_HELPERS = Path(__file__).resolve().parents[1] / "agent-tree-e2e"
+_HARNESS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(E2E_HELPERS))
+sys.path.insert(0, str(_HARNESS_DIR))
 
+import git_provenance as gp  # noqa: E402
 import run_e2e as base  # noqa: E402
 
 _SUITE_ROOT = Path(
@@ -537,12 +540,21 @@ def main() -> int:
     from claude_hub.models import WorkspaceTask  # noqa: WPS433
     from claude_hub.services import task_graph as tg  # noqa: WPS433
 
+    gp.forbid_git_provenance_env_overrides()
+    git_pre = gp.read_git_provenance(gp.delivery_source_root())
+    gp.require_clean_provenance(git_pre)
+
     evidence: dict = {
         "port": base.PORT,
         "home": str(base.E2E_ROOT),
         "repo": str(base.REPO),
         "suite_root": str(_SUITE_ROOT),
         "evidence_path": str(EVIDENCE),
+        "branch": git_pre["branch"],
+        "git_sha": git_pre["git_sha"],
+        "dirty": git_pre["dirty"],
+        "source_root": git_pre["source_root"],
+        "git_provenance_pre": git_pre,
         "driver": "claude-hub task + workspace tasks API",
         "harness_injected_report": False,
         "forbidden_surfaces": [
@@ -1097,6 +1109,8 @@ def main() -> int:
             evidence["REPO_EXISTS_after_cleanup"] = repo_path.exists()
             evidence["home_removed"] = not home_path.exists()
             evidence["repo_removed"] = not repo_path.exists()
+            git_post = gp.read_git_provenance(gp.delivery_source_root())
+            evidence.update(gp.finalize_git_provenance_evidence(git_pre, git_post))
             _SUITE_ROOT.mkdir(parents=True, exist_ok=True)
             EVIDENCE.write_text(json.dumps(evidence, indent=2, default=str))
             print(json.dumps(evidence, indent=2, default=str))
