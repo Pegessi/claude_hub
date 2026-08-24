@@ -23,6 +23,7 @@ from .task_graph import (
     tasks_in_subtree,
 )
 from .task_migration import linked_run_for_task, task_for_run
+from . import workspace_state_policy as state_policy
 
 logger = logging.getLogger(__name__)
 
@@ -1038,6 +1039,12 @@ class TaskMailbox:
                 continue
             if report.call_id and report.call_id in covered_call_ids:
                 continue
+            if self._wm._is_fallback_reaper_report(report):
+                review_cycle = int(report.review_cycle or task.review_cycle or 0)
+                if state_policy.current_round_has_verdict(
+                    task.review_cycle, task.reviewed_cycle
+                ) or self._wm._review_cycle_has_reviewer_activity(task.id, review_cycle):
+                    continue
             actor_session_id, actor_role = self._wm._task_actor_for_report(report)
             event_type = self._wm._task_event_type_for_report(report.state, task)
             consumer_key = task_supervisor_consumer_key(task)

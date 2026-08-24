@@ -806,6 +806,34 @@ class _TmuxQueriesMixin:
         latest = max(candidates)
         return (now - latest).total_seconds() < REVIEW_REAPER_DISPATCH_GRACE_SECONDS
 
+    def _is_fallback_reaper_report(self, report: AgentReport) -> bool:
+        if report.review_decision != ReviewDecision.REQUEST:
+            return False
+        blob = " ".join(
+            part
+            for part in (report.message, report.message_en, report.review_reason)
+            if isinstance(part, str)
+        ).lower()
+        return "fallback reaper" in blob or "background dispatcher" in blob
+
+    def _review_cycle_has_reviewer_activity(self, task_id: str, review_cycle: int) -> bool:
+        """True when review_started or a terminal reviewer verdict exists for the cycle."""
+
+        reviewer_states = {
+            AgentReportState.REVIEW_STARTED,
+            AgentReportState.REVIEW_PASSED,
+            AgentReportState.REVIEW_FAILED,
+            AgentReportState.REVIEW_NEEDS_INPUT,
+        }
+        for report in self.reports.values():
+            if report.task_id != task_id:
+                continue
+            if int(report.review_cycle or 0) != review_cycle:
+                continue
+            if report.state in reviewer_states:
+                return True
+        return False
+
     async def _reap_stuck_reviews(self, workspace_id: str) -> int:
         """Fallback reaper: find tasks whose review dispatch appears stuck
         (review-requested or REVIEW status with no active reviewer) and
@@ -843,6 +871,14 @@ class _TmuxQueriesMixin:
                     task.id,
                     task.review_cycle,
                     task.reviewed_cycle,
+                )
+                continue
+            if self._review_cycle_has_reviewer_activity(task.id, task.review_cycle):
+                logger.debug(
+                    "Skipping fallback reaper for task_id=%s: reviewer activity "
+                    "already recorded for review_cycle=%s",
+                    task.id,
+                    task.review_cycle,
                 )
                 continue
             needs_review_dispatch = False

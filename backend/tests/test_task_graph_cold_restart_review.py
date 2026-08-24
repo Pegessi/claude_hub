@@ -356,3 +356,74 @@ def test_cold_restart_repairs_stale_reviewed_cycle_when_verdict_present(
     assert max(event.sequence for event in after_events) == max_sequence
     assert all("fallback reaper" not in msg.lower() for _, msg in sent_messages)
     _assert_all_report_ids_resolve(reloaded, after_events)
+
+
+def test_cold_restart_skips_orphan_fallback_reaper_report_backfill(
+    cold_review_env: tuple[Path, list[tuple[str, str]]],
+    tmp_path: Path,
+) -> None:
+    """Orphan fallback-reaper reports must not backfill as seq4 after a verdict."""
+
+    client = TestClient(app)
+    repo = tmp_path / "repo-orphan"
+    repo.mkdir()
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Orphan Reaper", "path": str(repo), "session_prefix": "orphan"},
+    ).json()
+    workspace_id = workspace["id"]
+    parent = client.post(
+        f"/api/workspaces/{workspace_id}/tasks",
+        json={"title": "Parent orphan", "prompt": "Supervise"},
+    ).json()
+    parent_id = parent["id"]
+    child = client.post(
+        f"/api/workspaces/{workspace_id}/tasks",
+        json={
+            "title": "Child orphan",
+            "prompt": "Work",
+            "parent_task_id": parent_id,
+        },
+    ).json()
+    child_id = child["id"]
+
+    before_events, max_sequence = _run_review_cycle(
+        client,
+        workspace_id=workspace_id,
+        parent_id=parent_id,
+        child_id=child_id,
+    )
+    assert len(before_events) == 3
+
+    state_file = cold_review_env[0] / workspace_id / "state.json"
+    disk = json.loads(state_file.read_text(encoding="utf-8"))
+    orphan_id = "00000000-0000-4000-8000-000000000099"
+    judged = workspace_manager.tasks[child_id]
+    disk["reports"].append(
+        {
+            "id": orphan_id,
+            "workspace_id": workspace_id,
+            "task_id": child_id,
+            "session_id": judged.session_id,
+            "state": "ready_for_review",
+            "message": (
+                "Re-dispatching stuck review task (fallback reaper); "
+                "prior reviewer dispatch did not complete."
+            ),
+            "review_decision": "request",
+            "review_reason": "Stuck review recovered by background dispatcher.",
+            "review_cycle": judged.review_cycle,
+            "created_at": judged.review_completed_at.isoformat()
+            if judged.review_completed_at
+            else judged.updated_at.isoformat(),
+            "changed_files": [],
+        }
+    )
+    state_file.write_text(json.dumps(disk), encoding="utf-8")
+
+    _reset_singleton()
+    reloaded = WorkspaceManager()
+    after_events = _parent_subtree_events(reloaded, workspace_id, parent_id)
+    assert len(after_events) == len(before_events)
+    assert max(event.sequence for event in after_events) == max_sequence
+    _assert_all_report_ids_resolve(reloaded, after_events)

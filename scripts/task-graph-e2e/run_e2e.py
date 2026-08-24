@@ -945,6 +945,10 @@ def main() -> int:
                 reload_extras,
             )
         )
+        assert not reload_extras, (
+            "unexpected TaskMailbox extras after first cold reload: "
+            f"{reload_extras!r}"
+        )
         evidence["target_events_after_reload"] = _target_snapshots(target_after_reload)
 
         parent_after = task_cli(
@@ -1047,6 +1051,10 @@ def main() -> int:
                     post_ack_extras,
                 )
             )
+        assert not post_ack_extras, (
+            "unexpected TaskMailbox extras after ack cold reload wait: "
+            f"{post_ack_extras!r}"
+        )
         evidence["wait_after_reload"] = [
             {"call_id": item.get("call_id"), "sequence": item.get("sequence")}
             for item in replay_records
