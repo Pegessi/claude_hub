@@ -25,6 +25,7 @@ Every `events` / `wait` / `ack` call requires an explicit `TASK_ID`
 stderr `call_id=<id>`). `wait` does not ACK unless `--ack`.
 
 ```bash
+uv run claude-hub --json task create WS_ID --title "Child step" --prompt "Do the sub-step." --parent-task-id PARENT_TASK_ID
 uv run claude-hub --json task tree WS_ID
 uv run claude-hub --json task tree WS_ID TASK_ID
 uv run claude-hub --json task events WS_ID TASK_ID --since-sequence 0
@@ -70,11 +71,12 @@ and TaskMailbox events keyed by `task:<task_id>`.
 - **TaskMailbox.** Append-only `TaskEvent` log (`sequence` monotonic). Agents
   wait/ack/followup/abort through Task APIs. Identical `call_id` + payload →
   idempotent replay (**409** on followup conflict).
-- **Optional Resident agent.** An independent, long-running optional Agent.
-  It is **not** part of the Task Graph: no root Task, no implicit subtree, no
-  mailbox consumer, no Agent Tree supervisor role. If it participates in work,
-  assign it explicitly on a Task (`POST .../tasks/{id}/start` with
-  `target_session_id`) like any other session.
+- **Optional Resident agent.** An independent, long-running optional Agent for
+  periodic or free-form workspace work. It is **not** part of the Task Graph: no
+  root Task, no implicit subtree, no mailbox consumer, no Agent Tree supervisor
+  role, and **must not** be bound to Tasks via `POST .../tasks/{id}/start`
+  (`target_session_id`). Task orchestration uses ordinary worker/reviewer
+  sessions only.
 - **Agent Tree (compat projection only).** `/api/agent-tree/*` mirrors linked
   runs for legacy callers (`Task.agent_run_id` links). Ordinary Tasks project to
   `task.id`; runtime resolution uses canonical `Task.agent_run_id` only —

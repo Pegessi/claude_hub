@@ -452,6 +452,11 @@ def task_review(ctx: click.Context, task_id: str, workspace_id: Optional[str]) -
     help="Review profile (repeatable).",
 )
 @click.option("--related-task-id", default=None, help="Related task id.")
+@click.option(
+    "--parent-task-id",
+    default=None,
+    help="Parent Task id for an explicit Task Graph edge.",
+)
 @click.option("--session-id", default=None, help="Target existing session id.")
 @click.option(
     "--clear-context/--no-clear-context",
@@ -476,6 +481,7 @@ def task_create(
     execution_complexity: str,
     review_profiles: tuple,
     related_task_id: Optional[str],
+    parent_task_id: Optional[str],
     session_id: Optional[str],
     clear_context: Optional[bool],
     attachment_json: tuple,
@@ -491,6 +497,7 @@ def task_create(
         execution_complexity=execution_complexity,
         review_profiles=list(review_profiles),
         related_task_id=related_task_id,
+        parent_task_id=parent_task_id,
         session_id=session_id,
         clear_context=clear_context,
     )

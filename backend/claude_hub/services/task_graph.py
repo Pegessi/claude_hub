@@ -16,6 +16,26 @@ logger = logging.getLogger(__name__)
 TASK_CONSUMER_PREFIX = "task:"
 
 
+class TaskHasDescendantsError(ValueError):
+    """Raised when delete is attempted on a Task that still has child Tasks."""
+
+
+def task_has_descendants(
+    tasks: Dict[str, WorkspaceTask],
+    workspace_id: str,
+    task: WorkspaceTask,
+) -> bool:
+    """Return True if any direct or indirect child Task exists under ``task``."""
+
+    prefix = f"{task.path}/"
+    return any(
+        other.workspace_id == workspace_id
+        and other.id != task.id
+        and other.path.startswith(prefix)
+        for other in tasks.values()
+    )
+
+
 def compat_run_id_for_task(task: WorkspaceTask) -> str:
     """Stable compat projection id: linked run.id or the Task id itself."""
 

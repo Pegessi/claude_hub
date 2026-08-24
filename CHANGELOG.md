@@ -5,6 +5,23 @@
 
 ## Unreleased
 
+### fix: seal review rounds on cold load and harden Task Graph blockers
+
+- **P1-1:** Leaf-only Task delete with **409** when descendants exist; atomic
+  cleanup of TaskMailbox events, call index, compat runs, reports, and session
+  bindings with save rollback.
+- **P1-2:** Runtime isolation for legacy `resident_root` — skip in
+  `recover_pending_runs`; delivery-uncertain events write TaskMailbox only for
+  Task-bound sessions (no workspace root AgentRun fallback).
+- **P1-3:** Repair persisted `reviewed_cycle=0` when `review_completed_at` is
+  set during task normalization so cold reload does not re-trigger the fallback
+  reaper (seq4 extras). Regression:
+  `tests/test_task_graph_cold_restart_review.py`.
+- **P2-1:** Clarify Resident agent contract in `docs/AGENT_TREE.md` — not
+  bindable to Tasks via `target_session_id`.
+- **P2-2:** Add `claude-hub task create --parent-task-id` (explicit flag wins
+  over `--payload-json`).
+
 ### feat: unify Agent Tree into Workspace Task Graph
 
 - Make **Task Graph / TaskMailbox** the canonical coordination plane per

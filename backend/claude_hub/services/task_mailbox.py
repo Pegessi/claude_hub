@@ -745,6 +745,17 @@ class TaskMailbox:
         self._rebuild_call_index(workspace_id)
         self._next_seq[workspace_id] = self._workspace_max_sequence(workspace_id) + 1
 
+    def purge_task_events(self, workspace_id: str, task_id: str) -> None:
+        """Remove durable Task events and call-index entries for one Task."""
+
+        remaining = [
+            event
+            for event in self._events.get(workspace_id, [])
+            if event.task_id != task_id
+        ]
+        self._events[workspace_id] = remaining
+        self._rebuild_call_index(workspace_id)
+
     def _rebuild_call_index(self, workspace_id: str) -> None:
         ws_calls: Dict[str, dict[str, Any]] = {}
         for event in self._events.get(workspace_id, []):

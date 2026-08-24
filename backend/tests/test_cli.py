@@ -125,6 +125,37 @@ def test_task_create_body(monkeypatch):
     assert body["execution_complexity"] == "auto"
 
 
+def test_task_create_parent_task_id_and_payload_merge(monkeypatch):
+    bodies: List[Dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(201, json={"id": "child-1", "parent_task_id": "parent-cli"})
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "task",
+            "create",
+            "ws1",
+            "--title",
+            "Child",
+            "--prompt",
+            "sub-step",
+            "--parent-task-id",
+            "parent-cli",
+            "--payload-json",
+            '{"parent_task_id":"parent-json","prompt":"from json"}',
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert bodies[0]["parent_task_id"] == "parent-cli"
+    assert bodies[0]["prompt"] == "sub-step"
+    assert bodies[0]["title"] == "Child"
+
+
 def test_task_start_omits_none(monkeypatch):
     bodies: List[Dict[str, Any]] = []
 
