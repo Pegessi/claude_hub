@@ -99,3 +99,30 @@ def test_run_e2e_writes_git_provenance_in_finally() -> None:
     assert "finalize_git_provenance_evidence" in source
     assert "forbid_git_provenance_env_overrides" in source
     assert "require_clean_provenance" in source
+
+
+def test_run_sh_exports_delivery_source_root() -> None:
+    run_sh = (_HARNESS_DIR / "run.sh").read_text(encoding="utf-8")
+    assert 'export CLAUDE_HUB_E2E_SOURCE_ROOT="$ROOT"' in run_sh
+
+
+def test_read_git_provenance_matches_head_on_clean_delivery_repo() -> None:
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if dirty:
+        pytest.skip("delivery worktree dirty")
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    provenance = gp.read_git_provenance(_REPO_ROOT)
+    assert provenance["git_sha"] == head
+    assert provenance["dirty"] is False
