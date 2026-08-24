@@ -873,14 +873,6 @@ class _TmuxQueriesMixin:
                     task.reviewed_cycle,
                 )
                 continue
-            if self._review_cycle_has_reviewer_activity(task.id, task.review_cycle):
-                logger.debug(
-                    "Skipping fallback reaper for task_id=%s: reviewer activity "
-                    "already recorded for review_cycle=%s",
-                    task.id,
-                    task.review_cycle,
-                )
-                continue
             needs_review_dispatch = False
             if state_policy.review_in_flight(
                 task.review_requested_at, task.review_completed_at

@@ -29,9 +29,7 @@ def task_has_descendants(
 
     prefix = f"{task.path}/"
     return any(
-        other.workspace_id == workspace_id
-        and other.id != task.id
-        and other.path.startswith(prefix)
+        other.workspace_id == workspace_id and other.id != task.id and other.path.startswith(prefix)
         for other in tasks.values()
     )
 

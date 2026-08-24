@@ -413,9 +413,11 @@ def test_cold_restart_skips_orphan_fallback_reaper_report_backfill(
             "review_decision": "request",
             "review_reason": "Stuck review recovered by background dispatcher.",
             "review_cycle": judged.review_cycle,
-            "created_at": judged.review_completed_at.isoformat()
-            if judged.review_completed_at
-            else judged.updated_at.isoformat(),
+            "created_at": (
+                judged.review_completed_at.isoformat()
+                if judged.review_completed_at
+                else judged.updated_at.isoformat()
+            ),
             "changed_files": [],
         }
     )
