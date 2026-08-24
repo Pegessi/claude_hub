@@ -300,7 +300,17 @@ def assert_no_legacy_keys_on_disk(home: Path) -> dict[str, Any]:
     return disk
 
 
-def fetch_migration_snapshot() -> dict[str, Any]:
+def fetch_disk_event_snapshot(home: Path) -> dict[str, Any]:
+    disk = disk_state(home)
+    events = disk.get("task_events") or []
+    return {
+        "event_call_ids": [item.get("call_id") for item in events],
+        "event_sequences": [item.get("sequence") for item in events],
+        "task_event_count": len(events),
+    }
+
+
+def fetch_migration_snapshot(home: Path) -> dict[str, Any]:
     subtree = http("GET", f"/api/workspaces/{WORKSPACE_ID}/tasks/{TASK_PARENT}/tree")
     subtree = subtree if isinstance(subtree, list) else []
     by_id = {item["id"]: item for item in subtree if isinstance(item, dict) and item.get("id")}
@@ -313,18 +323,13 @@ def fetch_migration_snapshot() -> dict[str, Any]:
         raise RuntimeError(f"expected tasks missing from API tree: {sorted(by_id)}")
     child = by_id[TASK_CHILD]
     parent = by_id[TASK_PARENT]
-    events = http(
-        "GET",
-        f"/api/workspaces/{WORKSPACE_ID}/tasks/{TASK_PARENT}/events",
-        query={"since_sequence": "0"},
-    )
-    events = events if isinstance(events, list) else []
+    disk_events = fetch_disk_event_snapshot(home)
     return {
         "parent": parent,
         "child": child,
-        "events": events,
-        "event_call_ids": [item.get("call_id") for item in events],
-        "event_sequences": [item.get("sequence") for item in events],
+        "event_call_ids": disk_events["event_call_ids"],
+        "event_sequences": disk_events["event_sequences"],
+        "task_event_count": disk_events["task_event_count"],
         "parent_consumer_ack_sequence": parent.get("consumer_ack_sequence"),
         "child_consumer_ack_sequence": child.get("consumer_ack_sequence"),
         "child_parent_task_id": child.get("parent_task_id"),
@@ -397,7 +402,7 @@ def main() -> int:
         backend = base.start_backend(base.E2E_ROOT, launch_env)
         base.wait_health()
         assert_agent_tree_routes_gone()
-        snap1 = fetch_migration_snapshot()
+        snap1 = fetch_migration_snapshot(base.E2E_ROOT)
         disk1 = assert_no_legacy_keys_on_disk(base.E2E_ROOT)
         evidence["cold_starts"].append(
             {
@@ -429,7 +434,7 @@ def main() -> int:
             raise RuntimeError("child consumer_ack_sequence not migrated from linked run")
 
         backend = _cold_restart(backend, launch_env)
-        snap2 = fetch_migration_snapshot()
+        snap2 = fetch_migration_snapshot(base.E2E_ROOT)
         disk2 = assert_no_legacy_keys_on_disk(base.E2E_ROOT)
         evidence["cold_starts"].append(
             {
