@@ -20,8 +20,7 @@ resident agents, sending follow-up instructions, and reviewing progress reports.
   parent Tasks wait/ACK subtree events on `task:<task_id>` cursors
   (`claude-hub task tree/events/wait/ack/followup/start`). Worker and reviewer
   agents are ordinary Task session assignments; the optional Resident is an
-  independent long-running agent (not a mailbox consumer). `/api/agent-tree/*`
-  and `claude-hub agent-tree` are legacy compat projection only.
+  independent long-running agent (not a mailbox consumer).
 - Track task state across Todo, Queued, Working, Review, and Done columns.
 - Send follow-up messages from the task detail panel without leaving the board.
 - Record agent reports with changed files, validation, risks, and review status.
@@ -170,8 +169,6 @@ uv run claude-hub --json task events <WORKSPACE_ID> <TASK_ID> --subtree --since-
 uv run claude-hub --json task wait <WORKSPACE_ID> <TASK_ID> --subtree --since-sequence 0
 uv run claude-hub --json task ack <WORKSPACE_ID> <TASK_ID> <SEQUENCE>
 uv run claude-hub --json task followup <WORKSPACE_ID> <TASK_ID> --message "..."
-# Legacy compat projection only (linked AgentRun ids; new work uses task above):
-# uv run claude-hub --json agent-tree roots|spawn|wait|ack ...
 ```
 
 Loopback requests bypass auth, so a local backend needs no token; commands exit
@@ -275,7 +272,7 @@ rules). **No change — even a small one — should be made directly on `main`.*
 ## Reference Docs
 
 - [docs/TASK_GRAPH.md](docs/TASK_GRAPH.md): Task Graph / TaskMailbox agent guide
-  (`claude-hub task` primary; `claude-hub agent-tree` legacy compat only)
+  (`claude-hub task` primary)
 - [CLAUDE.md](CLAUDE.md): project conventions and development workflow
 - [CHANGELOG.md](CHANGELOG.md): merge-level change history
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): auth and public deployment setup

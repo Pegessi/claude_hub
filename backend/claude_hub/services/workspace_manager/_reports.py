@@ -980,7 +980,7 @@ class _ReportsMixin:
             else task.workspace_id if task is not None else None
         )
 
-        # ---- Agent-tree lifecycle reconciliation (BEFORE delivered mutation) ----
+        # ---- TaskMailbox followup reconciliation (BEFORE delivered mutation) ----
         #
         # reconcile_followup_outcome and the followup:delivered event append
         # each TaskMailbox persist -> self._save_state(), which writes
