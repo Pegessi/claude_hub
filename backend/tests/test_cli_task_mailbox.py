@@ -89,6 +89,26 @@ def test_help_registers_task_mailbox_commands() -> None:
     assert "interrupt" not in group.output
 
 
+def test_wait_ack_help_requires_task_identity_without_resident_cursor() -> None:
+    runner = CliRunner()
+
+    wait_help = runner.invoke(cli, ["task", "wait", "--help"])
+    ack_help = runner.invoke(cli, ["task", "ack", "--help"])
+    assert wait_help.exit_code == 0, wait_help.output
+    assert ack_help.exit_code == 0, ack_help.output
+    assert "WORKSPACE_ID TASK_ID" in wait_help.output
+    assert "WORKSPACE_ID TASK_ID SEQUENCE" in ack_help.output
+    assert "resident" not in wait_help.output.lower()
+    assert "resident" not in ack_help.output.lower()
+
+    missing_wait_task = runner.invoke(cli, ["task", "wait", "ws1"])
+    missing_ack_sequence = runner.invoke(cli, ["task", "ack", "ws1", "task-1"])
+    assert missing_wait_task.exit_code == 2
+    assert "Missing argument 'TASK_ID'" in missing_wait_task.output
+    assert missing_ack_sequence.exit_code == 2
+    assert "Missing argument 'SEQUENCE'" in missing_ack_sequence.output
+
+
 def test_tree_events_hit_workspace_task_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/tree"):
