@@ -301,8 +301,13 @@ def assert_no_legacy_keys_on_disk(home: Path) -> dict[str, Any]:
 
 
 def fetch_migration_snapshot() -> dict[str, Any]:
-    child = http("GET", f"/api/workspaces/{WORKSPACE_ID}/tasks/{TASK_CHILD}")
-    parent = http("GET", f"/api/workspaces/{WORKSPACE_ID}/tasks/{TASK_PARENT}")
+    tree = http("GET", f"/api/workspaces/{WORKSPACE_ID}/tasks/tree")
+    tree = tree if isinstance(tree, list) else []
+    by_id = {item["id"]: item for item in tree if isinstance(item, dict) and item.get("id")}
+    if TASK_CHILD not in by_id or TASK_PARENT not in by_id:
+        raise RuntimeError(f"expected tasks missing from tree: {sorted(by_id)}")
+    child = by_id[TASK_CHILD]
+    parent = by_id[TASK_PARENT]
     events = http(
         "GET",
         f"/api/workspaces/{WORKSPACE_ID}/tasks/{TASK_PARENT}/events",
