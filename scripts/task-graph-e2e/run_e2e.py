@@ -505,7 +505,8 @@ def _wait_until_target_categories(
 
 
 def _compat_run_id(task: dict) -> str:
-    return task.get("agent_run_id") or task["id"]
+    """Post Agent Tree removal, task id is the stable orchestration key."""
+    return task["id"]
 
 
 def _cold_restart(
@@ -553,7 +554,6 @@ def _init_e2e_repo() -> None:
 
 def main() -> int:
     sys.path.insert(0, str(BACKEND))
-    from claude_hub.models import WorkspaceTask  # noqa: WPS433
     from claude_hub.services import task_graph as tg  # noqa: WPS433
 
     gp.forbid_git_provenance_env_overrides()
@@ -903,14 +903,8 @@ def main() -> int:
         )
         evidence["parent_compat_run_id_before_reload"] = _compat_run_id(parent_detail)
         evidence["child_compat_run_id_before_reload"] = _compat_run_id(child_detail)
-        parent_model = WorkspaceTask.model_validate(parent_detail)
-        child_model = WorkspaceTask.model_validate(child_detail)
-        assert evidence[
-            "parent_compat_run_id_before_reload"
-        ] == tg.compat_run_id_for_task(parent_model)
-        assert evidence[
-            "child_compat_run_id_before_reload"
-        ] == tg.compat_run_id_for_task(child_model)
+        assert evidence["parent_compat_run_id_before_reload"] == parent_id
+        assert evidence["child_compat_run_id_before_reload"] == child_id
 
         # Freeze the original target set at verdict time (seq 1..3). Do not re-fetch
         # before reload — late mailbox rows (e.g. reaper follow-ups) may arrive in between.
