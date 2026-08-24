@@ -20,10 +20,18 @@ from typing import Any
 E2E_HELPERS = Path(__file__).resolve().parents[1] / "agent-tree-e2e"
 _HARNESS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(E2E_HELPERS))
-sys.path.insert(0, str(_HARNESS_DIR))
 
-import git_provenance as gp  # noqa: E402
+import importlib.util
+
 import run_e2e as base  # noqa: E402
+
+_gp_spec = importlib.util.spec_from_file_location(
+    "task_graph_git_provenance",
+    _HARNESS_DIR / "git_provenance.py",
+)
+assert _gp_spec and _gp_spec.loader
+gp = importlib.util.module_from_spec(_gp_spec)
+_gp_spec.loader.exec_module(gp)
 
 _SUITE_ROOT = Path(
     os.environ.get(
