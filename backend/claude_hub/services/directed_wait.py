@@ -1,7 +1,6 @@
 """Race-free directed wait: per-consumer lock + Event, optional subtree wake.
 
-Extracted from Agent Tree ``wait`` / ``_wake_for_run`` so TaskMailbox can
-long-poll on ``task:<id>`` / resident keys without an AgentRun.
+Shared by TaskMailbox for directed long-poll on ``task:<task_id>`` consumers.
 """
 
 from __future__ import annotations

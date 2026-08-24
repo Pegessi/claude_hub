@@ -355,8 +355,8 @@ class _ReportsMixin:
         # Two concurrent requests with the same call_id must not both pass
         # the "existing_report_id is None" check and create two reports.
         # Report intake replaces whole session/task models and may ACK mailbox
-        # state shared with Agent Tree.  Hold the workspace mutation lock so
-        # Agent Tree spawn/send/followup/interrupt/ack cannot persist between
+        # cursors shared with TaskMailbox waiters. Hold the workspace mutation
+        # lock so concurrent task followup/ack/wait cannot persist between
         # snapshot and rollback restore.  Different call_ids (and
         # worker/reviewer sessions for the same task) also cannot overwrite
         # each other's derived state.
@@ -437,7 +437,7 @@ class _ReportsMixin:
         # ------------------------------------------------------------------
         # Report intake idempotency (call_id + payload fingerprint).
         #
-        # create_report durably persists the report and Agent Tree bridge
+        # create_report durably persists the report and TaskMailbox bridge
         # together (via _save_state) BEFORE running message-sending
         # post-commit effects. If one of those effects raises AFTER the
         # durable commit, the client receives an error and retries. Without
@@ -871,8 +871,8 @@ class _ReportsMixin:
             wake_targets.add(bridge_wake_target)
 
         # Single durable commit for report/session/task plus mailbox ACK and
-        # Agent Tree lifecycle/cursor reconciliation.  The ACK helpers above
-        # only mutate in-memory state (persist=False); if this save fails the
+        # TaskMailbox cursor reconciliation. The ACK helpers above only mutate
+        # in-memory state (persist=False); if this save fails the workspace
         # workspace snapshot owned by create_report restores every domain.
         self._save_state()
         self._report_intake_committed.add(
@@ -1151,7 +1151,7 @@ class _ReportsMixin:
     def _emit_followup_delivered_if_followup(
         self, workspace_id: Optional[str], call_id: str
     ) -> tuple[str, str] | None:
-        """TaskMailbox followups do not emit Agent Tree delivered events."""
+        """TaskMailbox followups do not emit separate delivered events."""
 
         return None
 
@@ -1283,9 +1283,9 @@ class _ReportsMixin:
     ) -> tuple[str, str] | None:
         """Append a TaskMailbox event for a persisted report.
 
-        Ordinary and legacy-linked Tasks both write a TaskEvent. AgentRun
-        status, cursor, and context are not written here. Persist is deferred
-        to the outer report-intake ``_save_state``.
+        All task-linked reports write a TaskEvent. Run-tree status, cursor, and
+        context are not written here. Persist is deferred to the outer
+        report-intake ``_save_state``.
         """
         if not report.task_id:
             return None

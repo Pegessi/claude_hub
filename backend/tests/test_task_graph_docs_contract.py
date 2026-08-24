@@ -94,6 +94,11 @@ def _assert_backend_readme_task_first(text: str) -> None:
     assert "not a mailbox consumer" in text.lower()
     assert "New work must use Task Graph APIs" in text
     assert "explicit Task assignment" in text
+    lowered = text.lower()
+    assert "agent-tree" not in lowered
+    assert "agent_tree" not in lowered
+    assert "/api/agent-tree" not in text
+    assert "agentrun" not in lowered.replace(" ", "")
 
 
 _FORBIDDEN_DUAL_CONTROL_PHRASES = (
@@ -314,14 +319,14 @@ def test_task_graph_primary_contract_matches_source() -> None:
 
 
 def test_readmes_task_graph_primary_not_stale_agent_tree() -> None:
-    """README navigation: Task Graph primary; agent-tree is legacy compat only."""
+    """README navigation: Task Graph primary; backend README must not resurrect agent-tree."""
     root_readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     backend_readme = (REPO_ROOT / "backend" / "README.md").read_text(encoding="utf-8")
     for readme in (root_readme, backend_readme):
         _assert_no_stale_agent_tree_primary_wording(readme)
-        _assert_shared_task_first_floor(readme)
-    _assert_root_readme_task_first(root_readme)
+    _assert_shared_task_first_floor(root_readme)
     _assert_backend_readme_task_first(backend_readme)
+    _assert_root_readme_task_first(root_readme)
 
 
 def test_readmes_and_agent_entry_link_the_guide() -> None:

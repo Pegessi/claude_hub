@@ -894,7 +894,7 @@ class AgentReportCreate(BaseModel):
     # previously-persisted report instead of creating a duplicate. This makes
     # report/result intake safe under error-after-commit retries: if the Hub
     # durably persists the report but fails before returning the response
-    # (e.g. a late exception in _after_report_recorded or the agent-tree
+    # (e.g. a late exception in _after_report_recorded or the TaskMailbox
     # bridge), the client's retry with the same call_id is a no-op that
     # returns the existing report, task transition, and bridged event.
     call_id: Optional[str] = None
@@ -1245,7 +1245,7 @@ class TaskFollowupRequest(BaseModel):
 
 
 class TaskMailboxAckRequest(BaseModel):
-    """Advance a Task-owned mailbox cursor. Never writes AgentRun.ack_sequence."""
+    """Advance a Task-owned mailbox cursor (``consumer_ack_sequence``)."""
 
     sequence: int = Field(..., ge=0)
 

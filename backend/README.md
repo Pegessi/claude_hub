@@ -12,9 +12,9 @@ Agents orchestrating work via durable Task events should read
 The optional Resident agent is an independent long-running agent; if it
 participates in Task work it must use explicit Task assignment — it is not a mailbox consumer (not a Task root).
 
-Legacy AgentRun projection remains under `/api/agent-tree` and
-`uv run claude-hub agent-tree` as legacy compat projection only (spawn/wait/ack on
-deprecated run ids). New work must use Task Graph APIs.
+New work must use Task Graph APIs only. Legacy orchestration routes and CLI were
+removed; pre-unification workspace `state.json` migrates once on load
+(`legacy_state_migration`).
 
 ## Development
 
