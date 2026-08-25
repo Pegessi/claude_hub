@@ -616,7 +616,6 @@ watch(
     pendingSafeReplayTabId.value = null
     const myGeneration = ++tabSwitchGeneration
     requestAnimationFrame(() => {
-      scheduleMobileTerminalActivation(newTabId)
       // Initial mount, same-tab re-render, and mobile viewports get a single
       // coalesced resize here. Desktop tab switches are handled below so each
       // path has exactly one resize source (no double layout work).
@@ -648,11 +647,16 @@ watch(
         // the live screen. Defer history reconciliation: set the pending flag
         // (scoped to this tab) so the first stable status (idle/attention)
         // triggers a replay, even if we never observed the working→stable edge.
-        // For now just scroll to bottom + a single coalesced resize so the
-        // live ttyd buffer renders.
+        //
+        // IMPORTANT: do NOT send terminal-scroll-bottom here. If the user
+        // intentionally scrolled up to read output, yanking them to the bottom
+        // on tab switch violates the preserve-user-scroll invariant. The live
+        // ttyd buffer keeps rendering; xterm's own follow-state (auto-scroll
+        // when the viewport is at the bottom) shows new output for users who
+        // were already at the bottom, and leaves scrolled-up users untouched.
+        // A single coalesced resize ensures the iframe fits its container.
         pendingSafeReplay.value = true
         pendingSafeReplayTabId.value = newTabId
-        postTerminalScrollBottom(newTabId)
         scheduleTerminalResize(newTabId)
       }
     })
@@ -950,18 +954,6 @@ function isMobileTerminalViewport() {
     window.innerWidth <= MOBILE_TERMINAL_BREAKPOINT_PX ||
     (typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches)
   )
-}
-
-function scheduleMobileTerminalActivation(tabId?: string) {
-  if (!tabId || !isMobileTerminalViewport()) return
-
-  postTerminalMessage(tabId, {
-    type: 'terminal-activate',
-    refreshHistory: false,
-    scrollToBottom: true,
-  })
-  window.setTimeout(() => postTerminalScrollBottom(tabId), 120)
-  window.setTimeout(() => postTerminalScrollBottom(tabId), 360)
 }
 
 function refreshTerminalHistory(tabId?: string) {
@@ -1527,9 +1519,6 @@ ${buildIframeSabScript(tabId)}
     }
     postTerminalTheme(tabId)
     scheduleTerminalResize(tabId)
-    if (tabId === props.tabId) {
-      scheduleMobileTerminalActivation(tabId)
-    }
   } catch (e) {
     console.error('Error injecting script into iframe:', e)
   }

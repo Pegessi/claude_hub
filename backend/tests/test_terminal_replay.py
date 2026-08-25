@@ -1587,3 +1587,118 @@ def test_history_resync_does_not_replace_near_bottom_view(terminal_tab: dict, pa
         f"near-bottom historical view was replaced by idle resync: "
         f"before={before}, after={after}"
     )
+
+
+def test_non_manual_refresh_preserves_scroll_when_user_scrolls_up_during_fetch(
+    terminal_tab: dict, page: Page
+) -> None:
+    """A non-manual refresh must not yank the user to bottom even if they
+    scroll up *during* the history fetch.
+
+    The initial preserveUserScroll check runs before `await fetchHistorySnapshot`.
+    If the user is at the bottom at that point, `scrollToBottom` stays true.
+    The pre-write follow-state recheck (immediately before writeHistorySnapshot)
+    must catch a user who wheeled up while the fetch was in flight and drop
+    scrollToBottom so the snapshot write does not yank them back down.
+    """
+    tab = terminal_tab
+    session_name = f"claude-hub-{tab['id'][:8]}"
+
+    ensure_tmux_session(page, tab["id"], session_name)
+    produce_scrollback(session_name, count=260)
+    load_terminal_page(page, tab["id"], min_buffer_lines=260)
+
+    # Confirm we are at the bottom before the refresh (so the initial
+    # preserveUserScroll check passes and scrollToBottom stays true).
+    alignment_before = read_scroll_alignment(page)
+    assert alignment_before is not None
+    assert alignment_before["viewportY"] == alignment_before["baseY"], (
+        "terminal should be at the bottom before the refresh so the initial "
+        "preserveUserScroll check does not short-circuit scrollToBottom"
+    )
+
+    # Monkeypatch window.fetch in-page: for /api/terminal/history/ requests,
+    # call the original fetch, then await an 800ms promise before returning
+    # the response. This gives us a real window (in the page's JS event loop,
+    # not the Playwright dispatcher thread) to scroll up while the fetch is
+    # in flight.
+    page.evaluate("""() => {
+            const origFetch = window.fetch.bind(window);
+            window.__fetchDelayed = true;
+            window.fetch = function(input, init) {
+                const url = typeof input === 'string' ? input : input.url;
+                return origFetch(input, init).then(function(response) {
+                    if (url.indexOf('/api/terminal/history/') !== -1) {
+                        return new Promise(function(resolve) {
+                            setTimeout(function() { resolve(response); }, 800);
+                        });
+                    }
+                    return response;
+                });
+            };
+        }""")
+
+    page.evaluate("""() => {
+            window.__claudeHubRefreshEvents = [];
+            window.addEventListener('message', function(event) {
+                if (event.data && event.data.type === 'terminal-history-refresh-done') {
+                    window.__claudeHubRefreshEvents.push(event.data);
+                }
+            });
+            window.postMessage({
+                type: 'terminal-history-refresh',
+                reason: 'tab-switch',
+                scrollToBottom: true,
+                preserveUserScroll: true
+            }, '*');
+        }""")
+
+    # While the fetch is delayed (800ms), wheel up over the viewport so the
+    # user is no longer at the bottom when the snapshot is applied.
+    page.wait_for_timeout(150)
+    box = page.locator(".xterm-viewport").bounding_box()
+    assert box is not None, "xterm viewport not found"
+    page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    page.mouse.wheel(0, -600)
+
+    # Before the refresh completes, confirm the user is scrolled up and
+    # isUserScrolling is set (so the pre-write recheck has something to catch).
+    page.wait_for_function(
+        """() => {
+            const term = window.term;
+            if (!term) return false;
+            const buffer = term.buffer.active;
+            return buffer.viewportY < buffer.baseY;
+        }""",
+        timeout=5000,
+    )
+    mid_fetch = read_scroll_alignment(page)
+    assert mid_fetch is not None
+    assert mid_fetch["viewportY"] < mid_fetch["baseY"], (
+        "user should be scrolled up while the fetch is in flight"
+    )
+    # isUserScrolling is the canonical follow-state flag that the pre-write
+    # recheck reads via terminalIsAtBottom. It must be True here — otherwise
+    # the recheck would see the user as still at the bottom and not drop
+    # scrollToBottom, defeating the purpose of the test.
+    assert mid_fetch["isUserScrolling"] is True, (
+        "isUserScrolling must be True while the user is scrolled up during "
+        f"the fetch (mid_fetch={mid_fetch})"
+    )
+
+    page.wait_for_function(
+        """() => Array.isArray(window.__claudeHubRefreshEvents) &&
+            window.__claudeHubRefreshEvents.some(function(event) {
+                return event.reason === 'tab-switch' && event.ok === true;
+            })""",
+        timeout=10000,
+    )
+
+    alignment_after = read_scroll_alignment(page)
+    assert alignment_after is not None
+    assert (
+        alignment_after["viewportY"] < alignment_after["baseY"]
+    ), (
+        "non-manual refresh yanked the user back to bottom even though they "
+        f"scrolled up during the fetch: {alignment_after}"
+    )
