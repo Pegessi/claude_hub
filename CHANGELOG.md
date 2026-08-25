@@ -5,6 +5,27 @@
 
 ## Unreleased
 
+### fix: restore saturated status colors and fix terminal tab-switch history loss / typing lag
+
+- **What**: semantic status colors (success/warning/attention/danger) are
+  restored to a saturated, readable palette in both light and dark themes.
+  Terminal tab switches no longer reload the iframe (which wiped buffer and
+  scroll state), and typing latency after a switch matches the idle baseline.
+- **Why**: the previous palette was desaturated (saturation ~0.35–0.55) and
+  hard to read. The iframe cache used a single list as both LRU order and
+  v-for render order, so switching tabs reordered `<iframe>` DOM nodes;
+  Chromium rebuilt the browsing context, reloading xterm and losing history
+  and scroll position. Post-switch refreshes also used a blind 200 ms timer
+  for resize instead of correlating to the history-refresh completion.
+- **How**: split the cache into `cachedTabIds` (stable insertion-order render
+  list, never reordered) and `tabRecency` (LRU for eviction only), extracted
+  into the pure `computeCacheUpdate` function. History refreshes now carry a
+  `requestId` and the done event echoes it, so the post-switch resize fires
+  exactly when the snapshot settles. Non-manual refreshes honor
+  `preserveUserScroll` so a scrolled-up reader is not yanked to the bottom.
+  Agent TUI tabs (claude/codex/cursor) defer history replay while `working`
+  to avoid corrupting the live screen.
+
 ### fix: filter subagent sessions and cache codex session listing
 
 - **What**: the Codex session picker now shows only user-initiated sessions

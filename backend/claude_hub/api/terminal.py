@@ -648,7 +648,7 @@ async def proxy_terminal_request(
           }}
         }}
 
-        function postHistoryRefreshResult(reason, ok, detail) {{
+        function postHistoryRefreshResult(reason, ok, detail, requestId) {{
           try {{
             const target = window.parent && window.parent !== window ? window.parent : window;
             target.postMessage({{
@@ -657,6 +657,7 @@ async def proxy_terminal_request(
               reason: reason || 'manual',
               ok: !!ok,
               error: detail || null,
+              requestId: requestId || null,
             }}, '*');
           }} catch (error) {{}}
         }}
@@ -1414,7 +1415,11 @@ async def proxy_terminal_request(
           }}
 
           async function refreshHistoryFromTmux(options) {{
-            const opts = options || {{}};
+            // Clone the incoming options so follow-state adjustments (e.g.
+            // forcing scrollToBottom=false when the user is scrolled up) do
+            // not mutate the caller's object — which may be reused for a
+            // queued retry via forcedRefreshPendingOptions.
+            const opts = Object.assign({{}}, options || {{}});
             if (forcedRefreshRunning) {{
               forcedRefreshPendingOptions = opts;
               return false;
@@ -1423,6 +1428,19 @@ async def proxy_terminal_request(
             forcedRefreshRunning = true;
             const inputSensitiveRefresh = opts.reason !== 'manual';
             const inputGenerationAtStart = userInputGeneration;
+            // Follow-state preservation: for refreshes that are not an explicit
+            // "take me to the latest" action, if the user has scrolled up to
+            // read history, do not yank them back to the bottom. The caller
+            // opts in via the explicit `preserveUserScroll` flag (set by the
+            // frontend for tab-switch and auto-round-complete). Manual ↻
+            // refresh always scrolls to bottom because scrollToBottom=true and
+            // preserveUserScroll is unset.
+            if (opts.preserveUserScroll && opts.scrollToBottom !== false) {{
+              const term = termForHistoryAction();
+              if (term && !terminalIsAtBottom(term)) {{
+                opts.scrollToBottom = false;
+              }}
+            }}
             try {{
               const snapshot = await fetchHistorySnapshot();
               if (
@@ -1652,16 +1670,17 @@ async def proxy_terminal_request(
         function refreshHistoryWhenReady(options, attemptsLeft) {{
           const opts = options || {{}};
           const reason = opts.reason || 'manual';
+          const requestId = opts.requestId || null;
           const term = termForHistoryAction();
 
           if (term && typeof term.__claudeHubRefreshHistory === 'function') {{
             Promise.resolve(term.__claudeHubRefreshHistory(opts))
               .then(function(ok) {{
-                postHistoryRefreshResult(reason, ok !== false, null);
+                postHistoryRefreshResult(reason, ok !== false, null, requestId);
               }})
               .catch(function(error) {{
                 console.debug('claude-hub history refresh failed', error);
-                postHistoryRefreshResult(reason, false, error && error.message ? error.message : 'refresh failed');
+                postHistoryRefreshResult(reason, false, error && error.message ? error.message : 'refresh failed', requestId);
               }});
             return;
           }}
@@ -1673,7 +1692,7 @@ async def proxy_terminal_request(
             return;
           }}
 
-          postHistoryRefreshResult(reason, false, 'terminal not ready');
+          postHistoryRefreshResult(reason, false, 'terminal not ready', requestId);
         }}
 
         function terminalIsAtBottom(term) {{
@@ -1755,6 +1774,8 @@ async def proxy_terminal_request(
             refreshHistoryWhenReady({{
               reason: event.data.reason || 'manual',
               scrollToBottom: event.data.scrollToBottom !== false,
+              preserveUserScroll: event.data.preserveUserScroll === true,
+              requestId: event.data.requestId || null,
             }}, 80);
             return;
           }}
