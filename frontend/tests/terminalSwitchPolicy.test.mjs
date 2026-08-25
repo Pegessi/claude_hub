@@ -146,3 +146,105 @@ test('switch-away resets the deferred-replay state for the previous tab', () => 
   const r = decideStatusChangeReplay(null, 'idle', false)
   assert.equal(r.replay, false)
 })
+
+// ── Component-level regression: no forced scroll-bottom on working-agent switch ──
+
+const terminalViewSource = await readFile(
+  new URL('../src/components/TerminalView.vue', import.meta.url),
+  'utf8',
+)
+
+test('deferred (working-agent) switch branch must NOT call postTerminalScrollBottom', () => {
+  // The deferred branch handles agent TUI tabs that are working (or unknown
+  // status). A full history replay would corrupt the live xterm screen, so we
+  // only resize. Crucially, we must NOT force-scroll to bottom: if the user
+  // intentionally scrolled up to read output, yanking them down on tab switch
+  // violates the preserve-user-scroll invariant.
+  //
+  // This test parses TerminalView.vue and asserts that the `else` branch of
+  // `if (switchAction === 'immediate')` (the deferred path) contains no
+  // `postTerminalScrollBottom` call.
+  const switchMatch = terminalViewSource.match(
+    /if \(switchAction === 'immediate'\) \{[\s\S]*?\n {6}\} else \{([\s\S]*?)\n {6}\}/,
+  )
+  assert.ok(switchMatch, 'could not locate the switchAction immediate/else branch in TerminalView.vue')
+  const deferredBranch = switchMatch[1]
+  assert.ok(
+    !deferredBranch.includes('postTerminalScrollBottom'),
+    'deferred (working-agent) switch branch must not call postTerminalScrollBottom — ' +
+      'it would yank scrolled-up users to the bottom on tab switch',
+  )
+  // The deferred branch should only resize (plus set the pending flag).
+  assert.ok(
+    deferredBranch.includes('scheduleTerminalResize'),
+    'deferred branch should still call scheduleTerminalResize so the iframe fits its container',
+  )
+})
+
+test('scheduleMobileTerminalActivation must not exist (no forced scroll-bottom on mobile switch)', () => {
+  // Mobile warm tab switches must follow the same preserve-user-scroll contract
+  // as desktop: history=0, scroll-bottom=0, activate=0, resize=1. The previous
+  // scheduleMobileTerminalActivation helper sent terminal-activate with
+  // scrollToBottom:true plus delayed terminal-scroll-bottom messages, which
+  // yanked scrolled-up users. It was removed; this test guards against
+  // re-introduction.
+  assert.ok(
+    !terminalViewSource.includes('scheduleMobileTerminalActivation'),
+    'scheduleMobileTerminalActivation must not be defined or called — ' +
+      'mobile tab switch must not force scroll-to-bottom',
+  )
+})
+
+test('the only postTerminalScrollBottom calls are inside the manual refresh path', () => {
+  // postTerminalScrollBottom posts a terminal-scroll-bottom message to the
+  // iframe. It must ONLY be used by the explicit manual ↻ refresh
+  // (refreshTerminalHistory), never by tab-switch or auto-round-complete
+  // paths (which use preserveUserScroll instead).
+  //
+  // We locate the refreshTerminalHistory function body via brace matching and
+  // assert every postTerminalScrollBottom( call falls inside it.
+  const fnStart = terminalViewSource.indexOf('function refreshTerminalHistory(')
+  assert.ok(fnStart !== -1, 'refreshTerminalHistory function must exist')
+
+  // Find the opening brace of the function body.
+  const braceStart = terminalViewSource.indexOf('{', fnStart)
+  assert.ok(braceStart !== -1, 'refreshTerminalHistory must have a body')
+
+  // Walk forward counting braces to find the matching closing brace.
+  let depth = 0
+  let fnEnd = -1
+  for (let i = braceStart; i < terminalViewSource.length; i++) {
+    if (terminalViewSource[i] === '{') depth++
+    else if (terminalViewSource[i] === '}') {
+      depth--
+      if (depth === 0) {
+        fnEnd = i
+        break
+      }
+    }
+  }
+  assert.ok(fnEnd !== -1, 'could not find closing brace of refreshTerminalHistory')
+
+  const fnBody = terminalViewSource.slice(braceStart, fnEnd + 1)
+
+  // Collect all postTerminalScrollBottom( call sites in the whole file,
+  // excluding the function definition itself (which is preceded by `function `).
+  const allCalls = [...terminalViewSource.matchAll(/(?<!function )postTerminalScrollBottom\(/g)]
+  assert.ok(allCalls.length > 0, 'postTerminalScrollBottom should still exist for manual refresh')
+
+  for (const match of allCalls) {
+    const callIdx = match.index
+    const insideManual = callIdx > braceStart && callIdx < fnEnd
+    assert.ok(
+      insideManual,
+      `postTerminalScrollBottom must only be called from refreshTerminalHistory ` +
+        `(manual refresh), but found a call outside it at offset ${callIdx}`,
+    )
+  }
+
+  // Sanity: the manual refresh body itself must contain at least one call.
+  assert.ok(
+    fnBody.includes('postTerminalScrollBottom('),
+    'refreshTerminalHistory should call postTerminalScrollBottom to force latest output',
+  )
+})

@@ -1452,6 +1452,19 @@ async def proxy_terminal_request(
                 }}, userInputQuietDelayMs() + 100);
                 return false;
               }}
+              // Re-check follow-state immediately before applying the snapshot.
+              // The preserveUserScroll decision above ran before the await, so
+              // the user could have wheeled up while fetchHistorySnapshot was
+              // in flight. For non-manual preserveUserScroll refreshes, if the
+              // user is no longer at the bottom, drop scrollToBottom so the
+              // snapshot write does not yank them back down. This is a single
+              // terminalIsAtBottom check (no per-frame/per-keystroke cost).
+              if (opts.preserveUserScroll && opts.scrollToBottom !== false) {{
+                const termNow = termForHistoryAction();
+                if (termNow && !terminalIsAtBottom(termNow)) {{
+                  opts.scrollToBottom = false;
+                }}
+              }}
               return await new Promise(function(resolve) {{
                 writeHistorySnapshot(snapshot, opts, resolve);
               }});
