@@ -1373,6 +1373,29 @@ async def proxy_terminal_request(
           function writeHistorySnapshot(snapshot, options, cb) {{
             const payload = fullReplayPayloadForSnapshot(snapshot);
             const shouldScrollToBottom = !options || options.scrollToBottom !== false;
+            // The content-ready boundary (wait for the painted frame to commit
+            // before firing refresh-done) only matters for tab-switch refreshes,
+            // where the frontend hides the iframe until refresh-done. For
+            // post-replay / manual / auto-resync refreshes the iframe is already
+            // visible, so firing refresh-done immediately avoids letting live
+            // ttyd frames accumulate between the snapshot write and the done
+            // event (which would make xterm drift ahead of the tmux snapshot).
+            const isTabSwitch = options && options.reason === 'tab-switch';
+
+            // For preserveUserScroll refreshes (scrollToBottom === false), the
+            // full-replay payload contains \x1b[3J which clears scrollback and
+            // resets the viewport to the bottom. Capture the user's scroll
+            // position before the write so we can restore it afterwards.
+            let savedViewportY = null;
+            let savedScrollTop = null;
+            if (!shouldScrollToBottom) {{
+              try {{
+                const buf = term.buffer && term.buffer.active;
+                if (buf && buf.viewportY != null) savedViewportY = buf.viewportY;
+                const vp = document.querySelector('.xterm-viewport');
+                if (vp) savedScrollTop = vp.scrollTop;
+              }} catch (e) {{}}
+            }}
 
             function done(ok) {{
               resyncing = false;
@@ -1382,25 +1405,49 @@ async def proxy_terminal_request(
                 scrollTerminalToBottom(term, {{ refresh: true }});
                 domAtBottomCached = true;
               }}
-              // A history refresh (manual ↻ button, agent-round-complete
-              // auto-refresh, activate-on-tab-switch) is the user-visible
-              // "make the terminal right" action. Re-fit xterm to the
-              // current container dimensions so any rows that were lost
-              // to an early fit() during initial load (or after layout
-              // transitions the ResizeObserver hasn't caught yet) are
-              // recovered, matching the user expectation that "refresh"
-              // corrects display issues — without needing them to toggle
-              // the layout selector to manually force a resize.
+              // Re-fit xterm to the current container so any rows lost to an
+              // early fit() during initial load are recovered. For
+              // preserveUserScroll refreshes (scrollToBottom === false), we
+              // need fit() to run synchronously so we can restore the user's
+              // scroll position immediately after resize(). For
+              // scroll-to-bottom refreshes, defer fit() to the next frame so
+              // the just-written snapshot has time to be laid out before
+              // resize() measures the container — otherwise resize() can
+              // truncate the freshly-written buffer and drop lines.
               if (typeof term.__claudeHubRequestFit === 'function') {{
-                // Schedule on the next frame so the just-written content
-                // has been laid out before fit() measures and scrolls.
-                if (typeof requestAnimationFrame === 'function') {{
+                if (!shouldScrollToBottom) {{
+                  const bs = term._core && term._core._bufferService;
+                  if (bs) bs.isUserScrolling = true;
+                  term.__claudeHubRequestFit();
+                }} else if (typeof requestAnimationFrame === 'function') {{
                   requestAnimationFrame(function() {{ term.__claudeHubRequestFit(); }});
                 }} else {{
                   setTimeout(function() {{ term.__claudeHubRequestFit(); }}, 16);
                 }}
               }}
-              if (cb) cb(ok);
+              // Restore the user's scroll position after fit() — resize() can
+              // scroll to bottom when isUserScrolling is false, so re-apply the
+              // captured position and re-assert isUserScrolling.
+              if (!shouldScrollToBottom && (savedViewportY !== null || savedScrollTop !== null)) {{
+                const bs = term._core && term._core._bufferService;
+                if (bs) bs.isUserScrolling = true;
+                if (savedViewportY !== null && typeof term.scrollToLine === 'function') {{
+                  term.scrollToLine(savedViewportY);
+                }}
+                const vp = document.querySelector('.xterm-viewport');
+                if (vp && savedScrollTop !== null) vp.scrollTop = savedScrollTop;
+              }}
+              // Content-ready boundary: for tab-switch refreshes, wait for the
+              // painted frame to commit before firing refresh-done so the
+              // frontend only reveals the iframe once the snapshot is visible.
+              // Two rAFs are needed because the first schedules the paint, the
+              // second runs after it commits.
+              const finish = function() {{ if (cb) cb(ok); }};
+              if (isTabSwitch && typeof requestAnimationFrame === 'function') {{
+                requestAnimationFrame(function() {{ requestAnimationFrame(finish); }});
+              }} else {{
+                finish();
+              }}
             }}
 
             resyncing = true;

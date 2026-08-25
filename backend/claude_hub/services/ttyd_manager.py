@@ -1150,6 +1150,7 @@ class TTYDProcess:
         agent_session_id: Optional[str] = None,
         from_persisted_state: bool = False,
         resume_quarantined: bool = False,
+        shell_explicitly_provided: Optional[bool] = None,
     ):
         self.tab_id = tab_id
         self.port = port
@@ -1242,7 +1243,34 @@ class TTYDProcess:
         # Set by Phase 1C while signal/exception failure is being salvaged before
         # a sibling launch. None means "launched cleanly".
         self._pending_quarantine_reason: Optional[str] = None
-        # For terminal tabs, use the user's shell instead of an agent command.
+        # Track whether the caller explicitly supplied a shell. For agent tabs
+        # (claude/codex/cursor) the default launch command is the agent CLI;
+        # an explicit shell overrides that so the tab runs a plain shell
+        # instead (used by tests that need deterministic scrollback without a
+        # real agent login).
+        #
+        # NOTE: self.shell is always non-None (it falls back to the agent
+        # command or the user's shell), so we cannot derive this flag from
+        # self.shell after construction. It must be passed in explicitly when
+        # reconstructing from persisted state.
+        if shell_explicitly_provided is not None:
+            self._shell_explicitly_provided = shell_explicitly_provided
+        else:
+            # Legacy state (pre-shell_explicitly_provided): the flag was not
+            # persisted. self.shell is always non-None (it falls back to the
+            # agent command or the user's shell), so bool(shell) would
+            # incorrectly mark every agent tab as explicit-shell and bypass
+            # the agent CLI/resume path. Instead, derive the flag by comparing
+            # the persisted shell to the default for this agent type:
+            #   - agent tabs: shell == get_agent_command(agent_type) means the
+            #     default agent CLI was used (not an explicit override).
+            #   - terminal tabs: the shell is always run directly, so the flag
+            #     has no behavioral effect; default to False.
+            if agent_type == AgentType.TERMINAL:
+                self._shell_explicitly_provided = False
+            else:
+                default_cmd = get_agent_command(agent_type)
+                self._shell_explicitly_provided = bool(shell) and shell != default_cmd
         if shell:
             self.shell = shell
         elif agent_type == AgentType.TERMINAL:
@@ -1539,6 +1567,11 @@ asyncio.run(_main())
         recover = self._should_recover(session_exists=False)
         if self.target == ExecutionTarget.REMOTE:
             cmd.append(shlex.join(self._build_remote_launcher()))
+        elif self._shell_explicitly_provided:
+            # Caller supplied an explicit shell (e.g. tests that need a plain
+            # shell for deterministic scrollback). Run it directly instead of
+            # the agent CLI.
+            cmd.append(self._with_env(self.shell))
         elif self.solo_mode and self.agent_type in {AgentType.CLAUDE, AgentType.CODEX}:
             user_shell = os.environ.get("SHELL", "/bin/bash")
             cmd.append(
@@ -1726,6 +1759,11 @@ asyncio.run(_main())
         recover = self._should_recover(session_exists=session_exists)
         if self.target == ExecutionTarget.REMOTE:
             cmd.extend(self._build_remote_launcher())
+        elif self._shell_explicitly_provided:
+            # Caller supplied an explicit shell (e.g. tests that need a plain
+            # shell for deterministic scrollback). Run it directly instead of
+            # the agent CLI.
+            cmd.append(self._with_env(self.shell))
         elif (
             self.solo_mode
             and not session_exists
@@ -2487,6 +2525,7 @@ asyncio.run(_main())
             "created_at": self.created_at.isoformat(),
             "agent_session_id": self.agent_session_id,
             "resume_quarantined": bool(self.resume_quarantined),
+            "shell_explicitly_provided": self._shell_explicitly_provided,
         }
 
     def to_schema(self) -> TerminalTab:
@@ -2578,6 +2617,7 @@ class TTYDManager:
                             agent_session_id=tab_data.get("agent_session_id"),
                             from_persisted_state=True,
                             resume_quarantined=tab_data.get("resume_quarantined", False),
+                            shell_explicitly_provided=tab_data.get("shell_explicitly_provided"),
                         )
                         self.processes[process.tab_id] = process
                         if process.port > max_port:
