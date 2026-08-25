@@ -9,6 +9,14 @@ from ._constants import *  # noqa: F401,F403
 
 
 class _PersistenceMixin:
+    def _task_dump_for_state(self, task: WorkspaceTask) -> dict[str, Any]:
+        """Serialize a task for durable state without null optional metadata keys."""
+
+        payload = task.model_dump(mode="json")
+        if payload.get("agent_tag") is None:
+            payload.pop("agent_tag", None)
+        return payload
+
     def _atomic_write_text(self, path: Path, text: str) -> None:
         """Atomically write text to ``path`` via a temp file + os.replace.
 
@@ -40,7 +48,7 @@ class _PersistenceMixin:
 
         payload = {
             "tasks": [
-                item.model_dump(mode="json")
+                self._task_dump_for_state(item)
                 for item in self.tasks.values()
                 if item.workspace_id == workspace_id
             ],

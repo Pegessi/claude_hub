@@ -366,6 +366,7 @@ export interface WorkspaceTask {
   task_mode: WorkspaceTaskMode
   execution_complexity: WorkspaceTaskExecutionComplexity
   origin?: WorkspaceTaskOrigin
+  agent_tag?: string | null
   autonomy_policy?: AutonomyPolicy | null
   autonomous_run?: AutonomousRun | null
   status: WorkspaceTaskStatus
@@ -413,6 +414,7 @@ export interface WorkspaceTaskCreate {
   autonomy_policy?: AutonomyPolicy | null
   session_id?: string | null
   clear_context?: boolean | null
+  agent_tag?: string | null
 }
 
 export interface WorkspaceTaskUpdate {
@@ -425,6 +427,7 @@ export interface WorkspaceTaskUpdate {
   parent_task_id?: string | null
   clear_context?: boolean | null
   session_id?: string | null
+  agent_tag?: string | null
 }
 
 export interface StartTaskRequest {

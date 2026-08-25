@@ -58,6 +58,16 @@ class _NormalizeMixin:
         normalized.setdefault("dispatch_pending", False)
         normalized.setdefault("system_internal", False)
         normalized.setdefault("internal_kind", None)
+        raw_agent_tag = normalized.get("agent_tag")
+        if raw_agent_tag is None:
+            normalized.setdefault("agent_tag", None)
+        elif isinstance(raw_agent_tag, str):
+            try:
+                normalized["agent_tag"] = normalize_agent_tag(raw_agent_tag, allow_clear=True)
+            except ValueError:
+                normalized["agent_tag"] = None
+        else:
+            normalized["agent_tag"] = None
         normalized["feedback_lesson_ids"] = self._normalize_string_list(
             normalized.get("feedback_lesson_ids")
         )

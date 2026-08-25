@@ -1,9 +1,31 @@
 import uuid
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+AGENT_TAG_MAX_LENGTH = 64
+_AGENT_TAG_CONTROL_CHARS = frozenset({*range(0x00, 0x20), 0x7F})
+
+
+def normalize_agent_tag(value: Any, *, allow_clear: bool = False) -> Optional[str]:
+    """Normalize optional task agent labels: trim, bounded length, no enum."""
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("agent_tag must be a string")
+    trimmed = value.strip()
+    if not trimmed:
+        if allow_clear:
+            return None
+        raise ValueError("agent_tag must not be empty")
+    if any(ord(char) in _AGENT_TAG_CONTROL_CHARS for char in trimmed):
+        raise ValueError("agent_tag must be a single-line label without control characters")
+    if len(trimmed) > AGENT_TAG_MAX_LENGTH:
+        raise ValueError(f"agent_tag must be at most {AGENT_TAG_MAX_LENGTH} characters")
+    return trimmed
 
 
 class AgentType(str, Enum):
@@ -597,6 +619,12 @@ class WorkspaceTaskCreate(BaseModel):
     clear_context: Optional[bool] = None
     # Task Graph parent. Independent of related_task_id (session-affinity).
     parent_task_id: Optional[str] = None
+    agent_tag: Optional[str] = None
+
+    @field_validator("agent_tag", mode="before")
+    @classmethod
+    def _validate_agent_tag_create(cls, value: Any) -> Optional[str]:
+        return normalize_agent_tag(value, allow_clear=False)
 
 
 class WorkspaceAttachmentCreate(BaseModel):
@@ -636,6 +664,12 @@ class WorkspaceTaskUpdate(BaseModel):
     clear_context: Optional[bool] = None
     session_id: Optional[str] = None
     parent_task_id: Optional[str] = None
+    agent_tag: Optional[str] = None
+
+    @field_validator("agent_tag", mode="before")
+    @classmethod
+    def _validate_agent_tag_update(cls, value: Any) -> Optional[str]:
+        return normalize_agent_tag(value, allow_clear=True)
 
 
 class WorkspaceTask(BaseModel):
@@ -652,6 +686,7 @@ class WorkspaceTask(BaseModel):
     task_mode: WorkspaceTaskMode = WorkspaceTaskMode.REVIEWED
     execution_complexity: WorkspaceTaskExecutionComplexity = WorkspaceTaskExecutionComplexity.AUTO
     origin: WorkspaceTaskOrigin = WorkspaceTaskOrigin.HUMAN
+    agent_tag: Optional[str] = None
     autonomy_policy: Optional[AutonomyPolicy] = None
     autonomous_run: Optional[AutonomousRun] = None
     status: WorkspaceTaskStatus

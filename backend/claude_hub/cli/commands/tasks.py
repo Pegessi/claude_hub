@@ -457,6 +457,7 @@ def task_review(ctx: click.Context, task_id: str, workspace_id: Optional[str]) -
     default=None,
     help="Parent Task id for an explicit Task Graph edge.",
 )
+@click.option("--agent-tag", default=None, help="Optional agent label tag.")
 @click.option("--session-id", default=None, help="Target existing session id.")
 @click.option(
     "--clear-context/--no-clear-context",
@@ -482,6 +483,7 @@ def task_create(
     review_profiles: tuple,
     related_task_id: Optional[str],
     parent_task_id: Optional[str],
+    agent_tag: Optional[str],
     session_id: Optional[str],
     clear_context: Optional[bool],
     attachment_json: tuple,
@@ -498,6 +500,7 @@ def task_create(
         review_profiles=list(review_profiles),
         related_task_id=related_task_id,
         parent_task_id=parent_task_id,
+        agent_tag=agent_tag,
         session_id=session_id,
         clear_context=clear_context,
     )
@@ -615,6 +618,7 @@ def task_continue(
     help="Review profile list (repeatable).",
 )
 @click.option("--related-task-id", default=None, help="Related task id.")
+@click.option("--agent-tag", default=None, help="Agent label tag (empty string clears).")
 @click.option("--session-id", default=None, help="Session id.")
 @click.option(
     "--clear-context/--no-clear-context",
@@ -645,6 +649,7 @@ def task_update(
     execution_complexity: Optional[str],
     review_profiles: tuple,
     related_task_id: Optional[str],
+    agent_tag: Optional[str],
     session_id: Optional[str],
     clear_context: Optional[bool],
     attachment_json: tuple,
@@ -660,6 +665,7 @@ def task_update(
         task_mode=task_mode,
         execution_complexity=execution_complexity,
         related_task_id=related_task_id,
+        agent_tag=agent_tag,
         session_id=session_id,
         clear_context=clear_context,
     )
