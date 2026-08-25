@@ -3031,3 +3031,117 @@ def test_quarantine_preserves_sid_when_teardown_cannot_be_proven(
     assert tab.agent_session_id == "owned-sid"
     assert tab.resume_quarantined is True
     assert "cleanup failed" in (tab._pending_quarantine_reason or "")
+
+
+def test_legacy_state_without_shell_explicitly_provided_uses_agent_cli(
+    monkeypatch: MonkeyPatch, tmp_path
+) -> None:
+    """Legacy tabs.json (no shell_explicitly_provided key) must not bypass the
+    agent CLI/resume path for Claude/Codex/Cursor tabs.
+
+    Before the fix, the fallback ``bool(shell)`` was always True because
+    ``self.shell`` is always non-None, so every agent tab was treated as an
+    explicit-shell tab and launched the shell directly instead of the agent
+    CLI with resume/session-id semantics.
+    """
+    state_file = tmp_path / "tabs.json"
+    monkeypatch.setattr(ttyd_manager_module, "STATE_FILE", state_file)
+
+    # Build persisted rows the way a pre-shell_explicitly_provided backend
+    # would have: include "shell" but omit "shell_explicitly_provided".
+    def _legacy_row(tab_id: str, agent_type: AgentType, shell: str) -> dict:
+        proc = TTYDProcess(
+            tab_id=tab_id,
+            port=12380 + hash(tab_id) % 100,
+            name=tab_id,
+            agent_type=agent_type,
+            shell=shell,
+        )
+        row = proc.to_dict()
+        row.pop("shell_explicitly_provided", None)
+        return row
+
+    rows = [
+        # Agent tabs whose shell equals the default agent command: these must
+        # NOT be treated as explicit-shell overrides.
+        _legacy_row("legacy-claude", AgentType.CLAUDE, "claude"),
+        _legacy_row("legacy-codex", AgentType.CODEX, "codex"),
+        _legacy_row("legacy-cursor", AgentType.CURSOR, "agent"),
+        # A terminal tab: flag has no behavioral effect but must default False.
+        _legacy_row("legacy-terminal", AgentType.TERMINAL, "/bin/zsh"),
+        # An agent tab whose shell differs from the agent command: this WAS an
+        # explicit override and must keep running the shell directly.
+        _legacy_row("legacy-claude-override", AgentType.CLAUDE, "/bin/bash"),
+    ]
+    state_file.write_text(json.dumps(rows), encoding="utf-8")
+
+    manager = TTYDManager.__new__(TTYDManager)
+    manager.processes = {}
+    manager._next_port = 10000
+    manager._load_state()
+
+    # Claude/Codex/Cursor with default agent command shell: NOT explicit, so
+    # they must use the agent CLI/resume path (not the shell-direct branch).
+    for tab_id, agent_type in [
+        ("legacy-claude", AgentType.CLAUDE),
+        ("legacy-codex", AgentType.CODEX),
+        ("legacy-cursor", AgentType.CURSOR),
+    ]:
+        proc = manager.processes[tab_id]
+        assert proc._shell_explicitly_provided is False, (
+            f"{tab_id}: default agent shell must not be marked explicit"
+        )
+        cmd = proc._build_ttyd_command(session_exists=False)
+        # The explicit-shell branch appends self.shell directly; the agent CLI
+        # branch wraps the agent command with resume/session flags. For a fresh
+        # (non-recover) launch the tail must contain the agent command, not a
+        # bare shell path.
+        tail = cmd[-1]
+        agent_cmd = ttyd_manager_module.get_agent_command(agent_type)
+        assert agent_cmd in tail, f"{tab_id}: agent CLI path must be used"
+
+    # Terminal tab defaults to non-explicit (no behavioral difference).
+    term = manager.processes["legacy-terminal"]
+    assert term._shell_explicitly_provided is False
+
+    # Agent tab with a non-default shell WAS an explicit override: keep it.
+    override = manager.processes["legacy-claude-override"]
+    assert override._shell_explicitly_provided is True
+    cmd = override._build_ttyd_command(session_exists=False)
+    assert "/bin/bash" in cmd[-1]
+
+    # The next save must persist the now-derived key deterministically.
+    # Exercise the real manager save boundary (not just to_dict()) and verify
+    # the persisted raw JSON contains the expected boolean for every row.
+    manager._save_state()
+    saved_rows = json.loads(state_file.read_text(encoding="utf-8"))
+    saved_by_id = {row["id"]: row for row in saved_rows}
+
+    expected_explicit = {
+        "legacy-claude": False,
+        "legacy-codex": False,
+        "legacy-cursor": False,
+        "legacy-terminal": False,
+        "legacy-claude-override": True,
+    }
+    for tab_id, expected in expected_explicit.items():
+        row = saved_by_id[tab_id]
+        assert "shell_explicitly_provided" in row, (
+            f"{tab_id}: saved row must include shell_explicitly_provided"
+        )
+        assert row["shell_explicitly_provided"] is expected, (
+            f"{tab_id}: expected shell_explicitly_provided={expected}, "
+            f"got {row['shell_explicitly_provided']}"
+        )
+
+    # Reload from the persisted (migrated) state to prove the representation
+    # is stable: the boolean round-trips unchanged through save+load.
+    manager2 = TTYDManager.__new__(TTYDManager)
+    manager2.processes = {}
+    manager2._next_port = 10000
+    manager2._load_state()
+    for tab_id, expected in expected_explicit.items():
+        proc = manager2.processes[tab_id]
+        assert proc._shell_explicitly_provided is expected, (
+            f"{tab_id}: stable reload must preserve shell_explicitly_provided={expected}"
+        )

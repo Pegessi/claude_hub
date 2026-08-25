@@ -9,7 +9,7 @@
       :ref="(el) => registerIframe(el, cachedTabId)"
       :src="terminalIframeSrc(cachedTabId)"
       class="terminal-iframe"
-      :class="{ active: cachedTabId === tabId }"
+      :class="{ active: cachedTabId === tabId, 'content-pending': cachedTabId === tabId && !contentReady }"
       frameborder="0"
       allowfullscreen
       scrolling="yes"
@@ -63,6 +63,32 @@
           Retry
         </button>
       </template>
+    </div>
+    <!-- Content-refresh failure overlay: shown when the tab-switch history
+         refresh did not complete within CONTENT_REFRESH_TIMEOUT_MS. The pane
+         stays hidden (contentReady=false) so the user never sees a stale or
+         partial frame; this overlay offers a Retry button to re-trigger the
+         history refresh. Only shown when the iframe itself has loaded
+         (activeTabState === 'loaded') so it does not collide with the
+         connecting overlay. -->
+    <div
+      v-if="contentError && activeTabState === 'loaded'"
+      class="terminal-connecting-overlay"
+      role="alert"
+      aria-live="assertive"
+    >
+      <span
+        class="terminal-error-icon"
+        aria-hidden="true"
+      >⏳</span>
+      <span class="terminal-connecting-text">Terminal content failed to load</span>
+      <button
+        type="button"
+        class="terminal-retry-button"
+        @click="retryContentRefresh(tabId)"
+      >
+        Retry
+      </button>
     </div>
   </div>
 </template>
@@ -477,6 +503,21 @@ const pendingSafeReplay = ref(false)
 // the newly-active tab.
 const pendingSafeReplayTabId = ref<string | null>(null)
 
+// Content-ready boundary for the visible pane. When switching to a tab that
+// triggers an immediate history replay, the iframe must not reveal terminal
+// content until the history snapshot has been fetched, written to xterm, and
+// painted. Set to false before dispatching the tab-switch refresh; set back to
+// true only when terminal-history-refresh-done fires for the matching request.
+// The active iframe gets the `content-pending` class while this is false, which
+// hides it (opacity:0) so the user never sees a partially-rendered frame.
+//
+// Fail-closed: if the matching refresh-done never arrives, contentReady stays
+// false and contentError flips true so the user sees a Retry overlay instead
+// of a stale or partial frame. We never reveal content solely because time
+// passed.
+const contentReady = ref(true)
+const contentError = ref(false)
+
 // The agent status for the currently-displayed tab (props.tabId). The
 // terminalStore polls agentStatuses every 5s; only the entry matching
 // props.tabId is relevant since this TerminalView only displays props.tabId.
@@ -509,6 +550,13 @@ let lastThemeKey: string | null = null
 const MOBILE_TERMINAL_BREAKPOINT_PX = 768
 const MOBILE_KEYBOARD_RESIZE_SETTLE_MS = 260
 const MAX_SINGLE_PANE_CACHED_TERMINALS = 4
+
+// Fail-closed timeout for the tab-switch history refresh. If the matching
+// terminal-history-refresh-done event does not arrive within this window, the
+// pane stays hidden and a Retry overlay is shown (contentError=true). This is
+// an error-path timeout, not a content-reveal fallback — we never reveal
+// stale or partial content solely because elapsed time passed.
+const CONTENT_REFRESH_TIMEOUT_MS = 8000
 
 function getTerminalState(): TerminalKeyState {
   if (!window.__claudeHub.terminalState) {
@@ -564,17 +612,22 @@ let tabSwitchGeneration = 0
 // 200 ms setTimeout so FitAddon re-measures exactly after the snapshot is
 // written, not on a guessed timer. Correlates by requestId so an unrelated
 // auto/manual refresh completion for the same tab cannot satisfy this
-// listener. The fallback timeout is cleared when the done event fires so we
-// never post a duplicate resize for the same request.
+// listener.
+//
+// Fail-closed readiness: the pane is only revealed when the matching
+// refresh-done event arrives. If it never does (e.g. the iframe's handler
+// threw), the CONTENT_REFRESH_TIMEOUT_MS timer flips contentError=true so the
+// user sees a Retry overlay instead of a stale or partial frame. We never
+// reveal content solely because elapsed time passed.
 function resizeOnHistoryRefreshDone(tabId: string, requestId: string, generation: number) {
   let settled = false
-  let fallbackTimer: number | null = null
+  let errorTimer: number | null = null
 
   function cleanup() {
     window.removeEventListener('terminal-history-refresh-done', onDone)
-    if (fallbackTimer !== null) {
-      window.clearTimeout(fallbackTimer)
-      fallbackTimer = null
+    if (errorTimer !== null) {
+      window.clearTimeout(errorTimer)
+      errorTimer = null
     }
   }
 
@@ -584,22 +637,28 @@ function resizeOnHistoryRefreshDone(tabId: string, requestId: string, generation
     settled = true
     cleanup()
     if (tabSwitchGeneration !== generation) return
-    // Use the coalesced scheduler so this resize merges with any
-    // ResizeObserver-driven resize that fired when the container settled.
+    // Reveal the pane now that the history snapshot has been written and
+    // painted (the iframe-side double-rAF before refresh-done guarantees the
+    // paint committed). Then resize to fit the container.
+    contentError.value = false
+    contentReady.value = true
     scheduleTerminalResize(tabId)
   }
 
   window.addEventListener('terminal-history-refresh-done', onDone)
-  // Safety fallback: if the done event never fires (e.g. agent tab that
-  // short-circuits the refresh), still resize after a bounded delay so the
-  // visible pane is never left with a stale canvas. Cleared by cleanup()
-  // when the done event arrives.
-  fallbackTimer = window.setTimeout(() => {
+  // Fail-closed timeout: if the matching refresh-done never arrives, do NOT
+  // reveal the pane. Instead surface a Retry overlay so the user can re-trigger
+  // the history refresh. This is intentionally much longer than the old 350 ms
+  // fallback because it is an error path, not a content-reveal path.
+  errorTimer = window.setTimeout(() => {
     if (settled) return
     cleanup()
     if (tabSwitchGeneration !== generation) return
-    scheduleTerminalResize(tabId)
-  }, 350)
+    // Keep contentReady=false so the pane stays hidden; flip contentError to
+    // show the Retry overlay. The user can retry the history refresh instead
+    // of seeing a stale or partial frame.
+    contentError.value = true
+  }, CONTENT_REFRESH_TIMEOUT_MS)
 }
 
 watch(
@@ -620,6 +679,10 @@ watch(
       // coalesced resize here. Desktop tab switches are handled below so each
       // path has exactly one resize source (no double layout work).
       if (!oldTabId || oldTabId === newTabId || isMobileTerminalViewport()) {
+        // Initial mount, same-tab re-render, or mobile: no tab-switch history
+        // replay to wait for, so the pane is immediately content-ready.
+        contentError.value = false
+        contentReady.value = true
         scheduleTerminalResize(newTabId)
         return
       }
@@ -629,8 +692,17 @@ watch(
 
       if (switchAction === 'immediate') {
         // Stable screen (plain terminal, or idle/attention agent): replay
-        // history, then resize exactly once when the snapshot settles (or on
-        // the bounded fallback if the done event never fires).
+        // history, then resize exactly once when the snapshot settles.
+        //
+        // Content-ready boundary: hide the active pane until the history
+        // snapshot has been fetched, written to xterm, and painted. This
+        // prevents the user from seeing a transient incomplete frame (e.g.
+        // the old buffer mid-clear) when switching back to a tab. The iframe
+        // is revealed by resizeOnHistoryRefreshDone when refresh-done fires.
+        // Reset contentError so a previous tab's failed refresh does not leak
+        // into the new tab's overlay.
+        contentError.value = false
+        contentReady.value = false
         const requestId = postTerminalHistoryRefresh(newTabId, {
           reason: 'tab-switch',
           scrollToBottom: true,
@@ -639,7 +711,9 @@ watch(
         if (requestId) {
           resizeOnHistoryRefreshDone(newTabId, requestId, myGeneration)
         } else {
-          // Iframe not ready yet — fall back to a coalesced resize.
+          // Iframe not ready yet — fall back to a coalesced resize and
+          // reveal immediately since there is no refresh to wait on.
+          contentReady.value = true
           scheduleTerminalResize(newTabId)
         }
       } else {
@@ -657,6 +731,10 @@ watch(
         // A single coalesced resize ensures the iframe fits its container.
         pendingSafeReplay.value = true
         pendingSafeReplayTabId.value = newTabId
+        // No history replay for working/unknown agent tabs — the live ttyd
+        // stream keeps rendering, so the pane is immediately content-ready.
+        contentError.value = false
+        contentReady.value = true
         scheduleTerminalResize(newTabId)
       }
     })
@@ -915,6 +993,11 @@ function enqueueResize(tabId?: string) {
 function postTerminalMessage(tabId: string, message: Record<string, unknown>): boolean {
   const iframe = iframeRefs[tabId] || getTerminalState().iframes[tabId]
   if (!iframe?.contentWindow) return false
+  // If the iframe has not finished loading, its message listener has not been
+  // injected yet, so any postMessage we send would be silently dropped. Return
+  // false so callers can fall back to the no-refresh path (e.g. reveal the
+  // pane immediately for a never-loaded iframe, which has no stale content).
+  if (!loadedTabIds.value.has(tabId)) return false
 
   iframe.contentWindow.postMessage({
     ...message,
@@ -940,6 +1023,29 @@ function postTerminalHistoryRefresh(
     requestId,
   })
   return sent ? requestId : null
+}
+
+/**
+ * Re-trigger the tab-switch history refresh after a content-refresh timeout.
+ * Keeps the pane hidden (contentReady=false) until the matching refresh-done
+ * arrives, and resets contentError so the failure overlay disappears. If the
+ * iframe is not ready to accept the message, reveal the pane immediately
+ * (there is no refresh to wait on).
+ */
+function retryContentRefresh(tabId: string) {
+  contentError.value = false
+  contentReady.value = false
+  const requestId = postTerminalHistoryRefresh(tabId, {
+    reason: 'tab-switch',
+    scrollToBottom: true,
+    preserveUserScroll: true,
+  })
+  if (requestId) {
+    resizeOnHistoryRefreshDone(tabId, requestId, tabSwitchGeneration)
+  } else {
+    contentReady.value = true
+    scheduleTerminalResize(tabId)
+  }
 }
 
 function postTerminalScrollBottom(tabId: string): boolean {
@@ -1704,6 +1810,20 @@ onUnmounted(() => {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
+}
+
+/* Content-ready boundary: while the active tab's history snapshot is being
+   fetched, written, and painted, hide the iframe so the user never sees a
+   transient incomplete frame. Revealed by setting contentReady=true once
+   terminal-history-refresh-done fires (the iframe-side double-rAF guarantees
+   the paint committed before that event).
+   - opacity:0 hides the canvas but keeps it in the layout and focusable.
+   - pointer-events is intentionally left as auto (inherited from .active) so
+     the iframe can still receive focus and keystrokes during the pending
+     window. The SAB fast-input path and direct xterm focus both keep working,
+     so the user never loses keystrokes while waiting for the snapshot. */
+.terminal-iframe.active.content-pending {
+  opacity: 0;
 }
 
 /* Connecting / error overlay: shown until the active iframe loads. Sits above
