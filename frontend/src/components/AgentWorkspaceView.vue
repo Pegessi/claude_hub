@@ -457,6 +457,13 @@
                       Agent
                     </span>
                     <span
+                      v-if="task.agent_tag"
+                      class="agent-tag-badge"
+                      :title="`Agent tag: ${task.agent_tag}`"
+                    >
+                      {{ task.agent_tag }}
+                    </span>
+                    <span
                       v-if="task.task_mode === 'autonomous'"
                       class="autonomy-badge"
                       :title="task.autonomous_run?.next_action || 'Autonomous run'"
@@ -7023,6 +7030,24 @@ onUnmounted(() => {
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.03em;
+  line-height: 1;
+  padding: 4px 7px;
+  white-space: nowrap;
+}
+
+.agent-tag-badge {
+  display: inline-flex;
+  align-items: center;
+  max-width: 9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: var(--ch-radius-sm);
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--ch-color-text-muted, #94a3b8);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
   line-height: 1;
   padding: 4px 7px;
   white-space: nowrap;

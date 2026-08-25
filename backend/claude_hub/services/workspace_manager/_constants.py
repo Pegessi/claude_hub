@@ -63,6 +63,7 @@ from ...models import (
     WorkspaceTaskUpdate,
     WorkspaceUpdate,
 )
+from ...models.schemas import AGENT_TAG_MAX_LENGTH, normalize_agent_tag
 from .. import workspace_state_policy as state_policy
 from ..feedback_lessons import FeedbackLessonStore
 from ..remote_profiles import remote_profile_manager
@@ -271,6 +272,8 @@ __all__ = [
     "AgentReportState",
     "AgentRuntimeStatus",
     "AgentType",
+    "AGENT_TAG_MAX_LENGTH",
+    "normalize_agent_tag",
     "Any",
     "AutonomousIteration",
     "AutonomousRun",

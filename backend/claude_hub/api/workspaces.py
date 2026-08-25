@@ -476,6 +476,7 @@ async def update_task(
         and payload.review_profiles is None
         and payload.autonomy_policy is None
         and payload.autonomous_run is None
+        and "agent_tag" not in payload.model_fields_set
     ):
         raise HTTPException(status_code=400, detail="No task update provided")
     try:

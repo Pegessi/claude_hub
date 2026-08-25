@@ -37,6 +37,7 @@ class _TaskUpdatesMixin:
                 payload.clear_context is not None,
                 payload.session_id is not None,
                 payload.parent_task_id is not None,
+                "agent_tag" in payload.model_fields_set,
             ]
         )
 
@@ -118,6 +119,8 @@ class _TaskUpdatesMixin:
                 update["session_id"] = payload.session_id
             else:
                 update["session_id"] = None
+        if "agent_tag" in payload.model_fields_set:
+            update["agent_tag"] = payload.agent_tag
         if payload.goal_packet is not None:
             update["goal_packet"] = payload.goal_packet
         if payload.review_profiles is not None:
@@ -230,7 +233,7 @@ class _TaskUpdatesMixin:
             "schema_version": 1,
             "archived_at": _wm._now().isoformat(),
             "workspace_id": task.workspace_id,
-            "task": task.model_dump(mode="json"),
+            "task": self._task_dump_for_state(task),
             "session": session.model_dump(mode="json") if session else None,
             "reports": [report.model_dump(mode="json") for report in task_reports],
             "timeline": self._build_task_record_timeline(task, task_reports),

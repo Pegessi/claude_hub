@@ -5,6 +5,20 @@
 
 ## Unreleased
 
+### feat: optional workspace task agent_tag metadata
+
+- **What**: workspace tasks accept an optional bounded `agent_tag` string on
+  create/update, exposed as `claude-hub task create --agent-tag TEXT` and a
+  restrained badge on task cards when present.
+- **Why**: operators and automation need a stable, human-readable label for
+  which agent role owns a task without overloading `agent_type` or building a
+  generic tagging system.
+- **How**: optional field on `WorkspaceTask` / create / update schemas with
+  trim, single-line (no control characters), and max-length validation;
+  persistence omits null keys for legacy compatibility; board/tree/API
+  round-trip; frontend badge gated on truthy `agent_tag`; pytest/CLI/frontend/E2E
+  coverage.
+
 ### fix: restore saturated status colors and fix terminal tab-switch history loss / typing lag
 
 - **What**: semantic status colors (success/warning/attention/danger) are

@@ -125,6 +125,117 @@ def test_task_create_body(monkeypatch):
     assert body["execution_complexity"] == "auto"
 
 
+def test_task_create_agent_tag_success(monkeypatch):
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(201, json={"id": "t1", "agent_tag": "worker-a"})
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "task",
+            "create",
+            "ws1",
+            "--title",
+            "T",
+            "--prompt",
+            "do it",
+            "--agent-tag",
+            "worker-a",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert bodies[0]["agent_tag"] == "worker-a"
+
+
+def test_task_create_agent_tag_invalid_empty(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, json={"detail": [{"msg": "agent_tag must not be empty"}]})
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "task",
+            "create",
+            "ws1",
+            "--title",
+            "T",
+            "--prompt",
+            "do it",
+            "--agent-tag",
+            "   ",
+        ],
+    )
+    assert result.exit_code != 0
+
+
+def test_task_create_agent_tag_invalid_control_character(monkeypatch):
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(422, json={"detail": [{"msg": "control characters"}]})
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "task",
+            "create",
+            "ws1",
+            "--title",
+            "T",
+            "--prompt",
+            "do it",
+            "--agent-tag",
+            "bad\nline",
+        ],
+    )
+    assert result.exit_code != 0
+    assert bodies[0]["agent_tag"] == "bad\nline"
+
+
+def test_task_create_without_agent_tag_unchanged(monkeypatch):
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(201, json={"id": "t1"})
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["task", "create", "ws1", "--title", "T", "--prompt", "do it"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "agent_tag" not in bodies[0]
+
+
+def test_task_update_agent_tag_clear(monkeypatch):
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": "t1", "agent_tag": None})
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["task", "update", "t1", "--agent-tag", ""],
+    )
+    assert result.exit_code == 0, result.output
+    assert bodies[0]["agent_tag"] == ""
+
+
 def test_task_create_parent_task_id_and_payload_merge(monkeypatch):
     bodies: List[Dict[str, Any]] = []
 
