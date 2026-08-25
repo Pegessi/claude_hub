@@ -1099,6 +1099,106 @@ def test_manual_history_refresh_message_scrolls_to_latest(terminal_tab: dict, pa
     ), f"manual history refresh did not return to latest output: {alignment}"
 
 
+def test_history_refresh_done_carries_request_id(terminal_tab: dict, page: Page) -> None:
+    """The terminal-history-refresh-done event must echo the requestId from the
+    originating terminal-history-refresh message so callers can correlate a
+    specific refresh request to its completion (and not be satisfied by an
+    unrelated auto/manual refresh for the same tab)."""
+    tab = terminal_tab
+    session_name = f"claude-hub-{tab['id'][:8]}"
+
+    ensure_tmux_session(page, tab["id"], session_name)
+    produce_scrollback(session_name, count=60)
+    load_terminal_page(page, tab["id"], min_buffer_lines=60)
+
+    sent_request_id = "test-req-12345"
+    page.evaluate(
+        """(requestId) => {
+            window.__claudeHubRefreshEvents = [];
+            window.addEventListener('message', function(event) {
+                if (event.data && event.data.type === 'terminal-history-refresh-done') {
+                    window.__claudeHubRefreshEvents.push(event.data);
+                }
+            });
+            window.postMessage({
+                type: 'terminal-history-refresh',
+                reason: 'test-request-id',
+                scrollToBottom: true,
+                requestId: requestId,
+            }, '*');
+        }""",
+        arg=sent_request_id,
+    )
+
+    page.wait_for_function(
+        """() => Array.isArray(window.__claudeHubRefreshEvents) &&
+            window.__claudeHubRefreshEvents.some(function(event) {
+                return event.reason === 'test-request-id' && event.ok === true;
+            })""",
+        timeout=10000,
+    )
+
+    events = page.evaluate("() => window.__claudeHubRefreshEvents || []")
+    matching = [e for e in events if e.get("reason") == "test-request-id"]
+    assert matching, "no terminal-history-refresh-done event for test-request-id"
+    assert matching[0].get("requestId") == sent_request_id, (
+        "terminal-history-refresh-done did not echo the originating requestId: "
+        f"{matching[0]}"
+    )
+
+
+def test_non_manual_refresh_preserves_scroll_position(terminal_tab: dict, page: Page) -> None:
+    """A non-manual history refresh (e.g. tab-switch, auto-round-complete) must
+    not yank a scrolled-up user back to the bottom. Only the manual ↻ refresh
+    always scrolls to bottom. This is the follow-state preservation invariant."""
+    tab = terminal_tab
+    session_name = f"claude-hub-{tab['id'][:8]}"
+
+    ensure_tmux_session(page, tab["id"], session_name)
+    produce_scrollback(session_name, count=260)
+    load_terminal_page(page, tab["id"], min_buffer_lines=260)
+    scroll_terminal_to_top(page)
+
+    # Confirm we are scrolled up (not at bottom) before the refresh.
+    alignment_before = read_scroll_alignment(page)
+    assert alignment_before is not None
+    assert alignment_before["viewportY"] < alignment_before["baseY"], (
+        "terminal should be scrolled up before the non-manual refresh"
+    )
+
+    page.evaluate("""() => {
+            window.__claudeHubRefreshEvents = [];
+            window.addEventListener('message', function(event) {
+                if (event.data && event.data.type === 'terminal-history-refresh-done') {
+                    window.__claudeHubRefreshEvents.push(event.data);
+                }
+            });
+            window.postMessage({
+                type: 'terminal-history-refresh',
+                reason: 'tab-switch',
+                scrollToBottom: true,
+                preserveUserScroll: true
+            }, '*');
+        }""")
+
+    page.wait_for_function(
+        """() => Array.isArray(window.__claudeHubRefreshEvents) &&
+            window.__claudeHubRefreshEvents.some(function(event) {
+                return event.reason === 'tab-switch' && event.ok === true;
+            })""",
+        timeout=10000,
+    )
+
+    alignment_after = read_scroll_alignment(page)
+    assert alignment_after is not None
+    assert (
+        alignment_after["viewportY"] < alignment_after["baseY"]
+    ), (
+        "non-manual (tab-switch) refresh yanked the scrolled-up user back to "
+        f"bottom: {alignment_after}"
+    )
+
+
 def test_terminal_activate_message_scrolls_to_latest(terminal_tab: dict, page: Page) -> None:
     """Mobile tab activation can force a cached terminal back to the latest output."""
     tab = terminal_tab

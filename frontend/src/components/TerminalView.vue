@@ -73,6 +73,8 @@ import { storeToRefs } from 'pinia'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useTerminalConnecting, getConnectingState } from '@/composables/useTerminalConnecting'
+import { decideSwitchReplay, decideStatusChangeReplay } from '@/utils/terminalSwitchPolicy'
+import { computeCacheUpdate } from '@/utils/terminalCachePolicy'
 import type { AgentType, AgentRuntimeStatus } from '@/types'
 
 const props = defineProps<{
@@ -406,6 +408,10 @@ type TerminalThemePayload = {
 type TerminalHistoryRefreshOptions = {
   reason?: string
   scrollToBottom?: boolean
+  // When true, a scrolled-up user is NOT yanked to the bottom. Used for
+  // tab-switch and auto-round-complete refreshes so users reading history
+  // keep their position. Manual ↻ refresh leaves this unset (force bottom).
+  preserveUserScroll?: boolean
 }
 
 // NOTE: namespaced globals are declared in src/types/index.ts (Window.__claudeHub)
@@ -416,7 +422,16 @@ type TerminalHistoryRefreshOptions = {
 type IframeWithSabCache = HTMLIFrameElement & { __sabDrainScript?: HTMLScriptElement }
 
 const iframeRefs: Record<string, HTMLIFrameElement | null> = {}
+// `cachedTabIds` is the v-for render list. It MUST stay in stable insertion
+// order — never reordered on tab switch — because moving an <iframe> in the
+// DOM makes Chromium rebuild its browsing context, which reloads xterm and
+// wipes the buffer/scroll state. LRU eviction uses the separate `tabRecency`
+// list below; `cachedTabIds` only grows (append) and shrinks (evict by id).
 const cachedTabIds = ref<string[]>([])
+// LRU recency order: most-recently-used tab at the end. Updated on every
+// `cacheTabId` call. Used only to pick the eviction victim when the cache
+// exceeds MAX_SINGLE_PANE_CACHED_TERMINALS. Never used as a render order.
+const tabRecency = ref<string[]>([])
 const terminalContainer = ref<HTMLElement | null>(null)
 // Connecting-state management (loaded/error sets + bounded timeout + retry).
 // Extracted into a composable so the state machine is unit-testable. The
@@ -446,6 +461,21 @@ const { layoutType, agentStatuses } = storeToRefs(terminalStore)
 // turn. Reset to null whenever props.tabId changes (see the tabId watcher
 // below) to avoid cross-tab status comparisons triggering a spurious refresh.
 const lastAgentStatus = ref<AgentRuntimeStatus | null>(null)
+
+// When switching to an agent TUI tab whose status is not safe to replay
+// (working or unknown), we defer the history replay until the agent reaches
+// a stable state. The auto-round-complete watcher only fires on a
+// working→idle/attention edge; if the first polled status after switch is
+// already idle/attention (the working state was missed), that watcher would
+// never fire and the terminal would keep showing stale history. This flag
+// covers that gap: set when we defer on switch, fulfilled (replay + clear)
+// on the first stable status regardless of the transition edge. Cleared on
+// any subsequent switch or unmount.
+const pendingSafeReplay = ref(false)
+// The tab that owns the pending deferred replay. Cleared on any switch so a
+// stale status transition from a previous tab cannot fulfill this flag against
+// the newly-active tab.
+const pendingSafeReplayTabId = ref<string | null>(null)
 
 // The agent status for the currently-displayed tab (props.tabId). The
 // terminalStore polls agentStatuses every 5s; only the entry matching
@@ -508,24 +538,68 @@ function getOrCreateInputRing(tabId: string): SabInputRing | null {
 
 function cacheTabId(tabId: string) {
   if (!tabId) return
-  // Split layouts must not keep hidden iframe clients attached to tmux.
-  if (layoutType.value !== '1x1') {
-    const evicted = cachedTabIds.value.filter(id => id !== tabId)
-    evicted.forEach(id => resetTabConnectingState(id))
-    cachedTabIds.value = [tabId]
-    startConnectingTimer(tabId)
-    return
-  }
-  const cachedWithoutCurrent = cachedTabIds.value.filter(id => id !== tabId)
-  const next = [...cachedWithoutCurrent, tabId].slice(-MAX_SINGLE_PANE_CACHED_TERMINALS)
-  // Evict connecting/loaded/error state for tabs no longer cached so a future
-  // re-add shows the connecting overlay again from a clean slate.
-  const evicted = cachedTabIds.value.filter(id => !next.includes(id))
-  evicted.forEach(id => resetTabConnectingState(id))
-  cachedTabIds.value = next
+  const { cachedTabIds: nextCached, tabRecency: nextRecency, evicted } = computeCacheUpdate(
+    { cachedTabIds: cachedTabIds.value, tabRecency: tabRecency.value },
+    tabId,
+    layoutType.value,
+    MAX_SINGLE_PANE_CACHED_TERMINALS,
+  )
+  // Evicted tabs: reset connecting/loaded/error state so a future re-add
+  // shows the connecting overlay again from a clean slate.
+  evicted.forEach((id) => resetTabConnectingState(id))
+  cachedTabIds.value = nextCached
+  tabRecency.value = nextRecency
   // (Re)start the connecting timer for the tab we just cached. If it was
   // already cached and loaded, the timer is a no-op (cleared on load).
   startConnectingTimer(tabId)
+}
+
+// Tracks the latest tab-switch generation so stale callbacks from a previous
+// switch can be cancelled. Each time props.tabId changes we bump this; any
+// callback whose captured generation no longer matches is a no-op.
+let tabSwitchGeneration = 0
+
+// One-shot listener that fires post-switch resize once the iframe's history
+// replay settles (terminal-history-refresh-done). Replaces the previous blind
+// 200 ms setTimeout so FitAddon re-measures exactly after the snapshot is
+// written, not on a guessed timer. Correlates by requestId so an unrelated
+// auto/manual refresh completion for the same tab cannot satisfy this
+// listener. The fallback timeout is cleared when the done event fires so we
+// never post a duplicate resize for the same request.
+function resizeOnHistoryRefreshDone(tabId: string, requestId: string, generation: number) {
+  let settled = false
+  let fallbackTimer: number | null = null
+
+  function cleanup() {
+    window.removeEventListener('terminal-history-refresh-done', onDone)
+    if (fallbackTimer !== null) {
+      window.clearTimeout(fallbackTimer)
+      fallbackTimer = null
+    }
+  }
+
+  function onDone(event: Event) {
+    const detail = (event as CustomEvent).detail
+    if (!detail || detail.tabId !== tabId || detail.requestId !== requestId) return
+    settled = true
+    cleanup()
+    if (tabSwitchGeneration !== generation) return
+    // Use the coalesced scheduler so this resize merges with any
+    // ResizeObserver-driven resize that fired when the container settled.
+    scheduleTerminalResize(tabId)
+  }
+
+  window.addEventListener('terminal-history-refresh-done', onDone)
+  // Safety fallback: if the done event never fires (e.g. agent tab that
+  // short-circuits the refresh), still resize after a bounded delay so the
+  // visible pane is never left with a stale canvas. Cleared by cleanup()
+  // when the done event arrives.
+  fallbackTimer = window.setTimeout(() => {
+    if (settled) return
+    cleanup()
+    if (tabSwitchGeneration !== generation) return
+    scheduleTerminalResize(tabId)
+  }, 350)
 }
 
 watch(
@@ -533,27 +607,53 @@ watch(
   (newTabId, oldTabId) => {
     cacheTabId(newTabId)
     // Reset agent-status tracking so a status transition on the previous tab
-    // does not trigger an auto-refresh on the newly-active tab (acceptance
-    // criterion 3: switching tabs must not accidentally trigger a refresh).
+    // does not trigger an auto-refresh on the newly-active tab.
     lastAgentStatus.value = null
+    // Clear the deferred-replay flag synchronously — before the rAF below
+    // runs — so a currentAgentStatus change that fires in the gap cannot
+    // fulfill the *previous* tab's pending flag against the newly-active tab.
+    pendingSafeReplay.value = false
+    pendingSafeReplayTabId.value = null
+    const myGeneration = ++tabSwitchGeneration
     requestAnimationFrame(() => {
-      scheduleTerminalResize(newTabId)
       scheduleMobileTerminalActivation(newTabId)
-      // Desktop reactivation should be a cheap viewport action. Full tmux
-      // history replay is still available through the manual refresh button,
-      // but doing it automatically on tab switch makes long-context tabs show
-      // a visible history replay before the bottom prompt is usable.
-      if (oldTabId && oldTabId !== newTabId && !isMobileTerminalViewport()) {
+      // Initial mount, same-tab re-render, and mobile viewports get a single
+      // coalesced resize here. Desktop tab switches are handled below so each
+      // path has exactly one resize source (no double layout work).
+      if (!oldTabId || oldTabId === newTabId || isMobileTerminalViewport()) {
+        scheduleTerminalResize(newTabId)
+        return
+      }
+
+      const status = currentAgentStatus.value
+      const switchAction = decideSwitchReplay(props.agentType, status)
+
+      if (switchAction === 'immediate') {
+        // Stable screen (plain terminal, or idle/attention agent): replay
+        // history, then resize exactly once when the snapshot settles (or on
+        // the bounded fallback if the done event never fires).
+        const requestId = postTerminalHistoryRefresh(newTabId, {
+          reason: 'tab-switch',
+          scrollToBottom: true,
+          preserveUserScroll: true,
+        })
+        if (requestId) {
+          resizeOnHistoryRefreshDone(newTabId, requestId, myGeneration)
+        } else {
+          // Iframe not ready yet — fall back to a coalesced resize.
+          scheduleTerminalResize(newTabId)
+        }
+      } else {
+        // Agent TUI is working (or status unknown) — full replay would corrupt
+        // the live screen. Defer history reconciliation: set the pending flag
+        // (scoped to this tab) so the first stable status (idle/attention)
+        // triggers a replay, even if we never observed the working→stable edge.
+        // For now just scroll to bottom + a single coalesced resize so the
+        // live ttyd buffer renders.
+        pendingSafeReplay.value = true
+        pendingSafeReplayTabId.value = newTabId
         postTerminalScrollBottom(newTabId)
-        window.setTimeout(() => postTerminalScrollBottom(newTabId), 120)
-        window.setTimeout(() => postTerminalScrollBottom(newTabId), 360)
-        // Cached-tab reactivation: the iframe is absolute-positioned and
-        // never changed size while hidden, so the iframe-internal
-        // ResizeObserver doesn't fire. Explicitly send a resize so
-        // FitAddon re-measures in case rows were wrong from initial load
-        // (the classic "bottom input missing" race) and the user is
-        // switching back to this tab expecting a usable prompt.
-        window.setTimeout(() => postTerminalResize(newTabId), 200)
+        scheduleTerminalResize(newTabId)
       }
     })
   },
@@ -569,21 +669,44 @@ watch(
 // fires when this TerminalView is mounted — which is exactly the "displayed
 // state" (acceptance criterion 1).
 watch(currentAgentStatus, (newStatus) => {
-  if (
-    lastAgentStatus.value === 'working' &&
-    (newStatus === 'idle' || newStatus === 'attention')
-  ) {
+  // Guard: a deferred replay is only fulfilled for the tab that set it. If the
+  // user switched tabs, pendingSafeReplay was cleared synchronously and
+  // pendingSafeReplayTabId is null, so this no-ops even if a stale status
+  // transition from the previous tab arrives.
+  const pendingForCurrentTab =
+    pendingSafeReplay.value && pendingSafeReplayTabId.value === props.tabId
+  const { replay, clearPending } = decideStatusChangeReplay(
+    lastAgentStatus.value,
+    newStatus,
+    pendingForCurrentTab,
+  )
+  if (replay) {
+    const reason =
+      lastAgentStatus.value === 'working' ? 'auto-round-complete' : 'tab-switch-deferred'
     postTerminalHistoryRefresh(props.tabId, {
-      reason: 'auto-round-complete',
+      reason,
       scrollToBottom: true,
+      preserveUserScroll: true,
     })
+  }
+  if (clearPending) {
+    pendingSafeReplay.value = false
+    pendingSafeReplayTabId.value = null
   }
   lastAgentStatus.value = newStatus
 })
 
 watch(layoutType, () => {
   if (layoutType.value !== '1x1' && props.tabId) {
-    cachedTabIds.value = [props.tabId]
+    const { cachedTabIds: nextCached, tabRecency: nextRecency, evicted } = computeCacheUpdate(
+      { cachedTabIds: cachedTabIds.value, tabRecency: tabRecency.value },
+      props.tabId,
+      layoutType.value,
+      MAX_SINGLE_PANE_CACHED_TERMINALS,
+    )
+    evicted.forEach((id) => resetTabConnectingState(id))
+    cachedTabIds.value = nextCached
+    tabRecency.value = nextRecency
   }
 })
 
@@ -799,12 +922,20 @@ function postTerminalMessage(tabId: string, message: Record<string, unknown>): b
 function postTerminalHistoryRefresh(
   tabId: string,
   options: TerminalHistoryRefreshOptions = {}
-): boolean {
-  return postTerminalMessage(tabId, {
+): string | null {
+  // Generate a request ID so the caller can correlate the
+  // terminal-history-refresh-done event to this specific refresh. Without
+  // this, an unrelated auto/manual refresh completion for the same tab could
+  // satisfy a listener waiting for this request's done event.
+  const requestId = `hist-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  const sent = postTerminalMessage(tabId, {
     type: 'terminal-history-refresh',
     reason: options.reason || 'manual',
     scrollToBottom: options.scrollToBottom !== false,
+    preserveUserScroll: options.preserveUserScroll === true,
+    requestId,
   })
+  return sent ? requestId : null
 }
 
 function postTerminalScrollBottom(tabId: string): boolean {
@@ -1518,6 +1649,8 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('message', handleMessage)
+  pendingSafeReplay.value = false
+  pendingSafeReplayTabId.value = null
   if (window.__claudeHub.refreshTerminalHistory === refreshTerminalHistory) {
     delete window.__claudeHub.refreshTerminalHistory
   }
