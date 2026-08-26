@@ -3,9 +3,56 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 import click
+
+from claude_hub.models import redact_session_json_payload
+
+LIFECYCLE_RECIPE = (
+    "Lifecycle: one Claude Hub Workspace per Git repo (git common-dir);\n"
+    "Git feature worktree != Hub Workspace — run workspace ensure from any checkout.\n"
+    "Hub Workspace is shared by repo; agent execution cwd is separate.\n"
+    "From a feature worktree pass --cwd . so the agent runs in that checkout.\n"
+    "Default agent create best-effort reuses a compatible idle orchestrator.\n"
+    "Check agent status first; avoid extra agents unless parallel work needs them.\n"
+    "Overlapping creates may each create one; use --no-reuse-existing deliberately.\n"
+    "Pass --ephemeral for task-scoped sessions you own, then task cleanup when done.\n"
+    "Any built-in or saved custom env preset works by name/id; day1 is only an example.\n"
+    "Local Claude (feature worktree): claude-hub agent create WORKSPACE "
+    "--agent-type claude --cwd . --env-preset NAME_OR_ID\n"
+    "\n"
+    "Never delete reused/shared agents."
+)
+
+
+def lifecycle_group_help(summary: str) -> str:
+    """Build Click group help text with the shared lifecycle recipe appended."""
+    return f"{summary}\n\n{LIFECYCLE_RECIPE}"
+
+
+def resolve_cli_local_path(path: str) -> str:
+    """Resolve a user-supplied local path in the CLI process working directory."""
+    return str(Path(path).expanduser().resolve())
+
+
+def redact_session_env_payload(data: Any) -> Any:
+    """Redact env values from an agent session dict before CLI output."""
+    return redact_session_json_payload(data)
+
+
+def resolve_agent_reuse(ephemeral: bool, reuse_existing: bool, no_reuse_existing: bool) -> bool:
+    """Resolve tri-state agent reuse flags."""
+    if reuse_existing and no_reuse_existing:
+        raise click.ClickException("Cannot pass both --reuse-existing and --no-reuse-existing.")
+    if ephemeral and reuse_existing:
+        raise click.ClickException("Cannot combine --ephemeral with --reuse-existing.")
+    if no_reuse_existing:
+        return False
+    if ephemeral:
+        return False
+    return True
 
 
 def parse_json_object(value: Optional[str], option_name: str = "--payload-json") -> Dict[str, Any]:

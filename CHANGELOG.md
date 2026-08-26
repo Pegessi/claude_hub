@@ -5,6 +5,25 @@
 
 ## Unreleased
 
+### feat: CLI workspace/agent reuse lifecycle and env-preset support
+
+- **What**: `workspace ensure` reuses Hub Workspaces by Git `common-dir` identity;
+  `workspace create` fails closed on duplicate identity unless
+  `--allow-duplicate`; `agent create` defaults to best-effort compatible idle
+  reuse with tri-state `--reuse-existing` / `--no-reuse-existing` and
+  task-scoped `--ephemeral`. Reuse is advisory rather than an idempotency key:
+  overlapping creates may each produce an Agent for intentional parallelism,
+  while CLI/agent-entry help tells callers to inspect status and avoid
+  unnecessary sessions. `task cleanup` safely deletes caller-owned ephemeral
+  sessions; `--env-preset NAME_OR_ID` resolves any built-in or saved custom
+  preset (with `day1` merely an example) and explicit `--env` overrides it.
+- **Why**: CLI agents were creating duplicate Hub Workspaces per Git worktree,
+  reusing the first orchestrator unconditionally, and launching Claude without
+  user env presets (401 bootstrap failures).
+- **How**: `workspace_identity` + `env_preset_resolver` services; API
+  `POST /workspaces/ensure` and `POST /tasks/{id}/cleanup`; `caller_owned_ephemeral`
+  on `ManagedSession`; lifecycle recipe in CLI help and `AGENTS.md`/`CLAUDE.md`.
+
 ### feat: optional workspace task agent_tag metadata
 
 - **What**: workspace tasks accept an optional bounded `agent_tag` string on

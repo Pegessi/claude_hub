@@ -19,9 +19,17 @@ from ..models import (
     EnvPresetUpdate,
     User,
 )
+from ..services.env_preset_resolver import EnvPresetParseError, validate_env_preset_text
 from ..services.env_presets import BUILT_IN_PRESET_IDS, env_preset_manager
 
 router = APIRouter(prefix="/api/env-presets", tags=["env-presets"])
+
+
+def _validate_preset_text(text: str) -> None:
+    try:
+        validate_env_preset_text(text)
+    except EnvPresetParseError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
 
 
 def _state_to_response() -> EnvPresetsResponse:
@@ -51,6 +59,7 @@ async def create_env_preset(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="name must not be blank",
         )
+    _validate_preset_text(body.text)
     preset = env_preset_manager.create_preset(name=body.name, text=body.text)
     return preset
 
@@ -72,6 +81,7 @@ async def upsert_env_preset(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="name must not be blank",
         )
+    _validate_preset_text(body.text)
     preset = env_preset_manager.upsert_preset(preset_id=preset_id, name=body.name, text=body.text)
     return preset
 
@@ -93,6 +103,8 @@ async def update_env_preset(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="name must not be blank",
         )
+    if body.text is not None:
+        _validate_preset_text(body.text)
     preset = env_preset_manager.update_preset(
         preset_id=preset_id,
         name=body.name,
@@ -147,6 +159,8 @@ async def bulk_import_env_presets(
     """Merge-import presets from a client (used for one-time localStorage migration).
 
     Existing server-side presets are preserved (backend-wins merge)."""
+    for preset in body.custom_presets:
+        _validate_preset_text(preset.text)
     state = env_preset_manager.bulk_import(body)
     return EnvPresetsResponse(
         custom_presets=[EnvPreset(**p) for p in state["custom_presets"]],

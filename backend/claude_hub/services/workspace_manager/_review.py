@@ -96,6 +96,7 @@ class _ReviewMixin:
                 remote_cwd=workspace.remote_cwd,
                 remote_reconnect=workspace.remote_reconnect,
                 ephemeral=True,
+                caller_owned_ephemeral=False,
             ),
         )
 

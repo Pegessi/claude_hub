@@ -429,7 +429,11 @@ def test_delete_workspace_purges_state_and_dir(
     manager: WorkspaceManager, tmp_path: Path, state_root: Path
 ) -> None:
     workspace = _make_workspace(manager, tmp_path)
-    other = _make_workspace(manager, tmp_path, name="Other WS")
+    other_repo = tmp_path / "other-repo"
+    other_repo.mkdir(exist_ok=True)
+    other = manager.create_workspace(
+        WorkspaceCreate(name="Other WS", path=str(other_repo), session_prefix="res2")
+    )
 
     now = datetime.now()
     session = ManagedSession(
@@ -689,7 +693,7 @@ def test_create_workspace_resident_agent_config_parity(
 
     # Defaults when unspecified.
     other = manager.create_workspace(
-        WorkspaceCreate(name="WS2", path=str(repo), session_prefix="res2")
+        WorkspaceCreate(name="WS2", path=str(repo), session_prefix="res2", allow_duplicate=True)
     )
     assert other.resident_agent_type == AgentType.CLAUDE
     assert other.resident_agent_env == {}
@@ -770,7 +774,7 @@ def test_create_workspace_resident_placement_parity(
 
     # Defaults when unspecified.
     other = manager.create_workspace(
-        WorkspaceCreate(name="WS2", path=str(repo), session_prefix="res2")
+        WorkspaceCreate(name="WS2", path=str(repo), session_prefix="res2", allow_duplicate=True)
     )
     assert other.resident_agent_title is None
     assert other.resident_agent_target == ExecutionTarget.LOCAL
@@ -846,6 +850,7 @@ def test_update_workspace_placement_change_clears_resident_session(
     session so the next tick recreates the resident with the new placement."""
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)
+    first_create = True
     for field, value in (
         ("resident_agent_target", ExecutionTarget.REMOTE),
         ("resident_agent_remote_profile_id", "prof-2"),
@@ -857,6 +862,7 @@ def test_update_workspace_placement_change_clears_resident_session(
                 name=f"WS-{field}",
                 path=str(repo),
                 session_prefix="res",
+                allow_duplicate=not first_create,
                 resident_agent_enabled=True,
                 resident_agent_type=AgentType.CLAUDE,
                 resident_agent_target=ExecutionTarget.LOCAL,
@@ -874,6 +880,7 @@ def test_update_workspace_placement_change_clears_resident_session(
 
         assert updated.resident_agent_session_id is None, field
         assert session.id not in manager.sessions, field
+        first_create = False
 
 
 def test_update_workspace_placement_noop_keeps_resident_session(
@@ -1450,6 +1457,7 @@ def test_create_update_workspace_master_mode_persists(
             name="WS",
             path=str(repo),
             session_prefix="res",
+            allow_duplicate=True,
             resident_agent_master_mode=True,
         )
     )
@@ -1757,6 +1765,7 @@ def test_build_resident_prompt_no_periodic_block_when_empty(
             name="WS2",
             path=str(repo),
             session_prefix="res2",
+            allow_duplicate=True,
             resident_agent_periodic_tasks=[
                 ResidentPeriodicTask(id="a", text="paused chore", enabled=False),
             ],

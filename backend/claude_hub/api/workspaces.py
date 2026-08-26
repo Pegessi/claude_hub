@@ -19,13 +19,14 @@ from ..models import (
     FeedbackReaperRun,
     FeedbackSummaryRequest,
     FeedbackSummaryRun,
-    ManagedSession,
+    ManagedSessionPublic,
     ManualTaskControlRequest,
     RequestTaskReviewRequest,
     RetryUncertainDeliveryRequest,
     SendSessionMessageRequest,
     SpawnWorkerRequest,
     StartTaskRequest,
+    TaskCleanupResult,
     TaskFollowupRequest,
     TaskMailboxAckRequest,
     User,
@@ -33,15 +34,22 @@ from ..models import (
     WorkspaceArtifactPreview,
     WorkspaceBoard,
     WorkspaceCreate,
+    WorkspaceEnsure,
     WorkspaceTask,
     WorkspaceTaskCreate,
     WorkspaceTaskUpdate,
     WorkspaceUpdate,
+    redact_workspace_board_for_public,
 )
 from ..models.task_mailbox import TaskEvent
 from ..services import workspace_manager
 from ..services.task_graph import TaskHasDescendantsError
 from ..services.task_mailbox import TaskCallIdConflict
+from ..services.workspace_identity import (
+    AmbiguousWorkspaceError,
+    DuplicateWorkspaceError,
+    WorkspaceIdentityError,
+)
 from ..services.workspace_manager._constants import DeliveryUncertain
 from ..services.workspace_manager._reports import ReportCallIdConflict
 
@@ -89,6 +97,8 @@ def _task_public_http(exc: Exception) -> HTTPException:
         return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, TaskHasDescendantsError):
         return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, (DuplicateWorkspaceError, AmbiguousWorkspaceError)):
+        return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, (ValueError, RuntimeError)):
         return HTTPException(status_code=400, detail=str(exc))
     raise exc
@@ -108,6 +118,24 @@ async def create_workspace(
     """Create an Agent Workspace."""
     try:
         return workspace_manager.create_workspace(payload)
+    except (DuplicateWorkspaceError, AmbiguousWorkspaceError) as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/ensure", response_model=Workspace)
+async def ensure_workspace(
+    payload: WorkspaceEnsure,
+    current_user: User = Depends(get_current_user),
+) -> Workspace:
+    """Ensure a workspace exists for a repo identity (reuse or create)."""
+    try:
+        return workspace_manager.ensure_workspace(payload)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except (DuplicateWorkspaceError, AmbiguousWorkspaceError) as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -123,6 +151,10 @@ async def update_workspace(
         return workspace_manager.update_workspace(workspace_id, payload)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Workspace not found") from e
+    except DuplicateWorkspaceError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except WorkspaceIdentityError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -184,7 +216,7 @@ async def get_workspace_board(
     if if_none_match and etag in {tag.strip() for tag in if_none_match.split(",")}:
         return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
 
-    return board
+    return redact_workspace_board_for_public(board)
 
 
 @router.get(
@@ -445,15 +477,16 @@ async def preview_workspace_artifact(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.post("/{workspace_id}/agent", response_model=ManagedSession, status_code=201)
+@router.post("/{workspace_id}/agent", response_model=ManagedSessionPublic, status_code=201)
 async def ensure_workspace_agent(
     workspace_id: str,
     payload: EnsureWorkspaceAgentRequest,
     current_user: User = Depends(get_current_user),
-) -> ManagedSession:
+) -> ManagedSessionPublic:
     """Ensure a resident agent terminal exists for the workspace."""
     try:
-        return await workspace_manager.ensure_workspace_agent(workspace_id, payload)
+        session = await workspace_manager.ensure_workspace_agent(workspace_id, payload)
+        return ManagedSessionPublic.from_managed_session(session)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Workspace not found") from e
     except ValueError as e:
@@ -501,6 +534,20 @@ async def delete_task(
         raise HTTPException(status_code=409, detail=str(e)) from e
 
 
+@router.post("/tasks/{task_id}/cleanup", response_model=TaskCleanupResult)
+async def cleanup_task_session(
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+) -> TaskCleanupResult:
+    """Safely delete a caller-owned ephemeral session after a terminal task."""
+    try:
+        return await workspace_manager.cleanup_task_session(task_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Task not found") from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 @router.post("/tasks/{task_id}/feedback/reap", response_model=FeedbackReaperRun)
 async def reap_task_feedback(
     task_id: str,
@@ -516,15 +563,16 @@ async def reap_task_feedback(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.post("/tasks/{task_id}/spawn", response_model=ManagedSession, status_code=201)
+@router.post("/tasks/{task_id}/spawn", response_model=ManagedSessionPublic, status_code=201)
 async def spawn_worker(
     task_id: str,
     payload: SpawnWorkerRequest,
     current_user: User = Depends(get_current_user),
-) -> ManagedSession:
+) -> ManagedSessionPublic:
     """Spawn a worker session for a task."""
     try:
-        return await workspace_manager.spawn_worker(task_id, payload.agent_type)
+        session = await workspace_manager.spawn_worker(task_id, payload.agent_type)
+        return ManagedSessionPublic.from_managed_session(session)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Task not found") from e
     except (RuntimeError, ValueError) as e:

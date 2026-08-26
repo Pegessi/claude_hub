@@ -7,6 +7,7 @@ from typing import Optional
 import click
 
 from claude_hub.cli.client import HubClient
+from claude_hub.cli.commands.common import lifecycle_group_help
 from claude_hub.cli.config import DEFAULT_BASE_URL, DEFAULT_CONFIG_PATH, Settings, resolve_settings
 
 
@@ -30,7 +31,7 @@ def as_json(ctx: click.Context) -> bool:
     return settings.json_output
 
 
-@click.group()
+@click.group(help=lifecycle_group_help("Claude Hub command-line interface."))
 @click.option(
     "--base-url",
     envvar="CLAUDE_HUB_URL",
@@ -66,7 +67,7 @@ def cli(
     config: Optional[str],
     verbose: bool,
 ) -> None:
-    """Claude Hub command-line interface."""
+    """Root CLI entry (help text lives on the Click group decorator)."""
     ctx.obj = resolve_settings(
         base_url=base_url,
         token=token,

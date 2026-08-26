@@ -9,6 +9,8 @@ from typing import Any, Dict, Optional, Type
 
 import httpx
 
+from claude_hub.models import redact_session_json_payload
+
 
 class HubError(Exception):
     """Raised when a Claude Hub API request fails.
@@ -238,6 +240,10 @@ class HubClient:
         """POST /api/workspaces."""
         return self._request("POST", "/api/workspaces", json=body)
 
+    def ensure_workspace(self, body: Dict[str, Any]) -> Any:
+        """POST /api/workspaces/ensure."""
+        return self._request("POST", "/api/workspaces/ensure", json=body)
+
     def update_workspace(self, workspace_id: str, body: Dict[str, Any]) -> Any:
         """PATCH /api/workspaces/{workspace_id}."""
         return self._request("PATCH", f"/api/workspaces/{workspace_id}", json=body)
@@ -299,6 +305,10 @@ class HubClient:
     def delete_task(self, task_id: str) -> None:
         """DELETE /api/workspaces/tasks/{task_id}."""
         self._request("DELETE", f"/api/workspaces/tasks/{task_id}")
+
+    def cleanup_task(self, task_id: str) -> Any:
+        """POST /api/workspaces/tasks/{task_id}/cleanup."""
+        return self._request("POST", f"/api/workspaces/tasks/{task_id}/cleanup")
 
     def reap_task_feedback(self, task_id: str, body: Dict[str, Any]) -> Any:
         """POST /api/workspaces/tasks/{task_id}/feedback/reap."""
@@ -391,7 +401,8 @@ class HubClient:
 
     def ensure_agent(self, workspace_id: str, body: Dict[str, Any]) -> Any:
         """POST /api/workspaces/{workspace_id}/agent."""
-        return self._request("POST", f"/api/workspaces/{workspace_id}/agent", json=body)
+        data = self._request("POST", f"/api/workspaces/{workspace_id}/agent", json=body)
+        return redact_session_json_payload(data)
 
     def delete_session(self, session_id: str) -> None:
         """DELETE /api/workspaces/sessions/{session_id}."""

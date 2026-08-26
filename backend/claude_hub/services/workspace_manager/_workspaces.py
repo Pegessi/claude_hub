@@ -329,7 +329,58 @@ class _WorkspacesMixin:
     def get_workspace(self, workspace_id: str) -> Optional[Workspace]:
         return self.workspaces.get(workspace_id)
 
+    def _workspaces_for_identity_key(self, identity_key: str) -> list[Workspace]:
+        from ..workspace_identity import workspace_identity
+
+        matches = [
+            ws for ws in self.workspaces.values() if workspace_identity(ws).key == identity_key
+        ]
+        return sorted(matches, key=lambda ws: (ws.created_at, ws.id))
+
+    def _reconcile_workspace_session_pointers(self, workspace_id: str) -> None:
+        workspace = self.workspaces.get(workspace_id)
+        if workspace is None:
+            return
+        updates: dict[str, Any] = {}
+        if workspace.dispatcher_session_id:
+            session = self.sessions.get(workspace.dispatcher_session_id)
+            if session is None or session.status == ManagedSessionStatus.STOPPED:
+                updates["dispatcher_session_id"] = None
+        if workspace.resident_agent_session_id:
+            session = self.sessions.get(workspace.resident_agent_session_id)
+            if session is None or session.status == ManagedSessionStatus.STOPPED:
+                updates["resident_agent_session_id"] = None
+        if updates:
+            updates["updated_at"] = _wm._now()
+            self.workspaces[workspace_id] = workspace.model_copy(update=updates)
+            self._save_state()
+
+    def _assert_no_duplicate_identity(self, payload: WorkspaceCreate | WorkspaceEnsure) -> None:
+        from ..workspace_identity import (
+            DuplicateWorkspaceError,
+            workspace_identity_for_fields,
+        )
+
+        if getattr(payload, "allow_duplicate", False):
+            return
+        identity = workspace_identity_for_fields(
+            path=payload.path,
+            target=payload.target,
+            remote_profile_id=payload.remote_profile_id,
+            remote_cwd=payload.remote_cwd,
+        )
+        matches = self._workspaces_for_identity_key(identity.key)
+        if matches:
+            raise DuplicateWorkspaceError(identity.key, matches)
+
     def create_workspace(self, payload: WorkspaceCreate) -> Workspace:
+        from ..workspace_identity import (
+            canonical_workspace_path,
+            normalize_remote_cwd,
+            reject_relative_local_path,
+        )
+
+        reject_relative_local_path(payload.path, field="path")
         source_path = Path(payload.path).expanduser().resolve()
         if not source_path.exists() or not source_path.is_dir():
             raise ValueError(f"Local workspace dir does not exist: {source_path}")
@@ -339,6 +390,9 @@ class _WorkspacesMixin:
             if not remote_profile_manager.get_profile(payload.remote_profile_id):
                 raise ValueError(f"Remote profile not found: {payload.remote_profile_id}")
 
+        self._assert_no_duplicate_identity(payload)
+        canonical_path = canonical_workspace_path(str(source_path))
+
         workspace_id = str(uuid.uuid4())
         now = _wm._now()
         prefix = payload.session_prefix or _slug(payload.name)
@@ -347,16 +401,17 @@ class _WorkspacesMixin:
         resident_title = (payload.resident_agent_title or "").strip() or None
         resident_cwd = (payload.resident_agent_cwd or "").strip() or None
         periodic_tasks = self._normalize_periodic_tasks(payload.resident_agent_periodic_tasks)
+        stored_remote_cwd = normalize_remote_cwd(payload.remote_cwd) if payload.remote_cwd else None
         workspace = Workspace(
             id=workspace_id,
             name=payload.name,
-            path=str(source_path),
+            path=canonical_path,
             default_branch=payload.default_branch,
             session_prefix=prefix,
             dispatcher_session_id=None,
             target=payload.target,
             remote_profile_id=payload.remote_profile_id,
-            remote_cwd=payload.remote_cwd,
+            remote_cwd=stored_remote_cwd,
             remote_reconnect=payload.remote_reconnect,
             resident_agent_enabled=payload.resident_agent_enabled,
             resident_agent_paused=payload.resident_agent_paused,
@@ -381,6 +436,55 @@ class _WorkspacesMixin:
         self._save_state()
         return workspace
 
+    def ensure_workspace(self, payload: WorkspaceEnsure) -> Workspace:
+        from ..workspace_identity import (
+            default_workspace_create_name,
+            reject_relative_local_path,
+            select_workspace_candidate,
+            workspace_identity_for_fields,
+        )
+
+        reject_relative_local_path(payload.path, field="path")
+        source_path = Path(payload.path).expanduser().resolve()
+        if not source_path.exists() or not source_path.is_dir():
+            raise ValueError(f"Local workspace dir does not exist: {source_path}")
+        if payload.target == ExecutionTarget.REMOTE:
+            if not payload.remote_profile_id:
+                raise ValueError("Remote workspace requires remote_profile_id")
+            if not remote_profile_manager.get_profile(payload.remote_profile_id):
+                raise ValueError(f"Remote profile not found: {payload.remote_profile_id}")
+
+        identity = workspace_identity_for_fields(
+            path=str(source_path),
+            target=payload.target,
+            remote_profile_id=payload.remote_profile_id,
+            remote_cwd=payload.remote_cwd,
+        )
+        matches = self._workspaces_for_identity_key(identity.key)
+        if matches:
+            chosen = select_workspace_candidate(matches, requested_path=str(source_path))
+            self._reconcile_workspace_session_pointers(chosen.id)
+            return chosen
+
+        if not payload.create_if_missing:
+            raise KeyError(
+                f"No workspace for identity {identity.key}. Pass create_if_missing=true to create."
+            )
+
+        create_name = (payload.name or "").strip() or default_workspace_create_name(source_path)
+        create_payload = WorkspaceCreate(
+            name=create_name,
+            path=str(source_path),
+            default_branch=payload.default_branch,
+            session_prefix=payload.session_prefix,
+            target=payload.target,
+            remote_profile_id=payload.remote_profile_id,
+            remote_cwd=payload.remote_cwd,
+            remote_reconnect=payload.remote_reconnect,
+            allow_duplicate=payload.allow_duplicate,
+        )
+        return self.create_workspace(create_payload)
+
     def update_workspace(self, workspace_id: str, payload: WorkspaceUpdate) -> Workspace:
         workspace = self.workspaces.get(workspace_id)
         if workspace is None:
@@ -393,21 +497,26 @@ class _WorkspacesMixin:
                 raise ValueError("Workspace name cannot be empty")
             update_kwargs["name"] = name
         if payload.path is not None:
+            from ..workspace_identity import canonical_workspace_path, reject_relative_local_path
+
             new_path = payload.path.strip()
             if not new_path:
                 raise ValueError("Local workspace dir cannot be empty")
-            resolved = Path(new_path).expanduser().resolve()
-            if not resolved.exists() or not resolved.is_dir():
-                raise ValueError(f"Local workspace dir does not exist: {resolved}")
-            update_kwargs["path"] = str(resolved)
+            reject_relative_local_path(new_path, field="path")
+            source_path = Path(new_path).expanduser().resolve()
+            if not source_path.exists() or not source_path.is_dir():
+                raise ValueError(f"Local workspace dir does not exist: {source_path}")
+            update_kwargs["path"] = canonical_workspace_path(str(source_path))
         if payload.default_branch is not None:
             branch = payload.default_branch.strip()
             if not branch:
                 raise ValueError("Default branch cannot be empty")
             update_kwargs["default_branch"] = branch
         if payload.remote_cwd is not None:
+            from ..workspace_identity import normalize_remote_cwd
+
             value = payload.remote_cwd.strip()
-            update_kwargs["remote_cwd"] = value or None
+            update_kwargs["remote_cwd"] = normalize_remote_cwd(value) if value else None
         if payload.remote_reconnect is not None:
             update_kwargs["remote_reconnect"] = payload.remote_reconnect
         if payload.resident_agent_enabled is not None:
@@ -450,6 +559,20 @@ class _WorkspacesMixin:
             update_kwargs["resident_agent_remote_reconnect"] = (
                 payload.resident_agent_remote_reconnect
             )
+
+        if update_kwargs and {"path", "remote_cwd"} & update_kwargs.keys():
+            from ..workspace_identity import DuplicateWorkspaceError, workspace_identity_for_fields
+
+            effective = workspace.model_copy(update=update_kwargs)
+            new_identity = workspace_identity_for_fields(
+                path=effective.path,
+                target=effective.target,
+                remote_profile_id=effective.remote_profile_id,
+                remote_cwd=effective.remote_cwd,
+            )
+            for match in self._workspaces_for_identity_key(new_identity.key):
+                if match.id != workspace_id:
+                    raise DuplicateWorkspaceError(new_identity.key, [match])
 
         # Resident launch-config invalidation
         # ------------------------------------
@@ -765,6 +888,9 @@ class _WorkspacesMixin:
         the same curl-based resident prompt as normal.
         """
         existing = self.sessions.get(workspace.resident_agent_session_id or "")
+        if workspace.resident_agent_session_id and existing is None:
+            self._reconcile_workspace_session_pointers(workspace.id)
+            workspace = self.workspaces[workspace.id]
         if existing is not None and existing.status == ManagedSessionStatus.STOPPED:
             existing = None
         if existing is not None and existing.runtime_status == AgentRuntimeStatus.WORKING:

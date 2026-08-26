@@ -491,21 +491,250 @@ class _TmuxQueriesMixin:
         ]
 
     def _dispatcher_session(self, workspace: Workspace) -> Optional[ManagedSession]:
-        if workspace.dispatcher_session_id:
-            session = self.sessions.get(workspace.dispatcher_session_id)
-            if session and session.status != ManagedSessionStatus.STOPPED:
-                return session
-        for session in self._sessions_for_workspace_raw(workspace.id):
-            if (
-                session.role == WorkspaceSessionRole.DISPATCHER
-                and session.status != ManagedSessionStatus.STOPPED
-            ):
-                self.workspaces[workspace.id] = workspace.model_copy(
-                    update={"dispatcher_session_id": session.id, "updated_at": _wm._now()}
-                )
-                self._save_state()
-                return session
+        """Resolve the stored dispatcher pointer only.
+
+        Does not scan for arbitrary dispatcher sessions and must not be used
+        as a CLI reuse shortcut — agent create reuse goes through
+        ``_find_compatible_workspace_agent`` strict matching.
+        """
+        if not workspace.dispatcher_session_id:
+            return None
+        session = self.sessions.get(workspace.dispatcher_session_id)
+        if session and session.status != ManagedSessionStatus.STOPPED:
+            return session
+        self.workspaces[workspace.id] = workspace.model_copy(
+            update={"dispatcher_session_id": None, "updated_at": _wm._now()}
+        )
+        self._save_state()
         return None
+
+    _TERMINAL_TASK_STATUSES_FOR_REUSE = frozenset({WorkspaceTaskStatus.DONE})
+
+    def _session_has_active_canonical_ownership(self, session: ManagedSession) -> bool:
+        """True when a non-terminal task canonically owns this session via task.session_id."""
+        for task in self.tasks.values():
+            if task.workspace_id != session.workspace_id:
+                continue
+            if task.session_id != session.id:
+                continue
+            if task.status not in self._TERMINAL_TASK_STATUSES_FOR_REUSE:
+                return True
+        return False
+
+    def _orchestrator_assignment_is_orphaned(
+        self, session: ManagedSession, candidate_id: str
+    ) -> bool:
+        """Visible orphan while idle: task terminal or canonically owned by another live session."""
+        if session.runtime_status != AgentRuntimeStatus.IDLE:
+            return False
+        if session.status == ManagedSessionStatus.STOPPED:
+            return False
+        task = self.tasks.get(candidate_id)
+        if task is None or task.workspace_id != session.workspace_id:
+            return True
+        if task.status in self._TERMINAL_TASK_STATUSES_FOR_REUSE:
+            return True
+        canonical_session_id = task.session_id
+        if not canonical_session_id:
+            # Active dispatch/binding window before task.session_id is set.
+            return False
+        if canonical_session_id == session.id:
+            return False
+        owner = self.sessions.get(canonical_session_id)
+        if owner is None:
+            return False
+        if owner.workspace_id != task.workspace_id:
+            return False
+        if owner.status == ManagedSessionStatus.STOPPED:
+            return False
+        return True
+
+    def _non_terminal_tasks_referencing_session(
+        self,
+        session_id: str,
+        *,
+        exclude_task_id: str | None = None,
+    ) -> list[WorkspaceTask]:
+        return [
+            other
+            for other in self.tasks.values()
+            if other.id != exclude_task_id
+            and (other.session_id == session_id or other.review_session_id == session_id)
+            and other.status not in self._TERMINAL_TASK_STATUSES_FOR_REUSE
+        ]
+
+    def _session_raw_task_bindings_block_cleanup(
+        self,
+        session: ManagedSession,
+        *,
+        exclude_task_id: str | None = None,
+    ) -> bool:
+        """True when raw task_id/current_task_id bind a non-orphaned non-terminal task."""
+        for candidate_id in {session.task_id, session.current_task_id}:
+            if not candidate_id:
+                continue
+            if exclude_task_id and candidate_id == exclude_task_id:
+                continue
+            if self._orchestrator_assignment_is_orphaned(session, candidate_id):
+                continue
+            other = self.tasks.get(candidate_id)
+            if other is not None and other.status not in self._TERMINAL_TASK_STATUSES_FOR_REUSE:
+                return True
+        return False
+
+    def _orchestrator_assignment_should_clear(self, session: ManagedSession) -> bool:
+        if session.role != WorkspaceSessionRole.ORCHESTRATOR:
+            return False
+        if not session.task_id and not session.current_task_id:
+            return False
+        candidate_ids = {value for value in (session.task_id, session.current_task_id) if value}
+        if not any(
+            self._orchestrator_assignment_is_orphaned(session, candidate_id)
+            for candidate_id in candidate_ids
+        ):
+            return False
+        return not self._session_has_active_canonical_ownership(session)
+
+    def _cleared_orchestrator_assignment(
+        self, session: ManagedSession, now: datetime
+    ) -> ManagedSession:
+        return session.model_copy(
+            update={
+                "task_id": None,
+                "current_task_id": None,
+                "status": ManagedSessionStatus.IDLE,
+                "runtime_status": AgentRuntimeStatus.IDLE,
+                "auto_continue_task_id": None,
+                "auto_continue_attempts": 0,
+                "last_auto_continue_at": None,
+                "hard_recovery_task_id": None,
+                "hard_recovery_attempts": 0,
+                "last_hard_recovery_at": None,
+                "prompt_retry_task_id": None,
+                "prompt_retry_attempted_at": None,
+                "updated_at": now,
+                "last_activity_at": now,
+            }
+        )
+
+    def _reconcile_orchestrator_session_assignment(self, session_id: str) -> bool:
+        session = self.sessions.get(session_id)
+        if session is None or not self._orchestrator_assignment_should_clear(session):
+            return False
+        now = _wm._now()
+        logger.info(
+            "Cleaning stale orchestrator assignment session_id=%s task_ids=%s",
+            session.id,
+            sorted({value for value in (session.task_id, session.current_task_id) if value}),
+        )
+        self.sessions[session_id] = self._cleared_orchestrator_assignment(session, now)
+        return True
+
+    def _cleanup_stale_orchestrator_assignments(self, workspace_id: str) -> bool:
+        """Clear visibly orphaned orchestrator task_id/current_task_id under save.
+
+        An assignment is orphaned when the session is idle and the referenced
+        task is terminal or its canonical session_id points at another live
+        session in the same workspace. Unassigned canonical bindings
+        (session_id unset) and missing/stopped canonical owners are never cleared.
+        """
+        changed = False
+        for session in self._sessions_for_workspace_raw(workspace_id):
+            if session.role != WorkspaceSessionRole.ORCHESTRATOR:
+                continue
+            if self._reconcile_orchestrator_session_assignment(session.id):
+                changed = True
+        if changed:
+            self._save_state()
+        return changed
+
+    def _session_blocks_agent_reuse(self, session: ManagedSession) -> bool:
+        if self._queued_count(session.id) > 0:
+            return True
+        if session.role == WorkspaceSessionRole.REVIEWER:
+            return self._reviewer_has_active_task_binding(session)
+        if session.role == WorkspaceSessionRole.ORCHESTRATOR:
+            # Never block on raw task_id/current_task_id alone; stale fields are
+            # reconciled before reuse. Block only on active canonical ownership.
+            return self._session_has_active_canonical_ownership(session)
+        return False
+
+    def _find_compatible_workspace_agent(
+        self,
+        workspace: Workspace,
+        payload: EnsureWorkspaceAgentRequest,
+    ) -> Optional[ManagedSession]:
+        from ..env_preset_resolver import effective_launch_envs_match
+        from ..workspace_identity import (
+            effective_local_agent_cwd,
+            local_agent_cwd_allowed_for_workspace,
+            normalize_remote_cwd,
+            validate_local_agent_cwd_for_workspace,
+        )
+
+        self._cleanup_stale_orchestrator_assignments(workspace.id)
+
+        requested_target = self._effective_agent_target(workspace, payload)
+        requested_cwd = payload.cwd or workspace.path
+        if requested_target == ExecutionTarget.LOCAL:
+            requested_local_cwd = validate_local_agent_cwd_for_workspace(
+                workspace.path, requested_cwd
+            )
+        else:
+            requested_local_cwd = effective_local_agent_cwd(requested_cwd)
+        requested_remote_cwd = self._resolve_remote_cwd(
+            profile_id=payload.remote_profile_id or workspace.remote_profile_id,
+            requested_cwd=payload.remote_cwd,
+            workspace_cwd=workspace.remote_cwd,
+        )
+
+        compatible: list[ManagedSession] = []
+        reconcile_changed = False
+        for session in self._sessions_for_workspace_raw(workspace.id):
+            if session.role != payload.role:
+                continue
+            if session.agent_type != payload.agent_type:
+                continue
+            if session.solo_mode != payload.solo_mode:
+                continue
+            if session.status == ManagedSessionStatus.STOPPED:
+                continue
+            if session.runtime_status != AgentRuntimeStatus.IDLE:
+                continue
+            if session.role == WorkspaceSessionRole.ORCHESTRATOR:
+                if self._reconcile_orchestrator_session_assignment(session.id):
+                    reconcile_changed = True
+                session = self.sessions[session.id]
+            if self._session_blocks_agent_reuse(session):
+                continue
+            if session.ephemeral or session.caller_owned_ephemeral:
+                continue
+            if session.target != requested_target:
+                continue
+            if requested_target == ExecutionTarget.REMOTE:
+                session_profile = session.remote_profile_id or workspace.remote_profile_id
+                requested_profile = payload.remote_profile_id or workspace.remote_profile_id
+                if session_profile != requested_profile:
+                    continue
+                session_remote_cwd = normalize_remote_cwd(
+                    session.remote_cwd or workspace.remote_cwd
+                )
+                if session_remote_cwd != normalize_remote_cwd(requested_remote_cwd):
+                    continue
+            elif not local_agent_cwd_allowed_for_workspace(workspace.path, session.workspace_path):
+                continue
+            elif effective_local_agent_cwd(session.workspace_path) != requested_local_cwd:
+                continue
+            if not effective_launch_envs_match(session.env, payload.env):
+                continue
+            compatible.append(session)
+
+        if reconcile_changed:
+            self._save_state()
+
+        if not compatible:
+            return None
+        return sorted(compatible, key=lambda session: session.created_at)[0]
 
     def _first_available_workspace_agent(self, workspace_id: str) -> Optional[ManagedSession]:
         agents = self._workspace_agents(workspace_id)
@@ -1013,6 +1242,11 @@ class _TmuxQueriesMixin:
         return reaped
 
     def _first_available_reviewer(self, workspace_id: str) -> Optional[ManagedSession]:
+        """Internal review dispatch only — not CLI agent-create reuse.
+
+        Hub review routing may pick any idle reviewer; CLI ``agent create`` with
+        ``reuse_existing`` must use ``_find_compatible_workspace_agent`` instead.
+        """
         reviewers = [
             session
             for session in self._sessions_for_workspace_raw(workspace_id)
@@ -1053,6 +1287,8 @@ class _TmuxQueriesMixin:
 
         await self._refresh_session_statuses(workspace_id)
         self._reconcile_task_report_statuses(workspace_id)
+        self._reconcile_workspace_session_pointers(workspace_id)
+        self._cleanup_stale_orchestrator_assignments(workspace_id)
         await self._prune_orphan_workspace_tabs(workspace_id)
         self._sync_workspace_tab_metadata(workspace_id)
         tasks = [

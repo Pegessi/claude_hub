@@ -3,7 +3,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 AGENT_TAG_MAX_LENGTH = 64
 _AGENT_TAG_CONTROL_CHARS = frozenset({*range(0x00, 0x20), 0x7F})
@@ -535,6 +535,22 @@ class WorkspaceCreate(BaseModel):
     resident_agent_remote_profile_id: Optional[str] = None
     resident_agent_cwd: Optional[str] = None
     resident_agent_remote_reconnect: bool = True
+    allow_duplicate: bool = False
+
+
+class WorkspaceEnsure(BaseModel):
+    """Payload for ensuring a workspace exists for a repo identity."""
+
+    name: Optional[str] = None
+    path: str
+    default_branch: str = "main"
+    session_prefix: Optional[str] = None
+    target: ExecutionTarget = ExecutionTarget.LOCAL
+    remote_profile_id: Optional[str] = None
+    remote_cwd: Optional[str] = None
+    remote_reconnect: bool = True
+    create_if_missing: bool = True
+    allow_duplicate: bool = False
 
 
 class Workspace(BaseModel):
@@ -790,6 +806,7 @@ class ManagedSession(BaseModel):
     remote_reconnect: bool = True
     solo_mode: bool = True
     ephemeral: bool = False
+    caller_owned_ephemeral: bool = False
     env: Dict[str, str] = Field(default_factory=dict)
     remote_forward_port: Optional[int] = None
     auto_continue_task_id: Optional[str] = None
@@ -914,6 +931,52 @@ class ManagedSession(BaseModel):
     created_at: datetime
     updated_at: datetime
     last_activity_at: Optional[datetime] = None
+
+
+PUBLIC_REDACTED_ENV_VALUE = "[redacted]"
+
+
+def redact_env_for_public_response(env: Dict[str, str]) -> Dict[str, str]:
+    """Return env keys with redacted values for API/CLI/log surfaces."""
+    return {key: PUBLIC_REDACTED_ENV_VALUE for key in env}
+
+
+def redact_managed_session_env(session: ManagedSession) -> ManagedSession:
+    """Return a copy safe for API/CLI responses (never leak env secret values)."""
+    if not session.env:
+        return session
+    return session.model_copy(update={"env": redact_env_for_public_response(session.env)})
+
+
+def redact_managed_sessions_for_public(sessions: List[ManagedSession]) -> List[ManagedSession]:
+    """Redact env values on every session in a public list response."""
+    return [redact_managed_session_env(session) for session in sessions]
+
+
+def redact_session_json_payload(data: Any) -> Any:
+    """Redact env values on a session-shaped JSON dict (CLI/API escape hatches)."""
+    if isinstance(data, dict) and isinstance(data.get("env"), dict):
+        redacted = dict(data)
+        redacted["env"] = redact_env_for_public_response(data["env"])
+        return redacted
+    return data
+
+
+class ManagedSessionPublic(ManagedSession):
+    """Bounded API/CLI session response; env values are never literal secrets."""
+
+    @model_validator(mode="after")
+    def _redact_env_values(self) -> "ManagedSessionPublic":
+        if not self.env:
+            return self
+        if all(value == PUBLIC_REDACTED_ENV_VALUE for value in self.env.values()):
+            return self
+        return self.model_copy(update={"env": redact_env_for_public_response(self.env)})
+
+    @classmethod
+    def from_managed_session(cls, session: ManagedSession) -> "ManagedSessionPublic":
+        """Build a public response from an internal managed session."""
+        return cls.model_validate(redact_managed_session_env(session).model_dump(mode="json"))
 
 
 class AgentReportCreate(BaseModel):
@@ -1233,6 +1296,11 @@ class WorkspaceBoard(BaseModel):
     snapshot_path: Optional[str] = None
 
 
+def redact_workspace_board_for_public(board: WorkspaceBoard) -> WorkspaceBoard:
+    """Return a board copy safe for API responses (session env values redacted)."""
+    return board.model_copy(update={"sessions": redact_managed_sessions_for_public(board.sessions)})
+
+
 class SpawnWorkerRequest(BaseModel):
     """Payload for spawning a worker session for a task."""
 
@@ -1245,7 +1313,13 @@ class EnsureWorkspaceAgentRequest(BaseModel):
     agent_type: AgentType = AgentType.CODEX
     title: Optional[str] = None
     role: WorkspaceSessionRole = WorkspaceSessionRole.ORCHESTRATOR
-    reuse_existing: bool = False
+    reuse_existing: bool = Field(
+        default=False,
+        description=(
+            "Best-effort reuse of a compatible idle session already visible at request time. "
+            "This is advisory and does not collapse overlapping create requests."
+        ),
+    )
     cwd: Optional[str] = None
     solo_mode: bool = True
     target: Optional[ExecutionTarget] = None
@@ -1253,7 +1327,31 @@ class EnsureWorkspaceAgentRequest(BaseModel):
     remote_cwd: Optional[str] = None
     remote_reconnect: Optional[bool] = None
     ephemeral: bool = False
+    caller_owned_ephemeral: bool = Field(
+        default=False,
+        description=(
+            "Explicit CLI provenance: True only when the caller owns a task-scoped "
+            "ephemeral session (--ephemeral on claude-hub agent create). Internal "
+            "review/dispatch/resident paths must leave this False."
+        ),
+    )
     env: Dict[str, str] = Field(default_factory=dict)
+    env_preset: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _validate_caller_owned_provenance(self) -> "EnsureWorkspaceAgentRequest":
+        if self.caller_owned_ephemeral and not self.ephemeral:
+            raise ValueError("caller_owned_ephemeral requires ephemeral=True")
+        return self
+
+
+class TaskCleanupResult(BaseModel):
+    """Structured result for safe task-scoped session cleanup."""
+
+    task_id: str
+    session_id: Optional[str] = None
+    action: str
+    reason: Optional[str] = None
 
 
 class StartTaskRequest(BaseModel):

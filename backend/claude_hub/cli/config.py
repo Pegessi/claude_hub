@@ -30,6 +30,7 @@ class Settings:
     cookie: Optional[str] = None
     json_output: bool = False
     verbose: bool = False
+    default_env_preset: Optional[str] = None
 
 
 def _read_config_file(path: Path) -> Dict[str, Any]:
@@ -81,6 +82,7 @@ def resolve_settings(
     resolved_token = (
         token or os.environ.get("CLAUDE_HUB_TOKEN") or _str_or_none(file_config.get("token"))
     )
+    resolved_default_env_preset = _str_or_none(file_config.get("default_env_preset"))
 
     return Settings(
         base_url=str(resolved_base_url),
@@ -88,4 +90,5 @@ def resolve_settings(
         cookie=cookie,
         json_output=json_output,
         verbose=verbose,
+        default_env_preset=resolved_default_env_preset,
     )
