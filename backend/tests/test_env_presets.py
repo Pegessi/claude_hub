@@ -436,6 +436,29 @@ async def test_bulk_import_api(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_preset_preserves_hash_in_value(client: AsyncClient) -> None:
+    resp = await client.post(
+        "/api/env-presets",
+        json={"name": "Hashy", "text": "TOKEN=abc#def\nURL=https://x.test/p#frag"},
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["text"] == "TOKEN=abc#def\nURL=https://x.test/p#frag"
+
+
+@pytest.mark.asyncio
+async def test_create_preset_rejects_invalid_text_without_leaking_secret(
+    client: AsyncClient,
+) -> None:
+    resp = await client.post(
+        "/api/env-presets",
+        json={"name": "Bad", "text": "export 1BAD=super-secret-token"},
+    )
+    assert resp.status_code == 400
+    assert "super-secret-token" not in resp.text
+
+
+@pytest.mark.asyncio
 async def test_full_crud_lifecycle(client: AsyncClient) -> None:
     """End-to-end CRUD: create → list → update → delete."""
     # Create

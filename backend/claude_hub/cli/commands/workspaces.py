@@ -9,7 +9,14 @@ import click
 
 from claude_hub.cli import main as cli_main
 from claude_hub.cli.client import HubError
-from claude_hub.cli.commands.common import merge_payload, parse_kv_pairs
+from claude_hub.cli.commands.common import (
+    lifecycle_group_help,
+    merge_payload,
+    parse_kv_pairs,
+    redact_session_env_payload,
+    resolve_agent_reuse,
+    resolve_cli_local_path,
+)
 from claude_hub.cli.output import emit, print_rows
 
 WORKSPACE_COLUMNS = ["id", "name", "path", "default_branch"]
@@ -141,9 +148,9 @@ def _print_workspace_summary(workspace_id: str, summary: Dict[str, Any]) -> None
     print_rows(summary.get("active_sessions", []), SESSION_STATUS_COLUMNS)
 
 
-@click.group()
+@click.group(help=lifecycle_group_help("Manage agent workspaces."))
 def workspace() -> None:
-    """Manage agent workspaces."""
+    pass
 
 
 @workspace.command("list")
@@ -179,6 +186,12 @@ def workspace_list(ctx: click.Context) -> None:
     default=None,
     help="Reconnect remote sessions automatically.",
 )
+@click.option(
+    "--allow-duplicate",
+    is_flag=True,
+    default=False,
+    help="Allow creating a workspace when the repo identity already exists.",
+)
 @click.pass_context
 def workspace_create(
     ctx: click.Context,
@@ -190,11 +203,12 @@ def workspace_create(
     remote_profile_id: str,
     remote_cwd: str,
     remote_reconnect: bool,
+    allow_duplicate: bool,
 ) -> None:
-    """Create a workspace."""
+    """Create a workspace (refuses duplicate repo identity unless --allow-duplicate)."""
     body: Dict[str, Any] = {
         "name": name,
-        "path": path,
+        "path": resolve_cli_local_path(path),
         "default_branch": default_branch,
         "target": target,
     }
@@ -206,9 +220,87 @@ def workspace_create(
         body["remote_cwd"] = remote_cwd
     if remote_reconnect is not None:
         body["remote_reconnect"] = remote_reconnect
+    if allow_duplicate:
+        body["allow_duplicate"] = True
     try:
         with cli_main.get_client(ctx) as client:
             data = client.create_workspace(body)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(data, cli_main.as_json(ctx))
+
+
+@workspace.command("ensure")
+@click.option(
+    "--name",
+    default=None,
+    required=False,
+    help="Workspace name when creating (defaults to canonical primary repo basename).",
+)
+@click.option("--path", required=True, help="Local repository path or worktree.")
+@click.option("--default-branch", default="main", help="Default git branch.")
+@click.option("--session-prefix", default=None, help="Prefix for managed session names.")
+@click.option(
+    "--target",
+    type=click.Choice(["local", "remote"]),
+    default="local",
+    help="Execution target.",
+)
+@click.option("--remote-profile-id", default=None, help="Remote profile for remote workspaces.")
+@click.option("--remote-cwd", default=None, help="Remote working directory.")
+@click.option(
+    "--remote-reconnect/--no-remote-reconnect",
+    default=None,
+    help="Reconnect remote sessions automatically.",
+)
+@click.option(
+    "--create/--no-create",
+    "create_if_missing",
+    default=True,
+    help="Create the workspace when no identity match exists.",
+)
+@click.option(
+    "--allow-duplicate",
+    is_flag=True,
+    default=False,
+    help="Allow create when duplicate identity would otherwise fail.",
+)
+@click.pass_context
+def workspace_ensure(
+    ctx: click.Context,
+    name: Optional[str],
+    path: str,
+    default_branch: str,
+    session_prefix: str,
+    target: str,
+    remote_profile_id: str,
+    remote_cwd: str,
+    remote_reconnect: bool,
+    create_if_missing: bool,
+    allow_duplicate: bool,
+) -> None:
+    """Ensure the canonical Hub Workspace for a repo identity (reuse or create)."""
+    body: Dict[str, Any] = {
+        "path": resolve_cli_local_path(path),
+        "default_branch": default_branch,
+        "target": target,
+        "create_if_missing": create_if_missing,
+    }
+    if name is not None:
+        body["name"] = name
+    if session_prefix is not None:
+        body["session_prefix"] = session_prefix
+    if remote_profile_id is not None:
+        body["remote_profile_id"] = remote_profile_id
+    if remote_cwd is not None:
+        body["remote_cwd"] = remote_cwd
+    if remote_reconnect is not None:
+        body["remote_reconnect"] = remote_reconnect
+    if allow_duplicate:
+        body["allow_duplicate"] = True
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.ensure_workspace(body)
     except HubError as e:
         raise click.ClickException(str(e)) from e
     emit(data, cli_main.as_json(ctx))
@@ -241,7 +333,7 @@ def workspace_update(
     body = merge_payload(
         payload_json,
         name=name,
-        path=path,
+        path=resolve_cli_local_path(path) if path is not None else None,
         default_branch=default_branch,
         remote_cwd=remote_cwd,
         remote_reconnect=remote_reconnect,
@@ -393,9 +485,9 @@ def workspace_attachment_get(
     click.echo(response.text)
 
 
-@click.group()
+@click.group(help=lifecycle_group_help("Manage resident workspace agent sessions."))
 def agent() -> None:
-    """Manage resident workspace agent sessions."""
+    pass
 
 
 @agent.command("list")
@@ -458,7 +550,21 @@ def agent_status(ctx: click.Context, workspace_id: str, role: Optional[str]) -> 
     default="orchestrator",
     help="Session role.",
 )
-@click.option("--reuse-existing", is_flag=True, default=False, help="Reuse an existing session.")
+@click.option(
+    "--reuse-existing",
+    is_flag=True,
+    default=False,
+    help=(
+        "Request best-effort reuse of a compatible idle session "
+        "(default when neither flag is set)."
+    ),
+)
+@click.option(
+    "--no-reuse-existing",
+    is_flag=True,
+    default=False,
+    help="Always create a new session.",
+)
 @click.option("--cwd", default=None, help="Session working directory override.")
 @click.option(
     "--solo-mode/--no-solo-mode",
@@ -479,7 +585,14 @@ def agent_status(ctx: click.Context, workspace_id: str, role: Optional[str]) -> 
     help="Reconnect remote sessions automatically.",
 )
 @click.option("--env", "env_values", multiple=True, help="Environment variable KEY=VALUE.")
-@click.option("--ephemeral", is_flag=True, default=False, help="Create an ephemeral session.")
+@click.option(
+    "--env-preset",
+    default=None,
+    help="Any built-in or saved custom env preset, selected by id or name.",
+)
+@click.option(
+    "--ephemeral", is_flag=True, default=False, help="Create a task-scoped ephemeral session."
+)
 @click.option("--payload-json", default=None, help="Raw JSON object merged into the body.")
 @click.pass_context
 def agent_create(
@@ -489,6 +602,7 @@ def agent_create(
     title: str,
     role: str,
     reuse_existing: bool,
+    no_reuse_existing: bool,
     cwd: str,
     solo_mode: bool,
     target: str,
@@ -496,22 +610,29 @@ def agent_create(
     remote_cwd: str,
     remote_reconnect: bool,
     env_values: tuple,
+    env_preset: str,
     ephemeral: bool,
     payload_json: str,
 ) -> None:
     """Ensure a resident workspace agent session."""
+    effective_reuse = resolve_agent_reuse(ephemeral, reuse_existing, no_reuse_existing)
+    settings = ctx.obj
+    resolved_preset = env_preset or getattr(settings, "default_env_preset", None)
+    resolved_cwd = resolve_cli_local_path(cwd) if cwd is not None else None
     body: Dict[str, Any] = merge_payload(
         payload_json,
         agent_type=agent_type,
         role=role,
-        reuse_existing=reuse_existing,
-        cwd=cwd,
+        reuse_existing=effective_reuse,
+        cwd=resolved_cwd,
         solo_mode=solo_mode,
         target=target,
         remote_profile_id=remote_profile_id,
         remote_cwd=remote_cwd,
         remote_reconnect=remote_reconnect,
         ephemeral=ephemeral,
+        caller_owned_ephemeral=ephemeral if ephemeral else False,
+        env_preset=resolved_preset,
     )
     if title is not None:
         body["title"] = title
@@ -522,4 +643,5 @@ def agent_create(
             data = client.ensure_agent(workspace_id, body)
     except HubError as e:
         raise click.ClickException(str(e)) from e
+    data = redact_session_env_payload(data)
     emit(data, cli_main.as_json(ctx))

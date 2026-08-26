@@ -54,6 +54,41 @@ not permission to skip the worktree branch.
 If you catch yourself writing code on `main`, stop immediately. Stash or
 revert, create a worktree, and continue there.
 
+### Claude Hub Workspace vs Git Worktree
+
+These are different layers:
+
+- **Git worktree** (mandatory above): isolated checkout/branch for editing
+  code without touching `main`.
+- **Claude Hub Workspace**: one orchestration workspace per Git repo identity
+  (canonical `git common-dir`). Main and linked Git worktrees share the same
+  Hub Workspace. `workspace ensure` canonicalizes `Workspace.path` to the
+  primary/main worktree; agent execution cwd is separate and must be set
+  explicitly when working from a feature worktree (see below).
+
+CLI lifecycle recipe:
+
+1. `claude-hub workspace ensure --path …` — reuse or create the canonical Hub
+   Workspace for the repo (do not create a new Hub Workspace per Git worktree).
+2. Check `claude-hub agent status WORKSPACE_ID` before creating another Agent.
+   `claude-hub agent create …` best-effort reuses a compatible idle
+   orchestrator already visible to that request; this is guidance against
+   unnecessary Agents, not a concurrency/idempotency boundary. Overlapping
+   create requests may each create a session. Use `--no-reuse-existing` only
+   when parallel work genuinely needs another Agent, and `--ephemeral` only
+   for task-scoped sessions you will clean up yourself. Strict reuse matches
+   exact cwd, so bare `agent create` without `--cwd` targets the main/primary
+   checkout. **From a feature worktree**, pass `--cwd .` so the agent runs in
+   that checkout.
+3. Local Claude from a feature worktree:
+   `claude-hub agent create WORKSPACE_ID --agent-type claude --cwd . --env-preset NAME_OR_ID`.
+   `--env-preset` accepts any built-in preset or saved custom preset by name or
+   id (`day1` is only one possible custom preset). It can also come from
+   `default_env_preset` in `~/.config/claude-hub/config.toml`; explicit
+   `--env KEY=VALUE` overrides preset keys.
+4. After a terminal task on an ephemeral agent: `claude-hub task cleanup TASK_ID`.
+   Never delete reused/shared/persistent agents.
+
 ## Commit And CI
 
 Use conventional commits: `feat:`, `fix:`, `docs:`, `style:`, `refactor:`,
@@ -128,6 +163,7 @@ task.
 | Terminal replay, ttyd, tmux, Playwright terminal debug | `docs/terminal-debugging.md` |
 | Deployment | `docs/DEPLOYMENT.md` |
 | CLI (`claude-hub`) | `docs/working-logs/2026-06-15-claude-hub-cli.md` |
+| CLI workspace/agent reuse lifecycle | `docs/working-logs/2026-08-26-cli-reuse-lifecycle-policy.md` |
 | Orphan reviewer tabs / tab-session reconciliation | `docs/working-logs/2026-06-19-orphan-reviewer-tab-reconcile.md` |
 
 ## Common Edit Areas

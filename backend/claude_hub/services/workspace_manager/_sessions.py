@@ -1,7 +1,10 @@
 """Managed session lifecycle."""
 
+from __future__ import annotations
+
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
+from ...models import TaskCleanupResult
 from ..task_graph import TaskHasDescendantsError, task_has_descendants
 from ._constants import *  # noqa: F401,F403
 
@@ -10,6 +13,14 @@ class _SessionsMixin:
     # Initialized in _StateMixin.__init__; annotation-only declaration (no value,
     # so no runtime attribute is created) lets mypy type the rebind below.
     reports: "dict[str, AgentReport]"
+
+    @staticmethod
+    def _effective_agent_target(
+        workspace: Workspace,
+        payload: EnsureWorkspaceAgentRequest,
+    ) -> ExecutionTarget:
+        """Omitted agent target defaults to LOCAL (not workspace.target)."""
+        return payload.target or ExecutionTarget.LOCAL
 
     def delete_task(self, task_id: str) -> None:
         task = self.tasks.get(task_id)
@@ -77,6 +88,12 @@ class _SessionsMixin:
         workspace_id: str,
         payload_or_agent_type: EnsureWorkspaceAgentRequest | AgentType = AgentType.CODEX,
     ) -> ManagedSession:
+        from ..env_preset_resolver import (
+            EnvPresetNotFoundError,
+            EnvPresetParseError,
+            merge_env_with_preset,
+        )
+
         workspace = self.workspaces.get(workspace_id)
         if not workspace:
             raise KeyError(workspace_id)
@@ -89,23 +106,62 @@ class _SessionsMixin:
                 reuse_existing=True,
             )
 
-        if payload.role == WorkspaceSessionRole.DISPATCHER:
-            existing = self._dispatcher_session(workspace)
+        if payload.ephemeral and payload.reuse_existing:
+            raise ValueError("Cannot combine ephemeral with reuse_existing")
+
+        if payload.env_preset:
+            try:
+                merged_env = merge_env_with_preset(
+                    preset=payload.env_preset,
+                    explicit_env=dict(payload.env or {}),
+                )
+            except (EnvPresetNotFoundError, EnvPresetParseError) as exc:
+                raise ValueError(str(exc)) from None
+            payload = payload.model_copy(update={"env": merged_env})
+
+        if payload.caller_owned_ephemeral and not payload.ephemeral:
+            raise ValueError("caller_owned_ephemeral requires ephemeral=True")
+
+        session_target = self._effective_agent_target(workspace, payload)
+        if session_target == ExecutionTarget.LOCAL:
+            from ..workspace_identity import (
+                InvalidLocalAgentCwdError,
+                validate_local_agent_cwd_for_workspace,
+            )
+
+            try:
+                validate_local_agent_cwd_for_workspace(
+                    workspace.path,
+                    payload.cwd or workspace.path,
+                )
+            except InvalidLocalAgentCwdError as exc:
+                raise ValueError(str(exc)) from None
+
+        reuse_existing = payload.reuse_existing and not payload.ephemeral
+
+        if reuse_existing:
+            # Reuse is deliberately best-effort, not an idempotency boundary.
+            # A compatible idle session that is already persisted is reused,
+            # but overlapping create requests that both observe no session are
+            # allowed to create separate agents for intentional parallel work.
+            existing = self._find_compatible_workspace_agent(workspace, payload)
             if existing:
                 self._sync_session_tab_metadata(existing)
-                return existing
-        elif payload.role == WorkspaceSessionRole.REVIEWER and payload.reuse_existing:
-            existing = self._first_available_reviewer(workspace)
-            if existing:
-                self._sync_session_tab_metadata(existing)
-                return existing
-        elif payload.reuse_existing:
-            existing = self._first_available_workspace_agent(workspace.id)
-            if existing:
-                self._sync_session_tab_metadata(existing)
+                if payload.role == WorkspaceSessionRole.DISPATCHER:
+                    if workspace.dispatcher_session_id != existing.id:
+                        now = _wm._now()
+                        self.workspaces[workspace.id] = workspace.model_copy(
+                            update={"dispatcher_session_id": existing.id, "updated_at": now}
+                        )
+                        self._save_state()
                 return existing
 
-        session = await self._create_managed_session(workspace, payload)
+        # Serialize the stateful create itself so overlapping requests receive
+        # distinct role counters/session ids and cannot overwrite each other.
+        # Do not re-run the compatibility lookup inside this lock: doing so
+        # would turn advisory reuse into hard concurrent de-duplication.
+        async with self.workspace_mutation_lock(workspace_id):
+            session = await self._create_managed_session(workspace, payload)
         bootstrap_prompt = self._build_session_bootstrap_prompt(workspace, session)
         if bootstrap_prompt:
             await self.send_session_message(session.id, bootstrap_prompt)
@@ -137,7 +193,7 @@ class _SessionsMixin:
         if session_id in self.sessions:
             session_id = f"{session_id}-{uuid.uuid4().hex[:6]}"
 
-        session_target = payload.target or ExecutionTarget.LOCAL
+        session_target = self._effective_agent_target(workspace, payload)
         local_cwd = payload.cwd or workspace.path
         remote_profile_id: str | None = None
         remote_cwd: str | None = None
@@ -217,6 +273,7 @@ class _SessionsMixin:
             remote_reconnect=remote_reconnect,
             solo_mode=payload.solo_mode,
             ephemeral=payload.ephemeral,
+            caller_owned_ephemeral=bool(payload.caller_owned_ephemeral),
             env=payload.env,
             remote_forward_port=remote_forward_port,
             created_at=now,
@@ -243,14 +300,16 @@ class _SessionsMixin:
         requested_cwd: str | None,
         workspace_cwd: str | None,
     ) -> str:
+        from ..workspace_identity import normalize_remote_cwd
+
         if requested_cwd:
-            return requested_cwd
+            return normalize_remote_cwd(requested_cwd)
         if workspace_cwd:
-            return workspace_cwd
+            return normalize_remote_cwd(workspace_cwd)
         if profile_id:
             profile = remote_profile_manager.get_profile(profile_id)
             if profile and profile.default_cwd:
-                return profile.default_cwd
+                return normalize_remote_cwd(profile.default_cwd)
         return "~"
 
     def _next_remote_forward_port(self) -> int:
@@ -269,12 +328,7 @@ class _SessionsMixin:
         if not session:
             raise KeyError(session_id)
 
-        blocking = [
-            task
-            for task in self.tasks.values()
-            if (task.session_id == session_id or task.review_session_id == session_id)
-            and task.status != WorkspaceTaskStatus.DONE
-        ]
+        blocking = self._non_terminal_tasks_referencing_session(session_id)
         if blocking:
             raise RuntimeError("Cannot delete an agent with queued, working, or review tasks")
 
@@ -307,3 +361,134 @@ class _SessionsMixin:
                 session.id,
                 session.tab_id,
             )
+
+    _CLEANUP_ALLOWED_SESSION_ROLES = frozenset(
+        {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}
+    )
+
+    async def cleanup_task_session(self, task_id: str) -> TaskCleanupResult:
+        task = self.tasks.get(task_id)
+        if not task:
+            raise KeyError(task_id)
+
+        if task.system_internal or task.internal_kind:
+            return TaskCleanupResult(
+                task_id=task_id,
+                session_id=task.session_id,
+                action="skipped",
+                reason="task cleanup not allowed for internal/system tasks",
+            )
+
+        if task.status != WorkspaceTaskStatus.DONE:
+            return TaskCleanupResult(
+                task_id=task_id,
+                session_id=task.session_id,
+                action="skipped",
+                reason=f"task status is {task.status.value}; must be done",
+            )
+
+        session_id = task.session_id
+        if not session_id:
+            return TaskCleanupResult(
+                task_id=task_id,
+                session_id=None,
+                action="skipped",
+                reason="task has no session_id",
+            )
+
+        session = self.sessions.get(session_id)
+        if not session:
+            return TaskCleanupResult(
+                task_id=task_id,
+                session_id=session_id,
+                action="skipped",
+                reason="session no longer exists",
+            )
+
+        if session.workspace_id != task.workspace_id:
+            return TaskCleanupResult(
+                task_id=task_id,
+                session_id=session_id,
+                action="skipped",
+                reason="session belongs to a different workspace than the task",
+            )
+
+        if session.role not in self._CLEANUP_ALLOWED_SESSION_ROLES:
+            return TaskCleanupResult(
+                task_id=task_id,
+                session_id=session_id,
+                action="skipped",
+                reason=(
+                    f"task cleanup not allowed for {session.role.value} sessions "
+                    "(orchestrator/worker only)"
+                ),
+            )
+
+        if not session.caller_owned_ephemeral:
+            return TaskCleanupResult(
+                task_id=task_id,
+                session_id=session_id,
+                action="skipped",
+                reason="session is not caller-owned ephemeral",
+            )
+
+        workspace = self.workspaces.get(task.workspace_id)
+        if workspace is not None:
+            if workspace.resident_agent_session_id == session_id:
+                return TaskCleanupResult(
+                    task_id=task_id,
+                    session_id=session_id,
+                    action="skipped",
+                    reason="session is the workspace resident agent",
+                )
+            if workspace.dispatcher_session_id == session_id:
+                return TaskCleanupResult(
+                    task_id=task_id,
+                    session_id=session_id,
+                    action="skipped",
+                    reason="session is the workspace dispatcher",
+                )
+
+        if session.runtime_status != AgentRuntimeStatus.IDLE:
+            return TaskCleanupResult(
+                task_id=task_id,
+                session_id=session_id,
+                action="skipped",
+                reason=f"session runtime_status is {session.runtime_status.value}; must be idle",
+            )
+
+        if session.status == ManagedSessionStatus.STOPPED:
+            return TaskCleanupResult(
+                task_id=task_id,
+                session_id=session_id,
+                action="skipped",
+                reason="session is stopped",
+            )
+
+        if self._session_raw_task_bindings_block_cleanup(session, exclude_task_id=task_id):
+            return TaskCleanupResult(
+                task_id=task_id,
+                session_id=session_id,
+                action="skipped",
+                reason="session has active raw task binding to a non-terminal task",
+            )
+
+        blocking = self._non_terminal_tasks_referencing_session(
+            session_id,
+            exclude_task_id=task_id,
+        )
+        if blocking:
+            return TaskCleanupResult(
+                task_id=task_id,
+                session_id=session_id,
+                action="skipped",
+                reason="other non-terminal tasks still reference this session",
+            )
+
+        await self.delete_session(session_id)
+        return TaskCleanupResult(
+            task_id=task_id,
+            session_id=session_id,
+            action="deleted",
+            reason=None,
+        )

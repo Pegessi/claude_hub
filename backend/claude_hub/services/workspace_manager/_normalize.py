@@ -393,6 +393,7 @@ class _NormalizeMixin:
         normalized.setdefault("remote_reconnect", True)
         normalized.setdefault("solo_mode", True)
         normalized.setdefault("ephemeral", False)
+        normalized.setdefault("caller_owned_ephemeral", False)
         normalized.setdefault("remote_forward_port", None)
         normalized.setdefault("auto_continue_task_id", None)
         normalized.setdefault("auto_continue_attempts", 0)

@@ -12,6 +12,7 @@ import click
 from claude_hub.cli import main as cli_main
 from claude_hub.cli.client import HubError
 from claude_hub.cli.commands.common import (
+    lifecycle_group_help,
     merge_payload,
     parse_attachment_json,
     parse_json_object,
@@ -80,9 +81,9 @@ REVIEW_COLUMNS = [
 ]
 
 
-@click.group()
+@click.group(help=lifecycle_group_help("Manage workspace tasks."))
 def task() -> None:
-    """Manage workspace tasks."""
+    pass
 
 
 @task.command("list")
@@ -691,12 +692,19 @@ def task_update(
     help="Workspace to look in (skips the cross-workspace scan).",
 )
 @click.option("--message", default=None, help="Optional acceptance note (recorded as a report).")
+@click.option(
+    "--cleanup-session",
+    is_flag=True,
+    default=False,
+    help="After marking done, run safe task cleanup for caller-owned ephemeral sessions.",
+)
 @click.pass_context
 def task_accept(
     ctx: click.Context,
     task_id: str,
     workspace_id: Optional[str],
     message: Optional[str],
+    cleanup_session: bool,
 ) -> None:
     """Human-accept a task in review and mark it done."""
     try:
@@ -734,6 +742,29 @@ def task_accept(
                         },
                     )
             data = client.update_task(task_id, {"status": WorkspaceTaskStatus.DONE.value})
+            if cleanup_session:
+                cleanup = client.cleanup_task(task_id)
+                if cli_main.as_json(ctx):
+                    emit({"task": data, "cleanup": cleanup}, True)
+                    return
+                click.echo(
+                    f"cleanup: {cleanup.get('action')} {cleanup.get('reason') or ''}".strip()
+                )
+                emit(data, False)
+                return
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(data, cli_main.as_json(ctx))
+
+
+@task.command("cleanup")
+@click.argument("task_id")
+@click.pass_context
+def task_cleanup(ctx: click.Context, task_id: str) -> None:
+    """Safely delete a caller-owned ephemeral session after a terminal task."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.cleanup_task(task_id)
     except HubError as e:
         raise click.ClickException(str(e)) from e
     emit(data, cli_main.as_json(ctx))

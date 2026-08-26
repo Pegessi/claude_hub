@@ -3896,7 +3896,12 @@ def test_lessons_index_includes_all_active_lessons_without_full_body_leak(
 
     emoji_workspace = client.post(
         "/api/workspaces",
-        json={"name": "Emoji Lessons", "path": str(repo), "session_prefix": "emol"},
+        json={
+            "name": "Emoji Lessons",
+            "path": str(repo),
+            "session_prefix": "emol",
+            "allow_duplicate": True,
+        },
     ).json()
     write_iteration_task_record_fixture(state_root, emoji_workspace["id"], "evidence-emoji")
     client.post(
