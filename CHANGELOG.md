@@ -5,6 +5,20 @@
 
 ## Unreleased
 
+### fix: preserve terminal history across HMR remount and backend reload
+
+- **What**: Initial mount, HMR remount, iframe reload/retry, and backend/ttyd
+  restart now restore visible pane content from tmux scrollback before
+  `contentReady`, using request/generation-correlated history refresh with
+  working-agent TUI deferral unchanged.
+- **Why**: Shared-type HMR and uvicorn `--reload` rebuilt TerminalView/iframes
+  while tmux sessions persisted, leaving panes blank despite live sessions.
+- **How**: `schedulePaneHistoryRecovery` in `TerminalView.vue` +
+  `decidePaneRecoveryReplay` policy + per-document recovery correlation in
+  `terminalPaneRecovery.ts`; frontend source tests; isolated Playwright E2E
+  with real TerminalView harness on Vite at `test/harness/` (no backend test
+  route; `test_terminal_hmr_recovery_e2e.py`).
+
 ### feat: paginate Agent Workspace board task history (recent-15 lazy load)
 
 - **What**: `GET /api/workspaces/{id}/board` accepts optional `tasks_limit` and

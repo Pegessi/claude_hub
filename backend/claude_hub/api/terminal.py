@@ -515,35 +515,527 @@ async def proxy_terminal_request(
         let historyCursorX = null;
         let historyCursorY = null;
         let historyLoaded = false;
+        let bootstrapCorrelationRequestId = null;
+        let bootstrapCorrelationAgentStatus = null;
+        const bootstrapReadyPostedRequestIds = new Set();
+        const bootstrapPendingRequestIds = new Set();
+        let replayed = false;
+        let historyPreloadState = (IS_REMOTE_AGENT_TUI || AGENT_TYPE === 'terminal') ? 'skipped' : 'pending';
+        let historyPreloadError = null;
+        let initialReplayNeedsReconcile = true;
+        const HISTORY_FETCH_TIMEOUT_MS = 15000;
+        const BUFFERED_CAPTURE_QUIET_MS = 150;
+        const BUFFERED_CAPTURE_MAX_FETCH_ATTEMPTS = 12;
+
+        function postReadyAfterPaint(callback) {{
+          if (typeof requestAnimationFrame === 'function') {{
+            requestAnimationFrame(function() {{ requestAnimationFrame(callback); }});
+          }} else {{
+            callback();
+          }}
+        }}
+
+        function failBootstrapCorrelations(message, primaryRequestId) {{
+          const ids = new Set(bootstrapPendingRequestIds);
+          bootstrapPendingRequestIds.clear();
+          if (primaryRequestId) ids.add(primaryRequestId);
+          ids.forEach(function(rid) {{
+            if (!rid || bootstrapReadyPostedRequestIds.has(rid)) return;
+            bootstrapReadyPostedRequestIds.add(rid);
+            postHistoryRefreshResult('bootstrap', false, message, rid);
+          }});
+        }}
+
+        function postBootstrapDocumentReady(requestId) {{
+          const rid = requestId || bootstrapCorrelationRequestId;
+          if (!rid || bootstrapReadyPostedRequestIds.has(rid)) return;
+          const term = termForHistoryAction();
+          if (term && term.__claudeHubInitialReplayFailed) {{
+            runBootstrapRecoveryRefresh(rid);
+            return;
+          }}
+          if (historyPreloadState === 'failed') {{
+            runBootstrapRecoveryRefresh(rid);
+            return;
+          }}
+          if (!term || !term.__claudeHubReplayDone) return;
+          if (term.__claudeHubReplayBuffering === true) {{
+            bootstrapPendingRequestIds.add(rid);
+            return;
+          }}
+          bootstrapReadyPostedRequestIds.add(rid);
+          postReadyAfterPaint(function() {{
+            postHistoryRefreshResult('bootstrap', true, null, rid);
+          }});
+        }}
+
+        function tryPostBootstrapForCorrelation(requestId) {{
+          if (!requestId) return;
+          resolveBootstrapCorrelation(requestId, bootstrapCorrelationAgentStatus);
+        }}
+
+        function runBootstrapRecoveryRefresh(requestId) {{
+          if (!requestId || bootstrapReadyPostedRequestIds.has(requestId)) return;
+          const term = termForHistoryAction();
+          if (!term || typeof term.__claudeHubRefreshHistory !== 'function') {{
+            bootstrapPendingRequestIds.add(requestId);
+            return;
+          }}
+          Promise.resolve(term.__claudeHubRefreshHistory({{
+            reason: 'bootstrap',
+            scrollToBottom: true,
+            requestId: requestId,
+          }})).then(function(ok) {{
+            if (bootstrapReadyPostedRequestIds.has(requestId)) return;
+            bootstrapReadyPostedRequestIds.add(requestId);
+            if (ok !== false) {{
+              if (term.__claudeHubInitialReplayFailed) {{
+                term.__claudeHubInitialReplayFailed = false;
+              }}
+              if (historyPreloadState === 'failed') {{
+                historyPreloadState = 'ok';
+                historyPreloadError = null;
+              }}
+              postReadyAfterPaint(function() {{
+                postHistoryRefreshResult('bootstrap', true, null, requestId);
+              }});
+              return;
+            }}
+            postHistoryRefreshResult(
+              'bootstrap',
+              false,
+              'bootstrap recovery refresh failed',
+              requestId,
+            );
+          }}).catch(function(error) {{
+            if (bootstrapReadyPostedRequestIds.has(requestId)) return;
+            bootstrapReadyPostedRequestIds.add(requestId);
+            postHistoryRefreshResult(
+              'bootstrap',
+              false,
+              error && error.message ? error.message : 'bootstrap recovery refresh failed',
+              requestId,
+            );
+          }});
+        }}
+
+        function retryLocalAgentPreloadThenRefresh(requestId) {{
+          historyPreloadState = 'pending';
+          fetchHistorySnapshot(INITIAL_HISTORY_LINES, {{ timeoutMs: HISTORY_FETCH_TIMEOUT_MS }})
+            .then(function(snapshot) {{
+              historyText = snapshot.history;
+              historyCursorX = snapshot.cursorX;
+              historyCursorY = snapshot.cursorY;
+              historyPreloadState = 'ok';
+              historyPreloadError = null;
+            }})
+            .catch(function(error) {{
+              historyPreloadState = 'failed';
+              historyPreloadError = error && error.message ? error.message : 'history preload failed';
+            }})
+            .finally(function() {{
+              runBootstrapRecoveryRefresh(requestId);
+            }});
+        }}
+
+        function flushPendingBootstrapCorrelations() {{
+          const pending = Array.from(bootstrapPendingRequestIds);
+          bootstrapPendingRequestIds.clear();
+          pending.forEach(function(rid) {{ postBootstrapDocumentReady(rid); }});
+          postBootstrapDocumentReady(bootstrapCorrelationRequestId);
+        }}
+
+        function agentStatusIsStable(agentStatus) {{
+          return agentStatus === 'idle' || agentStatus === 'attention';
+        }}
+
+        function finishRemoteStableBootstrapReady(requestId) {{
+          if (!requestId || bootstrapReadyPostedRequestIds.has(requestId)) return;
+          bootstrapReadyPostedRequestIds.add(requestId);
+          postReadyAfterPaint(function() {{
+            postHistoryRefreshResult('bootstrap', true, null, requestId);
+          }});
+        }}
+
+        function completeRemoteLiveBootstrap(requestId) {{
+          function attempt(attemptsLeft) {{
+            const term = termForHistoryAction();
+            if (term && term.__claudeHubReplayDone && term.__claudeHubReplayBuffering !== true) {{
+              if (bootstrapReadyPostedRequestIds.has(requestId)) return;
+              bootstrapReadyPostedRequestIds.add(requestId);
+              postReadyAfterPaint(function() {{
+                postHistoryRefreshResult('bootstrap', true, null, requestId, {{ deferredRecovery: true }});
+              }});
+              return;
+            }}
+            if (attemptsLeft > 0) {{
+              setTimeout(function() {{ attempt(attemptsLeft - 1); }}, 50);
+            }} else {{
+              failBootstrapCorrelations('terminal not ready', requestId);
+            }}
+          }}
+          attempt(80);
+        }}
+
+        function completeRemoteStableBootstrap(requestId) {{
+          function attempt(attemptsLeft) {{
+            const term = termForHistoryAction();
+            if (!term || typeof term.write !== 'function') {{
+              if (attemptsLeft > 0) {{
+                setTimeout(function() {{ attempt(attemptsLeft - 1); }}, 50);
+              }} else {{
+                failBootstrapCorrelations('terminal not ready', requestId);
+              }}
+              return;
+            }}
+            if (term.__claudeHubRemoteStableBootstrapInFlight) {{
+              bootstrapPendingRequestIds.add(requestId);
+              return;
+            }}
+            runRemoteStableBootstrap(term, requestId);
+          }}
+          attempt(80);
+        }}
+
+        function runBufferedCaptureHistorySync(term, options) {{
+          const fetchLines = options && options.fetchLines;
+          const maxFetchAttempts = (options && options.maxFetchAttempts) || BUFFERED_CAPTURE_MAX_FETCH_ATTEMPTS;
+          const captureQuietMs = (options && options.captureQuietMs) || BUFFERED_CAPTURE_QUIET_MS;
+          const fetchTimeoutMs = (options && options.fetchTimeoutMs) || HISTORY_FETCH_TIMEOUT_MS;
+          const originalWrite = term.write;
+          const innerWriteFn = (
+            typeof term.__claudeHubInnerWrite === 'function'
+          ) ? term.__claudeHubInnerWrite : null;
+          const captureBuffer = [];
+          const refetchFallback = [];
+          let lastCaptureBufferedAt = 0;
+          let fetchAttempts = 0;
+          let phase = 'capturing';
+
+          function isCapturePhase() {{
+            return phase === 'capturing' || phase === 'finalizing';
+          }}
+
+          function invokeWrite(data, cb) {{
+            let cbCalled = false;
+            let writerReturned = false;
+            function wrappedCb() {{
+              if (cbCalled) return;
+              cbCalled = true;
+              if (writerReturned && typeof cb === 'function') {{
+                cb();
+              }}
+            }}
+            try {{
+              if (innerWriteFn) {{
+                innerWriteFn.call(term, data, wrappedCb);
+              }} else {{
+                originalWrite.call(term, data, wrappedCb);
+              }}
+              writerReturned = true;
+              if (cbCalled && typeof cb === 'function') {{
+                cb();
+              }}
+            }} catch (error) {{
+              writerReturned = true;
+              throw error;
+            }}
+          }}
+
+          function captureWrite(data, cb) {{
+            if (isCapturePhase()) {{
+              captureBuffer.push({{ data: data, cb: cb, cbInvoked: false }});
+              lastCaptureBufferedAt = Date.now();
+              return undefined;
+            }}
+            return originalWrite.call(term, data, cb);
+          }}
+          term.write = captureWrite;
+
+          function restoreWriteOnce() {{
+            if (term.write === captureWrite) {{
+              term.write = originalWrite;
+            }}
+          }}
+
+          function emitResultOnce(success, detail) {{
+            if (phase === 'settled') return;
+            phase = 'settled';
+            restoreWriteOnce();
+            try {{
+              if (success) {{
+                if (options && typeof options.onSuccess === 'function') options.onSuccess();
+              }} else if (options && typeof options.onError === 'function') {{
+                options.onError(detail || 'failed');
+              }}
+            }} catch (callbackError) {{
+              console.debug('claude-hub capture coordinator callback failed', callbackError);
+            }}
+          }}
+
+          function invokeItemCbOnce(item) {{
+            if (!item || item.cbInvoked) return;
+            item.cbInvoked = true;
+            try {{
+              if (typeof item.cb === 'function') item.cb();
+            }} catch (cbError) {{
+              console.debug('claude-hub capture drain callback failed', cbError);
+            }}
+          }}
+
+          function discardRemainingCaptureCallbacks() {{
+            const remaining = captureBuffer.splice(0, captureBuffer.length);
+            remaining.forEach(invokeItemCbOnce);
+          }}
+
+          function deferCaptureToRefetchFallback() {{
+            const pending = captureBuffer.splice(0, captureBuffer.length);
+            pending.forEach(function(item) {{
+              invokeItemCbOnce(item);
+              refetchFallback.push({{
+                data: item.data,
+                cb: null,
+                cbInvoked: true,
+              }});
+            }});
+          }}
+
+          function restoreRefetchFallbackToCaptureBuffer() {{
+            if (refetchFallback.length === 0) return;
+            captureBuffer.unshift.apply(captureBuffer, refetchFallback.splice(0, refetchFallback.length));
+          }}
+
+          function clearRefetchFallback() {{
+            refetchFallback.length = 0;
+          }}
+
+          function abortFinalize(message) {{
+            if (phase === 'settled') return;
+            discardRemainingCaptureCallbacks();
+            emitResultOnce(false, message);
+          }}
+
+          function drainCaptureBufferThen(callback) {{
+            function drainNext() {{
+              if (phase === 'settled') return;
+              if (captureBuffer.length === 0) {{
+                if (typeof callback === 'function') callback();
+                return;
+              }}
+              const item = captureBuffer.shift();
+              try {{
+                invokeWrite(item.data, function() {{
+                  invokeItemCbOnce(item);
+                  if (phase === 'settled') return;
+                  drainNext();
+                }});
+              }} catch (error) {{
+                invokeItemCbOnce(item);
+                abortFinalize(error && error.message ? error.message : 'drain write failed');
+              }}
+            }}
+            drainNext();
+          }}
+
+          function completeFinalize(success, detail) {{
+            if (phase === 'settled' || phase === 'finalizing') return;
+            phase = 'finalizing';
+            try {{
+              drainCaptureBufferThen(function() {{
+                if (phase === 'settled') return;
+                emitResultOnce(success, detail);
+              }});
+            }} catch (error) {{
+              abortFinalize(error && error.message ? error.message : 'finalize failed');
+            }}
+          }}
+
+          function finishSuccess() {{
+            if (phase === 'settled' || phase === 'finalizing') return;
+            completeFinalize(true);
+          }}
+
+          function finishFailure(message) {{
+            if (phase === 'settled' || phase === 'finalizing') return;
+            restoreRefetchFallbackToCaptureBuffer();
+            completeFinalize(false, message);
+          }}
+
+          function waitForCaptureQuietThen(callback) {{
+            function check() {{
+              if (phase === 'settled') return;
+              if (captureBuffer.length > 0) {{
+                deferCaptureToRefetchFallback();
+              }}
+              const quietFor = lastCaptureBufferedAt > 0
+                ? Date.now() - lastCaptureBufferedAt
+                : captureQuietMs;
+              if (quietFor < captureQuietMs) {{
+                setTimeout(check, captureQuietMs - quietFor + 10);
+                return;
+              }}
+              callback();
+            }}
+            check();
+          }}
+
+          function applyResolvedSnapshot(snapshot) {{
+            if (captureBuffer.length > 0) {{
+              deferCaptureToRefetchFallback();
+              waitForCaptureQuietThen(attemptFetch);
+              return;
+            }}
+
+            const payload = fullReplayPayloadForSnapshot(snapshot);
+            if (!payload) {{
+              clearRefetchFallback();
+              finishSuccess();
+              return;
+            }}
+
+            // Snapshot boundary: pre-apply captures were already deferred
+            // above; only frames arriving after this apply may finalize-drain.
+            discardRemainingCaptureCallbacks();
+
+            function onSnapshotApplied() {{
+              clearRefetchFallback();
+              finishSuccess();
+            }}
+
+            try {{
+              if (options && typeof options.applySnapshot === 'function') {{
+                options.applySnapshot(snapshot, payload, invokeWrite, onSnapshotApplied);
+              }} else {{
+                invokeWrite(payload, onSnapshotApplied);
+              }}
+            }} catch (error) {{
+              finishFailure(error && error.message ? error.message : 'apply failed');
+            }}
+          }}
+
+          function attemptFetch() {{
+            if (phase === 'settled') return;
+            fetchAttempts += 1;
+            if (fetchAttempts > maxFetchAttempts) {{
+              finishFailure('history sync fetch retry limit exceeded');
+              return;
+            }}
+
+            fetchHistorySnapshot(fetchLines, {{ timeoutMs: fetchTimeoutMs }})
+              .then(function(snapshot) {{
+                if (phase === 'settled') return;
+                applyResolvedSnapshot(snapshot);
+              }})
+              .catch(function(error) {{
+                if (phase === 'settled') return;
+                finishFailure(error && error.message ? error.message : 'fetch failed');
+              }});
+          }}
+
+          attemptFetch();
+        }}
+
+        function runRemoteStableBootstrap(term, requestId) {{
+          term.__claudeHubRemoteStableBootstrapInFlight = true;
+          term.__claudeHubReplayBuffering = true;
+
+          runBufferedCaptureHistorySync(term, {{
+            fetchLines: INITIAL_HISTORY_LINES,
+            onSuccess: function() {{
+              term.__claudeHubRemoteStableBootstrapInFlight = false;
+              term.__claudeHubReplayDone = true;
+              term.__claudeHubReplayBuffering = false;
+              initialReplayNeedsReconcile = false;
+              setupHistoryResync(term);
+              finishRemoteStableBootstrapReady(requestId);
+              flushPendingBootstrapCorrelations();
+            }},
+            onError: function(message) {{
+              term.__claudeHubRemoteStableBootstrapInFlight = false;
+              term.__claudeHubReplayBuffering = false;
+              term.__claudeHubReplayDone = true;
+              setupHistoryResync(term);
+              if (!bootstrapReadyPostedRequestIds.has(requestId)) {{
+                bootstrapReadyPostedRequestIds.add(requestId);
+                postHistoryRefreshResult('bootstrap', false, message, requestId);
+              }}
+              const pending = Array.from(bootstrapPendingRequestIds);
+              bootstrapPendingRequestIds.clear();
+              pending.forEach(function(rid) {{
+                if (!bootstrapReadyPostedRequestIds.has(rid)) {{
+                  bootstrapReadyPostedRequestIds.add(rid);
+                  postHistoryRefreshResult('bootstrap', false, message, rid);
+                }}
+              }});
+            }},
+            applySnapshot: function(snapshot, payload, wt, done) {{
+              wt(payload, done);
+            }},
+          }});
+        }}
+
+        function storeBootstrapCorrelation(requestId, agentStatus) {{
+          if (agentStatus !== undefined && agentStatus !== null) {{
+            bootstrapCorrelationAgentStatus = agentStatus;
+          }}
+          resolveBootstrapCorrelation(requestId || null, agentStatus);
+        }}
+
+        function resolveBootstrapCorrelation(requestId, agentStatus) {{
+          if (!requestId) return;
+          bootstrapCorrelationRequestId = requestId;
+          if (IS_REMOTE_AGENT_TUI) {{
+            const status = (
+              agentStatus !== undefined && agentStatus !== null
+            ) ? agentStatus : bootstrapCorrelationAgentStatus;
+            if (agentStatusIsStable(status)) {{
+              completeRemoteStableBootstrap(requestId);
+            }} else {{
+              completeRemoteLiveBootstrap(requestId);
+            }}
+            return;
+          }}
+          const term = termForHistoryAction();
+          if (historyPreloadState === 'failed') {{
+            retryLocalAgentPreloadThenRefresh(requestId);
+            return;
+          }}
+          if (term && term.__claudeHubInitialReplayFailed) {{
+            runBootstrapRecoveryRefresh(requestId);
+            return;
+          }}
+          if (!term || !term.__claudeHubReplayDone || term.__claudeHubReplayBuffering === true) {{
+            bootstrapPendingRequestIds.add(requestId);
+            return;
+          }}
+          postBootstrapDocumentReady(requestId);
+        }}
 
         function markHistoryLoaded() {{
           historyLoaded = true;
           tryHookTerm();
         }}
 
-        if (IS_REMOTE_AGENT_TUI) {{
-          // Remote Claude/Codex redraws its TUI after attach, while remote
-          // tmux history capture requires another SSH round-trip. Replaying a
-          // late snapshot can overwrite fresh prompt/input state, so keep the
-          // initial attach live and leave explicit history recovery to the
-          // manual refresh control.
+        if (IS_REMOTE_AGENT_TUI || AGENT_TYPE === 'terminal') {{
+          // Remote agent TUIs and plain terminals skip preload; plain terminals
+          // always fresh-fetch via the capture coordinator during replay.
           markHistoryLoaded();
         }} else {{
-          fetchHistorySnapshot(INITIAL_HISTORY_LINES)
+          fetchHistorySnapshot(INITIAL_HISTORY_LINES, {{ timeoutMs: HISTORY_FETCH_TIMEOUT_MS }})
             .then(function(snapshot) {{
+              if (replayed) return;
               historyText = snapshot.history;
               historyCursorX = snapshot.cursorX;
               historyCursorY = snapshot.cursorY;
+              historyPreloadState = 'ok';
             }})
             .catch(function(error) {{
+              if (replayed) return;
+              historyPreloadState = 'failed';
+              historyPreloadError = error && error.message ? error.message : 'history preload failed';
               console.debug('claude-hub history preload failed', error);
             }})
             .finally(markHistoryLoaded);
-
-          // Do not leave the terminal blank if the history endpoint stalls.
-          setTimeout(function() {{
-            if (!historyLoaded) markHistoryLoaded();
-          }}, 3000);
         }}
 
         // NOTE: Do NOT early-return when historyText is empty.  The
@@ -551,7 +1043,6 @@ async def proxy_terminal_request(
         // whether there is history to replay.
 
         let currentTerm = undefined;
-        let replayed = false;
         let userScrollGeneration = 0;
         let userInputGeneration = 0;
         let lastUserInputAt = 0;
@@ -600,14 +1091,29 @@ async def proxy_terminal_request(
           }};
         }}
 
-        async function fetchHistorySnapshot(lines) {{
+        async function fetchHistorySnapshot(lines, options) {{
           const requestedLines = Number.isInteger(lines) && lines > 0 ? lines : FULL_HISTORY_LINES;
-          const response = await fetch(`/api/terminal/history/${{TAB_ID}}?lines=${{requestedLines}}`, {{
-            cache: 'no-store',
-            credentials: 'same-origin',
-          }});
-          if (!response.ok) throw new Error('history fetch failed: ' + response.status);
-          return snapshotFromPayload(await response.json());
+          const timeoutMs = (options && options.timeoutMs) || HISTORY_FETCH_TIMEOUT_MS;
+          const controller = new AbortController();
+          const timeoutId = setTimeout(function() {{
+            controller.abort();
+          }}, timeoutMs);
+          try {{
+            const response = await fetch(`/api/terminal/history/${{TAB_ID}}?lines=${{requestedLines}}`, {{
+              cache: 'no-store',
+              credentials: 'same-origin',
+              signal: controller.signal,
+            }});
+            if (!response.ok) throw new Error('history fetch failed: ' + response.status);
+            return snapshotFromPayload(await response.json());
+          }} catch (error) {{
+            if (error && error.name === 'AbortError') {{
+              throw new Error('history fetch timed out after ' + timeoutMs + 'ms');
+            }}
+            throw error;
+          }} finally {{
+            clearTimeout(timeoutId);
+          }}
         }}
 
         function historyLinesFromText(text) {{
@@ -648,17 +1154,21 @@ async def proxy_terminal_request(
           }}
         }}
 
-        function postHistoryRefreshResult(reason, ok, detail, requestId) {{
+        function postHistoryRefreshResult(reason, ok, detail, requestId, extras) {{
           try {{
             const target = window.parent && window.parent !== window ? window.parent : window;
-            target.postMessage({{
+            const payload = {{
               type: 'terminal-history-refresh-done',
               tabId: TAB_ID,
               reason: reason || 'manual',
               ok: !!ok,
               error: detail || null,
               requestId: requestId || null,
-            }}, '*');
+            }};
+            if (extras && extras.deferredRecovery) {{
+              payload.deferredRecovery = true;
+            }}
+            target.postMessage(payload, '*');
           }} catch (error) {{}}
         }}
 
@@ -677,8 +1187,38 @@ async def proxy_terminal_request(
           if (lines.length > 0 && lines[lines.length - 1] === '') {{
             lines.pop();
           }}
+
+          if (fullReplay && AGENT_TYPE === 'terminal') {{
+            term.__claudeHubReplayBuffering = true;
+            runBufferedCaptureHistorySync(term, {{
+              fetchLines: INITIAL_HISTORY_LINES,
+              onSuccess: function() {{
+                term.__claudeHubReplayDone = true;
+                term.__claudeHubReplayBuffering = false;
+                initialReplayNeedsReconcile = false;
+                setupHistoryResync(term);
+                flushPendingBootstrapCorrelations();
+              }},
+              onError: function(message) {{
+                console.debug('claude-hub plain terminal initial replay failed', message);
+                term.__claudeHubInitialReplayFailed = true;
+                term.__claudeHubReplayDone = true;
+                term.__claudeHubReplayBuffering = false;
+                setupHistoryResync(term);
+                failBootstrapCorrelations(message, bootstrapCorrelationRequestId);
+                flushPendingBootstrapCorrelations();
+              }},
+            }});
+            return;
+          }}
+
           if (lines.length === 0) {{
             term.__claudeHubReplayDone = true;
+            term.__claudeHubReplayBuffering = false;
+            setupHistoryResync(term);
+            if (!term.__claudeHubRemoteStableBootstrapInFlight) {{
+              tryPostBootstrapForCorrelation(bootstrapCorrelationRequestId);
+            }}
             return;
           }}
           if (fullReplay && IS_AGENT_TUI && lines.length < INITIAL_AGENT_REPLAY_MIN_LINES) {{
@@ -689,6 +1229,10 @@ async def proxy_terminal_request(
             // genuinely long agent histories.
             term.__claudeHubReplaySkippedForShortHistory = true;
             term.__claudeHubReplayDone = true;
+            setupHistoryResync(term);
+            if (!term.__claudeHubRemoteStableBootstrapInFlight) {{
+              tryPostBootstrapForCorrelation(bootstrapCorrelationRequestId);
+            }}
             return;
           }}
 
@@ -696,7 +1240,7 @@ async def proxy_terminal_request(
           // history and real-time data from interleaving in the xterm buffer.
           const buffer = [];
           let historyDone = false;
-          const originalWrite = term.write.bind(term);
+          const originalWrite = term.write;
           const isRemoteAgentReplay = fullReplay && IS_REMOTE_AGENT_TUI;
           const FULL_REPLAY_MIN_HOLD_MS = isRemoteAgentReplay ? 250 : 2500;
           const FULL_REPLAY_QUIET_MS = isRemoteAgentReplay ? 150 : 750;
@@ -763,7 +1307,7 @@ async def proxy_terminal_request(
 
           term.write = function(data, cb) {{
             if (historyDone) {{
-              return originalWrite(data, cb);
+              return originalWrite.call(term, data, cb);
             }}
             if (fullReplay) {{
               lastBufferedAt = Date.now();
@@ -801,6 +1345,34 @@ async def proxy_terminal_request(
             scheduleReplayRecoveryAfterInputQuiet();
           }}
 
+          function flushReplayBufferThen(callback) {{
+            const filterDuplicateFrames = fullReplay && !AUTO_HISTORY_REPLAY_ENABLED;
+            function drainBatch() {{
+              if (buffer.length === 0) {{
+                if (typeof callback === 'function') callback();
+                return;
+              }}
+              let pending = buffer.length;
+              const batch = buffer.splice(0, buffer.length);
+              batch.forEach(function(item) {{
+                function onItemDone() {{
+                  try {{
+                    if (typeof item.cb === 'function') item.cb();
+                  }} finally {{
+                    pending--;
+                    if (pending === 0) drainBatch();
+                  }}
+                }}
+                if (filterDuplicateFrames && isDuplicateInitialFrame(item.data)) {{
+                  onItemDone();
+                  return;
+                }}
+                originalWrite.call(term, item.data, onItemDone);
+              }});
+            }}
+            drainBatch();
+          }}
+
           function flushBuffer() {{
             if (historyDone) return;
             if (fullReplayHoldTimer) {{
@@ -809,36 +1381,21 @@ async def proxy_terminal_request(
             }}
             clearTimeout(safetyTimer);
             historyDone = true;
-            term.__claudeHubReplayDone = true;
-            term.__claudeHubReplayBuffering = false;
-            removeReplayInputListener();
-            term.write = originalWrite;
-            // Flush buffered ws frames for plain terminals; any clobbered
-            // scrollback is corrected by the post-flush tmux refresh below.
-            // Agent TUIs cannot safely take that corrective snapshot replay, so
-            // keep the final replayed tmux history intact and drop the held
-            // ttyd initial-screen frames that would otherwise create duplicate
-            // or discontinuous scrollback while the user scrolls history. Keep
-            // frames that contain text not present in the replay snapshot; those
-            // are real Claude/Codex updates produced during the hold.
-            const filterDuplicateFrames = fullReplay && !AUTO_HISTORY_REPLAY_ENABLED;
-            for (const item of buffer) {{
-              if (filterDuplicateFrames && isDuplicateInitialFrame(item.data)) {{
-                if (typeof item.cb === 'function') item.cb();
-                continue;
+            flushReplayBufferThen(function() {{
+              removeReplayInputListener();
+              term.write = originalWrite;
+              term.__claudeHubReplayDone = true;
+              term.__claudeHubReplayBuffering = false;
+              initialReplayNeedsReconcile = false;
+              setupHistoryResync(term);
+              startPostReplayWatch();
+              flushPendingBootstrapCorrelations();
+              if (fullReplay && AUTO_HISTORY_REPLAY_ENABLED && !replayReleasedForInput) {{
+                setTimeout(function() {{
+                  refreshHistoryWhenReady({{ reason: 'post-replay-flush', scrollToBottom: true }}, 50);
+                }}, 0);
               }}
-              originalWrite(item.data, item.cb);
-            }}
-            buffer.length = 0;
-            startPostReplayWatch();
-            if (fullReplay && AUTO_HISTORY_REPLAY_ENABLED && !replayReleasedForInput) {{
-              // Reconcile xterm with current tmux state once the resync
-              // hooks attach. Repairs any scrollback clobbered by the
-              // ttyd initial-screen frame we just flushed.
-              setTimeout(function() {{
-                refreshHistoryWhenReady({{ reason: 'post-replay-flush', scrollToBottom: true }}, 50);
-              }}, 0);
-            }}
+            }});
           }}
 
           function hasExpectedReplayBuffer() {{
@@ -877,7 +1434,7 @@ async def proxy_terminal_request(
                 return;
               }}
               fullReplayVerifyAttempts++;
-              originalWrite(replayPayload, verifyFullReplayBeforeDone);
+              originalWrite.call(term, replayPayload, verifyFullReplayBeforeDone);
             }}, FULL_REPLAY_VERIFY_DELAY_MS);
           }}
 
@@ -897,7 +1454,7 @@ async def proxy_terminal_request(
             // On Linux CI, a later resize/initial-frame burst can still
             // collapse scrollback; verify the xterm buffer before setting
             // the public replay-done flag used by E2E readiness checks.
-            originalWrite(replayPayload, verifyFullReplayBeforeDone);
+            originalWrite.call(term, replayPayload, verifyFullReplayBeforeDone);
           }}
 
           function finishFullReplayWhenQuiet() {{
@@ -946,7 +1503,7 @@ async def proxy_terminal_request(
             // from scratch.  The last `rows` lines will land on the
             // visible screen; the rest becomes scrollback.
             // The \\x1b[3J clears scrollback, \\x1b[H\\x1b[2J clears screen.
-            originalWrite(replayPayload, function() {{
+            originalWrite.call(term, replayPayload, function() {{
               // ttyd can still deliver its initial screen payload after
               // xterm accepts the replay write, especially under the Linux
               // CI binary. Keep term.write buffered until that stream has
@@ -963,7 +1520,7 @@ async def proxy_terminal_request(
             // bottom `rows` lines (which land on the visible screen) into
             // scrollback so the visible screen is left blank for ttyd.
             var scrollUpSeq = '\\x1b[' + (term.rows || 24) + 'S';
-            originalWrite(lines.join('\\r\\n') + '\\r\\n' + scrollUpSeq, function() {{
+            originalWrite.call(term, lines.join('\\r\\n') + '\\r\\n' + scrollUpSeq, function() {{
               flushBuffer();
             }});
           }}
@@ -981,7 +1538,6 @@ async def proxy_terminal_request(
           if (term.element) {{
             replayHistory(term, true);
             setupResizeGuard(term);
-            setupHistoryResyncAfterReplay(term);
           }} else {{
             const originalOpen = term.open.bind(term);
             term.open = function(...args) {{
@@ -995,7 +1551,6 @@ async def proxy_terminal_request(
               // payload while replay is in progress.
               replayHistory(term, true);
               setupResizeGuard(term);
-              setupHistoryResyncAfterReplay(term);
               return result;
             }};
           }}
@@ -1166,7 +1721,11 @@ async def proxy_terminal_request(
           if (!term || term.__claudeHubHistoryResyncHooked || typeof term.write !== 'function') return;
           term.__claudeHubHistoryResyncHooked = true;
 
-          const writeThrough = term.write.bind(term);
+          const innerWriteRef = term.write;
+          function writeThrough(data, cb) {{
+            return innerWriteRef.call(term, data, cb);
+          }}
+          term.__claudeHubInnerWrite = writeThrough;
           let writeGeneration = 0;
           let timer = null;
           let resyncing = false;
@@ -1175,8 +1734,9 @@ async def proxy_terminal_request(
           let bottomFollowGeneration = 0;
           let bottomFollowUntil = 0;
           const resyncBuffer = [];
-          let forcedRefreshRunning = false;
-          let forcedRefreshPendingOptions = null;
+          let forcedRefreshQueue = [];
+          let forcedRefreshPumpPromise = null;
+          let historySyncOwner = 0;
           let agentHistoryViewNeedsSnapshot = false;
           let pendingResyncChars = 0;
           let pendingResyncLineBreaks = 0;
@@ -1363,29 +1923,66 @@ async def proxy_terminal_request(
             }}
           }}
 
-          function flushResyncBuffer() {{
-            while (resyncBuffer.length > 0) {{
-              const item = resyncBuffer.shift();
-              writeThrough(item.data, item.cb);
+          function beginHistorySyncOwner() {{
+            historySyncOwner++;
+            if (activeAutoResyncId !== null) {{
+              cancelledAutoResyncIds.add(activeAutoResyncId);
+              activeAutoResyncId = null;
+            }}
+            if (timer) {{
+              clearTimeout(timer);
+              timer = null;
+            }}
+            return historySyncOwner;
+          }}
+
+          function isHistorySyncOwner(owner) {{
+            return historySyncOwner === owner;
+          }}
+
+          function cancelAutoResyncForForcedRefresh() {{
+            if (activeAutoResyncId !== null) {{
+              cancelledAutoResyncIds.add(activeAutoResyncId);
+              activeAutoResyncId = null;
+            }}
+            if (timer) {{
+              clearTimeout(timer);
+              timer = null;
+            }}
+            if (resyncing) {{
+              resyncing = false;
+              flushResyncBuffer();
             }}
           }}
 
-          function writeHistorySnapshot(snapshot, options, cb) {{
-            const payload = fullReplayPayloadForSnapshot(snapshot);
-            const shouldScrollToBottom = !options || options.scrollToBottom !== false;
-            // The content-ready boundary (wait for the painted frame to commit
-            // before firing refresh-done) only matters for tab-switch refreshes,
-            // where the frontend hides the iframe until refresh-done. For
-            // post-replay / manual / auto-resync refreshes the iframe is already
-            // visible, so firing refresh-done immediately avoids letting live
-            // ttyd frames accumulate between the snapshot write and the done
-            // event (which would make xterm drift ahead of the tmux snapshot).
-            const isTabSwitch = options && options.reason === 'tab-switch';
+          function flushResyncBuffer() {{
+            flushResyncBufferThen(function() {{}});
+          }}
 
-            // For preserveUserScroll refreshes (scrollToBottom === false), the
-            // full-replay payload contains \x1b[3J which clears scrollback and
-            // resets the viewport to the bottom. Capture the user's scroll
-            // position before the write so we can restore it afterwards.
+          function flushResyncBufferThen(callback) {{
+            function drainBatch() {{
+              if (resyncBuffer.length === 0) {{
+                if (typeof callback === 'function') callback();
+                return;
+              }}
+              let pending = resyncBuffer.length;
+              const batch = resyncBuffer.splice(0, resyncBuffer.length);
+              batch.forEach(function(item) {{
+                writeThrough(item.data, function() {{
+                  try {{
+                    if (typeof item.cb === 'function') item.cb();
+                  }} finally {{
+                    pending--;
+                    if (pending === 0) drainBatch();
+                  }}
+                }});
+              }});
+            }}
+            drainBatch();
+          }}
+
+          function applyHistoryPayloadWithOptions(term, payload, options, wt, cb) {{
+            const shouldScrollToBottom = !options || options.scrollToBottom !== false;
             let savedViewportY = null;
             let savedScrollTop = null;
             if (!shouldScrollToBottom) {{
@@ -1397,23 +1994,11 @@ async def proxy_terminal_request(
               }} catch (e) {{}}
             }}
 
-            function done(ok) {{
-              resyncing = false;
-              resetResyncPressure();
-              flushResyncBuffer();
+            function finishApply(ok) {{
               if (shouldScrollToBottom) {{
                 scrollTerminalToBottom(term, {{ refresh: true }});
                 domAtBottomCached = true;
               }}
-              // Re-fit xterm to the current container so any rows lost to an
-              // early fit() during initial load are recovered. For
-              // preserveUserScroll refreshes (scrollToBottom === false), we
-              // need fit() to run synchronously so we can restore the user's
-              // scroll position immediately after resize(). For
-              // scroll-to-bottom refreshes, defer fit() to the next frame so
-              // the just-written snapshot has time to be laid out before
-              // resize() measures the container — otherwise resize() can
-              // truncate the freshly-written buffer and drop lines.
               if (typeof term.__claudeHubRequestFit === 'function') {{
                 if (!shouldScrollToBottom) {{
                   const bs = term._core && term._core._bufferService;
@@ -1425,9 +2010,6 @@ async def proxy_terminal_request(
                   setTimeout(function() {{ term.__claudeHubRequestFit(); }}, 16);
                 }}
               }}
-              // Restore the user's scroll position after fit() — resize() can
-              // scroll to bottom when isUserScrolling is false, so re-apply the
-              // captured position and re-assert isUserScrolling.
               if (!shouldScrollToBottom && (savedViewportY !== null || savedScrollTop !== null)) {{
                 const bs = term._core && term._core._bufferService;
                 if (bs) bs.isUserScrolling = true;
@@ -1437,92 +2019,107 @@ async def proxy_terminal_request(
                 const vp = document.querySelector('.xterm-viewport');
                 if (vp && savedScrollTop !== null) vp.scrollTop = savedScrollTop;
               }}
-              // Content-ready boundary: for tab-switch refreshes, wait for the
-              // painted frame to commit before firing refresh-done so the
-              // frontend only reveals the iframe once the snapshot is visible.
-              // Two rAFs are needed because the first schedules the paint, the
-              // second runs after it commits.
-              const finish = function() {{ if (cb) cb(ok); }};
-              if (isTabSwitch && typeof requestAnimationFrame === 'function') {{
-                requestAnimationFrame(function() {{ requestAnimationFrame(finish); }});
-              }} else {{
-                finish();
-              }}
+              if (typeof cb === 'function') cb(ok);
             }}
 
-            resyncing = true;
             if (!payload) {{
-              done(true);
+              finishApply(true);
               return;
             }}
 
-            writeThrough(payload, function() {{
-              done(true);
+            wt(payload, function() {{
+              finishApply(true);
             }});
           }}
 
-          async function refreshHistoryFromTmux(options) {{
-            // Clone the incoming options so follow-state adjustments (e.g.
-            // forcing scrollToBottom=false when the user is scrolled up) do
-            // not mutate the caller's object — which may be reused for a
-            // queued retry via forcedRefreshPendingOptions.
-            const opts = Object.assign({{}}, options || {{}});
-            if (forcedRefreshRunning) {{
-              forcedRefreshPendingOptions = opts;
-              return false;
-            }}
+          function scheduleForcedRefreshPump() {{
+            if (forcedRefreshPumpPromise) return;
+            forcedRefreshPumpPromise = (async function() {{
+              try {{
+                while (forcedRefreshQueue.length > 0) {{
+                  const entry = forcedRefreshQueue.shift();
+                  cancelAutoResyncForForcedRefresh();
+                  beginHistorySyncOwner();
+                  try {{
+                    const result = await executeForcedRefresh(entry.opts);
+                    entry.resolve(result);
+                  }} catch (error) {{
+                    if (resyncing) {{
+                      resyncing = false;
+                      flushResyncBuffer();
+                    }}
+                    entry.reject(error);
+                  }}
+                }}
+              }} finally {{
+                forcedRefreshPumpPromise = null;
+                if (forcedRefreshQueue.length > 0) {{
+                  scheduleForcedRefreshPump();
+                }}
+              }}
+            }})();
+          }}
 
-            forcedRefreshRunning = true;
-            const inputSensitiveRefresh = opts.reason !== 'manual';
-            const inputGenerationAtStart = userInputGeneration;
-            // Follow-state preservation: for refreshes that are not an explicit
-            // "take me to the latest" action, if the user has scrolled up to
-            // read history, do not yank them back to the bottom. The caller
-            // opts in via the explicit `preserveUserScroll` flag (set by the
-            // frontend for tab-switch and auto-round-complete). Manual ↻
-            // refresh always scrolls to bottom because scrollToBottom=true and
-            // preserveUserScroll is unset.
+          function enqueueForcedRefresh(options) {{
+            const opts = Object.assign({{}}, options || {{}});
+            return new Promise(function(resolve, reject) {{
+              forcedRefreshQueue.push({{ opts: opts, resolve: resolve, reject: reject }});
+              scheduleForcedRefreshPump();
+            }});
+          }}
+
+          async function waitForInputQuietUnlessManual(opts) {{
+            if (opts.reason === 'manual') return true;
+            while (true) {{
+              if (!hasRecentUserInput()) return true;
+              await new Promise(function(resolve) {{
+                setTimeout(resolve, userInputQuietDelayMs() + 100);
+              }});
+            }}
+          }}
+
+          async function executeForcedRefresh(opts) {{
             if (opts.preserveUserScroll && opts.scrollToBottom !== false) {{
               const term = termForHistoryAction();
               if (term && !terminalIsAtBottom(term)) {{
                 opts.scrollToBottom = false;
               }}
             }}
-            try {{
-              const snapshot = await fetchHistorySnapshot();
-              if (
-                inputSensitiveRefresh &&
-                (userInputGeneration !== inputGenerationAtStart || hasRecentUserInput())
-              ) {{
-                setTimeout(function() {{
-                  refreshHistoryFromTmux(opts);
-                }}, userInputQuietDelayMs() + 100);
-                return false;
-              }}
-              // Re-check follow-state immediately before applying the snapshot.
-              // The preserveUserScroll decision above ran before the await, so
-              // the user could have wheeled up while fetchHistorySnapshot was
-              // in flight. For non-manual preserveUserScroll refreshes, if the
-              // user is no longer at the bottom, drop scrollToBottom so the
-              // snapshot write does not yank them back down. This is a single
-              // terminalIsAtBottom check (no per-frame/per-keystroke cost).
-              if (opts.preserveUserScroll && opts.scrollToBottom !== false) {{
-                const termNow = termForHistoryAction();
-                if (termNow && !terminalIsAtBottom(termNow)) {{
-                  opts.scrollToBottom = false;
-                }}
-              }}
-              return await new Promise(function(resolve) {{
-                writeHistorySnapshot(snapshot, opts, resolve);
+            await waitForInputQuietUnlessManual(opts);
+            const term = termForHistoryAction();
+            if (!term) return false;
+
+            return await new Promise(function(resolve) {{
+              runBufferedCaptureHistorySync(term, {{
+                fetchLines: FULL_HISTORY_LINES,
+                onSuccess: function() {{
+                  resyncing = false;
+                  resetResyncPressure();
+                  resolve(true);
+                }},
+                onError: function(message) {{
+                  console.debug('claude-hub history refresh failed', message);
+                  resyncing = false;
+                  flushResyncBuffer();
+                  resolve(false);
+                }},
+                applySnapshot: function(snapshot, payload, wt, done) {{
+                  if (opts.preserveUserScroll && opts.scrollToBottom !== false) {{
+                    const termNow = termForHistoryAction();
+                    if (termNow && !terminalIsAtBottom(termNow)) {{
+                      opts.scrollToBottom = false;
+                    }}
+                  }}
+                  applyHistoryPayloadWithOptions(term, payload, opts, wt, function() {{
+                    done();
+                  }});
+                }},
               }});
-            }} finally {{
-              forcedRefreshRunning = false;
-              if (forcedRefreshPendingOptions) {{
-                const nextOptions = forcedRefreshPendingOptions;
-                forcedRefreshPendingOptions = null;
-                refreshHistoryFromTmux(nextOptions);
-              }}
-            }}
+            }});
+          }}
+
+          async function refreshHistoryFromTmux(options) {{
+            return enqueueForcedRefresh(options);
           }}
 
           function refreshAgentHistoryViewWhenBottom() {{
@@ -1598,16 +2195,17 @@ async def proxy_terminal_request(
             }}, {{ passive: true }});
           }}
 
-          // Run one idle reconciliation after setup. On a brand-new tab the
-          // initial history preload can be empty because tmux creates the
-          // session lazily after ttyd connects; this brings the prompt and
-          // cursor back into the same xterm buffer once tmux history exists.
-          if (historyText.length === 0) {{
+          // Run one idle reconciliation after setup when authoritative replay has
+          // not yet populated tmux history into xterm (lazy session creation).
+          if (initialReplayNeedsReconcile) {{
             scheduleResync(true);
           }}
 
           async function runResync() {{
             timer = null;
+            if (forcedRefreshPumpPromise || forcedRefreshQueue.length > 0) {{
+              return;
+            }}
             if (hasRecentUserInput()) {{
               scheduleResync(false);
               return;
@@ -1622,6 +2220,7 @@ async def proxy_terminal_request(
             // through and forcing us to abort + retry forever under a
             // hot live-write stream (e.g. Claude TUI redraws).
             const resyncId = nextAutoResyncId++;
+            const owner = beginHistorySyncOwner();
             activeAutoResyncId = resyncId;
             const inputGenerationAtStart = userInputGeneration;
             resyncing = true;
@@ -1679,48 +2278,30 @@ async def proxy_terminal_request(
             }}
 
             writeThrough(payload, function() {{
-              if (cancelledAutoResyncIds.has(resyncId)) {{
-                cancelledAutoResyncIds.delete(resyncId);
-                if (activeAutoResyncId === resyncId) {{
-                  activeAutoResyncId = null;
-                  resyncing = false;
-                  flushResyncBuffer();
-                  scheduleResyncAfterInputQuiet();
+              flushResyncBufferThen(function() {{
+                if (cancelledAutoResyncIds.has(resyncId)) {{
+                  cancelledAutoResyncIds.delete(resyncId);
+                  if (activeAutoResyncId === resyncId) {{
+                    activeAutoResyncId = null;
+                    resyncing = false;
+                    scheduleResyncAfterInputQuiet();
+                  }}
+                  return;
                 }}
-                return;
-              }}
-              if (activeAutoResyncId !== resyncId) {{
-                return;
-              }}
-              activeAutoResyncId = null;
-              resyncing = false;
-              resetResyncPressure();
-              flushResyncBuffer();
-              scrollTerminalToBottom(term, {{ refresh: true }});
-              domAtBottomCached = true;
-              // If new live writes arrived after the snapshot was taken,
-              // schedule another reconciliation so they're picked up.
-              if (resyncBuffer.length > 0) {{
-                scheduleResync(false);
-              }}
+                if (activeAutoResyncId !== resyncId) {{
+                  return;
+                }}
+                activeAutoResyncId = null;
+                resyncing = false;
+                resetResyncPressure();
+                scrollTerminalToBottom(term, {{ refresh: true }});
+                domAtBottomCached = true;
+                if (resyncBuffer.length > 0) {{
+                  scheduleResync(false);
+                }}
+              }});
             }});
           }}
-        }}
-
-        function setupHistoryResyncAfterReplay(term) {{
-          if (!term) return;
-          if (term.__claudeHubReplayDone) {{
-            setupHistoryResync(term);
-            return;
-          }}
-          var tries = 0;
-          var iv = setInterval(function() {{
-            tries++;
-            if (term.__claudeHubReplayDone || tries > 300) {{
-              clearInterval(iv);
-              setupHistoryResync(term);
-            }}
-          }}, 50);
         }}
 
         function termForHistoryAction() {{
@@ -1827,6 +2408,14 @@ async def proxy_terminal_request(
 
           if (event.data.type === 'terminal-key') {{
             noteTerminalUserInput();
+            return;
+          }}
+
+          if (event.data.type === 'terminal-bootstrap-correlation') {{
+            storeBootstrapCorrelation(
+              event.data.requestId || null,
+              event.data.agentStatus || null,
+            );
             return;
           }}
 

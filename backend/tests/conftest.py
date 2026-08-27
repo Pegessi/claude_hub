@@ -128,6 +128,7 @@ _PLAYWRIGHT_DEFER_MODULES = frozenset(
     {
         "tests.test_terminal_input_latency_perf",
         "tests.test_terminal_replay",
+        "tests.test_terminal_hmr_recovery_e2e",
         "tests.test_recovery_real_ttyd",
     }
 )
