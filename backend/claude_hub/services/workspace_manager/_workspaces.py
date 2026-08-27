@@ -251,7 +251,15 @@ class _WorkspacesMixin:
     reports: "dict[str, AgentReport]"
 
     def list_workspaces(self) -> list[Workspace]:
-        return sorted(self.workspaces.values(), key=lambda item: item.created_at)
+        def _activity_key(item: Workspace) -> tuple[float, str]:
+            latest_task_at = max(
+                (task.updated_at for task in self.tasks.values() if task.workspace_id == item.id),
+                default=item.updated_at,
+            )
+            activity_at = max(item.updated_at, latest_task_at)
+            return (-activity_at.timestamp(), item.id)
+
+        return sorted(self.workspaces.values(), key=_activity_key)
 
     def start_background_monitor(self) -> None:
         if self._monitor_task and not self._monitor_task.done():

@@ -5,6 +5,18 @@
 
 ## Unreleased
 
+### feat: paginate Agent Workspace board task history (recent-15 lazy load)
+
+- **What**: `GET /api/workspaces/{id}/board` accepts optional `tasks_limit` and
+  `tasks_cursor` for stable recent-activity pagination; the UI loads 15 tasks on
+  first paint and fetches older history on demand. Unpaginated board responses
+  remain the CLI/default full-history contract.
+- **Why**: Large workspaces shipped hundreds of tasks in every board poll,
+  bloating payload size and slowing first render.
+- **How**: `board_pagination` service + `BoardTasksPagination` schema; frontend
+  `workspaceStore.fetchBoard({ reset })` / `loadMoreBoardTasks()` with stale
+  fetch cancellation; workspace list sorted by latest activity.
+
 ### feat: CLI workspace/agent reuse lifecycle and env-preset support
 
 - **What**: `workspace ensure` reuses Hub Workspaces by Git `common-dir` identity;

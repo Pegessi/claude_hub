@@ -567,6 +567,14 @@ export interface AgentReportCreate {
   risk_level?: string | null
 }
 
+export interface BoardTasksPagination {
+  total_count: number
+  has_more: boolean
+  next_cursor?: string | null
+  limit?: number | null
+  status_counts?: Record<string, number>
+}
+
 export interface WorkspaceBoard {
   workspace: Workspace
   tasks: WorkspaceTask[]
@@ -574,6 +582,7 @@ export interface WorkspaceBoard {
   reports: AgentReport[]
   markdown_documents?: WorkspaceMarkdownDocument[]
   snapshot_path?: string | null
+  tasks_pagination?: BoardTasksPagination | null
 }
 
 export type FeedbackLessonScope = 'workspace' | 'family' | 'global'

@@ -1285,6 +1285,16 @@ class FeedbackSummaryRun(BaseModel):
     completed_at: Optional[datetime] = None
 
 
+class BoardTasksPagination(BaseModel):
+    """Pagination metadata for board task history (optional query params)."""
+
+    total_count: int
+    has_more: bool
+    next_cursor: Optional[str] = None
+    limit: Optional[int] = None
+    status_counts: Dict[str, int] = Field(default_factory=dict)
+
+
 class WorkspaceBoard(BaseModel):
     """Workspace board response for Agent Workspace mode."""
 
@@ -1294,6 +1304,7 @@ class WorkspaceBoard(BaseModel):
     reports: List[AgentReport]
     markdown_documents: List[WorkspaceMarkdownDocument] = Field(default_factory=list)
     snapshot_path: Optional[str] = None
+    tasks_pagination: Optional[BoardTasksPagination] = None
 
 
 def redact_workspace_board_for_public(board: WorkspaceBoard) -> WorkspaceBoard:
