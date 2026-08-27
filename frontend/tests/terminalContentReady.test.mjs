@@ -71,9 +71,9 @@ test('the content-refresh timeout sets contentError=true (fail-closed)', () => {
   // contentError.value = true so the Retry overlay shows. It must NOT set
   // contentReady.value = true.
   const errorTimerMatch = script.match(
-    /errorTimer\s*=\s*window\.setTimeout\s*\(\s*\(\s*\)\s*=>\s*\{([\s\S]*?)\}\s*,\s*CONTENT_REFRESH_TIMEOUT_MS\s*\)/,
+    /documentReadyErrorTimer\s*=\s*window\.setTimeout\s*\(\s*\(\s*\)\s*=>\s*\{([\s\S]*?)\}\s*,\s*CONTENT_REFRESH_TIMEOUT_MS\s*\)/,
   )
-  assert.ok(errorTimerMatch, 'errorTimer must be set with CONTENT_REFRESH_TIMEOUT_MS')
+  assert.ok(errorTimerMatch, 'documentReadyErrorTimer must be set with CONTENT_REFRESH_TIMEOUT_MS')
   const body = errorTimerMatch[1]
   assert.match(
     body,
@@ -99,12 +99,11 @@ test('the content-refresh timeout sets contentError=true (fail-closed)', () => {
 test('contentReady=true only appears in onDone or no-refresh branches', () => {
   // Count occurrences of contentReady.value = true.
   const revealMatches = script.match(/contentReady\.value\s*=\s*true/g) || []
-  // We expect exactly: onDone (1), iframe-not-ready else (1),
-  // initial/same-tab/mobile (1), deferred working-agent (1),
-  // and retryContentRefresh else (1).
+  // onDone (1), revealCachedTabSwitch (1), mobile tab-switch branch (1).
+  // Mount/remount/reload paths reveal only via onDone.
   assert.ok(
-    revealMatches.length >= 4,
-    `Expected at least 4 contentReady=true assignments (onDone + no-refresh branches), got ${revealMatches.length}`,
+    revealMatches.length >= 3,
+    `Expected at least 3 contentReady=true assignments (onDone + cached switch + mobile), got ${revealMatches.length}`,
   )
   // None of them may be inside a setTimeout body (invariant 1 covers this,
   // but re-assert here for clarity).
@@ -178,14 +177,36 @@ test('retryContentRefresh keeps contentReady=false until refresh-done', () => {
   assert.match(body, /contentError\.value\s*=\s*false/)
   assert.match(body, /contentReady\.value\s*=\s*false/)
   // It must re-issue the history refresh and wait on refresh-done.
-  assert.match(body, /postTerminalHistoryRefresh/)
-  assert.match(body, /resizeOnHistoryRefreshDone/)
-  // It must NOT unconditionally set contentReady=true (only in the
-  // iframe-not-ready else branch).
-  const revealInBody = body.match(/contentReady\.value\s*=\s*true/g) || []
-  assert.equal(
-    revealInBody.length,
-    1,
-    'retryContentRefresh may set contentReady=true only in the iframe-not-ready else branch',
+  assert.match(body, /armBootstrapDocumentWait/)
+  // Fail-closed: no unconditional contentReady=true (pending iframe load instead).
+  assert.doesNotMatch(
+    body,
+    /contentReady\.value\s*=\s*true/,
+    'retryContentRefresh must not set contentReady=true',
   )
+})
+
+test('refresh-done with ok=false stays fail-closed (no contentReady reveal)', () => {
+  const fnMatch = script.match(/function onDone\(event: Event\) \{([\s\S]*?)\n {2}\}/)
+  assert.ok(fnMatch, 'waitForDocumentReady onDone handler must exist')
+  const body = fnMatch[1]
+  assert.match(body, /detail\.ok\s*===\s*false/)
+  assert.match(body, /contentError\.value\s*=\s*true/)
+  const failBranch = body.split('detail.ok === false')[1] ?? ''
+  assert.doesNotMatch(
+    failBranch.split('contentError.value = false')[0] ?? failBranch,
+    /contentReady\.value\s*=\s*true/,
+    'ok=false must not set contentReady=true',
+  )
+})
+
+test('timeout shows contentError but keeps listener for late correlated success', () => {
+  assert.match(script, /function waitForDocumentReady\s*\(/)
+  assert.match(script, /contentError\.value = true/)
+  const timeoutBlock = script.match(
+    /documentReadyErrorTimer = window\.setTimeout\s*\(\s*\(\s*\)\s*=>\s*\{([\s\S]*?)\}\s*,\s*CONTENT_REFRESH_TIMEOUT_MS\s*\)/,
+  )
+  assert.ok(timeoutBlock, 'document-ready timeout must exist')
+  assert.doesNotMatch(timeoutBlock[1], /stopDocumentReadyWait\s*\(\)/)
+  assert.doesNotMatch(timeoutBlock[1], /removeEventListener/)
 })

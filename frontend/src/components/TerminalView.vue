@@ -99,7 +99,17 @@ import { storeToRefs } from 'pinia'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useTerminalConnecting, getConnectingState } from '@/composables/useTerminalConnecting'
-import { decideSwitchReplay, decideStatusChangeReplay } from '@/utils/terminalSwitchPolicy'
+import {
+  decideStatusChangeReplay,
+  decideSwitchReplay,
+} from '@/utils/terminalSwitchPolicy'
+import {
+  bumpIframeDocumentGeneration,
+  getIframeDocumentGeneration,
+  isStalePaneRefreshDone,
+  shouldDedupePaneRecovery,
+  type PaneRecoveryCorrelation,
+} from '@/utils/terminalPaneRecovery'
 import { computeCacheUpdate } from '@/utils/terminalCachePolicy'
 import type { AgentType, AgentRuntimeStatus } from '@/types'
 
@@ -503,6 +513,16 @@ const pendingSafeReplay = ref(false)
 // the newly-active tab.
 const pendingSafeReplayTabId = ref<string | null>(null)
 
+// Per-tab iframe document generation — bumped on each iframe load (new browsing context).
+const iframeDocumentGeneration: Record<string, number> = {}
+// In-flight recovery correlated by tab + tab-switch generation + document generation.
+let paneRecoveryInFlight: PaneRecoveryCorrelation | null = null
+
+function iframeWindowForTab(tabId: string): Window | null {
+  const iframe = iframeRefs[tabId] || getTerminalState().iframes[tabId]
+  return iframe?.contentWindow ?? null
+}
+
 // Content-ready boundary for the visible pane. When switching to a tab that
 // triggers an immediate history replay, the iframe must not reveal terminal
 // content until the history snapshot has been fetched, written to xterm, and
@@ -558,6 +578,10 @@ const MAX_SINGLE_PANE_CACHED_TERMINALS = 4
 // stale or partial content solely because elapsed time passed.
 const CONTENT_REFRESH_TIMEOUT_MS = 8000
 
+function makeHistoryRequestId(prefix: string): string {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
 function getTerminalState(): TerminalKeyState {
   if (!window.__claudeHub.terminalState) {
     // Create the state object using the local TerminalKeyState shape (includes
@@ -594,7 +618,10 @@ function cacheTabId(tabId: string) {
   )
   // Evicted tabs: reset connecting/loaded/error state so a future re-add
   // shows the connecting overlay again from a clean slate.
-  evicted.forEach((id) => resetTabConnectingState(id))
+  evicted.forEach((id) => {
+    resetTabConnectingState(id)
+    delete iframeDocumentGeneration[id]
+  })
   cachedTabIds.value = nextCached
   tabRecency.value = nextRecency
   // (Re)start the connecting timer for the tab we just cached. If it was
@@ -619,124 +646,176 @@ let tabSwitchGeneration = 0
 // threw), the CONTENT_REFRESH_TIMEOUT_MS timer flips contentError=true so the
 // user sees a Retry overlay instead of a stale or partial frame. We never
 // reveal content solely because elapsed time passed.
-function resizeOnHistoryRefreshDone(tabId: string, requestId: string, generation: number) {
-  let settled = false
-  let errorTimer: number | null = null
+// Tracks the active document-ready listener so Retry can supersede it.
+let documentReadyListener: ((event: Event) => void) | null = null
+let documentReadyErrorTimer: number | null = null
 
-  function cleanup() {
-    window.removeEventListener('terminal-history-refresh-done', onDone)
-    if (errorTimer !== null) {
-      window.clearTimeout(errorTimer)
-      errorTimer = null
-    }
+function stopDocumentReadyWait() {
+  if (documentReadyListener) {
+    window.removeEventListener('terminal-history-refresh-done', documentReadyListener)
+    documentReadyListener = null
+  }
+  if (documentReadyErrorTimer !== null) {
+    window.clearTimeout(documentReadyErrorTimer)
+    documentReadyErrorTimer = null
+  }
+}
+
+function waitForDocumentReady(
+  tabId: string,
+  requestId: string,
+  correlation: PaneRecoveryCorrelation,
+) {
+  stopDocumentReadyWait()
+  let settled = false
+
+  function correlationStillValid(): boolean {
+    return !isStalePaneRefreshDone(
+      correlation,
+      tabSwitchGeneration,
+      getIframeDocumentGeneration(iframeDocumentGeneration, tabId),
+    )
   }
 
   function onDone(event: Event) {
     const detail = (event as CustomEvent).detail
     if (!detail || detail.tabId !== tabId || detail.requestId !== requestId) return
+    if (!correlationStillValid()) return
     settled = true
-    cleanup()
-    if (tabSwitchGeneration !== generation) return
-    // Reveal the pane now that the history snapshot has been written and
-    // painted (the iframe-side double-rAF before refresh-done guarantees the
-    // paint committed). Then resize to fit the container.
+    stopDocumentReadyWait()
+    if (
+      paneRecoveryInFlight?.tabId === correlation.tabId &&
+      paneRecoveryInFlight?.tabSwitchGeneration === correlation.tabSwitchGeneration &&
+      paneRecoveryInFlight?.documentGeneration === correlation.documentGeneration
+    ) {
+      paneRecoveryInFlight = null
+    }
+    if (detail.ok === false) {
+      contentError.value = true
+      return
+    }
     contentError.value = false
     contentReady.value = true
+    if (detail.deferredRecovery) {
+      const stable =
+        currentAgentStatus.value === 'idle' || currentAgentStatus.value === 'attention'
+      if (stable) {
+        postTerminalHistoryRefresh(tabId, {
+          reason: 'deferred-status-refresh',
+          scrollToBottom: true,
+          preserveUserScroll: true,
+        })
+      } else {
+        pendingSafeReplay.value = true
+        pendingSafeReplayTabId.value = tabId
+      }
+    }
     scheduleTerminalResize(tabId)
   }
 
+  documentReadyListener = onDone
   window.addEventListener('terminal-history-refresh-done', onDone)
-  // Fail-closed timeout: if the matching refresh-done never arrives, do NOT
-  // reveal the pane. Instead surface a Retry overlay so the user can re-trigger
-  // the history refresh. This is intentionally much longer than the old 350 ms
-  // fallback because it is an error path, not a content-reveal path.
-  errorTimer = window.setTimeout(() => {
+  documentReadyErrorTimer = window.setTimeout(() => {
     if (settled) return
-    cleanup()
-    if (tabSwitchGeneration !== generation) return
-    // Keep contentReady=false so the pane stays hidden; flip contentError to
-    // show the Retry overlay. The user can retry the history refresh instead
-    // of seeing a stale or partial frame.
+    if (!correlationStillValid()) return
     contentError.value = true
   }, CONTENT_REFRESH_TIMEOUT_MS)
+}
+
+function makeRecoveryCorrelation(
+  tabId: string,
+  tabSwitchGen: number,
+  documentGeneration: number,
+): PaneRecoveryCorrelation {
+  return { tabId, tabSwitchGeneration: tabSwitchGen, documentGeneration }
+}
+
+/** Cached iframe tab switch: show live output only (no destructive snapshot). */
+function revealCachedTabSwitch(tabId: string): void {
+  if (!tabId || tabId !== props.tabId) {
+    scheduleTerminalResize(tabId)
+    return
+  }
+  contentError.value = false
+  contentReady.value = true
+  scheduleTerminalResize(tabId)
+  const switchAction = decideSwitchReplay(props.agentType, currentAgentStatus.value)
+  if (switchAction === 'defer') {
+    pendingSafeReplay.value = true
+    pendingSafeReplayTabId.value = tabId
+  }
+}
+
+/** New iframe document: wait for iframe bootstrap replay (no forced second snapshot). */
+function armBootstrapDocumentWait(
+  tabId: string,
+  tabSwitchGen: number,
+  documentGeneration: number,
+): void {
+  if (!tabId || tabId !== props.tabId) {
+    scheduleTerminalResize(tabId)
+    return
+  }
+
+  if (shouldDedupePaneRecovery(paneRecoveryInFlight, tabId, tabSwitchGen, documentGeneration)) {
+    return
+  }
+
+  if (
+    paneRecoveryInFlight &&
+    paneRecoveryInFlight.tabId === tabId &&
+    paneRecoveryInFlight.documentGeneration !== documentGeneration
+  ) {
+    stopDocumentReadyWait()
+    paneRecoveryInFlight = null
+  }
+
+  contentError.value = false
+  contentReady.value = false
+  const requestId = makeHistoryRequestId('bootstrap')
+  const iframeWindow = iframeWindowForTab(tabId)
+  const sent = postTerminalMessage(tabId, {
+    type: 'terminal-bootstrap-correlation',
+    requestId,
+    documentGeneration,
+    agentStatus: currentAgentStatus.value,
+  })
+  const correlation = makeRecoveryCorrelation(tabId, tabSwitchGen, documentGeneration)
+  if (!sent || !iframeWindow) {
+    contentError.value = true
+    return
+  }
+  paneRecoveryInFlight = correlation
+  waitForDocumentReady(tabId, requestId, correlation)
 }
 
 watch(
   () => props.tabId,
   (newTabId, oldTabId) => {
     cacheTabId(newTabId)
-    // Reset agent-status tracking so a status transition on the previous tab
-    // does not trigger an auto-refresh on the newly-active tab.
     lastAgentStatus.value = null
-    // Clear the deferred-replay flag synchronously — before the rAF below
-    // runs — so a currentAgentStatus change that fires in the gap cannot
-    // fulfill the *previous* tab's pending flag against the newly-active tab.
     pendingSafeReplay.value = false
     pendingSafeReplayTabId.value = null
-    const myGeneration = ++tabSwitchGeneration
+    ++tabSwitchGeneration
     requestAnimationFrame(() => {
-      // Initial mount, same-tab re-render, and mobile viewports get a single
-      // coalesced resize here. Desktop tab switches are handled below so each
-      // path has exactly one resize source (no double layout work).
-      if (!oldTabId || oldTabId === newTabId || isMobileTerminalViewport()) {
-        // Initial mount, same-tab re-render, or mobile: no tab-switch history
-        // replay to wait for, so the pane is immediately content-ready.
+      if (!oldTabId || oldTabId === newTabId) {
+        const docGen = getIframeDocumentGeneration(iframeDocumentGeneration, newTabId)
+        if (docGen === 0) {
+          contentError.value = false
+          contentReady.value = false
+          return
+        }
+        return
+      }
+
+      if (isMobileTerminalViewport()) {
         contentError.value = false
         contentReady.value = true
         scheduleTerminalResize(newTabId)
         return
       }
 
-      const status = currentAgentStatus.value
-      const switchAction = decideSwitchReplay(props.agentType, status)
-
-      if (switchAction === 'immediate') {
-        // Stable screen (plain terminal, or idle/attention agent): replay
-        // history, then resize exactly once when the snapshot settles.
-        //
-        // Content-ready boundary: hide the active pane until the history
-        // snapshot has been fetched, written to xterm, and painted. This
-        // prevents the user from seeing a transient incomplete frame (e.g.
-        // the old buffer mid-clear) when switching back to a tab. The iframe
-        // is revealed by resizeOnHistoryRefreshDone when refresh-done fires.
-        // Reset contentError so a previous tab's failed refresh does not leak
-        // into the new tab's overlay.
-        contentError.value = false
-        contentReady.value = false
-        const requestId = postTerminalHistoryRefresh(newTabId, {
-          reason: 'tab-switch',
-          scrollToBottom: true,
-          preserveUserScroll: true,
-        })
-        if (requestId) {
-          resizeOnHistoryRefreshDone(newTabId, requestId, myGeneration)
-        } else {
-          // Iframe not ready yet — fall back to a coalesced resize and
-          // reveal immediately since there is no refresh to wait on.
-          contentReady.value = true
-          scheduleTerminalResize(newTabId)
-        }
-      } else {
-        // Agent TUI is working (or status unknown) — full replay would corrupt
-        // the live screen. Defer history reconciliation: set the pending flag
-        // (scoped to this tab) so the first stable status (idle/attention)
-        // triggers a replay, even if we never observed the working→stable edge.
-        //
-        // IMPORTANT: do NOT send terminal-scroll-bottom here. If the user
-        // intentionally scrolled up to read output, yanking them to the bottom
-        // on tab switch violates the preserve-user-scroll invariant. The live
-        // ttyd buffer keeps rendering; xterm's own follow-state (auto-scroll
-        // when the viewport is at the bottom) shows new output for users who
-        // were already at the bottom, and leaves scrolled-up users untouched.
-        // A single coalesced resize ensures the iframe fits its container.
-        pendingSafeReplay.value = true
-        pendingSafeReplayTabId.value = newTabId
-        // No history replay for working/unknown agent tabs — the live ttyd
-        // stream keeps rendering, so the pane is immediately content-ready.
-        contentError.value = false
-        contentReady.value = true
-        scheduleTerminalResize(newTabId)
-      }
+      revealCachedTabSwitch(newTabId)
     })
   },
   { immediate: true }
@@ -764,7 +843,7 @@ watch(currentAgentStatus, (newStatus) => {
   )
   if (replay) {
     const reason =
-      lastAgentStatus.value === 'working' ? 'auto-round-complete' : 'tab-switch-deferred'
+      lastAgentStatus.value === 'working' ? 'auto-round-complete' : 'deferred-status-refresh'
     postTerminalHistoryRefresh(props.tabId, {
       reason,
       scrollToBottom: true,
@@ -786,7 +865,10 @@ watch(layoutType, () => {
       layoutType.value,
       MAX_SINGLE_PANE_CACHED_TERMINALS,
     )
-    evicted.forEach((id) => resetTabConnectingState(id))
+    evicted.forEach((id) => {
+      resetTabConnectingState(id)
+      delete iframeDocumentGeneration[id]
+    })
     cachedTabIds.value = nextCached
     tabRecency.value = nextRecency
   }
@@ -1033,19 +1115,12 @@ function postTerminalHistoryRefresh(
  * (there is no refresh to wait on).
  */
 function retryContentRefresh(tabId: string) {
+  stopDocumentReadyWait()
+  paneRecoveryInFlight = null
   contentError.value = false
   contentReady.value = false
-  const requestId = postTerminalHistoryRefresh(tabId, {
-    reason: 'tab-switch',
-    scrollToBottom: true,
-    preserveUserScroll: true,
-  })
-  if (requestId) {
-    resizeOnHistoryRefreshDone(tabId, requestId, tabSwitchGeneration)
-  } else {
-    contentReady.value = true
-    scheduleTerminalResize(tabId)
-  }
+  const docGen = getIframeDocumentGeneration(iframeDocumentGeneration, tabId)
+  armBootstrapDocumentWait(tabId, tabSwitchGeneration, docGen)
 }
 
 function postTerminalScrollBottom(tabId: string): boolean {
@@ -1625,8 +1700,16 @@ ${buildIframeSabScript(tabId)}
     }
     postTerminalTheme(tabId)
     scheduleTerminalResize(tabId)
+
+    const docGen = bumpIframeDocumentGeneration(iframeDocumentGeneration, tabId)
+    if (tabId === props.tabId) {
+      armBootstrapDocumentWait(tabId, tabSwitchGeneration, docGen)
+    }
   } catch (e) {
     console.error('Error injecting script into iframe:', e)
+    if (tabId === props.tabId) {
+      contentError.value = true
+    }
   }
 }
 
@@ -1671,6 +1754,10 @@ function handleMessage(event: MessageEvent) {
   }
 
   if (event.data.type === 'terminal-history-refresh-done') {
+    const tabId = event.data.tabId as string | undefined
+    if (!tabId) return
+    const expectedSource = iframeWindowForTab(tabId)
+    if (!expectedSource || event.source !== expectedSource) return
     window.dispatchEvent(new CustomEvent('terminal-history-refresh-done', {
       detail: event.data,
     }))
@@ -1746,6 +1833,8 @@ onUnmounted(() => {
   window.removeEventListener('message', handleMessage)
   pendingSafeReplay.value = false
   pendingSafeReplayTabId.value = null
+  stopDocumentReadyWait()
+  paneRecoveryInFlight = null
   if (window.__claudeHub.refreshTerminalHistory === refreshTerminalHistory) {
     delete window.__claudeHub.refreshTerminalHistory
   }

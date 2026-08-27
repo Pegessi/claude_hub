@@ -1142,9 +1142,72 @@ def test_history_refresh_done_carries_request_id(terminal_tab: dict, page: Page)
     matching = [e for e in events if e.get("reason") == "test-request-id"]
     assert matching, "no terminal-history-refresh-done event for test-request-id"
     assert matching[0].get("requestId") == sent_request_id, (
-        "terminal-history-refresh-done did not echo the originating requestId: "
-        f"{matching[0]}"
+        "terminal-history-refresh-done did not echo the originating requestId: " f"{matching[0]}"
     )
+
+
+def test_forced_refresh_uses_fifo_queue_not_coalesced_pending_options() -> None:
+    """refreshHistoryFromTmux must enqueue per-request Promises (no single-slot coalesce)."""
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "claude_hub" / "api" / "terminal.py"
+    ).read_text()
+    assert "forcedRefreshQueue" in source
+    assert "enqueueForcedRefresh" in source
+    assert "historySyncOwner" in source
+    assert "terminal-bootstrap-correlation" in source
+    assert "bootstrapReadyPostedRequestIds" in source
+    assert "flushReplayBufferThen" in source
+    assert "forcedRefreshPendingOptions" not in source
+    assert "return 'queued'" not in source
+    assert "isStructuralRecovery" not in source
+    refresh_block = source.split("function refreshHistoryWhenReady", 1)[0]
+    assert "if (ok === 'queued') return" not in refresh_block
+
+
+def test_auto_resync_owner_order_and_remote_bootstrap_paths() -> None:
+    """Auto resync must assign owner before activeAutoResyncId; remote bootstrap splits stable/working."""
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "claude_hub" / "api" / "terminal.py"
+    ).read_text()
+    run_resync = source.split("async function runResync()", 1)[1].split("async function", 1)[0]
+    owner_idx = run_resync.find("beginHistorySyncOwner()")
+    active_idx = run_resync.find("activeAutoResyncId = resyncId")
+    assert owner_idx >= 0 and active_idx >= 0 and owner_idx < active_idx
+    assert "completeRemoteStableBootstrap" in source
+    assert "completeRemoteLiveBootstrap" in source
+    assert "runRemoteStableBootstrap" in source
+    assert "bootstrapPendingRequestIds" in source
+    assert "deferredRecovery" in source
+    assert "function drainBatch()" in source
+
+
+def test_plain_terminal_authoritative_replay_skips_initial_setup_resync() -> None:
+    """Successful plain/remote-stable coordinator replay must not trigger setup resync."""
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "claude_hub" / "api" / "terminal.py"
+    ).read_text()
+    setup_block = source.split("function setupHistoryResync(term)", 1)[1].split(
+        "async function runResync()", 1
+    )[0]
+    assert "historyText.length === 0" not in setup_block
+    assert "if (initialReplayNeedsReconcile)" in setup_block
+
+    plain_block = source.split("if (fullReplay && AGENT_TYPE === 'terminal')", 1)[1]
+    plain_success = plain_block.split("onSuccess: function()", 1)[1].split(
+        "onError: function()", 1
+    )[0]
+    assert "initialReplayNeedsReconcile = false" in plain_success
+
+    remote_stable = source.split("function runRemoteStableBootstrap", 1)[1].split(
+        "onError: function", 1
+    )[0]
+    assert "initialReplayNeedsReconcile = false" in remote_stable
 
 
 def test_non_manual_refresh_preserves_scroll_position(terminal_tab: dict, page: Page) -> None:
@@ -1162,9 +1225,9 @@ def test_non_manual_refresh_preserves_scroll_position(terminal_tab: dict, page: 
     # Confirm we are scrolled up (not at bottom) before the refresh.
     alignment_before = read_scroll_alignment(page)
     assert alignment_before is not None
-    assert alignment_before["viewportY"] < alignment_before["baseY"], (
-        "terminal should be scrolled up before the non-manual refresh"
-    )
+    assert (
+        alignment_before["viewportY"] < alignment_before["baseY"]
+    ), "terminal should be scrolled up before the non-manual refresh"
 
     page.evaluate("""() => {
             window.__claudeHubRefreshEvents = [];
@@ -1191,9 +1254,7 @@ def test_non_manual_refresh_preserves_scroll_position(terminal_tab: dict, page: 
 
     alignment_after = read_scroll_alignment(page)
     assert alignment_after is not None
-    assert (
-        alignment_after["viewportY"] < alignment_after["baseY"]
-    ), (
+    assert alignment_after["viewportY"] < alignment_after["baseY"], (
         "non-manual (tab-switch) refresh yanked the scrolled-up user back to "
         f"bottom: {alignment_after}"
     )
@@ -1674,9 +1735,9 @@ def test_non_manual_refresh_preserves_scroll_when_user_scrolls_up_during_fetch(
     )
     mid_fetch = read_scroll_alignment(page)
     assert mid_fetch is not None
-    assert mid_fetch["viewportY"] < mid_fetch["baseY"], (
-        "user should be scrolled up while the fetch is in flight"
-    )
+    assert (
+        mid_fetch["viewportY"] < mid_fetch["baseY"]
+    ), "user should be scrolled up while the fetch is in flight"
     # isUserScrolling is the canonical follow-state flag that the pre-write
     # recheck reads via terminalIsAtBottom. It must be True here — otherwise
     # the recheck would see the user as still at the bottom and not drop
@@ -1696,9 +1757,7 @@ def test_non_manual_refresh_preserves_scroll_when_user_scrolls_up_during_fetch(
 
     alignment_after = read_scroll_alignment(page)
     assert alignment_after is not None
-    assert (
-        alignment_after["viewportY"] < alignment_after["baseY"]
-    ), (
+    assert alignment_after["viewportY"] < alignment_after["baseY"], (
         "non-manual refresh yanked the user back to bottom even though they "
         f"scrolled up during the fetch: {alignment_after}"
     )
