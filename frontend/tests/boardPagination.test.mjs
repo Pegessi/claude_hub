@@ -25,6 +25,7 @@ const {
   BOARD_TASKS_PAGE_SIZE,
   boardOlderRemainingCount,
   boardTasksLimitForPoll,
+  loadedDoneTaskCount,
   isStaleBoardGeneration,
   MAX_BOARD_TASKS_LIMIT,
   mergeBoardPollPagination,
@@ -90,14 +91,20 @@ test('mergeBoardTasks dedupes when appending', () => {
 })
 
 test('mergeBoardPollTasks preserves expanded tail beyond bounded poll window', () => {
-  const existing = Array.from({ length: 105 }, (_, index) => ({ id: `t${index}` }))
-  const incoming = Array.from({ length: 100 }, (_, index) => ({ id: `t${index}` }))
+  const existing = Array.from({ length: 105 }, (_, index) => ({
+    id: `t${index}`,
+    status: 'done',
+  }))
+  const incoming = Array.from({ length: 100 }, (_, index) => ({
+    id: `t${index}`,
+    status: 'done',
+  }))
   const merged = mergeBoardPollTasks(existing, incoming)
   assert.equal(merged.length, 105)
   assert.deepEqual(taskIds(merged.slice(-5)), ['t100', 't101', 't102', 't103', 't104'])
 })
 
-test('mergeBoardPollPagination keeps older cursor when expanded history remains', () => {
+test('mergeBoardPollPagination keeps older cursor when expanded done history remains', () => {
   const merged = mergeBoardPollPagination(
     {
       total_count: 120,
@@ -117,9 +124,15 @@ test('mergeBoardPollPagination keeps older cursor when expanded history remains'
   assert.equal(merged.next_cursor, 'older-cursor')
 })
 
-test('applyBoardPayloadState poll refresh preserves expanded history and cursor', () => {
-  const existingTasks = Array.from({ length: 105 }, (_, index) => ({ id: `t${index}` }))
-  const incomingTasks = Array.from({ length: 100 }, (_, index) => ({ id: `t${index}` }))
+test('applyBoardPayloadState poll refresh preserves expanded done history and cursor', () => {
+  const existingTasks = Array.from({ length: 105 }, (_, index) => ({
+    id: `t${index}`,
+    status: 'done',
+  }))
+  const incomingTasks = Array.from({ length: 100 }, (_, index) => ({
+    id: `t${index}`,
+    status: 'done',
+  }))
   const current = board('ws-a', existingTasks, {
     total_count: 120,
     has_more: true,
@@ -195,14 +208,33 @@ test('mergeBoardReports merges by report id', () => {
   assert.equal(merged.find(report => report.id === 'r1')?.message, 'updated')
 })
 
-test('boardOlderRemainingCount uses total minus loaded tasks', () => {
+test('boardOlderRemainingCount uses done total minus loaded done tasks', () => {
   assert.equal(
     boardOlderRemainingCount(
-      [{ id: '1' }, { id: '2' }],
+      [
+        { id: '1', status: 'todo' },
+        { id: '2', status: 'done' },
+        { id: '3', status: 'done' },
+      ],
       { total_count: 20, has_more: true, limit: 15 },
     ),
     18,
   )
+})
+
+test('loadedDoneTaskCount counts only done tasks', () => {
+  assert.equal(
+    loadedDoneTaskCount([
+      { id: '1', status: 'todo' },
+      { id: '2', status: 'done' },
+    ]),
+    1,
+  )
+})
+
+test('boardTasksLimitForPoll uses loaded done window', () => {
+  assert.equal(boardTasksLimitForPoll(15), 15)
+  assert.equal(boardTasksLimitForPoll(30), 30)
 })
 
 test('shouldAcceptBoardPayload rejects inactive workspace payloads', () => {
@@ -244,15 +276,15 @@ test('applyBoardPayloadState ignores stale same-workspace generation via caller 
   assert.deepEqual(kept.tasks, [{ id: 'fresh' }])
 })
 
-test('applyBoardPayloadState reset fetch drops expanded tail ghost after delete', () => {
+test('applyBoardPayloadState reset fetch drops expanded done tail ghost after delete', () => {
   const expanded = board(
     'ws-a',
-    Array.from({ length: 20 }, (_, index) => ({ id: `t${index}` })),
+    Array.from({ length: 20 }, (_, index) => ({ id: `t${index}`, status: 'done' })),
     { total_count: 20, has_more: true, limit: 15, next_cursor: 'older' },
   )
   const refreshed = board(
     'ws-a',
-    Array.from({ length: 15 }, (_, index) => ({ id: `t${index}` })),
+    Array.from({ length: 15 }, (_, index) => ({ id: `t${index}`, status: 'done' })),
     { total_count: 19, has_more: true, limit: 15, next_cursor: 'fresh' },
   )
 
@@ -317,14 +349,22 @@ test('runBoardLoadMoreAttempt retry clears error and appends page', async () => 
   assert.deepEqual(mergedTasks.map(task => task.id), ['1', '2', '3'])
 })
 
-test('applyBoardPayloadState appends load-more page for active workspace', () => {
-  const current = board('ws-a', [{ id: '1' }, { id: '2' }], {
-    total_count: 3,
-    has_more: true,
-    limit: 15,
-    next_cursor: 'cursor',
-  })
-  const olderPage = board('ws-a', [{ id: '3' }], {
+test('applyBoardPayloadState appends load-more done page for active workspace', () => {
+  const current = board(
+    'ws-a',
+    [
+      { id: 'open', status: 'todo' },
+      { id: '1', status: 'done' },
+      { id: '2', status: 'done' },
+    ],
+    {
+      total_count: 3,
+      has_more: true,
+      limit: 15,
+      next_cursor: 'cursor',
+    },
+  )
+  const olderPage = board('ws-a', [{ id: '3', status: 'done' }], {
     total_count: 3,
     has_more: false,
     limit: 15,
@@ -332,7 +372,7 @@ test('applyBoardPayloadState appends load-more page for active workspace', () =>
 
   const merged = applyBoardPayloadState('ws-a', 'ws-a', current, olderPage, true)
 
-  assert.deepEqual(merged.tasks.map(task => task.id), ['1', '2', '3'])
+  assert.deepEqual(merged.tasks.map(task => task.id), ['open', '1', '2', '3'])
   assert.equal(merged.tasks_pagination.has_more, false)
 })
 
@@ -341,10 +381,11 @@ const viewSource = await readFile(
   'utf8',
 )
 
-test('AgentWorkspaceView exposes load-more control for older tasks', () => {
+test('AgentWorkspaceView exposes load-more control for older done tasks', () => {
   assert.match(viewSource, /board-history-load-more/)
-  assert.match(viewSource, /Show older/)
+  assert.match(viewSource, /Show older done/)
   assert.match(viewSource, /handleLoadOlderTasks/)
+  assert.match(viewSource, /done tasks loaded/)
 })
 
 test('AgentWorkspaceView column counts prefer server status totals', () => {

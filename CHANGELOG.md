@@ -5,6 +5,16 @@
 
 ## Unreleased
 
+### fix: paginate only Done column on Agent Workspace board
+
+- **What**: Board `tasks_limit` now returns all non-Done tasks plus the most recent
+  Done window; pagination cursor/remaining counts and Show older apply to Done
+  only. Todo/Queued/Working/Review columns always render in full.
+- **Why**: The initial recent-15 pagination hid active non-Done tasks when Done
+  history was large.
+- **How**: Done-only slice in `board_pagination`; frontend remaining/summary
+  math uses loaded Done count; E2E fixture with mixed open + 18 Done tasks.
+
 ### feat: paginate Agent Workspace board task history (recent-15 lazy load)
 
 - **What**: `GET /api/workspaces/{id}/board` accepts optional `tasks_limit` and

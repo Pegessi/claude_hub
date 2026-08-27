@@ -99,7 +99,7 @@ def test_board_task_sort_updated_at_desc_then_id() -> None:
     assert pagination.has_more is False
 
 
-def test_board_pagination_first_page_limit_15() -> None:
+def test_board_pagination_first_page_limit_15_done_only() -> None:
     base = datetime(2026, 1, 1, tzinfo=timezone.utc)
     tasks = [_task(f"t{i:02d}", updated_at=base + timedelta(minutes=i)) for i in range(20)]
     page, pagination = paginate_board_tasks(tasks, limit=15)
@@ -108,6 +108,86 @@ def test_board_pagination_first_page_limit_15() -> None:
     assert pagination.total_count == 20
     assert pagination.has_more is True
     assert pagination.next_cursor
+
+
+def test_board_pagination_non_done_always_included_on_first_page() -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    done_tasks = [_task(f"done-{i:02d}", updated_at=base + timedelta(hours=i)) for i in range(20)]
+    non_done = [
+        _task(
+            "todo-old",
+            updated_at=base - timedelta(days=30),
+            status=WorkspaceTaskStatus.TODO,
+        ),
+        _task(
+            "review-stale",
+            updated_at=base - timedelta(days=60),
+            status=WorkspaceTaskStatus.REVIEW,
+        ),
+        _task(
+            "working-stale",
+            updated_at=base - timedelta(days=90),
+            status=WorkspaceTaskStatus.WORKING,
+        ),
+    ]
+    page, pagination = paginate_board_tasks(non_done + done_tasks, limit=15)
+    page_ids = {task.id for task in page}
+    assert {"todo-old", "review-stale", "working-stale"}.issubset(page_ids)
+    assert len([task for task in page if task.status == WorkspaceTaskStatus.DONE]) == 15
+    assert len(page) == 18
+    assert pagination is not None
+    assert pagination.total_count == 20
+    assert pagination.has_more is True
+
+
+def test_board_pagination_remaining_counts_done_only() -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    done_tasks = [_task(f"done-{i:02d}", updated_at=base + timedelta(hours=i)) for i in range(144)]
+    non_done = [
+        _task(
+            f"open-{i}",
+            updated_at=base - timedelta(days=i + 1),
+            status=WorkspaceTaskStatus.TODO,
+        )
+        for i in range(5)
+    ]
+    page, pagination = paginate_board_tasks(non_done + done_tasks, limit=15)
+    assert len(page) == 20
+    assert pagination is not None
+    assert pagination.total_count == 144
+    remaining = pagination.total_count - len(
+        [task for task in page if task.status == WorkspaceTaskStatus.DONE]
+    )
+    assert remaining == 129
+
+
+def test_board_pagination_second_page_done_only_no_non_done_repeat() -> None:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    done_tasks = [_task(f"done-{i:02d}", updated_at=base + timedelta(minutes=i)) for i in range(20)]
+    non_done = [
+        _task(
+            "todo-1",
+            updated_at=base - timedelta(days=1),
+            status=WorkspaceTaskStatus.TODO,
+        ),
+    ]
+    all_tasks = non_done + done_tasks
+    first, meta1 = paginate_board_tasks(all_tasks, limit=15)
+    second, meta2 = paginate_board_tasks(
+        all_tasks,
+        limit=15,
+        cursor=meta1.next_cursor if meta1 else None,
+    )
+    first_done_ids = [task.id for task in first if task.status == WorkspaceTaskStatus.DONE]
+    assert first_done_ids == [f"done-{i:02d}" for i in range(19, 4, -1)]
+    assert "todo-1" in {task.id for task in first}
+    assert len(first) == 16
+
+    second_ids = {task.id for task in second}
+    assert second_ids == {f"done-{i:02d}" for i in range(4, -1, -1)}
+    assert "todo-1" not in second_ids
+    assert meta2 is not None
+    assert meta2.has_more is False
 
 
 def test_board_pagination_second_page_no_overlap() -> None:
@@ -249,28 +329,41 @@ def test_board_api_paginated_initial_limit_15(tmp_path: Path) -> None:
     for index in range(18):
         task = client.post(
             f"/api/workspaces/{workspace['id']}/tasks",
-            json={"title": f"Task {index}", "prompt": "do work"},
+            json={"title": f"Done Task {index}", "prompt": "do work"},
         ).json()
         created_ids.append(task["id"])
+        client.patch(
+            f"/api/workspaces/tasks/{task['id']}",
+            json={"status": "done"},
+        )
+
+    open_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Open todo", "prompt": "still open"},
+    ).json()
 
     board = client.get(
         f"/api/workspaces/{workspace['id']}/board",
         params={"tasks_limit": 15},
     ).json()
-    assert len(board["tasks"]) == 15
+    assert len(board["tasks"]) == 16
+    assert {task["id"] for task in board["tasks"] if task["status"] != "done"} == {open_task["id"]}
+    assert len([task for task in board["tasks"] if task["status"] == "done"]) == 15
     pagination = board["tasks_pagination"]
     assert pagination["total_count"] == 18
     assert pagination["has_more"] is True
     assert pagination["next_cursor"]
-    assert len(board["reports"]) <= 15
+    assert pagination["status_counts"]["done"] == 18
+    assert pagination["status_counts"]["todo"] == 1
 
     page2 = client.get(
         f"/api/workspaces/{workspace['id']}/board",
         params={"tasks_limit": 15, "tasks_cursor": pagination["next_cursor"]},
     ).json()
     assert len(page2["tasks"]) == 3
-    all_ids = {task["id"] for task in board["tasks"]} | {task["id"] for task in page2["tasks"]}
-    assert all_ids == set(created_ids)
+    assert all(task["status"] == "done" for task in page2["tasks"])
+    done_ids = {task["id"] for task in board["tasks"] + page2["tasks"] if task["status"] == "done"}
+    assert done_ids == set(created_ids)
 
 
 def test_board_api_rejects_cursor_without_limit(tmp_path: Path) -> None:
