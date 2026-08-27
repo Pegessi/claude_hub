@@ -196,17 +196,40 @@ async def get_workspace_board(
     workspace_id: str,
     request: Request,
     response: Response,
+    tasks_limit: int | None = Query(
+        default=None,
+        ge=1,
+        le=100,
+        description="When set, return only this many tasks sorted by recent activity.",
+    ),
+    tasks_cursor: str | None = Query(
+        default=None,
+        description="Opaque cursor from a prior paginated board response (requires tasks_limit).",
+    ),
     current_user: User = Depends(get_current_user),
 ) -> Any:
     """Return tasks and managed sessions for one workspace.
 
     Sends a content-based ETag; an idle 2.5s poll whose ``If-None-Match`` still
     matches gets a bodyless 304 instead of the (gzipped) board payload.
+
+    Without ``tasks_limit`` the full task history is returned (CLI default).
     """
+    if tasks_cursor is not None and tasks_limit is None:
+        raise HTTPException(
+            status_code=400,
+            detail="tasks_cursor requires tasks_limit",
+        )
     try:
-        board = await workspace_manager.get_board(workspace_id)
+        board = await workspace_manager.get_board(
+            workspace_id,
+            tasks_limit=tasks_limit,
+            tasks_cursor=tasks_cursor,
+        )
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Workspace not found") from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     etag = _board_etag(board)
     response.headers["ETag"] = etag

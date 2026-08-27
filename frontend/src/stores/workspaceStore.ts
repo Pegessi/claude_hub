@@ -28,6 +28,17 @@ import type {
   NotificationType,
 } from '@/types'
 
+import {
+  applyBoardPayloadState,
+  BOARD_TASKS_PAGE_SIZE,
+  boardOlderRemainingCount,
+  boardTasksLimitForPoll,
+  isStaleBoardGeneration,
+  nextBoardFetchGeneration,
+  runBoardLoadMoreAttempt,
+  shouldCoalesceBoardFetch,
+} from '@/utils/boardPagination'
+
 const API_BASE = '/api'
 const STORAGE_KEY_ACTIVE_WORKSPACE = 'claude_hub_active_workspace_id'
 
@@ -73,8 +84,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     notifications.value.find(n => n.type === ('error' as NotificationType))?.message ?? null
   )
   const boardFetches = new Map<string, Promise<void>>()
-  // Last board ETag per workspace. Sent back as If-None-Match so an unchanged
-  // board resolves to a bodyless 304 and we skip re-parsing the payload.
+  const boardFetchControllers = new Map<string, AbortController>()
+  const boardFetchGeneration = new Map<string, number>()
+  const boardLoadMoreError = ref<string | null>(null)
+  const boardLoadMoreLoading = ref(false)
+  // Last board ETag per workspace + query signature. Sent back as If-None-Match so
+  // an unchanged paginated board resolves to a bodyless 304.
   const boardETags = new Map<string, string>()
   // Full per-task report history, fetched on demand when a task detail panel is
   // opened. The board response only carries the latest report per task, so the
@@ -86,6 +101,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     workspaces.value.find(workspace => workspace.id === activeWorkspaceId.value) || null
   )
   const tasks = computed(() => board.value?.tasks || [])
+  const boardTasksPagination = computed(() => board.value?.tasks_pagination ?? null)
+  const boardOlderTasksRemaining = computed(() =>
+    boardOlderRemainingCount(tasks.value, boardTasksPagination.value),
+  )
   const sessions = computed(() => board.value?.sessions || [])
   const reports = computed(() => board.value?.reports || [])
   const activeFeedbackLessons = computed(() =>
@@ -158,7 +177,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         setActiveWorkspace(workspaces.value[0].id)
       }
       if (activeWorkspaceId.value) {
-        await fetchBoard(activeWorkspaceId.value)
+        await fetchBoard(activeWorkspaceId.value, { reset: true })
       }
     } catch (e) {
       notifyError(e instanceof Error ? e.message : 'Failed to fetch workspaces')
@@ -172,27 +191,108 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     localStorage.setItem(STORAGE_KEY_ACTIVE_WORKSPACE, workspaceId)
   }
 
-  async function fetchBoard(workspaceId = activeWorkspaceId.value) {
+  function boardEtagKey(workspaceId: string, query: string): string {
+    return `${workspaceId}:${query}`
+  }
+
+  function beginBoardFetch(workspaceId: string, reset: boolean): {
+    generation: number
+    signal: AbortSignal
+  } {
+    if (reset) {
+      boardFetchControllers.get(workspaceId)?.abort()
+    }
+    const generation = boardFetchGeneration.get(workspaceId) ?? 0
+    const controller = new AbortController()
+    boardFetchControllers.set(workspaceId, controller)
+    return { generation, signal: controller.signal }
+  }
+
+  function isStaleBoardFetch(workspaceId: string, generation: number): boolean {
+    return isStaleBoardGeneration(boardFetchGeneration.get(workspaceId), generation)
+  }
+
+  function buildBoardQuery(limit: number, cursor?: string | null): string {
+    const params = new URLSearchParams({ tasks_limit: String(limit) })
+    if (cursor) {
+      params.set('tasks_cursor', cursor)
+    }
+    return params.toString()
+  }
+
+  function applyBoardPayload(
+    workspaceId: string,
+    payload: WorkspaceBoard,
+    append: boolean,
+    pollRefresh = false,
+  ) {
+    const next = applyBoardPayloadState(
+      activeWorkspaceId.value,
+      workspaceId,
+      board.value,
+      payload,
+      append,
+      pollRefresh,
+    )
+    if (next !== null) {
+      board.value = next
+    }
+  }
+
+  async function fetchBoard(
+    workspaceId = activeWorkspaceId.value,
+    options?: { reset?: boolean },
+  ) {
     if (!workspaceId) return
+    const reset = options?.reset ?? false
     const existing = boardFetches.get(workspaceId)
-    if (existing) return existing
+    if (shouldCoalesceBoardFetch(reset, existing !== undefined)) {
+      return existing
+    }
+
+    if (reset) {
+      boardFetchControllers.get(workspaceId)?.abort()
+      boardFetchGeneration.set(
+        workspaceId,
+        nextBoardFetchGeneration(boardFetchGeneration.get(workspaceId), true),
+      )
+    }
 
     const request = (async () => {
+      const loadedCount = board.value?.workspace.id === workspaceId ? board.value.tasks.length : 0
+      const limit = reset
+        ? BOARD_TASKS_PAGE_SIZE
+        : boardTasksLimitForPoll(loadedCount || BOARD_TASKS_PAGE_SIZE)
+      const query = buildBoardQuery(limit)
+      const { generation, signal } = beginBoardFetch(workspaceId, reset)
+
       const headers: Record<string, string> = {}
-      const knownETag = boardETags.get(workspaceId)
-      if (knownETag && board.value?.workspace.id === workspaceId) {
+      const etagKey = boardEtagKey(workspaceId, query)
+      const knownETag = boardETags.get(etagKey)
+      if (knownETag && board.value?.workspace.id === workspaceId && !reset) {
         headers['If-None-Match'] = knownETag
       }
-      const response = await fetch(`${API_BASE}/workspaces/${workspaceId}/board`, { headers })
+
+      const response = await fetch(`${API_BASE}/workspaces/${workspaceId}/board?${query}`, {
+        headers,
+        signal,
+      })
+      if (isStaleBoardFetch(workspaceId, generation)) {
+        return
+      }
       if (response.status === 304) {
-        // Board unchanged since the last fetch — keep the existing board.value.
         await fetchFeedbackLessons(workspaceId)
         return
       }
       if (!response.ok) throw new Error(await readError(response))
       const etag = response.headers.get('ETag')
-      if (etag) boardETags.set(workspaceId, etag)
-      board.value = await response.json()
+      if (etag) boardETags.set(etagKey, etag)
+      const payload = (await response.json()) as WorkspaceBoard
+      if (isStaleBoardFetch(workspaceId, generation)) {
+        return
+      }
+      applyBoardPayload(workspaceId, payload, false, !reset)
+      boardLoadMoreError.value = null
       await fetchFeedbackLessons(workspaceId)
     })()
 
@@ -200,11 +300,60 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     try {
       await request
     } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') {
+        return
+      }
       notifyError(e instanceof Error ? e.message : 'Failed to fetch workspace board')
       throw e
     } finally {
-      boardFetches.delete(workspaceId)
+      if (boardFetches.get(workspaceId) === request) {
+        boardFetches.delete(workspaceId)
+      }
     }
+  }
+
+  async function loadMoreBoardTasks(workspaceId = activeWorkspaceId.value) {
+    if (!workspaceId || boardLoadMoreLoading.value) return
+    const pagination = board.value?.tasks_pagination
+    if (!pagination?.has_more || !pagination.next_cursor) {
+      return
+    }
+
+    const generation = boardFetchGeneration.get(workspaceId) ?? 0
+    const query = buildBoardQuery(BOARD_TASKS_PAGE_SIZE, pagination.next_cursor)
+    const loadMoreState = {
+      get loading() {
+        return boardLoadMoreLoading.value
+      },
+      set loading(value: boolean) {
+        boardLoadMoreLoading.value = value
+      },
+      get error() {
+        return boardLoadMoreError.value
+      },
+      set error(value: string | null) {
+        boardLoadMoreError.value = value
+      },
+    }
+
+    await runBoardLoadMoreAttempt(
+      loadMoreState,
+      async () => {
+        const response = await fetch(`${API_BASE}/workspaces/${workspaceId}/board?${query}`)
+        if (isStaleBoardFetch(workspaceId, generation)) {
+          return null
+        }
+        if (!response.ok) throw new Error(await readError(response))
+        const payload = (await response.json()) as WorkspaceBoard
+        if (isStaleBoardFetch(workspaceId, generation)) {
+          return null
+        }
+        return payload
+      },
+      payload => {
+        applyBoardPayload(workspaceId, payload, true)
+      },
+    )
   }
 
   async function fetchTaskReports(
@@ -319,7 +468,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       const workspace: Workspace = await response.json()
       workspaces.value.push(workspace)
       setActiveWorkspace(workspace.id)
-      await fetchBoard(workspace.id)
+      await fetchBoard(workspace.id, { reset: true })
       return workspace
     } catch (e) {
       notifyError(e instanceof Error ? e.message : 'Failed to create workspace')
@@ -396,7 +545,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         const next = workspaces.value[0]
         if (next) {
           setActiveWorkspace(next.id)
-          await fetchBoard(next.id)
+          await fetchBoard(next.id, { reset: true })
         } else {
           activeWorkspaceId.value = null
           localStorage.removeItem(STORAGE_KEY_ACTIVE_WORKSPACE)
@@ -464,7 +613,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         method: 'DELETE',
       })
       if (!response.ok) throw new Error(await readError(response))
-      await fetchBoard()
+      await fetchBoard(undefined, { reset: true })
     } catch (e) {
       notifyError(e instanceof Error ? e.message : 'Failed to delete task')
       throw e
@@ -634,6 +783,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     board,
     feedbackLessons,
     activeFeedbackLessons,
+    boardTasksPagination,
+    boardOlderTasksRemaining,
+    boardLoadMoreLoading,
+    boardLoadMoreError,
     tasks,
     sessions,
     reports,
@@ -658,6 +811,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     fetchWorkspaces,
     setActiveWorkspace,
     fetchBoard,
+    loadMoreBoardTasks,
     fetchFeedbackLessons,
     createFeedbackLesson,
     deleteFeedbackLesson,

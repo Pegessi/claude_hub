@@ -192,7 +192,7 @@
           v-for="column in columns"
           :key="column.status"
         >
-          {{ column.label }} {{ tasksByStatus(column.status).length }}
+          {{ column.label }} {{ taskCountByStatus(column.status) }}
         </span>
       </div>
     </div>
@@ -424,7 +424,7 @@
             <div class="column-header">
               <h2>{{ column.label }}</h2>
               <div class="column-meta">
-                <span>{{ tasksByStatus(column.status).length }}</span>
+                <span>{{ taskCountByStatus(column.status) }}</span>
                 <button
                   type="button"
                   class="column-collapse-button"
@@ -645,6 +645,55 @@
             </div>
           </section>
         </template>
+        <footer
+          v-if="boardTasksPagination"
+          class="board-history-footer"
+        >
+          <p
+            v-if="boardOlderTasksRemaining > 0"
+            class="board-history-summary"
+          >
+            Showing {{ tasks.length }} of {{ boardTasksPagination.total_count }} tasks
+          </p>
+          <p
+            v-else-if="boardTasksPagination.total_count > 0"
+            class="board-history-summary"
+          >
+            All {{ boardTasksPagination.total_count }} tasks loaded
+          </p>
+          <div
+            v-if="boardOlderTasksRemaining > 0"
+            class="board-history-actions"
+          >
+            <button
+              type="button"
+              class="secondary-button board-history-load-more"
+              :disabled="boardLoadMoreLoading"
+              @click="handleLoadOlderTasks"
+            >
+              {{
+                boardLoadMoreLoading
+                  ? 'Loading older tasks…'
+                  : `Show older (${boardOlderTasksRemaining} more)`
+              }}
+            </button>
+            <button
+              v-if="boardLoadMoreError"
+              type="button"
+              class="secondary-button board-history-retry"
+              @click="handleLoadOlderTasks"
+            >
+              Retry
+            </button>
+            <span
+              v-if="boardLoadMoreError"
+              class="board-history-error"
+              role="alert"
+            >
+              {{ boardLoadMoreError }}
+            </span>
+          </div>
+        </footer>
       </main>
     </div>
 
@@ -3010,6 +3059,10 @@ const {
   activeWorkspaceId,
   board,
   tasks,
+  boardTasksPagination,
+  boardOlderTasksRemaining,
+  boardLoadMoreLoading,
+  boardLoadMoreError,
   activeFeedbackLessons,
   workspaceAgents,
   reviewerAgents,
@@ -3781,6 +3834,21 @@ function startOptionsFor(task: WorkspaceTask): TaskStartOptions {
 
 function tasksByStatus(status: WorkspaceTaskStatus) {
   return tasks.value.filter(task => task.status === status)
+}
+
+function taskCountByStatus(status: WorkspaceTaskStatus) {
+  const total = boardTasksPagination.value?.status_counts?.[status]
+  if (total != null) {
+    return total
+  }
+  return tasksByStatus(status).length
+}
+
+async function handleLoadOlderTasks() {
+  if (!activeWorkspaceId.value) return
+  await runPending('workspace:load-older', () =>
+    workspaceStore.loadMoreBoardTasks(activeWorkspaceId.value!),
+  )
 }
 
 function sessionForTask(task: WorkspaceTask) {
@@ -5321,7 +5389,7 @@ async function handleWorkspaceChange() {
   const workspaceId = selectedWorkspaceId.value
   await runPending('workspace:switch', async () => {
     workspaceStore.setActiveWorkspace(workspaceId)
-    await workspaceStore.fetchBoard(workspaceId)
+    await workspaceStore.fetchBoard(workspaceId, { reset: true })
   })
 }
 
@@ -6805,6 +6873,40 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   color: var(--ch-color-text-muted);
+}
+
+.board-history-footer {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 4px;
+  border-top: 1px solid var(--ch-color-border-muted);
+}
+
+.board-history-summary {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ch-color-text-muted);
+}
+
+.board-history-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.board-history-load-more,
+.board-history-retry {
+  min-height: 32px;
+}
+
+.board-history-error {
+  font-size: 12px;
+  color: var(--ch-color-danger, #c0392b);
 }
 
 .task-column {

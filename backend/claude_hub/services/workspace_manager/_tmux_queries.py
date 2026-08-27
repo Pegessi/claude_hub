@@ -1280,7 +1280,13 @@ class _TmuxQueriesMixin:
             }
         )
 
-    async def get_board(self, workspace_id: str) -> WorkspaceBoard:
+    async def get_board(
+        self,
+        workspace_id: str,
+        *,
+        tasks_limit: int | None = None,
+        tasks_cursor: str | None = None,
+    ) -> WorkspaceBoard:
         workspace = self.workspaces.get(workspace_id)
         if not workspace:
             raise KeyError(workspace_id)
@@ -1307,15 +1313,28 @@ class _TmuxQueriesMixin:
             for task in self.tasks.values()
             if task.workspace_id == workspace_id
         ]
+        from ..board_pagination import paginate_board_tasks
+
+        page_tasks, tasks_pagination = paginate_board_tasks(
+            tasks,
+            limit=tasks_limit,
+            cursor=tasks_cursor,
+        )
+        task_ids = {task.id for task in page_tasks}
+        reports = [
+            report
+            for report in self.latest_reports_per_task_for_workspace(workspace_id)
+            if report.task_id in task_ids
+        ]
         sessions = self.sessions_for_workspace(workspace_id)
-        reports = self.latest_reports_per_task_for_workspace(workspace_id)
         return WorkspaceBoard(
             workspace=self.workspaces[workspace_id],
-            tasks=tasks,
+            tasks=page_tasks,
             sessions=sessions,
             reports=reports,
             markdown_documents=self.markdown_documents_for_workspace(workspace_id),
             snapshot_path=str(self.snapshot_path(workspace_id)),
+            tasks_pagination=tasks_pagination,
         )
 
     def _sync_workspace_tab_metadata(self, workspace_id: str) -> None:
