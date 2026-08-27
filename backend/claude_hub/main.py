@@ -13,11 +13,13 @@ from starlette.responses import Response
 from .api import api_router
 from .config import settings
 from .services import ttyd_manager, workspace_manager
+from .services.backend_instance_lock import BackendInstanceLock
 
 # Create logs directory if it doesn't exist
 log_dir = Path.home() / ".claude_hub" / "logs"
 log_dir.mkdir(parents=True, exist_ok=True)
 log_file = log_dir / "backend.log"
+backend_lock_file = Path.home() / ".claude_hub" / "backend.lock"
 
 # Configure logging to both console and file
 logger = logging.getLogger()
@@ -47,16 +49,19 @@ logger.info(f"Logging to file: {log_file}")
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan - manage startup and shutdown."""
-    # Startup
-    logger.info("Starting Claude Hub Backend")
-    # Start all saved tabs
-    await ttyd_manager.start_all_tabs()
-    workspace_manager.start_background_monitor()
-    yield
-    # Shutdown
-    logger.info("Shutting down Claude Hub Backend")
-    await workspace_manager.stop_background_monitor()
-    await ttyd_manager.cleanup()
+    with BackendInstanceLock(backend_lock_file):
+        # Startup
+        logger.info("Starting Claude Hub Backend")
+        # Start all saved tabs
+        await ttyd_manager.start_all_tabs()
+        workspace_manager.start_background_monitor()
+        try:
+            yield
+        finally:
+            # Shutdown
+            logger.info("Shutting down Claude Hub Backend")
+            await workspace_manager.stop_background_monitor()
+            await ttyd_manager.cleanup()
 
 
 app = FastAPI(

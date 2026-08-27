@@ -38,6 +38,8 @@ STATE_FILE = Path.home() / ".claude_hub" / "tabs.json"
 ORDER_FILE = Path.home() / ".claude_hub" / "tab_order.json"
 LAUNCH_ENV_DIR = Path.home() / ".claude_hub" / "launch_env"
 TMUX_SESSION_PREFIX = "claude-hub-"
+_ORPHAN_TMUX_PRUNE_GRACE_SECONDS = 60.0
+_MANAGED_TMUX_SESSION_RE = re.compile(rf"^{re.escape(TMUX_SESSION_PREFIX)}[0-9a-f]{{8}}$")
 
 # ANSI escape sequences (CSI, OSC, charset selection) — stripped before
 # pattern matching so cursor blinks and color codes don't churn the hash
@@ -258,6 +260,35 @@ async def _tmux_list_sessions() -> set[str]:
     if proc.returncode != 0:
         return set()
     return {line for line in stdout.decode("utf-8", errors="ignore").splitlines() if line}
+
+
+async def _tmux_list_session_created() -> dict[str, float]:
+    """Return live tmux session names with their creation epoch."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "tmux",
+            "list-sessions",
+            "-F",
+            "#{session_name}\t#{session_created}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return {}
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return {}
+
+    sessions: dict[str, float] = {}
+    for line in stdout.decode("utf-8", errors="ignore").splitlines():
+        name, separator, created = line.partition("\t")
+        if not separator:
+            continue
+        try:
+            sessions[name] = float(created)
+        except ValueError:
+            logger.warning("Ignoring tmux session with invalid creation time: %r", line)
+    return sessions
 
 
 async def _tmux_kill_session(session_name: str) -> None:
@@ -2564,8 +2595,10 @@ class TTYDManager:
         logger.info("=" * 60)
         logger.info("Initializing TTYDManager - tmux session persistence enabled")
         logger.info("=" * 60)
-        # Ensure tmux server is running on initialization
-        _ensure_tmux_server()
+        # Do not touch tmux during module import. Backend ownership is acquired
+        # in FastAPI lifespan before start_all_tabs performs the tmux probe;
+        # probing here lets a duplicate backend hang or mutate shared runtime
+        # state before the single-instance guard can reject it.
         self._load_state()
         self._load_order()
         # Ensure all loaded tabs are in the order list
@@ -2920,11 +2953,15 @@ class TTYDManager:
         if tab_id not in self.processes:
             return False
 
-        process = self.processes.pop(tab_id)
+        process = self.processes[tab_id]
         logger.warning(
             f"User requested deletion of tab {tab_id}, killing tmux session {process.tmux_session}"
         )
+        # Keep the process registered until teardown is proven.  If tmux
+        # refuses to die, the workspace orphan reconciler can still see this
+        # tab and retry instead of losing its final durable owner reference.
         await process.stop(kill_tmux=True)
+        self.processes.pop(tab_id, None)
         if tab_id in self._tab_order:
             self._tab_order.remove(tab_id)
             self._save_order()
@@ -3876,6 +3913,13 @@ class TTYDManager:
         logger.info("Ensuring tmux server is running...")
         _ensure_tmux_server()
 
+        # Repair raw tmux sessions that survived an older failed/cancelled tab
+        # lifecycle and no longer have a durable tabs.json owner.  This runs
+        # before the API accepts requests and after the backend instance lock
+        # is acquired, so the grace window only needs to cover historical
+        # create crashes rather than a competing live backend.
+        await self._prune_orphan_tmux_sessions()
+
         # Phase 0: backfill + assign sids for cursor legacy tabs.
         self._backfill_agent_session_ids()
         self._backfill_codex_session_ids()
@@ -4033,6 +4077,41 @@ class TTYDManager:
 
         # Final persist.
         self._save_state()
+
+    async def _prune_orphan_tmux_sessions(
+        self,
+        *,
+        grace_seconds: float = _ORPHAN_TMUX_PRUNE_GRACE_SECONDS,
+    ) -> list[str]:
+        """Kill old managed-prefix tmux sessions absent from ``tabs.json``.
+
+        Manual/non-Hub tmux sessions and recently-created managed sessions are
+        preserved.  Failed kills remain live and are reported for a later
+        restart instead of being counted as successfully pruned.
+        """
+        owned = {process.tmux_session for process in self.processes.values()}
+        now = time.time()
+        pruned: list[str] = []
+        sessions = await _tmux_list_session_created()
+        for session_name, created_at in sorted(sessions.items()):
+            if not _MANAGED_TMUX_SESSION_RE.fullmatch(session_name):
+                continue
+            if session_name in owned:
+                continue
+            if now - created_at < grace_seconds:
+                continue
+            logger.warning(
+                "Pruning orphan tmux session with no tabs.json owner session=%s age_seconds=%.1f",
+                session_name,
+                now - created_at,
+            )
+            try:
+                await _tmux_kill_session(session_name)
+            except Exception:
+                logger.exception("Failed to prune orphan tmux session %s", session_name)
+                continue
+            pruned.append(session_name)
+        return pruned
 
     async def _reconcile_codex_phase_r(
         self, launched: List[TTYDProcess], pre_global_scan: Dict[str, ScanEntry]
