@@ -10,6 +10,7 @@ import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pytest import MonkeyPatch
@@ -87,6 +88,23 @@ def test_get_next_port_skips_existing_listener(monkeypatch: MonkeyPatch) -> None
     assert manager._get_next_port() == 12003
     assert manager._next_port == 12004
     assert checked == [12000, 12001, 12002, 12003]
+
+
+def test_manager_init_defers_tmux_probe_until_lifespan(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """Import-time manager construction must not block before the instance lock."""
+    monkeypatch.setattr(ttyd_manager_module, "STATE_FILE", tmp_path / "tabs.json")
+    monkeypatch.setattr(ttyd_manager_module, "ORDER_FILE", tmp_path / "order.json")
+
+    def _unexpected_tmux_probe() -> bool:
+        raise AssertionError("tmux must be probed only after backend ownership is acquired")
+
+    monkeypatch.setattr(ttyd_manager_module, "_ensure_tmux_server", _unexpected_tmux_probe)
+
+    manager = TTYDManager()
+
+    assert manager.processes == {}
 
 
 def test_get_next_port_raises_when_port_range_is_exhausted(
@@ -3001,6 +3019,67 @@ def test_tmux_kill_session_raises_when_session_survives(monkeypatch: MonkeyPatch
             await ttyd_manager_module._tmux_kill_session("claude-hub-live")
 
     _run_coro_in_isolated_thread(_exercise())
+
+
+def test_delete_tab_keeps_process_registered_when_teardown_fails(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """A failed tmux teardown must remain visible so reconciliation can retry it."""
+    manager = TTYDManager.__new__(TTYDManager)
+    process = SimpleNamespace(tmux_session="claude-hub-deadbeef")
+
+    async def _failed_stop(*, kill_tmux: bool = False) -> None:
+        assert kill_tmux is True
+        raise RuntimeError("tmux still alive")
+
+    process.stop = _failed_stop
+    manager.processes = {"deadbeef-tab": process}
+    manager._tab_order = ["deadbeef-tab"]
+
+    async def _exercise() -> None:
+        with pytest.raises(RuntimeError, match="tmux still alive"):
+            await manager.delete_tab("deadbeef-tab")
+
+    _run_coro_in_isolated_thread(_exercise())
+
+    assert manager.processes["deadbeef-tab"] is process
+    assert manager._tab_order == ["deadbeef-tab"]
+
+
+def test_startup_prunes_only_old_unpersisted_managed_tmux(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Cold start removes old managed-prefix tmux sessions with no tabs.json owner."""
+    manager = TTYDManager.__new__(TTYDManager)
+    manager.processes = {
+        "owned-tab": SimpleNamespace(tmux_session="claude-hub-a1b2c3d4"),
+    }
+    now = 10_000.0
+
+    async def _fake_list() -> dict[str, float]:
+        return {
+            "claude-hub-a1b2c3d4": now - 500,  # persisted owner: keep
+            "claude-hub-deadbeef": now - 500,  # old orphan: prune
+            "claude-hub-feedface": now - 10,  # fresh create race: keep
+            "claude-hub-nothexzz": now - 500,  # not our exact namespace: keep
+            "unrelated-session": now - 500,  # unrelated tmux: keep
+        }
+
+    killed: list[str] = []
+
+    async def _fake_kill(session_name: str) -> None:
+        killed.append(session_name)
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_list_session_created", _fake_list)
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_kill_session", _fake_kill)
+    monkeypatch.setattr(ttyd_manager_module.time, "time", lambda: now)
+
+    async def _exercise() -> None:
+        pruned = await manager._prune_orphan_tmux_sessions(grace_seconds=60.0)
+        assert pruned == ["claude-hub-deadbeef"]
+
+    _run_coro_in_isolated_thread(_exercise())
+    assert killed == ["claude-hub-deadbeef"]
 
 
 def test_quarantine_preserves_sid_when_teardown_cannot_be_proven(
