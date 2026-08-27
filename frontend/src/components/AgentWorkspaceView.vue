@@ -653,13 +653,13 @@
             v-if="boardOlderTasksRemaining > 0"
             class="board-history-summary"
           >
-            Showing {{ tasks.length }} of {{ boardTasksPagination.total_count }} tasks
+            Showing {{ loadedDoneTaskCount }} of {{ boardTasksPagination.total_count }} done tasks
           </p>
           <p
             v-else-if="boardTasksPagination.total_count > 0"
             class="board-history-summary"
           >
-            All {{ boardTasksPagination.total_count }} tasks loaded
+            All {{ boardTasksPagination.total_count }} done tasks loaded
           </p>
           <div
             v-if="boardOlderTasksRemaining > 0"
@@ -674,7 +674,7 @@
               {{
                 boardLoadMoreLoading
                   ? 'Loading older tasks…'
-                  : `Show older (${boardOlderTasksRemaining} more)`
+                  : `Show older done (${boardOlderTasksRemaining} more)`
               }}
             </button>
             <button
@@ -3073,6 +3073,10 @@ const {
   error,
   notifications: wsNotifications,
 } = storeToRefs(workspaceStore)
+
+const loadedDoneTaskCount = computed(() =>
+  tasks.value.filter(task => task.status === 'done').length,
+)
 
 // Combine workspace and terminal store notifications so toasts fire regardless
 // of which store pushed them (terminalStore.switchEnv pushes to itself; most

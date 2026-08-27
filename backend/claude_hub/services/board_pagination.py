@@ -1,4 +1,4 @@
-"""Stable cursor pagination for workspace board task history."""
+"""Stable cursor pagination for workspace board Done task history."""
 
 from __future__ import annotations
 
@@ -83,30 +83,36 @@ def validate_tasks_limit(limit: int) -> None:
         raise ValueError(f"tasks_limit must be between 1 and {MAX_BOARD_TASKS_LIMIT}")
 
 
-def paginate_board_tasks(
+def _split_done_tasks(
     tasks: list["WorkspaceTask"],
+) -> tuple[list["WorkspaceTask"], list["WorkspaceTask"]]:
+    from ..models.schemas import WorkspaceTaskStatus
+
+    non_done: list[WorkspaceTask] = []
+    done: list[WorkspaceTask] = []
+    for task in tasks:
+        if task.status == WorkspaceTaskStatus.DONE:
+            done.append(task)
+        else:
+            non_done.append(task)
+    return non_done, done
+
+
+def _sorted_non_done_tasks(non_done: list["WorkspaceTask"]) -> list["WorkspaceTask"]:
+    return sorted(non_done, key=board_task_sort_key)
+
+
+def _paginate_done_slice(
+    sorted_done: list["WorkspaceTask"],
     *,
-    limit: Optional[int] = None,
-    cursor: Optional[str] = None,
-) -> tuple[list["WorkspaceTask"], Optional["BoardTasksPagination"]]:
-    """Return a sorted task slice and optional pagination metadata."""
-    from ..models.schemas import BoardTasksPagination
-
-    if limit is None:
-        return list(tasks), None
-
-    sorted_tasks = sorted(tasks, key=board_task_sort_key)
-    total = len(sorted_tasks)
-    status_counts = dict(sorted(Counter(task.status.value for task in sorted_tasks).items()))
-
-    validate_tasks_limit(limit)
-    if cursor is not None and not cursor.strip():
-        raise ValueError("tasks_cursor must not be empty")
-
+    limit: int,
+    cursor: Optional[str],
+) -> tuple[list["WorkspaceTask"], bool, Optional[str]]:
+    total_done = len(sorted_done)
     start_index = 0
     if cursor:
         cursor_updated_at, cursor_created_at, cursor_id = decode_board_tasks_cursor(cursor)
-        for index, task in enumerate(sorted_tasks):
+        for index, task in enumerate(sorted_done):
             if _task_is_after_cursor(
                 task,
                 cursor_updated_at,
@@ -116,21 +122,55 @@ def paginate_board_tasks(
                 start_index = index
                 break
         else:
-            start_index = total
+            start_index = total_done
 
-    page = sorted_tasks[start_index : start_index + limit]
-    has_more = start_index + limit < total
+    page_done = sorted_done[start_index : start_index + limit]
+    has_more = start_index + limit < total_done
     next_cursor: Optional[str] = None
-    if has_more and page:
-        last = page[-1]
+    if has_more and page_done:
+        last = page_done[-1]
         next_cursor = encode_board_tasks_cursor(
             last.updated_at,
             last.created_at,
             last.id,
         )
+    return page_done, has_more, next_cursor
+
+
+def paginate_board_tasks(
+    tasks: list["WorkspaceTask"],
+    *,
+    limit: Optional[int] = None,
+    cursor: Optional[str] = None,
+) -> tuple[list["WorkspaceTask"], Optional["BoardTasksPagination"]]:
+    """Return board tasks with Done-only pagination when ``limit`` is set."""
+    from ..models.schemas import BoardTasksPagination
+
+    if limit is None:
+        return list(tasks), None
+
+    validate_tasks_limit(limit)
+    if cursor is not None and not cursor.strip():
+        raise ValueError("tasks_cursor must not be empty")
+
+    status_counts = dict(sorted(Counter(task.status.value for task in tasks).items()))
+    non_done, done_tasks = _split_done_tasks(tasks)
+    sorted_done = sorted(done_tasks, key=board_task_sort_key)
+    total_done = len(sorted_done)
+
+    page_done, has_more, next_cursor = _paginate_done_slice(
+        sorted_done,
+        limit=limit,
+        cursor=cursor,
+    )
+
+    if cursor:
+        page = page_done
+    else:
+        page = _sorted_non_done_tasks(non_done) + page_done
 
     pagination = BoardTasksPagination(
-        total_count=total,
+        total_count=total_done,
         has_more=has_more,
         next_cursor=next_cursor,
         limit=limit,
