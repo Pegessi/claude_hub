@@ -1678,8 +1678,13 @@ async def test_ensure_tab_running_starts_missing_ttyd_listener(monkeypatch: Monk
         started.append(self.tab_id)
         self.is_active = True
 
+    async def existing_tmux(_session_name: str) -> bool:
+        return True
+
     monkeypatch.setattr(ttyd_manager_module, "_is_local_port_listening", lambda _port: False)
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", existing_tmux)
     monkeypatch.setattr(TTYDProcess, "start", fake_start)
+    monkeypatch.setattr(manager, "_save_state", lambda: None)
 
     tab = await manager.ensure_tab_running(process.tab_id)
 
@@ -3082,6 +3087,410 @@ def test_startup_prunes_only_old_unpersisted_managed_tmux(
     assert killed == ["claude-hub-deadbeef"]
 
 
+def test_hot_restart_reattaches_only_tabs_with_surviving_tmux(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """A backend-only reload must not resurrect every historical saved tab."""
+    manager = TTYDManager.__new__(TTYDManager)
+    started: list[str] = []
+    ensured: list[str] = []
+
+    class FakeProcess:
+        def __init__(
+            self,
+            tab_id: str,
+            agent_type: AgentType,
+            target: ExecutionTarget = ExecutionTarget.LOCAL,
+        ) -> None:
+            self.tab_id = tab_id
+            self.tmux_session = f"claude-hub-{tab_id}"
+            self.agent_type = agent_type
+            self.target = target
+            self.agent_session_id = "pinned-session"
+            self.resume_quarantined = False
+            self.cwd = "/tmp"
+            self.is_active = False
+
+        async def start(self) -> None:
+            started.append(self.tab_id)
+            self.is_active = True
+
+        async def ensure_tmux_session(self) -> bool:
+            ensured.append(self.tab_id)
+            return True
+
+    live = FakeProcess("live0001", AgentType.CLAUDE)
+    stopped_cursor = FakeProcess("cold0001", AgentType.CURSOR)
+    stopped_codex = FakeProcess("cold0002", AgentType.CODEX)
+    stopped_terminal = FakeProcess("cold0003", AgentType.TERMINAL)
+    stopped_remote = FakeProcess("cold0004", AgentType.CLAUDE, ExecutionTarget.REMOTE)
+    manager.processes = {
+        p.tab_id: p for p in (live, stopped_cursor, stopped_codex, stopped_terminal, stopped_remote)
+    }
+
+    async def fake_prune() -> list[str]:
+        return []
+
+    async def fake_session_exists(session_name: str) -> bool:
+        return session_name == live.tmux_session
+
+    monkeypatch.setattr(manager, "_prune_orphan_tmux_sessions", fake_prune)
+    monkeypatch.setattr(manager, "_backfill_agent_session_ids", lambda: None)
+    monkeypatch.setattr(manager, "_backfill_codex_session_ids", lambda: None)
+    monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(ttyd_manager_module, "_ensure_tmux_server", lambda: None)
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", fake_session_exists)
+    monkeypatch.setattr(ttyd_manager_module, "_codex_scan_sessions", lambda: {})
+    monkeypatch.setattr(
+        ttyd_manager_module.os,
+        "popen",
+        lambda command: SimpleNamespace(read=lambda: "one live managed session"),
+    )
+
+    _run_coro_in_isolated_thread(manager.start_all_tabs())
+
+    assert started == ["live0001"]
+    assert ensured == []
+    assert live.is_active is True
+    assert stopped_cursor.is_active is False
+    assert stopped_codex.is_active is False
+    assert stopped_terminal.is_active is False
+    assert stopped_remote.is_active is False
+
+
+def test_cold_restart_recovers_all_saved_non_codex_tabs(monkeypatch: MonkeyPatch) -> None:
+    """With no surviving managed tmux, preserve full machine-restart recovery."""
+    manager = TTYDManager.__new__(TTYDManager)
+    started: list[str] = []
+    ensured: list[str] = []
+
+    class FakeProcess:
+        def __init__(self, tab_id: str, agent_type: AgentType) -> None:
+            self.tab_id = tab_id
+            self.tmux_session = f"claude-hub-{tab_id}"
+            self.agent_type = agent_type
+            self.target = ExecutionTarget.LOCAL
+            self.agent_session_id = None
+            self.resume_quarantined = False
+            self.cwd = "/tmp"
+            self.is_active = False
+
+        async def start(self) -> None:
+            started.append(self.tab_id)
+            self.is_active = True
+
+        async def ensure_tmux_session(self) -> bool:
+            ensured.append(self.tab_id)
+            return True
+
+    claude = FakeProcess("cold1001", AgentType.CLAUDE)
+    terminal = FakeProcess("cold1002", AgentType.TERMINAL)
+    manager.processes = {p.tab_id: p for p in (claude, terminal)}
+
+    async def fake_prune() -> list[str]:
+        return []
+
+    async def no_session_exists(session_name: str) -> bool:
+        return False
+
+    monkeypatch.setattr(manager, "_prune_orphan_tmux_sessions", fake_prune)
+    monkeypatch.setattr(manager, "_backfill_agent_session_ids", lambda: None)
+    monkeypatch.setattr(manager, "_backfill_codex_session_ids", lambda: None)
+    monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(ttyd_manager_module, "_ensure_tmux_server", lambda: None)
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", no_session_exists)
+    monkeypatch.setattr(ttyd_manager_module, "_codex_scan_sessions", lambda: {})
+    monkeypatch.setattr(
+        ttyd_manager_module.os,
+        "popen",
+        lambda command: SimpleNamespace(read=lambda: "no server running"),
+    )
+
+    _run_coro_in_isolated_thread(manager.start_all_tabs())
+
+    assert sorted(started) == ["cold1001", "cold1002"]
+    assert sorted(ensured) == ["cold1001", "cold1002"]
+    assert claude.is_active is True
+    assert terminal.is_active is True
+
+
+@pytest.mark.asyncio
+async def test_explicit_cursor_recovery_persists_rotated_sid_across_reload(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Opening a skipped Cursor tab must durably pin its constructive resume id."""
+    state_file = tmp_path / "tabs.json"
+    order_file = tmp_path / "order.json"
+    monkeypatch.setattr(ttyd_manager_module, "STATE_FILE", state_file)
+    monkeypatch.setattr(ttyd_manager_module, "ORDER_FILE", order_file)
+    monkeypatch.setattr(ttyd_manager_module, "_is_local_port_listening", lambda port: False)
+    monkeypatch.setattr(ttyd_manager_module, "_cursor_id_exists", lambda sid, cwd: False)
+
+    process = TTYDProcess(
+        tab_id="cursor-explicit-recovery",
+        port=12501,
+        name="Stopped Cursor",
+        cwd=str(tmp_path),
+        agent_type=AgentType.CURSOR,
+        agent_session_id="stale-cursor-sid",
+        from_persisted_state=True,
+    )
+    process.is_active = False
+
+    async def no_tmux(session_name: str) -> bool:
+        return False
+
+    async def fake_start() -> None:
+        process._build_ttyd_command(session_exists=False)
+        process.is_active = True
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", no_tmux)
+    monkeypatch.setattr(process, "start", fake_start)
+
+    manager = TTYDManager.__new__(TTYDManager)
+    manager.processes = {process.tab_id: process}
+    manager._tab_order = [process.tab_id]
+    manager._start_locks = {}
+
+    tab = await manager.ensure_tab_running(process.tab_id)
+
+    assert tab is not None
+    assert tab.is_active is True
+    assert tab.agent_session_id not in {None, "stale-cursor-sid"}
+    assert state_file.exists()
+
+    reloaded = TTYDManager()
+    assert reloaded.processes[process.tab_id].agent_session_id == tab.agent_session_id
+
+
+@pytest.mark.asyncio
+async def test_explicit_codex_fallback_is_attributed_and_persisted_across_reload(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Opening a skipped Codex tab must commit the fallback rollout identity."""
+    state_file = tmp_path / "tabs.json"
+    order_file = tmp_path / "order.json"
+    monkeypatch.setattr(ttyd_manager_module, "STATE_FILE", state_file)
+    monkeypatch.setattr(ttyd_manager_module, "ORDER_FILE", order_file)
+    monkeypatch.setattr(ttyd_manager_module, "_is_local_port_listening", lambda port: False)
+    monkeypatch.setattr(ttyd_manager_module, "_codex_scan_sessions", lambda: {})
+
+    process = TTYDProcess(
+        tab_id="codex-explicit-recovery",
+        port=12502,
+        name="Stopped Codex",
+        cwd=str(tmp_path),
+        agent_type=AgentType.CODEX,
+        agent_session_id="stale-codex-sid",
+        from_persisted_state=True,
+    )
+    process.is_active = False
+    started: list[str] = []
+    reconciled: list[list[str]] = []
+
+    async def no_tmux(session_name: str) -> bool:
+        return False
+
+    async def fake_launch(tab: TTYDProcess) -> tuple[str, str]:
+        assert tab is process
+        tab.agent_session_id = "attributed-fallback-sid"
+        tab._is_new_pin = True
+        tab.resume_quarantined = False
+        return "FALLBACK", "attributed-fallback-sid"
+
+    async def fake_reconcile(tabs: list[TTYDProcess], pre_scan: dict) -> None:
+        reconciled.append([tab.tab_id for tab in tabs])
+
+    async def fake_start() -> None:
+        started.append(process.tab_id)
+        process.is_active = True
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", no_tmux)
+    monkeypatch.setattr(process, "start", fake_start)
+
+    manager = TTYDManager.__new__(TTYDManager)
+    manager.processes = {process.tab_id: process}
+    manager._tab_order = [process.tab_id]
+    manager._start_locks = {}
+    monkeypatch.setattr(manager, "_launch_one_cold_codex_locked", fake_launch)
+    monkeypatch.setattr(manager, "_reconcile_codex_phase_r", fake_reconcile)
+
+    tab = await manager.ensure_tab_running(process.tab_id)
+
+    assert tab is not None
+    assert tab.is_active is True
+    assert tab.agent_session_id == "attributed-fallback-sid"
+    assert reconciled == [[process.tab_id]]
+    assert started == [process.tab_id]
+
+    reloaded = TTYDManager()
+    restored = reloaded.processes[process.tab_id]
+    assert restored.agent_session_id == "attributed-fallback-sid"
+    assert restored.resume_quarantined is False
+
+
+@pytest.mark.asyncio
+async def test_explicit_prequarantined_codex_launch_failure_still_kills_writer(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An incoming quarantine flag must not suppress this attempt's rollback."""
+    process = TTYDProcess(
+        tab_id="prequarantined-codex",
+        port=12503,
+        name="Prequarantined Codex",
+        cwd=str(tmp_path),
+        agent_type=AgentType.CODEX,
+        agent_session_id="untrusted-old-sid",
+        from_persisted_state=True,
+        resume_quarantined=True,
+    )
+    process.is_active = True
+    stopped: list[bool] = []
+    saves: list[str] = []
+
+    async def no_tmux(_session_name: str) -> bool:
+        return False
+
+    async def fail_after_create(_tab: TTYDProcess) -> tuple[str, str]:
+        process.is_active = True
+        raise RuntimeError("launch failed after tmux create")
+
+    async def fake_stop(kill_tmux: bool = False) -> None:
+        stopped.append(kill_tmux)
+        process.is_active = False
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", no_tmux)
+    monkeypatch.setattr(ttyd_manager_module, "_codex_scan_sessions", lambda: {})
+    monkeypatch.setattr(process, "stop", fake_stop)
+
+    manager = TTYDManager.__new__(TTYDManager)
+    manager.processes = {process.tab_id: process}
+    monkeypatch.setattr(manager, "_launch_one_cold_codex_locked", fail_after_create)
+    monkeypatch.setattr(manager, "_save_state", lambda: saves.append("saved"))
+
+    with pytest.raises(RuntimeError, match="launch failed after tmux create"):
+        await manager._start_missing_tab_identity_safe(process)
+
+    assert stopped == [True]
+    assert process.is_active is False
+    assert process.resume_quarantined is True
+    assert process.agent_session_id is None
+    assert saves == ["saved"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_codex_recovery_cancellation_shields_writer_teardown(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cancellation after tmux creation must wait for kill and durable quarantine."""
+    process = TTYDProcess(
+        tab_id="cancelled-codex-recovery",
+        port=12504,
+        name="Cancelled Codex",
+        cwd=str(tmp_path),
+        agent_type=AgentType.CODEX,
+        agent_session_id="old-codex-sid",
+        from_persisted_state=True,
+    )
+    process.is_active = False
+    launch_created = asyncio.Event()
+    keep_launch_open = asyncio.Event()
+    stopped: list[bool] = []
+    saves: list[str] = []
+
+    async def no_tmux(_session_name: str) -> bool:
+        return False
+
+    async def wait_after_create(_tab: TTYDProcess) -> tuple[str, str]:
+        process.is_active = True
+        launch_created.set()
+        await keep_launch_open.wait()
+        raise AssertionError("cancelled launch should not resume")
+
+    async def fake_stop(kill_tmux: bool = False) -> None:
+        await asyncio.sleep(0)
+        stopped.append(kill_tmux)
+        process.is_active = False
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", no_tmux)
+    monkeypatch.setattr(ttyd_manager_module, "_codex_scan_sessions", lambda: {})
+    monkeypatch.setattr(process, "stop", fake_stop)
+
+    manager = TTYDManager.__new__(TTYDManager)
+    manager.processes = {process.tab_id: process}
+    monkeypatch.setattr(manager, "_launch_one_cold_codex_locked", wait_after_create)
+    monkeypatch.setattr(manager, "_save_state", lambda: saves.append("saved"))
+
+    recovery = asyncio.create_task(manager._start_missing_tab_identity_safe(process))
+    await launch_created.wait()
+    recovery.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await recovery
+
+    assert stopped == [True]
+    assert process.is_active is False
+    assert process.resume_quarantined is True
+    assert process.agent_session_id is None
+    assert saves == ["saved"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_codex_cleanup_failure_persists_quarantine_evidence(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Repeated tmux kill failure must still durably retain its owner evidence."""
+    process = TTYDProcess(
+        tab_id="codex-cleanup-failure",
+        port=12505,
+        name="Codex Cleanup Failure",
+        agent_type=AgentType.CODEX,
+        agent_session_id="last-known-owner-sid",
+        from_persisted_state=True,
+    )
+    stop_attempts: list[bool] = []
+    saved: list[tuple[str | None, bool, str | None]] = []
+
+    async def failed_stop(kill_tmux: bool = False) -> None:
+        stop_attempts.append(kill_tmux)
+        raise RuntimeError("tmux still alive")
+
+    monkeypatch.setattr(process, "stop", failed_stop)
+
+    manager = TTYDManager.__new__(TTYDManager)
+    manager.processes = {process.tab_id: process}
+    monkeypatch.setattr(
+        manager,
+        "_save_state",
+        lambda: saved.append(
+            (
+                process.agent_session_id,
+                process.resume_quarantined,
+                process._pending_quarantine_reason,
+            )
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="failed to stop owned tmux/ttyd"):
+        await manager._finish_explicit_codex_recovery_rollback(process, "test rollback")
+
+    assert stop_attempts == [True, True]
+    assert process.agent_session_id == "last-known-owner-sid"
+    assert process.resume_quarantined is True
+    assert "cleanup failed" in (process._pending_quarantine_reason or "")
+    assert saved == [
+        (
+            "last-known-owner-sid",
+            True,
+            process._pending_quarantine_reason,
+        )
+    ]
+
+
 def test_quarantine_preserves_sid_when_teardown_cannot_be_proven(
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -3167,9 +3576,9 @@ def test_legacy_state_without_shell_explicitly_provided_uses_agent_cli(
         ("legacy-cursor", AgentType.CURSOR),
     ]:
         proc = manager.processes[tab_id]
-        assert proc._shell_explicitly_provided is False, (
-            f"{tab_id}: default agent shell must not be marked explicit"
-        )
+        assert (
+            proc._shell_explicitly_provided is False
+        ), f"{tab_id}: default agent shell must not be marked explicit"
         cmd = proc._build_ttyd_command(session_exists=False)
         # The explicit-shell branch appends self.shell directly; the agent CLI
         # branch wraps the agent command with resume/session flags. For a fresh
