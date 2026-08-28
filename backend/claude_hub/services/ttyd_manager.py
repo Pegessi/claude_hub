@@ -2999,7 +2999,7 @@ class TTYDManager:
                 process.port,
             )
             try:
-                await process.start()
+                await self._start_missing_tab_identity_safe(process)
             except Exception:
                 # During uvicorn --reload an old backend may still own the
                 # port briefly. If the listener exists now, let the proxy use
@@ -3017,6 +3017,110 @@ class TTYDManager:
                 raise
 
             return process.to_schema()
+
+    async def _start_missing_tab_identity_safe(self, process: TTYDProcess) -> None:
+        """Start an explicitly opened stopped tab without losing agent identity.
+
+        A hot backend restart intentionally leaves persisted tabs with no live
+        tmux session stopped.  Opening one is therefore a real cold recovery,
+        not merely a missing ttyd listener.  Local Codex recovery must reuse
+        the same attribution and reconciliation fence as bulk cold startup;
+        Cursor/Claude may update their pinned id while building the recovery
+        command, so their resulting state is persisted before returning.
+        """
+        session_exists = await _tmux_session_exists_async(process.tmux_session)
+        is_local_codex = (
+            not session_exists
+            and process.target == ExecutionTarget.LOCAL
+            and process.agent_type == AgentType.CODEX
+            and not process._shell_explicitly_provided
+        )
+        if not is_local_codex:
+            try:
+                await process.start()
+            finally:
+                # Cursor rotates an unverifiable persisted id while building
+                # its recovery command; Claude can defensively allocate a
+                # missing legacy id. Persist even if ttyd startup then fails so
+                # the next attempt targets the same conversation identity.
+                self._save_state()
+            return
+
+        # A prior launch in this backend process may have left attribution
+        # scratch fields populated even though its tmux was later killed.
+        process._launch_wall = None
+        process._launch_mono = None
+        process._is_new_pin = None
+        process._pre_scan = None
+        process._pending_quarantine_reason = None
+
+        async with GLOBAL_CODEX_LAUNCH_LOCK:
+            pre_global_scan = _codex_scan_sessions()
+            try:
+                outcome, _ = await self._launch_one_cold_codex_locked(process)
+                if outcome == "PendingQ":
+                    raise RuntimeError(
+                        "unresolved Codex ownership signal for explicitly opened "
+                        f"tab {process.tab_id}: {process._pending_quarantine_reason}"
+                    )
+                await self._reconcile_codex_phase_r([process], pre_global_scan)
+                if process.resume_quarantined:
+                    raise RuntimeError(
+                        f"Codex identity reconciliation quarantined tab {process.tab_id}"
+                    )
+            except asyncio.CancelledError:
+                try:
+                    await self._finish_explicit_codex_recovery_rollback(
+                        process,
+                        "explicit cold recovery cancelled before identity commit",
+                    )
+                except Exception as cleanup_error:
+                    raise RuntimeError(
+                        "Cancelled Codex explicit recovery could not prove process teardown "
+                        f"for tab {process.tab_id}"
+                    ) from cleanup_error
+                raise
+            except Exception as error:
+                try:
+                    await self._finish_explicit_codex_recovery_rollback(
+                        process,
+                        f"explicit cold recovery rollback: {error!r}",
+                    )
+                except Exception as cleanup_error:
+                    raise RuntimeError(
+                        "Codex explicit recovery could not prove process teardown "
+                        f"for tab {process.tab_id}"
+                    ) from cleanup_error
+                raise
+
+            # Commit the attributed SID before ttyd attaches. If ttyd binding
+            # fails, the owned tmux and durable identity remain safe to retry.
+            self._save_state()
+
+        await process.start()
+
+    async def _finish_explicit_codex_recovery_rollback(
+        self,
+        process: TTYDProcess,
+        reason: str,
+    ) -> None:
+        """Shield Codex teardown/state commit from request or reload cancellation."""
+        cleanup_task = asyncio.create_task(self._quarantine_codex_tab(process, reason))
+        try:
+            while not cleanup_task.done():
+                try:
+                    await asyncio.shield(cleanup_task)
+                except asyncio.CancelledError:
+                    # Repeated shutdown cancellation must not strand an
+                    # unattributed Codex writer. The caller re-raises its original
+                    # cancellation only after this task proves teardown.
+                    continue
+            await cleanup_task
+        finally:
+            # _quarantine_codex_tab deliberately retains its cleanup-failed
+            # evidence if tmux teardown cannot be proven. Persist that evidence
+            # even when the cleanup task itself raises.
+            self._save_state()
 
     def list_tabs(self) -> list[TerminalTab]:
         # Return tabs in saved order
@@ -3874,9 +3978,15 @@ class TTYDManager:
         cursor tabs missing them (Cursor is a constructive pin; V0 verified
         ``agent --resume <uuid>`` creates the store immediately).
 
-        Phase 1 (hot) — Launch all non-codex tabs (hot reattach + cursor +
-        claude + terminal) in parallel. Hot reattach is the common backend-
-        restart case (tmux still alive) and does not touch on-disk state.
+        Phase 1 (hot) — If at least one persisted tab still has its exact tmux
+        session, treat startup as a backend-only restart and reattach only the
+        tabs whose tmux sessions survived. Persisted tabs without a surviving
+        session stay stopped and can be resumed explicitly when opened. This
+        prevents a source reload from cold-launching every historical tab.
+
+        Phase 1 (cold) — If none of the persisted tabs has a surviving tmux
+        session, treat startup as a machine/runtime restart and recover all
+        saved tabs using the existing pinned-session recovery rules.
 
         Phase 1S — Serialize codex cold launches under GLOBAL_CODEX_LAUNCH_LOCK.
         Group tabs by cwd; within each cwd run VerifiedCodex (verified sid,
@@ -3942,20 +4052,41 @@ class TTYDManager:
         logger.info("Starting %d saved tabs", len(processes))
 
         # Partition into hot (session exists) / cold-codex / cold-non-codex.
+        # A mixed snapshot means the tmux server survived this backend restart.
+        # Missing sessions in that case are historical/stopped tabs, not proof
+        # that every one of them should be relaunched. They remain available in
+        # the UI and ``ensure_tab_running`` resumes one on explicit access.
         async def _session_exists(p: TTYDProcess) -> bool:
             return await _tmux_session_exists_async(p.tmux_session)
 
         exists = await asyncio.gather(*(_session_exists(p) for p in processes))
+        hot_restart = any(exists)
         hot: List[TTYDProcess] = []
         cold_non_codex: List[TTYDProcess] = []
         cold_codex: List[TTYDProcess] = []
         for p, ex in zip(processes, exists):
             if ex:
                 hot.append(p)
+            elif hot_restart:
+                p.is_active = False
             elif p.agent_type == AgentType.CODEX and p.target == ExecutionTarget.LOCAL:
                 cold_codex.append(p)
             else:
                 cold_non_codex.append(p)
+
+        if hot_restart:
+            skipped = len(processes) - len(hot)
+            logger.info(
+                "Hot backend restart detected: reattaching %d live tabs and "
+                "leaving %d tabs stopped until explicitly opened",
+                len(hot),
+                skipped,
+            )
+        else:
+            logger.info(
+                "Cold runtime restart detected: recovering all %d saved tabs",
+                len(processes),
+            )
 
         # Phase 1: launch hot + cold non-codex in parallel.
         async def _start_one(process: TTYDProcess) -> None:
