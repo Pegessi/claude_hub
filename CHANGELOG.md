@@ -3316,6 +3316,15 @@
   - backend/tests/test_workspaces.py
   - CHANGELOG.md
 
+## 2026-06-11
+
+### fix: route pasted images per agent type and degrade pasteboard sync gracefully
+- Switch `/api/clipboard/image` from a 500-on-AppleScript-failure endpoint to one that always returns 200 with the persisted absolute path, plus `pasteboard_synced` and `pasteboard_error` so the frontend can pick the right paste protocol per agent
+- Replace the AppleScript `set the clipboard to (read POSIX file ...)` route with a Swift NSPasteboard helper compiled lazily into `~/.claude_hub/bin/`. The previous route hit `«script» doesn't understand the read message (-1708)` because StandardAdditions.osax is not loaded into a launchd-descended backend's default script context, and even after forcing it to load `read POSIX file` is gated by macOS TCC. JXA + ObjC bridge sidesteps StandardAdditions but `NSPasteboard.setData` was observed throwing inside uvicorn workers; the native Swift binary has neither failure mode
+- Document that NSPasteboard writes still return false from a launchd-descended (daemonized) backend because the responsible application of the process tree is no longer the GUI user session, so Claude/Codex paste-image only works when `./start.sh` is run in a foreground Terminal/iTerm window
+- Route pasted images by agent type in the iframe paste handler: Cursor agent receives the absolute image path as plain text (it auto-converts to an `[Image #N]` attachment) and is therefore unaffected by pasteboard-sync failure; Claude / Codex still receive `\x16` to make the TUI re-read the system clipboard after the helper sync
+- **Files**: backend/claude_hub/api/clipboard.py, backend/claude_hub/api/clipboard_set_image.swift, frontend/src/components/TerminalView.vue, CHANGELOG.md
+
 ## 2026-06-10
 
 ### fix: skip initial replay for short agent terminal history

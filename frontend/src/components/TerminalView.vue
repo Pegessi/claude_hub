@@ -1490,9 +1490,14 @@ ${buildIframeSabScript(tabId)}
       }
 
       // Browser terminals do not forward image clipboard data to the TUI.
-      // Claude Code and Codex handle Ctrl+V by reading the macOS clipboard,
-      // so first sync the browser image data to the backend pasteboard and
-      // then trigger that key.
+      // Each agent has its own protocol for accepting a pasted image:
+      //   - Claude Code / Codex: Ctrl+V (\\x16) makes the TUI re-read the
+      //     macOS system clipboard, so we sync the browser image into the
+      //     pasteboard first, then send the keystroke.
+      //   - Cursor agent: doesn't watch the system clipboard. Instead it
+      //     auto-detects an absolute image path typed at the prompt and
+      //     converts it into an [Image #N] attachment, so we send the
+      //     uploaded file's absolute path as plain text.
       document.addEventListener('paste', function(event) {
         if (CLAUDE_HUB_AGENT_TYPE !== 'codex' && CLAUDE_HUB_AGENT_TYPE !== 'claude' && CLAUDE_HUB_AGENT_TYPE !== 'cursor') return;
 
@@ -1502,11 +1507,23 @@ ${buildIframeSabScript(tabId)}
         event.preventDefault();
         event.stopPropagation();
 
-        syncClipboardImageToBackend(imageFile).then(function() {
-          sendText('\\x16');
+        syncClipboardImageToBackend(imageFile).then(function(response) {
+          if (CLAUDE_HUB_AGENT_TYPE === 'cursor') {
+            if (response && response.path) {
+              sendText(response.path);
+            } else {
+              console.warn('Cursor clipboard sync returned no path; nothing to type');
+            }
+          } else {
+            sendText('\\x16');
+          }
         }).catch(function(error) {
           console.warn('Unable to sync clipboard image before paste:', error);
-          sendText('\\x16');
+          // Best-effort fallback only meaningful for Claude/Codex; Cursor
+          // would just receive a literal Ctrl+V char with nothing useful.
+          if (CLAUDE_HUB_AGENT_TYPE !== 'cursor') {
+            sendText('\\x16');
+          }
         });
       }, true);
 
