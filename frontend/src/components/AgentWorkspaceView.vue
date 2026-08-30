@@ -643,57 +643,45 @@
                 No tasks
               </div>
             </div>
+            <footer
+              v-if="column.status === 'done' && boardTasksPagination"
+              class="board-history-footer"
+            >
+              <div
+                v-if="boardOlderTasksRemaining > 0"
+                class="board-history-actions"
+              >
+                <button
+                  type="button"
+                  class="secondary-button board-history-load-more"
+                  :disabled="boardLoadMoreLoading"
+                  @click="handleLoadOlderTasks"
+                >
+                  {{
+                    boardLoadMoreLoading
+                      ? 'Loading older tasks…'
+                      : `Show older done (${boardOlderTasksRemaining} more)`
+                  }}
+                </button>
+                <button
+                  v-if="boardLoadMoreError"
+                  type="button"
+                  class="secondary-button board-history-retry"
+                  @click="handleLoadOlderTasks"
+                >
+                  Retry
+                </button>
+                <span
+                  v-if="boardLoadMoreError"
+                  class="board-history-error"
+                  role="alert"
+                >
+                  {{ boardLoadMoreError }}
+                </span>
+              </div>
+            </footer>
           </section>
         </template>
-        <footer
-          v-if="boardTasksPagination"
-          class="board-history-footer"
-        >
-          <p
-            v-if="boardOlderTasksRemaining > 0"
-            class="board-history-summary"
-          >
-            Showing {{ tasks.length }} of {{ boardTasksPagination.total_count }} tasks
-          </p>
-          <p
-            v-else-if="boardTasksPagination.total_count > 0"
-            class="board-history-summary"
-          >
-            All {{ boardTasksPagination.total_count }} tasks loaded
-          </p>
-          <div
-            v-if="boardOlderTasksRemaining > 0"
-            class="board-history-actions"
-          >
-            <button
-              type="button"
-              class="secondary-button board-history-load-more"
-              :disabled="boardLoadMoreLoading"
-              @click="handleLoadOlderTasks"
-            >
-              {{
-                boardLoadMoreLoading
-                  ? 'Loading older tasks…'
-                  : `Show older (${boardOlderTasksRemaining} more)`
-              }}
-            </button>
-            <button
-              v-if="boardLoadMoreError"
-              type="button"
-              class="secondary-button board-history-retry"
-              @click="handleLoadOlderTasks"
-            >
-              Retry
-            </button>
-            <span
-              v-if="boardLoadMoreError"
-              class="board-history-error"
-              role="alert"
-            >
-              {{ boardLoadMoreError }}
-            </span>
-          </div>
-        </footer>
       </main>
     </div>
 
@@ -6441,6 +6429,7 @@ onUnmounted(() => {
 .primary-button,
 .abort-button,
 .danger-button,
+.secondary-button,
 .advanced-start select {
   border: 1px solid var(--ch-color-border-strong);
   border-radius: var(--ch-radius-md);
@@ -6452,7 +6441,8 @@ onUnmounted(() => {
 .tool-button,
 .primary-button,
 .abort-button,
-.danger-button {
+.danger-button,
+.secondary-button {
   height: 32px;
   padding: 0 14px;
   font-size: var(--ch-font-size-base);
@@ -6464,7 +6454,8 @@ onUnmounted(() => {
 .tool-button,
 .primary-button,
 .abort-button,
-.danger-button {
+.danger-button,
+.secondary-button {
   gap: 6px;
   line-height: 1;
   display: inline-flex;
@@ -6475,7 +6466,8 @@ onUnmounted(() => {
 .tool-button:hover,
 .primary-button:hover,
 .abort-button:hover,
-.danger-button:hover {
+.danger-button:hover,
+.secondary-button:hover {
   border-color: var(--ch-color-border-hover);
 }
 
@@ -6483,6 +6475,7 @@ onUnmounted(() => {
 .primary-button:focus-visible,
 .abort-button:focus-visible,
 .danger-button:focus-visible,
+.secondary-button:focus-visible,
 .workspace-select:focus-visible,
 .path-nav-button:focus-visible {
   outline: none;
@@ -6527,6 +6520,7 @@ onUnmounted(() => {
 .primary-button,
 .abort-button,
 .danger-button,
+.secondary-button,
 .task-actions button,
 .agent-row button {
   cursor: pointer;
@@ -6536,6 +6530,7 @@ onUnmounted(() => {
 .primary-button:disabled,
 .abort-button:disabled,
 .danger-button:disabled,
+.secondary-button:disabled,
 .task-actions button:disabled,
 .agent-row button:disabled {
   cursor: not-allowed;
@@ -6876,19 +6871,13 @@ onUnmounted(() => {
 }
 
 .board-history-footer {
-  grid-column: 1 / -1;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px 4px;
+  align-items: stretch;
+  gap: 6px;
+  padding: 8px 10px;
   border-top: 1px solid var(--ch-color-border-muted);
-}
-
-.board-history-summary {
-  margin: 0;
-  font-size: 12px;
-  color: var(--ch-color-text-muted);
+  background: var(--ch-color-surface);
 }
 
 .board-history-actions {
@@ -6896,16 +6885,19 @@ onUnmounted(() => {
   flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .board-history-load-more,
 .board-history-retry {
-  min-height: 32px;
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .board-history-error {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--ch-color-danger, #c0392b);
 }
 

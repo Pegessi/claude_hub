@@ -59,7 +59,7 @@ export function applyBoardPayloadState(
       ? mergeBoardPollPagination(
           currentBoard.tasks_pagination,
           payload.tasks_pagination,
-          mergedTasks.length,
+          loadedDoneTaskCount(mergedTasks),
         )
       : payload.tasks_pagination ?? currentBoard.tasks_pagination ?? null
     return {
@@ -102,13 +102,13 @@ export function mergeBoardPollTasks(
 export function mergeBoardPollPagination(
   existingPagination: BoardTasksPagination | null | undefined,
   incomingPagination: BoardTasksPagination | null | undefined,
-  mergedTaskCount: number,
+  mergedDoneCount: number,
 ): BoardTasksPagination | null {
   if (!incomingPagination) {
     return existingPagination ?? null
   }
   const totalCount = incomingPagination.total_count
-  const hasMore = mergedTaskCount < totalCount
+  const hasMore = mergedDoneCount < totalCount
   const nextCursor =
     hasMore && existingPagination?.next_cursor
       ? existingPagination.next_cursor
@@ -154,19 +154,13 @@ export function mergeBoardReports(
   return [...byId.values()]
 }
 
-export function boardTasksLimitForPoll(loadedCount: number): number {
-  const window = Math.max(loadedCount, BOARD_TASKS_PAGE_SIZE)
-  return Math.min(window, MAX_BOARD_TASKS_LIMIT)
+export function loadedDoneTaskCount(tasks: WorkspaceTask[]): number {
+  return tasks.filter(task => task.status === 'done').length
 }
 
-export function loadedBoardTaskCount(
-  tasks: WorkspaceTask[],
-  pagination: BoardTasksPagination | null | undefined,
-): number {
-  if (pagination?.total_count != null) {
-    return tasks.length
-  }
-  return tasks.length
+export function boardTasksLimitForPoll(loadedDoneCount: number): number {
+  const window = Math.max(loadedDoneCount, BOARD_TASKS_PAGE_SIZE)
+  return Math.min(window, MAX_BOARD_TASKS_LIMIT)
 }
 
 export function boardOlderRemainingCount(
@@ -174,7 +168,7 @@ export function boardOlderRemainingCount(
   pagination: BoardTasksPagination | null | undefined,
 ): number {
   if (!pagination) return 0
-  return Math.max(0, pagination.total_count - tasks.length)
+  return Math.max(0, pagination.total_count - loadedDoneTaskCount(tasks))
 }
 
 export type BoardLoadMoreAttemptState = {

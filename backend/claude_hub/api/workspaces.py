@@ -200,7 +200,7 @@ async def get_workspace_board(
         default=None,
         ge=1,
         le=100,
-        description="When set, return only this many tasks sorted by recent activity.",
+        description=("When set, return all non-Done tasks plus this many most-recent Done tasks."),
     ),
     tasks_cursor: str | None = Query(
         default=None,
