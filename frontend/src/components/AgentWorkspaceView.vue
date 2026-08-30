@@ -643,57 +643,57 @@
                 No tasks
               </div>
             </div>
+            <footer
+              v-if="column.status === 'done' && boardTasksPagination"
+              class="board-history-footer"
+            >
+              <p
+                v-if="boardOlderTasksRemaining > 0"
+                class="board-history-summary"
+              >
+                Showing {{ loadedDoneTaskCount }} of {{ boardTasksPagination.total_count }} done tasks
+              </p>
+              <p
+                v-else-if="boardTasksPagination.total_count > 0"
+                class="board-history-summary"
+              >
+                All {{ boardTasksPagination.total_count }} done tasks loaded
+              </p>
+              <div
+                v-if="boardOlderTasksRemaining > 0"
+                class="board-history-actions"
+              >
+                <button
+                  type="button"
+                  class="secondary-button board-history-load-more"
+                  :disabled="boardLoadMoreLoading"
+                  @click="handleLoadOlderTasks"
+                >
+                  {{
+                    boardLoadMoreLoading
+                      ? 'Loading older tasks…'
+                      : `Show older done (${boardOlderTasksRemaining} more)`
+                  }}
+                </button>
+                <button
+                  v-if="boardLoadMoreError"
+                  type="button"
+                  class="secondary-button board-history-retry"
+                  @click="handleLoadOlderTasks"
+                >
+                  Retry
+                </button>
+                <span
+                  v-if="boardLoadMoreError"
+                  class="board-history-error"
+                  role="alert"
+                >
+                  {{ boardLoadMoreError }}
+                </span>
+              </div>
+            </footer>
           </section>
         </template>
-        <footer
-          v-if="boardTasksPagination"
-          class="board-history-footer"
-        >
-          <p
-            v-if="boardOlderTasksRemaining > 0"
-            class="board-history-summary"
-          >
-            Showing {{ loadedDoneTaskCount }} of {{ boardTasksPagination.total_count }} done tasks
-          </p>
-          <p
-            v-else-if="boardTasksPagination.total_count > 0"
-            class="board-history-summary"
-          >
-            All {{ boardTasksPagination.total_count }} done tasks loaded
-          </p>
-          <div
-            v-if="boardOlderTasksRemaining > 0"
-            class="board-history-actions"
-          >
-            <button
-              type="button"
-              class="secondary-button board-history-load-more"
-              :disabled="boardLoadMoreLoading"
-              @click="handleLoadOlderTasks"
-            >
-              {{
-                boardLoadMoreLoading
-                  ? 'Loading older tasks…'
-                  : `Show older done (${boardOlderTasksRemaining} more)`
-              }}
-            </button>
-            <button
-              v-if="boardLoadMoreError"
-              type="button"
-              class="secondary-button board-history-retry"
-              @click="handleLoadOlderTasks"
-            >
-              Retry
-            </button>
-            <span
-              v-if="boardLoadMoreError"
-              class="board-history-error"
-              role="alert"
-            >
-              {{ boardLoadMoreError }}
-            </span>
-          </div>
-        </footer>
       </main>
     </div>
 
@@ -6880,13 +6880,13 @@ onUnmounted(() => {
 }
 
 .board-history-footer {
-  grid-column: 1 / -1;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px 4px;
+  padding: 8px 12px;
   border-top: 1px solid var(--ch-color-border-muted);
+  background: var(--ch-color-surface);
 }
 
 .board-history-summary {
