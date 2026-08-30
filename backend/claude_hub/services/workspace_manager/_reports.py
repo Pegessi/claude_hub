@@ -18,6 +18,7 @@ _REPORT_STATE_TO_TASK_EVENT: dict[AgentReportState, TaskEventType] = {
     AgentReportState.NEEDS_INPUT: TaskEventType.NEEDS_INPUT,
     AgentReportState.READY_FOR_REVIEW: TaskEventType.REPORT,
     AgentReportState.COMPLETED: TaskEventType.COMPLETED,
+    AgentReportState.FAILED: TaskEventType.FAILED,
     AgentReportState.REVIEW_STARTED: TaskEventType.REVIEW_STARTED,
     AgentReportState.REVIEW_PASSED: TaskEventType.REVIEW_PASSED,
     AgentReportState.REVIEW_FAILED: TaskEventType.REVIEW_FAILED,
@@ -699,6 +700,10 @@ class _ReportsMixin:
                         task_update["started_at"] = self.tasks[task_id].started_at or now
                     if task_status == WorkspaceTaskStatus.REVIEW:
                         task_update["reviewed_at"] = now
+                    if task_status == WorkspaceTaskStatus.FAILED:
+                        task_update["failed_at"] = now
+                        task_update["failure_reason"] = payload.message or "agent reported failure"
+                        task_update["human_acceptance_requested_at"] = now
             # ------------------------------------------------------------------
             # REVIEWER terminal-review states: write all review fields and
             # release the reviewer binding BEFORE the first (and now only)
@@ -1377,6 +1382,16 @@ class _ReportsMixin:
                 task.review_session_id,
             )
             self._release_stale_reviewer_for_task(task, updated_at=_wm._now())
+        if task.task_mode == WorkspaceTaskMode.SUBAGENT:
+            # Subagent mode: the calling agent judges results. Never route to
+            # AI review regardless of review_decision. On completion, mark
+            # review-skipped so the task waits for the caller's acceptance.
+            if report.state in {
+                AgentReportState.COMPLETED,
+                AgentReportState.READY_FOR_REVIEW,
+            }:
+                self._mark_task_review_skipped(task, report)
+            return
         if task.task_mode == WorkspaceTaskMode.DIRECT:
             if report.review_decision == ReviewDecision.REQUEST:
                 await self._request_task_review(task, report)

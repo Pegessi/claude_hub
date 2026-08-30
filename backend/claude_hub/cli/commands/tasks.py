@@ -435,7 +435,7 @@ def task_review(ctx: click.Context, task_id: str, workspace_id: Optional[str]) -
 )
 @click.option(
     "--task-mode",
-    type=click.Choice(["direct", "reviewed", "autonomous"]),
+    type=click.Choice(["direct", "reviewed", "autonomous", "subagent"]),
     default="reviewed",
     help="Task automation mode.",
 )
@@ -466,6 +466,12 @@ def task_review(ctx: click.Context, task_id: str, workspace_id: Optional[str]) -
     help="Clear agent context before starting (omitted unless set).",
 )
 @click.option(
+    "--timeout-seconds",
+    type=int,
+    default=None,
+    help="Task timeout in seconds (default: 1800).",
+)
+@click.option(
     "--attachment-json",
     "attachment_json",
     multiple=True,
@@ -487,6 +493,7 @@ def task_create(
     agent_tag: Optional[str],
     session_id: Optional[str],
     clear_context: Optional[bool],
+    timeout_seconds: Optional[int],
     attachment_json: tuple,
     payload_json: Optional[str],
 ) -> None:
@@ -504,6 +511,7 @@ def task_create(
         agent_tag=agent_tag,
         session_id=session_id,
         clear_context=clear_context,
+        timeout_seconds=timeout_seconds,
     )
     if attachment_json:
         body["attachments"] = parse_attachment_json(attachment_json)
@@ -513,6 +521,151 @@ def task_create(
     except HubError as e:
         raise click.ClickException(str(e)) from e
     emit(data, cli_main.as_json(ctx))
+
+
+@task.command("run")
+@click.argument("workspace_id")
+@click.option("--title", required=True, help="Task title.")
+@click.option("--prompt", required=True, help="Task prompt.")
+@click.option(
+    "--agent-type",
+    type=click.Choice(["claude", "codex", "cursor", "terminal"]),
+    default="claude",
+    help="Agent type (default: claude).",
+)
+@click.option(
+    "--task-mode",
+    type=click.Choice(["subagent", "reviewed", "autonomous"]),
+    default="subagent",
+    help="Task mode (default: subagent). Use subagent for simple tasks you judge "
+    "yourself; reviewed for complex tasks needing AI review; autonomous for "
+    "multi-iteration self-driving work.",
+)
+@click.option(
+    "--execution-complexity",
+    type=click.Choice(["auto", "simple", "complex"]),
+    default="auto",
+    help="Execution complexity hint.",
+)
+@click.option("--cwd", default=None, help="Agent working directory (defaults to workspace path).")
+@click.option(
+    "--env-preset",
+    default=None,
+    help="Env preset by id or name. Defaults to per-agent-type preset from config, "
+    "then global default_env_preset.",
+)
+@click.option("--env", "env_values", multiple=True, help="Environment variable KEY=VALUE.")
+@click.option(
+    "--clear-context/--no-clear-context",
+    default=None,
+    help="Clear agent context before starting.",
+)
+@click.option("--related-task-id", default=None, help="Related task id.")
+@click.option("--parent-task-id", default=None, help="Parent task id.")
+@click.option(
+    "--timeout-seconds",
+    type=int,
+    default=1800,
+    show_default=True,
+    help="Task timeout in seconds.",
+)
+@click.option(
+    "--attachment-json",
+    "attachment_json",
+    multiple=True,
+    help="Attachment JSON object (repeatable).",
+)
+@click.option("--payload-json", default=None, help="Raw JSON object merged into the body.")
+@click.pass_context
+def task_run(
+    ctx: click.Context,
+    workspace_id: str,
+    title: str,
+    prompt: str,
+    agent_type: str,
+    task_mode: str,
+    execution_complexity: str,
+    cwd: Optional[str],
+    env_preset: Optional[str],
+    env_values: tuple,
+    clear_context: Optional[bool],
+    related_task_id: Optional[str],
+    parent_task_id: Optional[str],
+    timeout_seconds: int,
+    attachment_json: tuple,
+    payload_json: Optional[str],
+) -> None:
+    """Create and start a task in one step.
+
+    Ensures a compatible agent (reusing an idle one if available), creates the
+    task, and dispatches it. Defaults to subagent mode for agent-to-agent
+    delegation.
+    """
+    from claude_hub.cli.commands.common import (
+        parse_kv_pairs,
+        resolve_cli_local_path,
+    )
+
+    settings = ctx.obj
+    resolved_preset = (
+        env_preset
+        or settings.env_preset_for_agent_type(agent_type)
+        or getattr(settings, "default_env_preset", None)
+    )
+    resolved_cwd = resolve_cli_local_path(cwd) if cwd is not None else None
+
+    try:
+        with cli_main.get_client(ctx) as client:
+            # 1. Ensure an agent (reuse compatible idle orchestrator if available).
+            agent_body: Dict[str, Any] = {
+                "agent_type": agent_type,
+                "reuse_existing": True,
+                "role": "orchestrator",
+            }
+            if resolved_cwd is not None:
+                agent_body["cwd"] = resolved_cwd
+            if resolved_preset is not None:
+                agent_body["env_preset"] = resolved_preset
+            if env_values:
+                agent_body["env"] = parse_kv_pairs(env_values, "--env")
+            agent = client.ensure_agent(workspace_id, agent_body)
+            session_id = agent["id"]
+
+            # 2. Create the task assigned to that session.
+            task_body = merge_payload(
+                payload_json,
+                title=title,
+                prompt=prompt,
+                agent_type=agent_type,
+                task_mode=task_mode,
+                execution_complexity=execution_complexity,
+                related_task_id=related_task_id,
+                parent_task_id=parent_task_id,
+                session_id=session_id,
+                clear_context=clear_context,
+                timeout_seconds=timeout_seconds,
+            )
+            if attachment_json:
+                task_body["attachments"] = parse_attachment_json(attachment_json)
+            task = client.create_task(workspace_id, task_body)
+            task_id = task["id"]
+
+            # 3. Start the task.
+            start_body: Dict[str, Any] = {"target_session_id": session_id}
+            if clear_context is not None:
+                start_body["clear_context"] = clear_context
+            if related_task_id:
+                start_body["related_task_id"] = related_task_id
+            started = client.start_task(task_id, start_body)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+
+    result = {
+        "task_id": task_id,
+        "session_id": session_id,
+        "status": started.get("status"),
+    }
+    emit(result, cli_main.as_json(ctx))
 
 
 @task.command("start")
@@ -595,13 +748,13 @@ def task_continue(
 @click.option("--prompt", default=None, help="Task prompt.")
 @click.option(
     "--status",
-    type=click.Choice(["todo", "queued", "working", "review", "done"]),
+    type=click.Choice(["todo", "queued", "working", "review", "done", "failed"]),
     default=None,
     help="Task status.",
 )
 @click.option(
     "--task-mode",
-    type=click.Choice(["direct", "reviewed", "autonomous"]),
+    type=click.Choice(["direct", "reviewed", "autonomous", "subagent"]),
     default=None,
     help="Task automation mode.",
 )
@@ -719,12 +872,14 @@ def task_accept(
                 where = f" in workspace {workspace_id}" if workspace_id else ""
                 raise click.ClickException(f"Task {task_id} not found{where}.")
             status = match.get("status")
-            if status != WorkspaceTaskStatus.REVIEW.value:
+            if status not in (WorkspaceTaskStatus.REVIEW.value, WorkspaceTaskStatus.FAILED.value):
                 raise click.ClickException(
-                    f"Task {task_id} is '{status}', not 'review'; "
-                    "only tasks in review can be accepted."
+                    f"Task {task_id} is '{status}', not 'review' or 'failed'; "
+                    "only tasks in review or failed can be accepted."
                 )
-            if not match.get("human_acceptance_requested_at"):
+            if status == WorkspaceTaskStatus.REVIEW.value and not match.get(
+                "human_acceptance_requested_at"
+            ):
                 raise click.ClickException(
                     f"Task {task_id} is in review but is not awaiting human acceptance; "
                     "wait for review_passed or review_skipped before accepting."

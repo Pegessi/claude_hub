@@ -32,7 +32,7 @@ class _NormalizeMixin:
         if normalized.get("status") == "assigned":
             normalized["status"] = WorkspaceTaskStatus.QUEUED.value
             normalized.setdefault("queued_at", normalized.get("updated_at"))
-        if normalized.get("task_mode") not in {"direct", "reviewed", "autonomous"}:
+        if normalized.get("task_mode") not in {"direct", "reviewed", "autonomous", "subagent"}:
             normalized["task_mode"] = WorkspaceTaskMode.REVIEWED.value
         if normalized.get("execution_complexity") not in {"auto", "simple", "complex"}:
             normalized["execution_complexity"] = WorkspaceTaskExecutionComplexity.AUTO.value

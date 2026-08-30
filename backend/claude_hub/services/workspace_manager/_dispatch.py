@@ -382,10 +382,33 @@ class _DispatchMixin:
         task = self.tasks.get(task_id)
         if not task:
             raise KeyError(task_id)
-        if task.status != WorkspaceTaskStatus.REVIEW:
-            raise RuntimeError("Only review tasks can continue")
+        if task.status not in (WorkspaceTaskStatus.REVIEW, WorkspaceTaskStatus.FAILED):
+            raise RuntimeError("Only review or failed tasks can continue")
+
+        # For FAILED tasks whose original session is gone or stopped, reassign
+        # to a new agent via start_task. The failure_reason stays on the task so
+        # the assignment prompt surfaces it to the new worker; we clear it after
+        # start_task returns (the prompt has already been built and sent).
+        if task.status == WorkspaceTaskStatus.FAILED:
+            existing_session = self.sessions.get(task.session_id) if task.session_id else None
+            if existing_session is None or existing_session.status == ManagedSessionStatus.STOPPED:
+                await self.start_task(task.id)
+                task = self.tasks[task.id]
+                self.tasks[task.id] = task.model_copy(
+                    update={
+                        "failure_reason": None,
+                        "failed_at": None,
+                    }
+                )
+                self._save_state()
+                return self.tasks[task.id]
+
         if not task.session_id or task.session_id not in self.sessions:
-            raise RuntimeError("Review task has no original agent")
+            raise RuntimeError("Task has no original agent")
+
+        # Capture failure context (if any) before it is cleared below so the
+        # continue prompt can surface it to the worker.
+        failure_reason = task.failure_reason if task.status == WorkspaceTaskStatus.FAILED else None
 
         now = _wm._now()
         self._ensure_session_can_continue_task(self.sessions[task.session_id], task)
@@ -431,6 +454,8 @@ class _DispatchMixin:
                 "review_completed_at": None,
                 "reviewed_at": None,
                 "review_requested_at": None,
+                "failure_reason": None,
+                "failed_at": None,
             }
         )
         logger.info(
@@ -464,7 +489,8 @@ class _DispatchMixin:
             task_id=task.id,
             session_id=session.id,
             state=AgentReportState.WORKING,
-            message=payload.message or "Task continued from review",
+            message=payload.message
+            or ("Task continued after failure" if failure_reason else "Task continued from review"),
             changed_files=[],
             validation=None,
             risks=None,
@@ -486,7 +512,9 @@ class _DispatchMixin:
         try:
             await self.send_session_message(
                 session.id,
-                self._build_continue_prompt(self.tasks[task.id], payload, session),
+                self._build_continue_prompt(
+                    self.tasks[task.id], payload, session, failure_reason=failure_reason
+                ),
                 call_id=call_id,
             )
         except Exception as exc:
@@ -517,9 +545,9 @@ class _DispatchMixin:
         task: WorkspaceTask,
     ) -> None:
         if session.role != WorkspaceSessionRole.ORCHESTRATOR:
-            raise RuntimeError("Review task original session is not a workspace agent")
+            raise RuntimeError("Task original session is not a workspace agent")
         if session.status == ManagedSessionStatus.STOPPED:
-            raise RuntimeError("Review task original agent is stopped")
+            raise RuntimeError("Task original agent is stopped")
 
         assigned_ids = {
             assigned_id for assigned_id in (session.task_id, session.current_task_id) if assigned_id
@@ -529,7 +557,7 @@ class _DispatchMixin:
             busy_task = self.tasks.get(busy_id)
             if not busy_task or busy_task.status != WorkspaceTaskStatus.DONE:
                 raise RuntimeError(
-                    "Review task original agent is busy with another task; "
+                    "Task original agent is busy with another task; "
                     "wait for that task to finish before requesting changes."
                 )
 
