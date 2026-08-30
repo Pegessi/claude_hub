@@ -287,9 +287,18 @@ class _PromptsMixin:
         *,
         lesson_context: list[dict[str, Any]] | None = None,
     ) -> str:
+        if task.task_mode == WorkspaceTaskMode.SUBAGENT:
+            return self._build_subagent_assignment_prompt(
+                workspace, task, session, lesson_context=lesson_context
+            )
         clear_note = (
             "This task is unrelated to prior work. Treat prior conversation context as stale.\n\n"
             if task.clear_context
+            else ""
+        )
+        failure_note = (
+            f"This task previously failed. Previous failure reason: {task.failure_reason}\n\n"
+            if task.failure_reason
             else ""
         )
         attachment_note = (
@@ -324,6 +333,7 @@ class _PromptsMixin:
             f"State snapshot: {self.snapshot_path(workspace.id)}\n"
             f"Dispatch reason: {task.dispatch_reason or 'not specified'}\n\n"
             f"{clear_note}"
+            f"{failure_note}"
             f"Task description:\n{task.prompt}\n\n"
             f"{attachment_note}"
             f"{lesson_context_block}"
@@ -395,6 +405,91 @@ class _PromptsMixin:
             f'{{"task_id":"{task.id}","state":"working","call_id":"{progress_call_id}",'
             '"message":"...","message_en":"...",'
             '"message_zh":"...","acked_call_ids":["followup-abc123"]}}\n'
+        )
+
+    def _build_subagent_assignment_prompt(
+        self,
+        workspace: Workspace,
+        task: WorkspaceTask,
+        session: ManagedSession,
+        *,
+        lesson_context: list[dict[str, Any]] | None = None,
+    ) -> str:
+        """Minimal assignment prompt for subagent mode.
+
+        Subagent tasks are delegated by another agent that handles orchestration
+        and result judgment. The worker only needs to execute and report — no
+        Goal Packet, no bilingual messages, no review_decision.
+        """
+        clear_note = (
+            "This task is unrelated to prior work. Treat prior conversation context as stale.\n\n"
+            if task.clear_context
+            else ""
+        )
+        failure_note = (
+            f"This task previously failed. Previous failure reason: {task.failure_reason}\n\n"
+            if task.failure_reason
+            else ""
+        )
+        attachment_note = (
+            f"{self._attachment_prompt_block(task.attachments)}\n\n" if task.attachments else ""
+        )
+        lesson_context_block = self._lesson_context_block_from_payload(
+            (
+                lesson_context
+                if lesson_context is not None
+                else self._lesson_context_payload(workspace, f"{task.title}\n{task.prompt}")
+            ),
+            workspace_id=workspace.id,
+        )
+        assignment_attempt = max(task.dispatch_attempt, 1)
+        started_call_id = self._report_prompt_call_id(
+            task.id, "started", attempt=assignment_attempt
+        )
+        completed_call_id = self._report_prompt_call_id(
+            task.id, "completed", attempt=assignment_attempt
+        )
+        return (
+            "New workspace task assigned (subagent mode).\n\n"
+            f"Workspace: {workspace.name}\n"
+            f"Task ID: {task.id}\n"
+            f"Task title: {task.title}\n"
+            f"{self._session_environment_lines(workspace, session)}\n"
+            f"State snapshot: {self.snapshot_path(workspace.id)}\n\n"
+            f"{clear_note}"
+            f"{failure_note}"
+            f"Task description:\n{task.prompt}\n\n"
+            f"{attachment_note}"
+            f"{lesson_context_block}"
+            "You are a sub-agent executing a task delegated by another agent.\n"
+            "No Goal Packet, no AI review, no bilingual messages. Just do the work.\n\n"
+            "Start by reading the state snapshot; use the task description to choose the correct "
+            "project directory. Check for uncommitted changes before editing.\n\n"
+            "Report states: started -> working (as you progress) -> completed when done.\n"
+            "If you cannot proceed (missing info, blocked dependency), report state=blocked or\n"
+            "needs_input with a message explaining what you need. Your caller will send a\n"
+            "followup message; process it and include its call_id in acked_call_ids of your\n"
+            "next report.\n\n"
+            "Every report MUST include a non-empty call_id. Use a stable, per-logical-report "
+            f"call_id (e.g. `{task.id}-{{state}}-{{n}}` where n increments for each new report). "
+            "Reuse the SAME call_id if resubmitting after a failure so the Hub deduplicates.\n\n"
+            "Minimal report fields: task_id, state, call_id, message, changed_files.\n\n"
+            "Started report example:\n"
+            f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
+            "-H 'Content-Type: application/json' "
+            f'-d \'{{"task_id":"{task.id}","state":"started",'
+            f'"call_id":"{started_call_id}",'
+            '"message":"Started"}}\'\n\n'
+            "Completed report example:\n"
+            f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
+            "-H 'Content-Type: application/json' "
+            f'-d \'{{"task_id":"{task.id}","state":"completed",'
+            f'"call_id":"{completed_call_id}",'
+            '"message":"summary of changes","changed_files":["path/to/file"]}}\'\n\n'
+            "Call-id ACK contract: messages from your supervisor may be prefixed with a "
+            "`[call_id:<id>]` marker. ACK every call_id you process by listing it in "
+            "`acked_call_ids` of your next report. The dispatch call_id "
+            f"`dispatch:{task.id}:{{attempt}}` is ACKed automatically; do NOT list it.\n"
         )
 
     def _lesson_context_payload(self, workspace: Workspace, query: str) -> list[dict[str, Any]]:
@@ -1108,6 +1203,8 @@ class _PromptsMixin:
         task: WorkspaceTask,
         payload: ContinueTaskRequest,
         session: ManagedSession,
+        *,
+        failure_reason: str | None = None,
     ) -> str:
         message = payload.message.strip() if payload.message else ""
         attachments = self._persist_attachments(
@@ -1115,14 +1212,23 @@ class _PromptsMixin:
             f"{task.id}-continue-{uuid.uuid4().hex[:8]}",
             payload.attachments,
         )
+        if failure_reason:
+            header = "Continue workspace task after failure.\n\n"
+            failure_block = f"Previous failure reason: {failure_reason}\n\n"
+            default_followup = f"Retry the task, addressing the failure above. {message}".strip()
+        else:
+            header = "Continue workspace task from review.\n\n"
+            failure_block = ""
+            default_followup = "Continue addressing the review feedback."
         follow_up = self._append_attachment_block(
-            message or "Continue addressing the review feedback.",
+            message or default_followup,
             attachments,
         )
         return (
-            "Continue workspace task from review.\n\n"
+            f"{header}"
             f"Task ID: {task.id}\n"
             f"Task title: {task.title}\n"
+            f"{failure_block}"
             f"Follow-up instructions:\n{follow_up}\n\n"
             f"{self._autonomous_continue_orchestrator_reminder(task)}"
             "The task is back in working state. Report progress with the same task_id.\n\n"

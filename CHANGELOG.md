@@ -5,6 +5,25 @@
 
 ## Unreleased
 
+### feat: subagent task mode + failed state for agent-to-agent delegation
+
+- **What**: New `subagent` task mode for agent-to-agent delegation (no Goal
+  Packet, no bilingual, no AI review — the caller judges results). New
+  `failed` task status auto-triggered by worker report, session death, or
+  timeout. New `task run` CLI one-step command (ensure agent → create → start)
+  defaulting to `--agent-type claude --task-mode subagent`. Per-agent-type
+  default env presets via `[default_env_presets]` in config.toml.
+- **Why**: External agents delegating via Claude Hub CLI found the reviewed
+  flow (Goal Packet, bilingual, AI review) heavy; they judge results
+  themselves. Failures (dead session, timeout) previously left tasks stuck
+  `working` with no recovery path.
+- **How**: `WorkspaceTaskMode.SUBAGENT` + minimal assignment prompt;
+  `WorkspaceTaskStatus.FAILED` + `timeout_seconds`/`failure_reason`/`failed_at`
+  fields; monitor loop detects session death (`STOPPED`) and timeout
+  (`now - updated_at > timeout_seconds`); `continue_task` accepts FAILED
+  (reuses alive session or reassigns via `start_task`); `task accept` accepts
+  FAILED; `task run --timeout-seconds` (default 1800).
+
 ### fix: paginate only Done column on Agent Workspace board
 
 - **What**: Board `tasks_limit` now returns all non-Done tasks plus the most recent

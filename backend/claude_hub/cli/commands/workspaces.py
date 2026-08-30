@@ -617,7 +617,11 @@ def agent_create(
     """Ensure a resident workspace agent session."""
     effective_reuse = resolve_agent_reuse(ephemeral, reuse_existing, no_reuse_existing)
     settings = ctx.obj
-    resolved_preset = env_preset or getattr(settings, "default_env_preset", None)
+    resolved_preset = (
+        env_preset
+        or settings.env_preset_for_agent_type(agent_type)
+        or getattr(settings, "default_env_preset", None)
+    )
     resolved_cwd = resolve_cli_local_path(cwd) if cwd is not None else None
     body: Dict[str, Any] = merge_payload(
         payload_json,

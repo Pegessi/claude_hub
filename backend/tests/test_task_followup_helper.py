@@ -715,7 +715,7 @@ async def test_direct_continue_task_bridges_report_event_live_and_cold(
     assert [item.call_id for item in _mailbox_events(fresh, workspace_id)] == [report_call]
     assert len(_continue_reports(fresh, review.id)) == 1
     assert _continue_reports(fresh, review.id)[0].id == reports[0].id
-    with pytest.raises(RuntimeError, match="Only review tasks can continue"):
+    with pytest.raises(RuntimeError, match="Only review or failed tasks can continue"):
         await fresh.continue_task(review.id)
     assert [item.call_id for item in _mailbox_events(fresh, workspace_id)] == [report_call]
     assert len(_continue_reports(fresh, review.id)) == 1

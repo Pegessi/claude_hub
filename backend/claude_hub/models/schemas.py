@@ -71,6 +71,7 @@ class WorkspaceTaskStatus(str, Enum):
     WORKING = "working"
     REVIEW = "review"
     DONE = "done"
+    FAILED = "failed"
 
 
 class WorkspaceTaskMode(str, Enum):
@@ -79,6 +80,7 @@ class WorkspaceTaskMode(str, Enum):
     DIRECT = "direct"
     REVIEWED = "reviewed"
     AUTONOMOUS = "autonomous"
+    SUBAGENT = "subagent"
 
 
 class WorkspaceTaskExecutionComplexity(str, Enum):
@@ -168,6 +170,7 @@ class AgentReportState(str, Enum):
     NEEDS_INPUT = "needs_input"
     READY_FOR_REVIEW = "ready_for_review"
     COMPLETED = "completed"
+    FAILED = "failed"
     REVIEW_STARTED = "review_started"
     REVIEW_PASSED = "review_passed"
     REVIEW_FAILED = "review_failed"
@@ -773,6 +776,13 @@ class WorkspaceTask(BaseModel):
     review_skip_reason: Optional[str] = None
     manual_aborted_at: Optional[datetime] = None
     manual_abort_reason: Optional[str] = None
+    # Failure tracking. ``timeout_seconds`` bounds how long a task may stay in
+    # WORKING without a fresh report before the monitor marks it FAILED.
+    # ``failure_reason`` and ``failed_at`` are set when the task transitions to
+    # FAILED (worker-reported failure, session death, or timeout).
+    timeout_seconds: int = 1800
+    failure_reason: Optional[str] = None
+    failed_at: Optional[datetime] = None
     human_acceptance_requested_at: Optional[datetime] = None
     human_accepted_at: Optional[datetime] = None
     queued_at: Optional[datetime] = None

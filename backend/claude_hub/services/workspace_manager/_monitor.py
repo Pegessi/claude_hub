@@ -118,6 +118,53 @@ class _MonitorMixin:
 
             self.sessions[session_id] = session.model_copy(update=update)
             changed = True
+
+        # --- Failure detection: session death and timeout ---
+        # After refreshing session statuses, scan WORKING tasks for two
+        # failure conditions:
+        #   1. The task's worker session is STOPPED or no longer exists.
+        #   2. The task has been in WORKING longer than ``timeout_seconds``
+        #      without a fresh update (no report, no activity).
+        # Either moves the task to FAILED with a reason and requests human
+        # acceptance so the caller can accept/continue.
+        now = _wm._now()
+        for task in list(self.tasks.values()):
+            if task.status != WorkspaceTaskStatus.WORKING:
+                continue
+            if workspace_id is not None and task.workspace_id != workspace_id:
+                continue
+
+            failure_reason: str | None = None
+
+            # 1. Session death: the worker session is gone or STOPPED.
+            session = self.sessions.get(task.session_id) if task.session_id else None
+            if task.session_id and (
+                session is None or session.status == ManagedSessionStatus.STOPPED
+            ):
+                failure_reason = "session died"
+
+            # 2. Timeout: no update within the configured window.
+            if failure_reason is None and task.timeout_seconds:
+                if (now - task.updated_at).total_seconds() > task.timeout_seconds:
+                    failure_reason = f"timeout after {task.timeout_seconds}s"
+
+            if failure_reason is not None:
+                self.tasks[task.id] = task.model_copy(
+                    update={
+                        "status": WorkspaceTaskStatus.FAILED,
+                        "failure_reason": failure_reason,
+                        "failed_at": now,
+                        "human_acceptance_requested_at": now,
+                        "updated_at": now,
+                    }
+                )
+                changed = True
+                logger.warning(
+                    "Workspace task marked FAILED task_id=%s reason=%s",
+                    task.id,
+                    failure_reason,
+                )
+
         if changed:
             self._save_state()
 

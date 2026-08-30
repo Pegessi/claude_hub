@@ -309,6 +309,8 @@ def runtime_status_from_report(
 def task_status_from_report(state: AgentReportState) -> Optional[WorkspaceTaskStatus]:
     """Map a report state into a board-column task status when it should affect the task."""
 
+    if state == AgentReportState.FAILED:
+        return WorkspaceTaskStatus.FAILED
     if state in {
         AgentReportState.READY_FOR_REVIEW,
         AgentReportState.COMPLETED,
