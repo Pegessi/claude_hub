@@ -33,6 +33,7 @@ import {
   BOARD_TASKS_PAGE_SIZE,
   boardOlderRemainingCount,
   boardTasksLimitForPoll,
+  loadedDoneTaskCount,
   isStaleBoardGeneration,
   nextBoardFetchGeneration,
   runBoardLoadMoreAttempt,
@@ -259,10 +260,13 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
 
     const request = (async () => {
-      const loadedCount = board.value?.workspace.id === workspaceId ? board.value.tasks.length : 0
+      const loadedDone =
+        board.value?.workspace.id === workspaceId
+          ? loadedDoneTaskCount(board.value.tasks)
+          : 0
       const limit = reset
         ? BOARD_TASKS_PAGE_SIZE
-        : boardTasksLimitForPoll(loadedCount || BOARD_TASKS_PAGE_SIZE)
+        : boardTasksLimitForPoll(loadedDone || BOARD_TASKS_PAGE_SIZE)
       const query = buildBoardQuery(limit)
       const { generation, signal } = beginBoardFetch(workspaceId, reset)
 
