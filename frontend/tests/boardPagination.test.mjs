@@ -385,7 +385,6 @@ test('AgentWorkspaceView exposes load-more control for older done tasks', () => 
   assert.match(viewSource, /board-history-load-more/)
   assert.match(viewSource, /Show older done/)
   assert.match(viewSource, /handleLoadOlderTasks/)
-  assert.match(viewSource, /done tasks loaded/)
 })
 
 test('AgentWorkspaceView column counts prefer server status totals', () => {

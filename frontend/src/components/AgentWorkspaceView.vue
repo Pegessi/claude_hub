@@ -647,18 +647,6 @@
               v-if="column.status === 'done' && boardTasksPagination"
               class="board-history-footer"
             >
-              <p
-                v-if="boardOlderTasksRemaining > 0"
-                class="board-history-summary"
-              >
-                Showing {{ loadedDoneTaskCount }} of {{ boardTasksPagination.total_count }} done tasks
-              </p>
-              <p
-                v-else-if="boardTasksPagination.total_count > 0"
-                class="board-history-summary"
-              >
-                All {{ boardTasksPagination.total_count }} done tasks loaded
-              </p>
               <div
                 v-if="boardOlderTasksRemaining > 0"
                 class="board-history-actions"
@@ -3073,10 +3061,6 @@ const {
   error,
   notifications: wsNotifications,
 } = storeToRefs(workspaceStore)
-
-const loadedDoneTaskCount = computed(() =>
-  tasks.value.filter(task => task.status === 'done').length,
-)
 
 // Combine workspace and terminal store notifications so toasts fire regardless
 // of which store pushed them (terminalStore.switchEnv pushes to itself; most
@@ -6894,13 +6878,6 @@ onUnmounted(() => {
   padding: 8px 10px;
   border-top: 1px solid var(--ch-color-border-muted);
   background: var(--ch-color-surface);
-}
-
-.board-history-summary {
-  margin: 0;
-  font-size: 11px;
-  color: var(--ch-color-text-muted);
-  text-align: center;
 }
 
 .board-history-actions {
