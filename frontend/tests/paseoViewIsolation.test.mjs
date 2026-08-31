@@ -39,8 +39,18 @@ test('SAB terminal input decodes a non-shared copy before draining the record', 
   assert.match(terminalView, /return decoder\.decode\(decodedBytes\);/)
 })
 
-test('direct Paseo sends keep a visible pending acknowledgement until transcript catch-up', () => {
+test('direct Paseo sends one ordered prompt frame and keeps a pending acknowledgement', () => {
   assert.match(structuredPane, /const pendingDirectTurns = ref<PendingTurn\[\]>\(\[\]\)/)
   assert.match(structuredPane, /Sent to terminal · waiting for agent activity/)
-  assert.match(structuredPane, /if \(!sendKey\('Enter'\)\)/)
+  assert.match(structuredPane, /sendTerminalText/)
+  assert.match(structuredPane, /sendText\(`\$\{message\}\\r`, props\.tabId\)/)
+  assert.doesNotMatch(structuredPane, /for \(const char of Array\.from\(message\)\)/)
+  assert.match(terminalView, /event\.data\.type === 'terminal-text'/)
+})
+
+test('Paseo follows dynamic timeline height but preserves deliberate history reading', () => {
+  assert.match(structuredPane, /new ResizeObserver/)
+  assert.match(structuredPane, /isFollowingLatest\.value = isTimelineNearBottom\(el\)/)
+  assert.match(structuredPane, /requestLatestAnchor\(true\)/)
+  assert.match(structuredPane, /structured-jump-latest/)
 })

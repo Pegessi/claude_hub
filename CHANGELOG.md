@@ -38,7 +38,12 @@
   when no terminal target can accept it. Structured live updates now keep the
   sequence-based long-poll reader active alongside SSE, so a browser or dev
   proxy that silently buffers the SSE connection cannot leave agent responses
-  stale until a view switch or refresh.
+  stale until a view switch or refresh. Long direct prompts now cross the
+  terminal boundary as one ordered text-plus-submit frame instead of one
+  browser message per character, preventing the final Enter from being left
+  behind in Claude's input box. The Paseo timeline now follows actual content
+  height while the reader is at the tail, preserves deliberate upward scroll,
+  and offers an explicit `Latest` return control.
 
 ### fix: harden image attachment validation and SSE session-deletion handling
 

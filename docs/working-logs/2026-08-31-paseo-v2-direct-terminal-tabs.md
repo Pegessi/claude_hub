@@ -74,6 +74,22 @@ fail-closed.
    absent, so a connected-but-buffered SSE path had no reconciliation reader.
    Long-poll now remains authoritative while SSE is an optional accelerator;
    both paths deduplicate by `stream_sequence`.
+7. **Prompt delivery must be ordered as a unit.** A long Chinese prompt was
+   visible in the Raw Claude input box while neither the Claude transcript nor
+   the normalized stream advanced beyond the prior turn. The per-character
+   SAB path had rendered the prompt but left its final Enter behind. Direct
+   structured text now uses a dedicated bulk terminal frame containing the
+   prompt and submit carriage return, explicitly targeted to the owning tab.
+8. **Following output is layout state, not event-count state.** The initial UI
+   scrolled only when `events.length` changed. It missed optimistic pending
+   turns, same-row text growth, and Markdown reflow. Paseo commit
+   `7ae5133ed272dd6c48f0324682898e0d489f1161` was used as an external design
+   reference: its web timeline separates sticky-bottom from detached reading,
+   observes content geometry, anchors on send, and verifies the post-layout
+   position. Claude Hub independently implements the same interaction contract
+   with a 64 px tail threshold, `ResizeObserver`, a two-frame settle check,
+   lifecycle cancellation, and an explicit `Latest` button. No Paseo source or
+   types are copied (Paseo is AGPLv3).
 
 ## Verification
 
@@ -105,3 +121,14 @@ fail-closed.
   tests, `pnpm build`, and `git diff --check` pass. A real long-answer provider
   run was attempted separately but day1 remained in upstream capacity retries;
   this does not weaken the measured stream-reader result.
+- Long-prompt diagnosis: tmux showed the complete latest prompt still inside
+  Claude's input editor, while the pinned transcript remained byte-for-byte at
+  the prior turn and `/stream/events` contained only that prior turn. This
+  proves the reported absence was ingress failure rather than response
+  truncation in the Structured renderer.
+- Frontend validation after ordered prompt delivery and timeline anchoring:
+  `pnpm lint:check`, 122 unit tests, `pnpm build`, and `git diff --check` pass.
+  Browser-driven validation remains bounded because the connected Edge
+  extension timed out while claiming the dedicated isolated test tab; no
+  fallback browser automation was used and the user's active Tab 1 was not
+  modified.

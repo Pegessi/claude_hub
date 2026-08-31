@@ -746,6 +746,8 @@ export interface TerminalKeyState {
 
 /** Returns false only when no terminal target is available to accept/queue the key. */
 export type TerminalKeySender = (key: string, ctrl?: boolean, shift?: boolean) => boolean
+/** Sends one ordered text frame to a specific terminal. */
+export type TerminalTextSender = (text: string, tabId?: string) => boolean
 export type TerminalHistoryRefresher = (tabId?: string) => void
 export type TerminalIframeRegistrar = (el: HTMLIFrameElement | null, tabId: string) => void
 export type TerminalSelectModeSetter = (enabled: boolean, tabId?: string) => void
@@ -756,6 +758,7 @@ export interface ClaudeHubNamespace {
   registerTerminalIframe?: TerminalIframeRegistrar
   refreshTerminalHistory?: TerminalHistoryRefresher
   sendTerminalKey?: TerminalKeySender
+  sendTerminalText?: TerminalTextSender
   setTerminalSelectMode?: TerminalSelectModeSetter
 }
 

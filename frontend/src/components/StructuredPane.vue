@@ -45,8 +45,12 @@
       role="log"
       aria-live="polite"
       aria-label="Agent conversation"
+      @scroll.passive="handleTimelineScroll"
     >
-      <div class="structured-timeline-content">
+      <div
+        ref="timelineContentEl"
+        class="structured-timeline-content"
+      >
         <div
           v-if="turns.length === 0 && connectionState === 'live'"
           class="structured-empty"
@@ -198,6 +202,17 @@
       </div>
     </div>
 
+    <button
+      v-if="!isFollowingLatest"
+      type="button"
+      class="structured-jump-latest"
+      aria-label="Scroll to latest message"
+      @click="jumpToLatest"
+    >
+      <span aria-hidden="true">↓</span>
+      Latest
+    </button>
+
     <!-- Composer -->
     <div class="structured-composer">
       <div class="composer-shell">
@@ -282,6 +297,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
 import { useAgentStream, validateImageAttachment, fileToDataUrl } from '@/composables/useAgentStream'
 import { groupEventsIntoTurns } from '@/utils/agentStreamTimeline'
+import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import type { WorkspaceAttachmentCreate } from '@/types'
 
@@ -376,6 +392,12 @@ const isSending = ref(false)
 const isDragOver = ref(false)
 const fileInputEl = ref<HTMLInputElement | null>(null)
 const timelineEl = ref<HTMLElement | null>(null)
+const timelineContentEl = ref<HTMLElement | null>(null)
+const isFollowingLatest = ref(true)
+let timelineResizeObserver: ResizeObserver | null = null
+let timelineScrollFrame: number | null = null
+let timelineVerificationFrame: number | null = null
+let timelineDisposed = false
 
 const canSend = computed(() => draftMessage.value.trim().length > 0 || attachments.value.length > 0)
 
@@ -463,7 +485,8 @@ async function sendToTerminalTab(
   atts: WorkspaceAttachmentCreate[],
 ) {
   const sendKey = window.__claudeHub.sendTerminalKey
-  if (!sendKey) {
+  const sendText = window.__claudeHub.sendTerminalText
+  if (!sendKey || !sendText) {
     throw new Error('Terminal input is not ready. Switch to Terminal once, then retry.')
   }
 
@@ -485,12 +508,10 @@ async function sendToTerminalTab(
     }
   }
 
-  for (const char of Array.from(message)) {
-    if (!sendKey(char === '\n' ? 'Enter' : char)) {
-      throw new Error('Terminal input is not ready. Switch to Terminal once, then retry.')
-    }
-  }
-  if (!sendKey('Enter')) {
+  // One terminal write keeps the prompt and its submit carriage return in
+  // order. Per-character browser messages can render the text while losing
+  // the trailing Enter when a long prompt saturates the input path.
+  if (!sendText(`${message}\r`, props.tabId)) {
     throw new Error('Terminal input is not ready. Switch to Terminal once, then retry.')
   }
 }
@@ -516,6 +537,7 @@ async function submit() {
           attachmentCount: atts.length,
         },
       ]
+      requestLatestAnchor(true)
     } else if (props.sessionId) {
       await workspaceStore.sendMessage(props.sessionId, message, atts)
     } else {
@@ -532,20 +554,96 @@ async function submit() {
   }
 }
 
-// Auto-scroll the timeline to the bottom when new events arrive.
-watch(
-  () => events.value.length,
-  () => {
-    nextTick(() => {
+function cancelScheduledTimelineScroll() {
+  if (timelineScrollFrame !== null) {
+    cancelAnimationFrame(timelineScrollFrame)
+    timelineScrollFrame = null
+  }
+  if (timelineVerificationFrame !== null) {
+    cancelAnimationFrame(timelineVerificationFrame)
+    timelineVerificationFrame = null
+  }
+}
+
+/**
+ * Maintain the latest turn as a layout invariant. The second frame verifies
+ * the anchor after Markdown, images, fonts, or textarea layout changes have
+ * had a chance to resize the timeline.
+ */
+function requestLatestAnchor(force = false) {
+  if (force) isFollowingLatest.value = true
+  if (!isFollowingLatest.value || timelineDisposed) return
+  cancelScheduledTimelineScroll()
+  void nextTick(() => {
+    if (timelineDisposed) return
+    timelineScrollFrame = requestAnimationFrame(() => {
+      timelineScrollFrame = null
       const el = timelineEl.value
-      if (el) el.scrollTop = el.scrollHeight
+      if (!el || !isFollowingLatest.value || timelineDisposed) return
+      el.scrollTop = el.scrollHeight
+      timelineVerificationFrame = requestAnimationFrame(() => {
+        timelineVerificationFrame = null
+        const current = timelineEl.value
+        if (!current || !isFollowingLatest.value || timelineDisposed) return
+        if (!isTimelineNearBottom(current)) current.scrollTop = current.scrollHeight
+      })
     })
-  },
+  })
+}
+
+function handleTimelineScroll() {
+  const el = timelineEl.value
+  if (!el) return
+  isFollowingLatest.value = isTimelineNearBottom(el)
+}
+
+function jumpToLatest() {
+  requestLatestAnchor(true)
+}
+
+function observeTimelineGeometry() {
+  timelineResizeObserver?.disconnect()
+  if (typeof ResizeObserver === 'undefined') return
+  const viewport = timelineEl.value
+  const content = timelineContentEl.value
+  if (!viewport || !content) return
+  timelineResizeObserver = new ResizeObserver(() => {
+    if (isFollowingLatest.value) requestLatestAnchor()
+  })
+  timelineResizeObserver.observe(viewport)
+  timelineResizeObserver.observe(content)
+}
+
+watch(
+  () => [events.value.length, pendingTurns.value.length],
+  () => requestLatestAnchor(),
 )
+
+watch(
+  () => [props.sessionId, props.tabId],
+  () => requestLatestAnchor(true),
+)
+
+onMounted(() => {
+  timelineDisposed = false
+  void nextTick(() => {
+    if (timelineDisposed) return
+    observeTimelineGeometry()
+    requestLatestAnchor(true)
+  })
+})
+
+onUnmounted(() => {
+  timelineDisposed = true
+  timelineResizeObserver?.disconnect()
+  timelineResizeObserver = null
+  cancelScheduledTimelineScroll()
+})
 </script>
 
 <style scoped>
 .structured-pane {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -607,6 +705,27 @@ watch(
   overflow-y: auto;
   padding: 12px;
   min-height: 0;
+}
+
+.structured-jump-latest {
+  position: absolute;
+  right: 28px;
+  bottom: 92px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: 999px;
+  color: var(--ch-color-text);
+  background: var(--ch-color-surface-elevated, var(--ch-color-surface));
+  box-shadow: var(--ch-shadow-md, 0 8px 24px rgb(0 0 0 / 24%));
+  cursor: pointer;
+}
+
+.structured-jump-latest:hover {
+  border-color: var(--ch-color-accent);
 }
 
 .structured-empty {
