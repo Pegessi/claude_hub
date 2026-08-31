@@ -76,6 +76,37 @@ def _claude_settings_path(command: str) -> str:
     return parts[settings_index + 1]
 
 
+def test_ensure_tmux_server_refreshes_launch_environment(monkeypatch: MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    monkeypatch.setenv("HOME", "/Users/example")
+    monkeypatch.setenv("PATH", "/opt/example/bin:/usr/bin")
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "stale-test-owner")
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_server_running", lambda: True)
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(ttyd_manager_module.subprocess, "run", fake_run)
+
+    assert ttyd_manager_module._ensure_tmux_server() is True
+    assert (
+        ttyd_manager_module.tmux_command("set-environment", "-g", "HOME", "/Users/example") in calls
+    )
+    assert (
+        ttyd_manager_module.tmux_command(
+            "set-environment", "-g", "PATH", "/opt/example/bin:/usr/bin"
+        )
+        in calls
+    )
+    assert ttyd_manager_module.tmux_command("set-environment", "-g", "SHELL", "/bin/zsh") in calls
+    assert (
+        ttyd_manager_module.tmux_command("set-environment", "-gu", "PYTEST_CURRENT_TEST") in calls
+    )
+
+
 def test_get_next_port_skips_existing_listener(monkeypatch: MonkeyPatch) -> None:
     manager = TTYDManager.__new__(TTYDManager)
     manager._next_port = 12000
@@ -793,6 +824,43 @@ def test_claude_solo_env_model_is_passed_as_startup_model_flag(
     assert "export ANTHROPIC_MODEL='gateway/model with space'" in wrapper
     assert "ANTHROPIC_CUSTOM_MODEL_OPTION" not in wrapper
     assert "ANTHROPIC_CUSTOM_MODEL_OPTION" not in process.env
+
+
+def test_structured_claude_solo_preaccepts_bypass_disclaimer_as_flag_setting() -> None:
+    process = TTYDProcess(
+        tab_id="tab-structured-claude-solo",
+        port=12358,
+        name="Structured Claude Solo",
+        solo_mode=True,
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.AGENT,
+        env={"ANTHROPIC_MODEL": "gateway/model"},
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+    settings = json.load(open(_claude_settings_path(cmd[-1]), encoding="utf-8"))
+
+    assert "bypassPermissionsModeAccepted" not in settings
+    assert "bypassPermissionsModeAccepted" in cmd[-1]
+    assert cmd[-1].count("--settings") == 2
+
+
+def test_terminal_claude_solo_keeps_interactive_bypass_disclaimer() -> None:
+    process = TTYDProcess(
+        tab_id="tab-terminal-claude-solo",
+        port=12359,
+        name="Terminal Claude Solo",
+        solo_mode=True,
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.TERMINAL,
+        env={"ANTHROPIC_MODEL": "gateway/model"},
+    )
+
+    cmd = process._build_ttyd_command(session_exists=False)
+    settings = json.load(open(_claude_settings_path(cmd[-1]), encoding="utf-8"))
+
+    assert "bypassPermissionsModeAccepted" not in settings
+    assert cmd[-1].count("--settings") == 1
 
 
 def test_claude_custom_model_env_option_is_not_overwritten() -> None:
