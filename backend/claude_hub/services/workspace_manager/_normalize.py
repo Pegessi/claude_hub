@@ -99,6 +99,9 @@ class _NormalizeMixin:
         normalized.setdefault("started_at", None)
         normalized.setdefault("reviewed_at", None)
         normalized.setdefault("completed_at", None)
+        normalized.setdefault("timeout_seconds", None)
+        normalized.setdefault("failure_reason", None)
+        normalized.setdefault("failed_at", None)
         normalized["goal_packet"] = self._normalize_goal_packet(normalized.get("goal_packet"))
         normalized["autonomy_policy"] = self._normalize_autonomy_policy(
             normalized.get("autonomy_policy"),

@@ -69,11 +69,12 @@ from ...models.schemas import AGENT_TAG_MAX_LENGTH, normalize_agent_tag
 from .. import workspace_state_policy as state_policy
 from ..feedback_lessons import FeedbackLessonStore
 from ..remote_profiles import remote_profile_manager
+from ..runtime_isolation import resolve_state_root
 from ..ttyd_manager import ttyd_manager
 
 logger = logging.getLogger(__name__)
 
-STATE_ROOT = Path.home() / ".claude_hub" / "workspaces"
+STATE_ROOT = resolve_state_root()
 INDEX_FILE = STATE_ROOT / "index.json"
 LEGACY_STATE_FILE = Path.home() / ".claude_hub" / "workspaces.json"
 REMOTE_FORWARD_PORT_BASE = 18173

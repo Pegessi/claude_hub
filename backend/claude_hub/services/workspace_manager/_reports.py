@@ -1986,24 +1986,32 @@ class _ReportsMixin:
         #      implementation review) keep their context; a brand-new reviewer with
         #      no prior review (previous_review_task_id is None) pays no /clear
         #      round-trip.
-        # OR them so the user override adds to, rather than replaces, the heuristic.
+        # Same reviewer + same task (reaper redispath) never clears, even when
+        # clear_context is still set — that was the loop that blasted /clear
+        # into a mis-bound seat.
+        from ..session_seat import should_clear_reviewer_context
+
         user_requested_clear = bool(task.clear_context)
         unrelated_prior_review = (
             previous_review_task_id is not None and previous_review_task_id != task.id
         )
-        should_clear_context = user_requested_clear or unrelated_prior_review
-        if should_clear_context:
-            logger.info(
-                "Clearing reviewer context task_id=%s reviewer_id=%s "
-                "user_requested=%s unrelated_prior_review=%s",
-                task.id,
-                reviewer.id,
-                user_requested_clear,
-                unrelated_prior_review,
-            )
-            await self.send_session_message(reviewer.id, "/clear")
-            await asyncio.sleep(0.5)
+        should_clear_context = should_clear_reviewer_context(
+            user_requested=user_requested_clear,
+            previous_review_task_id=previous_review_task_id,
+            task_id=task.id,
+        )
         try:
+            if should_clear_context:
+                logger.info(
+                    "Clearing reviewer context task_id=%s reviewer_id=%s "
+                    "user_requested=%s unrelated_prior_review=%s",
+                    task.id,
+                    reviewer.id,
+                    user_requested_clear,
+                    unrelated_prior_review,
+                )
+                await self.send_session_message(reviewer.id, "/clear")
+                await asyncio.sleep(0.5)
             await self.send_session_message(
                 reviewer.id,
                 self._build_review_prompt(

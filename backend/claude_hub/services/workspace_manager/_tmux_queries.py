@@ -127,9 +127,10 @@ class _TmuxQueriesMixin:
         return False
 
     async def _run_tmux(self, *args: str) -> None:
+        from ..runtime_isolation import tmux_command
+
         proc = await asyncio.create_subprocess_exec(
-            "tmux",
-            *args,
+            *tmux_command(*args),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -145,9 +146,10 @@ class _TmuxQueriesMixin:
         option value. Raises ``RuntimeError`` on non-zero exit (including
         the case where the target session no longer exists).
         """
+        from ..runtime_isolation import tmux_command
+
         proc = await asyncio.create_subprocess_exec(
-            "tmux",
-            *args,
+            *tmux_command(*args),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

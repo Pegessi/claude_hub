@@ -103,6 +103,7 @@ retrying.
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
+from ..session_seat import SessionSeatMismatch, validate_session_seat
 from ._constants import *  # noqa: F401,F403
 
 
@@ -147,6 +148,7 @@ class _MessagingMixin:
         session = self.sessions.get(session_id)
         if not session:
             raise KeyError(session_id)
+        self._assert_session_seat(session)
 
         if call_id:
             # Compute the canonical payload fingerprint (message text +
@@ -580,9 +582,19 @@ class _MessagingMixin:
                 # here so the delivered message includes the attachment
                 # block. We do NOT re-persist (that would duplicate files).
                 persisted = session.pending_attachments.get(call_id, [])
+                self._assert_session_seat(self.sessions[session_id])
                 await self._ensure_session_ready_for_send(self.sessions[session_id])
                 full_message = f"{marker}\n{message}"
                 full_message = self._append_attachment_block(full_message, persisted)
+            except SessionSeatMismatch:
+                logger.exception(
+                    "pump: session seat mismatch for call_id=%s session %s; "
+                    "moving to uncertain (fail-closed, no auto-retry)",
+                    call_id,
+                    session_id,
+                )
+                self._mark_processing_as_uncertain(session_id, [call_id])
+                continue
             except Exception:
                 # Pre-side-effect failure: the tmux write was NOT attempted.
                 # Safe to roll the call_id back to pending so the next pump
@@ -1325,39 +1337,40 @@ class _MessagingMixin:
             persist=True,
         )
 
+    def _assert_session_seat(self, session: ManagedSession) -> str:
+        return validate_session_seat(session, processes=ttyd_manager.processes)
+
     async def _ensure_session_ready_for_send(self, session: ManagedSession) -> None:
-        created = await ttyd_manager.ensure_tab_tmux_session(session.tab_id)
-        if not created:
-            return
+        self._assert_session_seat(session)
+        from ..ttyd_manager import _tmux_session_exists_async
 
-        deadline = asyncio.get_running_loop().time() + 12
-        last_output = ""
-        while asyncio.get_running_loop().time() < deadline:
-            try:
-                last_output = await self._capture_tmux_output(session.tmux_session)
-            except RuntimeError:
-                await asyncio.sleep(0.3)
-                continue
-            if self._agent_input_ready(last_output):
-                return
-            await asyncio.sleep(0.5)
-
-        logger.warning(
-            "Timed out waiting for workspace agent input prompt before sending to %s. "
-            "Sending anyway. Last output tail: %s",
-            session.id,
-            last_output[-200:],
-        )
+        # Send paths must not create a same-name pane and pour into it.
+        # Missing seats fail closed so /clear cannot land on a freshly
+        # spawned empty Claude that reused the expected tmux name.
+        process = ttyd_manager.processes.get(session.tab_id)
+        if process is None:
+            raise SessionSeatMismatch(
+                f"session {session.id} tab {session.tab_id} is not live; "
+                "refusing to create a seat and send"
+            )
+        if not await _tmux_session_exists_async(session.tmux_session):
+            raise SessionSeatMismatch(
+                f"session {session.id} tmux {session.tmux_session} is gone; "
+                "refusing to recreate and send"
+            )
 
     async def _capture_tmux_output(self, tmux_session: str) -> str:
+        from ..runtime_isolation import tmux_command
+
         proc = await asyncio.create_subprocess_exec(
-            "tmux",
-            "capture-pane",
-            "-p",
-            "-S",
-            "-120",
-            "-t",
-            tmux_session,
+            *tmux_command(
+                "capture-pane",
+                "-p",
+                "-S",
+                "-120",
+                "-t",
+                tmux_session,
+            ),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

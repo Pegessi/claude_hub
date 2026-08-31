@@ -72,6 +72,8 @@ def tmux_session(tmp_path: Path) -> Generator[tuple[str, Path], None, None]:
     to ``effect_file``. Counting call_id marker occurrences in that file
     measures how many times the message was actually pasted.
     """
+    from claude_hub.services.runtime_isolation import tmux_command
+
     session_name = f"test-receipt-{uuid.uuid4().hex[:12]}"
     effect_file = tmp_path / "effect.log"
     effect_file.write_text("")
@@ -80,16 +82,16 @@ def tmux_session(tmp_path: Path) -> Generator[tuple[str, Path], None, None]:
     # Use `exec` so the shell is replaced by cat (no extra prompt lines).
     cmd = f"exec cat >> {effect_file}"
     subprocess.run(
-        ["tmux", "new-session", "-d", "-s", session_name, "bash", "-c", cmd],
+        tmux_command("new-session", "-d", "-s", session_name, "bash", "-c", cmd),
         check=True,
     )
     # Give the session a moment to start.
-    subprocess.run(["tmux", "has-session", "-t", session_name], check=True)
+    subprocess.run(tmux_command("has-session", "-t", session_name), check=True)
 
     try:
         yield session_name, effect_file
     finally:
-        subprocess.run(["tmux", "kill-session", "-t", session_name], check=False)
+        subprocess.run(tmux_command("kill-session", "-t", session_name), check=False)
         # Best-effort buffer cleanup (named buffers are server-global).
         # The receipt mechanism makes this safe even if a buffer lingers.
         for buf_prefix in ("buf_",):

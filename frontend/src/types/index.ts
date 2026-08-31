@@ -3,8 +3,8 @@ export type ExecutionTarget = 'local' | 'remote'
 export type AgentRuntimeStatus = 'idle' | 'working' | 'attention' | 'offline'
 export type AppMode = 'terminal' | 'workspace'
 export type ColorScheme = 'dark' | 'light'
-export type WorkspaceTaskStatus = 'todo' | 'queued' | 'working' | 'review' | 'done'
-export type WorkspaceTaskMode = 'direct' | 'reviewed' | 'autonomous'
+export type WorkspaceTaskStatus = 'todo' | 'queued' | 'working' | 'review' | 'done' | 'failed'
+export type WorkspaceTaskMode = 'direct' | 'reviewed' | 'autonomous' | 'subagent'
 export type WorkspaceTaskExecutionComplexity = 'auto' | 'simple' | 'complex'
 export type WorkspaceTaskOrigin = 'human' | 'resident'
 export type EvaluationStrictness = 'lenient' | 'balanced' | 'strict'
@@ -390,6 +390,9 @@ export interface WorkspaceTask {
   review_skip_reason?: string | null
   manual_aborted_at?: string | null
   manual_abort_reason?: string | null
+  timeout_seconds?: number | null
+  failure_reason?: string | null
+  failed_at?: string | null
   human_acceptance_requested_at?: string | null
   human_accepted_at?: string | null
   queued_at?: string | null

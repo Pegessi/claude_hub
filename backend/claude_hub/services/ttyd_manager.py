@@ -31,12 +31,14 @@ from ..models import (
 from ._cursor_verify import _cursor_id_exists
 from .agent_status_markers import codex_output_is_working
 from .remote_profiles import remote_profile_manager
+from .runtime_isolation import resolve_runtime_home, tmux_command, tmux_socket_args
 
 logger = logging.getLogger(__name__)
 
-STATE_FILE = Path.home() / ".claude_hub" / "tabs.json"
-ORDER_FILE = Path.home() / ".claude_hub" / "tab_order.json"
-LAUNCH_ENV_DIR = Path.home() / ".claude_hub" / "launch_env"
+_RUNTIME_HOME = resolve_runtime_home()
+STATE_FILE = _RUNTIME_HOME / "tabs.json"
+ORDER_FILE = _RUNTIME_HOME / "tab_order.json"
+LAUNCH_ENV_DIR = _RUNTIME_HOME / "launch_env"
 TMUX_SESSION_PREFIX = "claude-hub-"
 _ORPHAN_TMUX_PRUNE_GRACE_SECONDS = 60.0
 _MANAGED_TMUX_SESSION_RE = re.compile(rf"^{re.escape(TMUX_SESSION_PREFIX)}[0-9a-f]{{8}}$")
@@ -180,8 +182,15 @@ def _tmux_session_name(tab_id: str) -> str:
 
 def _tmux_server_running() -> bool:
     """Check if tmux server is running."""
-    ret = os.system("tmux ls 2>/dev/null")
-    return ret == 0 or ret == 256  # 0 = has sessions, 256 = no sessions but server running
+    try:
+        ret = subprocess.run(
+            tmux_command("ls"),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode
+    except FileNotFoundError:
+        return False
+    return ret == 0 or ret == 1  # 0 = has sessions, 1 = no sessions but server running
 
 
 def _ensure_tmux_server() -> bool:
@@ -193,7 +202,11 @@ def _ensure_tmux_server() -> bool:
         # Start a dummy session to initialize tmux server, then detach
         # This ensures the tmux server stays running even with no sessions
         logger.info("tmux server not running, starting it...")
-        ret = os.system("tmux new-session -d -s __tmux_server_keepalive__ 2>/dev/null")
+        ret = subprocess.run(
+            tmux_command("new-session", "-d", "-s", "__tmux_server_keepalive__"),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode
         if ret == 0:
             logger.info("tmux server started successfully with keepalive session")
         return True
@@ -212,7 +225,7 @@ def _tmux_session_exists(session_name: str) -> bool:
     """
     try:
         ret = subprocess.run(
-            ["tmux", "has-session", "-t", session_name],
+            tmux_command("has-session", "-t", session_name),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         ).returncode
@@ -225,10 +238,7 @@ async def _tmux_session_exists_async(session_name: str) -> bool:
     """Async, non-blocking check for whether a tmux session exists."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "tmux",
-            "has-session",
-            "-t",
-            session_name,
+            *tmux_command("has-session", "-t", session_name),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -247,10 +257,7 @@ async def _tmux_list_sessions() -> set[str]:
     """
     try:
         proc = await asyncio.create_subprocess_exec(
-            "tmux",
-            "list-sessions",
-            "-F",
-            "#{session_name}",
+            *tmux_command("list-sessions", "-F", "#{session_name}"),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -266,10 +273,7 @@ async def _tmux_list_session_created() -> dict[str, float]:
     """Return live tmux session names with their creation epoch."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "tmux",
-            "list-sessions",
-            "-F",
-            "#{session_name}\t#{session_created}",
+            *tmux_command("list-sessions", "-F", "#{session_name}\t#{session_created}"),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -300,10 +304,7 @@ async def _tmux_kill_session(session_name: str) -> None:
     quarantine, so always verify absence after the command completes.
     """
     proc = await asyncio.create_subprocess_exec(
-        "tmux",
-        "kill-session",
-        "-t",
-        session_name,
+        *tmux_command("kill-session", "-t", session_name),
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -394,14 +395,13 @@ def _tmux_session_created(session_name: str) -> Optional[float]:
     """
     try:
         proc = subprocess.run(
-            [
-                "tmux",
+            tmux_command(
                 "display-message",
                 "-p",
                 "-t",
                 session_name,
                 "#{session_created}",
-            ],
+            ),
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -1589,7 +1589,7 @@ asyncio.run(_main())
             return False
 
         _ensure_tmux_server()
-        cmd = ["tmux", "new-session", "-d", "-s", self.tmux_session]
+        cmd = tmux_command("new-session", "-d", "-s", self.tmux_session)
         if self.cwd and self.target == ExecutionTarget.LOCAL:
             cmd.extend(["-c", self.cwd])
         cmd.append("--")
@@ -1778,6 +1778,7 @@ asyncio.run(_main())
         cmd.extend(
             [
                 "tmux",
+                *tmux_socket_args(),
                 "new-session",
                 "-A",
                 "-s",
@@ -2097,15 +2098,16 @@ asyncio.run(_main())
 
         try:
             proc = await asyncio.create_subprocess_exec(
-                "tmux",
-                "respawn-pane",
-                "-k",
-                "-t",
-                self.tmux_session,
-                "--",
-                user_shell,
-                "-lc",
-                respawn_cmd,
+                *tmux_command(
+                    "respawn-pane",
+                    "-k",
+                    "-t",
+                    self.tmux_session,
+                    "--",
+                    user_shell,
+                    "-lc",
+                    respawn_cmd,
+                ),
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
                 env=_agent_spawn_env(),
@@ -2299,8 +2301,7 @@ asyncio.run(_main())
             for cmd in tmux_commands:
                 try:
                     proc = await asyncio.create_subprocess_exec(
-                        "tmux",
-                        *cmd,
+                        *tmux_command(*cmd),
                         stdout=asyncio.subprocess.DEVNULL,
                         stderr=asyncio.subprocess.DEVNULL,
                     )
@@ -2312,10 +2313,7 @@ asyncio.run(_main())
             for cmd in tmux_commands:
                 try:
                     proc = await asyncio.create_subprocess_exec(
-                        "tmux",
-                        "-t",
-                        self.tmux_session,
-                        *cmd,
+                        *tmux_command("-t", self.tmux_session, *cmd),
                         stdout=asyncio.subprocess.DEVNULL,
                         stderr=asyncio.subprocess.DEVNULL,
                     )
@@ -2382,14 +2380,15 @@ asyncio.run(_main())
         start = f"-{safe_lines}"
 
         proc = await asyncio.create_subprocess_exec(
-            "tmux",
-            "capture-pane",
-            "-p",
-            "-e",
-            "-S",
-            start,
-            "-t",
-            self.tmux_session,
+            *tmux_command(
+                "capture-pane",
+                "-p",
+                "-e",
+                "-S",
+                start,
+                "-t",
+                self.tmux_session,
+            ),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -2420,12 +2419,13 @@ asyncio.run(_main())
             return None
 
         proc = await asyncio.create_subprocess_exec(
-            "tmux",
-            "display-message",
-            "-p",
-            "-t",
-            self.tmux_session,
-            "#{cursor_x} #{cursor_y}",
+            *tmux_command(
+                "display-message",
+                "-p",
+                "-t",
+                self.tmux_session,
+                "#{cursor_x} #{cursor_y}",
+            ),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -2487,12 +2487,13 @@ asyncio.run(_main())
             return None
 
         proc = await asyncio.create_subprocess_exec(
-            "tmux",
-            "display-message",
-            "-p",
-            "-t",
-            self.tmux_session,
-            "#{pane_current_command}",
+            *tmux_command(
+                "display-message",
+                "-p",
+                "-t",
+                self.tmux_session,
+                "#{pane_current_command}",
+            ),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -4043,7 +4044,12 @@ class TTYDManager:
                 p.resume_quarantined = False
 
         try:
-            result = os.popen("tmux ls 2>&1").read()
+            listed = subprocess.run(
+                tmux_command("ls"),
+                capture_output=True,
+                text=True,
+            )
+            result = listed.stdout or listed.stderr
             logger.info("Existing tmux sessions before starting tabs:\n%s", result)
         except Exception as e:
             logger.debug("Could not list tmux sessions: %s", e)

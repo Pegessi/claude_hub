@@ -89,6 +89,7 @@ class _TasksMixin:
             related_task_id=payload.related_task_id,
             session_id=payload.session_id or None,
             clear_context=payload.clear_context,
+            timeout_seconds=payload.timeout_seconds,
             parent_task_id=parent_task_id,
             root_task_id=root_task_id,
             path=task_path,

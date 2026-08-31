@@ -38,8 +38,19 @@ class Settings:
             self.default_env_presets = {}
 
     def env_preset_for_agent_type(self, agent_type: str) -> Optional[str]:
-        """Return the default env preset for a given agent type, or None."""
-        return self.default_env_presets.get(agent_type)
+        """Return the default env preset for a given agent type, or None.
+
+        Config ``[default_env_presets]`` wins. Claude falls back to ``day1``
+        when that table has no entry. Set ``claude = "none"`` to disable.
+        """
+        if agent_type in self.default_env_presets:
+            value = self.default_env_presets[agent_type].strip()
+            if not value or value == "none":
+                return None
+            return value
+        if agent_type == "claude":
+            return "day1"
+        return None
 
 
 def _read_config_file(path: Path) -> Dict[str, Any]:

@@ -506,6 +506,13 @@
                   {{ task.dispatch_reason }}
                 </div>
                 <div
+                  v-if="task.status === 'failed' && task.failure_reason"
+                  class="latest-report"
+                >
+                  <strong>failed</strong>
+                  <span>{{ task.failure_reason }}</span>
+                </div>
+                <div
                   v-if="latestReportForTask(task)"
                   class="latest-report"
                 >
@@ -3134,6 +3141,7 @@ const mobileCollapsedColumns = reactive<Record<WorkspaceTaskStatus, boolean>>({
   working: false,
   review: false,
   done: false,
+  failed: false,
 })
 const startOptions = reactive<Record<string, TaskStartOptions>>({})
 let boardPollTimer: number | null = null
@@ -3406,10 +3414,16 @@ const selectedProgressTimeline = computed<ProgressTimelineItem[]>(() => {
     )
   })
   addTimelineItem(rawItems, 'task-reviewed', 'Review', task.reviewed_at, 'task')
+  addTimelineItem(rawItems, 'task-failed', 'Failed', task.failed_at, 'terminal')
   addTimelineItem(rawItems, 'task-done', 'Done', task.completed_at, 'terminal')
   addTimelineItem(rawItems, 'task-aborted', 'Aborted', task.manual_aborted_at, 'terminal')
 
-  if (task.status === 'queued' || task.status === 'working' || task.status === 'review') {
+  if (
+    task.status === 'queued' ||
+    task.status === 'working' ||
+    task.status === 'review' ||
+    task.status === 'failed'
+  ) {
     rawItems.push({
       id: 'task-now',
       label: 'Now',
@@ -3821,13 +3835,19 @@ function startOptionsFor(task: WorkspaceTask): TaskStartOptions {
 }
 
 function tasksByStatus(status: WorkspaceTaskStatus) {
+  if (status === 'working') {
+    return tasks.value.filter(task => task.status === 'working' || task.status === 'failed')
+  }
   return tasks.value.filter(task => task.status === status)
 }
 
 function taskCountByStatus(status: WorkspaceTaskStatus) {
-  const total = boardTasksPagination.value?.status_counts?.[status]
-  if (total != null) {
-    return total
+  const counts = boardTasksPagination.value?.status_counts
+  if (counts != null) {
+    if (status === 'working') {
+      return (counts.working ?? 0) + (counts.failed ?? 0)
+    }
+    return counts[status] ?? 0
   }
   return tasksByStatus(status).length
 }
@@ -3857,6 +3877,7 @@ function latestReviewReportForTask(task: WorkspaceTask) {
 function taskModeLabel(mode: WorkspaceTaskMode) {
   if (mode === 'autonomous') return 'Autonomous'
   if (mode === 'direct') return 'Direct'
+  if (mode === 'subagent') return 'Subagent'
   return 'Reviewed'
 }
 
@@ -4027,7 +4048,12 @@ function canRequestReviewTask(task: WorkspaceTask) {
 }
 
 function canAbortTask(task: WorkspaceTask) {
-  return task.status === 'queued' || task.status === 'working' || task.status === 'review'
+  return (
+    task.status === 'queued' ||
+    task.status === 'working' ||
+    task.status === 'review' ||
+    task.status === 'failed'
+  )
 }
 
 function canEditTask(task: WorkspaceTask) {
@@ -4425,7 +4451,10 @@ function taskTimingEndMs(task: WorkspaceTask): number {
     parseTimestampMs(task.completed_at) ??
     parseTimestampMs(task.manual_aborted_at) ??
     (
-      task.status === 'queued' || task.status === 'working' || task.status === 'review'
+      task.status === 'queued' ||
+      task.status === 'working' ||
+      task.status === 'review' ||
+      task.status === 'failed'
         ? elapsedClockMs.value
         : parseTimestampMs(task.updated_at) ?? elapsedClockMs.value
     )
@@ -5476,7 +5505,7 @@ async function sendDetailMessage() {
   const message = detailMessage.value.trim()
   const attachments = serializeDraftAttachments(detailAttachments.value)
   await runPending(taskActionKey('send', task.id), async () => {
-    if (task.status === 'review') {
+    if (task.status === 'review' || task.status === 'failed') {
       await workspaceStore.continueTask(task.id, { message, attachments })
     } else {
       await workspaceStore.sendMessage(session.id, message, attachments)
@@ -7000,6 +7029,10 @@ onUnmounted(() => {
   background: var(--ch-color-attention-strong);
 }
 
+.task-card--failed::before {
+  background: var(--ch-color-danger-strong, var(--ch-color-attention-strong));
+}
+
 .task-card--done::before {
   background: var(--ch-color-success-strong);
 }
@@ -7205,6 +7238,10 @@ onUnmounted(() => {
 
 .status-dot--review {
   background: var(--ch-color-attention-strong);
+}
+
+.status-dot--failed {
+  background: var(--ch-color-danger-strong, var(--ch-color-attention-strong));
 }
 
 .status-dot--done {

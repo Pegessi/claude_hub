@@ -136,17 +136,17 @@ class _MonitorMixin:
 
             failure_reason: str | None = None
 
-            # 1. Session death: the worker session is gone or STOPPED.
-            session = self.sessions.get(task.session_id) if task.session_id else None
-            if task.session_id and (
-                session is None or session.status == ManagedSessionStatus.STOPPED
-            ):
-                failure_reason = "session died"
-
-            # 2. Timeout: no update within the configured window.
-            if failure_reason is None and task.timeout_seconds:
-                if (now - task.updated_at).total_seconds() > task.timeout_seconds:
-                    failure_reason = f"timeout after {task.timeout_seconds}s"
+            # Session death and timeout apply to subagent tasks only. Reviewed /
+            # autonomous WORKING tasks keep the existing recovery paths.
+            if task.task_mode == WorkspaceTaskMode.SUBAGENT:
+                session = self.sessions.get(task.session_id) if task.session_id else None
+                if task.session_id and (
+                    session is None or session.status == ManagedSessionStatus.STOPPED
+                ):
+                    failure_reason = "session died"
+                if failure_reason is None and task.timeout_seconds:
+                    if (now - task.updated_at).total_seconds() > task.timeout_seconds:
+                        failure_reason = f"timeout after {task.timeout_seconds}s"
 
             if failure_reason is not None:
                 self.tasks[task.id] = task.model_copy(
