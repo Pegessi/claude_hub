@@ -200,7 +200,7 @@ export function useAgentStream(): UseAgentStreamApi {
 
       // Hydrate: pull the full history before going live.
       let since = -1
-       
+
       while (true) {
         const page = await fetchEvents(sessionId, since)
         applyPage(page)
