@@ -1989,6 +1989,52 @@ def test_garbage_image_bytes_are_rejected(
     assert "detail" in body
 
 
+def test_webp_riff_without_webp_marker_is_rejected(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A declared image/webp whose RIFF container bytes 8:12 are not WEBP
+    (e.g. WAVE) must be rejected. This exercises the explicit WebP second-marker
+    branch, not the generic magic-signature prefix check.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path / "state")
+
+    client = TestClient(app)
+    workspace_response = client.post(
+        "/api/workspaces",
+        json={
+            "name": "WebpMarker",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "wbp",
+        },
+    )
+
+    # RIFF header (bytes 0..3 = RIFF) but bytes 8..11 = WAVE, not WEBP.
+    riff_wave_bytes = b"RIFF\x00\x00\x00\x00WAVE" + b"\x00" * 8
+
+    response = client.post(
+        f"/api/workspaces/{workspace_response.json()['id']}/tasks",
+        json={
+            "title": "WebP without WEBP marker",
+            "prompt": "should fail",
+            "attachments": [
+                {
+                    "filename": "fake.webp",
+                    "mime_type": "image/webp",
+                    "data_url": _data_url("image/webp", riff_wave_bytes),
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert "detail" in body
+
+
 async def test_preview_report_markdown_artifact_is_scoped_to_report(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
