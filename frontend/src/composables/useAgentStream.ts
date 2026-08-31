@@ -15,7 +15,7 @@ const API_BASE = '/api'
  *
  * - `idle`: not started (raw terminal is the only view).
  * - `hydrating`: fetching capabilities + initial event page.
- * - `live`: SSE (or long-poll fallback) is streaming new events.
+ * - `live`: long-poll reconciliation is active; SSE may accelerate delivery.
  * - `failed`: hard failure — consumer should fall back to raw.
  */
 export type StreamConnectionState = 'idle' | 'hydrating' | 'live' | 'failed'
@@ -38,9 +38,12 @@ export interface UseAgentStreamApi {
  * Hydration contract (sequence-safe):
  *   1. GET /stream/capabilities — fail-closed to raw if ``structured=false``.
  *   2. GET /stream/events?since_sequence=-1 — backfill the timeline.
- *   3. GET /stream/live (SSE) — stream new events.
- *      On SSE failure (non-OK, parse error, or browser without EventSource),
- *      fall back to POST /stream/wait long-polling.
+ *   3. POST /stream/wait — authoritative live reconciliation loop.
+ *   4. GET /stream/live (SSE) — optional low-latency accelerator.
+ *
+ * Both live paths are sequence-deduplicated. Keeping long-poll active even
+ * when EventSource exists prevents a proxy-buffered or silently stale SSE
+ * connection from freezing the visible timeline.
  *
  * The consumer (StructuredPane) owns the decision of whether to show raw or
  * structured; this composable only reports capabilities + connection state.
@@ -125,7 +128,7 @@ export function useAgentStream(): UseAgentStreamApi {
     return (await res.json()) as AgentStreamEventPage
   }
 
-  /** Long-poll fallback loop used when SSE is unavailable or fails. */
+  /** Authoritative live reconciliation loop; SSE is only an accelerator. */
   async function longPollLoop(sourceId: string, streamPath: string) {
     while (!stopped && currentSessionId === sourceId) {
       try {
@@ -173,9 +176,9 @@ export function useAgentStream(): UseAgentStreamApi {
 
     eventSource.addEventListener('error', (ev: MessageEvent) => {
       if (stopped || currentSessionId !== sourceId) return
-      // EventSource auto-reconnects on transient errors; only fall back to
-      // long-poll when the stream explicitly errors or the connection is
-      // permanently closed.
+      // Long-poll remains authoritative. Retire a broken SSE connection rather
+      // than waiting for a browser/proxy reconnect that may stay silently
+      // buffered; the wait loop will surface a real session failure.
       const data = (ev as MessageEvent).data
       if (data) {
         try {
@@ -184,9 +187,8 @@ export function useAgentStream(): UseAgentStreamApi {
         } catch {
           errorMessage.value = 'structured stream error'
         }
-        connectionState.value = 'failed'
-        stop()
       }
+      closeSse()
     })
   }
 
@@ -220,12 +222,14 @@ export function useAgentStream(): UseAgentStreamApi {
 
       connectionState.value = 'live'
 
-      // Prefer SSE; fall back to long-poll if EventSource is unavailable.
+      // Long-poll is the correctness path and wakes as soon as the backend
+      // tailer publishes an event. SSE runs alongside it when available for
+      // lower latency; applyPage/sequence checks deduplicate both paths.
+      longPollAbort = new AbortController()
+      void longPollLoop(sourceId, streamPath)
+
       if (typeof EventSource !== 'undefined') {
         startSse(sourceId, streamPath)
-      } else {
-        longPollAbort = new AbortController()
-        void longPollLoop(sourceId, streamPath)
       }
     } catch (err) {
       if (stopped || currentSessionId !== sourceId || currentSource !== source) return
