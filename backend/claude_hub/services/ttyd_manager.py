@@ -285,10 +285,62 @@ def _tmux_server_running() -> bool:
     return ret == 0 or ret == 1  # 0 = has sessions, 1 = no sessions but server running
 
 
+_TMUX_LAUNCH_ENV_KEYS = (
+    "HOME",
+    "PATH",
+    "SHELL",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+)
+_TMUX_STALE_ENV_KEYS = (
+    "PYTEST_CURRENT_TEST",
+    "PYTEST_VERSION",
+)
+
+
+def _refresh_tmux_server_environment() -> None:
+    """Make future panes inherit this backend's stable launch environment.
+
+    A named tmux server outlives the process that first created it. Without an
+    explicit refresh, a server first started by an integration test can retain
+    that test's temporary HOME/PATH and pass them to later real Agent panes.
+    Session-specific credentials remain in the per-tab launch wrapper; this
+    boundary only repairs stable process-launch keys and removes test markers.
+    """
+
+    for key in _TMUX_LAUNCH_ENV_KEYS:
+        value = os.environ.get(key)
+        command = (
+            tmux_command("set-environment", "-g", key, value)
+            if value is not None
+            else tmux_command("set-environment", "-gu", key)
+        )
+        result = subprocess.run(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if result.returncode != 0:
+            logger.warning("Failed to refresh tmux global environment key %s", key)
+
+    for key in _TMUX_STALE_ENV_KEYS:
+        result = subprocess.run(
+            tmux_command("set-environment", "-gu", key),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if result.returncode != 0:
+            logger.warning("Failed to clear stale tmux global environment key %s", key)
+
+
 def _ensure_tmux_server() -> bool:
     """Ensure tmux server is running, start it if not."""
     if _tmux_server_running():
         logger.debug("tmux server is already running")
+        _refresh_tmux_server_environment()
         return True
     try:
         # Start a dummy session to initialize tmux server, then detach
@@ -301,6 +353,7 @@ def _ensure_tmux_server() -> bool:
         ).returncode
         if ret == 0:
             logger.info("tmux server started successfully with keepalive session")
+            _refresh_tmux_server_environment()
         return True
     except Exception as e:
         logger.warning(f"Failed to start tmux server: {e}")
@@ -1647,6 +1700,24 @@ asyncio.run(_main())
         os.chmod(settings_path, 0o600)
         return f" --settings {shlex.quote(str(settings_path))}"
 
+    def _claude_bypass_acceptance_arg(self) -> str:
+        if self.agent_type != AgentType.CLAUDE:
+            return ""
+        if self.session_kind != SessionKind.AGENT or not self.solo_mode:
+            return ""
+        # Claude 2.1.159 reads this disclaimer acknowledgement from the
+        # command-line settings source, but ignores the same internal key in a
+        # settings file. Keep the ordinary settings file for launch env
+        # propagation and add a second, secret-free inline settings source.
+        # Selecting Solo Mode is the user's explicit request for
+        # --dangerously-skip-permissions. Never mutate ~/.claude.json, and
+        # leave Terminal sessions on Claude's visible native confirmation UI.
+        acknowledgement = json.dumps(
+            {"bypassPermissionsModeAccepted": True},
+            separators=(",", ":"),
+        )
+        return f" --settings {shlex.quote(acknowledgement)}"
+
     def _claude_model_arg(self) -> str:
         if self.agent_type != AgentType.CLAUDE:
             return ""
@@ -1679,7 +1750,8 @@ asyncio.run(_main())
         if self.agent_type == AgentType.CLAUDE:
             return (
                 "IS_SANDBOX=1 claude --dangerously-skip-permissions"
-                f"{self._claude_settings_arg()}{self._claude_model_arg()}"
+                f"{self._claude_settings_arg()}{self._claude_bypass_acceptance_arg()}"
+                f"{self._claude_model_arg()}"
             )
         if self.agent_type == AgentType.CURSOR:
             # Cursor agent runs in yolo by default; solo_mode toggle is a no-op.
@@ -1987,7 +2059,10 @@ asyncio.run(_main())
             base = "IS_SANDBOX=1 claude --dangerously-skip-permissions"
         else:
             base = get_default_command()
-        return f"{base}{self._claude_settings_arg()}{self._claude_model_arg()}{session_flag}"
+        return (
+            f"{base}{self._claude_settings_arg()}{self._claude_bypass_acceptance_arg()}"
+            f"{self._claude_model_arg()}{session_flag}"
+        )
 
     def _should_recover(self, session_exists: bool) -> bool:
         """Recover (resume prior conversation) when:
@@ -2214,6 +2289,7 @@ asyncio.run(_main())
         else:
             # Claude path
             settings_arg = self._claude_settings_arg()
+            bypass_acceptance_arg = self._claude_bypass_acceptance_arg()
             model_arg = self._claude_model_arg()
             session_arg = self._claude_session_arg()
 
@@ -2224,11 +2300,17 @@ asyncio.run(_main())
 
             if self.agent_session_id:
                 quoted_sid = shlex.quote(self.agent_session_id)
-                resume_inner = f"{base}{settings_arg}{model_arg} --resume {quoted_sid}"
-                inner_cmd = f"{resume_inner} || {base}{settings_arg}{model_arg}{session_arg}"
+                resume_inner = (
+                    f"{base}{settings_arg}{bypass_acceptance_arg}{model_arg}"
+                    f" --resume {quoted_sid}"
+                )
+                inner_cmd = (
+                    f"{resume_inner} || "
+                    f"{base}{settings_arg}{bypass_acceptance_arg}{model_arg}{session_arg}"
+                )
             else:
                 # Defensive: legacy tab without a pinned session id; start fresh.
-                inner_cmd = f"{base}{settings_arg}{model_arg}{session_arg}"
+                inner_cmd = f"{base}{settings_arg}{bypass_acceptance_arg}{model_arg}{session_arg}"
 
         wrapped = self._with_env(inner_cmd)
 

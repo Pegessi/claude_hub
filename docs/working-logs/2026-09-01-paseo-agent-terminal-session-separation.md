@@ -48,6 +48,29 @@ Claude Agent SDK, Codex app-server, and Cursor ACP are deferred transport work.
 They can replace the observation source later without changing the Agent /
 Terminal product model introduced here.
 
+## Claude startup interaction gate
+
+Claude 2.1.159 displays a one-time responsibility disclaimer when
+`--dangerously-skip-permissions` starts in a configuration domain that has not
+accepted it. That prompt is visible in Terminal but is intentionally hidden by
+the Agent surface. Sending a normal chat message at that point submits the
+dialog's default `No, exit` choice, leaving the optimistic user bubble waiting
+while Claude has already returned to the shell.
+
+For a structured Agent, selecting Solo Mode is the explicit request to launch
+with `--dangerously-skip-permissions`. Claude Hub therefore supplies a
+secret-free inline settings acknowledgement for that combination only. It
+does not modify the user's global `~/.claude.json`; Claude Terminal sessions
+retain the native warning and interactive choice.
+
+The live reproduction also exposed an independent persistence boundary: a
+named tmux server retains the global environment of the process that first
+created it. An integration test had left the preview server with a pytest
+temporary `HOME` and `PATH`, so later real Agents launched in the wrong Claude
+configuration domain. `_ensure_tmux_server` now refreshes stable launch keys
+from the current backend and removes pytest ownership markers before any new
+pane is created.
+
 ## Key issues / pitfalls
 
 - Do not infer the surface from `agent_type`: a Claude/Codex/Cursor executable
@@ -56,6 +79,11 @@ Terminal product model introduced here.
   when creating the session.
 - Keep the hidden Agent PTY mounted until native provider transports replace
   it; the current composer sends ordered input through that owner.
+- Refresh the named tmux server environment even when the server already
+  exists. A process restart alone does not replace tmux's retained global
+  environment.
+- Never copy credentials into tmux's global environment. Provider credentials
+  remain in per-tab mode-0600 launch wrappers/settings.
 - Unsupported structured provenance must show an Agent-surface error. It must
   not silently reveal the raw terminal, because that changes the selected
   product contract.

@@ -27,6 +27,13 @@
 - **Scope**: This release intentionally retains transcript-backed block-level
   updates. Native Claude SDK, Codex app-server, and Cursor ACP streaming are a
   later transport change, not part of the Agent/Terminal product split.
+- **Startup gate fix**: A Claude Agent launched in Solo Mode now carries the
+  user's explicit bypass acknowledgement as a secret-free command-line
+  settings source, so the hidden PTY cannot stall on Claude's first-run safety
+  dialog. The Hub also refreshes stable HOME/PATH/shell values on its named
+  tmux server before creating panes and clears stale pytest markers. This
+  prevents a long-lived worktree tmux server first created by an integration
+  test from launching later Agents under that test's temporary home.
 
 ### fix: harden image attachment validation and SSE session-deletion handling
 
