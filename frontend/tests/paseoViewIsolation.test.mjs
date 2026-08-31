@@ -14,8 +14,12 @@ const structuredPane = readFileSync(
   new URL('../src/components/StructuredPane.vue', import.meta.url),
   'utf8',
 )
+const tabBar = readFileSync(
+  new URL('../src/components/TabBar.vue', import.meta.url),
+  'utf8',
+)
 
-test('Paseo keeps Raw mounted behind an opacity boundary', () => {
+test('Agent sessions keep their transport mounted behind an opacity boundary', () => {
   // ttyd's active iframe explicitly sets visibility:visible, so visibility on
   // a Vue parent is not a sufficient hiding boundary. This assertion guards
   // the exclusive same-source view contract without needing a browser iframe.
@@ -26,11 +30,24 @@ test('Paseo keeps Raw mounted behind an opacity boundary', () => {
   assert.match(hiddenRule[1], /z-index:\s*0/)
 })
 
-test('Paseo has fixed visible chrome and a peer structured wrapper', () => {
+test('Agent and Terminal are fixed session surfaces, not a per-pane view toggle', () => {
   assert.match(terminalPane, /class="pane-header pane-session-header"/)
   assert.match(terminalPane, /class="pane-structured"/)
-  assert.match(terminalPane, />\s*Terminal\s*<\/button>/)
-  assert.match(terminalPane, />\s*Paseo\s*<\/button>/)
+  assert.match(terminalPane, /const isAgentSession = computed/)
+  assert.match(terminalPane, /paneTab\.value\?\.session_kind === 'agent'/)
+  assert.match(terminalPane, /v-if="pane\.tabId && isAgentSession"/)
+  assert.doesNotMatch(terminalPane, /pane-view-switch/)
+  assert.doesNotMatch(terminalPane, /type ViewMode/)
+  assert.doesNotMatch(terminalPane, />\s*Paseo\s*<\/button>/)
+})
+
+test('new-session launcher requires an explicit Agent or Terminal surface', () => {
+  assert.match(tabBar, /Create New Session/)
+  assert.match(tabBar, /Session Type/)
+  assert.match(tabBar, /form\.session_kind === 'agent'/)
+  assert.match(tabBar, /form\.session_kind === 'terminal'/)
+  assert.match(tabBar, /session_kind:\s*form\.session_kind/)
+  assert.match(tabBar, /:allow-terminal="form\.session_kind === 'terminal'"/)
 })
 
 test('SAB terminal input decodes a non-shared copy before draining the record', () => {

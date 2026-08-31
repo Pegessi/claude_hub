@@ -101,7 +101,7 @@ def tab() -> None:
     """Manage terminal tabs."""
 
 
-TAB_COLUMNS = ["id", "name", "agent_type", "target", "cwd", "is_active"]
+TAB_COLUMNS = ["id", "name", "session_kind", "agent_type", "target", "cwd", "is_active"]
 
 
 @tab.command("list")
@@ -139,6 +139,7 @@ def _tab_body(
     cwd: Optional[str] = None,
     solo_mode: Optional[bool] = None,
     agent_type: Optional[str] = None,
+    session_kind: Optional[str] = None,
     target: Optional[str] = None,
     remote_profile_id: Optional[str] = None,
     remote_cwd: Optional[str] = None,
@@ -152,6 +153,7 @@ def _tab_body(
         cwd=cwd,
         solo_mode=solo_mode,
         agent_type=agent_type,
+        session_kind=session_kind,
         target=target,
         remote_profile_id=remote_profile_id,
         remote_cwd=remote_cwd,
@@ -174,6 +176,12 @@ def _tab_body(
     help="Agent type.",
 )
 @click.option(
+    "--session-kind",
+    type=click.Choice(["agent", "terminal"]),
+    default="terminal",
+    help="Fixed UI surface for the session.",
+)
+@click.option(
     "--target",
     type=click.Choice(["local", "remote"]),
     default="local",
@@ -192,6 +200,7 @@ def tab_create(
     cwd: str,
     solo_mode: bool,
     agent_type: str,
+    session_kind: str,
     target: str,
     remote_profile_id: str,
     remote_cwd: str,
@@ -207,6 +216,7 @@ def tab_create(
         cwd=cwd,
         solo_mode=solo_mode,
         agent_type=agent_type,
+        session_kind=session_kind,
         target=target,
         remote_profile_id=remote_profile_id,
         remote_cwd=remote_cwd,

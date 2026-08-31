@@ -7,9 +7,8 @@
     @dragleave="handleDragLeave"
     @drop="handleDrop"
   >
-    <!-- Pane identity and the two peer views.  This chrome deliberately stays
-         visible in both modes: a view switch that disappears with the raw
-         terminal is not a discoverable view switch. -->
+    <!-- The session kind is fixed at creation: Agent sessions own the
+         structured conversation surface, while Terminal sessions own raw PTY. -->
     <div
       v-if="pane.tabId"
       class="pane-header pane-session-header"
@@ -25,37 +24,8 @@
         </span>
       </div>
 
-      <!-- The two views are peers over one agent source.  Text labels are
-           intentional: the older icon-only affordance was too easy to miss. -->
-      <div
-        v-if="hasStructuredSource"
-        class="pane-view-switch"
-        role="group"
-        aria-label="Agent view"
-      >
-        <button
-          type="button"
-          class="pane-view-option"
-          :class="{ active: viewMode === 'raw' }"
-          :aria-pressed="viewMode === 'raw'"
-          @click.stop="setView('raw')"
-        >
-          Terminal
-        </button>
-        <button
-          type="button"
-          class="pane-view-option"
-          :class="{ active: viewMode === 'structured' }"
-          :aria-pressed="viewMode === 'structured'"
-          title="Paseo structured view"
-          @click.stop="setView('structured')"
-        >
-          Paseo
-        </button>
-      </div>
-
       <button
-        v-if="viewMode === 'raw'"
+        v-if="!isAgentSession"
         type="button"
         class="pane-action-button"
         :class="{ refreshing: isRefreshingHistory }"
@@ -85,15 +55,14 @@
       </p>
     </div>
 
-    <!-- 终端视图 (Raw).
-         Always mounted when a tab is assigned so the ttyd session + scrollback
-         survive switching to the structured view. Hidden via CSS when the
-         structured view is active. -->
+    <!-- Agent sessions still keep their PTY transport mounted so the existing
+         CLI process and ordered input bridge remain alive, but raw output is
+         not exposed as a second user-selectable surface. -->
     <div
       v-if="pane.tabId"
       class="pane-terminal"
-      :class="{ 'is-hidden': viewMode === 'structured' }"
-      :aria-hidden="viewMode === 'structured'"
+      :class="{ 'is-hidden': isAgentSession }"
+      :aria-hidden="isAgentSession"
     >
       <TerminalView
         :tab-id="pane.tabId"
@@ -101,24 +70,30 @@
       />
     </div>
 
-    <!-- Structured view.  Workspace agents retain their durable outbox;
-         standalone AI tabs use the same tab transcript and raw-terminal input
-         path.  Either source fails closed to raw. -->
+    <!-- Structured Agent surface. Workspace agents retain their durable
+         outbox; standalone agents use their own transcript and PTY input. -->
     <div
-      v-if="pane.tabId && viewMode === 'structured' && hasStructuredSource"
+      v-if="pane.tabId && isAgentSession"
       class="pane-structured"
     >
       <StructuredPane
+        v-if="hasStructuredSource"
         :session-id="managedSession?.id"
         :tab-id="directStructuredTabId"
-        @fallback-to-raw="switchToRaw"
       />
+      <div
+        v-else
+        class="structured-unavailable"
+      >
+        <strong>Structured conversation unavailable</strong>
+        <span>This provider session cannot be observed safely. Create a Terminal session to use its native TUI.</span>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted, watch } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
@@ -145,6 +120,7 @@ const paneTab = computed<TerminalTab | undefined>(() =>
 )
 const tabName = computed(() => paneTab.value?.name || '')
 const agentType = computed(() => paneTab.value?.agent_type)
+const isAgentSession = computed(() => paneTab.value?.session_kind === 'agent')
 
 // Workspace sessions keep their existing durable messaging path. A normal AI
 // tab has no Workspace board row, so it is observed by its own transcript via
@@ -154,7 +130,7 @@ const managedSession = computed(() =>
 )
 
 const directStructuredTabId = computed(() => {
-  if (managedSession.value || !paneTab.value) return undefined
+  if (!isAgentSession.value || managedSession.value || !paneTab.value) return undefined
   const type = paneTab.value.agent_type
   if (type === 'claude' || type === 'codex') return paneTab.value.id
   if (
@@ -178,13 +154,9 @@ const sessionMark = computed(() => {
 })
 
 const sessionStatusLabel = computed(() => {
-  if (viewMode.value === 'structured') return 'Paseo conversation'
-  if (hasStructuredSource.value) return 'Terminal · Paseo available'
-  return 'Terminal session'
+  if (isAgentSession.value) return 'Agent · structured conversation'
+  return 'Terminal · native TUI'
 })
-
-type ViewMode = 'raw' | 'structured'
-const viewMode = ref<ViewMode>('raw')
 
 const isDragOver = ref(false)
 const isRefreshingHistory = ref(false)
@@ -198,30 +170,6 @@ function getAgentType() {
   return agentType.value
 }
 
-function setView(next: ViewMode) {
-  emit('click')
-  if (next === 'structured' && !hasStructuredSource.value) return
-  viewMode.value = next
-}
-
-function switchToRaw() {
-  viewMode.value = 'raw'
-}
-
-// If the tab changes (or its session disappears) while in structured mode,
-// fall back to raw so we never show a stale structured pane.
-watch(
-  () => props.pane.tabId,
-  () => {
-    viewMode.value = 'raw'
-  },
-)
-
-watch(hasStructuredSource, (available) => {
-  if (!available && viewMode.value === 'structured') {
-    viewMode.value = 'raw'
-  }
-})
 
 function handleClick() {
   emit('click')
@@ -421,47 +369,6 @@ onUnmounted(() => {
   opacity: 0.8;
 }
 
-.pane-view-switch {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  flex: 0 0 auto;
-  padding: 2px;
-  border: 1px solid var(--ch-color-border-muted);
-  border-radius: var(--ch-radius-md);
-  background-color: var(--ch-color-surface-control);
-}
-
-.pane-view-option {
-  min-height: 26px;
-  padding: 4px 10px;
-  border: 0;
-  border-radius: calc(var(--ch-radius-md) - 2px);
-  color: var(--ch-color-text-muted);
-  background: transparent;
-  font: inherit;
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 16px;
-  cursor: pointer;
-}
-
-.pane-view-option:hover {
-  color: var(--ch-color-text);
-  background-color: var(--ch-color-surface-control-hover);
-}
-
-.pane-view-option.active {
-  color: var(--ch-color-text);
-  background-color: var(--ch-color-surface-control-active);
-  box-shadow: 0 1px 3px var(--ch-shadow-color-soft);
-}
-
-.pane-view-option:focus-visible {
-  outline: 2px solid var(--ch-color-accent-ring);
-  outline-offset: 1px;
-}
-
 .pane-action-icon {
   display: inline-block;
   font-size: 14px;
@@ -517,6 +424,22 @@ onUnmounted(() => {
   min-height: 0;
   position: relative;
   z-index: 1;
+}
+
+.structured-unavailable {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  color: var(--ch-color-text-muted);
+  text-align: center;
+}
+
+.structured-unavailable strong {
+  color: var(--ch-color-text);
 }
 
 /* Hide the raw terminal when structured view is active.

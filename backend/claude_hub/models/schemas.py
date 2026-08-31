@@ -37,6 +37,13 @@ class AgentType(str, Enum):
     TERMINAL = "terminal"
 
 
+class SessionKind(str, Enum):
+    """User-facing session surface chosen at creation time."""
+
+    AGENT = "agent"
+    TERMINAL = "terminal"
+
+
 class StreamCapabilities(BaseModel):
     """What the structured observation plane can offer for a session.
 
@@ -408,6 +415,10 @@ class TerminalTabBase(BaseModel):
     cwd: Optional[str] = Field(None, description="Working directory to start the terminal in")
     solo_mode: bool = Field(False, description="Whether to start in agent solo mode")
     agent_type: AgentType = Field(AgentType.CLAUDE, description="Type of agent to run")
+    session_kind: SessionKind = Field(
+        SessionKind.TERMINAL,
+        description="Fixed UI surface: structured Agent conversation or raw Terminal",
+    )
     target: ExecutionTarget = Field(ExecutionTarget.LOCAL, description="Where to run the tab")
     remote_profile_id: Optional[str] = Field(None, description="Remote profile ID for remote tabs")
     remote_cwd: Optional[str] = Field(None, description="Remote working directory")
@@ -432,6 +443,12 @@ class TerminalTabBase(BaseModel):
     cursor_transcript_schema: Optional[str] = Field(
         None, description="Pinned transcript schema identifier for same-pane transcript provenance"
     )
+
+    @model_validator(mode="after")
+    def validate_session_kind(self) -> "TerminalTabBase":
+        if self.session_kind == SessionKind.AGENT and self.agent_type == AgentType.TERMINAL:
+            raise ValueError("Agent sessions require a Claude, Codex, or Cursor provider")
+        return self
 
 
 class TerminalTabCreate(TerminalTabBase):
