@@ -168,6 +168,33 @@
             <span>{{ st.text }}</span>
           </div>
         </div>
+
+        <!-- Direct terminal input reaches the agent before its provider writes
+             a transcript line. Keep that acknowledgement visible during this
+             gap so Send never looks like a no-op. The pending turn disappears
+             once the authoritative transcript contains the same user text. -->
+        <div
+          v-for="turn in pendingTurns"
+          :key="turn.key"
+          class="structured-turn structured-turn--pending"
+        >
+          <div class="conversation-row conversation-row--user">
+            <div class="conversation-bubble conversation-bubble--user">
+              <MarkdownContent
+                v-if="turn.userText"
+                :text="turn.userText"
+                compact
+              />
+              <span
+                v-if="turn.attachmentCount"
+                class="pending-attachment"
+              >{{ turn.attachmentCount === 1 ? 'Image attached' : `${turn.attachmentCount} images attached` }}</span>
+            </div>
+          </div>
+          <div class="event-status event-status--pending">
+            <span>Sent to terminal · waiting for agent activity</span>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -288,6 +315,25 @@ function startStream() {
 // ``groupEventsIntoTurns`` utility (see agentStreamTimeline.ts).
 
 const turns = computed(() => groupEventsIntoTurns(events.value))
+
+type PendingTurn = {
+  key: string
+  userText: string
+  attachmentCount: number
+}
+
+const pendingDirectTurns = ref<PendingTurn[]>([])
+
+const pendingTurns = computed(() => {
+  const observedUserTexts = new Set(
+    turns.value
+      .map(turn => turn.userText.trim())
+      .filter(Boolean),
+  )
+  return pendingDirectTurns.value.filter(turn =>
+    !turn.userText.trim() || !observedUserTexts.has(turn.userText.trim()),
+  )
+})
 
 // ── Stream lifecycle ────────────────────────────────────────────────────────
 
@@ -434,13 +480,19 @@ async function sendToTerminalTab(
     if (!response.ok) {
       throw new Error(`Unable to prepare ${att.filename}: ${response.status}`)
     }
-    sendKey('v', true)
+    if (!sendKey('v', true)) {
+      throw new Error('Terminal input is not ready. Switch to Terminal once, then retry.')
+    }
   }
 
   for (const char of Array.from(message)) {
-    sendKey(char === '\n' ? 'Enter' : char)
+    if (!sendKey(char === '\n' ? 'Enter' : char)) {
+      throw new Error('Terminal input is not ready. Switch to Terminal once, then retry.')
+    }
   }
-  sendKey('Enter')
+  if (!sendKey('Enter')) {
+    throw new Error('Terminal input is not ready. Switch to Terminal once, then retry.')
+  }
 }
 
 async function submit() {
@@ -456,6 +508,14 @@ async function submit() {
   try {
     if (isTerminalTabSource.value) {
       await sendToTerminalTab(message, atts)
+      pendingDirectTurns.value = [
+        ...pendingDirectTurns.value,
+        {
+          key: `pending-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          userText: message,
+          attachmentCount: atts.length,
+        },
+      ]
     } else if (props.sessionId) {
       await workspaceStore.sendMessage(props.sessionId, message, atts)
     } else {
@@ -562,6 +622,19 @@ watch(
 
 .structured-turn {
   margin-bottom: 16px;
+}
+
+.structured-turn--pending {
+  opacity: 0.82;
+}
+
+.pending-attachment {
+  display: block;
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px solid color-mix(in srgb, currentColor 24%, transparent);
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .event {
@@ -697,6 +770,10 @@ watch(
   gap: 6px;
   font-size: 12px;
   color: var(--ch-color-text-subtle);
+}
+
+.event-status--pending {
+  color: var(--ch-color-text-muted);
 }
 
 .status-dot {
