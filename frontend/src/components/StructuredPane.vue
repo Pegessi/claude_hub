@@ -46,188 +46,205 @@
       aria-live="polite"
       aria-label="Agent conversation"
     >
-      <div
-        v-if="turns.length === 0 && connectionState === 'live'"
-        class="structured-empty"
-      >
-        <p>No messages yet.</p>
-        <p class="empty-hint">
-          Send a message below to start.
-        </p>
-      </div>
-
-      <div
-        v-for="turn in turns"
-        :key="turn.key"
-        class="structured-turn"
-      >
-        <!-- User message -->
+      <div class="structured-timeline-content">
         <div
-          v-if="turn.userText"
-          class="event event-user"
+          v-if="turns.length === 0 && connectionState === 'live'"
+          class="structured-empty"
         >
-          <div class="event-role">
-            You
-          </div>
-          <div class="event-body">
-            {{ turn.userText }}
-          </div>
+          <span
+            class="empty-orbit"
+            aria-hidden="true"
+          >✦</span>
+          <strong>Ready when you are</strong>
+          <p>Send a message below to start this agent conversation.</p>
         </div>
 
-        <!-- Assistant thinking -->
         <div
-          v-if="turn.thinkingText"
-          class="event event-thinking"
+          v-for="turn in turns"
+          :key="turn.key"
+          class="structured-turn"
         >
-          <details>
-            <summary>Thinking</summary>
-            <div class="event-body thinking-body">
-              {{ turn.thinkingText }}
+          <!-- A right-aligned user bubble and a left-aligned agent bubble make
+               this the same conversation as the terminal, not terminal text
+               pasted into a second surface. -->
+          <div
+            v-if="turn.userText"
+            class="conversation-row conversation-row--user"
+          >
+            <div class="conversation-bubble conversation-bubble--user">
+              <MarkdownContent
+                :text="turn.userText"
+                compact
+              />
             </div>
+          </div>
+
+          <details
+            v-if="turn.thinkingText"
+            class="thinking-card"
+          >
+            <summary>
+              <span
+                class="thinking-indicator"
+                aria-hidden="true"
+              />
+              Thinking
+            </summary>
+            <MarkdownContent
+              :text="turn.thinkingText"
+              compact
+              class="thinking-body"
+            />
           </details>
-        </div>
 
-        <!-- Assistant text -->
-        <div
-          v-if="turn.assistantText"
-          class="event event-assistant"
-        >
-          <div class="event-role">
-            Assistant
-          </div>
-          <div class="event-body">
-            {{ turn.assistantText }}
-          </div>
-        </div>
-
-        <!-- Tool calls -->
-        <div
-          v-for="tool in turn.tools"
-          :key="tool.callId || tool.key"
-          class="event event-tool"
-        >
-          <div class="tool-header">
-            <span class="tool-name">{{ tool.name }}</span>
+          <div
+            v-if="turn.assistantText"
+            class="conversation-row conversation-row--assistant"
+          >
             <span
-              class="tool-status"
-              :class="tool.status"
-            >{{ tool.status }}</span>
+              class="conversation-avatar"
+              aria-hidden="true"
+            >✦</span>
+            <div class="conversation-bubble conversation-bubble--assistant">
+              <MarkdownContent
+                :text="turn.assistantText"
+                compact
+              />
+            </div>
           </div>
-          <div
-            v-if="tool.argsText"
-            class="tool-args"
-          >
-            {{ tool.argsText }}
-          </div>
-          <div
-            v-if="tool.resultText"
-            class="tool-result"
-          >
-            {{ tool.resultText }}
-          </div>
-        </div>
 
-        <!-- Errors -->
-        <div
-          v-for="err in turn.errors"
-          :key="err.key"
-          class="event event-error"
-          role="alert"
-        >
-          <span
-            class="error-icon"
-            aria-hidden="true"
-          >⚠</span>
-          <span class="event-body">{{ err.message }}</span>
-        </div>
+          <div
+            v-for="tool in turn.tools"
+            :key="tool.callId || tool.key"
+            class="conversation-row conversation-row--assistant"
+          >
+            <span
+              class="conversation-avatar conversation-avatar--tool"
+              aria-hidden="true"
+            >⌘</span>
+            <details class="tool-card">
+              <summary class="tool-header">
+                <span class="tool-name">{{ tool.name }}</span>
+                <span
+                  class="tool-status"
+                  :class="tool.status"
+                >{{ tool.status }}</span>
+              </summary>
+              <div
+                v-if="tool.argsText"
+                class="tool-block"
+              >
+                <span>Input</span>
+                <pre>{{ tool.argsText }}</pre>
+              </div>
+              <div
+                v-if="tool.resultText"
+                class="tool-block"
+              >
+                <span>Result</span>
+                <pre>{{ tool.resultText }}</pre>
+              </div>
+            </details>
+          </div>
 
-        <!-- Status events -->
-        <div
-          v-for="st in turn.statuses"
-          :key="st.key"
-          class="event event-status"
-        >
-          <span
-            class="status-dot"
-            aria-hidden="true"
-          />
-          <span class="event-body">{{ st.text }}</span>
+          <div
+            v-for="err in turn.errors"
+            :key="err.key"
+            class="event-error"
+            role="alert"
+          >
+            <span
+              class="error-icon"
+              aria-hidden="true"
+            >⚠</span>
+            <span>{{ err.message }}</span>
+          </div>
+
+          <div
+            v-for="st in turn.statuses"
+            :key="st.key"
+            class="event-status"
+          >
+            <span>{{ st.text }}</span>
+          </div>
         </div>
       </div>
     </div>
 
     <!-- Composer -->
     <div class="structured-composer">
-      <!-- Attachment previews -->
-      <div
-        v-if="attachments.length > 0"
-        class="composer-attachments"
-      >
+      <div class="composer-shell">
+        <!-- Attachment previews -->
         <div
-          v-for="att in attachments"
-          :key="att.id"
-          class="attachment-chip"
+          v-if="attachments.length > 0"
+          class="composer-attachments"
         >
-          <img
-            :src="att.preview_url"
-            :alt="att.filename"
-            class="attachment-thumb"
+          <div
+            v-for="att in attachments"
+            :key="att.id"
+            class="attachment-chip"
           >
+            <img
+              :src="att.preview_url"
+              :alt="att.filename"
+              class="attachment-thumb"
+            >
+            <button
+              type="button"
+              class="attachment-remove"
+              :aria-label="`Remove ${att.filename}`"
+              @click="removeAttachment(att)"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+
+        <!-- Validation error -->
+        <div
+          v-if="composerError"
+          class="composer-error"
+          role="alert"
+        >
+          {{ composerError }}
+        </div>
+
+        <div class="composer-row">
           <button
             type="button"
-            class="attachment-remove"
-            :aria-label="`Remove ${att.filename}`"
-            @click="removeAttachment(att)"
+            class="composer-attach-btn"
+            aria-label="Attach image"
+            title="Attach image"
+            @click="triggerFilePicker"
           >
-            ×
+            <span aria-hidden="true">📎</span>
+          </button>
+          <input
+            ref="fileInputEl"
+            type="file"
+            accept="image/png,image/jpeg,image/gif,image/webp,image/bmp"
+            multiple
+            class="composer-file-input"
+            @change="handleFilePick"
+          >
+          <textarea
+            v-model="draftMessage"
+            class="composer-textarea"
+            placeholder="Send a message…"
+            rows="1"
+            :disabled="isSending"
+            @keydown.enter.exact.prevent="submit"
+            @paste="handlePaste"
+          />
+          <button
+            type="button"
+            class="composer-send-btn"
+            :disabled="!canSend || isSending"
+            @click="submit"
+          >
+            {{ isSending ? 'Sending…' : 'Send' }}
           </button>
         </div>
-      </div>
-
-      <!-- Validation error -->
-      <div
-        v-if="composerError"
-        class="composer-error"
-        role="alert"
-      >
-        {{ composerError }}
-      </div>
-
-      <div class="composer-row">
-        <button
-          type="button"
-          class="composer-attach-btn"
-          aria-label="Attach image"
-          title="Attach image"
-          @click="triggerFilePicker"
-        >
-          <span aria-hidden="true">📎</span>
-        </button>
-        <input
-          ref="fileInputEl"
-          type="file"
-          accept="image/png,image/jpeg,image/gif,image/webp,image/bmp"
-          multiple
-          class="composer-file-input"
-          @change="handleFilePick"
-        >
-        <textarea
-          v-model="draftMessage"
-          class="composer-textarea"
-          placeholder="Send a message…"
-          rows="1"
-          :disabled="isSending"
-          @keydown.enter.exact.prevent="submit"
-          @paste="handlePaste"
-        />
-        <button
-          type="button"
-          class="composer-send-btn"
-          :disabled="!canSend || isSending"
-          @click="submit"
-        >
-          {{ isSending ? 'Sending…' : 'Send' }}
-        </button>
       </div>
     </div>
   </div>
@@ -238,6 +255,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
 import { useAgentStream, validateImageAttachment, fileToDataUrl } from '@/composables/useAgentStream'
 import { groupEventsIntoTurns } from '@/utils/agentStreamTimeline'
+import MarkdownContent from '@/components/MarkdownContent.vue'
 import type { WorkspaceAttachmentCreate } from '@/types'
 
 const props = defineProps<{
@@ -829,6 +847,287 @@ watch(
   outline-offset: 1px;
 }
 
+/* Paseo conversation presentation ------------------------------------------------
+   The initial implementation was intentionally semantic but visually read like
+   terminal lines.  Keep the same stream model while giving its two peers a
+   deliberate, readable conversation surface. */
+.structured-pane {
+  background:
+    radial-gradient(circle at 50% -22%, var(--ch-color-surface-soft), transparent 44%),
+    var(--ch-color-app-bg);
+}
+
+.structured-timeline {
+  padding: 34px 28px 26px;
+}
+
+.structured-timeline-content {
+  width: 100%;
+  max-width: 860px;
+  min-height: 100%;
+  margin: 0 auto;
+}
+
+.structured-empty {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 24px;
+}
+
+.structured-empty strong {
+  color: var(--ch-color-text-muted);
+  font-weight: 500;
+}
+
+.structured-empty p {
+  max-width: 340px;
+  margin: 0;
+  color: var(--ch-color-text-subtle);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.empty-orbit {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 4px;
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface);
+  color: var(--ch-color-accent);
+  box-shadow: 0 8px 20px var(--ch-shadow-color-soft);
+}
+
+.structured-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 22px;
+}
+
+.conversation-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  min-width: 0;
+}
+
+.conversation-row--user {
+  justify-content: flex-end;
+}
+
+.conversation-bubble {
+  max-width: min(85%, 680px);
+  min-width: 0;
+  padding: 9px 12px;
+  border-radius: var(--ch-radius-md);
+  overflow-wrap: anywhere;
+}
+
+.conversation-bubble--user {
+  --paseo-user-bubble: #3268a8;
+
+  background: var(--paseo-user-bubble);
+  color: #fff;
+  border-bottom-right-radius: var(--ch-radius-sm);
+}
+
+.conversation-bubble--user :deep(.markdown-content),
+.conversation-bubble--user :deep(.markdown-content :where(h1, h2, h3, h4, a, blockquote)) {
+  color: inherit;
+}
+
+.conversation-bubble--assistant {
+  background: var(--ch-color-surface);
+  border: 1px solid var(--ch-color-border-muted);
+  border-bottom-left-radius: var(--ch-radius-sm);
+  box-shadow: 0 6px 18px var(--ch-shadow-color-soft);
+}
+
+.conversation-avatar {
+  width: 23px;
+  height: 23px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-accent-soft);
+  color: var(--ch-color-accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.conversation-avatar--tool {
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text-muted);
+  font-size: 10px;
+}
+
+.thinking-card {
+  align-self: flex-start;
+  width: min(85%, 680px);
+  border: 1px dashed var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-soft);
+  color: var(--ch-color-text-muted);
+  padding: 7px 10px;
+}
+
+.thinking-card summary,
+.tool-card summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.thinking-card summary::-webkit-details-marker,
+.tool-card summary::-webkit-details-marker {
+  display: none;
+}
+
+.thinking-card summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ch-color-text-subtle);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.thinking-card summary:focus-visible,
+.tool-card summary:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring);
+  outline-offset: 2px;
+  border-radius: var(--ch-radius-sm);
+}
+
+.thinking-indicator {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ch-color-text-subtle);
+}
+
+.thinking-body {
+  margin-top: 8px;
+  color: var(--ch-color-text-muted);
+}
+
+.tool-card {
+  width: min(85%, 680px);
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface);
+  overflow: hidden;
+}
+
+.tool-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+}
+
+.tool-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 600;
+}
+
+.tool-status {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+}
+
+.tool-block {
+  padding: 0 10px 10px;
+}
+
+.tool-block > span {
+  display: block;
+  color: var(--ch-color-text-subtle);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.tool-block pre {
+  max-height: 220px;
+  margin: 5px 0 0;
+  padding: 8px;
+  overflow: auto;
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-canvas);
+  color: var(--ch-color-text-code);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.event-error {
+  align-self: flex-start;
+  width: min(85%, 680px);
+  margin: 0;
+}
+
+.event-status {
+  justify-content: center;
+  font-style: italic;
+  text-align: center;
+}
+
+.structured-composer {
+  padding: 12px 28px;
+  background: color-mix(in srgb, var(--ch-color-surface) 94%, transparent);
+}
+
+.composer-shell {
+  width: 100%;
+  max-width: 860px;
+  margin: 0 auto;
+}
+
+.composer-row {
+  padding: 5px;
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: calc(var(--ch-radius-md) + 2px);
+  background: var(--ch-color-app-bg);
+  box-shadow: 0 8px 24px var(--ch-shadow-color-soft);
+}
+
+.composer-textarea {
+  min-height: 34px;
+  padding: 7px 6px;
+  border: 0;
+  background: transparent;
+}
+
+.composer-textarea:focus-visible {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.composer-attach-btn {
+  border-color: transparent;
+}
+
+.composer-send-btn {
+  height: 34px;
+  border-radius: var(--ch-radius-sm);
+}
+
 /* Drag-over highlight */
 .structured-pane.is-dragging .structured-timeline {
   outline: 2px dashed var(--ch-color-accent);
@@ -838,11 +1137,11 @@ watch(
 /* Narrow viewport: tighten composer and timeline padding */
 @media (max-width: 640px) {
   .structured-timeline {
-    padding: 8px;
+    padding: 18px 12px;
   }
 
   .structured-composer {
-    padding: 6px 8px;
+    padding: 8px 12px;
   }
 
   .composer-send-btn {
@@ -852,6 +1151,14 @@ watch(
   .attachment-chip {
     width: 40px;
     height: 40px;
+  }
+
+  .conversation-bubble,
+  .thinking-card,
+  .tool-card,
+  .event-error {
+    width: min(92%, 680px);
+    max-width: 92%;
   }
 }
 </style>

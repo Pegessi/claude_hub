@@ -7,12 +7,23 @@
     @dragleave="handleDragLeave"
     @drop="handleDrop"
   >
-    <!-- Pane 头部：显示当前 tab 名称 -->
+    <!-- Pane identity and the two peer views.  This chrome deliberately stays
+         visible in both modes: a view switch that disappears with the raw
+         terminal is not a discoverable view switch. -->
     <div
       v-if="pane.tabId"
-      class="pane-header"
+      class="pane-header pane-session-header"
     >
-      <span class="pane-tab-name">{{ getTabName() }}</span>
+      <div class="pane-session-identity">
+        <span
+          class="pane-session-mark"
+          aria-hidden="true"
+        >{{ sessionMark }}</span>
+        <span class="pane-session-copy">
+          <strong class="pane-tab-name">{{ getTabName() }}</strong>
+          <span class="pane-session-status">{{ sessionStatusLabel }}</span>
+        </span>
+      </div>
 
       <!-- The two views are peers over one agent source.  Text labels are
            intentional: the older icon-only affordance was too easy to miss. -->
@@ -44,6 +55,7 @@
       </div>
 
       <button
+        v-if="viewMode === 'raw'"
         type="button"
         class="pane-action-button"
         :class="{ refreshing: isRefreshingHistory }"
@@ -77,24 +89,31 @@
          Always mounted when a tab is assigned so the ttyd session + scrollback
          survive switching to the structured view. Hidden via CSS when the
          structured view is active. -->
-    <TerminalView
+    <div
       v-if="pane.tabId"
-      :tab-id="pane.tabId"
-      :agent-type="getAgentType()"
       class="pane-terminal"
       :class="{ 'is-hidden': viewMode === 'structured' }"
-    />
+      :aria-hidden="viewMode === 'structured'"
+    >
+      <TerminalView
+        :tab-id="pane.tabId"
+        :agent-type="getAgentType()"
+      />
+    </div>
 
     <!-- Structured view.  Workspace agents retain their durable outbox;
          standalone AI tabs use the same tab transcript and raw-terminal input
          path.  Either source fails closed to raw. -->
-    <StructuredPane
+    <div
       v-if="pane.tabId && viewMode === 'structured' && hasStructuredSource"
-      :session-id="managedSession?.id"
-      :tab-id="directStructuredTabId"
       class="pane-structured"
-      @fallback-to-raw="switchToRaw"
-    />
+    >
+      <StructuredPane
+        :session-id="managedSession?.id"
+        :tab-id="directStructuredTabId"
+        @fallback-to-raw="switchToRaw"
+      />
+    </div>
   </div>
 </template>
 
@@ -150,6 +169,19 @@ const directStructuredTabId = computed(() => {
 const hasStructuredSource = computed(() =>
   Boolean(managedSession.value || directStructuredTabId.value),
 )
+
+const sessionMark = computed(() => {
+  if (agentType.value === 'claude') return 'C'
+  if (agentType.value === 'codex') return 'X'
+  if (agentType.value === 'cursor') return '↗'
+  return '>_'
+})
+
+const sessionStatusLabel = computed(() => {
+  if (viewMode.value === 'structured') return 'Paseo conversation'
+  if (hasStructuredSource.value) return 'Terminal · Paseo available'
+  return 'Terminal session'
+})
 
 type ViewMode = 'raw' | 'structured'
 const viewMode = ref<ViewMode>('raw')
@@ -296,21 +328,63 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
-  max-height: 28px;
-  padding: 5px 9px;
+  min-height: 48px;
+  padding: 6px 10px;
   background-color: var(--ch-color-surface);
   border-bottom: 1px solid var(--ch-color-border-muted);
   flex-shrink: 0;
   overflow: hidden;
+  position: relative;
+  z-index: 3;
   transition: max-height 180ms cubic-bezier(0.2, 0, 0, 1), padding 180ms cubic-bezier(0.2, 0, 0, 1), border-color 180ms cubic-bezier(0.2, 0, 0, 1), opacity 140ms ease, transform 180ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 .pane-tab-name {
-  flex: 1;
+  display: block;
   min-width: 0;
   color: var(--ch-color-text);
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pane-session-identity {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: 1;
+  min-width: 0;
+}
+
+.pane-session-mark {
+  width: 27px;
+  height: 27px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-raised);
+  color: var(--ch-color-accent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.pane-session-copy {
+  display: block;
+  min-width: 0;
+}
+
+.pane-session-status {
+  display: block;
+  margin-top: 1px;
+  color: var(--ch-color-text-subtle);
+  font-size: 10px;
+  line-height: 1.2;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -354,19 +428,20 @@ onUnmounted(() => {
   flex: 0 0 auto;
   padding: 2px;
   border: 1px solid var(--ch-color-border-muted);
-  border-radius: var(--ch-radius-sm);
-  background-color: var(--ch-color-app-bg);
+  border-radius: var(--ch-radius-md);
+  background-color: var(--ch-color-surface-control);
 }
 
 .pane-view-option {
-  min-height: 18px;
-  padding: 1px 6px;
+  min-height: 26px;
+  padding: 4px 10px;
   border: 0;
-  border-radius: 3px;
+  border-radius: calc(var(--ch-radius-md) - 2px);
   color: var(--ch-color-text-muted);
   background: transparent;
   font: inherit;
   font-size: 11px;
+  font-weight: 500;
   line-height: 16px;
   cursor: pointer;
 }
@@ -378,8 +453,8 @@ onUnmounted(() => {
 
 .pane-view-option.active {
   color: var(--ch-color-text);
-  background-color: var(--ch-color-surface-control-hover);
-  box-shadow: inset 0 0 0 1px var(--ch-color-accent-ring);
+  background-color: var(--ch-color-surface-control-active);
+  box-shadow: 0 1px 3px var(--ch-shadow-color-soft);
 }
 
 .pane-view-option:focus-visible {
@@ -440,6 +515,8 @@ onUnmounted(() => {
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
+  position: relative;
+  z-index: 1;
 }
 
 /* Hide the raw terminal when structured view is active.
@@ -449,8 +526,13 @@ onUnmounted(() => {
 .pane-terminal.is-hidden {
   position: absolute;
   inset: 0;
+  /* ttyd explicitly restores visibility:visible on its active iframe.  An
+     opacity layer belongs to the wrapper, so no descendant can punch through
+     into the Paseo view. */
+  opacity: 0;
   visibility: hidden;
   pointer-events: none;
+  z-index: 0;
 }
 
 .pane-structured {
@@ -459,5 +541,8 @@ onUnmounted(() => {
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
+  position: relative;
+  z-index: 2;
+  background-color: var(--ch-color-app-bg);
 }
 </style>

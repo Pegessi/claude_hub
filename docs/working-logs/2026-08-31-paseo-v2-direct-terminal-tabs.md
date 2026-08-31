@@ -53,6 +53,11 @@ fail-closed.
    terminal iframe queue and image clipboard mechanism. The Raw view stays
    mounted and invisible, preserving scrollback and the terminal's single
    input owner.
+   `visibility: hidden` alone is insufficient: ttyd's active iframe sets
+   `visibility: visible` itself, which overrides the inherited hidden value.
+   The Raw wrapper must therefore own an opacity and stacking boundary while
+   Paseo is visible. The pane header remains above both surfaces and always
+   exposes the labelled `Terminal | Paseo` control.
 4. **Direct input has terminal semantics.** It intentionally does not claim
    the managed Workspace outbox's at-least-once receipt/ACK protocol; a direct
    terminal message is equivalent to a user typing into that Raw pane.
@@ -68,3 +73,7 @@ fail-closed.
   The preview uses its own runtime home, `tmux -L ch-paseo-ui-preview`, and
   ttyd base port `19250`; live `5173/8173` and the default tmux server remain
   untouched.
+- Frontend revalidation after the exclusive-surface fix: `pnpm lint` and
+  `pnpm build` pass. The view has been checked statically against the confirmed
+  direct-tab stream contract; the isolated preview remains available for the
+  final user visual pass.
