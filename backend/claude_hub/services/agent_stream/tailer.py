@@ -38,13 +38,20 @@ import weakref
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from ...models import AgentStreamEvent, AgentStreamEventType, ManagedSession
+from ...models import (
+    AgentStreamEvent,
+    AgentStreamEventType,
+    AgentType,
+    ManagedSession,
+    SessionKind,
+)
 from .base import (
     AgentStreamAdapter,
     NormalizeContext,
     discover_source_cached,
     invalidate_source,
 )
+from .native import ProviderSession, _detect_image_mime, create_native_session
 from .redaction import redact_event
 from .store import AgentStreamStore
 
@@ -79,6 +86,8 @@ class SessionTailer:
         adapter: AgentStreamAdapter,
         session_getter: Callable[[], Optional[ManagedSession]],
         store: Optional[AgentStreamStore] = None,
+        native_transport: Optional[ProviderSession] = None,
+        native_error: Optional[str] = None,
     ) -> None:
         self.workspace_id = workspace_id
         self.session_id = session_id
@@ -86,6 +95,11 @@ class SessionTailer:
         self._session_getter = session_getter
         self._store = store or AgentStreamStore(workspace_id, session_id)
         self._cursor_path = self._store.cursor_path
+        self._native_transport = native_transport
+        # When set, the agent session required a native transport but it could
+        # not be created. Fail-closed: never fall back to transcript as a
+        # real-time source for agent sessions.
+        self._native_error = native_error
 
         self._offset = 0
         self._inode: Optional[int] = None
@@ -95,6 +109,17 @@ class SessionTailer:
         self._snapshot_source_kinds: List[str] = []
         self._snapshot_digest: Optional[str] = None
         self._is_live = False
+
+        # The active user turn's stable id. Set by ``send_message`` the moment
+        # a user turn is submitted (before the provider runs), and cleared when
+        # the turn completes. Every provider event normalized while this is set
+        # is stamped with it so the frontend can upsert by identity.
+        self._active_turn_id: Optional[str] = None
+        # Whether the provider has emitted a terminal ``turn_completed`` event
+        # for the active turn. Used at EOF to decide whether a failed
+        # ``turn_completed`` must be synthesized (nonzero exit or early EOF
+        # with no completion record).
+        self._turn_completed_seen: bool = False
 
         self._task: Optional[asyncio.Task[Any]] = None
         self._subscribers: Set[asyncio.Queue[AgentStreamEvent]] = set()
@@ -106,6 +131,12 @@ class SessionTailer:
         self._current_source: Optional[Path] = None
         self._last_error: Optional[str] = None
         self._poll_lock = asyncio.Lock()
+        # Serializes composer input so two concurrent ``send_message`` calls
+        # cannot race on ``_active_turn_id`` / ``_run_epoch``. The lock is
+        # held across the busy-check, the authoritative ``turn_started``
+        # publish, and the transport send so a busy second send never mutates
+        # state that the in-flight first turn still depends on.
+        self._send_lock = asyncio.Lock()
 
     @property
     def hard_failed(self) -> bool:
@@ -125,6 +156,202 @@ class SessionTailer:
     @property
     def current_source(self) -> Optional[Path]:
         return self._current_source
+
+    @property
+    def native_transport(self) -> Optional[ProviderSession]:
+        """The live native provider transport, or ``None``.
+
+        The send endpoint uses this to deliver composer input directly to the
+        provider subprocess — never to a separate PTY (which would create a
+        dual-session split-brain).
+        """
+        return self._native_transport
+
+    @property
+    def native_error(self) -> Optional[str]:
+        return self._native_error
+
+    async def send_message(
+        self,
+        text: str,
+        images: List[bytes],
+        client_turn_id: str,
+    ) -> None:
+        """Atomically deliver a user turn (text + images) to the native transport.
+
+        This is the composer's single input path for AGENT sessions. The same
+        ``ProviderSession`` that produces the structured stream also consumes
+        the turn, so input and output never diverge across two sessions.
+
+        Stable turn identity: the frontend supplies ``client_turn_id``. Before
+        the provider runs, we append an authoritative ``turn_started`` event
+        stamped with that id (and ``message_id={turn_id}:user``) so the user's
+        message is immediately visible and can never be confused with a later
+        identical message. ``self._active_turn_id`` is set so every provider
+        event normalized during this turn inherits the same ``turn_id``.
+
+        Concurrency: the whole method runs under ``self._send_lock``. The
+        first thing we do inside the lock is check ``transport.turn_in_flight``;
+        if a turn is already active we raise ``RuntimeError`` (mapped to HTTP
+        409) WITHOUT touching ``_active_turn_id``, ``_run_epoch``, or the
+        store. This guarantees a busy second send can never clobber the
+        in-flight turn's identity.
+
+        Fail-closed: no native transport raises ``RuntimeError``; the caller
+        maps it to an HTTP error rather than falling back to tmux. On send
+        failure we append an ``error`` and a ``turn_completed(status=failed)``
+        for the same ``turn_id`` so the frontend never leaves the turn pending.
+        """
+        transport = self._native_transport
+        if transport is None:
+            raise RuntimeError("no native transport for this session; use the terminal send path")
+        if self._native_error is not None:
+            raise RuntimeError(self._native_error)
+        if not transport._started:
+            await transport.start()
+
+        async with self._send_lock:
+            # Busy check BEFORE any state mutation. If a turn is already in
+            # flight, fail fast so the in-flight turn's _active_turn_id and
+            # _run_epoch are never overwritten.
+            if transport.turn_in_flight:
+                raise RuntimeError(
+                    "a turn is already in flight; wait for it to complete before "
+                    "sending another message"
+                )
+
+            # Authoritative turn start: publish the user's message before the
+            # provider does anything. This guarantees the turn exists in the store
+            # and is fanned out to subscribers, even if the provider never echoes
+            # the user message back (e.g. Codex app-server notifications).
+            session = self._session_getter()
+            if session is None:
+                raise RuntimeError("session no longer exists")
+            self._active_turn_id = client_turn_id
+            self._run_epoch += 1
+            self._turn_completed_seen = False
+            ctx = NormalizeContext(
+                session_id=self.session_id,
+                tab_id=session.tab_id,
+                agent_type=session.agent_type,
+                run_epoch=self._run_epoch,
+                turn_id=client_turn_id,
+            )
+            attachments_meta = [
+                {"bytes": len(img), "mime": _detect_image_mime(img)} for img in images
+            ]
+            turn_started = ctx.event(
+                AgentStreamEventType.TURN_STARTED,
+                {"summary": text, "attachments": attachments_meta},
+            )
+            turn_started = redact_event(turn_started)
+            try:
+                turn_started = await self._store.append(turn_started)
+            except Exception:
+                logger.exception(
+                    "agent_stream store append failed for turn_started session %s",
+                    self.session_id,
+                )
+                # If we cannot persist the authoritative turn_started, the turn
+                # has no identity. Fail the send rather than fan out an unpersisted
+                # seq=0 event that the frontend will drop.
+                self._active_turn_id = None
+                raise
+            self._fanout(turn_started)
+
+            try:
+                await transport.send_message(text, images)
+            except Exception:
+                # The provider rejected or failed to start the turn. Publish an
+                # error and a failed completion for the same turn_id so the
+                # frontend can mark it failed instead of leaving it pending.
+                err_event = ctx.event(
+                    AgentStreamEventType.ERROR,
+                    {"message": "failed to deliver turn to provider"},
+                )
+                err_event = redact_event(err_event)
+                try:
+                    err_event = await self._store.append(err_event)
+                except Exception:
+                    logger.exception(
+                        "agent_stream store append failed for error session %s",
+                        self.session_id,
+                    )
+                else:
+                    self._fanout(err_event)
+                completed = ctx.event(
+                    AgentStreamEventType.TURN_COMPLETED,
+                    {"status": "failed"},
+                )
+                completed = redact_event(completed)
+                try:
+                    completed = await self._store.append(completed)
+                except Exception:
+                    logger.exception(
+                        "agent_stream store append failed for turn_completed session %s",
+                        self.session_id,
+                    )
+                else:
+                    self._fanout(completed)
+                self._active_turn_id = None
+                raise
+
+    async def _fail_active_turn(self, message: str, transport: ProviderSession) -> None:
+        """Emit an ``error`` event and a failed ``turn_completed``.
+
+        Called when a turn ends without a successful provider completion
+        (nonzero exit, early EOF, or the persistent Codex server dying). The
+        error message is surfaced from the provider's bounded stderr. Exactly
+        one ``turn_completed(status=failed)`` is appended for the active turn
+        so the frontend never leaves it pending.
+
+        This does NOT release the turn guard — the caller (EOF handler) is
+        responsible for clearing ``_active_turn_id`` and calling
+        ``acknowledge_turn_complete`` after this returns, so the failed
+        completion is persisted before a new turn can start.
+        """
+        turn_id = self._active_turn_id
+        if turn_id is None:
+            return
+        session = self._session_getter()
+        if session is None:
+            return
+        ctx = NormalizeContext(
+            session_id=self.session_id,
+            tab_id=session.tab_id,
+            agent_type=session.agent_type,
+            run_epoch=self._run_epoch,
+            turn_id=turn_id,
+        )
+        err_event = ctx.event(
+            AgentStreamEventType.ERROR,
+            {"message": message},
+        )
+        err_event = redact_event(err_event)
+        try:
+            err_event = await self._store.append(err_event)
+        except Exception:
+            logger.exception(
+                "agent_stream store append failed for error session %s",
+                self.session_id,
+            )
+        else:
+            self._fanout(err_event)
+        completed = ctx.event(
+            AgentStreamEventType.TURN_COMPLETED,
+            {"status": "failed"},
+        )
+        completed = redact_event(completed)
+        try:
+            completed = await self._store.append(completed)
+        except Exception:
+            logger.exception(
+                "agent_stream store append failed for turn_completed session %s",
+                self.session_id,
+            )
+        else:
+            self._fanout(completed)
+        self._turn_completed_seen = True
 
     async def poll_once(self) -> None:
         async with self._poll_lock:
@@ -163,36 +390,234 @@ class SessionTailer:
             except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                 pass
         self._task = None
+        if self._native_transport is not None:
+            try:
+                await self._native_transport.stop()
+            except Exception:
+                logger.exception("native transport stop failed for session %s", self.session_id)
 
     async def _run(self) -> None:
         try:
-            while not self._stopped:
-                try:
-                    await self.poll_once()
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.exception(
-                        "agent_stream tailer poll failed for session %s",
-                        self.session_id,
-                    )
-                if self._hard_failed:
-                    break
-                if not self._subscribers and (
-                    time.monotonic() - self._last_subscriber_at > IDLE_TTL_S
-                ):
-                    break
-                await asyncio.sleep(POLL_INTERVAL_S)
+            if self._native_transport is not None:
+                await self._run_native()
+            else:
+                await self._run_poll()
         except asyncio.CancelledError:
             pass
         finally:
             self._task = None
             self._stopped = True
 
+    async def _run_poll(self) -> None:
+        while not self._stopped:
+            try:
+                await self.poll_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "agent_stream tailer poll failed for session %s",
+                    self.session_id,
+                )
+            if self._hard_failed:
+                break
+            if not self._subscribers and (time.monotonic() - self._last_subscriber_at > IDLE_TTL_S):
+                break
+            await asyncio.sleep(POLL_INTERVAL_S)
+
+    async def _run_native(self) -> None:
+        """Push consumer for native provider transports.
+
+        Unlike the transcript poll loop, this continuously awaits
+        ``transport.read_line()`` and processes each record immediately — no
+        ``POLL_INTERVAL_S`` batching. One-shot providers (Claude/Cursor) emit
+        an EOF (``None``) at the end of each turn; we simply continue waiting
+        for the next turn. The persistent Codex app-server exiting (EOF) is
+        fatal and fails the session closed.
+
+        Idle reaping: ``read_line`` is wrapped in ``asyncio.wait_for`` with a
+        short tick so we can periodically check whether the tailer has had
+        zero subscribers for longer than ``IDLE_TTL_S`` and stop itself. The
+        tick does not add latency to record delivery — ``wait_for`` returns as
+        soon as a record is available.
+        """
+        transport = self._native_transport
+        assert transport is not None
+        while not self._stopped:
+            session = self._session_getter()
+            if session is None:
+                await asyncio.sleep(0.1)
+                continue
+            if self._native_error is not None:
+                self._hard_failed = True
+                self._last_error = self._native_error
+                _HARD_FAILED_SESSION_IDS.add(self.session_id)
+                break
+            if not transport._started:
+                try:
+                    await transport.start()
+                except Exception as exc:
+                    self._hard_failed = True
+                    self._last_error = str(exc)
+                    _HARD_FAILED_SESSION_IDS.add(self.session_id)
+                    break
+            self._hard_failed = False
+            _HARD_FAILED_SESSION_IDS.discard(self.session_id)
+            self._last_error = None
+            # Idle reaping: stop if we've had no subscribers for IDLE_TTL_S.
+            if not self._subscribers and (time.monotonic() - self._last_subscriber_at > IDLE_TTL_S):
+                # Stop the native transport so the provider subprocess (e.g.
+                # the Codex app-server) is reaped, not left orphaned.
+                try:
+                    await transport.stop()
+                except Exception:
+                    logger.exception(
+                        "native transport stop failed during idle reap for session %s",
+                        self.session_id,
+                    )
+                break
+            try:
+                record = await asyncio.wait_for(transport.read_line(), timeout=POLL_INTERVAL_S)
+            except asyncio.TimeoutError:
+                # No record arrived within the tick; loop back to re-check
+                # idle TTL and transport health.
+                continue
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception(
+                    "agent_stream native read failed for session %s",
+                    self.session_id,
+                )
+                self._last_error = str(exc)
+                continue
+            if record is None:
+                # EOF. For one-shot providers this is the normal end of a
+                # turn; keep waiting for the next turn. For Codex the
+                # persistent app-server died — fail closed.
+                if transport.eof_is_fatal:
+                    # The persistent provider died; the in-flight turn (if
+                    # any) is abandoned. Emit an error and a failed
+                    # turn_completed for the active turn so the frontend
+                    # never leaves it pending, then fail the session.
+                    await self._fail_active_turn("native transport process exited", transport)
+                    self._hard_failed = True
+                    self._last_error = "native transport process exited"
+                    _HARD_FAILED_SESSION_IDS.add(self.session_id)
+                    break
+                # One-shot turn complete. If the provider exited nonzero AND
+                # never emitted a terminal turn_completed, synthesize an
+                # error + failed turn_completed for the active turn. If the
+                # provider DID emit a terminal turn_completed, its status
+                # (completed/failed/cancelled from the result record) is the
+                # single source of truth — we must NOT emit a second
+                # completion, even on a nonzero exit, because that would
+                # produce two terminal events for the same turn.
+                exit_error = transport.exit_error
+                if not self._turn_completed_seen:
+                    await self._fail_active_turn(
+                        exit_error or "provider exited without a completion record",
+                        transport,
+                    )
+                elif exit_error is not None:
+                    # The provider emitted a terminal completion but still
+                    # exited nonzero. The completion's status already
+                    # reflects the outcome (failed/cancelled), so retain the
+                    # bounded stderr in diagnostics without emitting a second
+                    # terminal event.
+                    logger.warning(
+                        "provider exited nonzero after turn_completed for session %s: %s",
+                        self.session_id,
+                        exit_error,
+                    )
+                # Release the active turn id so the next ``send_message`` can
+                # set a new one. We do NOT clear it on ``TURN_COMPLETED``
+                # (which the provider may emit at ``message_stop``, before the
+                # final ``assistant`` snapshot) because trailing records of
+                # the same turn must still inherit this turn's id.
+                self._active_turn_id = None
+                # Now that we have consumed the EOF (and all preceding records
+                # of this turn), release the turn guard so a new send can
+                # proceed. This must happen after ``_active_turn_id`` is
+                # cleared, never before.
+                transport.acknowledge_turn_complete()
+                continue
+            transport.maybe_capture_conversation_id(record)
+            ctx = NormalizeContext(
+                session_id=self.session_id,
+                tab_id=session.tab_id,
+                agent_type=session.agent_type,
+                run_epoch=self._run_epoch,
+                turn_id=self._active_turn_id,
+            )
+            try:
+                events = self.adapter.normalize_line(record, ctx)
+            except Exception:
+                logger.exception(
+                    "agent_stream adapter %s failed on native record for session %s; skipping",
+                    self.adapter.adapter_id,
+                    self.session_id,
+                )
+                continue
+            for event in events:
+                if event.type == AgentStreamEventType.TURN_STARTED:
+                    # The authoritative turn_started was already published by
+                    # send_message with the frontend's client_turn_id. Provider
+                    # records that also signal a turn start (Claude
+                    # message_start, Codex turn/started) must NOT create a
+                    # second turn — skip them.
+                    continue
+                is_turn_completed = event.type == AgentStreamEventType.TURN_COMPLETED
+                if event.run_epoch is None:
+                    event.run_epoch = self._run_epoch
+                event = redact_event(event)
+                try:
+                    event = await self._store.append(event)
+                except Exception:
+                    logger.exception(
+                        "agent_stream store append failed for session %s; dropping event",
+                        self.session_id,
+                    )
+                    continue
+                # Native transport has no backfill concept: every record is
+                # live and must be fanned out to subscribers immediately.
+                self._fanout(event)
+                if is_turn_completed:
+                    # Mark that the provider emitted a terminal completion for
+                    # the active turn. At EOF we use this to decide whether a
+                    # failed turn_completed must be synthesized.
+                    self._turn_completed_seen = True
+                    # For persistent transports (Codex app-server) there is no
+                    # per-turn EOF; ``TURN_COMPLETED`` is the provider's
+                    # explicit turn-end signal. Release the active turn id and
+                    # the turn guard ONLY after the completion event has been
+                    # persisted and fanned out, so a concurrent
+                    # ``send_message`` cannot publish a new turn_started that
+                    # sequences ahead of this turn's completion.
+                    if transport.eof_is_fatal:
+                        self._active_turn_id = None
+                        transport.acknowledge_turn_complete()
+
     async def _poll_once(self) -> None:
         session = self._session_getter()
         if session is None:
             return
+
+        # Agent sessions require a native transport. If it could not be
+        # created, fail closed — never use the transcript as a real-time
+        # source for an agent session.
+        if self._native_error is not None:
+            self._hard_failed = True
+            self._last_error = self._native_error
+            _HARD_FAILED_SESSION_IDS.add(self.session_id)
+            return
+
+        # Native transport is driven by the push consumer in ``_run_native``,
+        # not by this poll loop. There is no transcript to backfill from, so
+        # ``poll_once`` is a no-op for native sessions.
+        if self._native_transport is not None:
+            return
+
         path = discover_source_cached(self.adapter, session)
         if path is None:
             if self._discovery_deadline is None:
@@ -209,6 +634,69 @@ class SessionTailer:
         self._last_error = None
         self._current_source = path
         await self._tail_file(path, session)
+
+    async def _poll_native(self, session: ManagedSession) -> None:
+        """Drain one batch of records from the native transport stdout."""
+        transport = self._native_transport
+        assert transport is not None
+        if not transport._started:
+            try:
+                await transport.start()
+            except Exception as exc:
+                self._hard_failed = True
+                self._last_error = str(exc)
+                _HARD_FAILED_SESSION_IDS.add(self.session_id)
+                return
+        self._hard_failed = False
+        _HARD_FAILED_SESSION_IDS.discard(self.session_id)
+        self._last_error = None
+
+        ctx = NormalizeContext(
+            session_id=self.session_id,
+            tab_id=session.tab_id,
+            agent_type=session.agent_type,
+            run_epoch=self._run_epoch,
+        )
+        # Drain whatever is currently available without blocking forever.
+        drained = 0
+        while drained < 200:
+            try:
+                record = await asyncio.wait_for(transport.read_line(), timeout=0.05)
+            except asyncio.TimeoutError:
+                break
+            if record is None:
+                # EOF: the provider process exited.
+                self._last_error = "native transport process exited"
+                break
+            drained += 1
+            # Let the transport capture any provider conversation id from the
+            # raw record (e.g. Claude/Cursor message_start.message.id).
+            transport.maybe_capture_conversation_id(record)
+            try:
+                events = self.adapter.normalize_line(record, ctx)
+            except Exception:
+                logger.exception(
+                    "agent_stream adapter %s failed on native record for session %s; skipping",
+                    self.adapter.adapter_id,
+                    self.session_id,
+                )
+                continue
+            for event in events:
+                if event.type == AgentStreamEventType.TURN_STARTED:
+                    self._run_epoch += 1
+                event.run_epoch = self._run_epoch
+                event = redact_event(event)
+                try:
+                    event = await self._store.append(event)
+                except Exception:
+                    logger.exception(
+                        "agent_stream store append failed for session %s; dropping event",
+                        self.session_id,
+                    )
+                    continue
+                if self._is_live:
+                    self._fanout(event)
+        self._is_live = True
 
     async def _tail_file(self, path: Path, session: ManagedSession) -> None:
         self._current_source = path
@@ -261,7 +749,7 @@ class SessionTailer:
                 event.run_epoch = self._run_epoch
                 event = redact_event(event)
                 try:
-                    await self._store.append(event)
+                    event = await self._store.append(event)
                 except Exception:
                     logger.exception(
                         "agent_stream store append failed for session %s; dropping event",
@@ -508,8 +996,17 @@ class SessionTailer:
 class TailerManager:
     """Process-wide registry of per-session tailers (one tailer per session)."""
 
-    def __init__(self, session_getter: Callable[[str], Optional[ManagedSession]]) -> None:
+    def __init__(
+        self,
+        session_getter: Callable[[str], Optional[ManagedSession]],
+        persist_session_id: Optional[Callable[[str, str], None]] = None,
+    ) -> None:
         self._session_getter = session_getter
+        # Optional durable persistence callback for the provider conversation
+        # id. When provided, it is invoked with (session_id, conversation_id)
+        # so the id survives a cold restart. When None, the id is only set on
+        # the in-memory ManagedSession (used by tests).
+        self._persist_session_id_cb = persist_session_id
         self._tailers: Dict[str, SessionTailer] = {}
         self._lock = asyncio.Lock()
         _TAILER_MANAGERS.add(self)
@@ -526,11 +1023,43 @@ class TailerManager:
                 adapter = get_adapter_for_session(session)
                 if adapter is None:
                     raise ValueError(f"no structured adapter for agent_type={session.agent_type}")
+
+                # Agent sessions use the native provider transport as their
+                # real-time source. Terminal sessions keep the transcript-file
+                # tailer.
+                #
+                # Fail-closed: if the native transport cannot be created for an
+                # agent session, surface the error and do NOT silently fall
+                # back to the transcript. The only exception is Cursor's
+                # explicit ``terminal_transcript`` compatibility mode.
+                native_transport: Optional[ProviderSession] = None
+                native_error: Optional[str] = None
+                is_agent = session.session_kind == SessionKind.AGENT
+                cursor_transcript_fallback = (
+                    session.agent_type == AgentType.CURSOR
+                    and session.cursor_transport == "terminal_transcript"
+                )
+
+                if is_agent and not cursor_transcript_fallback:
+                    try:
+                        native_transport = create_native_session(
+                            session,
+                            conversation_id_persist=lambda cid: self._persist_session_id(
+                                session.id, cid
+                            ),
+                        )
+                    except ValueError as exc:
+                        native_error = (
+                            f"native transport unavailable for {session.agent_type.value}: {exc}"
+                        )
+
                 tailer = SessionTailer(
                     workspace_id=session.workspace_id,
                     session_id=session.id,
                     adapter=adapter,
                     session_getter=lambda: self._session_getter(session.id),
+                    native_transport=native_transport,
+                    native_error=native_error,
                 )
                 self._tailers[session.id] = tailer
         if existing is not None:
@@ -552,6 +1081,24 @@ class TailerManager:
     async def subscribe(self, session: ManagedSession) -> "asyncio.Queue[AgentStreamEvent]":
         tailer = await self._get_or_create(session)
         return await tailer.subscribe()
+
+    async def send_message(
+        self,
+        session: ManagedSession,
+        text: str,
+        images: List[bytes],
+        client_turn_id: str,
+    ) -> None:
+        """Atomically deliver a user turn (text + images) for ``session``.
+
+        The composer's single input path for AGENT sessions. Delegates to the
+        tailer's native transport so the same ``ProviderSession`` owns both
+        the stream and the turn. ``client_turn_id`` is the frontend-generated
+        stable turn id; the tailer publishes an authoritative ``turn_started``
+        with it before the provider runs.
+        """
+        tailer = await self._get_or_create(session)
+        await tailer.send_message(text, images, client_turn_id)
 
     async def ensure_started(self, session: ManagedSession) -> SessionTailer:
         return await self._get_or_create(session)
@@ -578,6 +1125,45 @@ class TailerManager:
 
     def get_store(self, workspace_id: str, session_id: str) -> AgentStreamStore:
         return AgentStreamStore(workspace_id, session_id)
+
+    def _persist_session_id(self, session_id: str, conversation_id: str) -> None:
+        """Persist the provider conversation id back to the managed session.
+
+        This lets a cold restart resume the same provider conversation via
+        ``--resume`` (Claude/Cursor) or ``thread/resume`` (Codex).
+
+        This is only invoked after the provider has emitted the conversation id
+        in a system/init record, so ``agent_session_id_verified`` is set to
+        True alongside the id. A cold restart seeds ``_conversation_id_verified``
+        from this flag, never from the mere presence of a UUID.
+
+        If a durable persistence callback was supplied at construction, it is
+        invoked so the id is written to disk (ttyd tab state for direct tabs,
+        workspace session state for workspace sessions). Otherwise the id is
+        set on the in-memory ManagedSession only (test mode).
+        """
+        session = self._session_getter(session_id)
+        if session is None:
+            return
+        try:
+            session.agent_session_id = conversation_id
+            session.agent_session_id_verified = True
+        except Exception:
+            logger.exception(
+                "failed to set conversation id %s on session %s",
+                conversation_id,
+                session_id,
+            )
+            return
+        if self._persist_session_id_cb is not None:
+            try:
+                self._persist_session_id_cb(session_id, conversation_id)
+            except Exception:
+                logger.exception(
+                    "failed to durably persist conversation id %s for session %s",
+                    conversation_id,
+                    session_id,
+                )
 
     async def forget_session(self, session_id: str) -> None:
         """Stop and discard an in-process tailer for a deleted session."""

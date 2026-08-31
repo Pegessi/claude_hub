@@ -467,9 +467,12 @@ def test_structured_agent_session_rejects_plain_terminal_provider() -> None:
 
 
 @pytest.mark.asyncio
-async def test_direct_cursor_agent_pins_supported_transcript_transport(
+async def test_direct_cursor_agent_uses_native_transport(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Direct user AGENT cursor tabs use the native ProviderSession transport
+    (not the legacy terminal_transcript mode). The native transport owns the
+    Cursor process and produces the structured stream."""
     manager = TTYDManager.__new__(TTYDManager)
     manager._next_port = 12348
     manager.processes = {}
@@ -486,16 +489,6 @@ async def test_direct_cursor_agent_pins_supported_transcript_transport(
     monkeypatch.setattr(manager, "_save_state", lambda: None)
     monkeypatch.setattr(manager, "_save_order", lambda: None)
     monkeypatch.setattr(manager, "_schedule_codex_discovery", lambda process: None)
-    monkeypatch.setattr(
-        ttyd_manager_module,
-        "cursor_cli_version_from_executable",
-        lambda: next(iter(ttyd_manager_module.SUPPORTED_CURSOR_TRANSCRIPT_VERSIONS)),
-    )
-    monkeypatch.setattr(
-        ttyd_manager_module,
-        "cursor_data_dir_for_env",
-        lambda env: str(tmp_path / "cursor-data"),
-    )
 
     tab = await manager.create_tab(
         name="Cursor Agent",
@@ -505,10 +498,7 @@ async def test_direct_cursor_agent_pins_supported_transcript_transport(
     )
 
     process = manager.processes[tab.id]
-    assert process.cursor_transport == "terminal_transcript"
-    assert process.cursor_transcript_schema == ttyd_manager_module.CURSOR_TRANSCRIPT_SCHEMA
-    assert process.agent_session_id
-    assert process.agent_session_id in (process.cursor_transcript_path or "")
+    assert process.cursor_transport == "native"
 
 
 @pytest.mark.asyncio
@@ -543,9 +533,12 @@ async def test_cursor_terminal_session_keeps_native_terminal_transport(
 
 
 @pytest.mark.asyncio
-async def test_managed_nonterminal_tab_is_classified_as_agent(
+async def test_managed_nonterminal_tab_stays_terminal_unless_explicit_agent(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Managed task runners (workspace tabs without explicit session_kind=AGENT)
+    must keep raw TUI Terminal semantics. Only an explicit SessionKind.AGENT
+    from the caller promotes a tab to the native/inert structured surface."""
     manager = TTYDManager.__new__(TTYDManager)
     manager._next_port = 12350
     manager.processes = {}
@@ -563,6 +556,8 @@ async def test_managed_nonterminal_tab_is_classified_as_agent(
     monkeypatch.setattr(manager, "_save_order", lambda: None)
     monkeypatch.setattr(manager, "_schedule_codex_discovery", lambda process: None)
 
+    # Workspace-managed Claude tab with no explicit session_kind → stays TERMINAL
+    # so the orchestrator's task runner keeps raw TUI control-plane access.
     tab = await manager.create_tab(
         name="Managed Claude",
         cwd=str(tmp_path),
@@ -570,7 +565,18 @@ async def test_managed_nonterminal_tab_is_classified_as_agent(
         workspace_id="workspace-1",
     )
 
-    assert tab.session_kind == SessionKind.AGENT
+    assert tab.session_kind == SessionKind.TERMINAL
+
+    # An explicit SessionKind.AGENT (direct user Agent tab) is honored.
+    agent_tab = await manager.create_tab(
+        name="User Agent",
+        cwd=str(tmp_path),
+        agent_type=AgentType.CLAUDE,
+        workspace_id="workspace-1",
+        session_kind=SessionKind.AGENT,
+    )
+
+    assert agent_tab.session_kind == SessionKind.AGENT
 
 
 def test_non_solo_codex_initial_launch_translates_model_and_keeps_env_wrapper(
@@ -826,7 +832,11 @@ def test_claude_solo_env_model_is_passed_as_startup_model_flag(
     assert "ANTHROPIC_CUSTOM_MODEL_OPTION" not in process.env
 
 
-def test_structured_claude_solo_preaccepts_bypass_disclaimer_as_flag_setting() -> None:
+def test_structured_claude_solo_uses_native_transport_not_tmux_cli() -> None:
+    """For structured (AGENT) Claude solo sessions, the tmux pane hosts an
+    inert user shell — the native ProviderSession owns the Claude process and
+    applies ``--dangerously-skip-permissions`` directly. The tmux command
+    must NOT embed ``--settings`` or launch the provider CLI."""
     process = TTYDProcess(
         tab_id="tab-structured-claude-solo",
         port=12358,
@@ -834,15 +844,19 @@ def test_structured_claude_solo_preaccepts_bypass_disclaimer_as_flag_setting() -
         solo_mode=True,
         agent_type=AgentType.CLAUDE,
         session_kind=SessionKind.AGENT,
+        shell="claude",
         env={"ANTHROPIC_MODEL": "gateway/model"},
     )
 
     cmd = process._build_ttyd_command(session_exists=False)
-    settings = json.load(open(_claude_settings_path(cmd[-1]), encoding="utf-8"))
+    # The last token is the actual shell launched inside the env wrapper.
+    launched_shell = shlex.split(cmd[-1])[-1]
 
-    assert "bypassPermissionsModeAccepted" not in settings
-    assert "bypassPermissionsModeAccepted" in cmd[-1]
-    assert cmd[-1].count("--settings") == 2
+    # AGENT sessions run an inert user shell in tmux; the native transport
+    # owns the provider CLI and its solo-mode flags.
+    assert launched_shell not in ("claude", "codex", "agent")
+    assert "--settings" not in cmd[-1]
+    assert "bypassPermissionsModeAccepted" not in cmd[-1]
 
 
 def test_terminal_claude_solo_keeps_interactive_bypass_disclaimer() -> None:
@@ -3227,6 +3241,131 @@ def test_resume_quarantined_round_trips_through_state(monkeypatch: MonkeyPatch, 
     manager2._next_port = 10000
     manager2._load_state()
     assert manager2.processes["tab-legacy"].resume_quarantined is False
+
+
+def test_legacy_missing_session_kind_reloads_as_terminal(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """Legacy persisted tabs (no ``session_kind`` key) are managed task TUI
+    runners on the Hub control plane. They must reload as ``SessionKind.TERMINAL``
+    so they keep raw TUI semantics — never auto-promoted to the native/inert
+    Agent surface. An explicit persisted ``session_kind=agent`` is honored."""
+    state_file = tmp_path / "tabs.json"
+    monkeypatch.setattr(ttyd_manager_module, "STATE_FILE", state_file)
+
+    legacy_state = [
+        {
+            "id": "tab-legacy-claude",
+            "name": "Legacy Claude",
+            "shell": "claude",
+            "cwd": "/x",
+            "solo_mode": False,
+            "agent_type": "claude",
+            "target": "local",
+            "port": 12410,
+            "created_at": "2026-01-01T00:00:00",
+            "workspace_id": "ws-1",
+        },
+        {
+            "id": "tab-legacy-codex",
+            "name": "Legacy Codex",
+            "shell": "codex",
+            "cwd": "/x",
+            "solo_mode": False,
+            "agent_type": "codex",
+            "target": "local",
+            "port": 12411,
+            "created_at": "2026-01-01T00:00:00",
+            "workspace_id": "ws-1",
+        },
+        {
+            "id": "tab-explicit-agent",
+            "name": "Explicit Agent",
+            "shell": "claude",
+            "cwd": "/x",
+            "solo_mode": False,
+            "agent_type": "claude",
+            "target": "local",
+            "port": 12412,
+            "created_at": "2026-01-01T00:00:00",
+            "session_kind": "agent",
+        },
+    ]
+    state_file.write_text(json.dumps(legacy_state), encoding="utf-8")
+
+    manager = TTYDManager.__new__(TTYDManager)
+    manager.processes = {}
+    manager._next_port = 10000
+    manager._load_state()
+
+    # Legacy rows (no session_kind) default to TERMINAL regardless of
+    # agent_type or workspace_id — they are managed task runners.
+    assert manager.processes["tab-legacy-claude"].session_kind == SessionKind.TERMINAL
+    assert manager.processes["tab-legacy-codex"].session_kind == SessionKind.TERMINAL
+    # Explicit persisted session_kind=agent is honored.
+    assert manager.processes["tab-explicit-agent"].session_kind == SessionKind.AGENT
+
+
+def test_agent_session_id_verified_round_trips_through_state(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """``agent_session_id_verified`` must persist through ``tabs.json`` and
+    reload correctly. A verified id seeds ``_conversation_id_verified=True``
+    on cold restart so the first turn uses ``--resume``; an unverified
+    constructive id uses ``--session-id``."""
+    state_file = tmp_path / "tabs.json"
+    monkeypatch.setattr(ttyd_manager_module, "STATE_FILE", state_file)
+
+    verified = TTYDProcess(
+        tab_id="tab-verified",
+        port=12420,
+        name="Verified",
+        agent_type=AgentType.CLAUDE,
+        agent_session_id="verified-sid",
+        agent_session_id_verified=True,
+    )
+    unverified = TTYDProcess(
+        tab_id="tab-unverified",
+        port=12421,
+        name="Unverified",
+        agent_type=AgentType.CLAUDE,
+        agent_session_id="unverified-sid",
+        agent_session_id_verified=False,
+    )
+
+    state_file.write_text(json.dumps([verified.to_dict(), unverified.to_dict()]), encoding="utf-8")
+
+    manager = TTYDManager.__new__(TTYDManager)
+    manager.processes = {}
+    manager._next_port = 10000
+    manager._load_state()
+
+    assert manager.processes["tab-verified"].agent_session_id_verified is True
+    assert manager.processes["tab-verified"].agent_session_id == "verified-sid"
+    assert manager.processes["tab-unverified"].agent_session_id_verified is False
+    assert manager.processes["tab-unverified"].agent_session_id == "unverified-sid"
+
+    # Legacy state (no agent_session_id_verified key) defaults to False.
+    legacy_state = [
+        {
+            "id": "tab-legacy",
+            "name": "Legacy",
+            "shell": "claude",
+            "cwd": "/x",
+            "solo_mode": False,
+            "agent_type": "claude",
+            "target": "local",
+            "port": 12422,
+            "created_at": "2026-01-01T00:00:00",
+            "agent_session_id": "legacy-sid",
+        }
+    ]
+    state_file.write_text(json.dumps(legacy_state), encoding="utf-8")
+    manager2 = TTYDManager.__new__(TTYDManager)
+    manager2.processes = {}
+    manager2._next_port = 10000
+    manager2._load_state()
+    assert manager2.processes["tab-legacy"].agent_session_id_verified is False
 
 
 def test_codex_quarantined_does_not_issue_resume() -> None:

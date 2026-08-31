@@ -32,8 +32,8 @@ test('accepts a valid PNG under the size limit', () => {
   assert.equal(err, null)
 })
 
-test('accepts JPEG, GIF, WebP, BMP', () => {
-  for (const type of ['image/jpeg', 'image/gif', 'image/webp', 'image/bmp']) {
+test('accepts JPEG, GIF, and WebP', () => {
+  for (const type of ['image/jpeg', 'image/gif', 'image/webp']) {
     assert.equal(
       validateImageAttachment(fakeFile({ type })),
       null,
@@ -43,7 +43,7 @@ test('accepts JPEG, GIF, WebP, BMP', () => {
 })
 
 test('rejects unsupported mime types', () => {
-  for (const type of ['text/plain', 'application/pdf', 'image/svg+xml', 'image/tiff']) {
+  for (const type of ['text/plain', 'application/pdf', 'image/svg+xml', 'image/tiff', 'image/bmp']) {
     const err = validateImageAttachment(fakeFile({ type }))
     assert.ok(err, `${type} should be rejected`)
     assert.ok(err.includes('Unsupported image type'))

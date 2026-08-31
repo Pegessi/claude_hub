@@ -1324,6 +1324,7 @@ class TTYDProcess:
         workspace_role: Optional[WorkspaceSessionRole] = None,
         env: Optional[Dict[str, str]] = None,
         agent_session_id: Optional[str] = None,
+        agent_session_id_verified: bool = False,
         from_persisted_state: bool = False,
         resume_quarantined: bool = False,
         shell_explicitly_provided: Optional[bool] = None,
@@ -1350,7 +1351,9 @@ class TTYDProcess:
         self.workspace_name = workspace_name
         self.workspace_role = workspace_role
         self.cursor_transport = (
-            cursor_transport if cursor_transport in {"acp", "terminal_transcript"} else "terminal"
+            cursor_transport
+            if cursor_transport in {"acp", "terminal_transcript", "native"}
+            else "terminal"
         )
         self.cursor_data_dir = cursor_data_dir
         self.cursor_cli_version = cursor_cli_version
@@ -1399,6 +1402,13 @@ class TTYDProcess:
             self.agent_session_id = str(uuid.uuid4())
         else:
             self.agent_session_id = None
+        # Whether ``agent_session_id`` has been verified by the provider (the
+        # provider emitted it in a system/init record). Only a verified id may
+        # be passed to ``--resume``; an unverified (constructive) id must use
+        # ``--session-id``. Persisted alongside ``agent_session_id`` so a cold
+        # restart does not infer verification merely from the presence of a
+        # UUID.
+        self.agent_session_id_verified: bool = agent_session_id_verified
         # True only when an explicit session id was supplied at construction
         # time (e.g. the user selected a specific Codex session to resume in
         # the create-tab UI). A generated uuid4 placeholder (above) is used
@@ -1490,7 +1500,12 @@ class TTYDProcess:
             else:
                 default_cmd = get_agent_command(agent_type)
                 self._shell_explicitly_provided = bool(shell) and shell != default_cmd
-        if shell:
+        if session_kind == SessionKind.AGENT:
+            # Agent tabs always host an inert lifecycle shell. Ignore even an
+            # explicitly supplied provider-shaped ``shell`` value: the native
+            # ProviderSession is the only process allowed to own the provider.
+            self.shell = os.environ.get("SHELL", "/bin/bash")
+        elif shell:
             self.shell = shell
         elif agent_type == AgentType.TERMINAL:
             self.shell = os.environ.get("SHELL", "/bin/bash")
@@ -1759,6 +1774,10 @@ asyncio.run(_main())
         return None
 
     def _tmux_shell_command(self, session_exists: bool) -> str:
+        if self.session_kind == SessionKind.AGENT:
+            # Agent sessions are owned by the native ProviderSession; tmux
+            # only hosts an inert shell. Never launch the provider CLI here.
+            return self._with_env(self.shell)
         if (
             self.solo_mode
             and not session_exists
@@ -1803,7 +1822,13 @@ asyncio.run(_main())
         # Session is guaranteed absent here (we returned early if it existed),
         # so recover whenever this tab was restored from persisted state.
         recover = self._should_recover(session_exists=False)
-        if self.target == ExecutionTarget.REMOTE:
+        if self.session_kind == SessionKind.AGENT:
+            # Agent sessions are owned exclusively by the native ProviderSession.
+            # tmux hosts only an inert lifecycle shell so the tab/ttyd model
+            # still has a pane, but the provider CLI is never launched here.
+            # Composer input goes to the native transport, never to this pane.
+            cmd.append(self._with_env(self.shell))
+        elif self.target == ExecutionTarget.REMOTE:
             cmd.append(shlex.join(self._build_remote_launcher()))
         elif self._shell_explicitly_provided:
             # Caller supplied an explicit shell (e.g. tests that need a plain
@@ -1996,7 +2021,11 @@ asyncio.run(_main())
             cmd.extend(["-c", self.cwd])
 
         recover = self._should_recover(session_exists=session_exists)
-        if self.target == ExecutionTarget.REMOTE:
+        if self.session_kind == SessionKind.AGENT:
+            # Agent sessions are owned by the native ProviderSession; tmux
+            # only hosts an inert shell. Never launch the provider CLI here.
+            cmd.append(self._with_env(self.shell))
+        elif self.target == ExecutionTarget.REMOTE:
             cmd.extend(self._build_remote_launcher())
         elif self._shell_explicitly_provided:
             # Caller supplied an explicit shell (e.g. tests that need a plain
@@ -2239,6 +2268,10 @@ asyncio.run(_main())
         """
         if self.agent_type not in {AgentType.CLAUDE, AgentType.CODEX}:
             raise ValueError("switch_env is only supported for Claude and Codex tabs")
+        if self.session_kind == SessionKind.AGENT:
+            # Agent sessions own their provider via the native transport;
+            # env changes are applied to the ProviderSession, not tmux.
+            raise ValueError("switch_env is not supported for native Agent sessions")
         if self.target != ExecutionTarget.LOCAL:
             raise ValueError("switch_env is only supported for local tabs")
         if not await _tmux_session_exists_async(self.tmux_session):
@@ -2785,6 +2818,7 @@ asyncio.run(_main())
             "port": self.port,
             "created_at": self.created_at.isoformat(),
             "agent_session_id": self.agent_session_id,
+            "agent_session_id_verified": self.agent_session_id_verified,
             "resume_quarantined": bool(self.resume_quarantined),
             "shell_explicitly_provided": self._shell_explicitly_provided,
             "cursor_transport": self.cursor_transport,
@@ -2815,6 +2849,7 @@ asyncio.run(_main())
             workspace_name=self.workspace_name,
             workspace_role=self.workspace_role,
             agent_session_id=self.agent_session_id,
+            agent_session_id_verified=self.agent_session_id_verified,
             cursor_transport=self.cursor_transport,
             cursor_data_dir=self.cursor_data_dir,
             cursor_cli_version=self.cursor_cli_version,
@@ -2861,13 +2896,13 @@ class TTYDManager:
                         session_kind_str = tab_data.get("session_kind")
                         if session_kind_str in [e.value for e in SessionKind]:
                             session_kind = SessionKind(session_kind_str)
-                        elif tab_data.get("workspace_id") and agent_type != AgentType.TERMINAL:
-                            # Managed workspace rows predate session_kind but
-                            # have always represented agents, not user shells.
-                            session_kind = SessionKind.AGENT
                         else:
-                            # Standalone legacy tabs retain their raw terminal
-                            # presentation after upgrade.
+                            # Legacy rows (no session_kind) are raw TUI task
+                            # runners (dispatcher / reviewer / worker) on the
+                            # managed control plane. They must keep TERMINAL
+                            # semantics — only an explicit persisted
+                            # session_kind=agent marks a direct-user native
+                            # Agent surface.
                             session_kind = SessionKind.TERMINAL
                         target_str = tab_data.get("target", "local")
                         target = (
@@ -2901,6 +2936,9 @@ class TTYDManager:
                             workspace_name=tab_data.get("workspace_name"),
                             workspace_role=workspace_role,
                             agent_session_id=tab_data.get("agent_session_id"),
+                            agent_session_id_verified=tab_data.get(
+                                "agent_session_id_verified", False
+                            ),
                             from_persisted_state=True,
                             resume_quarantined=tab_data.get("resume_quarantined", False),
                             shell_explicitly_provided=tab_data.get("shell_explicitly_provided"),
@@ -3014,6 +3052,28 @@ class TTYDManager:
         self._save_state()
         return True
 
+    def set_tab_agent_session_id(self, tab_id: str, agent_session_id: str) -> bool:
+        """Durably persist the provider conversation id for a tab.
+
+        The captured conversation id (Claude/Codex/Cursor) is stored on the tab
+        so a cold restart can resume the same provider conversation via
+        ``--resume`` (Claude/Cursor) or ``thread/resume`` (Codex).
+
+        This is only called after the provider has emitted the id in a
+        system/init record, so ``agent_session_id_verified`` is set to True
+        alongside the id. A cold restart seeds ``_conversation_id_verified``
+        from this flag, never from the mere presence of a UUID.
+        """
+        process = self.processes.get(tab_id)
+        if not process:
+            return False
+        if process.agent_session_id == agent_session_id and process.agent_session_id_verified:
+            return True
+        process.agent_session_id = agent_session_id
+        process.agent_session_id_verified = True
+        self._save_state()
+        return True
+
     def _sync_order_with_processes(self) -> None:
         """Sync order list with current processes - add any missing tabs."""
         # Add any tabs that are in processes but not in order
@@ -3082,15 +3142,12 @@ class TTYDManager:
         logger.info(
             f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}, session_kind={session_kind}, target={target}, remote_profile_id={remote_profile_id}, remote_forward_port={remote_forward_port}, workspace_id={workspace_id}, workspace_role={workspace_role}, agent_session_id={agent_session_id}"
         )
-        if (
-            workspace_id
-            and agent_type != AgentType.TERMINAL
-            and session_kind == SessionKind.TERMINAL
-        ):
-            # Managed non-shell tabs are agents by product definition. Keep
-            # this classification at the manager boundary so older callers
-            # and test doubles do not need a new orchestration-only argument.
-            session_kind = SessionKind.AGENT
+        # session_kind is authoritative: only an explicit SessionKind.AGENT
+        # from the caller (direct user Agent tab) gets the native/inert
+        # structured surface. Managed task runners (dispatcher, reviewer,
+        # worker) created by the workspace orchestrator pass TERMINAL so they
+        # keep raw TUI control-plane semantics. We never auto-promote a
+        # TERMINAL tab to AGENT based on workspace_id or agent_type.
         if (
             session_kind == SessionKind.AGENT
             and agent_type == AgentType.CURSOR
@@ -3098,26 +3155,10 @@ class TTYDManager:
             and cwd
             and cursor_transport == "terminal"
         ):
-            # Direct Agent sessions need the same pinned same-process Cursor
-            # transcript provenance as managed workspace agents. Terminal
-            # sessions intentionally keep Cursor's native TUI transport.
-            cursor_session_id = agent_session_id or str(uuid.uuid4())
-            cursor_cli_version = cursor_cli_version_from_executable()
-            if cursor_cli_version in SUPPORTED_CURSOR_TRANSCRIPT_VERSIONS:
-                launch_env = dict(env or {})
-                cursor_data_dir = cursor_data_dir_for_env(launch_env)
-                launch_env["CURSOR_DATA_DIR"] = cursor_data_dir
-                env = launch_env
-                agent_session_id = cursor_session_id
-                cursor_transport = "terminal_transcript"
-                cursor_transcript_path = str(
-                    cursor_terminal_transcript_path(
-                        cwd,
-                        cursor_session_id,
-                        data_dir=cursor_data_dir,
-                    )
-                )
-                cursor_transcript_schema = CURSOR_TRANSCRIPT_SCHEMA
+            # Agent sessions use the native ProviderSession as the sole owner
+            # of the Cursor process. The legacy terminal_transcript mode is
+            # retained only as an explicit compatibility fallback.
+            cursor_transport = "native"
         tab_id = str(uuid.uuid4())
         port = self._get_next_port()
 

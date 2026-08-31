@@ -6,9 +6,8 @@
     @dragleave="handleDragLeave"
     @drop="handleDrop"
   >
-    <!-- Connection / hydration state banner.
-         role=status (polite) for hydrating; role=alert (assertive) for failed.
-         Fail-closed: when failed, the parent TerminalPane switches back to raw. -->
+    <!-- Agent sessions fail closed on this surface. A stream failure never
+         mounts a hidden raw terminal; users can retry or create a Terminal. -->
     <div
       v-if="connectionState !== 'live'"
       class="structured-banner"
@@ -35,6 +34,7 @@
         >
           Retry
         </button>
+        <span class="banner-guidance">Create a Terminal session for native TUI access.</span>
       </template>
     </div>
 
@@ -173,10 +173,7 @@
           </div>
         </div>
 
-        <!-- Direct terminal input reaches the agent before its provider writes
-             a transcript line. Keep that acknowledgement visible during this
-             gap so Send never looks like a no-op. The pending turn disappears
-             once the authoritative transcript contains the same user text. -->
+        <!-- Optimistic turns are reconciled by client_turn_id, never by text. -->
         <div
           v-for="turn in pendingTurns"
           :key="turn.key"
@@ -196,7 +193,7 @@
             </div>
           </div>
           <div class="event-status event-status--pending">
-            <span>Sent to terminal · waiting for agent activity</span>
+            <span>Waiting for agent activity…</span>
           </div>
         </div>
       </div>
@@ -256,7 +253,8 @@
             type="button"
             class="composer-attach-btn"
             aria-label="Attach image"
-            title="Attach image"
+            :title="supportsImages ? 'Attach image' : 'This agent does not support image attachments'"
+            :disabled="!supportsImages"
             @click="triggerFilePicker"
           >
             <span aria-hidden="true">📎</span>
@@ -264,7 +262,7 @@
           <input
             ref="fileInputEl"
             type="file"
-            accept="image/png,image/jpeg,image/gif,image/webp,image/bmp"
+            accept="image/png,image/jpeg,image/gif,image/webp"
             multiple
             class="composer-file-input"
             @change="handleFilePick"
@@ -274,7 +272,7 @@
             class="composer-textarea"
             placeholder="Send a message…"
             rows="1"
-            :disabled="isSending"
+            :disabled="isSending || connectionState !== 'live'"
             @keydown.enter.exact.prevent="submit"
             @paste="handlePaste"
           />
@@ -294,10 +292,19 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useWorkspaceStore } from '@/stores/workspaceStore'
 import { useAgentStream, validateImageAttachment, fileToDataUrl } from '@/composables/useAgentStream'
 import { groupEventsIntoTurns } from '@/utils/agentStreamTimeline'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
+import {
+  advanceTextReveal,
+  beginTextReveal,
+  completeTextReveal,
+  isTextRevealSettled,
+  nextTextRevealFrame,
+  retargetTextReveal,
+  visibleRevealedText,
+  type TextRevealState,
+} from '@/utils/textReveal'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import type { WorkspaceAttachmentCreate } from '@/types'
 
@@ -308,15 +315,7 @@ const props = defineProps<{
   tabId?: string
 }>()
 
-const emit = defineEmits<{
-  (e: 'fallback-to-raw'): void
-}>()
-
-const workspaceStore = useWorkspaceStore()
-
-const { events, connectionState, errorMessage, start, stop } = useAgentStream()
-
-const isTerminalTabSource = computed(() => Boolean(props.tabId))
+const { events, connectionState, errorMessage, capabilities, start, stop } = useAgentStream()
 
 function startStream() {
   if (props.tabId) {
@@ -330,10 +329,24 @@ function startStream() {
 // The flat event stream is grouped into turns by the pure
 // ``groupEventsIntoTurns`` utility (see agentStreamTimeline.ts).
 
-const turns = computed(() => groupEventsIntoTurns(events.value))
+const authoritativeTurns = computed(() => groupEventsIntoTurns(events.value))
+const revealStates = ref<Record<string, TextRevealState>>({})
+let revealAnimationFrame: number | null = null
+let previousRevealFrameAt: number | null = null
+
+const turns = computed(() => authoritativeTurns.value.map(turn => {
+  const state = revealStates.value[turn.key]
+  return {
+    ...turn,
+    assistantText: state
+      ? visibleRevealedText(state, { streaming: !turn.completed })
+      : turn.assistantText,
+  }
+}))
 
 type PendingTurn = {
   key: string
+  turnId: string
   userText: string
   attachmentCount: number
 }
@@ -341,15 +354,61 @@ type PendingTurn = {
 const pendingDirectTurns = ref<PendingTurn[]>([])
 
 const pendingTurns = computed(() => {
-  const observedUserTexts = new Set(
-    turns.value
-      .map(turn => turn.userText.trim())
-      .filter(Boolean),
-  )
-  return pendingDirectTurns.value.filter(turn =>
-    !turn.userText.trim() || !observedUserTexts.has(turn.userText.trim()),
-  )
+  const observedTurnIds = new Set(authoritativeTurns.value.map(turn => turn.turnId).filter(Boolean))
+  return pendingDirectTurns.value.filter(turn => !observedTurnIds.has(turn.turnId))
 })
+
+function cancelTextReveal() {
+  if (revealAnimationFrame !== null) cancelAnimationFrame(revealAnimationFrame)
+  revealAnimationFrame = null
+  previousRevealFrameAt = null
+}
+
+function scheduleTextReveal() {
+  if (revealAnimationFrame === null) revealAnimationFrame = requestAnimationFrame(advanceTextRevealFrame)
+}
+
+function advanceTextRevealFrame(timestamp: number) {
+  revealAnimationFrame = null
+  const frame = nextTextRevealFrame(previousRevealFrameAt, timestamp)
+  if (!frame) {
+    scheduleTextReveal()
+    return
+  }
+  previousRevealFrameAt = frame.frameAtMs
+  let hasBacklog = false
+  const next = { ...revealStates.value }
+  for (const [key, state] of Object.entries(next)) {
+    const advanced = advanceTextReveal(state, frame.elapsedMs)
+    next[key] = advanced
+    if (!isTextRevealSettled(advanced)) hasBacklog = true
+  }
+  revealStates.value = next
+  if (hasBacklog) scheduleTextReveal()
+  else previousRevealFrameAt = null
+}
+
+watch(
+  authoritativeTurns,
+  (latest) => {
+    const next: Record<string, TextRevealState> = {}
+    let hasBacklog = false
+    for (const turn of latest) {
+      const prior = revealStates.value[turn.key]
+      let state = prior
+        ? retargetTextReveal(prior, turn.assistantText)
+        : beginTextReveal(turn.assistantText)
+      if (turn.completed) state = completeTextReveal(state)
+      next[turn.key] = state
+      if (!isTextRevealSettled(state)) hasBacklog = true
+    }
+    revealStates.value = next
+    const observed = new Set(latest.map(turn => turn.turnId).filter(Boolean))
+    pendingDirectTurns.value = pendingDirectTurns.value.filter(turn => !observed.has(turn.turnId))
+    if (hasBacklog) scheduleTextReveal()
+  },
+  { immediate: true },
+)
 
 // ── Stream lifecycle ────────────────────────────────────────────────────────
 
@@ -363,15 +422,16 @@ onUnmounted(() => {
 
 watch(
   () => [props.sessionId, props.tabId],
-  startStream,
+  () => {
+    pendingDirectTurns.value = []
+    revealStates.value = {}
+    draftMessage.value = ''
+    attachments.value = []
+    composerError.value = null
+    cancelTextReveal()
+    startStream()
+  },
 )
-
-// Fail-closed: if the stream fails, tell the parent to switch back to raw.
-watch(connectionState, (state) => {
-  if (state === 'failed') {
-    emit('fallback-to-raw')
-  }
-})
 
 function retry() {
   startStream()
@@ -399,7 +459,10 @@ let timelineScrollFrame: number | null = null
 let timelineVerificationFrame: number | null = null
 let timelineDisposed = false
 
-const canSend = computed(() => draftMessage.value.trim().length > 0 || attachments.value.length > 0)
+const canSend = computed(() => connectionState.value === 'live' &&
+  (draftMessage.value.trim().length > 0 || attachments.value.length > 0))
+
+const supportsImages = computed(() => capabilities.value?.supports_images ?? false)
 
 function triggerFilePicker() {
   fileInputEl.value?.click()
@@ -407,6 +470,10 @@ function triggerFilePicker() {
 
 async function addFiles(files: FileList | File[]) {
   composerError.value = null
+  if (!supportsImages.value) {
+    composerError.value = 'This agent does not support image attachments.'
+    return
+  }
   const list = Array.from(files)
   for (const file of list) {
     const err = validateImageAttachment(file)
@@ -475,44 +542,45 @@ function removeAttachment(att: DraftAttachment) {
 }
 
 /**
- * Terminal-created tabs do not participate in the Workspace outbox.  Their
- * structured composer intentionally mirrors a user operating that very same
- * terminal: images go through the established macOS pasteboard bridge, then
- * input is queued through TerminalView so hidden raw panes retain ownership.
+ * Deliver composer input to the native provider transport via ``/stream/send``.
+ *
+ * StructuredPane is only mounted for AGENT sessions (session_kind=agent).
+ * Both workspace-managed sessions (sessionId) and direct agent tabs (tabId)
+ * route through the native transport's atomic send_message(text, images), so
+ * text and images are staged + submitted together — no leaked attachments
+ * across turns, no split-brain with a hidden xterm shell.
  */
-async function sendToTerminalTab(
+async function sendToStream(
   message: string,
   atts: WorkspaceAttachmentCreate[],
+  clientTurnId: string,
 ) {
-  const sendKey = window.__claudeHub.sendTerminalKey
-  const sendText = window.__claudeHub.sendTerminalText
-  if (!sendKey || !sendText) {
-    throw new Error('Terminal input is not ready. Switch to Terminal once, then retry.')
-  }
-
-  for (const att of atts) {
-    const image = await fetch(att.data_url)
-    if (!image.ok) throw new Error(`Unable to read ${att.filename}`)
-    const form = new FormData()
-    form.append('image', await image.blob(), att.filename)
-    const response = await fetch('/api/clipboard/image', {
-      method: 'POST',
-      body: form,
-      credentials: 'same-origin',
-    })
-    if (!response.ok) {
-      throw new Error(`Unable to prepare ${att.filename}: ${response.status}`)
+  const base = props.sessionId
+    ? `/api/workspaces/sessions/${props.sessionId}/stream/send`
+    : `/api/workspaces/tabs/${props.tabId}/stream/send`
+  const res = await fetch(base, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({
+      client_turn_id: clientTurnId,
+      text: message,
+      attachments: atts.map(({ filename, mime_type, data_url }) => ({
+        filename,
+        mime_type,
+        data_url,
+      })),
+    }),
+  })
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`
+    try {
+      const body = await res.json()
+      if (body?.detail) detail = body.detail
+    } catch {
+      // ignore non-JSON error body
     }
-    if (!sendKey('v', true)) {
-      throw new Error('Terminal input is not ready. Switch to Terminal once, then retry.')
-    }
-  }
-
-  // One terminal write keeps the prompt and its submit carriage return in
-  // order. Per-character browser messages can render the text while losing
-  // the trailing Enter when a long prompt saturates the input path.
-  if (!sendText(`${message}\r`, props.tabId)) {
-    throw new Error('Terminal input is not ready. Switch to Terminal once, then retry.')
+    throw new Error(detail)
   }
 }
 
@@ -526,27 +594,31 @@ async function submit() {
     mime_type,
     data_url,
   }))
+  const clientTurnId = typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `turn-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`
   try {
-    if (isTerminalTabSource.value) {
-      await sendToTerminalTab(message, atts)
-      pendingDirectTurns.value = [
-        ...pendingDirectTurns.value,
-        {
-          key: `pending-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          userText: message,
-          attachmentCount: atts.length,
-        },
-      ]
-      requestLatestAnchor(true)
-    } else if (props.sessionId) {
-      await workspaceStore.sendMessage(props.sessionId, message, atts)
-    } else {
+    if (!props.sessionId && !props.tabId) {
       throw new Error('Structured source is unavailable.')
     }
+    // Show the user's turn immediately; the stream will replace it with the
+    // authoritative transcript line once the provider echoes it back.
+    pendingDirectTurns.value = [
+      ...pendingDirectTurns.value,
+      {
+        key: `pending-${clientTurnId}`,
+        turnId: clientTurnId,
+        userText: message,
+        attachmentCount: atts.length,
+      },
+    ]
+    requestLatestAnchor(true)
+    await sendToStream(message, atts, clientTurnId)
     // Success: clear the composer.
     draftMessage.value = ''
     attachments.value = []
   } catch (err) {
+    pendingDirectTurns.value = pendingDirectTurns.value.filter(turn => turn.turnId !== clientTurnId)
     // Retain message + attachments on error so the user can retry.
     composerError.value = err instanceof Error ? err.message : 'Failed to send message.'
   } finally {
@@ -638,6 +710,7 @@ onUnmounted(() => {
   timelineResizeObserver?.disconnect()
   timelineResizeObserver = null
   cancelScheduledTimelineScroll()
+  cancelTextReveal()
 })
 </script>
 
@@ -664,6 +737,11 @@ onUnmounted(() => {
   font-size: 12px;
   color: var(--ch-color-text-muted);
   flex-shrink: 0;
+}
+
+.banner-guidance {
+  margin-left: auto;
+  color: var(--ch-color-text-subtle);
 }
 
 .banner-spinner {
@@ -980,6 +1058,11 @@ onUnmounted(() => {
 
 .composer-attach-btn:hover {
   background-color: var(--ch-color-surface-control-hover);
+}
+
+.composer-attach-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .composer-attach-btn:focus-visible {

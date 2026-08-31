@@ -303,6 +303,7 @@ class _SessionsMixin:
             tab_id=tab.id,
             role=role,
             agent_type=payload.agent_type,
+            session_kind=tab.session_kind,
             status=ManagedSessionStatus.SPAWNING,
             runtime_status=AgentRuntimeStatus.IDLE,
             current_task_id=None,
@@ -548,3 +549,26 @@ class _SessionsMixin:
             action="deleted",
             reason=None,
         )
+
+    def set_session_agent_session_id(self, session_id: str, agent_session_id: str) -> bool:
+        """Durably persist the provider conversation id for a workspace session.
+
+        The captured conversation id (Claude/Codex/Cursor) is stored on the
+        managed session so a cold restart can resume the same provider
+        conversation via ``--resume`` (Claude/Cursor) or ``thread/resume``
+        (Codex).
+
+        This is only called after the provider has emitted the id in a
+        system/init record, so ``agent_session_id_verified`` is set to True
+        alongside the id. A cold restart seeds ``_conversation_id_verified``
+        from this flag, never from the mere presence of a UUID.
+        """
+        session = self.sessions.get(session_id)
+        if session is None:
+            return False
+        if session.agent_session_id == agent_session_id and session.agent_session_id_verified:
+            return True
+        session.agent_session_id = agent_session_id
+        session.agent_session_id_verified = True
+        self._save_state()
+        return True

@@ -188,6 +188,14 @@ class CodexJsonlAdapter(AgentStreamAdapter):
         events: List[AgentStreamEvent] = []
         if not isinstance(raw, dict):
             return events
+
+        # Native app-server transport emits JSON-RPC notifications with a
+        # ``method`` field (slash-delimited, e.g. ``item/agentMessage/delta``).
+        # Transcript files use ``type``/``payload`` instead.
+        method = raw.get("method")
+        if isinstance(method, str):
+            return self._normalize_notification(method, raw.get("params"), ctx)
+
         top_type = raw.get("type")
         payload = raw.get("payload")
         if not isinstance(payload, dict):
@@ -200,6 +208,37 @@ class CodexJsonlAdapter(AgentStreamAdapter):
             events.extend(self._normalize_event_msg(payload, payload_type, ctx))
         elif top_type == "response_item":
             events.extend(self._normalize_response_item(payload, payload_type, ctx))
+        return events
+
+    def _normalize_notification(
+        self, method: str, params: Any, ctx: NormalizeContext
+    ) -> List[AgentStreamEvent]:
+        """Normalize a Codex app-server JSON-RPC notification."""
+        events: List[AgentStreamEvent] = []
+        if not isinstance(params, dict):
+            return events
+        if method == "turn/started":
+            events.append(ctx.event(AgentStreamEventType.TURN_STARTED, {"summary": ""}))
+        elif method == "turn/completed":
+            turn = params.get("turn")
+            status = "completed"
+            if isinstance(turn, dict):
+                turn_status = turn.get("status")
+                if turn_status in ("failed", "cancelled", "completed"):
+                    status = turn_status
+            events.append(ctx.event(AgentStreamEventType.TURN_COMPLETED, {"status": status}))
+        elif method == "item/agentMessage/delta":
+            delta = params.get("delta")
+            if isinstance(delta, str) and delta:
+                events.append(ctx.event(AgentStreamEventType.TEXT_DELTA, {"text": delta}))
+        elif method == "item/reasoning/textDelta":
+            delta = params.get("delta")
+            if isinstance(delta, str) and delta:
+                events.append(ctx.event(AgentStreamEventType.THINKING_DELTA, {"text": delta}))
+        elif method == "item/plan/delta":
+            delta = params.get("delta")
+            if isinstance(delta, str) and delta:
+                events.append(ctx.event(AgentStreamEventType.TEXT_DELTA, {"text": delta}))
         return events
 
     def _normalize_event_msg(

@@ -5,7 +5,7 @@
  * pulling in Vue's reactivity runtime.
  */
 
-const SUPPORTED_IMAGE_MIME = /^image\/(png|jpeg|gif|webp|bmp)$/i
+const SUPPORTED_IMAGE_MIME = /^image\/(png|jpeg|gif|webp)$/i
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024 // 8 MB
 
 /**
@@ -16,7 +16,7 @@ const MAX_IMAGE_BYTES = 8 * 1024 * 1024 // 8 MB
  */
 export function validateImageAttachment(file: File): string | null {
   if (!SUPPORTED_IMAGE_MIME.test(file.type)) {
-    return `Unsupported image type: ${file.type || 'unknown'}. Use PNG, JPEG, GIF, WebP, or BMP.`
+    return `Unsupported image type: ${file.type || 'unknown'}. Use PNG, JPEG, GIF, or WebP.`
   }
   if (file.size > MAX_IMAGE_BYTES) {
     return `Image ${file.name} is ${(file.size / 1024 / 1024).toFixed(1)} MB; the limit is 8 MB.`

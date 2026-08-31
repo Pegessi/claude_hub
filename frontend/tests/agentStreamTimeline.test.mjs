@@ -183,3 +183,28 @@ test('events before the first turn_started are grouped into an implicit turn', (
   assert.equal(turns[0].assistantText, 'stray text')
   assert.equal(turns[1].userText, 'real turn')
 })
+
+test('stable turn ids reconcile late events into the original turn', () => {
+  const events = [
+    makeEvent(0, 'turn_started', { summary: 'first' }, { turn_id: 'turn-a' }),
+    makeEvent(1, 'turn_started', { summary: 'second' }, { turn_id: 'turn-b' }),
+    makeEvent(2, 'text_delta', { text: 'answer-a' }, { turn_id: 'turn-a', message_id: 'turn-a:assistant' }),
+  ]
+  const turns = groupEventsIntoTurns(events)
+  assert.equal(turns.length, 2)
+  assert.equal(turns[0].key, 'turn-turn-a')
+  assert.equal(turns[0].assistantText, 'answer-a')
+  assert.equal(turns[1].assistantText, '')
+})
+
+test('identical user text remains distinct when client turn ids differ', () => {
+  const turns = groupEventsIntoTurns([
+    makeEvent(0, 'turn_started', { summary: 'same' }, { turn_id: 'one' }),
+    makeEvent(1, 'turn_completed', { status: 'completed' }, { turn_id: 'one' }),
+    makeEvent(2, 'turn_started', { summary: 'same' }, { turn_id: 'two' }),
+  ])
+  assert.deepEqual(turns.map(turn => turn.turnId), ['one', 'two'])
+  assert.deepEqual(turns.map(turn => turn.userText), ['same', 'same'])
+  assert.equal(turns[0].completed, true)
+  assert.equal(turns[1].completed, false)
+})

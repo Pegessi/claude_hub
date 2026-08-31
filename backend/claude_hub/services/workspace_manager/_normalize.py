@@ -407,6 +407,12 @@ class _NormalizeMixin:
         normalized.setdefault("prompt_retry_task_id", None)
         normalized.setdefault("prompt_retry_attempted_at", None)
         normalized.setdefault("last_review_task_id", None)
+        # Persisted managed sessions predate session_kind. They were all
+        # internal task runners (dispatcher / reviewer / worker) that drive
+        # the raw TUI control plane, so default to TERMINAL. Only direct
+        # user Agent tabs carry an explicit SessionKind.AGENT and get the
+        # native/inert structured surface.
+        normalized.setdefault("session_kind", SessionKind.TERMINAL.value)
         return normalized
 
     def _runtime_from_managed_status(self, item: dict[str, Any]) -> str:

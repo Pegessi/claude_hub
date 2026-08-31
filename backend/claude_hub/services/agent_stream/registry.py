@@ -51,6 +51,9 @@ def get_adapter_for_session(
         return None
     if session.agent_type == AgentType.CURSOR:
         transport = getattr(session, "cursor_transport", "terminal")
-        if transport not in ("acp", "terminal_transcript"):
+        # "native" uses the ProviderSession directly; "acp" and
+        # "terminal_transcript" are the transcript-based structured paths.
+        # "terminal" (raw TUI) fails closed for structured.
+        if transport not in ("acp", "terminal_transcript", "native"):
             return None
     return adapter_cls()
