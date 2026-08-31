@@ -1781,6 +1781,42 @@ def test_cursor_pins_session_id_terminal_does_not() -> None:
     assert terminal.agent_session_id is None
 
 
+def test_cursor_transcript_data_dir_is_pinned_to_child_environment(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """A custom child HOME must not split Cursor's writer from its observer."""
+    monkeypatch.setattr(
+        ttyd_manager_module,
+        "cursor_cli_version_from_executable",
+        lambda: "2026.08.25-3e8eec8",
+    )
+    child_home = tmp_path / "isolated-home"
+    sid = str(uuid.uuid4())
+    data_dir = child_home / ".cursor"
+    transcript = ttyd_manager_module.cursor_terminal_transcript_path(
+        "/workspace", sid, data_dir=str(data_dir)
+    )
+
+    process = TTYDProcess(
+        tab_id="tab-cursor-transcript-env",
+        port=12363,
+        name="Cursor Transcript",
+        agent_type=AgentType.CURSOR,
+        cwd="/workspace",
+        env={"HOME": str(child_home)},
+        agent_session_id=sid,
+        cursor_transport="terminal_transcript",
+        cursor_data_dir=str(data_dir),
+        cursor_cli_version="2026.08.25-3e8eec8",
+        cursor_transcript_path=str(transcript),
+        cursor_transcript_schema="cli-transcript-v1",
+    )
+
+    assert process.cursor_transport == "terminal_transcript"
+    assert process.cursor_data_dir == str(data_dir)
+    assert process.env["CURSOR_DATA_DIR"] == str(data_dir)
+
+
 def test_should_recover_only_when_persisted_and_session_gone() -> None:
     process = TTYDProcess(
         tab_id="tab-recover-flag",
@@ -3614,9 +3650,9 @@ def test_legacy_state_without_shell_explicitly_provided_uses_agent_cli(
     }
     for tab_id, expected in expected_explicit.items():
         row = saved_by_id[tab_id]
-        assert "shell_explicitly_provided" in row, (
-            f"{tab_id}: saved row must include shell_explicitly_provided"
-        )
+        assert (
+            "shell_explicitly_provided" in row
+        ), f"{tab_id}: saved row must include shell_explicitly_provided"
         assert row["shell_explicitly_provided"] is expected, (
             f"{tab_id}: expected shell_explicitly_provided={expected}, "
             f"got {row['shell_explicitly_provided']}"
@@ -3630,6 +3666,6 @@ def test_legacy_state_without_shell_explicitly_provided_uses_agent_cli(
     manager2._load_state()
     for tab_id, expected in expected_explicit.items():
         proc = manager2.processes[tab_id]
-        assert proc._shell_explicitly_provided is expected, (
-            f"{tab_id}: stable reload must preserve shell_explicitly_provided={expected}"
-        )
+        assert (
+            proc._shell_explicitly_provided is expected
+        ), f"{tab_id}: stable reload must preserve shell_explicitly_provided={expected}"

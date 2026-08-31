@@ -57,6 +57,30 @@ class NormalizeContext:
         )
 
 
+@dataclass(frozen=True)
+class SnapshotRecord:
+    """One validated row from an authoritative whole-file transcript.
+
+    ``source_id`` is stable across full-file rewrites and includes the
+    managed-session id, canonical row digest, and duplicate occurrence ordinal.
+    The tailer persists it so unchanged history is never appended twice.
+    """
+
+    source_id: str
+    raw: Dict[str, Any]
+    # A provider-declared row class used only for narrow reconciliation rules.
+    # Empty preserves the conservative generic default.
+    source_kind: str = ""
+
+
+@dataclass(frozen=True)
+class TranscriptSnapshot:
+    """A bounded, fully validated transcript snapshot."""
+
+    digest: str
+    records: Tuple[SnapshotRecord, ...]
+
+
 class AgentStreamAdapter:
     """Abstract base for provider transcript adapters.
 
@@ -104,13 +128,18 @@ class AgentStreamAdapter:
 
     # ── snapshot support (optional) ──────────────────────────────────────────
 
-    def supports_snapshot(self) -> bool:
-        """Whether this adapter reads a full snapshot instead of tailing lines."""
+    def supports_snapshot(self, session: ManagedSession) -> bool:
+        """Whether this adapter reads a full snapshot instead of tailing lines.
+
+        Append-only Claude/Codex sources keep the default ``False``. Cursor's
+        interactive transcript can rewrite its JSONL during checkpoint
+        compaction, so its adapter opts into snapshot reconciliation.
+        """
         return False
 
-    def read_snapshot(self, session: ManagedSession) -> List[AgentStreamEvent]:
-        """Return the full event list for snapshot-style sources."""
-        return []
+    def read_snapshot(self, path: Path, session: ManagedSession) -> TranscriptSnapshot:
+        """Return the validated snapshot for snapshot-style sources."""
+        raise NotImplementedError
 
 
 # ── shared discovery helpers ─────────────────────────────────────────────────

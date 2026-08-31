@@ -18,12 +18,12 @@ from ...models import AgentType, ManagedSession
 from .base import AgentStreamAdapter
 from .claude_jsonl import ClaudeJsonlAdapter
 from .codex_jsonl import CodexJsonlAdapter
+from .cursor_cli_transcript import CursorCliTranscriptAdapter
 
 _ADAPTERS: Dict[AgentType, Type[AgentStreamAdapter]] = {
     AgentType.CLAUDE: ClaudeJsonlAdapter,
     AgentType.CODEX: CodexJsonlAdapter,
-    # Cursor has no ACP bridge in this wave; it is intentionally absent so
-    # get_adapter returns None and structured=False.
+    AgentType.CURSOR: CursorCliTranscriptAdapter,
 }
 
 

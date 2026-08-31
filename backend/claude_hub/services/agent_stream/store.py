@@ -40,6 +40,11 @@ class AgentStreamStore:
     def path(self) -> Path:
         return self._path
 
+    @property
+    def cursor_path(self) -> Path:
+        """Path for the paired tailer cursor checkpoint."""
+        return self._path.with_name(self._path.stem + ".cursor.json")
+
     def _ensure_dir(self) -> None:
         self._dir.mkdir(parents=True, exist_ok=True)
 
@@ -79,6 +84,24 @@ class AgentStreamStore:
             self._ensure_dir()
             await asyncio.to_thread(self._write_line, event)
             return event
+
+    async def clear(self) -> None:
+        """Remove this session's event log and cursor checkpoint.
+
+        Managed-session identifiers can be reused after an explicit delete, so
+        retaining either file would leak an old conversation into a new tab.
+        Missing files are an expected no-op.
+        """
+        async with self._lock:
+            await asyncio.to_thread(self._unlink_session_files)
+            self._next_seq = None
+
+    def _unlink_session_files(self) -> None:
+        for path in (self._path, self.cursor_path):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
 
     def _write_line(self, event: AgentStreamEvent) -> None:
         with self._path.open("a", encoding="utf-8") as f:

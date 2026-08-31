@@ -30,8 +30,14 @@ from claude_hub.services.agent_stream import (
     redact_event,
     supports_structured,
 )
-from claude_hub.services.agent_stream.base import NormalizeContext
+from claude_hub.services.agent_stream.base import (
+    AgentStreamAdapter,
+    NormalizeContext,
+    SnapshotRecord,
+    TranscriptSnapshot,
+)
 from claude_hub.services.agent_stream.store import AgentStreamStore
+from claude_hub.services.agent_stream.tailer import SessionTailer
 
 # ── redaction ────────────────────────────────────────────────────────────────
 
@@ -188,6 +194,154 @@ def test_store_recovers_sequence_after_restart(store: AgentStreamStore):
     asyncio.run(run())
 
 
+def test_store_clear_removes_event_log_and_cursor_checkpoint(store: AgentStreamStore):
+    async def run() -> None:
+        await store.append(_event(text="old"))
+        store.cursor_path.write_text("{}", encoding="utf-8")
+
+        await store.clear()
+
+        assert not store.path.exists()
+        assert not store.cursor_path.exists()
+        fresh = await store.append(_event(text="new"))
+        assert fresh.stream_sequence == 0
+
+    asyncio.run(run())
+
+
+class _SnapshotAdapter(AgentStreamAdapter):
+    """Small whole-file source used to exercise append-only reconciliation."""
+
+    adapter_id = "test-snapshot"
+
+    def __init__(self, snapshot: TranscriptSnapshot) -> None:
+        self.snapshot = snapshot
+
+    def discover_source(self, session: ManagedSession) -> Path:
+        return Path("/tmp/test-snapshot.jsonl")
+
+    def supports_snapshot(self, session: ManagedSession) -> bool:
+        return True
+
+    def read_snapshot(self, path: Path, session: ManagedSession) -> TranscriptSnapshot:
+        return self.snapshot
+
+    def normalize_line(self, raw: Dict[str, Any], ctx: NormalizeContext) -> list[AgentStreamEvent]:
+        if raw["kind"] == "user":
+            return [ctx.event(AgentStreamEventType.TURN_STARTED, {"summary": raw["text"]})]
+        if raw["kind"] == "turn_ended":
+            return [ctx.event(AgentStreamEventType.TURN_COMPLETED, {"status": "completed"})]
+        return [ctx.event(AgentStreamEventType.TEXT_DELTA, {"text": raw["text"]})]
+
+
+def _snapshot(*rows: tuple[str, str, str]) -> TranscriptSnapshot:
+    return TranscriptSnapshot(
+        digest="|".join(row[0] for row in rows),
+        records=tuple(
+            SnapshotRecord(
+                source_id=source_id,
+                raw={"kind": kind, "text": text},
+                source_kind=kind,
+            )
+            for source_id, kind, text in rows
+        ),
+    )
+
+
+def _snapshot_session() -> ManagedSession:
+    now = datetime.now(timezone.utc)
+    return ManagedSession(
+        id="s1",
+        workspace_id="ws1",
+        tab_id="t1",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CURSOR,
+        status=ManagedSessionStatus.WORKING,
+        title="cursor",
+        workspace_path="/tmp",
+        tmux_session="tmux-s1",
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def test_snapshot_tailer_appends_only_new_suffix_and_fans_out(store: AgentStreamStore):
+    async def run() -> None:
+        session = _snapshot_session()
+        adapter = _SnapshotAdapter(_snapshot(("u1", "user", "hello")))
+        tailer = SessionTailer("ws1", "s1", adapter, lambda: session, store=store)
+
+        await tailer._tail_snapshot(Path("/ignored"), session)
+        first = await store.read_since(-1)
+        assert [event.stream_sequence for event in first.events] == [0]
+        assert [event.run_epoch for event in first.events] == [1]
+
+        queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue()
+        tailer._subscribers.add(queue)
+        adapter.snapshot = _snapshot(
+            ("u1", "user", "hello"),
+            ("a1", "assistant", "world"),
+        )
+        await tailer._tail_snapshot(Path("/ignored"), session)
+
+        second = await store.read_since(-1)
+        assert [event.stream_sequence for event in second.events] == [0, 1]
+        assert [event.payload["text"] for event in second.events[1:]] == ["world"]
+        assert second.events[1].run_epoch == 1
+        assert (await queue.get()).stream_sequence == 1
+
+    asyncio.run(run())
+
+
+def test_snapshot_tailer_fails_closed_on_rewritten_history(store: AgentStreamStore):
+    async def run() -> None:
+        session = _snapshot_session()
+        adapter = _SnapshotAdapter(_snapshot(("u1", "user", "hello")))
+        tailer = SessionTailer("ws1", "s1", adapter, lambda: session, store=store)
+
+        await tailer._tail_snapshot(Path("/ignored"), session)
+        adapter.snapshot = _snapshot(("u2", "user", "rewritten"))
+        await tailer._tail_snapshot(Path("/ignored"), session)
+
+        assert tailer.hard_failed is True
+        page = await store.read_since(-1)
+        assert [event.payload["summary"] for event in page.events] == ["hello"]
+
+    asyncio.run(run())
+
+
+def test_snapshot_tailer_allows_cursor_style_replacement_of_tail_end_marker(
+    store: AgentStreamStore,
+):
+    async def run() -> None:
+        session = _snapshot_session()
+        adapter = _SnapshotAdapter(
+            _snapshot(
+                ("u1", "user", "first"),
+                ("end-1", "turn_ended", ""),
+            )
+        )
+        tailer = SessionTailer("ws1", "s1", adapter, lambda: session, store=store)
+
+        await tailer._tail_snapshot(Path("/ignored"), session)
+        adapter.snapshot = _snapshot(
+            ("u1", "user", "first"),
+            ("u2", "user", "second"),
+        )
+        await tailer._tail_snapshot(Path("/ignored"), session)
+
+        assert tailer.hard_failed is False
+        page = await store.read_since(-1)
+        assert [event.type for event in page.events] == [
+            AgentStreamEventType.TURN_STARTED,
+            AgentStreamEventType.TURN_COMPLETED,
+            AgentStreamEventType.TURN_STARTED,
+        ]
+        assert [event.run_epoch for event in page.events] == [1, 1, 2]
+
+    asyncio.run(run())
+
+
 # ── registry / fail-closed ───────────────────────────────────────────────────
 
 
@@ -196,9 +350,9 @@ def test_registry_claude_and_codex_supported():
     assert supports_structured(AgentType.CODEX) is True
 
 
-def test_registry_cursor_fail_closed():
-    assert supports_structured(AgentType.CURSOR) is False
-    assert get_adapter(AgentType.CURSOR) is None
+def test_registry_cursor_has_a_structured_adapter():
+    assert supports_structured(AgentType.CURSOR) is True
+    assert get_adapter(AgentType.CURSOR) is not None
 
 
 def test_get_adapter_for_session_cursor_terminal_transport_fail_closed():

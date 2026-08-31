@@ -12,9 +12,10 @@ Design points:
 - **Close the file every poll** — ``_read_new_lines`` opens, reads, and closes
   within a worker thread, so no fd is held open between polls.
 - **Persisted cursor** — ``{session}.cursor.json`` records ``(path, inode,
-  offset, run_epoch)`` so a tailer restarted after idle (or after a backend
-  restart) resumes without re-processing or duplicating already-persisted
-  events. Written atomically (tmp + rename).
+  offset, run_epoch)`` plus snapshot identities when necessary, so a tailer
+  restarted after idle (or after a backend restart) resumes without
+  re-processing or duplicating already-persisted events. Written atomically
+  (tmp + rename).
 - **run_epoch** — incremented for each ``turn_started`` and stamped on every
   event of that turn, so the frontend can group a prompt's full response.
 - **Backfill vs live** — the first read from offset 0 is a backfill: events are
@@ -33,6 +34,7 @@ import json
 import logging
 import os
 import time
+import weakref
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -55,6 +57,7 @@ SUBSCRIBER_QUEUE_MAX = 2000
 _STOP_JOIN_TIMEOUT_S = 5.0
 
 _HARD_FAILED_SESSION_IDS: Set[str] = set()
+_TAILER_MANAGERS: Any = weakref.WeakSet()
 
 
 def structured_source_hard_failed(session_id: str) -> bool:
@@ -82,13 +85,14 @@ class SessionTailer:
         self.adapter = adapter
         self._session_getter = session_getter
         self._store = store or AgentStreamStore(workspace_id, session_id)
-        self._cursor_path = self._store.path.with_name(self._store.path.stem + ".cursor.json")
+        self._cursor_path = self._store.cursor_path
 
         self._offset = 0
         self._inode: Optional[int] = None
         self._run_epoch = 0
         self._loaded_cursor = False
         self._snapshot_source_ids: List[str] = []
+        self._snapshot_source_kinds: List[str] = []
         self._snapshot_digest: Optional[str] = None
         self._is_live = False
 
@@ -211,7 +215,7 @@ class SessionTailer:
         if not self._loaded_cursor:
             self._load_cursor(path)
             self._loaded_cursor = True
-        if self.adapter.supports_snapshot():
+        if self.adapter.supports_snapshot(session):
             await self._tail_snapshot(path, session)
             return
         try:
@@ -250,7 +254,11 @@ class SessionTailer:
             for event in events:
                 if event.type == AgentStreamEventType.TURN_STARTED:
                     self._run_epoch += 1
-                    event.run_epoch = self._run_epoch
+                # Normalizers receive a context for the source row, but a turn
+                # can span many rows. Stamp every emitted event with the
+                # current epoch so assistant output remains grouped with its
+                # preceding user turn.
+                event.run_epoch = self._run_epoch
                 event = redact_event(event)
                 try:
                     await self._store.append(event)
@@ -270,16 +278,118 @@ class SessionTailer:
     async def _tail_snapshot(self, path: Path, session: ManagedSession) -> None:
         """Reconcile one bounded authoritative whole-file snapshot.
 
-        Append-only growth persists only the new suffix. Any divergence
-        rebuilds the normalized replay store atomically.
+        The event store and SSE protocol are append-only. A changed snapshot is
+        therefore safe to publish only when the previously persisted source
+        identities are an exact prefix of the new snapshot. In that case we
+        append and fan out only the suffix. A compaction that rewrites history
+        cannot be expressed safely to an already-connected client, so it
+        fails closed and the UI returns to the raw terminal rather than showing
+        duplicated or silently replaced turns.
         """
-        snapshot = await asyncio.to_thread(self.adapter.read_snapshot, session)
-        # For this wave, snapshot sources (Cursor) are fail-closed, so this
-        # path is a no-op placeholder. The interface is kept for future use.
-        if not snapshot:
+        try:
+            snapshot = await asyncio.to_thread(self.adapter.read_snapshot, path, session)
+        except Exception:
+            logger.exception(
+                "agent_stream snapshot read failed for session %s; failing closed",
+                self.session_id,
+            )
+            invalidate_source(self.session_id)
+            return
+
+        if snapshot is None:
+            return
+
+        if not snapshot.records:
+            # A temporary empty file can be observed while a producer rewrites
+            # its checkpoint. Keep the last good cursor and retry next poll.
+            if self._snapshot_source_ids:
+                return
+            self._snapshot_digest = snapshot.digest
+            self._is_live = True
+            self._save_cursor()
+            return
+
+        if snapshot.digest == self._snapshot_digest:
             self._is_live = True
             return
+
+        source_ids = [record.source_id for record in snapshot.records]
+        prior_count = len(self._snapshot_source_ids)
+        if source_ids[:prior_count] == self._snapshot_source_ids:
+            pass
+        elif (
+            prior_count
+            and len(self._snapshot_source_kinds) == prior_count
+            and self._snapshot_source_kinds[-1] == "turn_ended"
+            and source_ids[: prior_count - 1] == self._snapshot_source_ids[: prior_count - 1]
+        ):
+            # Cursor writes a terminal ``turn_ended`` row, then replaces only
+            # that tail marker with the next user row. The completed event was
+            # already published and remains valid; treat this exact observed
+            # marker replacement as the next append point. Any other rewrite
+            # stays fail-closed below.
+            prior_count -= 1
+        else:
+            self._hard_failed = True
+            self._last_error = (
+                "Cursor transcript rewrote previously published history; "
+                "structured view safely returned to the raw terminal"
+            )
+            _HARD_FAILED_SESSION_IDS.add(self.session_id)
+            invalidate_source(self.session_id)
+            return
+
+        new_records = snapshot.records[prior_count:]
+        if not new_records:
+            self._snapshot_digest = snapshot.digest
+            self._is_live = True
+            self._save_cursor()
+            return
+
+        ctx = NormalizeContext(
+            session_id=self.session_id,
+            tab_id=session.tab_id,
+            agent_type=session.agent_type,
+            run_epoch=self._run_epoch,
+        )
+        run_epoch = self._run_epoch
+        for record in new_records:
+            try:
+                record_events = self.adapter.normalize_line(record.raw, ctx)
+            except Exception:
+                logger.exception(
+                    "agent_stream adapter %s failed on snapshot record for session %s; skipping",
+                    self.adapter.adapter_id,
+                    self.session_id,
+                )
+                continue
+            for ev in record_events:
+                if ev.type == AgentStreamEventType.TURN_STARTED:
+                    run_epoch += 1
+                ev.run_epoch = run_epoch
+                ev = redact_event(ev)
+                try:
+                    ev = await self._store.append(ev)
+                except Exception:
+                    logger.exception(
+                        "agent_stream store append failed for snapshot session %s; failing closed",
+                        self.session_id,
+                    )
+                    self._hard_failed = True
+                    self._last_error = (
+                        "structured event persistence failed; returned to raw terminal"
+                    )
+                    _HARD_FAILED_SESSION_IDS.add(self.session_id)
+                    return
+                if self._is_live:
+                    self._fanout(ev)
+
+        self._run_epoch = run_epoch
+        self._snapshot_digest = snapshot.digest
+        self._snapshot_source_ids = source_ids
+        self._snapshot_source_kinds = [record.source_kind for record in snapshot.records]
         self._is_live = True
+        self._save_cursor()
 
     def _read_new_lines(self, path: Path) -> Tuple[List[Dict[str, Any]], int, int, bool]:
         st = os.stat(path)
@@ -350,11 +460,16 @@ class SessionTailer:
             return
         self._inode = st.st_ino
         snapshot_ids = data.get("snapshot_source_ids")
+        snapshot_kinds = data.get("snapshot_source_kinds")
         snapshot_digest = data.get("snapshot_digest")
         if isinstance(snapshot_ids, list) and all(isinstance(item, str) for item in snapshot_ids):
             self._snapshot_source_ids = list(snapshot_ids)
         if isinstance(snapshot_digest, str):
             self._snapshot_digest = snapshot_digest
+        if isinstance(snapshot_kinds, list) and all(
+            isinstance(item, str) for item in snapshot_kinds
+        ):
+            self._snapshot_source_kinds = list(snapshot_kinds)
         if self._offset > 0:
             self._is_live = True
 
@@ -365,6 +480,7 @@ class SessionTailer:
             "inode": self._inode,
             "run_epoch": self._run_epoch,
             "snapshot_source_ids": self._snapshot_source_ids,
+            "snapshot_source_kinds": self._snapshot_source_kinds,
             "snapshot_digest": self._snapshot_digest,
         }
         try:
@@ -383,6 +499,7 @@ class SessionTailer:
         self._inode = None
         self._run_epoch = 0
         self._snapshot_source_ids = []
+        self._snapshot_source_kinds = []
         self._snapshot_digest = None
         self._is_live = False
         invalidate_source(self.session_id)
@@ -395,6 +512,7 @@ class TailerManager:
         self._session_getter = session_getter
         self._tailers: Dict[str, SessionTailer] = {}
         self._lock = asyncio.Lock()
+        _TAILER_MANAGERS.add(self)
 
     async def _get_or_create(self, session: ManagedSession) -> SessionTailer:
         existing: Optional[SessionTailer] = None
@@ -461,9 +579,30 @@ class TailerManager:
     def get_store(self, workspace_id: str, session_id: str) -> AgentStreamStore:
         return AgentStreamStore(workspace_id, session_id)
 
+    async def forget_session(self, session_id: str) -> None:
+        """Stop and discard an in-process tailer for a deleted session."""
+        async with self._lock:
+            tailer = self._tailers.pop(session_id, None)
+        if tailer is not None:
+            await tailer.stop()
+        _HARD_FAILED_SESSION_IDS.discard(session_id)
+        invalidate_source(session_id)
+
     async def stop_all(self) -> None:
         async with self._lock:
             for tailer in list(self._tailers.values()):
                 await tailer.stop()
                 _HARD_FAILED_SESSION_IDS.discard(tailer.session_id)
             self._tailers.clear()
+
+
+async def discard_session_stream(workspace_id: str, session_id: str) -> None:
+    """Purge all structured state when a managed session is deleted.
+
+    The workspace allocator may reuse a friendly session id (for example,
+    ``prefix-agent-1``). Both on-disk events and an in-process tailer therefore
+    must be forgotten before that id can identify another conversation.
+    """
+    for manager in list(_TAILER_MANAGERS):
+        await manager.forget_session(session_id)
+    await AgentStreamStore(workspace_id, session_id).clear()
