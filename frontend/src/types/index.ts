@@ -518,6 +518,7 @@ export interface StreamCapabilities {
   sources: string[]
   supports_approval_ui: boolean
   supports_tool_timeline: boolean
+  supports_images: boolean
 }
 
 export type AgentStreamEventType =
@@ -539,6 +540,8 @@ export interface AgentStreamEvent {
   agent_type: AgentType
   type: AgentStreamEventType
   run_epoch?: number | null
+  turn_id?: string | null
+  message_id?: string | null
   call_id?: string | null
   payload: Record<string, unknown>
   created_at: string

@@ -55,14 +55,11 @@
       </p>
     </div>
 
-    <!-- Agent sessions still keep their PTY transport mounted so the existing
-         CLI process and ordered input bridge remain alive, but raw output is
-         not exposed as a second user-selectable surface. -->
+    <!-- Session kind is an ownership boundary: Terminal mounts raw PTY and
+         Agent mounts structured UI. There is no silent cross-mode fallback. -->
     <div
-      v-if="pane.tabId"
+      v-if="pane.tabId && !isAgentSession"
       class="pane-terminal"
-      :class="{ 'is-hidden': isAgentSession }"
-      :aria-hidden="isAgentSession"
     >
       <TerminalView
         :tab-id="pane.tabId"
@@ -70,24 +67,16 @@
       />
     </div>
 
-    <!-- Structured Agent surface. Workspace agents retain their durable
-         outbox; standalone agents use their own transcript and PTY input. -->
+    <!-- All Agent providers use the native structured endpoint. If provider
+         setup fails, StructuredPane shows an explicit retryable error. -->
     <div
       v-if="pane.tabId && isAgentSession"
       class="pane-structured"
     >
       <StructuredPane
-        v-if="hasStructuredSource"
         :session-id="managedSession?.id"
         :tab-id="directStructuredTabId"
       />
-      <div
-        v-else
-        class="structured-unavailable"
-      >
-        <strong>Structured conversation unavailable</strong>
-        <span>This provider session cannot be observed safely. Create a Terminal session to use its native TUI.</span>
-      </div>
     </div>
   </div>
 </template>
@@ -132,19 +121,9 @@ const managedSession = computed(() =>
 const directStructuredTabId = computed(() => {
   if (!isAgentSession.value || managedSession.value || !paneTab.value) return undefined
   const type = paneTab.value.agent_type
-  if (type === 'claude' || type === 'codex') return paneTab.value.id
-  if (
-    type === 'cursor' &&
-    (paneTab.value.cursor_transport === 'acp' || paneTab.value.cursor_transport === 'terminal_transcript')
-  ) {
-    return paneTab.value.id
-  }
+  if (type === 'claude' || type === 'codex' || type === 'cursor') return paneTab.value.id
   return undefined
 })
-
-const hasStructuredSource = computed(() =>
-  Boolean(managedSession.value || directStructuredTabId.value),
-)
 
 const sessionMark = computed(() => {
   if (agentType.value === 'claude') return 'C'
@@ -424,38 +403,6 @@ onUnmounted(() => {
   min-height: 0;
   position: relative;
   z-index: 1;
-}
-
-.structured-unavailable {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 24px;
-  color: var(--ch-color-text-muted);
-  text-align: center;
-}
-
-.structured-unavailable strong {
-  color: var(--ch-color-text);
-}
-
-/* Hide the raw terminal when structured view is active.
-   IMPORTANT: we use visibility:hidden + position:absolute (NOT display:none)
-   so the ttyd iframe stays loaded and its scrollback is preserved.
-   pointer-events:none prevents the hidden terminal from intercepting clicks. */
-.pane-terminal.is-hidden {
-  position: absolute;
-  inset: 0;
-  /* ttyd explicitly restores visibility:visible on its active iframe.  An
-     opacity layer belongs to the wrapper, so no descendant can punch through
-     into the Paseo view. */
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  z-index: 0;
 }
 
 .pane-structured {

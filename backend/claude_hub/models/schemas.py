@@ -57,6 +57,7 @@ class StreamCapabilities(BaseModel):
     sources: List[str] = Field(default_factory=list)
     supports_approval_ui: bool = False
     supports_tool_timeline: bool = False
+    supports_images: bool = False
 
 
 class ExecutionTarget(str, Enum):
@@ -516,6 +517,16 @@ class TerminalTab(TerminalTabBase):
         None,
         description="Stable agent CLI conversation id (Claude --session-id); used for /resume and diagnostics.",
     )
+    agent_session_id_verified: bool = Field(
+        False,
+        description=(
+            "Whether agent_session_id was confirmed by the provider in a "
+            "system/init record. Only a verified id may be passed to --resume; "
+            "an unverified (constructive) id uses --session-id. Persisted so a "
+            "cold restart does not infer verification from the mere presence "
+            "of a UUID."
+        ),
+    )
 
     class Config:
         from_attributes = True
@@ -851,6 +862,7 @@ class ManagedSession(BaseModel):
     tab_id: str
     role: WorkspaceSessionRole
     agent_type: AgentType
+    session_kind: SessionKind = SessionKind.TERMINAL
     status: ManagedSessionStatus
     runtime_status: AgentRuntimeStatus = AgentRuntimeStatus.IDLE
     current_task_id: Optional[str] = None
@@ -992,6 +1004,12 @@ class ManagedSession(BaseModel):
     # Persistent provider conversation id.  Its exact use remains provider
     # specific; Codex resume is the currently supported caller-owned path.
     agent_session_id: Optional[str] = None
+    # Whether ``agent_session_id`` has been verified by the provider (i.e. the
+    # provider emitted it in a system/init record). Only a verified id may be
+    # passed to ``--resume``; an unverified (constructive) id must use
+    # ``--session-id``. Persisted alongside ``agent_session_id`` so a cold
+    # restart does not infer verification merely from the presence of a UUID.
+    agent_session_id_verified: bool = False
     cursor_transport: str = "terminal"
     # Cursor CLI transcript provenance. All five must validate exactly for the
     # structured adapter to return structured=True; otherwise fail-closed to

@@ -1,11 +1,47 @@
 import assert from 'node:assert/strict'
+import { Buffer } from 'node:buffer'
 import { readFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import test from 'node:test'
+import ts from 'typescript'
 
 const composable = readFileSync(
   new URL('../src/composables/useAgentStream.ts', import.meta.url),
   'utf8',
 )
+
+const sequenceSource = await readFile(
+  new URL('../src/utils/agentStreamSequence.ts', import.meta.url),
+  'utf8',
+)
+const { outputText } = ts.transpileModule(sequenceSource, {
+  compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
+})
+const { createContiguousEventBuffer } = await import(
+  `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`
+)
+
+test('SSE futures wait until long-poll fills the sequence gap', () => {
+  const buffer = createContiguousEventBuffer()
+  assert.deepEqual(buffer.push([{ stream_sequence: 1 }]), [])
+  assert.equal(buffer.cursor, -1)
+  assert.deepEqual(buffer.push([{ stream_sequence: 0 }]).map(event => event.stream_sequence), [0, 1])
+  assert.equal(buffer.cursor, 1)
+})
+
+test('duplicate paths commit each sequence exactly once', () => {
+  const buffer = createContiguousEventBuffer()
+  assert.deepEqual(
+    buffer.push([{ stream_sequence: 0 }, { stream_sequence: 0 }, { stream_sequence: 2 }])
+      .map(event => event.stream_sequence),
+    [0],
+  )
+  assert.deepEqual(
+    buffer.push([{ stream_sequence: 1 }, { stream_sequence: 2 }]).map(event => event.stream_sequence),
+    [1, 2],
+  )
+  assert.deepEqual(buffer.push([{ stream_sequence: 1 }]), [])
+})
 
 test('long-poll reconciliation starts even when EventSource is available', () => {
   const startIndex = composable.indexOf('longPollAbort = new AbortController()')

@@ -5,6 +5,7 @@ import type {
   StreamCapabilities,
 } from '@/types'
 import { validateImageAttachment, fileToDataUrl } from '@/utils/agentStreamAttachments'
+import { createContiguousEventBuffer } from '@/utils/agentStreamSequence'
 
 export { validateImageAttachment, fileToDataUrl }
 
@@ -13,10 +14,10 @@ const API_BASE = '/api'
 /**
  * Connection lifecycle for the structured observation plane.
  *
- * - `idle`: not started (raw terminal is the only view).
+ * - `idle`: not started.
  * - `hydrating`: fetching capabilities + initial event page.
  * - `live`: long-poll reconciliation is active; SSE may accelerate delivery.
- * - `failed`: hard failure — consumer should fall back to raw.
+ * - `failed`: hard failure — Agent surface stays visible and offers retry.
  */
 export type StreamConnectionState = 'idle' | 'hydrating' | 'live' | 'failed'
 export type StreamSource = 'managed-session' | 'terminal-tab'
@@ -26,7 +27,7 @@ export interface UseAgentStreamApi {
   events: Ref<AgentStreamEvent[]>
   connectionState: Ref<StreamConnectionState>
   errorMessage: Ref<string | null>
-  /** Start (or restart) a managed-session or Terminal-tab stream. */
+  /** Start (or restart) a managed-session or direct Agent-tab stream. */
   start: (sourceId: string, source?: StreamSource) => Promise<void>
   /** Tear down the stream (SSE / long-poll). Safe to call repeatedly. */
   stop: () => void
@@ -36,7 +37,7 @@ export interface UseAgentStreamApi {
  * Structured agent-stream client.
  *
  * Hydration contract (sequence-safe):
- *   1. GET /stream/capabilities — fail-closed to raw if ``structured=false``.
+ *   1. GET /stream/capabilities — fail closed if ``structured=false``.
  *   2. GET /stream/events?since_sequence=-1 — backfill the timeline.
  *   3. POST /stream/wait — authoritative live reconciliation loop.
  *   4. GET /stream/live (SSE) — optional low-latency accelerator.
@@ -45,8 +46,8 @@ export interface UseAgentStreamApi {
  * when EventSource exists prevents a proxy-buffered or silently stale SSE
  * connection from freezing the visible timeline.
  *
- * The consumer (StructuredPane) owns the decision of whether to show raw or
- * structured; this composable only reports capabilities + connection state.
+ * Agent sessions never silently fall back to raw; the composable reports an
+ * explicit retryable failure to StructuredPane.
  */
 export function useAgentStream(): UseAgentStreamApi {
   const capabilities = shallowRef<StreamCapabilities | null>(null)
@@ -58,8 +59,9 @@ export function useAgentStream(): UseAgentStreamApi {
   let currentSource: StreamSource = 'managed-session'
   let eventSource: EventSource | null = null
   let longPollAbort: AbortController | null = null
-  // Stream sequences are zero-based and cursors are exclusive.
-  let deliveredSequence = -1
+  // Stream sequences are zero-based and cursors are exclusive. SSE is only an
+  // accelerator: future events stay buffered until long-poll fills every gap.
+  const sequenceBuffer = createContiguousEventBuffer<AgentStreamEvent>()
   let stopped = false
 
   function reset() {
@@ -67,7 +69,7 @@ export function useAgentStream(): UseAgentStreamApi {
     events.value = []
     connectionState.value = 'idle'
     errorMessage.value = null
-    deliveredSequence = -1
+    sequenceBuffer.reset()
   }
 
   function closeSse() {
@@ -85,16 +87,8 @@ export function useAgentStream(): UseAgentStreamApi {
   }
 
   function applyPage(page: AgentStreamEventPage) {
-    if (page.events.length === 0) return
-    // Deduplicate by stream_sequence; events are append-only and ordered.
-    const existing = new Set(events.value.map(e => e.stream_sequence))
-    const fresh = page.events.filter(e => !existing.has(e.stream_sequence))
-    if (fresh.length) {
-      events.value = [...events.value, ...fresh]
-    }
-    if (page.next_sequence > deliveredSequence) {
-      deliveredSequence = page.next_sequence
-    }
+    const committed = sequenceBuffer.push(page.events)
+    if (committed.length) events.value = [...events.value, ...committed]
   }
 
   function streamBasePath(sourceId: string, source: StreamSource): string {
@@ -132,11 +126,11 @@ export function useAgentStream(): UseAgentStreamApi {
   async function longPollLoop(sourceId: string, streamPath: string) {
     while (!stopped && currentSessionId === sourceId) {
       try {
-        const page = await waitEvents(streamPath, deliveredSequence)
+        const page = await waitEvents(streamPath, sequenceBuffer.cursor)
         applyPage(page)
       } catch (err) {
         if (stopped || currentSessionId !== sourceId) return
-        // Surface the failure and stop; the consumer falls back to raw.
+        // Surface the failure and stop; the Agent surface stays fail-closed.
         errorMessage.value = err instanceof Error ? err.message : 'stream wait failed'
         connectionState.value = 'failed'
         return
@@ -145,7 +139,7 @@ export function useAgentStream(): UseAgentStreamApi {
   }
 
   function startSse(sourceId: string, streamPath: string) {
-    const url = `${streamPath}/live?since_sequence=${deliveredSequence}`
+    const url = `${streamPath}/live?since_sequence=${sequenceBuffer.cursor}`
     eventSource = new EventSource(url)
 
     eventSource.addEventListener('hello', (ev: MessageEvent) => {
@@ -165,10 +159,8 @@ export function useAgentStream(): UseAgentStreamApi {
     eventSource.addEventListener('agent-stream', (ev: MessageEvent) => {
       try {
         const evt = JSON.parse(ev.data) as AgentStreamEvent
-        if (evt.stream_sequence > deliveredSequence) {
-          events.value = [...events.value, evt]
-          deliveredSequence = evt.stream_sequence
-        }
+        const committed = sequenceBuffer.push([evt])
+        if (committed.length) events.value = [...events.value, ...committed]
       } catch {
         // ignore malformed event
       }

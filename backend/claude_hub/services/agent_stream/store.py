@@ -79,10 +79,12 @@ class AgentStreamStore:
             if self._next_seq is None:
                 self._next_seq = self._recover_next_seq()
             seq = self._next_seq
-            self._next_seq += 1
             event = event.model_copy(update={"stream_sequence": seq})
             self._ensure_dir()
             await asyncio.to_thread(self._write_line, event)
+            # Only advance the sequence counter after a successful write so a
+            # failed append does not leave a permanent gap in the stream.
+            self._next_seq = seq + 1
             return event
 
     async def clear(self) -> None:

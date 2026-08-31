@@ -231,6 +231,15 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
         events: List[AgentStreamEvent] = []
         if not isinstance(raw, dict):
             return events
+
+        # Native stream-json stdout records carry a top-level ``type`` field
+        # (``system``, ``thinking``, ``assistant``, ``result``). Transcript
+        # file rows use ``role`` (``user``/``assistant``) or ``type:
+        # turn_ended``. Dispatch on the native shape first.
+        top_type = raw.get("type")
+        if top_type in ("system", "thinking", "assistant", "result"):
+            return self._normalize_stream_json(raw, ctx)
+
         role = raw.get("role")
         if role == "user":
             text = self._extract_text(raw.get("message"))
@@ -248,9 +257,30 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
                         if btype == "text":
                             block_text = block.get("text")
                             if isinstance(block_text, str) and block_text:
-                                events.append(
-                                    ctx.event(AgentStreamEventType.TEXT_DELTA, {"text": block_text})
-                                )
+                                # Transcript assistant rows are final messages.
+                                # Reconcile against any accumulated streaming
+                                # text (which would be empty for pure
+                                # transcript reads).
+                                suffix = self._reconcile_text(ctx, block_text)
+                                if suffix is None:
+                                    events.append(
+                                        ctx.event(
+                                            AgentStreamEventType.ERROR,
+                                            {
+                                                "message": (
+                                                    "assistant final text does not match "
+                                                    "streamed deltas; cannot safely reconcile"
+                                                )
+                                            },
+                                        )
+                                    )
+                                elif suffix:
+                                    events.append(
+                                        ctx.event(
+                                            AgentStreamEventType.TEXT_DELTA,
+                                            {"text": suffix},
+                                        )
+                                    )
                         elif btype == "tool_use":
                             name = block.get("name") or "unknown"
                             args = block.get("input")
@@ -279,6 +309,102 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
                 events.append(
                     ctx.event(AgentStreamEventType.TURN_COMPLETED, {"status": "cancelled"})
                 )
+            self._clear_turn_state(ctx)
+        return events
+
+    def _normalize_stream_json(
+        self, raw: Dict[str, Any], ctx: NormalizeContext
+    ) -> List[AgentStreamEvent]:
+        """Normalize a Cursor ``--print --output-format stream-json`` stdout record.
+
+        Record shapes (verified):
+
+        - ``{type:"system", subtype:"init", session_id, ...}`` — session init;
+          the conversation id is captured by the transport, no event emitted.
+        - ``{type:"thinking", subtype:"delta", text, session_id, timestamp_ms}``
+          — incremental reasoning text.
+        - ``{type:"assistant", message:{role:"assistant", content:[{type:"text",
+          text:"Hi"}]}, session_id, timestamp_ms, ...}`` — assistant text chunk.
+          Cursor emits timestamped streaming assistant records followed by a
+          final duplicate assistant record (no ``timestamp_ms``) that carries
+          the complete text. We accumulate the streaming chunks and reconcile
+          the final snapshot so the visible text is never doubled.
+        - ``{type:"result", subtype:"success", is_error:false, result:"Hi",
+          session_id, request_id, ...}`` — turn completion.
+        """
+        events: List[AgentStreamEvent] = []
+        top_type = raw.get("type")
+        if top_type == "system":
+            # Handled by the transport's maybe_capture_conversation_id.
+            return events
+        if top_type == "thinking":
+            if raw.get("subtype") == "delta":
+                text = raw.get("text")
+                if isinstance(text, str) and text:
+                    state = self._get_turn_state(ctx)
+                    state.thinking += text
+                    events.append(ctx.event(AgentStreamEventType.THINKING_DELTA, {"text": text}))
+            return events
+        if top_type == "assistant":
+            message = raw.get("message")
+            if isinstance(message, dict):
+                content = message.get("content")
+                if isinstance(content, list):
+                    # Cursor distinguishes streaming chunks (timestamp_ms
+                    # present) from the final full-text snapshot (no
+                    # timestamp_ms). Streaming chunks are emitted and
+                    # accumulated; the final snapshot is reconciled.
+                    is_streaming_chunk = "timestamp_ms" in raw
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        if block.get("type") == "text":
+                            text = block.get("text")
+                            if isinstance(text, str) and text:
+                                if is_streaming_chunk:
+                                    state = self._get_turn_state(ctx)
+                                    state.text += text
+                                    events.append(
+                                        ctx.event(
+                                            AgentStreamEventType.TEXT_DELTA,
+                                            {"text": text},
+                                        )
+                                    )
+                                else:
+                                    suffix = self._reconcile_text(ctx, text)
+                                    if suffix is None:
+                                        events.append(
+                                            ctx.event(
+                                                AgentStreamEventType.ERROR,
+                                                {
+                                                    "message": (
+                                                        "assistant final text does not match "
+                                                        "streamed deltas; cannot safely reconcile"
+                                                    )
+                                                },
+                                            )
+                                        )
+                                    elif suffix:
+                                        events.append(
+                                            ctx.event(
+                                                AgentStreamEventType.TEXT_DELTA,
+                                                {"text": suffix},
+                                            )
+                                        )
+            return events
+        if top_type == "result":
+            is_error = raw.get("is_error", False)
+            if is_error:
+                err = raw.get("result") or raw.get("error") or "turn failed"
+                if isinstance(err, str) and err:
+                    events.append(ctx.event(AgentStreamEventType.ERROR, {"message": err}))
+                events.append(ctx.event(AgentStreamEventType.TURN_COMPLETED, {"status": "failed"}))
+            else:
+                events.append(
+                    ctx.event(AgentStreamEventType.TURN_COMPLETED, {"status": "completed"})
+                )
+            self._clear_turn_state(ctx)
+            return events
         return events
 
     @staticmethod

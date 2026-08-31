@@ -19,15 +19,11 @@ const tabBar = readFileSync(
   'utf8',
 )
 
-test('Agent sessions keep their transport mounted behind an opacity boundary', () => {
-  // ttyd's active iframe explicitly sets visibility:visible, so visibility on
-  // a Vue parent is not a sufficient hiding boundary. This assertion guards
-  // the exclusive same-source view contract without needing a browser iframe.
-  const hiddenRule = terminalPane.match(/\.pane-terminal\.is-hidden\s*\{([\s\S]*?)\n\}/)
-  assert.ok(hiddenRule, 'the mounted Raw wrapper must have a hidden rule')
-  assert.match(hiddenRule[1], /opacity:\s*0/)
-  assert.match(hiddenRule[1], /pointer-events:\s*none/)
-  assert.match(hiddenRule[1], /z-index:\s*0/)
+test('Agent sessions never mount a hidden raw terminal fallback', () => {
+  assert.match(terminalPane, /v-if="pane\.tabId && !isAgentSession"/)
+  assert.match(terminalPane, /v-if="pane\.tabId && isAgentSession"/)
+  assert.doesNotMatch(terminalPane, /hasStructuredSource/)
+  assert.doesNotMatch(structuredPane, /fallback-to-raw/)
 })
 
 test('Agent and Terminal are fixed session surfaces, not a per-pane view toggle', () => {
@@ -56,13 +52,13 @@ test('SAB terminal input decodes a non-shared copy before draining the record', 
   assert.match(terminalView, /return decoder\.decode\(decodedBytes\);/)
 })
 
-test('direct Paseo sends one ordered prompt frame and keeps a pending acknowledgement', () => {
+test('direct Paseo sends atomically with a stable client turn id', () => {
   assert.match(structuredPane, /const pendingDirectTurns = ref<PendingTurn\[\]>\(\[\]\)/)
-  assert.match(structuredPane, /Sent to terminal · waiting for agent activity/)
-  assert.match(structuredPane, /sendTerminalText/)
-  assert.match(structuredPane, /sendText\(`\$\{message\}\\r`, props\.tabId\)/)
-  assert.doesNotMatch(structuredPane, /for \(const char of Array\.from\(message\)\)/)
-  assert.match(terminalView, /event\.data\.type === 'terminal-text'/)
+  assert.match(structuredPane, /client_turn_id: clientTurnId/)
+  assert.match(structuredPane, /crypto\.randomUUID/)
+  assert.match(structuredPane, /turn\.turnId !== clientTurnId/)
+  assert.doesNotMatch(structuredPane, /Sent to terminal/)
+  assert.doesNotMatch(structuredPane, /sendTerminalText/)
 })
 
 test('Paseo follows dynamic timeline height but preserves deliberate history reading', () => {

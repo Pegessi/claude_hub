@@ -27,19 +27,21 @@ import json
 import logging
 import os
 from datetime import datetime
-from typing import Any, Callable, Dict, NoReturn, Optional
+from typing import Any, Callable, Dict, List, NoReturn, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from ..auth.dependencies import get_current_user
 from ..models import (
     AgentRuntimeStatus,
     AgentStreamEvent,
     AgentStreamEventPage,
+    AgentType,
     ManagedSession,
     ManagedSessionStatus,
+    SessionKind,
     StreamCapabilities,
     User,
     WorkspaceSessionRole,
@@ -79,11 +81,26 @@ _TAB_STREAM_WORKSPACE_ID = "terminal-tabs"
 _TAB_STREAM_SESSION_PREFIX = "terminal-tab-"
 
 
+def _persist_workspace_agent_session_id(session_id: str, conversation_id: str) -> None:
+    """Persist a provider-owned conversation id for a managed Agent session."""
+
+    workspace_manager.set_session_agent_session_id(session_id, conversation_id)
+
+
+def _persist_tab_agent_session_id(stream_session_id: str, conversation_id: str) -> None:
+    """Persist a provider-owned conversation id for an Agent tab."""
+
+    ttyd_manager.set_tab_agent_session_id(
+        stream_session_id.removeprefix(_TAB_STREAM_SESSION_PREFIX), conversation_id
+    )
+
+
 def _get_tailer_manager() -> TailerManager:
     global _tailer_manager
     if _tailer_manager is None:
         _tailer_manager = TailerManager(
-            session_getter=lambda sid: workspace_manager.sessions.get(sid)
+            session_getter=lambda sid: workspace_manager.sessions.get(sid),
+            persist_session_id=_persist_workspace_agent_session_id,
         )
     return _tailer_manager
 
@@ -112,6 +129,7 @@ def _terminal_tab_stream_session(tab_id: str) -> Optional[ManagedSession]:
         tab_id=tab.id,
         role=WorkspaceSessionRole.WORKER,
         agent_type=tab.agent_type,
+        session_kind=tab.session_kind,
         status=ManagedSessionStatus.IDLE,
         runtime_status=AgentRuntimeStatus.IDLE,
         title=tab.name,
@@ -128,6 +146,7 @@ def _terminal_tab_stream_session(tab_id: str) -> Optional[ManagedSession]:
         solo_mode=tab.solo_mode,
         env=dict(tab.env),
         agent_session_id=tab.agent_session_id,
+        agent_session_id_verified=getattr(tab, "agent_session_id_verified", False),
         cursor_transport=tab.cursor_transport,
         cursor_data_dir=tab.cursor_data_dir,
         cursor_cli_version=tab.cursor_cli_version,
@@ -147,7 +166,10 @@ def _terminal_tab_stream_session_by_id(stream_session_id: str) -> Optional[Manag
 def _get_tab_tailer_manager() -> TailerManager:
     global _tab_tailer_manager
     if _tab_tailer_manager is None:
-        _tab_tailer_manager = TailerManager(session_getter=_terminal_tab_stream_session_by_id)
+        _tab_tailer_manager = TailerManager(
+            session_getter=_terminal_tab_stream_session_by_id,
+            persist_session_id=_persist_tab_agent_session_id,
+        )
     return _tab_tailer_manager
 
 
@@ -171,20 +193,71 @@ def _terminal_tab_session_or_404(tab_id: str) -> ManagedSession:
     return session
 
 
-def _capabilities_for(
+def _is_agent_native(session: ManagedSession) -> bool:
+    """True when the session must use its native provider transport.
+
+    AGENT sessions own a single native ``ProviderSession`` as their real-time
+    source. The only exception is Cursor's explicit ``terminal_transcript``
+    compatibility mode, which keeps the transcript-file tailer.
+    """
+
+    if session.session_kind != SessionKind.AGENT:
+        return False
+    if session.agent_type == AgentType.CURSOR and session.cursor_transport == "terminal_transcript":
+        return False
+    return True
+
+
+async def _capabilities_for(
     session: ManagedSession,
     manager: Optional[TailerManager] = None,
 ) -> StreamCapabilities:
+    """Return structured-stream capabilities for ``session``.
+
+    For AGENT sessions the native provider transport is the sole owner of the
+    real-time stream, so capabilities (including ``supports_images``) come
+    from the transport. Transcript discovery is only used for TERMINAL
+    sessions and Cursor's ``terminal_transcript`` fallback.
+
+    Fail-closed: if the native transport could not be created, return
+    ``structured=False`` rather than silently falling back to the transcript.
+    """
+
+    manager = manager or _get_tailer_manager()
+
+    if _is_agent_native(session):
+        # Ensure the tailer (and its native transport) exist. ``ensure_started``
+        # creates the transport synchronously; it does not require a turn to
+        # have been sent.
+        try:
+            tailer = await manager.ensure_started(session)
+        except (ValueError, StructuredSourceUnavailable):
+            return StreamCapabilities()
+        if tailer.native_error is not None:
+            # Native transport creation failed — fail closed.
+            return StreamCapabilities(structured=False)
+        transport = tailer.native_transport
+        if transport is None:
+            return StreamCapabilities(structured=False)
+        caps = transport.capabilities()
+        if manager.hard_failed(session.id):
+            caps = caps.model_copy(update={"structured": False})
+        return caps
+
+    # TERMINAL sessions (and Cursor terminal_transcript fallback): use the
+    # adapter's transcript-based discovery.
     adapter = get_adapter_for_session(session)
     if adapter is None:
         return StreamCapabilities()
     caps = adapter.capabilities(session)
-    if (manager or _get_tailer_manager()).hard_failed(session.id):
+    if manager.hard_failed(session.id):
         caps = caps.model_copy(update={"structured": False})
     return caps
 
 
-def _tab_capabilities_for(session: ManagedSession, manager: TailerManager) -> StreamCapabilities:
+async def _tab_capabilities_for(
+    session: ManagedSession, manager: TailerManager
+) -> StreamCapabilities:
     """Advertise an empty, ready-to-compose view before its first transcript.
 
     Claude and Codex create their transcript lazily, often only after the first
@@ -194,7 +267,7 @@ def _tab_capabilities_for(session: ManagedSession, manager: TailerManager) -> St
     remain fail-closed because they have no adapter at all.
     """
 
-    caps = _capabilities_for(session, manager)
+    caps = await _capabilities_for(session, manager)
     if (
         not caps.structured
         and get_adapter_for_session(session) is not None
@@ -253,7 +326,7 @@ async def get_stream_capabilities(
     current_user: User = Depends(get_current_user),
 ) -> StreamCapabilities:
     session = _session_or_404(managed_session_id)
-    return _capabilities_for(session)
+    return await _capabilities_for(session)
 
 
 @router.get(
@@ -267,7 +340,7 @@ async def get_tab_stream_capabilities(
     """Return structured-stream capability for a Terminal-created agent tab."""
 
     session = _terminal_tab_session_or_404(tab_id)
-    return _tab_capabilities_for(session, _get_tab_tailer_manager())
+    return await _tab_capabilities_for(session, _get_tab_tailer_manager())
 
 
 async def _stream_events_for(
@@ -277,10 +350,8 @@ async def _stream_events_for(
     limit: int,
     allow_pending_source: bool = False,
 ) -> AgentStreamEventPage:
-    adapter = get_adapter_for_session(session)
-    if adapter is None or (
-        not allow_pending_source and not adapter.capabilities(session).structured
-    ):
+    caps = await _capabilities_for(session, manager)
+    if not caps.structured and not allow_pending_source:
         return AgentStreamEventPage(events=[], next_sequence=since_sequence, has_more=False)
     try:
         await manager.ensure_started(session)
@@ -342,10 +413,8 @@ async def _wait_stream_events_for(
     allow_pending_source: bool = False,
 ) -> AgentStreamEventPage:
     since = payload.since_sequence
-    adapter = get_adapter_for_session(session)
-    if adapter is None or (
-        not allow_pending_source and not adapter.capabilities(session).structured
-    ):
+    caps = await _capabilities_for(session, manager)
+    if not caps.structured and not allow_pending_source:
         return AgentStreamEventPage(events=[], next_sequence=since, has_more=False)
 
     timeout = payload.timeout_seconds
@@ -428,32 +497,23 @@ async def _stream_live_for(
     since_sequence: int,
     allow_pending_source: bool = False,
 ) -> StreamingResponse:
-    adapter = get_adapter_for_session(session)
-    if adapter is None or (
-        not allow_pending_source and not adapter.capabilities(session).structured
-    ):
+    caps = await _capabilities_for(session, manager)
+    if not caps.structured and not allow_pending_source:
         return _closed_unavailable_stream(
-            StreamCapabilities(),
+            caps,
             "structured observation unavailable for this session",
         )
 
     if manager.hard_failed(session.id):
-        return _closed_unavailable_stream(
-            _capabilities_for(session, manager), _structured_failure_message(session.id, manager)
-        )
+        return _closed_unavailable_stream(caps, _structured_failure_message(session.id, manager))
     try:
         queue = await manager.subscribe(session)
     except StructuredSourceUnavailable:
-        return _closed_unavailable_stream(
-            _capabilities_for(session, manager), _structured_failure_message(session.id, manager)
-        )
+        return _closed_unavailable_stream(caps, _structured_failure_message(session.id, manager))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    caps = (
-        _tab_capabilities_for(session, manager)
-        if allow_pending_source
-        else _capabilities_for(session, manager)
-    )
+    if allow_pending_source:
+        caps = await _tab_capabilities_for(session, manager)
     store = manager.get_store(session.workspace_id, session.id)
 
     async def event_stream() -> Any:
@@ -569,7 +629,7 @@ async def get_stream_diagnostics(
         }
 
     tailer = manager.get_tailer(session.id)
-    structured = _capabilities_for(session).structured
+    structured = (await _capabilities_for(session, manager)).structured
     tail_path: Optional[str] = None
     last_error: Optional[str] = None
     if tailer is not None:
@@ -577,6 +637,10 @@ async def get_stream_diagnostics(
         if source is not None:
             tail_path = str(source)
         last_error = tailer.last_error
+        # For AGENT sessions the native transport is the source; surface its
+        # error if the transport creation failed.
+        if tailer.native_error is not None and not last_error:
+            last_error = tailer.native_error
     else:
         try:
             source = discover_source_cached(adapter, session)
@@ -594,6 +658,172 @@ async def get_stream_diagnostics(
         "event_count": await store.count(),
         "last_event_at": await store.last_event_at(),
     }
+
+
+# ── Native composer input (send) ────────────────────────────────────────────
+
+# Hard limits on composer attachments. These protect the backend from
+# pathological payloads before any provider subprocess is involved.
+_MAX_ATTACHMENTS = 10
+_MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024  # 20 MiB decoded
+
+
+class AgentStreamAttachment(BaseModel):
+    filename: str
+    mime_type: str
+    data_url: str
+
+
+class AgentStreamSendRequest(BaseModel):
+    # Text may be empty for image-only turns, but at least one of text or
+    # attachments must be present (validated in the model validator).
+    text: str = ""
+    attachments: List[AgentStreamAttachment] = Field(default_factory=list)
+    # Stable turn id generated by the frontend. The tailer echoes it back on
+    # every event of the turn (turn_started, deltas, turn_completed) so the
+    # frontend can upsert by identity instead of text matching. Two identical
+    # user messages therefore remain two distinct turns.
+    client_turn_id: str
+
+    @model_validator(mode="after")
+    def _require_text_or_attachments(self) -> "AgentStreamSendRequest":
+        if not self.text.strip() and not self.attachments:
+            raise ValueError("send request must include text or at least one attachment")
+        if not self.client_turn_id.strip():
+            raise ValueError("client_turn_id is required")
+        return self
+
+
+def _decode_attachments(attachments: List[AgentStreamAttachment]) -> List[bytes]:
+    """Decode data-URL attachments into raw bytes with strict limits.
+
+    Fail-closed: any attachment that is not a valid ``data:`` URL, exceeds
+    the size limit, or is not valid base64 raises ``HTTPException(400)``.
+    The total attachment count is also bounded.
+    """
+    import base64
+
+    if len(attachments) > _MAX_ATTACHMENTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"too many attachments: {len(attachments)} > {_MAX_ATTACHMENTS}",
+        )
+
+    decoded: List[bytes] = []
+    for att in attachments:
+        if not att.data_url.startswith("data:"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"attachment {att.filename!r} is not a data URL",
+            )
+        header, _, b64 = att.data_url.partition(",")
+        try:
+            data = base64.b64decode(b64, validate=True)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"attachment {att.filename!r} is not valid base64: {exc}",
+            )
+        if len(data) > _MAX_ATTACHMENT_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"attachment {att.filename!r} exceeds size limit: "
+                    f"{len(data)} > {_MAX_ATTACHMENT_BYTES} bytes"
+                ),
+            )
+        decoded.append(data)
+    return decoded
+
+
+async def _send_to_native(
+    session: ManagedSession,
+    payload: AgentStreamSendRequest,
+    manager: TailerManager,
+) -> None:
+    """Deliver composer input to the native provider transport atomically.
+
+    AGENT sessions own a single ``ProviderSession`` that is both the stream
+    source and the input sink. Text and images are delivered together via
+    ``send_message`` so a failed send never leaves staged images that could
+    pollute a later turn. This is the only input path for AGENT sessions —
+    it must never fall back to tmux or the workspace outbox.
+    """
+    if not _is_agent_native(session):
+        raise HTTPException(
+            status_code=400,
+            detail="native composer input is only available for AGENT sessions",
+        )
+
+    images = _decode_attachments(payload.attachments)
+    if images:
+        # Verify the transport supports images before staging them.
+        caps = await _capabilities_for(session, manager)
+        if not caps.supports_images:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{session.agent_type.value} does not support image attachments",
+            )
+    await manager.send_message(session, payload.text, images, payload.client_turn_id)
+
+
+def _map_send_exception(exc: Exception) -> HTTPException:
+    """Map provider send errors to explicit HTTP status codes.
+
+    ``ValueError`` (invalid image, bad input) → 400.
+    ``NotImplementedError`` (provider lacks image support) → 400.
+    ``RuntimeError`` for an in-flight turn → 409 Conflict.
+    Other ``RuntimeError`` (no native transport, transport died) → 503.
+    """
+    if isinstance(exc, ValueError):
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, NotImplementedError):
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, RuntimeError):
+        msg = str(exc)
+        if "turn is already in flight" in msg:
+            return HTTPException(status_code=409, detail=msg)
+        return HTTPException(status_code=503, detail=msg)
+    # Unknown errors still fail closed, never as a bare 500.
+    return HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/sessions/{managed_session_id}/stream/send")
+async def send_stream_input(
+    managed_session_id: str,
+    payload: AgentStreamSendRequest,
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    session = _session_or_404(managed_session_id)
+    manager = _get_tailer_manager()
+    try:
+        await _send_to_native(session, payload, manager)
+    except StructuredSourceUnavailable as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _map_send_exception(exc)
+    return {"ok": True}
+
+
+@router.post("/tabs/{tab_id}/stream/send")
+async def send_tab_stream_input(
+    tab_id: str,
+    payload: AgentStreamSendRequest,
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    session = _terminal_tab_session_or_404(tab_id)
+    manager = _get_tab_tailer_manager()
+    try:
+        await _send_to_native(session, payload, manager)
+    except StructuredSourceUnavailable as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _map_send_exception(exc)
+    return {"ok": True}
 
 
 __all__ = ["router", "_reset_tailer_manager"]

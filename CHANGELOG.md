@@ -17,16 +17,22 @@
   to expect raw-terminal and structured rendering to be identical in real
   time.
 - **How**: A persisted `session_kind` (`agent` or `terminal`) now controls the
-  renderer independently of the Claude/Codex/Cursor/runtime profile. Existing
-  standalone tabs migrate to Terminal; existing managed non-shell workspace
-  sessions migrate to Agent. The hidden PTY remains mounted only as the current
-  Agent transport/input bridge. Cursor Agent creation pins the same verified
-  transcript provenance used by Workspace agents, while Cursor Terminal keeps
-  the native TUI. See
+  renderer independently of the Claude/Codex/Cursor/runtime profile. Explicit
+  user Agent sessions use a provider-native structured transport; Terminal and
+  internal managed-task runners retain their native TUI. No hidden raw terminal
+  is mounted behind an Agent surface. See
   `docs/working-logs/2026-09-01-paseo-agent-terminal-session-separation.md`.
-- **Scope**: This release intentionally retains transcript-backed block-level
-  updates. Native Claude SDK, Codex app-server, and Cursor ACP streaming are a
-  later transport change, not part of the Agent/Terminal product split.
+- **Streaming**: Claude stream-json, Codex app-server, and Cursor stream-json
+  feed stable turn/message IDs into an append-only event stream. SSE accelerates
+  long-poll reconciliation; out-of-order events remain buffered until every
+  sequence gap is filled. The renderer uses Paseo-style ~60 Hz paced reveal
+  with a 150 ms backlog horizon and flushes authoritative text on completion.
+- **Codex lifecycle**: Persistent app-server startup is single-flight, so a
+  first composer send racing the stream subscriber cannot spawn two readers
+  against one overwritten process and break incremental delivery.
+- **Images**: Claude and Codex Agent composers accept PNG/JPEG/GIF/WebP. The
+  installed Cursor CLI has no image-input contract, so its attachment control
+  is explicitly disabled instead of pretending to send an image.
 - **Startup gate fix**: A Claude Agent launched in Solo Mode now carries the
   user's explicit bypass acknowledgement as a secret-free command-line
   settings source, so the hidden PTY cannot stall on Claude's first-run safety
@@ -92,9 +98,9 @@
   transport. It renders a turn-grouped timeline
   (user, assistant text, collapsible thinking, tool calls with status, errors,
   status events) from the backend agent-stream plane, with SSE + long-poll
-  fallback and fail-closed to raw on `structured=false` or stream failure.
+  reconciliation and a retryable fail-closed Agent surface on stream failure.
   Composer supports text + image attachments (file picker, drag-drop, paste)
-  with PNG/JPEG/GIF/WebP/BMP + 8 MB validation, preview/remove, image-only
+  with PNG/JPEG/GIF/WebP + 8 MB validation, preview/remove, image-only
   send, and message/attachment retention on send error. No file paths or
   secrets are rendered in the UI.
 - **Why**: First-release product contract for the Paseo v2 structured
@@ -102,7 +108,8 @@
 - **How**: `StructuredPane.vue`, `agentStreamTimeline.ts`,
   `agentStreamAttachments.ts`, `useAgentStream.ts`; `TerminalPane.vue` selects
   the fixed surface from `session_kind` and keeps the Agent transport hidden.
-  `sessionForTab` maps tab → managed session for stream keying.
+  `sessionForTab` maps tab → managed session for stream keying. Stable
+  `client_turn_id` reconciliation keeps identical prompts distinct.
 
 ### feat: Paseo v2 backend structured observation foundation (Layer B)
 
