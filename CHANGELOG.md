@@ -35,7 +35,10 @@
   structured direct send appear to clear without reaching the terminal. The
   decoder now copies each ring record to normal memory before decoding; direct
   sends also surface an immediate pending acknowledgement and retain the draft
-  when no terminal target can accept it.
+  when no terminal target can accept it. Structured live updates now keep the
+  sequence-based long-poll reader active alongside SSE, so a browser or dev
+  proxy that silently buffers the SSE connection cannot leave agent responses
+  stale until a view switch or refresh.
 
 ### fix: harden image attachment validation and SSE session-deletion handling
 

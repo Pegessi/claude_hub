@@ -67,6 +67,13 @@ fail-closed.
    structured key and every key behind it. Decode a copied, ordinary
    `Uint8Array` record instead; the `sendTerminalKey` boundary returns whether
    it has a target so the composer can retain a failed draft.
+6. **EventSource availability is not a freshness guarantee.** In the isolated
+   preview, Claude and the backend event store both had a response within two
+   seconds while the mounted Structured view remained on its optimistic
+   pending turn. The old client started long-poll only when `EventSource` was
+   absent, so a connected-but-buffered SSE path had no reconciliation reader.
+   Long-poll now remains authoritative while SSE is an optional accelerator;
+   both paths deduplicate by `stream_sequence`.
 
 ## Verification
 
@@ -88,3 +95,13 @@ fail-closed.
   appeared in Structured. An image pasted into the Structured composer reached
   Claude's native input as `[Image #1]`. These are terminal-ingress checks;
   agent-provider response availability is intentionally a separate concern.
+- Freshness reproduction: the original direct-tab store persisted its latest
+  assistant text at `14:19:09Z`, while a screenshot captured at `14:19:20Z`
+  still showed only the optimistic pending turn. After enabling concurrent
+  long-poll reconciliation, a pre-armed `/stream/wait` request received the
+  next test event in 1.746 seconds, including a deliberate one-second delay
+  before submission (about 0.75 seconds of source-to-client latency).
+- Frontend validation after the freshness fix: `pnpm lint:check`, 118 unit
+  tests, `pnpm build`, and `git diff --check` pass. A real long-answer provider
+  run was attempted separately but day1 remained in upstream capacity retries;
+  this does not weaken the measured stream-reader result.
