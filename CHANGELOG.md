@@ -23,6 +23,14 @@
   Workspace agents' durable outbox. Direct-tab composer input is sent through
   the mounted Raw terminal queue and its existing clipboard-image bridge. See
   `docs/working-logs/2026-08-31-paseo-v2-direct-terminal-tabs.md`.
+- **Follow-up**: Paseo is now an exclusive visible surface rather than a
+  translucent overlay on top of Raw. The ttyd iframe explicitly sets
+  `visibility: visible`, so hiding only its Vue parent allowed terminal pixels
+  to leak through. The mounted Raw wrapper now owns an opacity/z-index boundary
+  and the fixed pane chrome makes the `Terminal | Paseo` switch discoverable in
+  both views. The timeline also restores the centered, conversational Paseo
+  presentation from the earlier prototype while retaining the v2 stream and
+  image-composer behavior.
 
 ### fix: harden image attachment validation and SSE session-deletion handling
 
