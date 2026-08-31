@@ -501,6 +501,48 @@ export interface ManagedSession {
   last_activity_at?: string | null
 }
 
+// ── Structured agent-stream (Layer B observation plane) ─────────────────────
+
+export interface StreamCapabilities {
+  structured: boolean
+  adapter_id: string
+  schema_version: number
+  sources: string[]
+  supports_approval_ui: boolean
+  supports_tool_timeline: boolean
+}
+
+export type AgentStreamEventType =
+  | 'turn_started'
+  | 'turn_completed'
+  | 'text_delta'
+  | 'thinking_delta'
+  | 'tool_call_started'
+  | 'tool_call_completed'
+  | 'approval_required'
+  | 'approval_resolved'
+  | 'error'
+  | 'status'
+
+export interface AgentStreamEvent {
+  stream_sequence: number
+  session_id: string
+  tab_id: string
+  agent_type: AgentType
+  type: AgentStreamEventType
+  run_epoch?: number | null
+  call_id?: string | null
+  payload: Record<string, unknown>
+  created_at: string
+  redacted: boolean
+}
+
+export interface AgentStreamEventPage {
+  events: AgentStreamEvent[]
+  next_sequence: number
+  has_more: boolean
+}
+
 export interface AgentReport {
   id: string
   workspace_id: string

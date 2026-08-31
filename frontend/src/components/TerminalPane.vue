@@ -13,6 +13,25 @@
       class="pane-header"
     >
       <span class="pane-tab-name">{{ getTabName() }}</span>
+
+      <!-- Structured / Raw view toggle.
+           Only shown for tabs backed by a managed agent session.
+           Plain terminal tabs have no structured plane. -->
+      <button
+        v-if="managedSession"
+        type="button"
+        class="pane-action-button pane-view-toggle"
+        :title="viewMode === 'raw' ? 'Switch to structured view' : 'Switch to raw terminal'"
+        :aria-label="viewMode === 'raw' ? 'Switch to structured view' : 'Switch to raw terminal'"
+        :aria-pressed="viewMode === 'structured'"
+        @click.stop="toggleView"
+      >
+        <span
+          class="pane-action-icon"
+          aria-hidden="true"
+        >{{ viewMode === 'raw' ? '≡' : '⌨' }}</span>
+      </button>
+
       <button
         type="button"
         class="pane-action-button"
@@ -43,21 +62,38 @@
       </p>
     </div>
 
-    <!-- 终端视图 -->
+    <!-- 终端视图 (Raw).
+         Always mounted when a tab is assigned so the ttyd session + scrollback
+         survive switching to the structured view. Hidden via CSS when the
+         structured view is active. -->
     <TerminalView
       v-if="pane.tabId"
       :tab-id="pane.tabId"
       :agent-type="getAgentType()"
       class="pane-terminal"
+      :class="{ 'is-hidden': viewMode === 'structured' }"
+    />
+
+    <!-- Structured view.
+         Only rendered when the user has opted in AND the tab has a managed
+         session. Fail-closed: if the stream reports structured=false or fails,
+         StructuredPane emits fallback-to-raw and we switch back to raw. -->
+    <StructuredPane
+      v-if="pane.tabId && viewMode === 'structured' && managedSession"
+      :session-id="managedSession.id"
+      class="pane-structured"
+      @fallback-to-raw="switchToRaw"
     />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useTerminalStore } from '@/stores/terminalStore'
+import { useWorkspaceStore } from '@/stores/workspaceStore'
 import TerminalView from '@/components/TerminalView.vue'
+import StructuredPane from '@/components/StructuredPane.vue'
 import type { Pane, TerminalTab } from '@/types'
 
 const props = defineProps<{
@@ -69,6 +105,7 @@ const emit = defineEmits<{
 }>()
 
 const store = useTerminalStore()
+const workspaceStore = useWorkspaceStore()
 const { tabs } = storeToRefs(store)
 
 // Resolve the current tab once via computed so we don't do a tabs.find() on
@@ -79,11 +116,19 @@ const paneTab = computed<TerminalTab | undefined>(() =>
 const tabName = computed(() => paneTab.value?.name || '')
 const agentType = computed(() => paneTab.value?.agent_type)
 
+// Map the tab to its managed agent session. The structured observation plane
+// is keyed by managed-session id; plain terminal tabs (no session) have no
+// structured view and the toggle is hidden.
+const managedSession = computed(() =>
+  props.pane.tabId ? workspaceStore.sessionForTab(props.pane.tabId) : null
+)
+
+type ViewMode = 'raw' | 'structured'
+const viewMode = ref<ViewMode>('raw')
+
 const isDragOver = ref(false)
 const isRefreshingHistory = ref(false)
 let refreshFeedbackTimer: number | null = null
-
-// (F8) WindowWithTerminalHistory no longer needed — globals are typed via Window.__claudeHub in types/index.ts
 
 function getTabName(): string {
   return tabName.value
@@ -92,6 +137,36 @@ function getTabName(): string {
 function getAgentType() {
   return agentType.value
 }
+
+function toggleView() {
+  if (viewMode.value === 'raw') {
+    // Fail-closed guard: only enter structured view if the tab has a managed
+    // session. If not, stay on raw.
+    if (!managedSession.value) return
+    viewMode.value = 'structured'
+  } else {
+    viewMode.value = 'raw'
+  }
+}
+
+function switchToRaw() {
+  viewMode.value = 'raw'
+}
+
+// If the tab changes (or its session disappears) while in structured mode,
+// fall back to raw so we never show a stale structured pane.
+watch(
+  () => props.pane.tabId,
+  () => {
+    viewMode.value = 'raw'
+  },
+)
+
+watch(managedSession, (session) => {
+  if (!session && viewMode.value === 'structured') {
+    viewMode.value = 'raw'
+  }
+})
 
 function handleClick() {
   emit('click')
@@ -301,5 +376,25 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-height: 0;
+}
+
+/* Hide the raw terminal when structured view is active.
+   IMPORTANT: we use visibility:hidden + position:absolute (NOT display:none)
+   so the ttyd iframe stays loaded and its scrollback is preserved.
+   pointer-events:none prevents the hidden terminal from intercepting clicks. */
+.pane-terminal.is-hidden {
+  position: absolute;
+  inset: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.pane-structured {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
 }
 </style>
