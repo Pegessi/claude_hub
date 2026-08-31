@@ -510,7 +510,13 @@ class _TmuxQueriesMixin:
         self._save_state()
         return None
 
-    _TERMINAL_TASK_STATUSES_FOR_REUSE = frozenset({WorkspaceTaskStatus.DONE})
+    # FAILED is a terminal execution outcome even though the human may later
+    # choose to continue or accept the task.  Treating it as active here would
+    # keep an idle failed worker permanently attached: abort deliberately
+    # rejects failed tasks, while delete/reuse would reject their binding.
+    _TERMINAL_TASK_STATUSES_FOR_REUSE = frozenset(
+        {WorkspaceTaskStatus.DONE, WorkspaceTaskStatus.FAILED}
+    )
 
     def _session_has_active_canonical_ownership(self, session: ManagedSession) -> bool:
         """True when a non-terminal task canonically owns this session via task.session_id."""

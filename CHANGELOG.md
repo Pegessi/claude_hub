@@ -5,6 +5,17 @@
 
 ## Unreleased
 
+### fix: release idle sessions after a failed subagent run
+
+- **What**: A `failed` task is now terminal for agent-session reuse and
+  deletion. Its idle agent can be removed without first forcing the task
+  through an invalid abort transition.
+- **Why**: Timed-out subagents enter `failed`, while manual abort accepts only
+  queued/working/review tasks. Treating `failed` as active in the cleanup
+  guard left an otherwise idle agent session permanently consuming a seat.
+- **How**: Session binding checks now recognize both `done` and `failed` as
+  terminal outcomes; regression coverage exercises direct session deletion.
+
 ### feat: Cursor same-pane transcript bridge for Paseo Structured
 
 - **What**: Local Cursor CLI sessions on the verified
