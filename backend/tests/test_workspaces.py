@@ -43,6 +43,22 @@ PNG_DATA_URL = (
     "WjR9awAAAABJRU5ErkJggg=="
 )
 
+# Minimal valid image bytes keyed by declared MIME type. Each starts with the
+# format's magic signature so the content-signature validator accepts them.
+_VALID_IMAGE_BYTES: dict[str, bytes] = {
+    "image/png": b"\x89PNG\r\n\x1a\n" + b"\x00" * 16,
+    "image/jpeg": b"\xff\xd8\xff\xe0" + b"\x00" * 16,
+    "image/gif": b"GIF89a" + b"\x00" * 16,
+    "image/webp": b"RIFF\x00\x00\x00\x00WEBP" + b"\x00" * 8,
+    "image/bmp": b"BM" + b"\x00" * 16,
+}
+
+
+def _data_url(mime: str, raw: bytes) -> str:
+    import base64
+
+    return f"data:{mime};base64,{base64.b64encode(raw).decode()}"
+
 
 def write_iteration_task_record_fixture(
     state_root: Path,
@@ -1808,6 +1824,169 @@ def test_image_attachment_prompt_requires_native_inspection() -> None:
     assert "Image handling:" in block
     assert "native image-viewing capability" in block
     assert "/tmp/reference.png" in block
+
+
+def test_bmp_attachment_is_supported(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The structured composer offers BMP; the backend must accept it."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path / "state")
+
+    client = TestClient(app)
+    workspace_response = client.post(
+        "/api/workspaces",
+        json={
+            "name": "BMP Repo",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "bmp",
+        },
+    )
+
+    response = client.post(
+        f"/api/workspaces/{workspace_response.json()['id']}/tasks",
+        json={
+            "title": "Use BMP",
+            "prompt": "Inspect the pasted BMP",
+            "attachments": [
+                {
+                    "filename": "diagram.bmp",
+                    "mime_type": "image/bmp",
+                    "data_url": _data_url("image/bmp", _VALID_IMAGE_BYTES["image/bmp"]),
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 201
+    task = response.json()
+    assert task["attachments"][0]["mime_type"] == "image/bmp"
+    assert task["attachments"][0]["filename"].endswith(".bmp")
+    attachment_path = Path(task["attachments"][0]["path"])
+    assert attachment_path.exists()
+    assert attachment_path.read_bytes().startswith(b"BM")
+
+
+@pytest.mark.parametrize("mime_type", list(_VALID_IMAGE_BYTES.keys()))
+def test_valid_image_signature_is_accepted(
+    mime_type: str,
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Each supported declared MIME type must accept bytes with a matching signature."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path / "state")
+
+    client = TestClient(app)
+    workspace_response = client.post(
+        "/api/workspaces",
+        json={
+            "name": f"Sig-{mime_type.split('/')[-1]}",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "sig",
+        },
+    )
+
+    response = client.post(
+        f"/api/workspaces/{workspace_response.json()['id']}/tasks",
+        json={
+            "title": "Valid signature",
+            "prompt": "ok",
+            "attachments": [
+                {
+                    "filename": f"img.{mime_type.split('/')[-1]}",
+                    "mime_type": mime_type,
+                    "data_url": _data_url(mime_type, _VALID_IMAGE_BYTES[mime_type]),
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 201
+
+
+def test_mismatched_image_signature_is_rejected(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Declared MIME must match the bytes' magic signature; otherwise reject."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path / "state")
+
+    client = TestClient(app)
+    workspace_response = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Mismatch",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "mm",
+        },
+    )
+
+    # Declare image/jpeg but send PNG bytes.
+    response = client.post(
+        f"/api/workspaces/{workspace_response.json()['id']}/tasks",
+        json={
+            "title": "Mismatched",
+            "prompt": "should fail",
+            "attachments": [
+                {
+                    "filename": "fake.jpg",
+                    "mime_type": "image/jpeg",
+                    "data_url": _data_url("image/jpeg", _VALID_IMAGE_BYTES["image/png"]),
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+
+
+def test_garbage_image_bytes_are_rejected(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Bytes that match no supported image signature must be rejected."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path / "state")
+
+    client = TestClient(app)
+    workspace_response = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Garbage",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "gbg",
+        },
+    )
+
+    response = client.post(
+        f"/api/workspaces/{workspace_response.json()['id']}/tasks",
+        json={
+            "title": "Garbage",
+            "prompt": "should fail",
+            "attachments": [
+                {
+                    "filename": "notanimage.png",
+                    "mime_type": "image/png",
+                    "data_url": _data_url("image/png", b"this is not an image"),
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert "detail" in body
 
 
 async def test_preview_report_markdown_artifact_is_scoped_to_report(

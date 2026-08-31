@@ -12,18 +12,22 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
+from unittest.mock import MagicMock
 
 import pytest
 
 from claude_hub.models import (
     AgentStreamEvent,
+    AgentStreamEventPage,
     AgentStreamEventType,
     AgentType,
     ManagedSession,
     ManagedSessionStatus,
     StreamCapabilities,
+    User,
     WorkspaceSessionRole,
 )
+from claude_hub.services import workspace_manager
 from claude_hub.services.agent_stream import (
     get_adapter,
     get_adapter_for_session,
@@ -489,3 +493,88 @@ def test_codex_adapter_task_complete_emits_turn_completed():
     assert len(events) == 1
     assert events[0].type == AgentStreamEventType.TURN_COMPLETED
     assert events[0].payload["summary"] == "done"
+
+
+# ── SSE live stream: session deletion ───────────────────────────────────────
+
+
+def _sse_session(workspace_id: str, session_id: str) -> ManagedSession:
+    now = datetime.now(timezone.utc)
+    return ManagedSession(
+        id=session_id,
+        workspace_id=workspace_id,
+        tab_id="tab-sse",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.IDLE,
+        title="sse",
+        workspace_path="/tmp",
+        tmux_session="tmux-sse",
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def test_sse_live_stream_terminates_when_session_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live SSE connection must error out (not heartbeat forever) when its
+    session is deleted.
+
+    We drive the endpoint's async generator directly (TestClient buffers
+    infinite SSE responses and would hang).
+    """
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    workspace_id = "ws-sse-del"
+    session_id = "s-sse-del"
+    workspace_manager.sessions[session_id] = _sse_session(workspace_id, session_id)
+
+    # Adapter reports structured=True so the stream enters the live loop.
+    mock_adapter = MagicMock()
+    mock_adapter.capabilities.return_value = StreamCapabilities(
+        structured=True, adapter_id="mock", schema_version=1
+    )
+    monkeypatch.setattr(agent_stream_api, "get_adapter_for_session", lambda s: mock_adapter)
+
+    manager = agent_stream_api._get_tailer_manager()
+
+    async def _fake_subscribe(session: ManagedSession) -> asyncio.Queue:
+        return asyncio.Queue()
+
+    monkeypatch.setattr(manager, "subscribe", _fake_subscribe)
+
+    class _EmptyStore:
+        async def read_since(self, since: int, limit: int = 200) -> AgentStreamEventPage:
+            return AgentStreamEventPage(events=[], next_sequence=since, has_more=False)
+
+    monkeypatch.setattr(manager, "get_store", lambda ws, sid: _EmptyStore())
+
+    fake_user = User(open_id="local", name="Local", email="local@localhost", avatar_url=None)
+
+    async def run() -> None:
+        response = await agent_stream_api.stream_live(
+            managed_session_id=session_id,
+            since_sequence=-1,
+            current_user=fake_user,
+        )
+        agen = response.body_iterator
+
+        # First chunk is the "hello" event.
+        hello = await agen.__anext__()
+        assert hello.startswith("event: hello")
+
+        # Delete the session out from under the stream.
+        workspace_manager.sessions.pop(session_id, None)
+
+        # The stream must emit an error event and then end (no endless
+        # heartbeats). Guard with a timeout so a regression fails fast.
+        error_chunk = await asyncio.wait_for(agen.__anext__(), timeout=5.0)
+        assert error_chunk.startswith("event: error")
+        assert "session was deleted" in error_chunk
+
+        # Generator should terminate after the error event.
+        with pytest.raises(StopAsyncIteration):
+            await agen.__anext__()
+
+    asyncio.run(run())

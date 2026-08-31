@@ -5,6 +5,25 @@ import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time pa
 from ._constants import *  # noqa: F401,F403
 
 
+def _validate_image_signature(mime_type: str, content: bytes) -> None:
+    """Verify the decoded bytes carry a magic signature matching ``mime_type``.
+
+    Rejects mismatched or unrecognized bytes before they touch disk. The check
+    is intentionally shallow (magic bytes only) — it guards against declared
+    MIME / actual content mismatches, not against well-formed-but-malicious
+    images (those are handled by the agent's native image viewer).
+    """
+    signatures = IMAGE_ATTACHMENT_SIGNATURES.get(mime_type)
+    if not signatures:
+        raise ValueError(f"Unsupported attachment type: {mime_type}")
+    if not any(content.startswith(sig) for sig in signatures):
+        raise ValueError(f"Attachment bytes do not match declared image type {mime_type}")
+    if mime_type == "image/webp":
+        # RIFF container: bytes 0..3 = "RIFF", bytes 8..11 = "WEBP".
+        if len(content) < 12 or content[8:12] != b"WEBP":
+            raise ValueError("Attachment bytes do not match declared image type image/webp")
+
+
 class _AttachmentsMixin:
     def _persist_attachments(
         self,
@@ -34,6 +53,7 @@ class _AttachmentsMixin:
                 raise ValueError("Attachment data is empty")
             if len(content) > ATTACHMENT_MAX_BYTES:
                 raise ValueError("Attachment exceeds the 8 MB limit")
+            _validate_image_signature(mime_type, content)
 
             attachment_id = uuid.uuid4().hex
             filename = _safe_attachment_filename(item.filename, suffix)

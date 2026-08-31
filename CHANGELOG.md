@@ -5,6 +5,24 @@
 
 ## Unreleased
 
+### fix: harden image attachment validation and SSE session-deletion handling
+
+- **What**: Image attachments now validate content signatures (magic bytes)
+  against the declared MIME type before persisting, and `image/bmp` is now a
+  supported attachment type. A live SSE agent-stream connection emits an error
+  and terminates promptly when its session is deleted, instead of heartbeating
+  forever.
+- **Why**: The frontend composer offers BMP, but the backend allowlist omitted
+  it. Without signature checks, a client could declare one MIME type while
+  uploading bytes of another (or arbitrary non-image data). On the stream side,
+  `hard_failed` returns `False` once a deleted session's tailer is forgotten,
+  so the SSE loop had no signal to stop.
+- **How**: `IMAGE_ATTACHMENT_SIGNATURES` in `_constants.py` plus
+  `_validate_image_signature` in `_attachments.py` (WebP checks both the `RIFF`
+  prefix and `WEBP` at offset 8). The SSE `event_stream` loop and the long-poll
+  `wait` loop now check `workspace_manager.sessions.get(session.id)` and emit a
+  `session was deleted` error when the session is gone.
+
 ### fix: release idle sessions after a failed subagent run
 
 - **What**: A `failed` task is now terminal for agent-session reuse and

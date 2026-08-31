@@ -211,6 +211,8 @@ async def wait_stream_events(
             page = await store.read_since(since, limit=200)
             if page.events:
                 return page
+            if workspace_manager.sessions.get(session.id) is None:
+                _raise_structured_unavailable(session.id)
             if manager.hard_failed(session.id):
                 _raise_structured_unavailable(session.id)
             remaining = deadline - loop.time()
@@ -279,6 +281,17 @@ async def stream_live(
             loop = asyncio.get_running_loop()
             last_heartbeat = loop.time()
             while True:
+                # If the session was deleted (tailer forgotten + session popped
+                # from workspace_manager.sessions), terminate the stream with an
+                # error instead of heartbeating forever. ``hard_failed`` returns
+                # False once the tailer is gone, so we must check existence
+                # directly.
+                if workspace_manager.sessions.get(session.id) is None:
+                    yield _sse(
+                        "error",
+                        {"message": "session was deleted"},
+                    )
+                    return
                 if manager.hard_failed(session.id):
                     yield _sse(
                         "error",

@@ -210,6 +210,19 @@ IMAGE_ATTACHMENT_TYPES = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
     "image/webp": ".webp",
+    "image/bmp": ".bmp",
+}
+
+# Magic-byte signatures for each supported image MIME type. The validator
+# checks the decoded bytes against the declared type's signature before
+# persisting, so a client cannot smuggle arbitrary (or malicious) payloads by
+# lying about the MIME type. Each entry is a tuple of acceptable prefixes.
+IMAGE_ATTACHMENT_SIGNATURES: dict[str, tuple[bytes, ...]] = {
+    "image/png": (b"\x89PNG\r\n\x1a\n",),
+    "image/jpeg": (b"\xff\xd8\xff",),
+    "image/gif": (b"GIF87a", b"GIF89a"),
+    "image/webp": (b"RIFF",),  # bytes 8..12 must be b"WEBP"; checked separately
+    "image/bmp": (b"BM",),
 }
 
 
@@ -300,6 +313,7 @@ __all__ = [
     "HARD_RECOVERY_REVIEWER_MESSAGE",
     "HARD_RECOVERY_WORKER_MESSAGE",
     "IMAGE_ATTACHMENT_TYPES",
+    "IMAGE_ATTACHMENT_SIGNATURES",
     "INDEX_FILE",
     "INTERNAL_API_CURL",
     "INTERRUPT_SETTLE_SECONDS",
