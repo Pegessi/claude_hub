@@ -72,6 +72,11 @@ export interface TerminalTab {
   workspace_name?: string | null
   workspace_role?: WorkspaceSessionRole | null
   agent_session_id?: string | null
+  cursor_transport?: string
+  cursor_data_dir?: string | null
+  cursor_cli_version?: string | null
+  cursor_transcript_path?: string | null
+  cursor_transcript_schema?: string | null
 }
 
 export interface TerminalTabCreate {

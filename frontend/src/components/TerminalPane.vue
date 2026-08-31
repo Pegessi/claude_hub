@@ -14,23 +14,34 @@
     >
       <span class="pane-tab-name">{{ getTabName() }}</span>
 
-      <!-- Structured / Raw view toggle.
-           Only shown for tabs backed by a managed agent session.
-           Plain terminal tabs have no structured plane. -->
-      <button
-        v-if="managedSession"
-        type="button"
-        class="pane-action-button pane-view-toggle"
-        :title="viewMode === 'raw' ? 'Switch to structured view' : 'Switch to raw terminal'"
-        :aria-label="viewMode === 'raw' ? 'Switch to structured view' : 'Switch to raw terminal'"
-        :aria-pressed="viewMode === 'structured'"
-        @click.stop="toggleView"
+      <!-- The two views are peers over one agent source.  Text labels are
+           intentional: the older icon-only affordance was too easy to miss. -->
+      <div
+        v-if="hasStructuredSource"
+        class="pane-view-switch"
+        role="group"
+        aria-label="Agent view"
       >
-        <span
-          class="pane-action-icon"
-          aria-hidden="true"
-        >{{ viewMode === 'raw' ? '≡' : '⌨' }}</span>
-      </button>
+        <button
+          type="button"
+          class="pane-view-option"
+          :class="{ active: viewMode === 'raw' }"
+          :aria-pressed="viewMode === 'raw'"
+          @click.stop="setView('raw')"
+        >
+          Terminal
+        </button>
+        <button
+          type="button"
+          class="pane-view-option"
+          :class="{ active: viewMode === 'structured' }"
+          :aria-pressed="viewMode === 'structured'"
+          title="Paseo structured view"
+          @click.stop="setView('structured')"
+        >
+          Paseo
+        </button>
+      </div>
 
       <button
         type="button"
@@ -74,13 +85,13 @@
       :class="{ 'is-hidden': viewMode === 'structured' }"
     />
 
-    <!-- Structured view.
-         Only rendered when the user has opted in AND the tab has a managed
-         session. Fail-closed: if the stream reports structured=false or fails,
-         StructuredPane emits fallback-to-raw and we switch back to raw. -->
+    <!-- Structured view.  Workspace agents retain their durable outbox;
+         standalone AI tabs use the same tab transcript and raw-terminal input
+         path.  Either source fails closed to raw. -->
     <StructuredPane
-      v-if="pane.tabId && viewMode === 'structured' && managedSession"
-      :session-id="managedSession.id"
+      v-if="pane.tabId && viewMode === 'structured' && hasStructuredSource"
+      :session-id="managedSession?.id"
+      :tab-id="directStructuredTabId"
       class="pane-structured"
       @fallback-to-raw="switchToRaw"
     />
@@ -116,11 +127,28 @@ const paneTab = computed<TerminalTab | undefined>(() =>
 const tabName = computed(() => paneTab.value?.name || '')
 const agentType = computed(() => paneTab.value?.agent_type)
 
-// Map the tab to its managed agent session. The structured observation plane
-// is keyed by managed-session id; plain terminal tabs (no session) have no
-// structured view and the toggle is hidden.
+// Workspace sessions keep their existing durable messaging path. A normal AI
+// tab has no Workspace board row, so it is observed by its own transcript via
+// the tab stream endpoint instead.
 const managedSession = computed(() =>
   props.pane.tabId ? workspaceStore.sessionForTab(props.pane.tabId) : null
+)
+
+const directStructuredTabId = computed(() => {
+  if (managedSession.value || !paneTab.value) return undefined
+  const type = paneTab.value.agent_type
+  if (type === 'claude' || type === 'codex') return paneTab.value.id
+  if (
+    type === 'cursor' &&
+    (paneTab.value.cursor_transport === 'acp' || paneTab.value.cursor_transport === 'terminal_transcript')
+  ) {
+    return paneTab.value.id
+  }
+  return undefined
+})
+
+const hasStructuredSource = computed(() =>
+  Boolean(managedSession.value || directStructuredTabId.value),
 )
 
 type ViewMode = 'raw' | 'structured'
@@ -138,15 +166,10 @@ function getAgentType() {
   return agentType.value
 }
 
-function toggleView() {
-  if (viewMode.value === 'raw') {
-    // Fail-closed guard: only enter structured view if the tab has a managed
-    // session. If not, stay on raw.
-    if (!managedSession.value) return
-    viewMode.value = 'structured'
-  } else {
-    viewMode.value = 'raw'
-  }
+function setView(next: ViewMode) {
+  emit('click')
+  if (next === 'structured' && !hasStructuredSource.value) return
+  viewMode.value = next
 }
 
 function switchToRaw() {
@@ -162,8 +185,8 @@ watch(
   },
 )
 
-watch(managedSession, (session) => {
-  if (!session && viewMode.value === 'structured') {
+watch(hasStructuredSource, (available) => {
+  if (!available && viewMode.value === 'structured') {
     viewMode.value = 'raw'
   }
 })
@@ -322,6 +345,46 @@ onUnmounted(() => {
 .pane-action-button:disabled {
   cursor: default;
   opacity: 0.8;
+}
+
+.pane-view-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  padding: 2px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-sm);
+  background-color: var(--ch-color-app-bg);
+}
+
+.pane-view-option {
+  min-height: 18px;
+  padding: 1px 6px;
+  border: 0;
+  border-radius: 3px;
+  color: var(--ch-color-text-muted);
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.pane-view-option:hover {
+  color: var(--ch-color-text);
+  background-color: var(--ch-color-surface-control-hover);
+}
+
+.pane-view-option.active {
+  color: var(--ch-color-text);
+  background-color: var(--ch-color-surface-control-hover);
+  box-shadow: inset 0 0 0 1px var(--ch-color-accent-ring);
+}
+
+.pane-view-option:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring);
+  outline-offset: 1px;
 }
 
 .pane-action-icon {

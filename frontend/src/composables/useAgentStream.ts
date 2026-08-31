@@ -19,14 +19,15 @@ const API_BASE = '/api'
  * - `failed`: hard failure — consumer should fall back to raw.
  */
 export type StreamConnectionState = 'idle' | 'hydrating' | 'live' | 'failed'
+export type StreamSource = 'managed-session' | 'terminal-tab'
 
 export interface UseAgentStreamApi {
   capabilities: ShallowRef<StreamCapabilities | null>
   events: Ref<AgentStreamEvent[]>
   connectionState: Ref<StreamConnectionState>
   errorMessage: Ref<string | null>
-  /** Start (or restart) the stream for the given managed session. */
-  start: (sessionId: string) => Promise<void>
+  /** Start (or restart) a managed-session or Terminal-tab stream. */
+  start: (sourceId: string, source?: StreamSource) => Promise<void>
   /** Tear down the stream (SSE / long-poll). Safe to call repeatedly. */
   stop: () => void
 }
@@ -51,6 +52,7 @@ export function useAgentStream(): UseAgentStreamApi {
   const errorMessage = ref<string | null>(null)
 
   let currentSessionId: string | null = null
+  let currentSource: StreamSource = 'managed-session'
   let eventSource: EventSource | null = null
   let longPollAbort: AbortController | null = null
   // Stream sequences are zero-based and cursors are exclusive.
@@ -92,22 +94,28 @@ export function useAgentStream(): UseAgentStreamApi {
     }
   }
 
-  async function fetchCapabilities(sessionId: string): Promise<StreamCapabilities> {
-    const res = await fetch(`${API_BASE}/workspaces/sessions/${sessionId}/stream/capabilities`)
+  function streamBasePath(sourceId: string, source: StreamSource): string {
+    return source === 'terminal-tab'
+      ? `${API_BASE}/workspaces/tabs/${sourceId}/stream`
+      : `${API_BASE}/workspaces/sessions/${sourceId}/stream`
+  }
+
+  async function fetchCapabilities(streamPath: string): Promise<StreamCapabilities> {
+    const res = await fetch(`${streamPath}/capabilities`)
     if (!res.ok) throw new Error(`capabilities HTTP ${res.status}`)
     return (await res.json()) as StreamCapabilities
   }
 
-  async function fetchEvents(sessionId: string, since: number): Promise<AgentStreamEventPage> {
+  async function fetchEvents(streamPath: string, since: number): Promise<AgentStreamEventPage> {
     const res = await fetch(
-      `${API_BASE}/workspaces/sessions/${sessionId}/stream/events?since_sequence=${since}&limit=200`,
+      `${streamPath}/events?since_sequence=${since}&limit=200`,
     )
     if (!res.ok) throw new Error(`events HTTP ${res.status}`)
     return (await res.json()) as AgentStreamEventPage
   }
 
-  async function waitEvents(sessionId: string, since: number): Promise<AgentStreamEventPage> {
-    const res = await fetch(`${API_BASE}/workspaces/sessions/${sessionId}/stream/wait`, {
+  async function waitEvents(streamPath: string, since: number): Promise<AgentStreamEventPage> {
+    const res = await fetch(`${streamPath}/wait`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ since_sequence: since, timeout_seconds: 30 }),
@@ -118,13 +126,13 @@ export function useAgentStream(): UseAgentStreamApi {
   }
 
   /** Long-poll fallback loop used when SSE is unavailable or fails. */
-  async function longPollLoop(sessionId: string) {
-    while (!stopped && currentSessionId === sessionId) {
+  async function longPollLoop(sourceId: string, streamPath: string) {
+    while (!stopped && currentSessionId === sourceId) {
       try {
-        const page = await waitEvents(sessionId, deliveredSequence)
+        const page = await waitEvents(streamPath, deliveredSequence)
         applyPage(page)
       } catch (err) {
-        if (stopped || currentSessionId !== sessionId) return
+        if (stopped || currentSessionId !== sourceId) return
         // Surface the failure and stop; the consumer falls back to raw.
         errorMessage.value = err instanceof Error ? err.message : 'stream wait failed'
         connectionState.value = 'failed'
@@ -133,8 +141,8 @@ export function useAgentStream(): UseAgentStreamApi {
     }
   }
 
-  function startSse(sessionId: string) {
-    const url = `${API_BASE}/workspaces/sessions/${sessionId}/stream/live?since_sequence=${deliveredSequence}`
+  function startSse(sourceId: string, streamPath: string) {
+    const url = `${streamPath}/live?since_sequence=${deliveredSequence}`
     eventSource = new EventSource(url)
 
     eventSource.addEventListener('hello', (ev: MessageEvent) => {
@@ -164,7 +172,7 @@ export function useAgentStream(): UseAgentStreamApi {
     })
 
     eventSource.addEventListener('error', (ev: MessageEvent) => {
-      if (stopped || currentSessionId !== sessionId) return
+      if (stopped || currentSessionId !== sourceId) return
       // EventSource auto-reconnects on transient errors; only fall back to
       // long-poll when the stream explicitly errors or the connection is
       // permanently closed.
@@ -182,15 +190,17 @@ export function useAgentStream(): UseAgentStreamApi {
     })
   }
 
-  async function start(sessionId: string) {
+  async function start(sourceId: string, source: StreamSource = 'managed-session') {
     stop()
     stopped = false
-    currentSessionId = sessionId
+    currentSessionId = sourceId
+    currentSource = source
     reset()
     connectionState.value = 'hydrating'
+    const streamPath = streamBasePath(sourceId, source)
 
     try {
-      const caps = await fetchCapabilities(sessionId)
+      const caps = await fetchCapabilities(streamPath)
       capabilities.value = caps
       if (!caps.structured) {
         errorMessage.value = 'structured observation unavailable for this session'
@@ -202,7 +212,7 @@ export function useAgentStream(): UseAgentStreamApi {
       let since = -1
 
       while (true) {
-        const page = await fetchEvents(sessionId, since)
+        const page = await fetchEvents(streamPath, since)
         applyPage(page)
         since = page.next_sequence
         if (!page.has_more) break
@@ -212,13 +222,13 @@ export function useAgentStream(): UseAgentStreamApi {
 
       // Prefer SSE; fall back to long-poll if EventSource is unavailable.
       if (typeof EventSource !== 'undefined') {
-        startSse(sessionId)
+        startSse(sourceId, streamPath)
       } else {
         longPollAbort = new AbortController()
-        void longPollLoop(sessionId)
+        void longPollLoop(sourceId, streamPath)
       }
     } catch (err) {
-      if (stopped || currentSessionId !== sessionId) return
+      if (stopped || currentSessionId !== sourceId || currentSource !== source) return
       errorMessage.value = err instanceof Error ? err.message : 'stream start failed'
       connectionState.value = 'failed'
     }

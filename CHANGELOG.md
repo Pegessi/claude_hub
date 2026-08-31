@@ -5,6 +5,25 @@
 
 ## Unreleased
 
+### fix: expose Paseo for ordinary Claude and Codex terminal tabs
+
+- **What**: Agent tabs now present an explicit `Terminal | Paseo` view switch
+  rather than an icon-only control. Paseo can open before the first transcript
+  exists, and standard Claude/Codex tabs gain their own structured stream
+  endpoint, timeline, text composer, and image-paste path without requiring an
+  Agent Workspace board entry.
+- **Why**: A normal Terminal-created agent tab has a provider conversation id,
+  not a managed Workspace-session id. Looking it up only through the board
+  hid the view switch entirely; showing it with that id would then have failed
+  at the managed-session stream API. Claude/Codex also create a transcript only
+  after the first prompt, precisely when a structured composer must be usable.
+- **How**: Direct tabs are represented as ephemeral stream descriptors in the
+  isolated `terminal-tabs` event namespace. New `/api/workspaces/tabs/{id}/stream/*`
+  routes share the normalized timeline/SSE/long-poll pipeline while preserving
+  Workspace agents' durable outbox. Direct-tab composer input is sent through
+  the mounted Raw terminal queue and its existing clipboard-image bridge. See
+  `docs/working-logs/2026-08-31-paseo-v2-direct-terminal-tabs.md`.
+
 ### fix: harden image attachment validation and SSE session-deletion handling
 
 - **What**: Image attachments now validate content signatures (magic bytes)
