@@ -15,6 +15,7 @@ from typing import Any, Dict
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import HTTPException
 
 from claude_hub.models import (
     AgentStreamEvent,
@@ -578,3 +579,79 @@ def test_sse_live_stream_terminates_when_session_deleted(
             await agen.__anext__()
 
     asyncio.run(run())
+
+
+# ── long-poll wait: session deletion ─────────────────────────────────────────
+
+
+def test_wait_stream_events_raises_structured_unavailable_when_session_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``wait_stream_events`` must detect a session removed after endpoint
+    entry/subscription and raise the structured-unavailable HTTP error (409)
+    promptly — it must not block for the full request timeout.
+
+    Driven directly against the endpoint coroutine (no TestClient, which would
+    serialize/deserialize and could mask the raise). The store's ``read_since``
+    removes the session as a side effect so the deletion is observed on the
+    first loop iteration, right after subscribe.
+    """
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    workspace_id = "ws-wait-del"
+    session_id = "s-wait-del"
+    workspace_manager.sessions[session_id] = _sse_session(workspace_id, session_id)
+
+    mock_adapter = MagicMock()
+    mock_adapter.capabilities.return_value = StreamCapabilities(
+        structured=True, adapter_id="mock", schema_version=1
+    )
+    monkeypatch.setattr(agent_stream_api, "get_adapter_for_session", lambda s: mock_adapter)
+
+    manager = agent_stream_api._get_tailer_manager()
+
+    async def _fake_subscribe(session: ManagedSession) -> asyncio.Queue:
+        return asyncio.Queue()
+
+    monkeypatch.setattr(manager, "subscribe", _fake_subscribe)
+
+    class _DeletingStore:
+        """On the first read, remove the session out from under the waiter."""
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def read_since(self, since: int, limit: int = 200) -> AgentStreamEventPage:
+            self.calls += 1
+            # Simulate the session being deleted after subscribe but while the
+            # waiter is inside its poll loop.
+            workspace_manager.sessions.pop(session_id, None)
+            return AgentStreamEventPage(events=[], next_sequence=since, has_more=False)
+
+    deleting_store = _DeletingStore()
+    monkeypatch.setattr(manager, "get_store", lambda ws, sid: deleting_store)
+
+    fake_user = User(open_id="local", name="Local", email="local@localhost", avatar_url=None)
+    payload = agent_stream_api.AgentStreamWaitRequest(
+        since_sequence=-1,
+        # Long timeout: if the waiter fails to detect deletion promptly, this
+        # test would hang for the full duration. The deletion-detection branch
+        # must short-circuit well before it.
+        timeout_seconds=30.0,
+    )
+
+    async def run() -> None:
+        with pytest.raises(HTTPException) as exc_info:
+            await agent_stream_api.wait_stream_events(
+                managed_session_id=session_id,
+                payload=payload,
+                current_user=fake_user,
+            )
+        assert exc_info.value.status_code == 409
+        # The store must have been consulted at least once (proving we entered
+        # the loop after subscribe) and the session must be gone.
+        assert deleting_store.calls >= 1
+        assert workspace_manager.sessions.get(session_id) is None
+
+    # Guard against a regression that waits out the full timeout.
+    asyncio.run(asyncio.wait_for(run(), timeout=5.0))
