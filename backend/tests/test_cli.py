@@ -684,6 +684,38 @@ def test_config_precedence(monkeypatch, tmp_path):
     assert s3.base_url == "http://from-file:9999"
 
 
+def test_env_preset_for_agent_type_defaults_claude_to_day1(tmp_path, monkeypatch):
+    from claude_hub.cli.config import resolve_settings
+
+    config_file = tmp_path / "config.toml"
+    config_file.write_text('[default]\nbase_url = "http://x"\n', encoding="utf-8")
+    monkeypatch.delenv("CLAUDE_HUB_URL", raising=False)
+    settings = resolve_settings(
+        base_url=None,
+        token=None,
+        cookie=None,
+        json_output=False,
+        verbose=False,
+        config_path=str(config_file),
+    )
+    assert settings.env_preset_for_agent_type("claude") == "day1"
+    assert settings.env_preset_for_agent_type("codex") is None
+
+    config_file.write_text(
+        '[default]\nbase_url = "http://x"\n\n[default_env_presets]\nclaude = "none"\n',
+        encoding="utf-8",
+    )
+    settings_none = resolve_settings(
+        base_url=None,
+        token=None,
+        cookie=None,
+        json_output=False,
+        verbose=False,
+        config_path=str(config_file),
+    )
+    assert settings_none.env_preset_for_agent_type("claude") is None
+
+
 def test_client_token_cookie():
     seen: Dict[str, str] = {}
 

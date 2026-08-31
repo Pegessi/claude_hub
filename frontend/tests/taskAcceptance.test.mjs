@@ -98,3 +98,12 @@ test('task not in review status -> Done hidden regardless of signals', () => {
   const t = task({ status: 'working', human_acceptance_requested_at: '2026-06-30T12:00:00Z' })
   assert.equal(awaitingHumanAcceptance(t, report('completed'), report('review_passed')), false)
 })
+
+test('failed status + human acceptance -> Done shown', () => {
+  const t = task({
+    status: 'failed',
+    human_acceptance_requested_at: '2026-08-31T01:00:00Z',
+  })
+  assert.equal(awaitingHumanAcceptance(t, null, null), true)
+  assert.equal(canMarkDoneTask(t, null, null), true)
+})

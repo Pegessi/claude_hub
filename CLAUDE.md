@@ -165,6 +165,7 @@ task.
 | CLI (`claude-hub`) | `docs/working-logs/2026-06-15-claude-hub-cli.md` |
 | CLI workspace/agent reuse lifecycle | `docs/working-logs/2026-08-26-cli-reuse-lifecycle-policy.md` |
 | Orphan reviewer tabs / tab-session reconciliation | `docs/working-logs/2026-06-19-orphan-reviewer-tab-reconcile.md` |
+| Subagent mode / worktree runtime isolation / `/clear` seat check | `docs/working-logs/2026-08-31-subagent-mode-and-session-seat.md` |
 
 ## Common Edit Areas
 
@@ -189,6 +190,11 @@ task.
 - **No direct work on `main`**: always create a worktree + feature branch first.
   Even small fixes and doc changes go through a worktree. See
   [Mandatory Workflow](#mandatory-workflow).
+- **Live Hub is off-limits**: do not stop or restart the 5173/8173 main
+  service, and do not write `~/.claude_hub/workspaces` or the default tmux
+  server from a feature worktree. Worktree backends use an isolated runtime
+  home and `tmux -L`. `/clear` is fail-closed if the stored tmux name does
+  not match `claude-hub-{tab_id[:8]}`.
 - **Pinia reactivity**: use `storeToRefs()` for state refs and computed getters.
   Actions can be destructured directly.
 - **System proxy**: backend clears proxy env vars at import in `terminal.py`.

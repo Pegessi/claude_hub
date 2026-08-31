@@ -469,7 +469,7 @@ def task_review(ctx: click.Context, task_id: str, workspace_id: Optional[str]) -
     "--timeout-seconds",
     type=int,
     default=None,
-    help="Task timeout in seconds (default: 1800).",
+    help="Task timeout in seconds (omitted unless set).",
 )
 @click.option(
     "--attachment-json",

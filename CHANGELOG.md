@@ -5,6 +5,22 @@
 
 ## Unreleased
 
+### fix: isolate worktree runtime and fail-closed session seat before /clear
+
+- **What**: Linked-worktree backends default to an isolated runtime home and
+  tmux socket, and refuse the live `~/.claude_hub` / default tmux server.
+  Instance lock and backend logs follow the same isolated home so a
+  worktree preview does not collide with the live 8173 process.
+  `send_session_message` checks that `tmux_session == claude-hub-{tab_id[:8]}`
+  and that no other live tab claims the name. A missing pane fails closed
+  instead of `ensure_tab_tmux_session` recreating the same name and sending
+  into it. Same reviewer + same task no longer re-sends `/clear` on reaper
+  redispath even when `clear_context` is set.
+- **Why**: A worktree verification run rewrote live state / renamed tmux, then
+  a reviewer `/clear` landed in the main agent seat.
+- **How**: `runtime_isolation.py` + `session_seat.py`; tmux argv goes through
+  `tmux_command()`; reviewer clear uses `should_clear_reviewer_context`.
+
 ### feat: subagent task mode + failed state for agent-to-agent delegation
 
 - **What**: New `subagent` task mode for agent-to-agent delegation (no Goal
@@ -20,9 +36,13 @@
 - **How**: `WorkspaceTaskMode.SUBAGENT` + minimal assignment prompt;
   `WorkspaceTaskStatus.FAILED` + `timeout_seconds`/`failure_reason`/`failed_at`
   fields; monitor loop detects session death (`STOPPED`) and timeout
-  (`now - updated_at > timeout_seconds`); `continue_task` accepts FAILED
-  (reuses alive session or reassigns via `start_task`); `task accept` accepts
-  FAILED; `task run --timeout-seconds` (default 1800).
+  (`now - updated_at > timeout_seconds`, only when set); session death /
+  timeout apply to `subagent` only; `timeout_seconds` defaults to `None` so
+  existing WORKING tasks are not auto-failed; frontend keeps `failed` in the
+  Working column (no new column); Claude CLI default env preset is `day1`;
+  `continue_task` accepts FAILED (reuses alive session or reassigns via
+  `start_task`); `task accept` accepts FAILED; `task run --timeout-seconds`
+  (default 1800).
 
 ### fix: paginate only Done column on Agent Workspace board
 

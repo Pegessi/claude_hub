@@ -636,6 +636,7 @@ class WorkspaceTaskCreate(BaseModel):
     autonomy_policy: Optional[AutonomyPolicy] = None
     session_id: Optional[str] = None
     clear_context: Optional[bool] = None
+    timeout_seconds: Optional[int] = None
     # Task Graph parent. Independent of related_task_id (session-affinity).
     parent_task_id: Optional[str] = None
     agent_tag: Optional[str] = None
@@ -780,7 +781,7 @@ class WorkspaceTask(BaseModel):
     # WORKING without a fresh report before the monitor marks it FAILED.
     # ``failure_reason`` and ``failed_at`` are set when the task transitions to
     # FAILED (worker-reported failure, session death, or timeout).
-    timeout_seconds: int = 1800
+    timeout_seconds: Optional[int] = None
     failure_reason: Optional[str] = None
     failed_at: Optional[datetime] = None
     human_acceptance_requested_at: Optional[datetime] = None

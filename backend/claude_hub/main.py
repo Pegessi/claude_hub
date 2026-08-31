@@ -14,12 +14,15 @@ from .api import api_router
 from .config import settings
 from .services import ttyd_manager, workspace_manager
 from .services.backend_instance_lock import BackendInstanceLock
+from .services.runtime_isolation import resolve_runtime_home
 
-# Create logs directory if it doesn't exist
-log_dir = Path.home() / ".claude_hub" / "logs"
+# Worktree backends use an isolated runtime home so they do not share the
+# live instance lock, logs, or tabs.json with the 8173 main service.
+_RUNTIME_HOME = resolve_runtime_home()
+log_dir = _RUNTIME_HOME / "logs"
 log_dir.mkdir(parents=True, exist_ok=True)
 log_file = log_dir / "backend.log"
-backend_lock_file = Path.home() / ".claude_hub" / "backend.lock"
+backend_lock_file = _RUNTIME_HOME / "backend.lock"
 
 # Configure logging to both console and file
 logger = logging.getLogger()

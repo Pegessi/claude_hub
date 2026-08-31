@@ -61,7 +61,7 @@ export function awaitingHumanAcceptance(
   latestReport: AgentReport | null,
   latestReviewReport: AgentReport | null,
 ): boolean {
-  if (task.status !== 'review') return false
+  if (task.status !== 'review' && task.status !== 'failed') return false
 
   const finalAcceptanceSignal = hasFinalAcceptanceSignal(
     task,
