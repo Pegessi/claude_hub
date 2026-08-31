@@ -1654,6 +1654,31 @@ ${buildIframeSabScript(tabId)}
           return;
         }
 
+        // Structured composers submit an entire prompt as one ordered frame.
+        // Sending every character through separate browser tasks can leave the
+        // final carriage return behind the rendered text under load, making a
+        // successful-looking Send stop at Claude's input box.
+        if (event.data.type === 'terminal-text') {
+          var text = typeof event.data.text === 'string' ? event.data.text : '';
+          if (text && sendText(text)) {
+            // Keep the history-replay input generation in sync with virtual
+            // keyboard and SAB input without dispatching the text twice.
+            try {
+              window.postMessage({
+                type: 'terminal-key',
+                tabId: event.data.tabId || null,
+                key: ''
+              }, '*');
+            } catch (_) { /* best-effort */ }
+            return;
+          }
+          window.parent.postMessage({
+            type: 'terminal-not-ready',
+            tabId: event.data.tabId || null
+          }, '*');
+          return;
+        }
+
         if (event.data.type !== 'terminal-key') return;
 
         var key = event.data.key;
@@ -1809,6 +1834,21 @@ onMounted(() => {
       return true
     }
 
+    // Bulk terminal input is intentionally separate from the virtual-keyboard
+    // API. It preserves prompt + Enter ordering in a single ttyd/xterm write
+    // and lets the caller target the pane it owns instead of relying on a
+    // potentially stale active-pane global.
+    window.__claudeHub.sendTerminalText = function(text: string, tabId?: string) {
+      const targetTabId = tabId || window.__claudeHub.activePaneTabId || props.tabId
+      if (!targetTabId || !text) return false
+      const state = getTerminalState()
+      if (!state.ready[targetTabId]) return false
+      return postTerminalMessage(targetTabId, {
+        type: 'terminal-text',
+        text,
+      })
+    }
+
     // Mobile "select text" mode toggle. Posts to the active terminal iframe,
     // which translates single-finger touches into xterm selection while the
     // mode is on (see terminal.py injected select-mode handler).
@@ -1858,6 +1898,9 @@ onUnmounted(() => {
   // onMounted; delete the slot if it's this component's identity heuristically.
   if (sendKeyFn) {
     delete window.__claudeHub.sendTerminalKey
+  }
+  if (window.__claudeHub.sendTerminalText) {
+    delete window.__claudeHub.sendTerminalText
   }
   if (window.__claudeHub.setTerminalSelectMode) {
     delete window.__claudeHub.setTerminalSelectMode
