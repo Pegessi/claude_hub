@@ -22,7 +22,7 @@
       <label
         class="acf-label"
         :for="`${uid}-agent-type`"
-      >Agent Type</label>
+      >{{ typeLabel }}</label>
       <select
         :id="`${uid}-agent-type`"
         :class="['acf-select', selectClass]"
@@ -124,6 +124,7 @@ interface Props {
   envText: string
   variant?: 'modal' | 'form'
   allowTerminal?: boolean
+  typeLabel?: string
   soloLabel?: string
   disabled?: boolean
 }
@@ -131,6 +132,7 @@ interface Props {
 const props = withDefaults(defineProps<Props>(), {
   variant: 'modal',
   allowTerminal: true,
+  typeLabel: 'Agent Type',
   soloLabel: 'YOLO mode',
   disabled: false,
 })

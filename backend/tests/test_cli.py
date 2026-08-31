@@ -1153,6 +1153,8 @@ def test_tab_create_remote_body(monkeypatch):
             "create",
             "--name",
             "remote",
+            "--session-kind",
+            "agent",
             "--target",
             "remote",
             "--remote-profile-id",
@@ -1165,6 +1167,7 @@ def test_tab_create_remote_body(monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert bodies[0]["target"] == "remote"
+    assert bodies[0]["session_kind"] == "agent"
     assert bodies[0]["remote_profile_id"] == "prod"
     assert bodies[0]["remote_cwd"] == "/srv/app"
     assert bodies[0]["env"] == {"A": "B"}

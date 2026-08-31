@@ -1,4 +1,5 @@
 export type AgentType = 'claude' | 'codex' | 'cursor' | 'terminal'
+export type SessionKind = 'agent' | 'terminal'
 export type ExecutionTarget = 'local' | 'remote'
 export type AgentRuntimeStatus = 'idle' | 'working' | 'attention' | 'offline'
 export type AppMode = 'terminal' | 'workspace'
@@ -60,6 +61,7 @@ export interface TerminalTab {
   cwd?: string
   solo_mode?: boolean
   agent_type?: AgentType
+  session_kind: SessionKind
   target?: ExecutionTarget
   remote_profile_id?: string | null
   remote_cwd?: string | null
@@ -85,6 +87,7 @@ export interface TerminalTabCreate {
   cwd?: string
   solo_mode?: boolean
   agent_type?: AgentType
+  session_kind?: SessionKind
   target?: ExecutionTarget
   remote_profile_id?: string | null
   remote_cwd?: string | null

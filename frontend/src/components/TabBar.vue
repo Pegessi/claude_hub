@@ -44,6 +44,11 @@
             @dblclick.stop="startRename(tab)"
           >{{ tab.name }}</span>
           <span
+            class="tab-kind"
+            :data-kind="tab.session_kind"
+            :title="tab.session_kind === 'agent' ? 'Agent session' : 'Terminal session'"
+          >{{ tab.session_kind === 'agent' ? 'A' : '>_' }}</span>
+          <span
             v-if="tab.is_active"
             class="tab-indicator"
             :data-status="getTabStatus(tab)"
@@ -199,8 +204,32 @@
       @click.self="closeCreateModal"
     >
       <div class="modal">
-        <h3>Create New Terminal</h3>
+        <h3>Create New Session</h3>
         <form @submit.prevent="handleCreateTab">
+          <div class="form-group">
+            <label>Session Type</label>
+            <div class="segmented-control session-kind-control">
+              <button
+                type="button"
+                :class="['segment-button', { active: form.session_kind === 'agent' }]"
+                @click="setSessionKind('agent')"
+              >
+                Agent
+              </button>
+              <button
+                type="button"
+                :class="['segment-button', { active: form.session_kind === 'terminal' }]"
+                @click="setSessionKind('terminal')"
+              >
+                Terminal
+              </button>
+            </div>
+            <p class="form-hint">
+              {{ form.session_kind === 'agent'
+                ? 'Structured conversation with messages, images, and parsed agent output.'
+                : 'Native terminal UI with full keyboard and shell interaction.' }}
+            </p>
+          </div>
           <div class="form-group">
             <label for="tabName">Tab Name</label>
             <input
@@ -295,6 +324,8 @@
             v-model:env-preset="form.env_preset"
             v-model:env-text="form.env_text"
             variant="form"
+            :allow-terminal="form.session_kind === 'terminal'"
+            :type-label="form.session_kind === 'agent' ? 'Agent Provider' : 'Terminal Profile'"
             solo-label="Solo Mode"
           />
           <CodexSessionSelector
@@ -668,7 +699,7 @@ import { usePendingActions } from '@/composables/usePendingActions'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import type { AppMode, RemoteProfile, TerminalTab } from '@/types'
-import type { AgentRuntimeStatus, AgentType, SwitchEnvRequest } from '@/types'
+import type { AgentRuntimeStatus, AgentType, SessionKind, SwitchEnvRequest } from '@/types'
 
 interface FileInfo {
   name: string
@@ -787,6 +818,7 @@ const showRightFade = ref(false)
 const form = reactive({
   name: '',
   cwd: '',
+  session_kind: 'agent' as SessionKind,
   solo_mode: false,
   agent_type: 'claude' as AgentType,
   target: 'local' as 'local' | 'remote',
@@ -833,6 +865,14 @@ function tabActionKey(action: string, tabId: string | null | undefined) {
 function resetEnvForAgentType(agentType: AgentType) {
   form.env_preset = defaultLaunchEnvPresetForAgent(agentType)
   form.env_text = defaultPresetTextForAgent(agentType)
+}
+
+function setSessionKind(kind: SessionKind) {
+  form.session_kind = kind
+  if (kind === 'agent' && form.agent_type === 'terminal') {
+    form.agent_type = 'claude'
+    resetEnvForAgentType(form.agent_type)
+  }
 }
 
 function agentTypeLabel(agentType: AgentType): string {
@@ -1318,6 +1358,7 @@ async function handleCreateTab() {
   await runPending('tab:create', async () => {
     await store.createTab({
       name: tabName,
+      session_kind: form.session_kind,
       cwd: target === 'local' ? cwd : undefined,
       solo_mode,
       agent_type,
@@ -1332,6 +1373,7 @@ async function handleCreateTab() {
     form.name = ''
     form.cwd = ''
     form.solo_mode = false
+    form.session_kind = 'agent'
     form.agent_type = 'claude'
     form.target = 'local'
     form.remote_profile_id = remoteProfiles.value[0]?.id || ''
@@ -1593,6 +1635,26 @@ async function handleCreateTab() {
   text-overflow: ellipsis;
   line-height: 1;
   transition: font-size 180ms cubic-bezier(0.2, 0, 0, 1), max-width 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.tab-kind {
+  min-width: 18px;
+  padding: 2px 4px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: 999px;
+  color: var(--ch-color-text-subtle);
+  background: var(--ch-color-surface-sunken);
+  font-family: var(--ch-font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+  text-align: center;
+}
+
+.tab-kind[data-kind='agent'] {
+  color: var(--ch-color-accent);
+  border-color: var(--ch-color-accent-ring-strong);
+  background: var(--ch-color-accent-soft);
 }
 
 .tab-name-input {

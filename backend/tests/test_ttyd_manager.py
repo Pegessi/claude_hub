@@ -20,6 +20,8 @@ from claude_hub.models import (
     AgentType,
     ExecutionTarget,
     RemoteProfile,
+    SessionKind,
+    TerminalTabCreate,
     WorkspaceSessionRole,
 )
 from claude_hub.services.ttyd_manager import (
@@ -399,6 +401,145 @@ def test_codex_tab_uses_codex_command() -> None:
 
     assert process.shell == "codex"
     assert process._build_ttyd_command(session_exists=False)[-1] == "codex"
+
+
+def test_tab_session_kind_defaults_to_terminal_and_round_trips() -> None:
+    legacy = TTYDProcess(
+        tab_id="legacy-tab",
+        port=12346,
+        name="Legacy",
+        agent_type=AgentType.CLAUDE,
+    )
+    agent = TTYDProcess(
+        tab_id="agent-tab",
+        port=12347,
+        name="Agent",
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.AGENT,
+    )
+
+    assert legacy.session_kind == SessionKind.TERMINAL
+    assert legacy.to_dict()["session_kind"] == "terminal"
+    assert legacy.to_schema().session_kind == SessionKind.TERMINAL
+    assert agent.session_kind == SessionKind.AGENT
+    assert agent.to_dict()["session_kind"] == "agent"
+    assert agent.to_schema().session_kind == SessionKind.AGENT
+
+
+def test_structured_agent_session_rejects_plain_terminal_provider() -> None:
+    with pytest.raises(ValueError, match="Agent sessions require"):
+        TerminalTabCreate(
+            name="Invalid Agent",
+            agent_type=AgentType.TERMINAL,
+            session_kind=SessionKind.AGENT,
+        )
+
+
+@pytest.mark.asyncio
+async def test_direct_cursor_agent_pins_supported_transcript_transport(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._next_port = 12348
+    manager.processes = {}
+    manager._tab_order = []
+
+    async def fake_ensure_tmux_session(self: TTYDProcess) -> bool:
+        return True
+
+    async def fake_start(self: TTYDProcess) -> None:
+        self.is_active = True
+
+    monkeypatch.setattr(TTYDProcess, "ensure_tmux_session", fake_ensure_tmux_session)
+    monkeypatch.setattr(TTYDProcess, "start", fake_start)
+    monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_order", lambda: None)
+    monkeypatch.setattr(manager, "_schedule_codex_discovery", lambda process: None)
+    monkeypatch.setattr(
+        ttyd_manager_module,
+        "cursor_cli_version_from_executable",
+        lambda: next(iter(ttyd_manager_module.SUPPORTED_CURSOR_TRANSCRIPT_VERSIONS)),
+    )
+    monkeypatch.setattr(
+        ttyd_manager_module,
+        "cursor_data_dir_for_env",
+        lambda env: str(tmp_path / "cursor-data"),
+    )
+
+    tab = await manager.create_tab(
+        name="Cursor Agent",
+        cwd=str(tmp_path),
+        agent_type=AgentType.CURSOR,
+        session_kind=SessionKind.AGENT,
+    )
+
+    process = manager.processes[tab.id]
+    assert process.cursor_transport == "terminal_transcript"
+    assert process.cursor_transcript_schema == ttyd_manager_module.CURSOR_TRANSCRIPT_SCHEMA
+    assert process.agent_session_id
+    assert process.agent_session_id in (process.cursor_transcript_path or "")
+
+
+@pytest.mark.asyncio
+async def test_cursor_terminal_session_keeps_native_terminal_transport(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._next_port = 12349
+    manager.processes = {}
+    manager._tab_order = []
+
+    async def fake_ensure_tmux_session(self: TTYDProcess) -> bool:
+        return True
+
+    async def fake_start(self: TTYDProcess) -> None:
+        self.is_active = True
+
+    monkeypatch.setattr(TTYDProcess, "ensure_tmux_session", fake_ensure_tmux_session)
+    monkeypatch.setattr(TTYDProcess, "start", fake_start)
+    monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_order", lambda: None)
+    monkeypatch.setattr(manager, "_schedule_codex_discovery", lambda process: None)
+
+    tab = await manager.create_tab(
+        name="Cursor Terminal",
+        cwd=str(tmp_path),
+        agent_type=AgentType.CURSOR,
+        session_kind=SessionKind.TERMINAL,
+    )
+
+    assert manager.processes[tab.id].cursor_transport == "terminal"
+
+
+@pytest.mark.asyncio
+async def test_managed_nonterminal_tab_is_classified_as_agent(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._next_port = 12350
+    manager.processes = {}
+    manager._tab_order = []
+
+    async def fake_ensure_tmux_session(self: TTYDProcess) -> bool:
+        return True
+
+    async def fake_start(self: TTYDProcess) -> None:
+        self.is_active = True
+
+    monkeypatch.setattr(TTYDProcess, "ensure_tmux_session", fake_ensure_tmux_session)
+    monkeypatch.setattr(TTYDProcess, "start", fake_start)
+    monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_order", lambda: None)
+    monkeypatch.setattr(manager, "_schedule_codex_discovery", lambda process: None)
+
+    tab = await manager.create_tab(
+        name="Managed Claude",
+        cwd=str(tmp_path),
+        agent_type=AgentType.CLAUDE,
+        workspace_id="workspace-1",
+    )
+
+    assert tab.session_kind == SessionKind.AGENT
 
 
 def test_non_solo_codex_initial_launch_translates_model_and_keeps_env_wrapper(

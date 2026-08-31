@@ -25,6 +25,7 @@ from ..models import (
     AgentRuntimeStatus,
     AgentType,
     ExecutionTarget,
+    SessionKind,
     TerminalAgentStatus,
     TerminalTab,
     WorkspaceSessionRole,
@@ -1278,6 +1279,7 @@ class TTYDProcess:
         cursor_cli_version: Optional[str] = None,
         cursor_transcript_path: Optional[str] = None,
         cursor_transcript_schema: Optional[str] = None,
+        session_kind: SessionKind = SessionKind.TERMINAL,
     ):
         self.tab_id = tab_id
         self.port = port
@@ -1285,6 +1287,7 @@ class TTYDProcess:
         self.cwd = cwd
         self.solo_mode = solo_mode
         self.agent_type = agent_type
+        self.session_kind = session_kind
         self.target = target
         self.remote_profile_id = remote_profile_id
         self.remote_cwd = remote_cwd
@@ -2677,6 +2680,11 @@ asyncio.run(_main())
             "agent_type": (
                 self.agent_type.value if isinstance(self.agent_type, AgentType) else self.agent_type
             ),
+            "session_kind": (
+                self.session_kind.value
+                if isinstance(self.session_kind, SessionKind)
+                else self.session_kind
+            ),
             "target": (
                 self.target.value if isinstance(self.target, ExecutionTarget) else self.target
             ),
@@ -2712,6 +2720,7 @@ asyncio.run(_main())
             cwd=self.cwd,
             solo_mode=self.solo_mode,
             agent_type=self.agent_type,
+            session_kind=self.session_kind,
             target=self.target,
             remote_profile_id=self.remote_profile_id,
             remote_cwd=self.remote_cwd,
@@ -2767,6 +2776,17 @@ class TTYDManager:
                             if agent_type_str in [e.value for e in AgentType]
                             else AgentType.CLAUDE
                         )
+                        session_kind_str = tab_data.get("session_kind")
+                        if session_kind_str in [e.value for e in SessionKind]:
+                            session_kind = SessionKind(session_kind_str)
+                        elif tab_data.get("workspace_id") and agent_type != AgentType.TERMINAL:
+                            # Managed workspace rows predate session_kind but
+                            # have always represented agents, not user shells.
+                            session_kind = SessionKind.AGENT
+                        else:
+                            # Standalone legacy tabs retain their raw terminal
+                            # presentation after upgrade.
+                            session_kind = SessionKind.TERMINAL
                         target_str = tab_data.get("target", "local")
                         target = (
                             ExecutionTarget(target_str)
@@ -2788,6 +2808,7 @@ class TTYDManager:
                             created_at=datetime.fromisoformat(tab_data["created_at"]),
                             solo_mode=tab_data.get("solo_mode", False),
                             agent_type=agent_type,
+                            session_kind=session_kind,
                             target=target,
                             remote_profile_id=tab_data.get("remote_profile_id"),
                             remote_cwd=tab_data.get("remote_cwd"),
@@ -2974,10 +2995,47 @@ class TTYDManager:
         cursor_cli_version: Optional[str] = None,
         cursor_transcript_path: Optional[str] = None,
         cursor_transcript_schema: Optional[str] = None,
+        session_kind: SessionKind = SessionKind.TERMINAL,
     ) -> TerminalTab:
         logger.info(
-            f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}, target={target}, remote_profile_id={remote_profile_id}, remote_forward_port={remote_forward_port}, workspace_id={workspace_id}, workspace_role={workspace_role}, agent_session_id={agent_session_id}"
+            f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}, session_kind={session_kind}, target={target}, remote_profile_id={remote_profile_id}, remote_forward_port={remote_forward_port}, workspace_id={workspace_id}, workspace_role={workspace_role}, agent_session_id={agent_session_id}"
         )
+        if (
+            workspace_id
+            and agent_type != AgentType.TERMINAL
+            and session_kind == SessionKind.TERMINAL
+        ):
+            # Managed non-shell tabs are agents by product definition. Keep
+            # this classification at the manager boundary so older callers
+            # and test doubles do not need a new orchestration-only argument.
+            session_kind = SessionKind.AGENT
+        if (
+            session_kind == SessionKind.AGENT
+            and agent_type == AgentType.CURSOR
+            and target == ExecutionTarget.LOCAL
+            and cwd
+            and cursor_transport == "terminal"
+        ):
+            # Direct Agent sessions need the same pinned same-process Cursor
+            # transcript provenance as managed workspace agents. Terminal
+            # sessions intentionally keep Cursor's native TUI transport.
+            cursor_session_id = agent_session_id or str(uuid.uuid4())
+            cursor_cli_version = cursor_cli_version_from_executable()
+            if cursor_cli_version in SUPPORTED_CURSOR_TRANSCRIPT_VERSIONS:
+                launch_env = dict(env or {})
+                cursor_data_dir = cursor_data_dir_for_env(launch_env)
+                launch_env["CURSOR_DATA_DIR"] = cursor_data_dir
+                env = launch_env
+                agent_session_id = cursor_session_id
+                cursor_transport = "terminal_transcript"
+                cursor_transcript_path = str(
+                    cursor_terminal_transcript_path(
+                        cwd,
+                        cursor_session_id,
+                        data_dir=cursor_data_dir,
+                    )
+                )
+                cursor_transcript_schema = CURSOR_TRANSCRIPT_SCHEMA
         tab_id = str(uuid.uuid4())
         port = self._get_next_port()
 
@@ -2989,6 +3047,7 @@ class TTYDManager:
             cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -3105,6 +3164,7 @@ class TTYDManager:
             cwd=source.cwd,
             solo_mode=source.solo_mode,
             agent_type=source.agent_type,
+            session_kind=source.session_kind,
             target=source.target,
             remote_profile_id=source.remote_profile_id,
             remote_cwd=source.remote_cwd,

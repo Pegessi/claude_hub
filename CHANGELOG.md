@@ -5,45 +5,28 @@
 
 ## Unreleased
 
-### fix: expose Paseo for ordinary Claude and Codex terminal tabs
+### feat: separate Paseo Agent sessions from native Terminal sessions
 
-- **What**: Agent tabs now present an explicit `Terminal | Paseo` view switch
-  rather than an icon-only control. Paseo can open before the first transcript
-  exists, and standard Claude/Codex tabs gain their own structured stream
-  endpoint, timeline, text composer, and image-paste path without requiring an
-  Agent Workspace board entry.
-- **Why**: A normal Terminal-created agent tab has a provider conversation id,
-  not a managed Workspace-session id. Looking it up only through the board
-  hid the view switch entirely; showing it with that id would then have failed
-  at the managed-session stream API. Claude/Codex also create a transcript only
-  after the first prompt, precisely when a structured composer must be usable.
-- **How**: Direct tabs are represented as ephemeral stream descriptors in the
-  isolated `terminal-tabs` event namespace. New `/api/workspaces/tabs/{id}/stream/*`
-  routes share the normalized timeline/SSE/long-poll pipeline while preserving
-  Workspace agents' durable outbox. Direct-tab composer input is sent through
-  the mounted Raw terminal queue and its existing clipboard-image bridge. See
-  `docs/working-logs/2026-08-31-paseo-v2-direct-terminal-tabs.md`.
-- **Follow-up**: Paseo is now an exclusive visible surface rather than a
-  translucent overlay on top of Raw. The ttyd iframe explicitly sets
-  `visibility: visible`, so hiding only its Vue parent allowed terminal pixels
-  to leak through. The mounted Raw wrapper now owns an opacity/z-index boundary
-  and the fixed pane chrome makes the `Terminal | Paseo` switch discoverable in
-  both views. The timeline also restores the centered, conversational Paseo
-  presentation from the earlier prototype while retaining the v2 stream and
-  image-composer behavior. Chromium's `TextDecoder` rejects a view backed by
-  the terminal input ring's `SharedArrayBuffer`, which previously made every
-  structured direct send appear to clear without reaching the terminal. The
-  decoder now copies each ring record to normal memory before decoding; direct
-  sends also surface an immediate pending acknowledgement and retain the draft
-  when no terminal target can accept it. Structured live updates now keep the
-  sequence-based long-poll reader active alongside SSE, so a browser or dev
-  proxy that silently buffers the SSE connection cannot leave agent responses
-  stale until a view switch or refresh. Long direct prompts now cross the
-  terminal boundary as one ordered text-plus-submit frame instead of one
-  browser message per character, preventing the final Enter from being left
-  behind in Claude's input box. The Paseo timeline now follows actual content
-  height while the reader is at the tail, preserves deliberate upward scroll,
-  and offers an explicit `Latest` return control.
+- **What**: The new-session flow now asks for a fixed `Agent` or `Terminal`
+  session type. Agent sessions open directly in the Paseo structured timeline
+  with text/image composer; Terminal sessions open directly in the native PTY
+  UI. There is no per-pane `Terminal | Paseo` switch.
+- **Why**: Paseo models agents and terminals as different sessions. Treating
+  structured output as a second view of every terminal made the creation
+  contract ambiguous, exposed unsupported combinations, and encouraged users
+  to expect raw-terminal and structured rendering to be identical in real
+  time.
+- **How**: A persisted `session_kind` (`agent` or `terminal`) now controls the
+  renderer independently of the Claude/Codex/Cursor/runtime profile. Existing
+  standalone tabs migrate to Terminal; existing managed non-shell workspace
+  sessions migrate to Agent. The hidden PTY remains mounted only as the current
+  Agent transport/input bridge. Cursor Agent creation pins the same verified
+  transcript provenance used by Workspace agents, while Cursor Terminal keeps
+  the native TUI. See
+  `docs/working-logs/2026-09-01-paseo-agent-terminal-session-separation.md`.
+- **Scope**: This release intentionally retains transcript-backed block-level
+  updates. Native Claude SDK, Codex app-server, and Cursor ACP streaming are a
+  later transport change, not part of the Agent/Terminal product split.
 
 ### fix: harden image attachment validation and SSE session-deletion handling
 
@@ -96,11 +79,10 @@
   sequence-zero hydration, and stream cleanup on session delete. See
   `docs/working-logs/2026-08-31-paseo-v2-cursor-transcript-bridge.md`.
 
-### feat: Paseo v2 structured terminal UI + image composer (frontend)
+### feat: Paseo v2 structured Agent UI + image composer (frontend)
 
-- **What**: Reversible Structured/Raw view toggle on managed-agent terminal
-  panes. Raw stays mounted (ttyd session + scrollback preserved) when the
-  Structured view is active. Structured view renders a turn-grouped timeline
+- **What**: Structured Agent surface backed by the existing hidden PTY
+  transport. It renders a turn-grouped timeline
   (user, assistant text, collapsible thinking, tool calls with status, errors,
   status events) from the backend agent-stream plane, with SSE + long-poll
   fallback and fail-closed to raw on `structured=false` or stream failure.
@@ -111,9 +93,9 @@
 - **Why**: First-release product contract for the Paseo v2 structured
   observation layer without altering raw terminal semantics.
 - **How**: `StructuredPane.vue`, `agentStreamTimeline.ts`,
-  `agentStreamAttachments.ts`, `useAgentStream.ts`; `TerminalPane.vue` gains
-  the view toggle and raw-stays-mounted CSS hide. `sessionForTab` maps tab →
-  managed session for stream keying.
+  `agentStreamAttachments.ts`, `useAgentStream.ts`; `TerminalPane.vue` selects
+  the fixed surface from `session_kind` and keeps the Agent transport hidden.
+  `sessionForTab` maps tab → managed session for stream keying.
 
 ### feat: Paseo v2 backend structured observation foundation (Layer B)
 
