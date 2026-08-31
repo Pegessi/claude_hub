@@ -110,6 +110,21 @@ async def list_workspaces(current_user: User = Depends(get_current_user)) -> Lis
     return workspace_manager.list_workspaces()
 
 
+@router.get("/sessions", response_model=List[ManagedSessionPublic])
+async def list_managed_sessions(
+    current_user: User = Depends(get_current_user),
+) -> List[ManagedSessionPublic]:
+    """List managed sessions across workspaces for terminal-tab discovery.
+
+    The terminal shell is independent of the currently selected Agent
+    Workspace, so it cannot use the active board as its session identity
+    index. Returns the public (env-redacted) projection of every managed
+    session so the frontend can map a terminal tab to its managed session.
+    """
+    sessions = list(workspace_manager.sessions.values())
+    return [ManagedSessionPublic.from_managed_session(s) for s in sessions]
+
+
 @router.post("", response_model=Workspace, status_code=201)
 async def create_workspace(
     payload: WorkspaceCreate,

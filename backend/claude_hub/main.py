@@ -63,6 +63,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         finally:
             # Shutdown
             logger.info("Shutting down Claude Hub Backend")
+            try:
+                from .api.agent_stream import _get_tailer_manager
+
+                await _get_tailer_manager().stop_all()
+            except Exception:
+                logger.exception("Failed to stop agent-stream tailers")
             await workspace_manager.stop_background_monitor()
             await ttyd_manager.cleanup()
 
