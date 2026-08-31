@@ -132,9 +132,16 @@ const sessionMark = computed(() => {
   return '>_'
 })
 
+const providerLabel = computed(() => {
+  if (agentType.value === 'claude') return 'Claude'
+  if (agentType.value === 'codex') return 'Codex'
+  if (agentType.value === 'cursor') return 'Cursor'
+  return 'Shell'
+})
+
 const sessionStatusLabel = computed(() => {
-  if (isAgentSession.value) return 'Agent · structured conversation'
-  return 'Terminal · native TUI'
+  if (isAgentSession.value) return `${providerLabel.value} Agent · native structured`
+  return `${providerLabel.value} Terminal · native TUI`
 })
 
 const isDragOver = ref(false)
