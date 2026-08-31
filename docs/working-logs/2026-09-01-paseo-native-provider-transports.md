@@ -69,6 +69,14 @@ prompt; the response streams as `AgentMessageDelta` notifications.
 Each `assistant` line is a growing text chunk; the final line is the complete
 message. `thinking/completed` ends the reasoning block.
 
+The installed executable was probed directly as
+`agent --version` → `2026.08.25-3e8eec8` and `agent --help`. That build exposes
+`--output-format stream-json`, `--stream-partial-output`, and `--resume`, but no
+ACP server command and no image-input option. The native Cursor adapter
+therefore uses the executable's supported partial-event protocol rather than
+PTY/transcript scraping; image capability is explicitly false instead of
+inventing an ACP or attachment path that this binary cannot provide.
+
 ## Phased file list
 
 ### Phase 1 — ProviderSession + Claude transport (RED→GREEN)
