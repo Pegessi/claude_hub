@@ -61,6 +61,12 @@ fail-closed.
 4. **Direct input has terminal semantics.** It intentionally does not claim
    the managed Workspace outbox's at-least-once receipt/ACK protocol; a direct
    terminal message is equivalent to a user typing into that Raw pane.
+5. **The shared input ring must not be decoded in place.** Chromium refuses a
+   `TextDecoder.decode()` view backed by `SharedArrayBuffer`. That exception
+   occurred before the ring tail advanced, permanently blocking the first
+   structured key and every key behind it. Decode a copied, ordinary
+   `Uint8Array` record instead; the `sendTerminalKey` boundary returns whether
+   it has a target so the composer can retain a failed draft.
 
 ## Verification
 
@@ -77,3 +83,8 @@ fail-closed.
   `pnpm build` pass. The view has been checked statically against the confirmed
   direct-tab stream contract; the isolated preview remains available for the
   final user visual pass.
+- End-to-end isolated preview: a Structured text submission was observed in
+  the corresponding Raw Claude terminal; after the timeline poll it also
+  appeared in Structured. An image pasted into the Structured composer reached
+  Claude's native input as `[Image #1]`. These are terminal-ingress checks;
+  agent-provider response availability is intentionally a separate concern.

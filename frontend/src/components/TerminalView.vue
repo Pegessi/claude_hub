@@ -300,7 +300,16 @@ function buildIframeSabScript(tabId: string): string {
   var decoder = typeof TextDecoder !== 'undefined' ? new TextDecoder() : null;
 
   function utf8Decode(bytes) {
-    if (decoder) return decoder.decode(bytes);
+    if (decoder) {
+      // Chromium rejects a view backed by SharedArrayBuffer in TextDecoder.
+      // The ring deliberately uses shared storage, so copy this tiny record
+      // into ordinary ArrayBuffer-backed memory before decoding. Without this
+      // copy drain() throws before advancing tail, leaving every later key
+      // permanently blocked behind the same record.
+      var decodedBytes = new Uint8Array(bytes.length);
+      decodedBytes.set(bytes);
+      return decoder.decode(decodedBytes);
+    }
     // Tiny fallback for very old browsers.
     var str = '';
     for (var i = 0; i < bytes.length; i++) str += String.fromCharCode(bytes[i]);
@@ -1783,12 +1792,12 @@ onMounted(() => {
     window.__claudeHub.sendTerminalKey = function(key: string, ctrl = false, shift = false) {
       const activePaneTabId = window.__claudeHub.activePaneTabId
       const targetTabId = activePaneTabId || props.tabId
-      if (!targetTabId) return
+      if (!targetTabId) return false
 
       const item = { key, ctrl, shift }
       const state = getTerminalState()
       if (state.ready[targetTabId] && postTerminalKey(targetTabId, item)) {
-        return
+        return true
       }
 
       if (state.iframes[targetTabId]) {
@@ -1797,6 +1806,7 @@ onMounted(() => {
         console.warn('No iframe found for tab:', targetTabId)
         queueTerminalKey(targetTabId, item)
       }
+      return true
     }
 
     // Mobile "select text" mode toggle. Posts to the active terminal iframe,

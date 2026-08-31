@@ -30,7 +30,12 @@
   and the fixed pane chrome makes the `Terminal | Paseo` switch discoverable in
   both views. The timeline also restores the centered, conversational Paseo
   presentation from the earlier prototype while retaining the v2 stream and
-  image-composer behavior.
+  image-composer behavior. Chromium's `TextDecoder` rejects a view backed by
+  the terminal input ring's `SharedArrayBuffer`, which previously made every
+  structured direct send appear to clear without reaching the terminal. The
+  decoder now copies each ring record to normal memory before decoding; direct
+  sends also surface an immediate pending acknowledgement and retain the draft
+  when no terminal target can accept it.
 
 ### fix: harden image attachment validation and SSE session-deletion handling
 

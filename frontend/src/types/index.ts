@@ -744,7 +744,8 @@ export interface TerminalKeyState {
   inputRing: Record<string, unknown>
 }
 
-export type TerminalKeySender = (key: string, ctrl?: boolean, shift?: boolean) => void
+/** Returns false only when no terminal target is available to accept/queue the key. */
+export type TerminalKeySender = (key: string, ctrl?: boolean, shift?: boolean) => boolean
 export type TerminalHistoryRefresher = (tabId?: string) => void
 export type TerminalIframeRegistrar = (el: HTMLIFrameElement | null, tabId: string) => void
 export type TerminalSelectModeSetter = (enabled: boolean, tabId?: string) => void
