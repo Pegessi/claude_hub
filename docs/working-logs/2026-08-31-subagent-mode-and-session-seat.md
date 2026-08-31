@@ -45,6 +45,10 @@ feature work. Isolation and tests stay inside the git worktree.
   must not clear again on the same task + same reviewer.
 - `start_all_tabs` must list sessions via `tmux_command("ls")`. A bare
   `tmux ls` on a worktree backend enumerates the live default server.
+- `failed` is terminal for session reuse and deletion, even though a human can
+  later continue or accept that task. Otherwise the intentionally narrow
+  abort transition (queued/working/review only) and the cleanup guard create
+  an unrecoverable idle subagent seat after a timeout.
 
 ## Isolated verification (2026-08-31)
 

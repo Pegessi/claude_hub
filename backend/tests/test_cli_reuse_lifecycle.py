@@ -820,6 +820,51 @@ async def test_task_cleanup_deletes_caller_owned_ephemeral_session(
 
 
 @pytest.mark.asyncio
+async def test_delete_session_allows_failed_task_binding(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """A timed-out subagent must not permanently consume an idle agent seat."""
+    manager = WorkspaceManager()
+    monkeypatch.setattr(manager, "_save_state", lambda: None)
+    repo, ws = _cleanup_workspace(tmp_path, manager)
+    session = _caller_owned_ephemeral_session(ws=ws, repo=repo)
+    now = datetime.now(timezone.utc)
+    task = WorkspaceTask(
+        id="task-failed",
+        workspace_id=ws.id,
+        title="timed out",
+        prompt="p",
+        agent_type=AgentType.CLAUDE,
+        status=WorkspaceTaskStatus.FAILED,
+        session_id=session.id,
+        task_mode=WorkspaceTaskMode.SUBAGENT,
+        created_at=now,
+        updated_at=now,
+    )
+    manager.sessions[session.id] = session
+    manager.tasks[task.id] = task
+    discarded: list[tuple[str, str]] = []
+    deleted_tabs: list[str] = []
+
+    async def fake_discard(workspace_id: str, session_id: str) -> None:
+        discarded.append((workspace_id, session_id))
+
+    async def fake_delete_tab(tab_id: str) -> None:
+        deleted_tabs.append(tab_id)
+
+    import claude_hub.services.agent_stream as agent_stream
+
+    monkeypatch.setattr(agent_stream, "discard_session_stream", fake_discard)
+    monkeypatch.setattr(ttyd_manager, "delete_tab", fake_delete_tab)
+
+    await manager.delete_session(session.id)
+
+    assert session.id not in manager.sessions
+    assert discarded == [(ws.id, session.id)]
+    assert deleted_tabs == [session.tab_id]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "status",
     [
