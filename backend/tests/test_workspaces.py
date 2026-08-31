@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timedelta
 from importlib import import_module
 from pathlib import Path
-from typing import Generator, Optional
+from typing import Dict, Generator, Optional
 
 import pytest
 from fastapi.testclient import TestClient
@@ -28,6 +28,7 @@ from claude_hub.models import (
     TerminalTab,
     User,
     Workspace,
+    WorkspaceAttachment,
     WorkspaceSessionRole,
     WorkspaceTask,
     WorkspaceTaskStatus,
@@ -112,6 +113,13 @@ def stub_workspace_terminal(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        env: Optional[Dict[str, str]] = None,
+        agent_session_id: Optional[str] = None,
+        cursor_transport: str = "terminal",
+        cursor_data_dir: Optional[str] = None,
+        cursor_cli_version: Optional[str] = None,
+        cursor_transcript_path: Optional[str] = None,
+        cursor_transcript_schema: Optional[str] = None,
     ) -> TerminalTab:
         nonlocal created_count
         created_count += 1
@@ -132,6 +140,12 @@ def stub_workspace_terminal(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            agent_session_id=agent_session_id,
+            cursor_transport=cursor_transport,
+            cursor_data_dir=cursor_data_dir,
+            cursor_cli_version=cursor_cli_version,
+            cursor_transcript_path=cursor_transcript_path,
+            cursor_transcript_schema=cursor_transcript_schema,
         )
 
     async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
@@ -1776,6 +1790,24 @@ def test_create_task_persists_pasted_image_attachment(
     attachment_path = Path(task["attachments"][0]["path"])
     assert attachment_path.exists()
     assert attachment_path.read_bytes().startswith(b"\x89PNG")
+
+
+def test_image_attachment_prompt_requires_native_inspection() -> None:
+    block = workspace_manager._attachment_prompt_block(
+        [
+            WorkspaceAttachment(
+                id="attachment-1",
+                filename="reference.png",
+                mime_type="image/png",
+                path="/tmp/reference.png",
+                size_bytes=42,
+            )
+        ]
+    )
+
+    assert "Image handling:" in block
+    assert "native image-viewing capability" in block
+    assert "/tmp/reference.png" in block
 
 
 async def test_preview_report_markdown_artifact_is_scoped_to_report(
@@ -11471,3 +11503,45 @@ def test_create_lesson_rejects_unknown_fingerprint_e2e(
     )
     assert resp.status_code == 400, resp.text
     assert "fingerprint" in resp.text.lower()
+
+
+async def test_cursor_unsupported_cli_version_falls_back_to_raw_terminal(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An unsupported/unavailable Cursor CLI must NOT raise; the tab stays a
+    plain raw-terminal Cursor session (cursor_transport='terminal') so the
+    registry reports structured=False and the pane remains truthful."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path / "state")
+    stub_workspace_terminal(monkeypatch, repo, tab_id="cur-fallback", port=18199)
+
+    import sys
+
+    ttyd_manager_mod = sys.modules["claude_hub.services.ttyd_manager"]
+    monkeypatch.setattr(
+        ttyd_manager_mod, "cursor_cli_version_from_executable", lambda: "0.0.0-unsupported"
+    )
+
+    client = TestClient(app)
+    ws = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Cursor Fallback",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "curfb",
+        },
+    ).json()
+
+    session = await workspace_manager.ensure_workspace_agent(
+        ws["id"],
+        workspace_module.EnsureWorkspaceAgentRequest(agent_type="cursor", reuse_existing=False),
+    )
+
+    assert session.agent_type == AgentType.CURSOR
+    assert session.cursor_transport == "terminal"
+    assert session.cursor_cli_version is None
+    assert session.cursor_transcript_path is None
+    assert session.cursor_transcript_schema is None

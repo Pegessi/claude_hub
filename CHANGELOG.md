@@ -5,6 +5,28 @@
 
 ## Unreleased
 
+### feat: Cursor same-pane transcript bridge for Paseo Structured
+
+- **What**: Local Cursor CLI sessions on the verified
+  `2026.08.25-3e8eec8` release can now power the same Structured timeline as
+  Claude and Codex while retaining the authoritative Raw terminal pane.
+  Cursor sessions pin their CLI version, data root, schema, conversation ID,
+  canonical cwd-derived transcript path, and child `CURSOR_DATA_DIR`; any
+  mismatch remains Raw-only. Snapshot reconciliation appends monotonic stream
+  events, supports Cursor's observed replacement of a trailing `turn_ended`
+  marker by the next user turn, and otherwise fails closed rather than
+  rewriting a connected timeline. Deleting a managed session also purges its
+  stream log/cursor, preventing a reused friendly session ID from exposing a
+  prior conversation. Image attachment instructions now explicitly require
+  native image inspection before an image-dependent answer.
+- **Why**: Cursor had the same two-view product contract but no trustworthy
+  structured source. A guessed transcript path, non-monotonic replay, or
+  attachment path treated as metadata would make Structured misleading.
+- **How**: `cursor_cli_transcript.py`, snapshot-aware `SessionTailer`, Cursor
+  launch provenance in `ttyd_manager.py` and managed-session creation,
+  sequence-zero hydration, and stream cleanup on session delete. See
+  `docs/working-logs/2026-08-31-paseo-v2-cursor-transcript-bridge.md`.
+
 ### feat: Paseo v2 structured terminal UI + image composer (frontend)
 
 - **What**: Reversible Structured/Raw view toggle on managed-agent terminal
@@ -42,7 +64,8 @@
 - **How**: `services/agent_stream/` (base, redaction, store, registry,
   claude_jsonl, codex_jsonl, tailer) + `api/agent_stream.py`;
   `ManagedSession` gains `stream_capabilities`, `agent_session_id`,
-  `cursor_transport`. Lifespan stops tailers on shutdown.
+  `cursor_transport`. Lifespan stops tailers on shutdown. Cursor's verified
+  transcript bridge is documented in the following Unreleased entry.
 
 ### fix: isolate worktree runtime and fail-closed session seat before /clear
 

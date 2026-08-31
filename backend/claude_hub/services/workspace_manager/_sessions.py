@@ -220,7 +220,47 @@ class _SessionsMixin:
         session_workspace_path = (
             (remote_cwd or local_cwd) if session_target == ExecutionTarget.REMOTE else local_cwd
         )
-        if payload.env:
+        cursor_transport = "terminal"
+        cursor_create_kwargs: dict[str, Any] = {}
+        cursor_session_id: str | None = None
+        launch_env = dict(payload.env)
+        if payload.agent_type == AgentType.CURSOR and session_target == ExecutionTarget.LOCAL:
+            from ..ttyd_manager import (
+                CURSOR_TRANSCRIPT_SCHEMA,
+                SUPPORTED_CURSOR_TRANSCRIPT_VERSIONS,
+                cursor_cli_version_from_executable,
+                cursor_data_dir_for_env,
+                cursor_terminal_transcript_path,
+            )
+
+            cursor_session_id = str(uuid.uuid4())
+            cursor_cli_version = cursor_cli_version_from_executable()
+            if cursor_cli_version in SUPPORTED_CURSOR_TRANSCRIPT_VERSIONS:
+                cursor_data_dir = cursor_data_dir_for_env(launch_env)
+                cursor_transport = "terminal_transcript"
+                # The launched Cursor process must use the exact root recorded
+                # in provenance. Do not infer it later from whichever HOME the
+                # backend happens to have after a restart.
+                launch_env["CURSOR_DATA_DIR"] = cursor_data_dir
+                cursor_create_kwargs = {
+                    "cursor_transport": cursor_transport,
+                    "cursor_data_dir": cursor_data_dir,
+                    "cursor_cli_version": cursor_cli_version,
+                    "cursor_transcript_path": str(
+                        cursor_terminal_transcript_path(
+                            local_cwd, cursor_session_id, data_dir=cursor_data_dir
+                        )
+                    ),
+                    "cursor_transcript_schema": CURSOR_TRANSCRIPT_SCHEMA,
+                }
+            # else: unsupported or unavailable CLI → fail closed to a plain
+            # Cursor terminal tab (cursor_transport stays "terminal"). The
+            # registry reports structured=False; the raw pane remains truthful.
+        agent_session_id = payload.agent_session_id or cursor_session_id
+        agent_session_kwargs: dict[str, Any] = (
+            {"agent_session_id": agent_session_id} if agent_session_id is not None else {}
+        )
+        if launch_env:
             tab = await ttyd_manager.create_tab(
                 name=title,
                 cwd=local_cwd if session_target == ExecutionTarget.LOCAL else None,
@@ -234,7 +274,9 @@ class _SessionsMixin:
                 workspace_id=workspace.id,
                 workspace_name=workspace.name,
                 workspace_role=role,
-                env=payload.env,
+                env=launch_env,
+                **agent_session_kwargs,
+                **cursor_create_kwargs,
             )
         else:
             tab = await ttyd_manager.create_tab(
@@ -250,6 +292,8 @@ class _SessionsMixin:
                 workspace_id=workspace.id,
                 workspace_name=workspace.name,
                 workspace_role=role,
+                **agent_session_kwargs,
+                **cursor_create_kwargs,
             )
         now = _wm._now()
         session = ManagedSession(
@@ -274,8 +318,14 @@ class _SessionsMixin:
             solo_mode=payload.solo_mode,
             ephemeral=payload.ephemeral,
             caller_owned_ephemeral=bool(payload.caller_owned_ephemeral),
-            env=payload.env,
+            env=launch_env,
             remote_forward_port=remote_forward_port,
+            agent_session_id=tab.agent_session_id,
+            cursor_transport=tab.cursor_transport,
+            cursor_data_dir=tab.cursor_data_dir,
+            cursor_cli_version=tab.cursor_cli_version,
+            cursor_transcript_path=tab.cursor_transcript_path,
+            cursor_transcript_schema=tab.cursor_transcript_schema,
             created_at=now,
             updated_at=now,
         )
@@ -331,6 +381,12 @@ class _SessionsMixin:
         blocking = self._non_terminal_tasks_referencing_session(session_id)
         if blocking:
             raise RuntimeError("Cannot delete an agent with queued, working, or review tasks")
+
+        # A later create can reuse this human-readable session id. Remove the
+        # structured stream before exposing that id for a new conversation.
+        from ..agent_stream import discard_session_stream
+
+        await discard_session_stream(session.workspace_id, session_id)
 
         self.sessions.pop(session_id, None)
         workspace = self.workspaces.get(session.workspace_id)

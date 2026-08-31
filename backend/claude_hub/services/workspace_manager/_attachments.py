@@ -53,7 +53,15 @@ class _AttachmentsMixin:
     def _attachment_prompt_block(self, attachments: list[WorkspaceAttachment]) -> str:
         if not attachments:
             return ""
-        lines = ["Attachments:"]
+        lines = [
+            "Attachments:",
+            (
+                "Image handling: these images are part of the user's message, not "
+                "mere file references. Before answering a request that depends on an "
+                "image, inspect it from the local path with your native image-viewing "
+                "capability."
+            ),
+        ]
         for attachment in attachments:
             lines.append(
                 f"- {attachment.filename} ({attachment.mime_type}, {attachment.size_bytes} bytes): "

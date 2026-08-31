@@ -36,7 +36,7 @@ export interface UseAgentStreamApi {
  *
  * Hydration contract (sequence-safe):
  *   1. GET /stream/capabilities — fail-closed to raw if ``structured=false``.
- *   2. GET /stream/events?since_sequence=0 — backfill the timeline.
+ *   2. GET /stream/events?since_sequence=-1 — backfill the timeline.
  *   3. GET /stream/live (SSE) — stream new events.
  *      On SSE failure (non-OK, parse error, or browser without EventSource),
  *      fall back to POST /stream/wait long-polling.
@@ -53,7 +53,8 @@ export function useAgentStream(): UseAgentStreamApi {
   let currentSessionId: string | null = null
   let eventSource: EventSource | null = null
   let longPollAbort: AbortController | null = null
-  let deliveredSequence = 0
+  // Stream sequences are zero-based and cursors are exclusive.
+  let deliveredSequence = -1
   let stopped = false
 
   function reset() {
@@ -61,7 +62,7 @@ export function useAgentStream(): UseAgentStreamApi {
     events.value = []
     connectionState.value = 'idle'
     errorMessage.value = null
-    deliveredSequence = 0
+    deliveredSequence = -1
   }
 
   function closeSse() {
@@ -198,7 +199,7 @@ export function useAgentStream(): UseAgentStreamApi {
       }
 
       // Hydrate: pull the full history before going live.
-      let since = 0
+      let since = -1
        
       while (true) {
         const page = await fetchEvents(sessionId, since)

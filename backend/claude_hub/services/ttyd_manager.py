@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import socket
 import sqlite3  # noqa: F401  (re-exported indirectly for tests)
 import subprocess
@@ -42,6 +43,96 @@ LAUNCH_ENV_DIR = _RUNTIME_HOME / "launch_env"
 TMUX_SESSION_PREFIX = "claude-hub-"
 _ORPHAN_TMUX_PRUNE_GRACE_SECONDS = 60.0
 _MANAGED_TMUX_SESSION_RE = re.compile(rf"^{re.escape(TMUX_SESSION_PREFIX)}[0-9a-f]{{8}}$")
+
+#: Schema identifier for the same-pane Cursor CLI transcript format.
+CURSOR_TRANSCRIPT_SCHEMA = "cli-transcript-v1"
+
+#: Cursor CLI versions whose same-pane transcript row shape is known to match
+#: :data:`CURSOR_TRANSCRIPT_SCHEMA`. Pinned so an unknown CLI version fails
+#: closed rather than mis-normalizing rows.
+SUPPORTED_CURSOR_TRANSCRIPT_VERSIONS: frozenset[str] = frozenset({"2026.08.25-3e8eec8"})
+
+
+def cursor_cli_version_from_executable() -> Optional[str]:
+    """Return the installed Cursor CLI version without starting another agent.
+
+    The official launcher is a symlink into ``.../versions/<version>/`` in the
+    supported local install. A layout we cannot attribute fails closed.
+    """
+    executable = shutil.which("agent")
+    if not executable:
+        return None
+    try:
+        resolved = Path(executable).resolve(strict=True)
+    except OSError:
+        return None
+    for parent in resolved.parents:
+        if parent.parent.name == "versions" and parent.name:
+            return parent.name
+    return None
+
+
+def cursor_data_dir_for_env(env: Optional[Dict[str, str]]) -> str:
+    """Return the canonical Cursor data directory that a child process will use."""
+    if env:
+        explicit = env.get("CURSOR_DATA_DIR")
+        if explicit and explicit.strip():
+            return str(Path(explicit).expanduser().resolve(strict=False))
+        child_home = env.get("HOME")
+        if child_home and child_home.strip():
+            return str((Path(child_home).expanduser() / ".cursor").resolve(strict=False))
+    return str((Path.home() / ".cursor").resolve(strict=False))
+
+
+def cursor_terminal_transcript_path(
+    cwd: str,
+    session_id: str,
+    *,
+    data_dir: Optional[str] = None,
+) -> Path:
+    """Return the authoritative Cursor CLI transcript for one exact cwd/SID."""
+    canonical_cwd = str(Path(cwd).resolve(strict=False))
+    project_key = re.sub(r"[^A-Za-z0-9]+", "-", canonical_cwd).strip("-")
+    root = (
+        Path(data_dir).expanduser().resolve(strict=False)
+        if data_dir
+        else (Path.home() / ".cursor").resolve(strict=False)
+    )
+    return (
+        root / "projects" / project_key / "agent-transcripts" / session_id / f"{session_id}.jsonl"
+    )
+
+
+def cursor_terminal_transcript_provenance_valid(
+    *,
+    cwd: Optional[str],
+    session_id: Optional[str],
+    cli_version: Optional[str],
+    transcript_path: Optional[str],
+    transcript_schema: Optional[str],
+    data_dir: Optional[str],
+    env: Optional[Dict[str, str]] = None,
+) -> bool:
+    """Fail closed unless stored same-pane transcript provenance is exact."""
+    if not all((cwd, session_id, cli_version, transcript_path, data_dir)):
+        return False
+    try:
+        parsed = uuid.UUID(str(session_id))
+    except (ValueError, AttributeError):
+        return False
+    if str(parsed) != str(session_id):
+        return False
+    if transcript_schema != CURSOR_TRANSCRIPT_SCHEMA:
+        return False
+    if cli_version not in SUPPORTED_CURSOR_TRANSCRIPT_VERSIONS:
+        return False
+    if cursor_cli_version_from_executable() != cli_version:
+        return False
+    if str(Path(str(data_dir)).expanduser().resolve(strict=False)) != cursor_data_dir_for_env(env):
+        return False
+    expected = cursor_terminal_transcript_path(str(cwd), str(session_id), data_dir=str(data_dir))
+    return Path(str(transcript_path)).resolve(strict=False) == expected.resolve(strict=False)
+
 
 # ANSI escape sequences (CSI, OSC, charset selection) — stripped before
 # pattern matching so cursor blinks and color codes don't churn the hash
@@ -1182,6 +1273,11 @@ class TTYDProcess:
         from_persisted_state: bool = False,
         resume_quarantined: bool = False,
         shell_explicitly_provided: Optional[bool] = None,
+        cursor_transport: str = "terminal",
+        cursor_data_dir: Optional[str] = None,
+        cursor_cli_version: Optional[str] = None,
+        cursor_transcript_path: Optional[str] = None,
+        cursor_transcript_schema: Optional[str] = None,
     ):
         self.tab_id = tab_id
         self.port = port
@@ -1197,8 +1293,21 @@ class TTYDProcess:
         self.workspace_id = workspace_id
         self.workspace_name = workspace_name
         self.workspace_role = workspace_role
+        self.cursor_transport = (
+            cursor_transport if cursor_transport in {"acp", "terminal_transcript"} else "terminal"
+        )
+        self.cursor_data_dir = cursor_data_dir
+        self.cursor_cli_version = cursor_cli_version
+        self.cursor_transcript_path = cursor_transcript_path
+        self.cursor_transcript_schema = cursor_transcript_schema
         launch_env = env if env else self._default_env_for_agent(agent_type)
         self.env = self._clean_env(launch_env)
+        if self.cursor_transport == "terminal_transcript" and self.cursor_data_dir:
+            # Pin the exact source directory into the child environment. This
+            # keeps the process that owns the raw pane and the provenance that
+            # gates Structured on the same Cursor data root, including custom
+            # HOME/CURSOR_DATA_DIR launch environments.
+            self.env["CURSOR_DATA_DIR"] = self.cursor_data_dir
         self._prepare_agent_env()
         if agent_type != AgentType.CLAUDE:
             self._setup_tunnel_env()
@@ -1240,6 +1349,29 @@ class TTYDProcess:
         # solely for conversation pinning and must NOT be treated as a
         # "resume this session" signal — see _should_recover.
         self._has_explicit_session_id: bool = bool(agent_session_id)
+        if self.cursor_transport == "terminal_transcript" and not (
+            self.agent_type == AgentType.CURSOR
+            and self.target == ExecutionTarget.LOCAL
+            and cursor_terminal_transcript_provenance_valid(
+                cwd=self.cwd,
+                session_id=self.agent_session_id,
+                cli_version=self.cursor_cli_version,
+                transcript_path=self.cursor_transcript_path,
+                transcript_schema=self.cursor_transcript_schema,
+                data_dir=self.cursor_data_dir,
+                env=self.env,
+            )
+        ):
+            logger.warning(
+                "Cursor terminal transcript provenance mismatch for tab %s; "
+                "failing closed to terminal transport",
+                self.tab_id,
+            )
+            self.cursor_transport = "terminal"
+            self.cursor_data_dir = None
+            self.cursor_cli_version = None
+            self.cursor_transcript_path = None
+            self.cursor_transcript_schema = None
         # True when this process was reconstructed from persisted tabs.json on
         # startup (vs. freshly created by a user/API call). Combined with an
         # absent tmux session, this is the signal that we are recovering after a
@@ -1971,6 +2103,13 @@ asyncio.run(_main())
         if self.agent_type == AgentType.CODEX:
             return self._codex_launch_command(recover=recover)
         if self.agent_type == AgentType.CURSOR:
+            if self.cursor_transport == "terminal_transcript":
+                # One authoritative process owns both the raw Terminal view
+                # and the transcript tailed for Chat. Provenance is validated
+                # at construction/load, so never rotate or fall back here.
+                assert self.agent_session_id is not None
+                flags = " --yolo" if self.solo_mode else ""
+                return f"agent --resume {shlex.quote(self.agent_session_id)}{flags}"
             # Cursor CLI supports constructive pinning via `agent --resume <uuid>`:
             # V0 verified that passing an arbitrary uuid causes Cursor to create
             # a fresh store.db immediately (rather than erroring out). A persisted
@@ -2558,6 +2697,11 @@ asyncio.run(_main())
             "agent_session_id": self.agent_session_id,
             "resume_quarantined": bool(self.resume_quarantined),
             "shell_explicitly_provided": self._shell_explicitly_provided,
+            "cursor_transport": self.cursor_transport,
+            "cursor_data_dir": self.cursor_data_dir,
+            "cursor_cli_version": self.cursor_cli_version,
+            "cursor_transcript_path": self.cursor_transcript_path,
+            "cursor_transcript_schema": self.cursor_transcript_schema,
         }
 
     def to_schema(self) -> TerminalTab:
@@ -2580,6 +2724,11 @@ asyncio.run(_main())
             workspace_name=self.workspace_name,
             workspace_role=self.workspace_role,
             agent_session_id=self.agent_session_id,
+            cursor_transport=self.cursor_transport,
+            cursor_data_dir=self.cursor_data_dir,
+            cursor_cli_version=self.cursor_cli_version,
+            cursor_transcript_path=self.cursor_transcript_path,
+            cursor_transcript_schema=self.cursor_transcript_schema,
         )
 
 
@@ -2652,6 +2801,11 @@ class TTYDManager:
                             from_persisted_state=True,
                             resume_quarantined=tab_data.get("resume_quarantined", False),
                             shell_explicitly_provided=tab_data.get("shell_explicitly_provided"),
+                            cursor_transport=tab_data.get("cursor_transport", "terminal"),
+                            cursor_data_dir=tab_data.get("cursor_data_dir"),
+                            cursor_cli_version=tab_data.get("cursor_cli_version"),
+                            cursor_transcript_path=tab_data.get("cursor_transcript_path"),
+                            cursor_transcript_schema=tab_data.get("cursor_transcript_schema"),
                         )
                         self.processes[process.tab_id] = process
                         if process.port > max_port:
@@ -2815,6 +2969,11 @@ class TTYDManager:
         workspace_role: Optional[WorkspaceSessionRole] = None,
         env: Optional[Dict[str, str]] = None,
         agent_session_id: Optional[str] = None,
+        cursor_transport: str = "terminal",
+        cursor_data_dir: Optional[str] = None,
+        cursor_cli_version: Optional[str] = None,
+        cursor_transcript_path: Optional[str] = None,
+        cursor_transcript_schema: Optional[str] = None,
     ) -> TerminalTab:
         logger.info(
             f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}, target={target}, remote_profile_id={remote_profile_id}, remote_forward_port={remote_forward_port}, workspace_id={workspace_id}, workspace_role={workspace_role}, agent_session_id={agent_session_id}"
@@ -2840,6 +2999,11 @@ class TTYDManager:
             workspace_role=workspace_role,
             env=env,
             agent_session_id=agent_session_id,
+            cursor_transport=cursor_transport,
+            cursor_data_dir=cursor_data_dir,
+            cursor_cli_version=cursor_cli_version,
+            cursor_transcript_path=cursor_transcript_path,
+            cursor_transcript_schema=cursor_transcript_schema,
         )
         logger.info(
             f"Created TTYDProcess with solo_mode={process.solo_mode}, agent_type={process.agent_type}"
@@ -3438,6 +3602,11 @@ class TTYDManager:
                 process.agent_session_id = None
                 if agent_type in (AgentType.CLAUDE, AgentType.CODEX):
                     process.agent_session_id = str(uuid.uuid4())
+                process.cursor_transport = "terminal"
+                process.cursor_data_dir = None
+                process.cursor_cli_version = None
+                process.cursor_transcript_path = None
+                process.cursor_transcript_schema = None
                 logger.info(f"reset agent_session_id for tab {tab_id} due to agent_type change")
             process.agent_type = agent_type
             needs_restart = True
@@ -3459,6 +3628,24 @@ class TTYDManager:
             if process.agent_type != AgentType.CLAUDE:
                 process._setup_tunnel_env()
             needs_restart = True
+
+        if process.cursor_transport == "terminal_transcript" and not (
+            process.target == ExecutionTarget.LOCAL
+            and cursor_terminal_transcript_provenance_valid(
+                cwd=process.cwd,
+                session_id=process.agent_session_id,
+                cli_version=process.cursor_cli_version,
+                transcript_path=process.cursor_transcript_path,
+                transcript_schema=process.cursor_transcript_schema,
+                data_dir=process.cursor_data_dir,
+                env=process.env,
+            )
+        ):
+            process.cursor_transport = "terminal"
+            process.cursor_data_dir = None
+            process.cursor_cli_version = None
+            process.cursor_transcript_path = None
+            process.cursor_transcript_schema = None
 
         if needs_restart:
             logger.info(

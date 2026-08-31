@@ -416,6 +416,22 @@ class TerminalTabBase(BaseModel):
         default_factory=dict,
         description="Environment variables to inject into the launched terminal or agent",
     )
+    cursor_transport: str = Field(
+        "terminal",
+        description="Cursor transport mode: 'terminal' (raw), 'terminal_transcript', or 'acp'",
+    )
+    cursor_data_dir: Optional[str] = Field(
+        None, description="Pinned Cursor data directory for same-pane transcript provenance"
+    )
+    cursor_cli_version: Optional[str] = Field(
+        None, description="Pinned Cursor CLI version for same-pane transcript provenance"
+    )
+    cursor_transcript_path: Optional[str] = Field(
+        None, description="Pinned absolute transcript path for same-pane transcript provenance"
+    )
+    cursor_transcript_schema: Optional[str] = Field(
+        None, description="Pinned transcript schema identifier for same-pane transcript provenance"
+    )
 
 
 class TerminalTabCreate(TerminalTabBase):
@@ -960,6 +976,13 @@ class ManagedSession(BaseModel):
     # specific; Codex resume is the currently supported caller-owned path.
     agent_session_id: Optional[str] = None
     cursor_transport: str = "terminal"
+    # Cursor CLI transcript provenance. All five must validate exactly for the
+    # structured adapter to return structured=True; otherwise fail-closed to
+    # the raw terminal.
+    cursor_data_dir: Optional[str] = None
+    cursor_cli_version: Optional[str] = None
+    cursor_transcript_schema: Optional[str] = None
+    cursor_transcript_path: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     last_activity_at: Optional[datetime] = None

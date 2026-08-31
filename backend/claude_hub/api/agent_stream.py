@@ -124,7 +124,9 @@ def _closed_unavailable_stream(capabilities: StreamCapabilities, message: str) -
 
 
 class AgentStreamWaitRequest(BaseModel):
-    since_sequence: int = Field(0, ge=0)
+    # Store sequences start at zero and the cursor is exclusive, so -1 is the
+    # only value that can request the first persisted event.
+    since_sequence: int = Field(-1, ge=-1)
     timeout_seconds: Optional[float] = Field(None, ge=0)
 
 
@@ -152,7 +154,7 @@ async def get_stream_capabilities(
 )
 async def get_stream_events(
     managed_session_id: str,
-    since_sequence: int = Query(0, ge=0),
+    since_sequence: int = Query(-1, ge=-1),
     limit: int = Query(200, ge=1, le=1000),
     current_user: User = Depends(get_current_user),
 ) -> AgentStreamEventPage:
@@ -228,7 +230,7 @@ async def wait_stream_events(
 @router.get("/sessions/{managed_session_id}/stream/live")
 async def stream_live(
     managed_session_id: str,
-    since_sequence: int = Query(0, ge=0),
+    since_sequence: int = Query(-1, ge=-1),
     current_user: User = Depends(get_current_user),
 ) -> StreamingResponse:
     session = _session_or_404(managed_session_id)
