@@ -11,6 +11,7 @@ import json
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import MagicMock
 
@@ -22,6 +23,7 @@ from claude_hub.models import (
     AgentStreamEventPage,
     AgentStreamEventType,
     AgentType,
+    ExecutionTarget,
     ManagedSession,
     ManagedSessionStatus,
     StreamCapabilities,
@@ -45,6 +47,111 @@ from claude_hub.services.agent_stream.store import AgentStreamStore
 from claude_hub.services.agent_stream.tailer import SessionTailer
 
 # ── redaction ────────────────────────────────────────────────────────────────
+
+
+def test_terminal_tab_stream_session_uses_tab_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Terminal-created agent tab is a stream source without a Workspace row."""
+
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    tab = SimpleNamespace(
+        id="tab-direct",
+        name="Direct Claude",
+        cwd="/tmp/direct",
+        remote_cwd=None,
+        target=ExecutionTarget.LOCAL,
+        remote_profile_id=None,
+        remote_reconnect=True,
+        solo_mode=True,
+        env={"SAFE": "value"},
+        agent_session_id="provider-session-id",
+        cursor_transport="terminal",
+        cursor_data_dir=None,
+        cursor_cli_version=None,
+        cursor_transcript_path=None,
+        cursor_transcript_schema=None,
+        agent_type=AgentType.CLAUDE,
+    )
+    monkeypatch.setattr(agent_stream_api.ttyd_manager, "get_tab", lambda tab_id: tab)
+
+    session = agent_stream_api._terminal_tab_stream_session("tab-direct")
+
+    assert session is not None
+    assert session.id == "terminal-tab-tab-direct"
+    assert session.workspace_id == "terminal-tabs"
+    assert session.tab_id == "tab-direct"
+    assert session.agent_type == AgentType.CLAUDE
+    assert session.agent_session_id == "provider-session-id"
+    assert session.workspace_path == "/tmp/direct"
+    assert get_adapter_for_session(session) is not None
+
+
+def test_terminal_tab_stream_session_returns_none_for_missing_tab(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    monkeypatch.setattr(agent_stream_api.ttyd_manager, "get_tab", lambda tab_id: None)
+    assert agent_stream_api._terminal_tab_stream_session("missing") is None
+
+
+def test_terminal_tab_stream_session_uses_backend_cwd_when_tab_cwd_is_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    tab = SimpleNamespace(
+        id="tab-inherited-cwd",
+        name="Inherited cwd",
+        cwd=None,
+        remote_cwd=None,
+        target=ExecutionTarget.LOCAL,
+        remote_profile_id=None,
+        remote_reconnect=True,
+        solo_mode=True,
+        env={},
+        agent_session_id="provider-session-id",
+        cursor_transport="terminal",
+        cursor_data_dir=None,
+        cursor_cli_version=None,
+        cursor_transcript_path=None,
+        cursor_transcript_schema=None,
+        agent_type=AgentType.CLAUDE,
+    )
+    monkeypatch.setattr(agent_stream_api.ttyd_manager, "get_tab", lambda tab_id: tab)
+    monkeypatch.setattr(agent_stream_api.os, "getcwd", lambda: "/preview/backend")
+
+    session = agent_stream_api._terminal_tab_stream_session("tab-inherited-cwd")
+
+    assert session is not None
+    assert session.workspace_path == "/preview/backend"
+
+
+def test_tab_capability_keeps_empty_claude_composer_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first prompt creates the transcript, so no source is not Raw-only."""
+
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    session = _sse_session("terminal-tabs", "terminal-tab-empty")
+    adapter = MagicMock()
+    adapter.capabilities.return_value = StreamCapabilities(
+        structured=False,
+        adapter_id="claude-jsonl",
+        schema_version=1,
+        sources=[],
+    )
+    manager = MagicMock()
+    manager.hard_failed.return_value = False
+    monkeypatch.setattr(agent_stream_api, "get_adapter_for_session", lambda _session: adapter)
+
+    caps = agent_stream_api._tab_capabilities_for(session, manager)
+
+    assert caps.structured is True
+    assert caps.sources == []
 
 
 def test_redact_event_strips_env_values():

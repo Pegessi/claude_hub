@@ -241,7 +241,10 @@ import { groupEventsIntoTurns } from '@/utils/agentStreamTimeline'
 import type { WorkspaceAttachmentCreate } from '@/types'
 
 const props = defineProps<{
-  sessionId: string
+  /** A Workspace-managed agent keeps the existing durable message path. */
+  sessionId?: string
+  /** A normal Terminal agent tab owns its transcript directly. */
+  tabId?: string
 }>()
 
 const emit = defineEmits<{
@@ -252,6 +255,16 @@ const workspaceStore = useWorkspaceStore()
 
 const { events, connectionState, errorMessage, start, stop } = useAgentStream()
 
+const isTerminalTabSource = computed(() => Boolean(props.tabId))
+
+function startStream() {
+  if (props.tabId) {
+    void start(props.tabId, 'terminal-tab')
+  } else if (props.sessionId) {
+    void start(props.sessionId, 'managed-session')
+  }
+}
+
 // ── Timeline grouping ───────────────────────────────────────────────────────
 // The flat event stream is grouped into turns by the pure
 // ``groupEventsIntoTurns`` utility (see agentStreamTimeline.ts).
@@ -261,7 +274,7 @@ const turns = computed(() => groupEventsIntoTurns(events.value))
 // ── Stream lifecycle ────────────────────────────────────────────────────────
 
 onMounted(() => {
-  void start(props.sessionId)
+  startStream()
 })
 
 onUnmounted(() => {
@@ -269,10 +282,8 @@ onUnmounted(() => {
 })
 
 watch(
-  () => props.sessionId,
-  (id) => {
-    void start(id)
-  },
+  () => [props.sessionId, props.tabId],
+  startStream,
 )
 
 // Fail-closed: if the stream fails, tell the parent to switch back to raw.
@@ -283,7 +294,7 @@ watch(connectionState, (state) => {
 })
 
 function retry() {
-  void start(props.sessionId)
+  startStream()
 }
 
 // ── Composer ────────────────────────────────────────────────────────────────
@@ -377,6 +388,43 @@ function removeAttachment(att: DraftAttachment) {
   if (idx >= 0) attachments.value.splice(idx, 1)
 }
 
+/**
+ * Terminal-created tabs do not participate in the Workspace outbox.  Their
+ * structured composer intentionally mirrors a user operating that very same
+ * terminal: images go through the established macOS pasteboard bridge, then
+ * input is queued through TerminalView so hidden raw panes retain ownership.
+ */
+async function sendToTerminalTab(
+  message: string,
+  atts: WorkspaceAttachmentCreate[],
+) {
+  const sendKey = window.__claudeHub.sendTerminalKey
+  if (!sendKey) {
+    throw new Error('Terminal input is not ready. Switch to Terminal once, then retry.')
+  }
+
+  for (const att of atts) {
+    const image = await fetch(att.data_url)
+    if (!image.ok) throw new Error(`Unable to read ${att.filename}`)
+    const form = new FormData()
+    form.append('image', await image.blob(), att.filename)
+    const response = await fetch('/api/clipboard/image', {
+      method: 'POST',
+      body: form,
+      credentials: 'same-origin',
+    })
+    if (!response.ok) {
+      throw new Error(`Unable to prepare ${att.filename}: ${response.status}`)
+    }
+    sendKey('v', true)
+  }
+
+  for (const char of Array.from(message)) {
+    sendKey(char === '\n' ? 'Enter' : char)
+  }
+  sendKey('Enter')
+}
+
 async function submit() {
   if (!canSend.value || isSending.value) return
   isSending.value = true
@@ -388,7 +436,13 @@ async function submit() {
     data_url,
   }))
   try {
-    await workspaceStore.sendMessage(props.sessionId, message, atts)
+    if (isTerminalTabSource.value) {
+      await sendToTerminalTab(message, atts)
+    } else if (props.sessionId) {
+      await workspaceStore.sendMessage(props.sessionId, message, atts)
+    } else {
+      throw new Error('Structured source is unavailable.')
+    }
     // Success: clear the composer.
     draftMessage.value = ''
     attachments.value = []
