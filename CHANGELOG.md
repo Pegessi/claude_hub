@@ -5,6 +5,26 @@
 
 ## Unreleased
 
+### feat: Paseo v2 backend structured observation foundation (Layer B)
+
+- **What**: Provider-neutral structured agent event stream for the Paseo v2
+  UI. Adds append-only per-session JSONL event stores with monotonic
+  `stream_sequence`, server-side redaction (env value stripping, token
+  masking, 4000-char field truncation), and a tailer lifecycle that tails
+  Claude JSONL and Codex rollout transcripts into normalized events. Exposes
+  REST/SSE/long-poll stream routes under
+  `/api/workspaces/sessions/{id}/stream/*` plus a read-only
+  `GET /api/workspaces/sessions` tab-to-managed-session mapping. Cursor
+  fail-closes (no adapter) until a future ACP/transcript bridge lands.
+- **Why**: The raw terminal plane cannot drive a structured agent UI
+  (turns, tool calls, thinking). A normalized event log lets the frontend
+  render a Paseo-style observation layer without coupling to any single
+  provider's transcript format.
+- **How**: `services/agent_stream/` (base, redaction, store, registry,
+  claude_jsonl, codex_jsonl, tailer) + `api/agent_stream.py`;
+  `ManagedSession` gains `stream_capabilities`, `agent_session_id`,
+  `cursor_transport`. Lifespan stops tailers on shutdown.
+
 ### fix: isolate worktree runtime and fail-closed session seat before /clear
 
 - **What**: Linked-worktree backends default to an isolated runtime home and

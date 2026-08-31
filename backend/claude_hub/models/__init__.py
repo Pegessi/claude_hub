@@ -1,3 +1,8 @@
+from .agent_stream import (  # noqa: E402
+    AgentStreamEvent,
+    AgentStreamEventPage,
+    AgentStreamEventType,
+)
 from .schemas import (
     PUBLIC_REDACTED_ENV_VALUE,
     AcceptanceCheck,
@@ -63,6 +68,7 @@ from .schemas import (
     SendSessionMessageRequest,
     SpawnWorkerRequest,
     StartTaskRequest,
+    StreamCapabilities,
     SwitchEnvRequest,
     TaskCleanupResult,
     TaskFollowupRequest,
@@ -194,4 +200,8 @@ __all__ = [
     "EnvPresetHiddenRequest",
     "EnvPresetBulkImport",
     "EnvPresetsResponse",
+    "StreamCapabilities",
+    "AgentStreamEvent",
+    "AgentStreamEventType",
+    "AgentStreamEventPage",
 ]

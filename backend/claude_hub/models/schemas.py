@@ -37,6 +37,21 @@ class AgentType(str, Enum):
     TERMINAL = "terminal"
 
 
+class StreamCapabilities(BaseModel):
+    """What the structured observation plane can offer for a session.
+
+    ``structured=False`` is the fail-closed state: callers retain the raw
+    terminal when no supported transcript source is available.
+    """
+
+    structured: bool = False
+    adapter_id: str = "none"
+    schema_version: int = 0
+    sources: List[str] = Field(default_factory=list)
+    supports_approval_ui: bool = False
+    supports_tool_timeline: bool = False
+
+
 class ExecutionTarget(str, Enum):
     """Where the terminal command should run."""
 
@@ -939,6 +954,12 @@ class ManagedSession(BaseModel):
     # risk_level, acked_call_ids) and excludes only bookkeeping fields
     # (id, workspace_id, session_id, created_at, review_cycle, call_id).
     report_call_fingerprints: Dict[str, str] = Field(default_factory=dict)
+    # None means structured capability has not been negotiated yet.
+    stream_capabilities: Optional[StreamCapabilities] = None
+    # Persistent provider conversation id.  Its exact use remains provider
+    # specific; Codex resume is the currently supported caller-owned path.
+    agent_session_id: Optional[str] = None
+    cursor_transport: str = "terminal"
     created_at: datetime
     updated_at: datetime
     last_activity_at: Optional[datetime] = None
@@ -1359,11 +1380,31 @@ class EnsureWorkspaceAgentRequest(BaseModel):
     )
     env: Dict[str, str] = Field(default_factory=dict)
     env_preset: Optional[str] = None
+    agent_session_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Existing Codex conversation id to resume for a new local managed " "session."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_caller_owned_provenance(self) -> "EnsureWorkspaceAgentRequest":
         if self.caller_owned_ephemeral and not self.ephemeral:
             raise ValueError("caller_owned_ephemeral requires ephemeral=True")
+        if self.agent_session_id is not None:
+            if not self.agent_session_id.strip():
+                raise ValueError("agent_session_id must not be empty")
+            if self.agent_type != AgentType.CODEX:
+                raise ValueError("agent_session_id is supported only for Codex agents")
+            if (
+                self.target == ExecutionTarget.REMOTE
+                or self.remote_profile_id is not None
+                or self.remote_cwd is not None
+                or self.remote_reconnect is not None
+            ):
+                raise ValueError("agent_session_id is supported only for local Codex agents")
+            if self.reuse_existing:
+                raise ValueError("agent_session_id cannot be combined with reuse_existing")
         return self
 
 
