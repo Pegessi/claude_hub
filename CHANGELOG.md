@@ -5,6 +5,25 @@
 
 ## Unreleased
 
+### feat: Paseo v2 structured terminal UI + image composer (frontend)
+
+- **What**: Reversible Structured/Raw view toggle on managed-agent terminal
+  panes. Raw stays mounted (ttyd session + scrollback preserved) when the
+  Structured view is active. Structured view renders a turn-grouped timeline
+  (user, assistant text, collapsible thinking, tool calls with status, errors,
+  status events) from the backend agent-stream plane, with SSE + long-poll
+  fallback and fail-closed to raw on `structured=false` or stream failure.
+  Composer supports text + image attachments (file picker, drag-drop, paste)
+  with PNG/JPEG/GIF/WebP/BMP + 8 MB validation, preview/remove, image-only
+  send, and message/attachment retention on send error. No file paths or
+  secrets are rendered in the UI.
+- **Why**: First-release product contract for the Paseo v2 structured
+  observation layer without altering raw terminal semantics.
+- **How**: `StructuredPane.vue`, `agentStreamTimeline.ts`,
+  `agentStreamAttachments.ts`, `useAgentStream.ts`; `TerminalPane.vue` gains
+  the view toggle and raw-stays-mounted CSS hide. `sessionForTab` maps tab →
+  managed session for stream keying.
+
 ### feat: Paseo v2 backend structured observation foundation (Layer B)
 
 - **What**: Provider-neutral structured agent event stream for the Paseo v2
