@@ -53,7 +53,7 @@
         class="structured-timeline-content"
       >
         <div
-          v-if="turns.length === 0 && connectionState === 'live'"
+          v-if="turns.length === 0 && pendingDirectTurns.length === 0 && connectionState === 'live'"
           class="structured-empty"
         >
           <span
@@ -67,21 +67,51 @@
         <div
           v-for="turn in turns"
           :key="turn.key"
-          v-memo="[turn.renderRevision]"
+          v-memo="[turn.renderRevision, erroredAttachments.size]"
           class="structured-turn"
         >
           <!-- A right-aligned user bubble and a left-aligned agent bubble make
                this the same conversation as the terminal, not terminal text
                pasted into a second surface. -->
           <div
-            v-if="turn.userText"
+            v-if="turn.userText || turn.attachments?.length"
             class="conversation-row conversation-row--user"
           >
             <div class="conversation-bubble conversation-bubble--user">
               <MarkdownContent
+                v-if="turn.userText"
                 :text="turn.userText"
                 compact
               />
+              <div
+                v-if="turn.attachments?.length"
+                class="turn-attachments"
+              >
+                <template
+                  v-for="(att, i) in turn.attachments"
+                  :key="att.id ?? `null-${turn.key}-${i}`"
+                >
+                  <!-- Render the preview image when we have a valid id that has
+                       not errored. The img comes first in source order so static
+                       template analysis finds it before the placeholder
+                       branches. -->
+                  <img
+                    v-if="att.id !== null && !erroredAttachments.has(att.id)"
+                    :src="attachmentUrl(att.id)"
+                    class="turn-attachment-img"
+                    alt="attached image"
+                    @error="onAttachmentError($event, att)"
+                  >
+                  <!-- Placeholder for no-preview (id is null) or evicted
+                       preview (fetch returned 404/410). -->
+                  <div
+                    v-else
+                    class="turn-attachment-placeholder"
+                  >
+                    <span>{{ att.id === null ? 'Preview unavailable' : 'Preview expired' }}</span>
+                  </div>
+                </template>
+              </div>
             </div>
           </div>
 
@@ -216,10 +246,18 @@
                 :text="turn.userText"
                 compact
               />
-              <span
-                v-if="turn.attachmentCount"
-                class="pending-attachment"
-              >{{ turn.attachmentCount === 1 ? 'Image attached' : `${turn.attachmentCount} images attached` }}</span>
+              <div
+                v-if="turn.attachments?.length"
+                class="turn-attachments"
+              >
+                <img
+                  v-for="(att, i) in turn.attachments"
+                  :key="i"
+                  :src="att.preview_url"
+                  class="turn-attachment-img"
+                  alt="attached image"
+                >
+              </div>
             </div>
           </div>
           <div class="event-status event-status--pending">
@@ -284,7 +322,7 @@
             class="composer-attach-btn"
             aria-label="Attach image"
             :title="supportsImages ? 'Attach image' : 'This agent does not support image attachments'"
-            :disabled="!supportsImages"
+            :disabled="!supportsImages || isSending || isPreparingAttachments"
             @click="triggerFilePicker"
           >
             <span aria-hidden="true">📎</span>
@@ -322,8 +360,8 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useAgentStream, validateImageAttachment, fileToDataUrl } from '@/composables/useAgentStream'
-import { IncrementalTimelineReducer } from '@/utils/agentStreamTimeline'
+import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '@/composables/useAgentStream'
+import { IncrementalTimelineReducer, type TimelineAttachment } from '@/utils/agentStreamTimeline'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
 import MarkdownContent from '@/components/MarkdownContent.vue'
@@ -384,7 +422,7 @@ type PendingTurn = {
   key: string
   turnId: string
   userText: string
-  attachmentCount: number
+  attachments: { preview_url: string; mime_type: string }[]
 }
 
 const pendingDirectTurns = ref<PendingTurn[]>([])
@@ -412,13 +450,16 @@ onMounted(() => {
   startStream()
 })
 
-onUnmounted(() => {
-  stop()
-})
-
 watch(
   () => [props.sessionId, props.tabId],
   () => {
+    // Advance the preparation epoch so any in-flight attachment batch from
+    // the previous source fails its post-await epoch check and aborts
+    // instead of appending into the new source's composer.
+    preparationEpoch.value++
+    // A new source means a fresh composer: the previous source's
+    // preparation (if any) is no longer relevant, so re-enable Send.
+    isPreparingAttachments.value = false
     pendingDirectTurns.value = []
     draftMessage.value = ''
     attachments.value = []
@@ -426,6 +467,13 @@ watch(
     startStream()
   },
 )
+
+onUnmounted(() => {
+  // Bump the epoch on unmount so any in-flight preparation batch aborts
+  // instead of mutating state after the component is gone.
+  preparationEpoch.value++
+  stop()
+})
 
 function retry() {
   if (props.tabId) {
@@ -447,10 +495,22 @@ const draftMessage = ref('')
 const attachments = ref<DraftAttachment[]>([])
 const composerError = ref<string | null>(null)
 const isSending = ref(false)
+const isPreparingAttachments = ref(false)
+/** Monotonically increasing epoch that advances on every source switch
+ *  (session/tab change) and on unmount. Captured at the start of an
+ *  attachment preparation batch and re-checked after every await; an exact
+ *  match is required so a stale batch from a previous source visit cannot
+ *  append into a later visit of the same source (the ABA problem: switch
+ *  A→B→A while FileReader/canvas awaits, and the stale A batch would
+ *  otherwise pass a source-string equality check). */
+const preparationEpoch = ref(0)
 const isDragOver = ref(false)
 const fileInputEl = ref<HTMLInputElement | null>(null)
 const timelineEl = ref<HTMLElement | null>(null)
 const timelineContentEl = ref<HTMLElement | null>(null)
+/** Attachment ids whose preview fetch returned 404/410 (evicted or never
+ *  cached). Rendered as a visible "Preview expired" placeholder. */
+const erroredAttachments = ref<Set<string>>(new Set())
 
 // Activation gate: the timeline is not revealed until authoritative history
 // has been hydrated and the tail has been synchronously pinned. This prevents
@@ -495,36 +555,144 @@ let timelineVerificationFrame: number | null = null
 let timelineDisposed = false
 
 const canSend = computed(() => connectionState.value === 'live' &&
+  !isPreparingAttachments.value &&
   (draftMessage.value.trim().length > 0 || attachments.value.length > 0))
 
 const supportsImages = computed(() => capabilities.value?.supports_images ?? false)
 
 function triggerFilePicker() {
+  if (isSending.value) return
   fileInputEl.value?.click()
 }
 
+const MAX_ATTACHMENTS = 10
+// Backend enforces a 40 MiB total decoded cap per send request (originals +
+// previews). We enforce it conservatively client-side: sum of original file
+// sizes plus 512 KiB reserved per selected preview must stay <= 40 MiB. The
+// backend remains authoritative.
+const MAX_TOTAL_REQUEST_BYTES = 40 * 1024 * 1024
+const PREVIEW_RESERVED_BYTES = 512 * 1024
+
 async function addFiles(files: FileList | File[]) {
+  // Capture the epoch BEFORE any state mutation. If the source switches
+  // (or the component unmounts) during this batch, the epoch advances and
+  // every post-await check fails, so this stale batch never touches the
+  // new source's composer state.
+  const epoch = preparationEpoch.value
+
   composerError.value = null
   if (!supportsImages.value) {
     composerError.value = 'This agent does not support image attachments.'
     return
   }
+  // Serialize preparation batches: reject new input while a previous batch is
+  // still reading/generating previews. Without this, two concurrent batches
+  // both set isPreparingAttachments=true; the first to finish clears it and
+  // re-enables Send while the second is still mid-await.
+  if (isPreparingAttachments.value) return
+  // Block new attachments while a send is in flight: an async continuation
+  // must never append into a composer that has already been cleared and sent.
+  if (isSending.value) return
+
   const list = Array.from(files)
-  for (const file of list) {
+  // Enforce the max-attachment count client-side.
+  const remaining = MAX_ATTACHMENTS - attachments.value.length
+  if (remaining <= 0) {
+    composerError.value = `You can attach up to ${MAX_ATTACHMENTS} images.`
+    return
+  }
+  const accepted = list.slice(0, remaining)
+  if (accepted.length < list.length) {
+    composerError.value = `You can attach up to ${MAX_ATTACHMENTS} images.`
+  }
+
+  // Enforce the total request byte cap before reading: sum of existing draft
+  // originals + new originals + 512 KiB per preview must stay <= 40 MiB.
+  const existingBytes = attachments.value.reduce((sum, a) => sum + (a.size_bytes || 0), 0)
+  const newBytes = accepted.reduce((sum, f) => sum + f.size, 0)
+  const totalPreviews = attachments.value.length + accepted.length
+  const projected = existingBytes + newBytes + totalPreviews * PREVIEW_RESERVED_BYTES
+  if (projected > MAX_TOTAL_REQUEST_BYTES) {
+    const mb = (MAX_TOTAL_REQUEST_BYTES / 1024 / 1024).toFixed(0)
+    composerError.value = `Total attachment size exceeds the ${mb} MiB request limit.`
+    return
+  }
+
+  // Validate all accepted files before starting any async work.
+  for (const file of accepted) {
     const err = validateImageAttachment(file)
     if (err) {
       composerError.value = err
-      continue
+      return
     }
-    const dataUrl = await fileToDataUrl(file)
-    attachments.value.push({
-      id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      filename: file.name,
-      mime_type: file.type,
-      data_url: dataUrl,
-      preview_url: dataUrl,
-      size_bytes: file.size,
-    })
+  }
+
+  // Mark the entire preparation batch active BEFORE the first await so Send
+  // stays disabled for the whole read+preview-generation window.
+  isPreparingAttachments.value = true
+
+  try {
+    for (const file of accepted) {
+      // Read the original once. The provisional thumbnail uses the original
+      // data URL so it appears instantly; the bounded preview is generated
+      // from the same data URL (no second read).
+      let dataUrl: string
+      try {
+        dataUrl = await fileToDataUrl(file)
+      } catch (e) {
+        // Only surface the error if this batch still owns the composer.
+        if (preparationEpoch.value === epoch) {
+          composerError.value = e instanceof Error
+            ? `Failed to read ${file.name}: ${e.message}`
+            : `Failed to read ${file.name}.`
+        }
+        continue
+      }
+      // Stale batch (source switched or send started): bail out WITHOUT
+      // clearing isPreparingAttachments — the new source's batch may own it.
+      if (preparationEpoch.value !== epoch || isSending.value) return
+
+      const provisionalId = `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      const provisional: DraftAttachment = {
+        id: provisionalId,
+        filename: file.name,
+        mime_type: file.type,
+        data_url: dataUrl,
+        // Provisional thumbnail uses the original data URL.
+        preview_url: dataUrl,
+        size_bytes: file.size,
+      }
+      attachments.value.push(provisional)
+
+      try {
+        // Pass the already-read data URL so we do not read the file twice.
+        const previewDataUrl = await generatePreviewDataUrl(file, dataUrl)
+        // Stale batch: bail out without clearing the flag.
+        if (preparationEpoch.value !== epoch || isSending.value) return
+        const idx = attachments.value.findIndex((a) => a.id === provisionalId)
+        if (idx < 0) continue // removed by the user while preparing
+        attachments.value[idx] = {
+          ...provisional,
+          preview_data_url: previewDataUrl,
+          // Replace the provisional thumbnail with the bounded preview.
+          preview_url: previewDataUrl,
+        }
+      } catch (e) {
+        // Preview generation failed. Only mutate state if this batch still
+        // owns the composer; otherwise leave the new source's state alone.
+        if (preparationEpoch.value !== epoch) return
+        attachments.value = attachments.value.filter((a) => a.id !== provisionalId)
+        composerError.value = e instanceof Error
+          ? `Failed to prepare ${file.name}: ${e.message}`
+          : `Failed to prepare ${file.name}.`
+      }
+    }
+  } finally {
+    // Only the owning batch may clear the preparing flag. A stale batch
+    // (epoch advanced) must not unlock a newer batch that set the flag.
+    if (preparationEpoch.value === epoch) {
+      isPreparingAttachments.value = false
+    }
   }
 }
 
@@ -537,6 +705,7 @@ function handleFilePick(event: Event) {
 }
 
 function handlePaste(event: ClipboardEvent) {
+  if (isSending.value) return
   const items = event.clipboardData?.items
   if (!items) return
   const files: File[] = []
@@ -565,6 +734,7 @@ function handleDragLeave() {
 function handleDrop(event: DragEvent) {
   event.preventDefault()
   isDragOver.value = false
+  if (isSending.value) return
   const files = event.dataTransfer?.files
   if (files && files.length > 0) {
     void addFiles(files)
@@ -572,8 +742,37 @@ function handleDrop(event: DragEvent) {
 }
 
 function removeAttachment(att: DraftAttachment) {
+  if (isSending.value) return
   const idx = attachments.value.findIndex((a) => a.id === att.id)
   if (idx >= 0) attachments.value.splice(idx, 1)
+}
+
+/**
+ * Build the scoped preview URL for an authoritative attachment id.
+ *
+ * The endpoint is session/tab-scoped so a leaked id from another session
+ * cannot be used to fetch previews. The backend validates the id against the
+ * session/tab manifest before serving.
+ */
+function attachmentUrl(attachmentId: string): string {
+  const encId = encodeURIComponent(attachmentId)
+  if (props.sessionId) {
+    return `/api/workspaces/sessions/${encodeURIComponent(props.sessionId)}/stream/attachments/${encId}`
+  }
+  return `/api/workspaces/tabs/${encodeURIComponent(props.tabId ?? '')}/stream/attachments/${encId}`
+}
+
+/**
+ * Record an attachment whose preview fetch failed (404/410 or network error).
+ *
+ * The template renders a visible "Preview expired" placeholder for ids in
+ * ``erroredAttachments`` instead of a broken image icon. The set is keyed by
+ * attachment id; a re-render of the turn (e.g. on reconnect) does not clear
+ * it, so the placeholder stays stable.
+ */
+function onAttachmentError(_event: Event, att: TimelineAttachment): void {
+  if (att.id === null) return
+  erroredAttachments.value = new Set(erroredAttachments.value).add(att.id)
 }
 
 /**
@@ -600,10 +799,11 @@ async function sendToStream(
     body: JSON.stringify({
       client_turn_id: clientTurnId,
       text: message,
-      attachments: atts.map(({ filename, mime_type, data_url }) => ({
+      attachments: atts.map(({ filename, mime_type, data_url, preview_data_url }) => ({
         filename,
         mime_type,
         data_url,
+        preview_data_url,
       })),
     }),
   })
@@ -624,10 +824,24 @@ async function submit() {
   isSending.value = true
   composerError.value = null
   const message = draftMessage.value
-  const atts: WorkspaceAttachmentCreate[] = attachments.value.map(({ filename, mime_type, data_url }) => ({
-    filename,
+  // Snapshot the full draft attachments (including id, preview_url,
+  // preview_data_url, size_bytes) so we can restore the composer exactly on
+  // send failure — no reconstructed ids, no zeroed sizes.
+  const draftAtts: DraftAttachment[] = [...attachments.value]
+  // Wire payload carries the original data_url (for the provider) and the
+  // bounded preview_data_url (for the cache) separately.
+  const atts: WorkspaceAttachmentCreate[] = draftAtts.map(
+    ({ filename, mime_type, data_url, preview_data_url }) => ({
+      filename,
+      mime_type,
+      data_url,
+      preview_data_url,
+    }),
+  )
+  // Optimistic bubble thumbnails come from the bounded preview.
+  const pendingAtts = draftAtts.map(({ preview_url, mime_type }) => ({
+    preview_url,
     mime_type,
-    data_url,
   }))
   const clientTurnId = typeof crypto.randomUUID === 'function'
     ? crypto.randomUUID()
@@ -636,6 +850,11 @@ async function submit() {
     if (!props.sessionId && !props.tabId) {
       throw new Error('Structured source is unavailable.')
     }
+    // Clear the composer synchronously BEFORE the send promise settles so the
+    // thumbnail disappears immediately on Send. On rejection we restore the
+    // exact snapshot below.
+    draftMessage.value = ''
+    attachments.value = []
     // Show the user's turn immediately; the stream will replace it with the
     // authoritative transcript line once the provider echoes it back.
     pendingDirectTurns.value = [
@@ -644,17 +863,18 @@ async function submit() {
         key: `pending-${clientTurnId}`,
         turnId: clientTurnId,
         userText: message,
-        attachmentCount: atts.length,
+        attachments: pendingAtts,
       },
     ]
     requestLatestAnchor(true)
     await sendToStream(message, atts, clientTurnId)
-    // Success: clear the composer.
-    draftMessage.value = ''
-    attachments.value = []
+    // Success: composer already cleared; nothing more to do.
   } catch (err) {
     pendingDirectTurns.value = pendingDirectTurns.value.filter(turn => turn.turnId !== clientTurnId)
-    // Retain message + attachments on error so the user can retry.
+    // Restore the exact draft text and attachments so the user can retry
+    // without losing their input.
+    draftMessage.value = message
+    attachments.value = draftAtts
     composerError.value = err instanceof Error ? err.message : 'Failed to send message.'
   } finally {
     isSending.value = false
@@ -767,6 +987,9 @@ watch(
   () => [props.sessionId, props.tabId],
   () => {
     resetActivation()
+    // Attachment ids are scoped to a session/tab; switching source invalidates
+    // all previously-recorded 404/410 error state.
+    erroredAttachments.value = new Set()
     requestLatestAnchor(true)
   },
 )

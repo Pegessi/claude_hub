@@ -55,6 +55,35 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     with BackendInstanceLock(backend_lock_file):
         # Startup
         logger.info("Starting Claude Hub Backend")
+
+        # Run cache GC and prior-process temp cleanup *before* starting any
+        # tabs or the workspace monitor. BackendInstanceLock guarantees we
+        # are the sole owner of this runtime, so no concurrent turn can be
+        # staging files while we clean up. Running cleanup after
+        # start_all_tabs / start_background_monitor would race background
+        # activity against the cleanup pass.
+        #
+        # Preview cache GC: enforce quotas, age TTL, and clean orphans from
+        # a crashed process. Failures are non-fatal and are retried on the
+        # next isolated-backend startup.
+        try:
+            from .services.agent_stream.attachments import run_global_gc
+
+            await run_global_gc()
+        except Exception:
+            logger.exception("agent-stream attachment GC failed at startup")
+        # Remove any Codex image temp files left by a prior crashed process.
+        # BackendInstanceLock guarantees single ownership, so we can remove
+        # all of them before any tab can stage files for a new turn.
+        try:
+            from .services.agent_stream.native import cleanup_codex_temp_dir
+
+            removed = cleanup_codex_temp_dir()
+            if removed:
+                logger.info("cleaned up %d orphaned Codex image temp files", removed)
+        except Exception:
+            logger.exception("Codex image temp cleanup failed at startup")
+
         # Start all saved tabs
         await ttyd_manager.start_all_tabs()
         workspace_manager.start_background_monitor()

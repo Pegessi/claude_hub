@@ -916,3 +916,91 @@ async def test_codex_turn_completed_before_response_cleans_up_images() -> None:
     # The turn guard is released only after the consumer acknowledges the
     # turn/completed record.
     assert not native._turn_in_flight
+
+
+@pytest.mark.asyncio
+async def test_codex_eof_before_turn_completed_cleans_inflight_images(
+    tmp_path: Path,
+) -> None:
+    """If the persistent app-server dies mid-turn, no ``turn/completed``
+    notification will arrive, so the stdout-reader ``finally`` block owns
+    cleanup of the localImage temp files.
+    """
+    proc = _FakeProcess(
+        stdout_lines=[
+            json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}).encode() + b"\n",
+            json.dumps({"jsonrpc": "2.0", "id": 2, "result": {"thread": {"id": "th-1"}}}).encode()
+            + b"\n",
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "result": {"turn": {"id": "tu-1", "status": "running"}},
+                }
+            ).encode()
+            + b"\n",
+        ]
+    )
+    native = _codex_session()
+    captured_paths: List[Path] = []
+    original_stage = native._stage_images
+
+    def tracking_stage(images: List[bytes]) -> None:
+        original_stage(images)
+        captured_paths.extend(native._staged_images)
+
+    native._stage_images = tracking_stage  # type: ignore[assignment]
+
+    with (
+        patch(
+            "claude_hub.services.agent_stream.native._runtime_home",
+            return_value=tmp_path,
+        ),
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+    ):
+        await native.start()
+        await native.send_message("hello", [_VALID_PNG])
+        assert captured_paths and all(path.exists() for path in captured_paths)
+
+        proc.stdout.push(b"")
+        assert await asyncio.wait_for(native.read_line(), timeout=1.0) is None
+
+    assert native._inflight_images == []
+    assert native._staged_images == []
+    assert all(not path.exists() for path in captured_paths)
+
+
+def test_codex_image_staging_uses_private_runtime_owned_files(tmp_path: Path) -> None:
+    native = _codex_session()
+    with patch(
+        "claude_hub.services.agent_stream.native._runtime_home",
+        return_value=tmp_path,
+    ):
+        native._stage_images([_VALID_PNG])
+        staged = list(native._staged_images)
+        temp_dir = tmp_path / "tmp" / "codex-images"
+
+        assert staged and staged[0].parent == temp_dir
+        assert temp_dir.stat().st_mode & 0o777 == 0o700
+        assert staged[0].stat().st_mode & 0o777 == 0o600
+
+        native._clear_staged_images()
+
+    assert all(not path.exists() for path in staged)
+
+
+def test_codex_startup_cleanup_removes_prior_process_temp_files(tmp_path: Path) -> None:
+    from claude_hub.services.agent_stream.native import cleanup_codex_temp_dir
+
+    temp_dir = tmp_path / "tmp" / "codex-images"
+    temp_dir.mkdir(parents=True)
+    orphan = temp_dir / "codex-img-orphan.png"
+    orphan.write_bytes(_VALID_PNG)
+
+    with patch(
+        "claude_hub.services.agent_stream.native._runtime_home",
+        return_value=tmp_path,
+    ):
+        assert cleanup_codex_temp_dir() == 1
+
+    assert not orphan.exists()

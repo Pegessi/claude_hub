@@ -4,12 +4,12 @@ import type {
   AgentStreamEventPage,
   StreamCapabilities,
 } from '@/types'
-import { validateImageAttachment, fileToDataUrl } from '@/utils/agentStreamAttachments'
+import { validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '@/utils/agentStreamAttachments'
 import { createContiguousEventBuffer } from '@/utils/agentStreamSequence'
 import { AgentStreamBatcher } from '@/utils/agentStreamBatcher'
 import { StreamConnectionStateMachine } from '@/utils/streamConnectionStateMachine'
 
-export { validateImageAttachment, fileToDataUrl }
+export { validateImageAttachment, fileToDataUrl, generatePreviewDataUrl }
 
 const API_BASE = '/api'
 

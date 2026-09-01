@@ -45,6 +45,7 @@ from ...models import (
     ManagedSession,
     SessionKind,
 )
+from .attachments import AgentStreamAttachmentStore
 from .base import (
     AgentStreamAdapter,
     NormalizeContext,
@@ -95,6 +96,7 @@ class SessionTailer:
         self.adapter = adapter
         self._session_getter = session_getter
         self._store = store or AgentStreamStore(workspace_id, session_id)
+        self._attachment_store: Optional[AgentStreamAttachmentStore] = None
         self._cursor_path = self._store.cursor_path
         self._native_transport = native_transport
         # When set, the agent session required a native transport but it could
@@ -157,6 +159,13 @@ class SessionTailer:
     def store(self) -> AgentStreamStore:
         return self._store
 
+    @property
+    def attachment_store(self) -> AgentStreamAttachmentStore:
+        """Lazily-created bounded preview cache for this session."""
+        if self._attachment_store is None:
+            self._attachment_store = AgentStreamAttachmentStore(self.workspace_id, self.session_id)
+        return self._attachment_store
+
     def is_running(self) -> bool:
         return self._task is not None and not self._task.done()
 
@@ -187,6 +196,8 @@ class SessionTailer:
         text: str,
         images: List[bytes],
         client_turn_id: str,
+        *,
+        previews: Optional[List[bytes]] = None,
     ) -> None:
         """Atomically deliver a user turn (text + images) to the native transport.
 
@@ -194,19 +205,38 @@ class SessionTailer:
         ``ProviderSession`` that produces the structured stream also consumes
         the turn, so input and output never diverge across two sessions.
 
+        ``images`` are the original (full-resolution) bytes sent to the
+        provider. ``previews`` are the bounded (max edge 1024px) bytes that
+        the frontend generated for display; only the previews are persisted to
+        the attachment cache. The original bytes are never written to disk
+        (except for Codex's transient temp staging, which is cleaned up).
+
+        If ``previews`` is ``None`` the originals are still sent to the
+        provider but **not** durably cached — the ``turn_started`` event
+        carries non-renderable placeholder metadata so the turn is still
+        visible but no original bytes are persisted. This preserves the
+        "originals never enter the durable cache" boundary.
+
+        Transaction ordering (all under ``self._send_lock``):
+
+        1. busy check (``transport.turn_in_flight``)
+        2. session existence check
+        3. preview count validation (``len(previews) == len(images)``)
+        4. persist bounded previews to the attachment cache
+        5. publish ``turn_started`` (durable)
+        6. deliver to provider
+
+        If step 4 partially fails, any already-saved preview ids are deleted.
+        If step 5 fails, all newly saved preview ids are deleted (the turn has
+        no durable identity). Once step 5 succeeds, the previews are retained
+        even if step 6 fails — the user turn exists and must remain renderable.
+
         Stable turn identity: the frontend supplies ``client_turn_id``. Before
         the provider runs, we append an authoritative ``turn_started`` event
         stamped with that id (and ``message_id={turn_id}:user``) so the user's
         message is immediately visible and can never be confused with a later
         identical message. ``self._active_turn_id`` is set so every provider
         event normalized during this turn inherits the same ``turn_id``.
-
-        Concurrency: the whole method runs under ``self._send_lock``. The
-        first thing we do inside the lock is check ``transport.turn_in_flight``;
-        if a turn is already active we raise ``RuntimeError`` (mapped to HTTP
-        409) WITHOUT touching ``_active_turn_id``, ``_run_epoch``, or the
-        store. This guarantees a busy second send can never clobber the
-        in-flight turn's identity.
 
         Fail-closed: no native transport raises ``RuntimeError``; the caller
         maps it to an HTTP error rather than falling back to tmux. On send
@@ -222,22 +252,66 @@ class SessionTailer:
             await transport.start()
 
         async with self._send_lock:
-            # Busy check BEFORE any state mutation. If a turn is already in
-            # flight, fail fast so the in-flight turn's _active_turn_id and
-            # _run_epoch are never overwritten.
+            # 1. Busy check BEFORE any state mutation. If a turn is already in
+            #    flight, fail fast so the in-flight turn's _active_turn_id and
+            #    _run_epoch are never overwritten.
             if transport.turn_in_flight:
                 raise RuntimeError(
                     "a turn is already in flight; wait for it to complete before "
                     "sending another message"
                 )
 
-            # Authoritative turn start: publish the user's message before the
-            # provider does anything. This guarantees the turn exists in the store
-            # and is fanned out to subscribers, even if the provider never echoes
-            # the user message back (e.g. Codex app-server notifications).
+            # 2. Session existence check.
             session = self._session_getter()
             if session is None:
                 raise RuntimeError("session no longer exists")
+
+            # 3. Preview count validation. When the frontend supplies previews,
+            #    there must be exactly one per image. When previews is None,
+            #    originals are sent but NOT cached (placeholder metadata only).
+            if previews is not None and len(previews) != len(images):
+                raise ValueError(
+                    f"preview count ({len(previews)}) must match image count ({len(images)})"
+                )
+
+            # 4. Persist bounded previews. Originals are never used as previews.
+            attachment_metas: List[Dict[str, Any]] = []
+            saved_ids: List[str] = []
+            try:
+                if previews is not None:
+                    for prev in previews:
+                        mime = _detect_image_mime(prev) or "image/png"
+                        meta = await self.attachment_store.save(mime, prev)
+                        saved_ids.append(meta["id"])
+                        attachment_metas.append(meta)
+                else:
+                    # No previews supplied: emit non-renderable placeholder
+                    # metadata so the turn is visible but no original bytes
+                    # are persisted. The frontend renders a "no preview"
+                    # placeholder for entries without an id.
+                    for img in images:
+                        attachment_metas.append(
+                            {
+                                "id": None,
+                                "mime_type": _detect_image_mime(img) or "image/png",
+                                "bytes": len(img),
+                                "width": None,
+                                "height": None,
+                            }
+                        )
+            except Exception:
+                # Partial save failure: delete any previews already persisted
+                # in this turn so we don't leak unreferenced cache entries.
+                for att_id in saved_ids:
+                    try:
+                        await self.attachment_store._delete_by_id(att_id)
+                    except Exception:
+                        logger.exception("failed to clean up preview %s after partial save", att_id)
+                raise
+
+            # 5. Authoritative turn start: publish the user's message before
+            #    the provider does anything. This guarantees the turn exists in
+            #    the store and is fanned out to subscribers.
             self._active_turn_id = client_turn_id
             self._run_epoch += 1
             self._turn_completed_seen = False
@@ -248,12 +322,11 @@ class SessionTailer:
                 run_epoch=self._run_epoch,
                 turn_id=client_turn_id,
             )
-            attachments_meta = [
-                {"bytes": len(img), "mime": _detect_image_mime(img)} for img in images
-            ]
+            # The event carries only opaque attachment metadata (id, mime_type,
+            # bytes, width, height) — never raw bytes or local paths.
             turn_started = ctx.event(
                 AgentStreamEventType.TURN_STARTED,
-                {"summary": text, "attachments": attachments_meta},
+                {"summary": text, "attachments": attachment_metas},
             )
             turn_started = redact_event(turn_started)
             try:
@@ -264,11 +337,21 @@ class SessionTailer:
                     self.session_id,
                 )
                 # If we cannot persist the authoritative turn_started, the turn
-                # has no identity. Fail the send rather than fan out an unpersisted
-                # seq=0 event that the frontend will drop.
+                # has no identity. Delete all previews saved in this turn so we
+                # don't leak unreferenced cache entries, then fail.
+                for att_id in saved_ids:
+                    try:
+                        await self.attachment_store._delete_by_id(att_id)
+                    except Exception:
+                        logger.exception(
+                            "failed to clean up preview %s after publish failure", att_id
+                        )
                 self._active_turn_id = None
                 raise
 
+            # 6. Deliver to the provider. Previews are retained from here on:
+            #    the user turn is durably recorded and must remain renderable
+            #    even if the provider rejects the input.
             try:
                 await transport.send_message(text, images)
             except Exception:
@@ -1144,6 +1227,8 @@ class TailerManager:
         text: str,
         images: List[bytes],
         client_turn_id: str,
+        *,
+        previews: Optional[List[bytes]] = None,
     ) -> None:
         """Atomically deliver a user turn (text + images) for ``session``.
 
@@ -1152,9 +1237,12 @@ class TailerManager:
         the stream and the turn. ``client_turn_id`` is the frontend-generated
         stable turn id; the tailer publishes an authoritative ``turn_started``
         with it before the provider runs.
+
+        ``images`` are the original bytes sent to the provider; ``previews``
+        are the bounded display previews persisted to the attachment cache.
         """
         tailer = await self._get_or_create(session)
-        await tailer.send_message(text, images, client_turn_id)
+        await tailer.send_message(text, images, client_turn_id, previews=previews)
 
     async def ensure_started(self, session: ManagedSession) -> SessionTailer:
         return await self._get_or_create(session)
@@ -1266,3 +1354,6 @@ async def discard_session_stream(workspace_id: str, session_id: str) -> None:
     for manager in list(_TAILER_MANAGERS):
         await manager.forget_session(session_id)
     await AgentStreamStore(workspace_id, session_id).clear()
+    # Also clear the session's bounded preview cache so a reused session id
+    # cannot surface another conversation's images.
+    await AgentStreamAttachmentStore(workspace_id, session_id).clear()

@@ -471,3 +471,40 @@ test('tool_call_completed with unchanged status/result does not advance renderRe
   ]
   assert.equal(reducer.reduce(events)[0].renderRevision, revisionAfterBase)
 })
+
+test('turn_started with attachments populates durable attachment descriptors on the turn', () => {
+  // The authoritative turn_started payload carries opaque attachment ids,
+  // mime types, byte sizes, and optional dimensions — never raw bytes or
+  // local paths. The reducer must surface these on the turn so the user
+  // bubble can resolve and render the preview.
+  const reducer = new IncrementalTimelineReducer()
+  const events = [
+    makeEvent(0, 'turn_started', {
+      summary: 'look at this',
+      attachments: [
+        { id: 'att-1', mime_type: 'image/jpeg', bytes: 12345, width: 512, height: 384 },
+        { id: 'att-2', mime_type: 'image/png', bytes: 6789, width: 256, height: 256 },
+      ],
+    }, { turn_id: 't1' }),
+  ]
+
+  const turns = reducer.reduce(events)
+  assert.equal(turns.length, 1)
+  const turn = turns[0]
+  assert.ok(Array.isArray(turn.attachments), 'turn must expose an attachments array')
+  assert.equal(turn.attachments.length, 2)
+  assert.deepEqual(turn.attachments[0], {
+    id: 'att-1',
+    mime_type: 'image/jpeg',
+    bytes: 12345,
+    width: 512,
+    height: 384,
+  })
+  assert.deepEqual(turn.attachments[1], {
+    id: 'att-2',
+    mime_type: 'image/png',
+    bytes: 6789,
+    width: 256,
+    height: 256,
+  })
+})

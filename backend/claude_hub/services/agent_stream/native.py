@@ -99,6 +99,79 @@ def _mime_extension(mime: str) -> str:
     }.get(mime, ".bin")
 
 
+# Codex ``turn/start`` accepts ``localImage`` input items that reference a
+# local file path. The original image bytes are staged to temp files for the
+# duration of one turn. These files live under an app-owned 0700 directory
+# inside the runtime home (NOT the persistent workspace STATE_ROOT) so that:
+#
+# * the backend controls the lifecycle and permissions,
+# * original images never end up in durable/backup state,
+# * a crashed process leaves orphans that the startup cleanup can remove,
+# * no other user on the host can read the staged images.
+#
+# ``BackendInstanceLock`` guarantees a single owning process per runtime
+# home, so at startup we can safely remove any prior-process temp files.
+_CODEX_IMAGE_TEMP_DIR_NAME = "codex-images"
+
+
+def _runtime_home() -> Path:
+    """Return the runtime home directory (isolated per worktree)."""
+    from ...services.runtime_isolation import resolve_runtime_home
+
+    return resolve_runtime_home()
+
+
+def _codex_image_temp_dir() -> Path:
+    """Return the app-owned Codex image temp directory, creating it mode 0700.
+
+    The directory lives under ``runtime_home/tmp`` so it is scoped to the
+    runtime instance and never persisted as part of workspace state.
+    """
+    path = _runtime_home() / "tmp" / _CODEX_IMAGE_TEMP_DIR_NAME
+    path.mkdir(parents=True, exist_ok=True)
+    # mkdir is subject to umask; force 0700 on every component up to runtime
+    # home so the whole tmp tree is private.
+    current = path
+    root = _runtime_home()
+    while current != root and current != current.parent:
+        try:
+            os.chmod(current, 0o700)
+        except OSError:
+            pass
+        current = current.parent
+    return path
+
+
+def cleanup_codex_temp_dir(max_age_seconds: Optional[float] = None) -> int:
+    """Remove Codex image temp files.
+
+    At startup (before any turn can stage new files) ``BackendInstanceLock``
+    guarantees we are the sole owner of this runtime, so the default
+    (``max_age_seconds=None``) removes *all* leftover files from a prior
+    crashed process — including fresh ones. Pass a bounded
+    ``max_age_seconds`` to only remove files older than the threshold (a
+    safety net for mid-run cleanup, though the normal lifecycle already
+    removes files on turn completion / stop).
+
+    Returns the number of files removed.
+    """
+    import time
+
+    temp_dir = _codex_image_temp_dir()
+    now = time.time()
+    removed = 0
+    for entry in temp_dir.iterdir():
+        if not entry.is_file():
+            continue
+        try:
+            if max_age_seconds is None or (now - entry.stat().st_mtime) > max_age_seconds:
+                entry.unlink(missing_ok=True)
+                removed += 1
+        except OSError:
+            pass
+    return removed
+
+
 class ProviderSession(ABC):
     """Base contract for a native provider transport.
 
@@ -883,22 +956,53 @@ class CodexNativeSession(ProviderSession):
 
         Codex's ``turn/start`` accepts ``localImage`` input items with a file
         path. We stage the bytes to temp files (validated by magic bytes and
-        size) and attach them to the next ``_send_text`` call. Temp files are
-        deleted after the turn completes (success or failure) and on ``stop``.
+        size) inside the app-owned 0700 Codex image temp directory and attach
+        them to the next ``_send_text`` call. Temp files are deleted after the
+        turn completes (success or failure) and on ``stop``.
         """
         if not images:
             return
+        temp_dir = _codex_image_temp_dir()
         for img in images:
             media_type = _detect_image_mime(img)
             if media_type is None:
                 raise ValueError("unsupported image format or not an image")
-            fd, path = tempfile.mkstemp(prefix="codex-img-", suffix=_mime_extension(media_type))
+            # Use a unique name inside the app-owned temp dir. ``mkstemp``
+            # would create the file in the system temp dir; we want it under
+            # our 0700 directory so the backend owns the lifecycle.
+            fd, path = tempfile.mkstemp(
+                prefix="codex-img-",
+                suffix=_mime_extension(media_type),
+                dir=str(temp_dir),
+            )
+            f = None
             try:
-                with os.fdopen(fd, "wb") as f:
-                    f.write(img)
+                f = os.fdopen(fd, "wb")
+                f.write(img)
             except Exception:
-                os.close(fd)
+                # Best-effort cleanup: never let a close/unlink error mask
+                # the original write exception.
+                try:
+                    Path(path).unlink(missing_ok=True)
+                except OSError:
+                    pass
                 raise
+            finally:
+                if f is not None:
+                    try:
+                        f.close()
+                    except OSError:
+                        pass
+                else:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+            # Files are created 0600 by mkstemp, but chmod to defeat umask.
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
             self._staged_images.append(Path(path))
 
     def _clear_staged_images(self) -> None:
@@ -1029,6 +1133,17 @@ class CodexNativeSession(ProviderSession):
         except Exception:
             logger.exception("codex native transport stdout drain failed")
         finally:
+            # If the app-server died mid-turn (EOF or exception before
+            # turn/completed), the in-flight image temp files will never be
+            # reclaimed by the turn/completed handler. Clean them up here so
+            # they do not leak until stop(). Staged images (not yet sent) are
+            # also abandoned; a later user send supplies its own attachments.
+            inflight = self._inflight_images
+            self._inflight_images = []
+            self._cleanup_images(inflight)
+            staged = self._staged_images
+            self._staged_images = []
+            self._cleanup_images(staged)
             # Signal EOF to notification consumers.
             await self._notification_queue.put(None)
             # Fail any still-pending requests.
