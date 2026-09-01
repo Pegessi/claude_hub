@@ -17,7 +17,7 @@
   soon as Send is pressed, the optimistic user turn shows its image, and the
   authoritative history resolves the same scoped preview after refresh.
 - **Compact click-to-expand previews**: conversation images now render as
-  compact 4:3 thumbnails (at most 112px wide) instead of expanding the user
+  compact 4:3 thumbnails (72–88px wide) instead of expanding the user
   bubble to the image width.
   Clicking a thumbnail opens a viewport-contained lightbox that closes from
   the backdrop, close button, or Escape and restores keyboard focus.

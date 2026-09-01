@@ -133,7 +133,7 @@ test('conversation attachments are compact buttons that open the image lightbox'
 test('attachment thumbnails have a bounded footprint instead of using intrinsic size', () => {
   const buttonRule = structuredPane.match(/\.turn-attachment-button\s*\{[\s\S]*?\}/)
   assert.ok(buttonRule, 'thumbnail button CSS must exist')
-  assert.match(buttonRule[0], /width:\s*clamp\(80px,\s*10vw,\s*112px\)/)
+  assert.match(buttonRule[0], /width:\s*clamp\(72px,\s*8vw,\s*88px\)/)
   assert.match(buttonRule[0], /aspect-ratio:/)
   assert.match(buttonRule[0], /overflow:\s*hidden/)
 
@@ -145,7 +145,7 @@ test('attachment thumbnails have a bounded footprint instead of using intrinsic 
 
   const placeholderRule = structuredPane.match(/\.turn-attachment-placeholder\s*\{[\s\S]*?\}/)
   assert.ok(placeholderRule, 'expired thumbnail placeholder CSS must exist')
-  assert.match(placeholderRule[0], /width:\s*clamp\(80px,\s*10vw,\s*112px\)/)
+  assert.match(placeholderRule[0], /width:\s*clamp\(72px,\s*8vw,\s*88px\)/)
 })
 
 test('image lightbox supports backdrop, close button, and Escape', () => {
@@ -155,6 +155,23 @@ test('image lightbox supports backdrop, close button, and Escape', () => {
   assert.match(structuredPane, /@click\.self="closeImageLightbox"/)
   assert.match(structuredPane, /aria-label="Close image preview"/)
   assert.match(structuredPane, /event\.key === 'Escape'/)
+})
+
+test('mobile image controls retain a touch target and keep the lightbox inside the viewport', () => {
+  const buttonRule = structuredPane.match(/\.turn-attachment-button\s*\{[\s\S]*?\}/)
+  assert.ok(buttonRule, 'thumbnail button CSS must exist')
+  const minWidth = Number(buttonRule[0].match(/clamp\((\d+)px/)?.[1])
+  assert.ok(minWidth >= 44, 'mobile thumbnail must remain at least a 44px touch target')
+
+  const imageRule = structuredPane.match(/\.structured-image-lightbox-img\s*\{[\s\S]*?\}/)
+  assert.ok(imageRule, 'lightbox image CSS must exist')
+  assert.match(imageRule[0], /max-width:\s*min\([^;]*calc\(100vw\s*-\s*48px\)\)/)
+  assert.match(imageRule[0], /max-height:\s*calc\(100dvh\s*-\s*48px\)/)
+
+  const closeRule = structuredPane.match(/\.structured-image-lightbox-close\s*\{[\s\S]*?\}/)
+  assert.ok(closeRule, 'lightbox close button CSS must exist')
+  assert.match(closeRule[0], /width:\s*44px/)
+  assert.match(closeRule[0], /height:\s*44px/)
 })
 
 // ---------------------------------------------------------------------------
