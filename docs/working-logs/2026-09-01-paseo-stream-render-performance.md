@@ -155,21 +155,48 @@ Cost per batch is O(new events), independent of history length.
   tool ordering and replay dedup across batches; returns a fresh array
   reference each call.
 
+### Frontend: Removal of second-stage text reveal (`StructuredPane.vue`)
+
+The original `StructuredPane` ran a character-by-character `textReveal`
+animation on top of the already-batched event stream. Each committed text
+batch retargeted the reveal state and paced out the new characters over a
+~150ms horizon, producing 3–4 intermediate DOM/Markdown updates per batch.
+
+Authoritative E2E (turn `c01df02c-0a46-4cca-b9af-e4a58e0953b4`, real day1
+Claude, 5275/18173) measured **98 `text_delta` events** expanding into
+**375 distinct assistant text DOM states** — a ~3.8× multiplier from the
+reveal layer. Each reveal frame re-ran the live-tail markdown parse and
+`v-html` update, driving long tasks.
+
+The `textReveal` module and all reveal lifecycle code in `StructuredPane`
+have been removed. Assistant text now streams directly from the batched
+event stream (backend 60ms coalescer + frontend rAF/48ms batcher): each
+committed batch updates the visible text exactly once. On `turn_completed`,
+`MarkdownContent`'s `complete` prop flips to `true`, caching the final
+block and exposing the exact final text synchronously.
+
+Deterministic test (`agentStreamTimelineReducer.test.mjs`): 4 text batches
+produce exactly 4 distinct assistant text values, each equal to the full
+accumulated `assistantText` (no partial-reveal prefix).
+
 ### E2E (Playwright, isolated backend 18173 / frontend 5275)
 
-**Status: unverified this round.** The network-interception harness that
-sniffed SSE/long-poll for `turn_completed` timed out, even though the
-backend turn `ba23f49d-28de-438f-8494-4d4f83ac78a1` reached `turn_completed`
-at stream_sequence 14119. The prior round's E2E numbers (max long-task
-277ms) were based on a flawed harness that accepted `textLen=0` and a
-500ms threshold; those claims are retracted. The reliable
-`since_sequence`-polling harness should be used for the authoritative
-measurement.
+**Authoritative run (commander), turn `c01df02c-0a46-4cca-b9af-e4a58e0953b4`:**
 
-What the flawed-but-informative run did show before the timeout:
-- 1493-char Thinking, 1247-char text, 1 tool call, 0 queue drops.
-- 6 long tasks, max 136ms, p95 136ms (measured only after history settled
-  and LongTask metrics reset).
+- Duration: 91.68s
+- 519 `thinking_delta` / 98 `text_delta`; thinking 4572 chars, final text
+  1474 chars; one Bash start+completed.
+- Waiting placeholder seen; final marker visible; joined block HTML exactly
+  equals `MarkdownBlockCache` complete render.
+- Scroll held at top, Latest visible, click gap=0; tool completed.
+- **375 distinct assistant text DOM states** and 511 Thinking states.
+- **Long Tasks after hydration reset: 6 durations — 58, 60, 50, 76, 64,
+  90 ms.** Gate still fails (>50ms).
+
+Root signal: the `textReveal` second-stage interpolation magnified 98 text
+events into 375 DOM/Markdown live-tail updates. Removed (see above). The
+6 long tasks above are from the pre-removal build; the post-removal E2E
+is pending re-run.
 
 ### Correctness invariants preserved
 
@@ -192,12 +219,16 @@ What the flawed-but-informative run did show before the timeout:
 - `frontend/src/utils/agentStreamBatcher.ts` (new)
 - `frontend/src/components/MarkdownContent.vue` (modified)
 - `frontend/src/components/StructuredPane.vue` (modified — uses
-  `IncrementalTimelineReducer` instead of `groupEventsIntoTurns`)
+  `IncrementalTimelineReducer` instead of `groupEventsIntoTurns`; removed
+  second-stage `textReveal` interpolation)
+- `frontend/src/utils/textReveal.ts` (deleted — unused after reveal removal)
 - `frontend/src/composables/useAgentStream.ts` (modified)
 - `frontend/tests/markdownBlocks.test.mjs` (new)
 - `frontend/tests/agentStreamBatcher.test.mjs` (new)
 - `frontend/tests/thinkingNoMarkdown.test.mjs` (new)
-- `frontend/tests/agentStreamTimelineReducer.test.mjs` (new)
+- `frontend/tests/agentStreamTimelineReducer.test.mjs` (new — includes
+  one-update-per-batch deterministic test)
+- `frontend/tests/textReveal.test.mjs` (deleted — module removed)
 
 ## Residual risks
 
