@@ -114,6 +114,45 @@ test('authoritative user turn renders attachment images', () => {
   assert.match(block, /<img/, 'authoritative user turn must render <img> for attachments')
 })
 
+test('conversation attachments are compact buttons that open the image lightbox', () => {
+  const authoritativeBlock = structuredPane.match(
+    /class="turn-attachments"[\s\S]*?Placeholder for no-preview/,
+  )
+  assert.ok(authoritativeBlock, 'authoritative attachment block must exist')
+  assert.match(authoritativeBlock[0], /class="turn-attachment-button"/)
+  assert.match(authoritativeBlock[0], /@click="openImageLightbox/)
+
+  const pendingBlock = structuredPane.match(
+    /v-for="turn in pendingTurns"[\s\S]*?structured-turn--pending[\s\S]*?<\/div>\s*<\/div>/,
+  )
+  assert.ok(pendingBlock, 'pending turns block must exist')
+  assert.match(pendingBlock[0], /class="turn-attachment-button"/)
+  assert.match(pendingBlock[0], /@click="openImageLightbox/)
+})
+
+test('attachment thumbnails have a bounded footprint instead of using intrinsic size', () => {
+  const buttonRule = structuredPane.match(/\.turn-attachment-button\s*\{[\s\S]*?\}/)
+  assert.ok(buttonRule, 'thumbnail button CSS must exist')
+  assert.match(buttonRule[0], /width:\s*clamp\(/)
+  assert.match(buttonRule[0], /aspect-ratio:/)
+  assert.match(buttonRule[0], /overflow:\s*hidden/)
+
+  const imageRule = structuredPane.match(/\.turn-attachment-img\s*\{[\s\S]*?\}/)
+  assert.ok(imageRule, 'thumbnail image CSS must exist')
+  assert.match(imageRule[0], /width:\s*100%/)
+  assert.match(imageRule[0], /height:\s*100%/)
+  assert.match(imageRule[0], /object-fit:\s*cover/)
+})
+
+test('image lightbox supports backdrop, close button, and Escape', () => {
+  assert.match(structuredPane, /<Teleport to="body">[\s\S]*?class="structured-image-lightbox"/)
+  assert.match(structuredPane, /role="dialog"/)
+  assert.match(structuredPane, /aria-modal="true"/)
+  assert.match(structuredPane, /@click\.self="closeImageLightbox"/)
+  assert.match(structuredPane, /aria-label="Close image preview"/)
+  assert.match(structuredPane, /event\.key === 'Escape'/)
+})
+
 // ---------------------------------------------------------------------------
 // Async preparation ownership: a FileReader/canvas continuation from a prior
 // session must never unlock or mutate the composer for the newly selected
