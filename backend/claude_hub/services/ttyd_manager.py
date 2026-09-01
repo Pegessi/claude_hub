@@ -3314,6 +3314,18 @@ class TTYDManager:
             self._tab_order.remove(tab_id)
             self._save_order()
         self._save_state()
+        # Purge the tab's structured stream: forget the in-process tailer
+        # (so an in-flight send cannot rewrite previews/events after clear),
+        # then clear the event log and the bounded preview cache. Using
+        # discard_session_stream (rather than clearing the attachment store
+        # directly) guarantees the tailer is stopped before any state is
+        # wiped, so a concurrent send cannot resurrect deleted previews.
+        try:
+            from .agent_stream.tailer import discard_session_stream
+
+            await discard_session_stream("terminal-tabs", f"terminal-tab-{tab_id}")
+        except Exception:
+            logger.exception("Failed to discard structured stream for tab %s", tab_id)
         return True
 
     def get_tab(self, tab_id: str) -> Optional[TerminalTab]:

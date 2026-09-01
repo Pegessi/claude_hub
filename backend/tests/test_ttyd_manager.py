@@ -3435,6 +3435,65 @@ def test_delete_tab_keeps_process_registered_when_teardown_fails(
     assert manager._tab_order == ["deadbeef-tab"]
 
 
+def test_delete_tab_discards_structured_stream_via_tailer(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """``delete_tab`` must purge the tab's structured stream through
+    ``discard_session_stream`` — which forgets the in-process tailer
+    *before* clearing events/previews — rather than clearing the
+    attachment store directly.
+
+    Causal invariant: if the tailer were not stopped first, an in-flight
+    send could rewrite previews/events after the clear, resurrecting
+    deleted state. ``discard_session_stream`` guarantees the
+    forget-then-clear ordering; ``delete_tab`` must delegate to it.
+    """
+    manager = TTYDManager.__new__(TTYDManager)
+    process = SimpleNamespace(tmux_session="claude-hub-deadbeef")
+
+    async def _ok_stop(*, kill_tmux: bool = False) -> None:
+        assert kill_tmux is True
+
+    process.stop = _ok_stop
+    manager.processes = {"deadbeef-tab": process}
+    manager._tab_order = ["deadbeef-tab"]
+
+    discard_calls: list[tuple[str, str]] = []
+
+    async def _fake_discard(workspace_id: str, session_id: str) -> None:
+        discard_calls.append((workspace_id, session_id))
+
+    tailer_module = importlib.import_module("claude_hub.services.agent_stream.tailer")
+    monkeypatch.setattr(tailer_module, "discard_session_stream", _fake_discard)
+
+    # Prove the direct attachment-store clear is NOT used: if it were, this
+    # spy would record a call.
+    clear_calls: list[str] = []
+
+    async def _fake_clear(self) -> None:
+        clear_calls.append(self.session_id)
+
+    attachments_module = importlib.import_module("claude_hub.services.agent_stream.attachments")
+    monkeypatch.setattr(
+        attachments_module.AgentStreamAttachmentStore,
+        "clear",
+        _fake_clear,
+    )
+
+    async def _exercise() -> None:
+        ok = await manager.delete_tab("deadbeef-tab")
+        assert ok is True
+
+    _run_coro_in_isolated_thread(_exercise())
+
+    # delete_tab must route through discard_session_stream with the
+    # terminal-tabs workspace and the tab-scoped session id.
+    assert discard_calls == [("terminal-tabs", "terminal-tab-deadbeef-tab")]
+    # The attachment store must not be cleared directly from delete_tab;
+    # discard_session_stream owns that step (after forgetting the tailer).
+    assert clear_calls == []
+
+
 def test_startup_prunes_only_old_unpersisted_managed_tmux(
     monkeypatch: MonkeyPatch,
 ) -> None:

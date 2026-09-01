@@ -5,6 +5,44 @@
 
 ## Unreleased
 
+### feat: bounded structured image-message history
+
+- **Bounded preview persistence**: Structured/Paseo sends keep original image
+  bytes out of durable history and persist only browser-generated previews
+  (1024px maximum edge, 512 KiB maximum each). FIFO limits default to 200
+  previews / 64 MiB per session and 2000 previews / 512 MiB globally. Evicted
+  previews leave the user message intact and render an explicit expired
+  placeholder.
+- **Immediate composer and conversation thumbnails**: the composer clears as
+  soon as Send is pressed, the optimistic user turn shows its image, and the
+  authoritative history resolves the same scoped preview after refresh.
+- **TTL live enforcement in `save`** (`attachments.py`): `attachment_max_age_seconds`
+  was previously enforced only during startup `gc`, so a long-lived process
+  would never age out previews between saves. `save` now runs `_evict_aged`
+  before session/global quota eviction. When `max_age_seconds` is `None`
+  (the default), `_evict_aged` returns immediately without scanning the
+  index, so an under-quota save still incurs exactly one manifest write.
+  `gc`'s inline age-eviction was refactored to call the same `_evict_aged`
+  helper.
+- **Tab deletion forgets the tailer before clearing state** (`ttyd_manager.py`):
+  `delete_tab` previously called `AgentStreamAttachmentStore.clear()`
+  directly, leaving the in-process terminal-tab stream tailer running. An
+  in-flight send could then rewrite previews/events after the clear,
+  resurrecting deleted state. `delete_tab` now delegates to
+  `discard_session_stream("terminal-tabs", f"terminal-tab-{tab_id}")`,
+  which stops the tailer first, then clears the event log and preview
+  cache.
+- **Codex inflight image cleanup on server death** (`native.py`): if the
+  Codex app-server dies mid-turn (EOF on stdout before `turn/completed`),
+  the in-flight image temp files were leaked until `stop()`. The
+  `_drain_stdout` `finally` block now cleans both `_inflight_images` and
+  `_staged_images` before signalling EOF to consumers.
+- **Failure and path hardening**: atomic 0600 writes, 0700 cache/temp
+  directories, startup orphan GC, symlink-safe cleanup, rollback on
+  publication/eviction failures, request count/size/MIME validation, and
+  session-scoped preview GET endpoints prevent unbounded or cross-session
+  history growth in normal operation.
+
 ### fix: structured timeline scroll replay during history hydration
 
 - **Activation gate** (`timelineActivation.ts`): the structured timeline is

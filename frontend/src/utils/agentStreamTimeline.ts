@@ -9,6 +9,27 @@ export interface TimelineTool {
   resultText: string
 }
 
+/** Durable attachment descriptor carried by ``turn_started``.
+ *
+ *  The durable attachment cache stores only the browser-generated bounded
+ *  preview bytes (max edge 1024px, max 512 KiB). The original image bytes are
+ *  transient provider input — they are forwarded to the model and never
+ *  persisted (the Codex native provider stages them under the runtime temp
+ *  dir and deletes them when the turn ends). The user bubble fetches the
+ *  persisted preview from the scoped attachment GET endpoint using ``id``.
+ *
+ *  ``id`` may be ``null`` for a deliberate no-preview placeholder when the
+ *  client did not supply a bounded preview. Eviction keeps the opaque id in
+ *  history; the scoped GET then returns 410 and the template replaces the
+ *  failed image with a stable placeholder. */
+export interface TimelineAttachment {
+  id: string | null
+  mime_type: string
+  bytes: number
+  width?: number
+  height?: number
+}
+
 export type TimelinePart =
   | { kind: 'thinking'; key: string; text: string }
   | { kind: 'text'; key: string; text: string }
@@ -20,6 +41,11 @@ export interface TimelineTurn {
   key: string
   turnId: string | null
   userText: string
+  /** Durable attachment descriptors surfaced by ``turn_started``.
+   *  Each entry carries the opaque attachment id, mime type, byte size,
+   *  and optional pixel dimensions — never raw bytes or local paths. The
+   *  user bubble resolves the preview via the scoped attachment GET. */
+  attachments: TimelineAttachment[]
   /** Ordered sequence of thinking/text/tool/error/status parts as they arrived. */
   parts: TimelinePart[]
   // Compatibility aggregates kept for callers/tests that read the flat
@@ -60,6 +86,7 @@ function createTurn(key: string, turnId: string | null): TimelineTurn {
     key,
     turnId,
     userText: '',
+    attachments: [],
     parts: [],
     assistantText: '',
     thinkingText: '',
@@ -172,6 +199,29 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
       if (turn.userText !== summary) {
         turn.userText = summary
         mutated = true
+      }
+      // Surface durable attachment descriptors so the user bubble can resolve
+      // and render the preview. The payload carries opaque ids + mime + size
+      // (+ optional dimensions), never raw bytes.
+      const rawAtts = event.payload.attachments
+      if (Array.isArray(rawAtts)) {
+        const atts: TimelineAttachment[] = rawAtts
+          .filter((a): a is Record<string, unknown> => a && typeof a === 'object')
+          .map((a) => ({
+            id: a.id == null ? null : String(a.id),
+            mime_type: String(a.mime_type ?? ''),
+            bytes: typeof a.bytes === 'number' ? a.bytes : 0,
+            width: typeof a.width === 'number' ? a.width : undefined,
+            height: typeof a.height === 'number' ? a.height : undefined,
+          }))
+        // Only mutate if the attachment list actually changed.
+        if (
+          turn.attachments.length !== atts.length ||
+          turn.attachments.some((a, i) => a.id !== atts[i].id)
+        ) {
+          turn.attachments = atts
+          mutated = true
+        }
       }
       break
     }

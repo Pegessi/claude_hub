@@ -991,6 +991,20 @@ class _WorkspacesMixin:
 
         for session in [s for s in self.sessions.values() if s.workspace_id == workspace_id]:
             self.sessions.pop(session.id, None)
+            # Discard the structured stream (events + bounded preview cache)
+            # before the session id can be reused. delete_tab below also clears
+            # the terminal-tab stream's previews, but workspace sessions use
+            # the workspace id as their stream namespace, so clear them here.
+            try:
+                from ..agent_stream import discard_session_stream
+
+                await discard_session_stream(session.workspace_id, session.id)
+            except Exception:
+                logger.exception(
+                    "Failed to discard stream for session %s while deleting workspace %s",
+                    session.id,
+                    workspace_id,
+                )
             try:
                 await ttyd_manager.delete_tab(session.tab_id)
             except Exception:
