@@ -78,7 +78,8 @@ test('structured Retry asks the backend to replace a failed provider transport',
 
 test('Paseo follows dynamic timeline height but preserves deliberate history reading', () => {
   assert.match(structuredPane, /new ResizeObserver/)
-  assert.match(structuredPane, /isFollowingLatest\.value = isTimelineNearBottom\(el\)/)
+  assert.match(structuredPane, /isTimelineNearBottom\(el\)/)
+  assert.match(structuredPane, /detachFromTail\(\)/)
   assert.match(structuredPane, /requestLatestAnchor\(true\)/)
   assert.match(structuredPane, /structured-jump-latest/)
 })

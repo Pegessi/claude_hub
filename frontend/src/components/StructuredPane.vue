@@ -42,6 +42,7 @@
     <div
       ref="timelineEl"
       class="structured-timeline"
+      :class="{ 'is-timeline-hidden': timelinePhase !== 'revealed' }"
       role="log"
       aria-live="polite"
       aria-label="Agent conversation"
@@ -324,6 +325,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAgentStream, validateImageAttachment, fileToDataUrl } from '@/composables/useAgentStream'
 import { IncrementalTimelineReducer } from '@/utils/agentStreamTimeline'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
+import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import type { WorkspaceAttachmentCreate } from '@/types'
 
@@ -449,9 +451,46 @@ const isDragOver = ref(false)
 const fileInputEl = ref<HTMLInputElement | null>(null)
 const timelineEl = ref<HTMLElement | null>(null)
 const timelineContentEl = ref<HTMLElement | null>(null)
-const isFollowingLatest = ref(true)
+
+// Activation gate: the timeline is not revealed until authoritative history
+// has been hydrated and the tail has been synchronously pinned. This prevents
+// the visible "scroll replay" where history paints at the top and then jumps
+// to the bottom. See timelineActivation.ts for the state machine contract.
+const activation = createTimelineActivation()
+const timelinePhase = ref<TimelinePhase>(activation.phase)
+const isFollowingLatest = ref(activation.followOutput)
+
+function syncActivation() {
+  timelinePhase.value = activation.phase
+  isFollowingLatest.value = activation.followOutput
+}
+
+function markHistoryReady() {
+  activation.markHistoryReady()
+  syncActivation()
+}
+
+function confirmTailPinned() {
+  activation.confirmTailPinned()
+  syncActivation()
+}
+
+function detachFromTail() {
+  activation.detachFromTail()
+  syncActivation()
+}
+
+function rearmFollow() {
+  activation.rearmFollow()
+  syncActivation()
+}
+
+function resetActivation() {
+  activation.reset()
+  syncActivation()
+}
+
 let timelineResizeObserver: ResizeObserver | null = null
-let timelineScrollFrame: number | null = null
 let timelineVerificationFrame: number | null = null
 let timelineDisposed = false
 
@@ -623,10 +662,6 @@ async function submit() {
 }
 
 function cancelScheduledTimelineScroll() {
-  if (timelineScrollFrame !== null) {
-    cancelAnimationFrame(timelineScrollFrame)
-    timelineScrollFrame = null
-  }
   if (timelineVerificationFrame !== null) {
     cancelAnimationFrame(timelineVerificationFrame)
     timelineVerificationFrame = null
@@ -634,27 +669,34 @@ function cancelScheduledTimelineScroll() {
 }
 
 /**
- * Maintain the latest turn as a layout invariant. The second frame verifies
- * the anchor after Markdown, images, fonts, or textarea layout changes have
- * had a chance to resize the timeline.
+ * Pin the timeline to the latest turn.
+ *
+ * The initial reveal is handled by the activation gate (``markHistoryReady``
+ * → synchronous ``scrollTop = scrollHeight`` in ``nextTick`` →
+ * ``confirmTailPinned``). This function only drives live updates once the
+ * timeline is revealed and the user has not detached.
+ *
+ * The scroll is applied synchronously inside ``nextTick`` (after Vue's DOM
+ * commit, before the browser paints) so a growing assistant message never
+ * paints above the fold and then jumps down. A single verification rAF
+ * re-sticks if Markdown / image / font layout changed the scroll height.
  */
 function requestLatestAnchor(force = false) {
-  if (force) isFollowingLatest.value = true
+  if (force) rearmFollow()
   if (!isFollowingLatest.value || timelineDisposed) return
+  // While hidden or pinning, the activation gate owns the scroll position.
+  if (timelinePhase.value !== 'revealed') return
   cancelScheduledTimelineScroll()
   void nextTick(() => {
     if (timelineDisposed) return
-    timelineScrollFrame = requestAnimationFrame(() => {
-      timelineScrollFrame = null
-      const el = timelineEl.value
-      if (!el || !isFollowingLatest.value || timelineDisposed) return
-      el.scrollTop = el.scrollHeight
-      timelineVerificationFrame = requestAnimationFrame(() => {
-        timelineVerificationFrame = null
-        const current = timelineEl.value
-        if (!current || !isFollowingLatest.value || timelineDisposed) return
-        if (!isTimelineNearBottom(current)) current.scrollTop = current.scrollHeight
-      })
+    const el = timelineEl.value
+    if (!el || !isFollowingLatest.value || timelineDisposed) return
+    el.scrollTop = el.scrollHeight
+    timelineVerificationFrame = requestAnimationFrame(() => {
+      timelineVerificationFrame = null
+      const current = timelineEl.value
+      if (!current || !isFollowingLatest.value || timelineDisposed) return
+      if (!isTimelineNearBottom(current)) current.scrollTop = current.scrollHeight
     })
   })
 }
@@ -662,10 +704,17 @@ function requestLatestAnchor(force = false) {
 function handleTimelineScroll() {
   const el = timelineEl.value
   if (!el) return
-  isFollowingLatest.value = isTimelineNearBottom(el)
+  // Scroll events during hydration are not user-driven and must not detach.
+  if (timelinePhase.value !== 'revealed') return
+  if (isTimelineNearBottom(el)) {
+    if (!isFollowingLatest.value) rearmFollow()
+  } else {
+    if (isFollowingLatest.value) detachFromTail()
+  }
 }
 
 function jumpToLatest() {
+  rearmFollow()
   requestLatestAnchor(true)
 }
 
@@ -676,7 +725,9 @@ function observeTimelineGeometry() {
   const content = timelineContentEl.value
   if (!viewport || !content) return
   timelineResizeObserver = new ResizeObserver(() => {
-    if (isFollowingLatest.value) requestLatestAnchor()
+    // Resize only re-sticks while the user is following the tail. A detached
+    // viewport must never be hijacked by a layout change.
+    if (activation.shouldHandleResize()) requestLatestAnchor()
   })
   timelineResizeObserver.observe(viewport)
   timelineResizeObserver.observe(content)
@@ -687,9 +738,37 @@ watch(
   () => requestLatestAnchor(),
 )
 
+// Activation gate: when the stream goes live, authoritative history is in the
+// DOM. Pin the tail synchronously (after Vue's DOM commit, before paint) and
+// only then reveal the timeline. This is the Paseo ``isAuthoritativeHistoryReady``
+// pattern — the first painted frame is already at the tail.
+//
+// ``immediate`` covers the cached-stream case: if the composable is already
+// ``live`` when this pane mounts (quick tab switch-back), we still run the
+// pin-and-reveal sequence instead of leaving the timeline permanently hidden.
+watch(connectionState, (state) => {
+  if (state === 'live') {
+    markHistoryReady()
+    void nextTick(() => {
+      if (timelineDisposed) return
+      const el = timelineEl.value
+      if (el) el.scrollTop = el.scrollHeight
+      confirmTailPinned()
+    })
+  } else if (state === 'hydrating') {
+    resetActivation()
+  }
+  // 'failed' and 'idle' leave the timeline hidden; the banner (Retry) is
+  // shown because ``connectionState !== 'live'``. Retry re-enters
+  // 'hydrating' and the gate runs again.
+}, { immediate: true })
+
 watch(
   () => [props.sessionId, props.tabId],
-  () => requestLatestAnchor(true),
+  () => {
+    resetActivation()
+    requestLatestAnchor(true)
+  },
 )
 
 onMounted(() => {
@@ -697,7 +776,6 @@ onMounted(() => {
   void nextTick(() => {
     if (timelineDisposed) return
     observeTimelineGeometry()
-    requestLatestAnchor(true)
   })
 })
 
@@ -778,6 +856,15 @@ onUnmounted(() => {
   overflow-y: auto;
   padding: 12px;
   min-height: 0;
+}
+
+/* Activation gate: while authoritative history is being hydrated, the timeline
+   content is hidden and its scroll container is clipped. The first painted
+   frame after reveal is already pinned to the tail, so the user never sees
+   history paint at the top and then jump down. */
+.structured-timeline.is-timeline-hidden {
+  visibility: hidden;
+  overflow: hidden;
 }
 
 .structured-jump-latest {
