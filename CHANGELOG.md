@@ -247,23 +247,37 @@
   the persisted stream contained one tool start, one completion, no error,
   one final marker, and a completed turn.
 
-### feat: separate Paseo Agent sessions from native Terminal sessions
+### feat: separate Paseo Chat sessions from native Terminal sessions
 
-- **What**: The new-session flow now asks for a fixed `Agent` or `Terminal`
-  session type. Agent sessions open directly in the Paseo structured timeline
+- **What**: The new-session flow now asks for a fixed `Chat` or `Terminal`
+  session type. Chat sessions open directly in the Paseo structured timeline
   with text/image composer; Terminal sessions open directly in the native PTY
   UI. There is no per-pane `Terminal | Paseo` switch.
-- **Why**: Paseo models agents and terminals as different sessions. Treating
+- **Why**: Paseo models chats and terminals as different sessions. Treating
   structured output as a second view of every terminal made the creation
   contract ambiguous, exposed unsupported combinations, and encouraged users
   to expect raw-terminal and structured rendering to be identical in real
   time.
-- **How**: A persisted `session_kind` (`agent` or `terminal`) now controls the
+- **How**: A persisted `session_kind` (`chat` or `terminal`) now controls the
   renderer independently of the Claude/Codex/Cursor/runtime profile. Explicit
-  user Agent sessions use a provider-native structured transport; Terminal and
+  user Chat sessions use a provider-native structured transport; Terminal and
   internal managed-task runners retain their native TUI. No hidden raw terminal
-  is mounted behind an Agent surface. See
+  is mounted behind a Chat surface. The retired persisted `agent` value is
+  migrated to `chat` only at state-load boundaries. See
   `docs/working-logs/2026-09-01-paseo-agent-terminal-session-separation.md`.
+- **Connection lifecycle**: Only visible Chat panes hydrate history and keep
+  an SSE accelerator plus the authoritative long poll. Switching away closes
+  those browser connections. The backend shares one tailer per Chat and keeps
+  it warm for five minutes after the final subscriber leaves; returning later
+  rehydrates the append-only event log and resumes the persisted provider
+  conversation/thread id.
+- **Provider runtime**: Claude and Cursor run one streaming subprocess per
+  submitted turn, with no provider process left idle between turns. Codex keeps
+  a persistent `codex app-server --stdio` process while its tailer is warm.
+- **Current lifecycle limit**: The zero-subscriber reaper currently checks only
+  subscriber count and elapsed time. If a provider turn is still running five
+  minutes after every pane leaves, that transport can be stopped; an in-flight
+  guard remains follow-up work.
 - **Streaming**: Claude stream-json, Codex app-server, and Cursor stream-json
   feed stable turn/message IDs into an append-only event stream. SSE accelerates
   long-poll reconciliation; out-of-order events remain buffered until every
@@ -272,16 +286,16 @@
 - **Codex lifecycle**: Persistent app-server startup is single-flight, so a
   first composer send racing the stream subscriber cannot spawn two readers
   against one overwritten process and break incremental delivery.
-- **Images**: Claude and Codex Agent composers accept PNG/JPEG/GIF/WebP. The
+- **Images**: Claude and Codex Chat composers accept PNG/JPEG/GIF/WebP. The
   installed Cursor CLI has no image-input contract, so its attachment control
   is explicitly disabled instead of pretending to send an image.
-- **Startup gate fix**: A Claude Agent launched in Solo Mode now carries the
+- **Startup gate fix**: A Claude Chat launched in Solo Mode now carries the
   user's explicit bypass acknowledgement as a secret-free command-line
-  settings source, so the hidden PTY cannot stall on Claude's first-run safety
-  dialog. The Hub also refreshes stable HOME/PATH/shell values on its named
-  tmux server before creating panes and clears stale pytest markers. This
-  prevents a long-lived worktree tmux server first created by an integration
-  test from launching later Agents under that test's temporary home.
+  settings source, so the provider-native transport cannot stall on Claude's
+  first-run safety dialog. The Hub also refreshes stable HOME/PATH/shell values
+  on its named tmux server before creating panes and clears stale pytest
+  markers. This prevents a long-lived worktree tmux server first created by an
+  integration test from retaining that test's temporary environment.
 
 ### fix: harden image attachment validation and SSE session-deletion handling
 
@@ -334,13 +348,13 @@
   sequence-zero hydration, and stream cleanup on session delete. See
   `docs/working-logs/2026-08-31-paseo-v2-cursor-transcript-bridge.md`.
 
-### feat: Paseo v2 structured Agent UI + image composer (frontend)
+### feat: Paseo v2 structured Chat UI + image composer (frontend)
 
-- **What**: Structured Agent surface backed by the existing hidden PTY
-  transport. It renders a turn-grouped timeline
+- **What**: Structured Chat surface backed by the provider transport. It
+  renders a turn-grouped timeline
   (user, assistant text, collapsible thinking, tool calls with status, errors,
   status events) from the backend agent-stream plane, with SSE + long-poll
-  reconciliation and a retryable fail-closed Agent surface on stream failure.
+  reconciliation and a retryable fail-closed Chat surface on stream failure.
   Composer supports text + image attachments (file picker, drag-drop, paste)
   with PNG/JPEG/GIF/WebP + 8 MB validation, preview/remove, image-only
   send, and message/attachment retention on send error. No file paths or
@@ -349,7 +363,7 @@
   observation layer without altering raw terminal semantics.
 - **How**: `StructuredPane.vue`, `agentStreamTimeline.ts`,
   `agentStreamAttachments.ts`, `useAgentStream.ts`; `TerminalPane.vue` selects
-  the fixed surface from `session_kind` and keeps the Agent transport hidden.
+  the fixed surface from `session_kind` and keeps the provider transport hidden.
   `sessionForTab` maps tab → managed session for stream keying. Stable
   `client_turn_id` reconciliation keeps identical prompts distinct.
 

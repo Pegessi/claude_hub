@@ -1500,8 +1500,8 @@ class TTYDProcess:
             else:
                 default_cmd = get_agent_command(agent_type)
                 self._shell_explicitly_provided = bool(shell) and shell != default_cmd
-        if session_kind == SessionKind.AGENT:
-            # Agent tabs always host an inert lifecycle shell. Ignore even an
+        if session_kind == SessionKind.CHAT:
+            # Chat tabs always host an inert lifecycle shell. Ignore even an
             # explicitly supplied provider-shaped ``shell`` value: the native
             # ProviderSession is the only process allowed to own the provider.
             self.shell = os.environ.get("SHELL", "/bin/bash")
@@ -1718,7 +1718,7 @@ asyncio.run(_main())
     def _claude_bypass_acceptance_arg(self) -> str:
         if self.agent_type != AgentType.CLAUDE:
             return ""
-        if self.session_kind != SessionKind.AGENT or not self.solo_mode:
+        if self.session_kind != SessionKind.CHAT or not self.solo_mode:
             return ""
         # Claude 2.1.159 reads this disclaimer acknowledgement from the
         # command-line settings source, but ignores the same internal key in a
@@ -1774,8 +1774,8 @@ asyncio.run(_main())
         return None
 
     def _tmux_shell_command(self, session_exists: bool) -> str:
-        if self.session_kind == SessionKind.AGENT:
-            # Agent sessions are owned by the native ProviderSession; tmux
+        if self.session_kind == SessionKind.CHAT:
+            # Chat sessions are owned by the native ProviderSession; tmux
             # only hosts an inert shell. Never launch the provider CLI here.
             return self._with_env(self.shell)
         if (
@@ -1822,8 +1822,8 @@ asyncio.run(_main())
         # Session is guaranteed absent here (we returned early if it existed),
         # so recover whenever this tab was restored from persisted state.
         recover = self._should_recover(session_exists=False)
-        if self.session_kind == SessionKind.AGENT:
-            # Agent sessions are owned exclusively by the native ProviderSession.
+        if self.session_kind == SessionKind.CHAT:
+            # Chat sessions are owned exclusively by the native ProviderSession.
             # tmux hosts only an inert lifecycle shell so the tab/ttyd model
             # still has a pane, but the provider CLI is never launched here.
             # Composer input goes to the native transport, never to this pane.
@@ -2021,8 +2021,8 @@ asyncio.run(_main())
             cmd.extend(["-c", self.cwd])
 
         recover = self._should_recover(session_exists=session_exists)
-        if self.session_kind == SessionKind.AGENT:
-            # Agent sessions are owned by the native ProviderSession; tmux
+        if self.session_kind == SessionKind.CHAT:
+            # Chat sessions are owned by the native ProviderSession; tmux
             # only hosts an inert shell. Never launch the provider CLI here.
             cmd.append(self._with_env(self.shell))
         elif self.target == ExecutionTarget.REMOTE:
@@ -2268,10 +2268,10 @@ asyncio.run(_main())
         """
         if self.agent_type not in {AgentType.CLAUDE, AgentType.CODEX}:
             raise ValueError("switch_env is only supported for Claude and Codex tabs")
-        if self.session_kind == SessionKind.AGENT:
-            # Agent sessions own their provider via the native transport;
+        if self.session_kind == SessionKind.CHAT:
+            # Chat sessions own their provider via the native transport;
             # env changes are applied to the ProviderSession, not tmux.
-            raise ValueError("switch_env is not supported for native Agent sessions")
+            raise ValueError("switch_env is not supported for native Chat sessions")
         if self.target != ExecutionTarget.LOCAL:
             raise ValueError("switch_env is only supported for local tabs")
         if not await _tmux_session_exists_async(self.tmux_session):
@@ -2894,15 +2894,17 @@ class TTYDManager:
                             else AgentType.CLAUDE
                         )
                         session_kind_str = tab_data.get("session_kind")
-                        if session_kind_str in [e.value for e in SessionKind]:
+                        if session_kind_str == "agent":
+                            session_kind = SessionKind.CHAT
+                        elif session_kind_str in [e.value for e in SessionKind]:
                             session_kind = SessionKind(session_kind_str)
                         else:
                             # Legacy rows (no session_kind) are raw TUI task
                             # runners (dispatcher / reviewer / worker) on the
                             # managed control plane. They must keep TERMINAL
                             # semantics — only an explicit persisted
-                            # session_kind=agent marks a direct-user native
-                            # Agent surface.
+                            # session_kind=chat marks a direct-user native
+                            # Chat surface.
                             session_kind = SessionKind.TERMINAL
                         target_str = tab_data.get("target", "local")
                         target = (
@@ -3142,20 +3144,20 @@ class TTYDManager:
         logger.info(
             f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}, session_kind={session_kind}, target={target}, remote_profile_id={remote_profile_id}, remote_forward_port={remote_forward_port}, workspace_id={workspace_id}, workspace_role={workspace_role}, agent_session_id={agent_session_id}"
         )
-        # session_kind is authoritative: only an explicit SessionKind.AGENT
-        # from the caller (direct user Agent tab) gets the native/inert
+        # session_kind is authoritative: only an explicit SessionKind.CHAT
+        # from the caller (direct user Chat tab) gets the native/inert
         # structured surface. Managed task runners (dispatcher, reviewer,
         # worker) created by the workspace orchestrator pass TERMINAL so they
         # keep raw TUI control-plane semantics. We never auto-promote a
-        # TERMINAL tab to AGENT based on workspace_id or agent_type.
+        # TERMINAL tab to CHAT based on workspace_id or agent_type.
         if (
-            session_kind == SessionKind.AGENT
+            session_kind == SessionKind.CHAT
             and agent_type == AgentType.CURSOR
             and target == ExecutionTarget.LOCAL
             and cwd
             and cursor_transport == "terminal"
         ):
-            # Agent sessions use the native ProviderSession as the sole owner
+            # Chat sessions use the native ProviderSession as the sole owner
             # of the Cursor process. The legacy terminal_transcript mode is
             # retained only as an explicit compatibility fallback.
             cursor_transport = "native"

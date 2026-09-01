@@ -19,34 +19,45 @@ const tabBar = readFileSync(
   'utf8',
 )
 
-test('Agent sessions never mount a hidden raw terminal fallback', () => {
-  assert.match(terminalPane, /v-if="pane\.tabId && !isAgentSession"/)
-  assert.match(terminalPane, /v-if="pane\.tabId && isAgentSession"/)
+test('Chat sessions never mount a hidden raw terminal fallback', () => {
+  assert.match(terminalPane, /v-if="pane\.tabId && !isChatSession"/)
+  assert.match(terminalPane, /v-if="pane\.tabId && isChatSession"/)
   assert.doesNotMatch(terminalPane, /hasStructuredSource/)
   assert.doesNotMatch(structuredPane, /fallback-to-raw/)
 })
 
-test('Agent and Terminal are fixed session surfaces, not a per-pane view toggle', () => {
+test('Chat and Terminal are fixed session surfaces, not a per-pane view toggle', () => {
   assert.match(terminalPane, /class="pane-header pane-session-header"/)
   assert.match(terminalPane, /class="pane-structured"/)
-  assert.match(terminalPane, /const isAgentSession = computed/)
-  assert.match(terminalPane, /paneTab\.value\?\.session_kind === 'agent'/)
-  assert.match(terminalPane, /Agent · native structured/)
+  assert.match(terminalPane, /const isChatSession = computed/)
+  assert.match(terminalPane, /paneTab\.value\?\.session_kind === 'chat'/)
+  assert.match(terminalPane, /Chat · native structured/)
   assert.match(terminalPane, /Terminal · native TUI/)
   assert.match(terminalPane, /const providerLabel = computed/)
-  assert.match(terminalPane, /v-if="pane\.tabId && isAgentSession"/)
+  assert.match(terminalPane, /v-if="pane\.tabId && isChatSession"/)
   assert.doesNotMatch(terminalPane, /pane-view-switch/)
   assert.doesNotMatch(terminalPane, /type ViewMode/)
   assert.doesNotMatch(terminalPane, />\s*Paseo\s*<\/button>/)
 })
 
-test('new-session launcher requires an explicit Agent or Terminal surface', () => {
+test('new-session launcher requires an explicit Chat or Terminal surface', () => {
   assert.match(tabBar, /Create New Session/)
   assert.match(tabBar, /Session Type/)
-  assert.match(tabBar, /form\.session_kind === 'agent'/)
+  assert.match(tabBar, /form\.session_kind === 'chat'/)
   assert.match(tabBar, /form\.session_kind === 'terminal'/)
   assert.match(tabBar, /session_kind:\s*form\.session_kind/)
   assert.match(tabBar, /:allow-terminal="form\.session_kind === 'terminal'"/)
+  assert.match(tabBar, />\s*Chat\s*<\/button>/)
+  assert.match(tabBar, /Chat Provider/)
+  assert.match(tabBar, /Chat session/)
+  assert.match(structuredPane, /aria-label="Chat conversation"/)
+  assert.match(structuredPane, /start this chat/)
+  assert.match(structuredPane, /Waiting for response…/)
+  assert.match(structuredPane, /Waiting for model activity…/)
+  assert.match(structuredPane, /This chat does not support image attachments/)
+  assert.match(tabBar, /The chat provider will restart/)
+  assert.match(tabBar, />\s*Restart Provider\s*</)
+  assert.match(tabBar, /Chat is resuming its conversation/)
 })
 
 test('SAB terminal input decodes a non-shared copy before draining the record', () => {
@@ -66,7 +77,7 @@ test('direct Paseo sends atomically with a stable client turn id', () => {
 
 test('an acknowledged turn shows a waiting state until provider activity arrives', () => {
   assert.match(structuredPane, /awaitingAgentActivity: !turn\.completed/)
-  assert.match(structuredPane, /Waiting for agent response…/)
+  assert.match(structuredPane, /Waiting for response…/)
   assert.match(structuredPane, /agent-waiting-pulse/)
 })
 

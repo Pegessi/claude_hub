@@ -1,4 +1,4 @@
-"""Native provider transport sessions for the Paseo Agent surface.
+"""Native provider transport sessions for the Paseo Chat surface.
 
 A :class:`ProviderSession` owns the provider subprocess (or persistent
 JSON-RPC connection) and exposes a uniform ``send_message`` / ``read_line``
@@ -484,7 +484,7 @@ class ProviderSession(ABC):
     # ── capabilities ────────────────────────────────────────────────────────
 
     def capabilities(self) -> StreamCapabilities:
-        # For AGENT sessions the native transport is the sole real-time source.
+        # For CHAT sessions the native transport is the sole real-time source.
         # ``structured`` is True only when (a) the provider binary is
         # discoverable on PATH and (b) the transport has not recorded a fatal
         # error. We must not depend on ``_handshake_complete``, which stays

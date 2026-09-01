@@ -19,7 +19,7 @@ const API_BASE = '/api'
  * - `idle`: not started.
  * - `hydrating`: fetching capabilities + initial event page.
  * - `live`: long-poll reconciliation is active; SSE may accelerate delivery.
- * - `failed`: hard failure — Agent surface stays visible and offers retry.
+ * - `failed`: hard failure — Chat surface stays visible and offers retry.
  */
 export type StreamConnectionState = 'idle' | 'hydrating' | 'live' | 'failed'
 export type StreamSource = 'managed-session' | 'terminal-tab'
@@ -36,7 +36,7 @@ export interface UseAgentStreamApi {
   events: Ref<AgentStreamEvent[]>
   connectionState: Ref<StreamConnectionState>
   errorMessage: Ref<string | null>
-  /** Start (or restart) a managed-session or direct Agent-tab stream. */
+  /** Start (or restart) a managed-session or direct Chat-tab stream. */
   start: (sourceId: string, source?: StreamSource) => Promise<void>
   /** Replace a failed provider transport, then hydrate its resumed stream. */
   retry: (sourceId: string, source?: StreamSource) => Promise<void>
@@ -45,7 +45,7 @@ export interface UseAgentStreamApi {
 }
 
 /**
- * Structured agent-stream client.
+ * Structured Chat-stream client.
  *
  * Hydration contract (sequence-safe):
  *   1. GET /stream/capabilities — fail closed if ``structured=false``.
@@ -70,7 +70,7 @@ export interface UseAgentStreamApi {
  * owned by the current generation, and ``applyPage`` is guarded by generation
  * so a stale page cannot advance the shared sequence cursor.
  *
- * Agent sessions never silently fall back to raw; the composable reports an
+ * Chat sessions never silently fall back to raw; the composable reports an
  * explicit retryable failure to StructuredPane.
  */
 export function useAgentStream(): UseAgentStreamApi {
@@ -218,7 +218,7 @@ export function useAgentStream(): UseAgentStreamApi {
         applyPage(page, generationId)
       } catch (err) {
         if (stopped || currentSessionId !== sourceId || !stateMachine.isCurrent(generationId)) return
-        // Surface the failure and stop; the Agent surface stays fail-closed.
+        // Surface the failure and stop; the Chat surface stays fail-closed.
         const message = err instanceof Error ? err.message : 'stream wait failed'
         if (stateMachine.fail(generationId, message)) {
           errorMessage.value = message

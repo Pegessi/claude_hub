@@ -2,10 +2,10 @@
 
 ## System overview
 
-Paseo Agent sessions use one provider-native process for both composer input
+Paseo Chat sessions use provider-native transport for composer input
 and structured output. The frontend hydrates persisted events, subscribes to
 live events, and applies a paced text reveal. A raw Terminal session remains a
-separate product choice; recovery must never switch an Agent session to tmux
+separate product choice; recovery must never switch a Chat session to tmux
 input or create a second provider conversation.
 
 This change hardens two lifecycle edges in that path:

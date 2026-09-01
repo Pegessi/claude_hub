@@ -40,7 +40,7 @@ class AgentType(str, Enum):
 class SessionKind(str, Enum):
     """User-facing session surface chosen at creation time."""
 
-    AGENT = "agent"
+    CHAT = "chat"
     TERMINAL = "terminal"
 
 
@@ -418,7 +418,7 @@ class TerminalTabBase(BaseModel):
     agent_type: AgentType = Field(AgentType.CLAUDE, description="Type of agent to run")
     session_kind: SessionKind = Field(
         SessionKind.TERMINAL,
-        description="Fixed UI surface: structured Agent conversation or raw Terminal",
+        description="Fixed UI surface: structured Chat conversation or raw Terminal",
     )
     target: ExecutionTarget = Field(ExecutionTarget.LOCAL, description="Where to run the tab")
     remote_profile_id: Optional[str] = Field(None, description="Remote profile ID for remote tabs")
@@ -447,8 +447,8 @@ class TerminalTabBase(BaseModel):
 
     @model_validator(mode="after")
     def validate_session_kind(self) -> "TerminalTabBase":
-        if self.session_kind == SessionKind.AGENT and self.agent_type == AgentType.TERMINAL:
-            raise ValueError("Agent sessions require a Claude, Codex, or Cursor provider")
+        if self.session_kind == SessionKind.CHAT and self.agent_type == AgentType.TERMINAL:
+            raise ValueError("Chat sessions require a Claude, Codex, or Cursor provider")
         return self
 
 

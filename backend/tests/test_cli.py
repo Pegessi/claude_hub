@@ -1154,7 +1154,7 @@ def test_tab_create_remote_body(monkeypatch):
             "--name",
             "remote",
             "--session-kind",
-            "agent",
+            "chat",
             "--target",
             "remote",
             "--remote-profile-id",
@@ -1167,10 +1167,38 @@ def test_tab_create_remote_body(monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert bodies[0]["target"] == "remote"
-    assert bodies[0]["session_kind"] == "agent"
+    assert bodies[0]["session_kind"] == "chat"
     assert bodies[0]["remote_profile_id"] == "prod"
     assert bodies[0]["remote_cwd"] == "/srv/app"
     assert bodies[0]["env"] == {"A": "B"}
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["tab", "create", "--name", "retired", "--session-kind", "agent"],
+        [
+            "tab",
+            "create",
+            "--name",
+            "retired-json",
+            "--payload-json",
+            json.dumps({"session_kind": "agent"}),
+        ],
+        [
+            "tab",
+            "update",
+            "tab-1",
+            "--payload-json",
+            json.dumps({"session_kind": "agent"}),
+        ],
+    ],
+)
+def test_tab_commands_reject_retired_agent_session_kind(args):
+    result = CliRunner().invoke(cli, args)
+
+    assert result.exit_code != 0
+    assert "agent" in result.output
 
 
 def test_task_update_payload_and_flags(monkeypatch):

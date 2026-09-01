@@ -8,7 +8,7 @@ not true incremental output. Paseo instead owns each provider session and
 consumes its native event stream. The new transports apply that same boundary:
 provider deltas reach the structured pane as they are emitted.
 
-Terminal sessions keep tmux+ttyd. Agent sessions use a `ProviderSession` that
+Terminal sessions keep tmux+ttyd. Chat sessions use a `ProviderSession` that
 owns the provider subprocess, parses its native stream, and feeds normalized
 `AgentStreamEvent`s into the existing store + SSE fanout pipeline.
 
@@ -94,7 +94,7 @@ inventing an ACP or attachment path that this binary cannot provide.
   `native_transport`; when set, read from `read_line()` instead of polling a
   file. Reuse `normalize_line`, store append, fanout.
 - `backend/claude_hub/services/agent_stream/registry.py` — return a native
-  transport for `session_kind == agent`; keep transcript adapters for
+  transport for `session_kind == chat`; keep transcript adapters for
   terminal sessions.
 
 ### Phase 3 — Codex app-server + Cursor transports
@@ -107,7 +107,7 @@ inventing an ACP or attachment path that this binary cannot provide.
 
 ### Phase 4 — ttyd_manager launch + send path
 
-- `ttyd_manager.py` — for `session_kind == agent`, keep only an inert lifecycle
+- `ttyd_manager.py` — for `session_kind == chat`, keep only an inert lifecycle
   shell in tmux; the `ProviderSession` is the sole owner of the provider CLI.
 - `agent_stream/tailer.py` — route each composer turn through the single atomic
   `send_message(text, images)` path and acknowledge completion only after the
@@ -128,10 +128,10 @@ inventing an ACP or attachment path that this binary cannot provide.
 
 ## Control-plane boundary
 
-User-created `SessionKind.AGENT` tabs are native and structured. Hub-managed
+User-created `SessionKind.CHAT` tabs are native and structured. Hub-managed
 orchestrator/reviewer/worker sessions are control-plane runners and must remain
-raw TUI sessions; converting them to inert Agent shells prevents task dispatch
-and recovery. Regression tests cover both creation paths.
+raw TUI sessions; converting them to inert Chat lifecycle shells prevents task
+dispatch and recovery. Regression tests cover both creation paths.
 
 ### Phase 6 — Validation
 
@@ -180,7 +180,7 @@ test asserts exactly one subprocess spawn and one live stdout reader.
 
 ## Fail-closed rules
 
-- If the provider binary is missing, the Agent surface fails closed instead of
+- If the provider binary is missing, the Chat surface fails closed instead of
   mounting a raw-terminal fallback. A per-turn non-zero exit is persisted as an
   error plus exactly one failed completion; Codex app-server EOF hard-fails the
   structured session.

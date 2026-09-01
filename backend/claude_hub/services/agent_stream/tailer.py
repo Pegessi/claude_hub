@@ -201,7 +201,7 @@ class SessionTailer:
     ) -> None:
         """Atomically deliver a user turn (text + images) to the native transport.
 
-        This is the composer's single input path for AGENT sessions. The same
+        This is the composer's single input path for CHAT sessions. The same
         ``ProviderSession`` that produces the structured stream also consumes
         the turn, so input and output never diverge across two sessions.
 
@@ -694,7 +694,7 @@ class SessionTailer:
         if session is None:
             return
 
-        # Agent sessions require a native transport. If it could not be
+        # Chat sessions require a native transport. If it could not be
         # created, fail closed — never use the transcript as a real-time
         # source for an agent session.
         if self._native_error is not None:
@@ -1163,7 +1163,7 @@ class TailerManager:
                 if adapter is None:
                     raise ValueError(f"no structured adapter for agent_type={session.agent_type}")
 
-                # Agent sessions use the native provider transport as their
+                # Chat sessions use the native provider transport as their
                 # real-time source. Terminal sessions keep the transcript-file
                 # tailer.
                 #
@@ -1173,13 +1173,13 @@ class TailerManager:
                 # explicit ``terminal_transcript`` compatibility mode.
                 native_transport: Optional[ProviderSession] = None
                 native_error: Optional[str] = None
-                is_agent = session.session_kind == SessionKind.AGENT
+                is_chat = session.session_kind == SessionKind.CHAT
                 cursor_transcript_fallback = (
                     session.agent_type == AgentType.CURSOR
                     and session.cursor_transport == "terminal_transcript"
                 )
 
-                if is_agent and not cursor_transcript_fallback:
+                if is_chat and not cursor_transcript_fallback:
                     try:
                         native_transport = create_native_session(
                             session,
@@ -1232,7 +1232,7 @@ class TailerManager:
     ) -> None:
         """Atomically deliver a user turn (text + images) for ``session``.
 
-        The composer's single input path for AGENT sessions. Delegates to the
+        The composer's single input path for CHAT sessions. Delegates to the
         tailer's native transport so the same ``ProviderSession`` owns both
         the stream and the turn. ``client_turn_id`` is the frontend-generated
         stable turn id; the tailer publishes an authoritative ``turn_started``

@@ -410,9 +410,11 @@ class _NormalizeMixin:
         # Persisted managed sessions predate session_kind. They were all
         # internal task runners (dispatcher / reviewer / worker) that drive
         # the raw TUI control plane, so default to TERMINAL. Only direct
-        # user Agent tabs carry an explicit SessionKind.AGENT and get the
+        # user Chat tabs carry an explicit SessionKind.CHAT and get the
         # native/inert structured surface.
         normalized.setdefault("session_kind", SessionKind.TERMINAL.value)
+        if normalized["session_kind"] == "agent":
+            normalized["session_kind"] = SessionKind.CHAT.value
         return normalized
 
     def _runtime_from_managed_status(self, item: dict[str, Any]) -> str:

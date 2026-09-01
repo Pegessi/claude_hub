@@ -46,8 +46,8 @@
           <span
             class="tab-kind"
             :data-kind="tab.session_kind"
-            :title="tab.session_kind === 'agent' ? 'Agent session' : 'Terminal session'"
-          >{{ tab.session_kind === 'agent' ? 'A' : '>_' }}</span>
+            :title="tab.session_kind === 'chat' ? 'Chat session' : 'Terminal session'"
+          >{{ tab.session_kind === 'chat' ? 'C' : '>_' }}</span>
           <span
             v-if="tab.is_active"
             class="tab-indicator"
@@ -211,10 +211,10 @@
             <div class="segmented-control session-kind-control">
               <button
                 type="button"
-                :class="['segment-button', { active: form.session_kind === 'agent' }]"
-                @click="setSessionKind('agent')"
+                :class="['segment-button', { active: form.session_kind === 'chat' }]"
+                @click="setSessionKind('chat')"
               >
-                Agent
+                Chat
               </button>
               <button
                 type="button"
@@ -225,8 +225,8 @@
               </button>
             </div>
             <p class="form-hint">
-              {{ form.session_kind === 'agent'
-                ? 'Structured conversation with messages, images, and parsed agent output.'
+              {{ form.session_kind === 'chat'
+                ? 'Structured conversation with messages, images, and parsed model output.'
                 : 'Native terminal UI with full keyboard and shell interaction.' }}
             </p>
           </div>
@@ -325,7 +325,7 @@
             v-model:env-text="form.env_text"
             variant="form"
             :allow-terminal="form.session_kind === 'terminal'"
-            :type-label="form.session_kind === 'agent' ? 'Agent Provider' : 'Terminal Profile'"
+            :type-label="form.session_kind === 'chat' ? 'Chat Provider' : 'Terminal Profile'"
             solo-label="Solo Mode"
           />
           <CodexSessionSelector
@@ -539,7 +539,7 @@
             aria-hidden="true"
           >↻</span>
           <span>
-            The agent will restart and automatically resume its conversation.
+            The chat provider will restart and automatically resume this conversation.
             In-flight generation will be interrupted.
           </span>
         </p>
@@ -629,7 +629,7 @@
               :loading="switchEnvTab ? isPending(tabActionKey('switch-env', switchEnvTab.id)) : false"
               loading-label="Restarting…"
             >
-              Restart Agent
+              Restart Provider
             </LoadingButton>
           </div>
         </form>
@@ -818,7 +818,7 @@ const showRightFade = ref(false)
 const form = reactive({
   name: '',
   cwd: '',
-  session_kind: 'agent' as SessionKind,
+  session_kind: 'chat' as SessionKind,
   solo_mode: false,
   agent_type: 'claude' as AgentType,
   target: 'local' as 'local' | 'remote',
@@ -869,7 +869,7 @@ function resetEnvForAgentType(agentType: AgentType) {
 
 function setSessionKind(kind: SessionKind) {
   form.session_kind = kind
-  if (kind === 'agent' && form.agent_type === 'terminal') {
+  if (kind === 'chat' && form.agent_type === 'terminal') {
     form.agent_type = 'claude'
     resetEnvForAgentType(form.agent_type)
   }
@@ -1172,7 +1172,7 @@ async function handleSwitchEnv() {
     })
     store.pushNotification({
       type: 'success',
-      message: `Environment switched for "${tab.name}". Agent is resuming conversation.`,
+      message: `Environment switched for "${tab.name}". Chat is resuming its conversation.`,
       autoDismissMs: 4000,
     })
     closeSwitchEnvModal()
@@ -1373,7 +1373,7 @@ async function handleCreateTab() {
     form.name = ''
     form.cwd = ''
     form.solo_mode = false
-    form.session_kind = 'agent'
+    form.session_kind = 'chat'
     form.agent_type = 'claude'
     form.target = 'local'
     form.remote_profile_id = remoteProfiles.value[0]?.id || ''
@@ -1651,7 +1651,7 @@ async function handleCreateTab() {
   text-align: center;
 }
 
-.tab-kind[data-kind='agent'] {
+.tab-kind[data-kind='chat'] {
   color: var(--ch-color-accent);
   border-color: var(--ch-color-accent-ring-strong);
   background: var(--ch-color-accent-soft);
