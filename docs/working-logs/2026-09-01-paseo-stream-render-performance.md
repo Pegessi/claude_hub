@@ -118,6 +118,54 @@ only processes the unseen suffix:
 
 Cost per batch is O(new events), independent of history length.
 
+### Frontend: Per-turn render revision + `v-memo` (`agentStreamTimeline.ts`, `StructuredPane.vue`)
+
+After removing `textReveal`, the E2E run still showed 7 long tasks
+(53, 55, 57, 58, 59, 53, 102 ms). The root cause was full historical VNode
+reconstruction: every `authoritativeTurns` fresh-array update (which happens
+on every committed batch) re-rendered **all** turns, including the completed
+historical ones whose content had not changed.
+
+`TimelineTurn` now carries a `renderRevision: number` field, initialized to
+`0` in `createTurn`. `applyEventToState` tracks a `mutated` boolean per event
+and increments `turn.renderRevision` only when the event visibly mutates the
+turn:
+
+| Event | Visible mutation condition |
+| --- | --- |
+| `turn_started` | `turn.userText !== summary` |
+| `turn_completed` | `!turn.completed` |
+| `text_delta` | text non-empty **and** not an exact multi-chunk replay |
+| `thinking_delta` | text non-empty |
+| `tool_call_started` | tool identity not already in the turn's tool map |
+| `tool_call_completed` | new tool, or status changed, or result changed |
+| `error` | always (pushes a new error part) |
+| `status` | always (pushes a new status part) |
+
+No-op events (empty text, exact multi-chunk replay, duplicate tool start,
+unchanged tool completion) leave `renderRevision` unchanged.
+
+`StructuredPane` puts `v-memo="[turn.renderRevision]"` on each
+`.structured-turn` element. Vue's `v-memo` skips re-rendering a subtree when
+its dependency array is shallow-equal to the previous render. Since completed
+historical turns' `renderRevision` stops changing once they are done, Vue
+reuses their existing VNodes and DOM without diffing them. Only the active
+turn (whose revision advances on each incoming delta) rebuilds.
+
+The `turns` computed spreads each turn object (`...turn`), so
+`renderRevision` is included in the spread and `v-memo` receives the current
+value.
+
+Deterministic tests (`agentStreamTimelineReducer.test.mjs`):
+- Active turn `renderRevision` increments on `turn_started`, `text_delta`,
+  `thinking_delta`, `turn_completed`.
+- Completed historical turn's `renderRevision` stays stable while a later
+  turn streams.
+- Empty `text_delta` and exact multi-chunk replay do not advance revision.
+- Duplicate `tool_call_started` does not advance revision.
+- `tool_call_completed` with unchanged status/result does not advance
+  revision.
+
 ## Validation
 
 ### Backend tests
@@ -244,3 +292,9 @@ is pending re-run.
   outer array. Downstream computed properties (`turns`) create new turn
   objects via spread, so Vue reactivity is preserved. If a future consumer
   relies on turn object identity across batches, it must handle mutation.
+- `v-memo="[turn.renderRevision]"` skips re-rendering a turn whose revision
+  has not changed. If a future visible mutation is added to a turn without
+  incrementing `renderRevision`, that turn will appear stale until its
+  revision advances. The `mutated` flag in `applyEventToState` is the single
+  source of truth for revision increments; any new event type or mutation
+  path must set `mutated = true` to keep `v-memo` correct.

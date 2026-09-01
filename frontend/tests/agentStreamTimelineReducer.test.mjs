@@ -333,3 +333,141 @@ test('assistant text part exposes full accumulated text — no second-stage reve
   assert.equal(seenTexts.length, batches.length)
   assert.deepEqual(seenTexts, ['Hel', 'Hello ', 'Hello wor', 'Hello world'])
 })
+
+test('renderRevision increments only on visible mutations of the active turn', () => {
+  const reducer = new IncrementalTimelineReducer()
+
+  // turn_started with a summary visibly mutates the turn (userText set).
+  let events = [
+    makeEvent(0, 'turn_started', { summary: 'q' }, { turn_id: 't1' }),
+  ]
+  let turn = reducer.reduce(events)[0]
+  assert.equal(turn.renderRevision, 1)
+
+  // A non-empty text_delta visibly mutates (assistantText grows).
+  events = [
+    ...events,
+    makeEvent(1, 'text_delta', { text: 'a' }, { turn_id: 't1' }),
+  ]
+  turn = reducer.reduce(events)[0]
+  assert.equal(turn.renderRevision, 2)
+
+  // thinking_delta also visibly mutates.
+  events = [
+    ...events,
+    makeEvent(2, 'thinking_delta', { text: 't' }, { turn_id: 't1' }),
+  ]
+  turn = reducer.reduce(events)[0]
+  assert.equal(turn.renderRevision, 3)
+
+  // turn_completed visibly mutates (completed flag flips).
+  events = [
+    ...events,
+    makeEvent(3, 'turn_completed', { status: 'completed' }, { turn_id: 't1' }),
+  ]
+  turn = reducer.reduce(events)[0]
+  assert.equal(turn.renderRevision, 4)
+})
+
+test('renderRevision does not advance on empty text or exact multi-chunk replay', () => {
+  const reducer = new IncrementalTimelineReducer()
+
+  const base = [
+    makeEvent(0, 'turn_started', { summary: 'q' }, { turn_id: 't1' }),
+    makeEvent(1, 'text_delta', { text: '智涌' }, { turn_id: 't1' }),
+    makeEvent(2, 'text_delta', { text: '今朝\n' }, { turn_id: 't1' }),
+  ]
+  let events = [...base]
+  const revisionAfterBase = reducer.reduce(events)[0].renderRevision
+  // turn_started + 2 text deltas = 3 visible mutations.
+  assert.equal(revisionAfterBase, 3)
+
+  // Empty text_delta is a no-op: revision must not advance.
+  events = [
+    ...base,
+    makeEvent(3, 'text_delta', { text: '' }, { turn_id: 't1' }),
+  ]
+  assert.equal(reducer.reduce(events)[0].renderRevision, revisionAfterBase)
+
+  // Exact multi-chunk replay (the last two chunks concatenated) is a no-op:
+  // revision must not advance.
+  events = [
+    ...base,
+    makeEvent(3, 'text_delta', { text: '' }, { turn_id: 't1' }),
+    makeEvent(4, 'text_delta', { text: '智涌今朝\n' }, { turn_id: 't1' }),
+  ]
+  assert.equal(reducer.reduce(events)[0].renderRevision, revisionAfterBase)
+})
+
+test('completed historical turn renderRevision stays stable while a later turn mutates', () => {
+  const reducer = new IncrementalTimelineReducer()
+
+  // First turn completes.
+  const turn1 = [
+    makeEvent(0, 'turn_started', { summary: 'q1' }, { turn_id: 't1' }),
+    makeEvent(1, 'text_delta', { text: 'a1' }, { turn_id: 't1' }),
+    makeEvent(2, 'turn_completed', { status: 'completed' }, { turn_id: 't1' }),
+  ]
+  const firstTurnRevision = reducer.reduce(turn1)[0].renderRevision
+  assert.ok(firstTurnRevision > 0)
+
+  // Second turn starts and streams. The first (completed) turn's revision
+  // must NOT change — only the active turn rebuilds.
+  const events = [
+    ...turn1,
+    makeEvent(3, 'turn_started', { summary: 'q2' }, { turn_id: 't2' }),
+    makeEvent(4, 'text_delta', { text: 'a2' }, { turn_id: 't2' }),
+    makeEvent(5, 'thinking_delta', { text: 't2' }, { turn_id: 't2' }),
+  ]
+  const turns = reducer.reduce(events)
+  assert.equal(turns[0].renderRevision, firstTurnRevision,
+    'completed historical turn revision must be stable')
+  assert.ok(turns[1].renderRevision > 0, 'active turn revision advances')
+})
+
+test('duplicate tool_call_started does not advance renderRevision', () => {
+  const reducer = new IncrementalTimelineReducer()
+
+  const base = [
+    makeEvent(0, 'turn_started', { summary: 'q' }, { turn_id: 't1' }),
+    makeEvent(1, 'tool_call_started', {
+      tool_call_id: 'c1', name: 'Bash', args: {},
+    }, { turn_id: 't1' }),
+  ]
+  let events = [...base]
+  const revisionAfterBase = reducer.reduce(events)[0].renderRevision
+
+  // Re-sending the same tool_call_started is a no-op (tool already exists).
+  events = [
+    ...base,
+    makeEvent(2, 'tool_call_started', {
+      tool_call_id: 'c1', name: 'Bash', args: {},
+    }, { turn_id: 't1' }),
+  ]
+  assert.equal(reducer.reduce(events)[0].renderRevision, revisionAfterBase)
+})
+
+test('tool_call_completed with unchanged status/result does not advance renderRevision', () => {
+  const reducer = new IncrementalTimelineReducer()
+
+  const base = [
+    makeEvent(0, 'turn_started', { summary: 'q' }, { turn_id: 't1' }),
+    makeEvent(1, 'tool_call_started', {
+      tool_call_id: 'c1', name: 'Bash', args: {},
+    }, { turn_id: 't1' }),
+    makeEvent(2, 'tool_call_completed', {
+      tool_call_id: 'c1', status: 'completed', result: 'ok',
+    }, { turn_id: 't1' }),
+  ]
+  let events = [...base]
+  const revisionAfterBase = reducer.reduce(events)[0].renderRevision
+
+  // Re-sending the same completion (same status + result) is a no-op.
+  events = [
+    ...base,
+    makeEvent(3, 'tool_call_completed', {
+      tool_call_id: 'c1', status: 'completed', result: 'ok',
+    }, { turn_id: 't1' }),
+  ]
+  assert.equal(reducer.reduce(events)[0].renderRevision, revisionAfterBase)
+})
