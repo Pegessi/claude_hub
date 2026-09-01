@@ -2116,3 +2116,378 @@ async def test_codex_turn_completed_ack_after_persistence_no_turn_ahead() -> Non
     assert started2.type == AgentStreamEventType.TURN_STARTED
     assert started2.turn_id == "turn-codex-3"
     await tailer.stop()
+
+
+# ── long-poll wait: bounded queue-drain (no per-tick read_since) ─────────────
+
+
+def _wait_event(session_id: str, seq: int) -> AgentStreamEvent:
+    now = datetime.now(timezone.utc)
+    return AgentStreamEvent(
+        stream_sequence=seq,
+        session_id=session_id,
+        tab_id="tab-wait",
+        agent_type=AgentType.CLAUDE,
+        type=AgentStreamEventType.TEXT_DELTA,
+        turn_id="turn-1",
+        message_id="m-1",
+        payload={"text": f"chunk-{seq}"},
+        created_at=now,
+    )
+
+
+def _setup_wait_manager(
+    monkeypatch: pytest.MonkeyPatch,
+    session_id: str,
+    queue: asyncio.Queue,
+    read_since_impl,
+):
+    """Wire the tailer manager so subscribe returns ``queue`` and get_store
+    returns a store whose ``read_since`` is ``read_since_impl``."""
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    mock_adapter = MagicMock()
+    mock_adapter.capabilities.return_value = StreamCapabilities(
+        structured=True, adapter_id="mock", schema_version=1
+    )
+    monkeypatch.setattr(agent_stream_api, "get_adapter_for_session", lambda s: mock_adapter)
+
+    manager = agent_stream_api._get_tailer_manager()
+
+    async def _fake_subscribe(session: ManagedSession) -> asyncio.Queue:
+        return queue
+
+    monkeypatch.setattr(manager, "subscribe", _fake_subscribe)
+
+    class _Store:
+        async def read_since(self, since: int, limit: int = 200) -> AgentStreamEventPage:
+            return await read_since_impl(since, limit)
+
+    monkeypatch.setattr(manager, "get_store", lambda ws, sid: _Store())
+    return manager
+
+
+def test_wait_initial_read_since_then_no_reread_on_health_ticks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the initial catch-up read_since returns empty, repeated health
+    poll timeouts must NOT call read_since again. The store scan is O(rows)
+    and must not run on every 1s tick."""
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    workspace_id = "ws-wait-health"
+    session_id = "s-wait-health"
+    workspace_manager.sessions[session_id] = _sse_session(workspace_id, session_id)
+
+    queue: asyncio.Queue = asyncio.Queue()
+    read_calls = {"n": 0}
+
+    async def _read_since(since: int, limit: int = 200) -> AgentStreamEventPage:
+        read_calls["n"] += 1
+        return AgentStreamEventPage(events=[], next_sequence=since, has_more=False)
+
+    _setup_wait_manager(monkeypatch, session_id, queue, _read_since)
+
+    # Shorten the health poll so the test runs fast; we restore it after.
+    original_poll = agent_stream_api._SSE_HEALTH_POLL_S
+    agent_stream_api._SSE_HEALTH_POLL_S = 0.01
+    try:
+        payload = agent_stream_api.AgentStreamWaitRequest(
+            since_sequence=-1,
+            timeout_seconds=0.05,
+        )
+
+        async def run() -> AgentStreamEventPage:
+            return await agent_stream_api.wait_stream_events(
+                managed_session_id=session_id,
+                payload=payload,
+                current_user=User(open_id="local", name="L", email="l@l", avatar_url=None),
+            )
+
+        page = asyncio.run(asyncio.wait_for(run(), timeout=5.0))
+    finally:
+        agent_stream_api._SSE_HEALTH_POLL_S = original_poll
+
+    # Exactly one read_since call: the initial catch-up. The ~5 health ticks
+    # that fired during the 50ms window must not have triggered additional
+    # scans.
+    assert read_calls["n"] == 1
+    assert page.events == []
+
+
+def test_wait_consumes_queue_event_without_read_since(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the initial read_since is empty and a single contiguous event
+    arrives on the subscriber queue, the waiter must return it directly
+    without calling read_since again."""
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    workspace_id = "ws-wait-queue"
+    session_id = "s-wait-queue"
+    workspace_manager.sessions[session_id] = _sse_session(workspace_id, session_id)
+
+    queue: asyncio.Queue = asyncio.Queue()
+    read_calls = {"n": 0}
+
+    async def _read_since(since: int, limit: int = 200) -> AgentStreamEventPage:
+        read_calls["n"] += 1
+        return AgentStreamEventPage(events=[], next_sequence=since, has_more=False)
+
+    _setup_wait_manager(monkeypatch, session_id, queue, _read_since)
+
+    # Push one event contiguous with the cursor (since=-1 → seq 0).
+    queue.put_nowait(_wait_event(session_id, 0))
+
+    payload = agent_stream_api.AgentStreamWaitRequest(
+        since_sequence=-1,
+        timeout_seconds=1.0,
+    )
+
+    async def run() -> AgentStreamEventPage:
+        return await agent_stream_api.wait_stream_events(
+            managed_session_id=session_id,
+            payload=payload,
+            current_user=User(open_id="local", name="L", email="l@l", avatar_url=None),
+        )
+
+    page = asyncio.run(asyncio.wait_for(run(), timeout=5.0))
+
+    # Only the initial read_since ran; the queue event was consumed directly.
+    assert read_calls["n"] == 1
+    assert len(page.events) == 1
+    assert page.events[0].stream_sequence == 0
+    assert page.next_sequence == 0
+
+
+def test_wait_skips_stale_overlap_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Events on the queue whose sequence is <= since must be skipped
+    (they were already delivered). The waiter must not return them and must
+    not call read_since for them."""
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    workspace_id = "ws-wait-stale"
+    session_id = "s-wait-stale"
+    workspace_manager.sessions[session_id] = _sse_session(workspace_id, session_id)
+
+    queue: asyncio.Queue = asyncio.Queue()
+    read_calls = {"n": 0}
+
+    async def _read_since(since: int, limit: int = 200) -> AgentStreamEventPage:
+        read_calls["n"] += 1
+        return AgentStreamEventPage(events=[], next_sequence=since, has_more=False)
+
+    _setup_wait_manager(monkeypatch, session_id, queue, _read_since)
+
+    # since=5; push stale events (seq 3, 5) then a fresh contiguous one (6).
+    for seq in (3, 5, 6):
+        queue.put_nowait(_wait_event(session_id, seq))
+
+    payload = agent_stream_api.AgentStreamWaitRequest(
+        since_sequence=5,
+        timeout_seconds=1.0,
+    )
+
+    async def run() -> AgentStreamEventPage:
+        return await agent_stream_api.wait_stream_events(
+            managed_session_id=session_id,
+            payload=payload,
+            current_user=User(open_id="local", name="L", email="l@l", avatar_url=None),
+        )
+
+    page = asyncio.run(asyncio.wait_for(run(), timeout=5.0))
+
+    assert read_calls["n"] == 1
+    assert len(page.events) == 1
+    assert page.events[0].stream_sequence == 6
+    assert page.next_sequence == 6
+
+
+def test_wait_drains_contiguous_queue_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the first queued event is contiguous (seq == since+1), the waiter
+    must drain all further contiguous events already in the queue in one
+    batch, up to the limit, without calling read_since again."""
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    workspace_id = "ws-wait-drain"
+    session_id = "s-wait-drain"
+    workspace_manager.sessions[session_id] = _sse_session(workspace_id, session_id)
+
+    queue: asyncio.Queue = asyncio.Queue()
+    read_calls = {"n": 0}
+
+    async def _read_since(since: int, limit: int = 200) -> AgentStreamEventPage:
+        read_calls["n"] += 1
+        return AgentStreamEventPage(events=[], next_sequence=since, has_more=False)
+
+    _setup_wait_manager(monkeypatch, session_id, queue, _read_since)
+
+    # since=9 → contiguous events 10..14 already queued.
+    for seq in range(10, 15):
+        queue.put_nowait(_wait_event(session_id, seq))
+
+    payload = agent_stream_api.AgentStreamWaitRequest(
+        since_sequence=9,
+        timeout_seconds=1.0,
+    )
+
+    async def run() -> AgentStreamEventPage:
+        return await agent_stream_api.wait_stream_events(
+            managed_session_id=session_id,
+            payload=payload,
+            current_user=User(open_id="local", name="L", email="l@l", avatar_url=None),
+        )
+
+    page = asyncio.run(asyncio.wait_for(run(), timeout=5.0))
+
+    assert read_calls["n"] == 1
+    assert [e.stream_sequence for e in page.events] == [10, 11, 12, 13, 14]
+    assert page.next_sequence == 14
+
+
+def test_wait_gap_falls_back_to_single_read_since(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the first queued event is NOT contiguous (seq > since+1), the
+    waiter must reconcile by calling read_since exactly once and returning
+    its page. This covers subscriber-queue overflow where events were
+    dropped."""
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    workspace_id = "ws-wait-gap"
+    session_id = "s-wait-gap"
+    workspace_manager.sessions[session_id] = _sse_session(workspace_id, session_id)
+
+    queue: asyncio.Queue = asyncio.Queue()
+    read_calls = {"n": 0}
+
+    # The gap-fallback read_since returns the missing events. The initial
+    # catch-up call must return empty so we reach the queue.
+    async def _read_since(since: int, limit: int = 200) -> AgentStreamEventPage:
+        read_calls["n"] += 1
+        if read_calls["n"] == 1:
+            return AgentStreamEventPage(events=[], next_sequence=since, has_more=False)
+        events = [_wait_event(session_id, since + 1)]
+        return AgentStreamEventPage(events=events, next_sequence=since + 1, has_more=False)
+
+    _setup_wait_manager(monkeypatch, session_id, queue, _read_since)
+
+    # since=9 but the queue jumps to seq 12 (10 and 11 were dropped).
+    queue.put_nowait(_wait_event(session_id, 12))
+
+    payload = agent_stream_api.AgentStreamWaitRequest(
+        since_sequence=9,
+        timeout_seconds=1.0,
+    )
+
+    async def run() -> AgentStreamEventPage:
+        return await agent_stream_api.wait_stream_events(
+            managed_session_id=session_id,
+            payload=payload,
+            current_user=User(open_id="local", name="L", email="l@l", avatar_url=None),
+        )
+
+    page = asyncio.run(asyncio.wait_for(run(), timeout=5.0))
+
+    # Initial read_since (empty) + one gap-fallback read_since = 2 calls.
+    assert read_calls["n"] == 2
+    assert len(page.events) == 1
+    assert page.events[0].stream_sequence == 10
+
+
+def test_wait_drains_full_batch_sets_has_more_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When more than 200 contiguous events are queued, the waiter must
+    return exactly 200 and set ``has_more=True`` so consumers (e.g. the
+    hydration loop) know more events are immediately available."""
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    workspace_id = "ws-wait-fullbatch"
+    session_id = "s-wait-fullbatch"
+    workspace_manager.sessions[session_id] = _sse_session(workspace_id, session_id)
+
+    queue: asyncio.Queue = asyncio.Queue()
+    read_calls = {"n": 0}
+
+    async def _read_since(since: int, limit: int = 200) -> AgentStreamEventPage:
+        read_calls["n"] += 1
+        return AgentStreamEventPage(events=[], next_sequence=since, has_more=False)
+
+    _setup_wait_manager(monkeypatch, session_id, queue, _read_since)
+
+    # since=-1 → push 250 contiguous events (seq 0..249).
+    for seq in range(250):
+        queue.put_nowait(_wait_event(session_id, seq))
+
+    payload = agent_stream_api.AgentStreamWaitRequest(
+        since_sequence=-1,
+        timeout_seconds=1.0,
+    )
+
+    async def run() -> AgentStreamEventPage:
+        return await agent_stream_api.wait_stream_events(
+            managed_session_id=session_id,
+            payload=payload,
+            current_user=User(open_id="local", name="L", email="l@l", avatar_url=None),
+        )
+
+    page = asyncio.run(asyncio.wait_for(run(), timeout=5.0))
+
+    # Exactly the batch limit, has_more signals remaining queued events.
+    assert read_calls["n"] == 1
+    assert len(page.events) == 200
+    assert page.events[0].stream_sequence == 0
+    assert page.events[-1].stream_sequence == 199
+    assert page.next_sequence == 199
+    assert page.has_more is True
+
+
+def test_wait_drain_skips_duplicate_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If a duplicate sequence (== next_seq) appears mid-drain, the waiter
+    must skip it and continue draining the remaining contiguous events
+    rather than treating it as a gap."""
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    workspace_id = "ws-wait-dup"
+    session_id = "s-wait-dup"
+    workspace_manager.sessions[session_id] = _sse_session(workspace_id, session_id)
+
+    queue: asyncio.Queue = asyncio.Queue()
+    read_calls = {"n": 0}
+
+    async def _read_since(since: int, limit: int = 200) -> AgentStreamEventPage:
+        read_calls["n"] += 1
+        return AgentStreamEventPage(events=[], next_sequence=since, has_more=False)
+
+    _setup_wait_manager(monkeypatch, session_id, queue, _read_since)
+
+    # since=9; push 10, 11, duplicate 11, 12, 13.
+    for seq in (10, 11, 11, 12, 13):
+        queue.put_nowait(_wait_event(session_id, seq))
+
+    payload = agent_stream_api.AgentStreamWaitRequest(
+        since_sequence=9,
+        timeout_seconds=1.0,
+    )
+
+    async def run() -> AgentStreamEventPage:
+        return await agent_stream_api.wait_stream_events(
+            managed_session_id=session_id,
+            payload=payload,
+            current_user=User(open_id="local", name="L", email="l@l", avatar_url=None),
+        )
+
+    page = asyncio.run(asyncio.wait_for(run(), timeout=5.0))
+
+    # Duplicate seq 11 is skipped; contiguous prefix 10..13 returned.
+    assert read_calls["n"] == 1
+    assert [e.stream_sequence for e in page.events] == [10, 11, 12, 13]
+    assert page.next_sequence == 13
+    assert page.has_more is False

@@ -255,12 +255,126 @@ is pending re-run.
 - Exact final: incremental output is byte-identical to `groupEventsIntoTurns`
   for the same event list (asserted in tests).
 
+### Backend: bounded long-poll queue drain (no per-tick `read_since`)
+
+`_wait_stream_events_for` (the authoritative long-poll path) previously called
+`store.read_since` on **every** loop iteration — on each 1s health-poll
+timeout and on every queue wake. `read_since` scans the full per-session JSONL
+from byte 0, so its cost is O(rows). Measured on a session with 15,672 rows,
+a single `read_since` call takes 60–76ms. Under a 30s long-poll window that
+translates to ~30 full scans per connection, and with multiple tabs the
+per-wake cost amplifies live-stream latency.
+
+The waiter now follows a bounded queue-drain protocol:
+
+1. **Initial / reconnect**: call `read_since(since)` exactly once after
+   `subscribe`. If it returns events, return them.
+2. **No initial events**: wait on the subscriber queue. Since `_publish`
+   persists before fanout, every event that reaches the queue is already
+   durable — we never need to re-scan the JSONL to find it.
+3. **Queue event arrives**:
+   - `seq <= since`: already delivered; skip.
+   - `seq == since + 1`: contiguous with our cursor. Return this event plus
+     any further contiguous events already queued (up to the 200-event limit)
+     in one batch.
+   - `seq > since + 1`: gap (e.g. the subscriber queue overflowed and dropped
+     events). Call `read_since(since)` **once** to reconcile and return its
+     page.
+4. **Health-poll timeout**: only check `session_exists`, `hard_failed`, and
+   the deadline. Do **not** call `read_since`.
+
+`read_since` is therefore invoked at most twice per long-poll request: once
+for the initial catch-up and once on a detected gap. The common live path
+(contiguous events) incurs zero JSONL scans.
+
+**`has_more` contract**: when the drain fills the 200-event batch and the
+subscriber queue still holds events, the response sets `has_more=True`. The
+long-poll client ignores `has_more` (it always re-requests), but the
+hydration loop and any other consumer rely on it to know whether more events
+are immediately available. `qsize()` is a stable snapshot here because no
+producer can run between the last `get_nowait` and the check in a
+single-threaded asyncio context.
+
+**Duplicate / stale handling in drain**: `_fanout` puts each event once per
+subscriber, so queues should not contain duplicates under normal operation.
+Defensively, the drain loop skips any event with `seq <= next_seq` (stale or
+duplicate of an already-collected event) instead of treating it as a gap.
+Only `seq > next_seq + 1` breaks the drain with a real gap.
+
+Deterministic tests (`test_agent_stream.py`):
+- Initial `read_since` returns empty; repeated health ticks do not call
+  `read_since` again (exactly one call total).
+- A single contiguous queue event is returned directly with no second
+  `read_since`.
+- Stale overlap events (`seq <= since`) are skipped.
+- Multiple contiguous queued events are drained in one batch.
+- A non-contiguous first event (`seq > since+1`) triggers exactly one
+  gap-fallback `read_since`.
+- More than 200 contiguous queued events return exactly 200 with
+  `has_more=True`.
+- A duplicate sequence mid-drain is skipped; the contiguous prefix is
+  returned intact.
+
+### Root-cause distinction: stale probe vs. product per-wake inefficiency
+
+The post-`v-memo` E2E run observed the backend at 40–65% CPU and attributed
+it to the long-poll `read_since` loop. Subsequent investigation found the
+sustained idle load was actually caused by a **stale Python E2E polling
+probe** (PID 88343) left running from this worktree. The probe repeatedly
+requested the legacy cursor `?after=999&limit=1000`, which the backend
+ignored and answered with the first 1000 rows on every tick. After SIGTERM
+of the probe, the live backend (PID 46248) dropped to 0–0.7% idle (one 7.2%
+poll blip).
+
+The product long-poll full-scan is a **separate, measured per-wake
+inefficiency** (60–76ms `read_since` on 15,672 rows) that the bounded
+queue-drain change above addresses. It was not the cause of the sustained
+idle CPU. Neither the stale probe nor the per-wake scan is claimed as the
+final UI long-task root cause until a fresh E2E run after cleanup.
+
+### Rejected experiment: CSS `content-visibility` for history virtualization
+
+A history A/B against the same model turn tested two CSS-only approaches to
+reduce long tasks during long Thinking bursts:
+
+- **Naive `content-visibility: auto`**: reduced long tasks 29→21 and max
+  307ms→208ms, but broke the bottom gap (the scroll anchor / autoscroll
+  region lost its height because off-screen turns were skipped by the
+  browser).
+- **`content-visibility` with hydration-height reserve**: reduced long tasks
+  23→13 and max 508ms→245ms, but still broke the bottom anchor (gap 21055px).
+
+**Verdict: rejected.** Both variants reduce long-task count/duration but
+break the bottom-anchor / autoscroll contract that Paseo's history
+virtualization layer relies on. A CSS-only patch is unacceptable because it
+silently corrupts the scroll position the user expects during streaming.
+This validates that Paseo's history virtualization / bottom-anchor layer is
+a relevant performance lever, but the fix must be implemented in the
+virtualization layer itself (with correct height reservation and anchor
+maintenance), not as a raw CSS `content-visibility` override. Backend
+optimizations (bounded queue-drain) are the priority; a proper history
+virtualization fix is a separate follow-up.
+
+### Fresh UI evidence: no product truncation
+
+The first clean E2E run appeared to show truncated assistant/thinking output,
+but this was a measurement artifact: the script queried only the first
+assistant/thinking part of a turn that actually has two parts split around a
+Bash tool call. The reducer output is exact: 3460 text / 3636 thinking
+characters with the correct marker. Cold hydration is also exact when
+summing all parts. No product truncation was present in this run.
+
 ## Changed files
 
 - `backend/claude_hub/services/agent_stream/coalescer.py` (new)
 - `backend/claude_hub/services/agent_stream/tailer.py` (modified)
+- `backend/claude_hub/api/agent_stream.py` (modified — bounded long-poll
+  queue drain; `read_since` no longer called on every health tick)
 - `backend/tests/test_agent_stream_coalescer.py` (new)
-- `backend/tests/test_agent_stream.py` (modified)
+- `backend/tests/test_agent_stream.py` (modified — added bounded queue-drain
+  tests: no per-tick read_since, direct queue consumption, stale overlap
+  skip, contiguous drain, gap fallback, full-batch has_more=True,
+  duplicate-sequence skip)
 - `frontend/src/utils/agentStreamTimeline.ts` (modified — added
   `IncrementalTimelineReducer`, refactored shared event-application logic)
 - `frontend/src/utils/markdownBlocks.ts` (new)
@@ -298,3 +412,10 @@ is pending re-run.
   revision advances. The `mutated` flag in `applyEventToState` is the single
   source of truth for revision increments; any new event type or mutation
   path must set `mutated = true` to keep `v-memo` correct.
+- The bounded long-poll queue drain relies on `_publish` persisting before
+  fanout so queued events are durable. If that invariant changes (e.g. a
+  future code path fans out an unpersisted event), the waiter could return
+  an event that is not yet in the store, and a reconnect that calls
+  `read_since` would miss it. The gap-fallback `read_since` path only
+  triggers on `seq > since+1`; a silently dropped event (no gap in
+  sequence) would not be detected.
