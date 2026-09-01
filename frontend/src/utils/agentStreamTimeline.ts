@@ -47,11 +47,30 @@ function createTurn(key: string, turnId: string | null): TimelineTurn {
   }
 }
 
+function isExactMultiChunkReplay(
+  accumulatedText: string,
+  priorChunks: string[],
+  candidate: string,
+): boolean {
+  if (!candidate || !accumulatedText.endsWith(candidate)) return false
+
+  let remaining = candidate.length
+  let matchedChunks = 0
+  for (let index = priorChunks.length - 1; index >= 0; index -= 1) {
+    remaining -= priorChunks[index].length
+    matchedChunks += 1
+    if (remaining === 0) return matchedChunks >= 2
+    if (remaining < 0) return false
+  }
+  return false
+}
+
 /** Fold append-only events into turns keyed by the native turn identity. */
 export function groupEventsIntoTurns(events: AgentStreamEvent[]): TimelineTurn[] {
   const turns: TimelineTurn[] = []
   const byTurnId = new Map<string, TimelineTurn>()
   const toolsByTurn = new Map<string, Map<string, TimelineTool>>()
+  const textChunksByTurn = new Map<string, string[]>()
   let legacyCurrent: TimelineTurn | null = null
 
   const resolveTurn = (event: AgentStreamEvent): TimelineTurn => {
@@ -92,8 +111,22 @@ export function groupEventsIntoTurns(events: AgentStreamEvent[]): TimelineTurn[]
         }
         break
       case 'text_delta':
-        turn.assistantText += payloadString(event, 'text')
+      {
+        const text = payloadString(event, 'text')
+        if (!text) break
+        const chunks = textChunksByTurn.get(toolMapKey) ?? []
+        // Older persisted Cursor streams may already contain a provider final
+        // snapshot that exactly replays several preceding deltas. Keep the
+        // append-only store authoritative, but suppress that proven replay at
+        // render time so upgrading repairs existing conversations too. Two
+        // complete prior chunks are required, preserving a legitimate single
+        // repeated delta.
+        if (isExactMultiChunkReplay(turn.assistantText, chunks, text)) break
+        turn.assistantText += text
+        chunks.push(text)
+        textChunksByTurn.set(toolMapKey, chunks)
         break
+      }
       case 'thinking_delta':
         turn.thinkingText += payloadString(event, 'text')
         break

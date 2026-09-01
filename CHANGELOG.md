@@ -14,8 +14,11 @@
   explicit backend transport rebuild while preserving the provider thread.
 - **Cursor reconciliation**: Timestamped final-message replays are recognized
   from their exact multi-chunk boundaries and no longer appended as fresh
-  deltas. Legitimate repeated single-token deltas and multiple assistant
-  messages in one turn remain supported.
+  deltas. The timeline applies the same conservative rule while hydrating, so
+  conversations whose duplicate snapshot was already persisted are repaired
+  without rewriting the append-only event log. Legitimate repeated
+  single-token deltas and multiple assistant messages in one turn remain
+  supported.
 - **Waiting feedback**: A submitted turn renders an animated agent-side waiting
   card before the first thinking, text, tool, status, or error event arrives;
   normal paced reveal takes over as soon as text begins streaming.
