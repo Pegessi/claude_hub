@@ -91,17 +91,22 @@
                   v-for="(att, i) in turn.attachments"
                   :key="att.id ?? `null-${turn.key}-${i}`"
                 >
-                  <!-- Render the preview image when we have a valid id that has
-                       not errored. The img comes first in source order so static
-                       template analysis finds it before the placeholder
-                       branches. -->
-                  <img
+                  <!-- Keep conversation density high: render a bounded
+                       thumbnail and open the full preview in a lightbox. -->
+                  <button
                     v-if="att.id !== null && !erroredAttachments.has(att.id)"
-                    :src="attachmentUrl(att.id)"
-                    class="turn-attachment-img"
-                    alt="attached image"
-                    @error="onAttachmentError($event, att)"
+                    type="button"
+                    class="turn-attachment-button"
+                    aria-label="Open attached image preview"
+                    @click="openImageLightbox(attachmentUrl(att.id), 'attached image', $event)"
                   >
+                    <img
+                      :src="attachmentUrl(att.id)"
+                      class="turn-attachment-img"
+                      alt="attached image"
+                      @error="onAttachmentError($event, att)"
+                    >
+                  </button>
                   <!-- Placeholder for no-preview (id is null) or evicted
                        preview (fetch returned 404/410). -->
                   <div
@@ -250,13 +255,20 @@
                 v-if="turn.attachments?.length"
                 class="turn-attachments"
               >
-                <img
+                <button
                   v-for="(att, i) in turn.attachments"
                   :key="i"
-                  :src="att.preview_url"
-                  class="turn-attachment-img"
-                  alt="attached image"
+                  type="button"
+                  class="turn-attachment-button"
+                  aria-label="Open attached image preview"
+                  @click="openImageLightbox(att.preview_url, 'attached image', $event)"
                 >
+                  <img
+                    :src="att.preview_url"
+                    class="turn-attachment-img"
+                    alt="attached image"
+                  >
+                </button>
               </div>
             </div>
           </div>
@@ -355,6 +367,34 @@
         </div>
       </div>
     </div>
+
+    <Teleport to="body">
+      <div
+        v-if="imageLightboxUrl"
+        class="structured-image-lightbox"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Image preview"
+        @click.self="closeImageLightbox"
+      >
+        <button
+          ref="lightboxCloseEl"
+          type="button"
+          class="structured-image-lightbox-close"
+          aria-label="Close image preview"
+          @click="closeImageLightbox"
+        >
+          ×
+        </button>
+        <img
+          class="structured-image-lightbox-img"
+          :src="imageLightboxUrl"
+          :alt="imageLightboxAlt"
+          @click.stop
+          @error="closeImageLightbox"
+        >
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -448,6 +488,7 @@ watch(
 
 onMounted(() => {
   startStream()
+  document.addEventListener('keydown', handleLightboxKeydown)
 })
 
 watch(
@@ -464,6 +505,7 @@ watch(
     draftMessage.value = ''
     attachments.value = []
     composerError.value = null
+    dismissImageLightbox(false)
     startStream()
   },
 )
@@ -472,6 +514,8 @@ onUnmounted(() => {
   // Bump the epoch on unmount so any in-flight preparation batch aborts
   // instead of mutating state after the component is gone.
   preparationEpoch.value++
+  document.removeEventListener('keydown', handleLightboxKeydown)
+  dismissImageLightbox(false)
   stop()
 })
 
@@ -511,6 +555,39 @@ const timelineContentEl = ref<HTMLElement | null>(null)
 /** Attachment ids whose preview fetch returned 404/410 (evicted or never
  *  cached). Rendered as a visible "Preview expired" placeholder. */
 const erroredAttachments = ref<Set<string>>(new Set())
+const imageLightboxUrl = ref<string | null>(null)
+const imageLightboxAlt = ref('')
+const lightboxCloseEl = ref<HTMLButtonElement | null>(null)
+let imageLightboxTrigger: HTMLElement | null = null
+
+function openImageLightbox(url: string, alt: string, event: MouseEvent) {
+  imageLightboxUrl.value = url
+  imageLightboxAlt.value = alt
+  imageLightboxTrigger = event.currentTarget instanceof HTMLElement
+    ? event.currentTarget
+    : null
+  void nextTick(() => lightboxCloseEl.value?.focus())
+}
+
+function dismissImageLightbox(restoreFocus: boolean) {
+  if (!imageLightboxUrl.value) return
+  const trigger = imageLightboxTrigger
+  imageLightboxUrl.value = null
+  imageLightboxAlt.value = ''
+  imageLightboxTrigger = null
+  if (restoreFocus) void nextTick(() => trigger?.focus())
+}
+
+function closeImageLightbox() {
+  dismissImageLightbox(true)
+}
+
+function handleLightboxKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && imageLightboxUrl.value) {
+    event.preventDefault()
+    closeImageLightbox()
+  }
+}
 
 // Activation gate: the timeline is not revealed until authoritative history
 // has been hydrated and the tail has been synchronously pinned. This prevents
@@ -1528,6 +1605,108 @@ onUnmounted(() => {
   color: inherit;
 }
 
+.turn-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.turn-attachment-button {
+  width: clamp(112px, 18vw, 168px);
+  aspect-ratio: 4 / 3;
+  display: block;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, #fff 34%, transparent);
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-surface-control);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 18%);
+  cursor: zoom-in;
+}
+
+.turn-attachment-button:hover {
+  border-color: color-mix(in srgb, #fff 70%, transparent);
+}
+
+.turn-attachment-button:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+
+.turn-attachment-img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  transition: transform 140ms ease;
+}
+
+.turn-attachment-button:hover .turn-attachment-img {
+  transform: scale(1.025);
+}
+
+.turn-attachment-placeholder {
+  width: clamp(112px, 18vw, 168px);
+  aspect-ratio: 4 / 3;
+  display: grid;
+  place-items: center;
+  padding: 10px;
+  border: 1px dashed color-mix(in srgb, #fff 36%, transparent);
+  border-radius: var(--ch-radius-sm);
+  color: color-mix(in srgb, #fff 78%, transparent);
+  font-size: 11px;
+  text-align: center;
+}
+
+.structured-image-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgb(0 0 0 / 78%);
+  backdrop-filter: blur(4px);
+}
+
+.structured-image-lightbox-img {
+  max-width: min(1200px, calc(100vw - 48px));
+  max-height: calc(100dvh - 48px);
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: var(--ch-radius-sm);
+  box-shadow: 0 18px 64px rgb(0 0 0 / 52%);
+  cursor: zoom-out;
+}
+
+.structured-image-lightbox-close {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgb(255 255 255 / 28%);
+  border-radius: 50%;
+  background: rgb(24 24 24 / 88%);
+  color: #fff;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.structured-image-lightbox-close:hover,
+.structured-image-lightbox-close:focus-visible {
+  border-color: rgb(255 255 255 / 72%);
+  background: rgb(42 42 42 / 96%);
+  outline: none;
+}
+
 .conversation-bubble--assistant {
   background: var(--ch-color-surface);
   border: 1px solid var(--ch-color-border-muted);
@@ -1811,6 +1990,10 @@ onUnmounted(() => {
   .banner-spinner,
   .thinking-indicator {
     animation: none;
+  }
+
+  .turn-attachment-img {
+    transition: none;
   }
 }
 </style>
