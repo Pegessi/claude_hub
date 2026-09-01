@@ -12,6 +12,24 @@ import DOMPurify from 'dompurify'
 const MARKED_OPTIONS = { gfm: true, breaks: true }
 
 /**
+ * A single rendered markdown block.
+ *
+ * ``key`` is a stable Vue ``v-for`` key derived from the block's index in
+ * the token list. Completed blocks never change position, so their key is
+ * stable and Vue reuses their DOM node across renders. The live tail (the
+ * still-growing last block) always sits at the last index, so its key is
+ * stable while it grows and Vue reuses one DOM node, updating only its
+ * ``innerHTML``. The rest of the subtree is left untouched.
+ *
+ * The cache stores rendered HTML strings keyed by the block's raw text
+ * (plus the linkMarkdownPaths mode); it does not cache descriptor objects.
+ */
+export interface RenderedBlock {
+  key: string
+  html: string
+}
+
+/**
  * Split markdown source into top-level block tokens.
  *
  * Uses ``marked.lexer`` so block boundaries (fenced code, lists,
@@ -31,6 +49,67 @@ export function renderBlockToken(token: Token): string {
   return DOMPurify.sanitize(marked.parser([token], MARKED_OPTIONS))
 }
 
+const MARKDOWN_PATH_PATTERN =
+  /((?:~|\.{1,2}|\/|[\w.-]+\/)?[\w./~@:+-]+\.(?:md|markdown|mdown|mkd)(?::\d+)?(?:[?#][^\s`"'<>)]*)?)/gi
+
+function hasLinkExcludedParent(node: Node): boolean {
+  let parent = node.parentElement
+  while (parent) {
+    if (['A', 'CODE', 'PRE', 'KBD', 'SAMP'].includes(parent.tagName)) return true
+    parent = parent.parentElement
+  }
+  return false
+}
+
+/**
+ * Wrap markdown path mentions (``foo.md``, ``./bar.md:12``, …) in anchor
+ * tags so the host component can intercept clicks. Operates on a single
+ * block's HTML string.
+ */
+export function linkPathMentions(html: string): string {
+  if (typeof document === 'undefined') return html
+  const template = document.createElement('template')
+  template.innerHTML = html
+  const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT)
+  const textNodes: Text[] = []
+  let node = walker.nextNode()
+  while (node) {
+    if (node instanceof Text && !hasLinkExcludedParent(node)) {
+      textNodes.push(node)
+    }
+    node = walker.nextNode()
+  }
+
+  textNodes.forEach((textNode) => {
+    const text = textNode.nodeValue || ''
+    const matches = Array.from(text.matchAll(MARKDOWN_PATH_PATTERN))
+    if (matches.length === 0) return
+
+    const fragment = document.createDocumentFragment()
+    let offset = 0
+    matches.forEach((match) => {
+      const path = match[0]
+      const index = match.index ?? 0
+      if (index > offset) {
+        fragment.append(document.createTextNode(text.slice(offset, index)))
+      }
+      const link = document.createElement('a')
+      link.href = '#'
+      link.dataset.markdownPath = path
+      link.textContent = path
+      link.className = 'markdown-path-link'
+      fragment.append(link)
+      offset = index + path.length
+    })
+    if (offset < text.length) {
+      fragment.append(document.createTextNode(text.slice(offset)))
+    }
+    textNode.replaceWith(fragment)
+  })
+
+  return template.innerHTML
+}
+
 /**
  * Per-block render cache that avoids caching the live tail.
  *
@@ -43,42 +122,78 @@ export function renderBlockToken(token: Token): string {
  *
  * This keeps the cache size bounded to the number of completed blocks,
  * not the number of deltas.
+ *
+ * Cache keys include the ``linkMarkdownPaths`` mode so that switching the
+ * mode does not serve stale (un)linked HTML.
  */
 export class MarkdownBlockCache {
   private cache = new Map<string, string>()
+  /** The linkMarkdownPaths mode the cache was populated for. If the mode
+   *  changes, the cache is invalidated. */
+  private linkMode: boolean | null = null
+
+  private cacheKey(raw: string, linkMarkdownPaths: boolean): string {
+    return `${linkMarkdownPaths ? 'l:' : 'n:'}${raw}`
+  }
 
   /**
-   * Render a full markdown source, caching completed blocks.
+   * Render a full markdown source into a list of block descriptors.
+   *
+   * Completed blocks are cached by their raw text (plus link mode); the
+   * returned descriptor carries the cached HTML and an index-based stable
+   * key. The live tail (the still-growing last block) is rendered fresh
+   * each call and carries the last index as its key so Vue reuses one DOM
+   * node.
    *
    * @param source - markdown text.
-   * @param complete - when true, the final block is also cached (stream
-   *   has ended). Defaults to false for live streaming.
+   * @param options.complete - when true, the final block is also cached
+   *   (stream has ended). Defaults to false for live streaming.
+   * @param options.linkMarkdownPaths - when true, markdown path mentions
+   *   are wrapped in anchor tags. Defaults to false.
    */
-  render(source: string, complete = false): string {
-    const tokens = splitBlockTokens(source)
-    if (tokens.length === 0) return ''
+  render(
+    source: string,
+    options: { complete?: boolean; linkMarkdownPaths?: boolean } = {},
+  ): RenderedBlock[] {
+    const { complete = false, linkMarkdownPaths = false } = options
 
-    let html = ''
+    // Invalidate the cache if the link mode changed since the last render.
+    if (this.linkMode !== null && this.linkMode !== linkMarkdownPaths) {
+      this.cache.clear()
+    }
+    this.linkMode = linkMarkdownPaths
+
+    const tokens = splitBlockTokens(source)
+    if (tokens.length === 0) return []
+
+    const blocks: RenderedBlock[] = []
     const lastIndex = tokens.length - 1
     for (let i = 0; i < tokens.length; i++) {
       const token = tokens[i]
       const isLast = i === lastIndex
-      const key = token.raw
+      const rawKey = this.cacheKey(token.raw, linkMarkdownPaths)
 
       if (!isLast || complete) {
-        // Completed block: parse once and cache.
-        let blockHtml = this.cache.get(key)
+        // Completed block: parse once, apply link wrapping once, cache.
+        let blockHtml = this.cache.get(rawKey)
         if (blockHtml === undefined) {
           blockHtml = renderBlockToken(token)
-          this.cache.set(key, blockHtml)
+          if (linkMarkdownPaths) {
+            blockHtml = linkPathMentions(blockHtml)
+          }
+          this.cache.set(rawKey, blockHtml)
         }
-        html += blockHtml
+        blocks.push({ key: `block:${i}`, html: blockHtml })
       } else {
-        // Live tail: render but do not cache.
-        html += renderBlockToken(token)
+        // Live tail: render (and link-wrap) but do not cache.
+        let blockHtml = renderBlockToken(token)
+        if (linkMarkdownPaths) {
+          blockHtml = linkPathMentions(blockHtml)
+        }
+        blocks.push({ key: `block:${i}`, html: blockHtml })
       }
     }
-    return html
+    return blocks
   }
 
   /** Number of cached blocks. */
@@ -89,10 +204,19 @@ export class MarkdownBlockCache {
   /** Clear the cache. */
   clear(): void {
     this.cache.clear()
+    this.linkMode = null
   }
 
   /** Check whether a block's raw text is cached. */
   has(raw: string): boolean {
-    return this.cache.has(raw)
+    // Check both link-mode variants.
+    return this.cache.has(this.cacheKey(raw, true)) ||
+      this.cache.has(this.cacheKey(raw, false))
   }
+}
+
+/** Join rendered blocks back into a single HTML string (for tests and
+ *  callers that need the legacy concatenated output). */
+export function joinBlocks(blocks: RenderedBlock[]): string {
+  return blocks.map((b) => b.html).join('')
 }

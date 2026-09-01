@@ -96,138 +96,236 @@ function isExactMultiChunkReplay(
   return false
 }
 
+/**
+ * Mutable reducer state shared by ``groupEventsIntoTurns`` and
+ * ``IncrementalTimelineReducer``. Processing one event mutates the state in
+ * place; the reducer owns the lifecycle (reset, processed-count tracking).
+ */
+interface ReducerState {
+  turns: TimelineTurn[]
+  byTurnId: Map<string, TimelineTurn>
+  toolsByTurn: Map<string, Map<string, TimelineTool>>
+  textChunksByTurn: Map<string, string[]>
+  legacyCurrent: TimelineTurn | null
+}
+
+function createReducerState(): ReducerState {
+  return {
+    turns: [],
+    byTurnId: new Map(),
+    toolsByTurn: new Map(),
+    textChunksByTurn: new Map(),
+    legacyCurrent: null,
+  }
+}
+
+function resolveTurn(state: ReducerState, event: AgentStreamEvent): TimelineTurn {
+  if (event.turn_id) {
+    let turn = state.byTurnId.get(event.turn_id)
+    if (!turn) {
+      turn = createTurn(`turn-${event.turn_id}`, event.turn_id)
+      state.byTurnId.set(event.turn_id, turn)
+      state.turns.push(turn)
+    }
+    return turn
+  }
+  if (event.type === 'turn_started' || !state.legacyCurrent) {
+    state.legacyCurrent = createTurn(`legacy-turn-${event.stream_sequence}`, null)
+    state.turns.push(state.legacyCurrent)
+  }
+  return state.legacyCurrent
+}
+
+/** Apply a single event to the reducer state. Pure mutation; no allocation
+ *  beyond the turn/tool/part objects the event requires. */
+function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
+  const turn = resolveTurn(state, event)
+  const toolMapKey = turn.turnId ?? turn.key
+  let toolMap = state.toolsByTurn.get(toolMapKey)
+  if (!toolMap) {
+    toolMap = new Map<string, TimelineTool>()
+    state.toolsByTurn.set(toolMapKey, toolMap)
+  }
+
+  switch (event.type) {
+    case 'turn_started':
+      turn.userText = payloadString(event, 'summary')
+      break
+    case 'turn_completed':
+      turn.completed = true
+      turn.completionStatus = payloadString(event, 'status') || 'completed'
+      for (const tool of turn.tools) {
+        if (tool.status === 'running') tool.status = 'completed'
+      }
+      break
+    case 'text_delta':
+    {
+      const text = payloadString(event, 'text')
+      if (!text) break
+      const chunks = state.textChunksByTurn.get(toolMapKey) ?? []
+      if (isExactMultiChunkReplay(turn.assistantText, chunks, text)) break
+      appendTextPart(turn, 'text', text, event.stream_sequence)
+      chunks.push(text)
+      state.textChunksByTurn.set(toolMapKey, chunks)
+      break
+    }
+    case 'thinking_delta':
+      appendTextPart(turn, 'thinking', payloadString(event, 'text'), event.stream_sequence)
+      break
+    case 'tool_call_started': {
+      const callId = (event.payload.tool_call_id as string | null) ?? event.call_id ?? null
+      let argsText = ''
+      try {
+        argsText = JSON.stringify(payloadRecord(event, 'args'), null, 2)
+      } catch {
+        argsText = String(event.payload.args ?? '')
+      }
+      const identity = callId ?? event.message_id ?? `sequence-${event.stream_sequence}`
+      if (!toolMap.has(identity)) {
+        const tool: TimelineTool = {
+          key: `tool-${identity}`,
+          callId,
+          name: payloadString(event, 'name') || 'unknown',
+          status: 'running',
+          argsText,
+          resultText: '',
+        }
+        toolMap.set(identity, tool)
+        turn.tools.push(tool)
+        turn.parts.push({ kind: 'tool', key: tool.key, tool })
+      }
+      break
+    }
+    case 'tool_call_completed': {
+      const callId = (event.payload.tool_call_id as string | null) ?? event.call_id ?? null
+      const identity = callId ?? event.message_id ?? `sequence-${event.stream_sequence}`
+      let tool = toolMap.get(identity)
+      if (!tool) {
+        tool = {
+          key: `tool-${identity}`,
+          callId,
+          name: payloadString(event, 'name') || 'tool',
+          status: 'running',
+          argsText: '',
+          resultText: '',
+        }
+        toolMap.set(identity, tool)
+        turn.tools.push(tool)
+        turn.parts.push({ kind: 'tool', key: tool.key, tool })
+      }
+      tool.status = payloadString(event, 'status') === 'failed' ? 'failed' : 'completed'
+      tool.resultText = payloadString(event, 'result')
+      break
+    }
+    case 'error': {
+      const message = payloadString(event, 'message') || 'An error occurred.'
+      const errKey = `error-${event.message_id ?? 'event'}-${event.stream_sequence}`
+      turn.errors.push({ key: errKey, message })
+      turn.parts.push({ kind: 'error', key: errKey, message })
+      break
+    }
+    case 'status': {
+      const text = payloadString(event, 'text') || payloadString(event, 'message') ||
+        payloadString(event, 'status') || 'status update'
+      const statusKey = `status-${event.message_id ?? 'event'}-${event.stream_sequence}`
+      turn.statuses.push({ key: statusKey, text })
+      turn.parts.push({ kind: 'status', key: statusKey, text })
+      break
+    }
+    default:
+      break
+  }
+}
+
 /** Fold append-only events into turns keyed by the native turn identity. */
 export function groupEventsIntoTurns(events: AgentStreamEvent[]): TimelineTurn[] {
-  const turns: TimelineTurn[] = []
-  const byTurnId = new Map<string, TimelineTurn>()
-  const toolsByTurn = new Map<string, Map<string, TimelineTool>>()
-  const textChunksByTurn = new Map<string, string[]>()
-  let legacyCurrent: TimelineTurn | null = null
-
-  const resolveTurn = (event: AgentStreamEvent): TimelineTurn => {
-    if (event.turn_id) {
-      let turn = byTurnId.get(event.turn_id)
-      if (!turn) {
-        turn = createTurn(`turn-${event.turn_id}`, event.turn_id)
-        byTurnId.set(event.turn_id, turn)
-        turns.push(turn)
-      }
-      return turn
-    }
-    if (event.type === 'turn_started' || !legacyCurrent) {
-      legacyCurrent = createTurn(`legacy-turn-${event.stream_sequence}`, null)
-      turns.push(legacyCurrent)
-    }
-    return legacyCurrent
-  }
-
+  const state = createReducerState()
   for (const event of events) {
-    const turn = resolveTurn(event)
-    const toolMapKey = turn.turnId ?? turn.key
-    let toolMap = toolsByTurn.get(toolMapKey)
-    if (!toolMap) {
-      toolMap = new Map<string, TimelineTool>()
-      toolsByTurn.set(toolMapKey, toolMap)
-    }
+    applyEventToState(state, event)
+  }
+  return state.turns
+}
 
-    switch (event.type) {
-      case 'turn_started':
-        turn.userText = payloadString(event, 'summary')
-        break
-      case 'turn_completed':
-        turn.completed = true
-        turn.completionStatus = payloadString(event, 'status') || 'completed'
-        for (const tool of turn.tools) {
-          if (tool.status === 'running') tool.status = 'completed'
-        }
-        break
-      case 'text_delta':
-      {
-        const text = payloadString(event, 'text')
-        if (!text) break
-        const chunks = textChunksByTurn.get(toolMapKey) ?? []
-        // Older persisted Cursor streams may already contain a provider final
-        // snapshot that exactly replays several preceding deltas. Keep the
-        // append-only store authoritative, but suppress that proven replay at
-        // render time so upgrading repairs existing conversations too. Two
-        // complete prior chunks are required, preserving a legitimate single
-        // repeated delta.
-        if (isExactMultiChunkReplay(turn.assistantText, chunks, text)) break
-        appendTextPart(turn, 'text', text, event.stream_sequence)
-        chunks.push(text)
-        textChunksByTurn.set(toolMapKey, chunks)
-        break
-      }
-      case 'thinking_delta':
-        appendTextPart(turn, 'thinking', payloadString(event, 'text'), event.stream_sequence)
-        break
-      case 'tool_call_started': {
-        const callId = (event.payload.tool_call_id as string | null) ?? event.call_id ?? null
-        let argsText = ''
-        try {
-          argsText = JSON.stringify(payloadRecord(event, 'args'), null, 2)
-        } catch {
-          argsText = String(event.payload.args ?? '')
-        }
-        const identity = callId ?? event.message_id ?? `sequence-${event.stream_sequence}`
-        if (!toolMap.has(identity)) {
-          const tool: TimelineTool = {
-            key: `tool-${identity}`,
-            callId,
-            name: payloadString(event, 'name') || 'unknown',
-            status: 'running',
-            argsText,
-            resultText: '',
-          }
-          toolMap.set(identity, tool)
-          turn.tools.push(tool)
-          turn.parts.push({ kind: 'tool', key: tool.key, tool })
-        }
-        break
-      }
-      case 'tool_call_completed': {
-        const callId = (event.payload.tool_call_id as string | null) ?? event.call_id ?? null
-        const identity = callId ?? event.message_id ?? `sequence-${event.stream_sequence}`
-        let tool = toolMap.get(identity)
-        if (!tool) {
-          tool = {
-            key: `tool-${identity}`,
-            callId,
-            name: payloadString(event, 'name') || 'tool',
-            status: 'running',
-            argsText: '',
-            resultText: '',
-          }
-          toolMap.set(identity, tool)
-          turn.tools.push(tool)
-          turn.parts.push({ kind: 'tool', key: tool.key, tool })
-        }
-        tool.status = payloadString(event, 'status') === 'failed' ? 'failed' : 'completed'
-        tool.resultText = payloadString(event, 'result')
-        break
-      }
-      case 'error': {
-        const message = payloadString(event, 'message') || 'An error occurred.'
-        const errKey = `error-${event.message_id ?? 'event'}-${event.stream_sequence}`
-        turn.errors.push({ key: errKey, message })
-        // Paseo keeps protocol errors in stream order, not deferred to the
-        // turn's end. Surface them as ordered parts so a reconciliation error
-        // appears exactly where the provider emitted it.
-        turn.parts.push({ kind: 'error', key: errKey, message })
-        break
-      }
-      case 'status': {
-        const text = payloadString(event, 'text') || payloadString(event, 'message') ||
-          payloadString(event, 'status') || 'status update'
-        const statusKey = `status-${event.message_id ?? 'event'}-${event.stream_sequence}`
-        turn.statuses.push({ key: statusKey, text })
-        turn.parts.push({ kind: 'status', key: statusKey, text })
-        break
-      }
-      default:
-        break
-    }
+/**
+ * Incremental timeline reducer.
+ *
+ * ``groupEventsIntoTurns`` re-scans the entire event list on every call, which
+ * becomes O(total events) per batch. For a session with 13.5k historical
+ * events, each incoming delta re-runs the full reduction and dominates the
+ * long-task budget.
+ *
+ * ``IncrementalTimelineReducer`` keeps the reducer state alive across calls
+ * and only processes events it has not seen yet. The cost per batch is
+ * O(new events), independent of history length.
+ *
+ * Correctness contract:
+ * - Events are append-only (sequence numbers never decrease within a session).
+ * - The reducer detects when the event list is no longer a strict append of
+ *   the previously processed prefix (shrink, same-length replacement, or a
+ *   longer list whose prefix diverges — e.g. session switch, reconnect, or
+ *   reset) and rebuilds from scratch.
+ * - The returned array is a fresh reference each call so Vue computed
+ *   invalidation fires; turn objects are mutated in place.
+ */
+export class IncrementalTimelineReducer {
+  private state: ReducerState = createReducerState()
+  private processedCount = 0
+  /** Cumulative number of events applied since the last reset. Exposed so
+   *  tests can assert the incremental path applies exactly the unseen suffix
+   *  rather than re-scanning history. */
+  private totalApplied = 0
+  /** Identity of the last applied event, used to detect non-prefix
+   *  replacements of the event list (session switch / reconnect / reset). */
+  private lastAppliedKey: string | null = null
+
+  private static eventKey(event: AgentStreamEvent): string {
+    // stream_sequence is zero-based per session; combine with session/tab
+    // identity so a reused sequence number from a different session does not
+    // pass the prefix check.
+    return `${event.session_id ?? ''}\u0000${event.tab_id ?? ''}\u0000${event.stream_sequence}`
   }
 
-  return turns
+  /** Reduce the full event list, processing only the unseen suffix. */
+  reduce(events: AgentStreamEvent[]): TimelineTurn[] {
+    // Detect non-prefix replacements: if we have processed events, the event
+    // at index processedCount - 1 must be the same event we last applied.
+    // A mismatch means the list was replaced (session switch, reconnect, or
+    // reset) rather than appended to, so we rebuild from scratch.
+    if (this.processedCount > 0) {
+      const lastProcessed = events[this.processedCount - 1]
+      if (!lastProcessed || IncrementalTimelineReducer.eventKey(lastProcessed) !== this.lastAppliedKey) {
+        this.reset()
+      }
+    }
+
+    const newEvents = events.slice(this.processedCount)
+    for (const event of newEvents) {
+      applyEventToState(this.state, event)
+      this.totalApplied += 1
+      this.lastAppliedKey = IncrementalTimelineReducer.eventKey(event)
+    }
+    this.processedCount = events.length
+    // Return a fresh array reference so Vue's computed dependency tracking
+    // detects the change. Turn objects are mutated in place; callers that
+    // need structural sharing can rely on turn.key stability.
+    return [...this.state.turns]
+  }
+
+  reset(): void {
+    this.state = createReducerState()
+    this.processedCount = 0
+    this.totalApplied = 0
+    this.lastAppliedKey = null
+  }
+
+  /** Number of events consumed so far. Exposed for tests. */
+  get consumed(): number {
+    return this.processedCount
+  }
+
+  /** Cumulative events applied since the last reset. Exposed for tests to
+   *  assert the incremental path only processes the unseen suffix. */
+  get appliedCount(): number {
+    return this.totalApplied
+  }
 }
