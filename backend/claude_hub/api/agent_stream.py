@@ -479,21 +479,83 @@ async def _wait_stream_events_for(
     try:
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
+
+        # Initial/reconnect catch-up: read_since ONCE after subscribe. This
+        # returns every event persisted before we subscribed. ``_publish``
+        # persists before fanout, so any event published after this point is
+        # already in our queue — we never need to re-scan the JSONL to find
+        # it.
+        page = await store.read_since(since, limit=200)
+        if page.events:
+            return page
+
         while True:
-            page = await store.read_since(since, limit=200)
-            if page.events:
-                return page
             if not session_exists():
                 _raise_structured_unavailable(session.id, manager)
             if manager.hard_failed(session.id):
                 _raise_structured_unavailable(session.id, manager)
             remaining = deadline - loop.time()
             if remaining <= 0:
-                return page
+                return AgentStreamEventPage(events=[], next_sequence=since, has_more=False)
             try:
-                await asyncio.wait_for(queue.get(), timeout=min(remaining, _SSE_HEALTH_POLL_S))
+                event = await asyncio.wait_for(
+                    queue.get(), timeout=min(remaining, _SSE_HEALTH_POLL_S)
+                )
             except asyncio.TimeoutError:
-                pass
+                # Health tick: only existence / hard_failure / deadline are
+                # checked above. We deliberately do NOT call read_since here —
+                # that would re-scan the full JSONL from byte 0 on every 1s
+                # tick, which dominates CPU for long sessions.
+                continue
+
+            # Consume the queue event directly. ``_publish`` persists before
+            # fanout, so the event is already durable.
+            if event.stream_sequence <= since:
+                # Already delivered via the initial read_since or a prior
+                # batch; skip without touching the store.
+                continue
+
+            if event.stream_sequence > since + 1:
+                # Gap: the queue skipped one or more sequences (e.g. the
+                # subscriber queue overflowed and dropped events). Reconcile
+                # by reading the store once. This is the only path besides
+                # the initial catch-up that calls read_since.
+                return await store.read_since(since, limit=200)
+
+            # event.stream_sequence == since + 1: contiguous with our cursor.
+            # Drain as many contiguous events as are already queued so the
+            # frontend gets a full batch instead of one event per round-trip.
+            events: List[AgentStreamEvent] = [event]
+            next_seq = event.stream_sequence
+            while len(events) < 200:
+                try:
+                    next_event = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if next_event.stream_sequence <= next_seq:
+                    # Stale (seq <= since) or duplicate of an already-collected
+                    # event. ``_fanout`` puts each event once per subscriber,
+                    # so duplicates should not occur under normal operation,
+                    # but we skip defensively rather than treating them as a
+                    # gap.
+                    continue
+                if next_event.stream_sequence != next_seq + 1:
+                    # Mid-drain gap: stop. The events we've collected are
+                    # contiguous and safe to return; the gap will be filled
+                    # by the next request's read_since(since=next_seq).
+                    break
+                events.append(next_event)
+                next_seq = next_event.stream_sequence
+
+            # has_more: we filled the batch to its limit and the subscriber
+            # queue still holds events. In a single-threaded asyncio context
+            # no producer can run between the last get_nowait and this check,
+            # so qsize() is a stable snapshot. The long-poll client ignores
+            # has_more (it always re-requests), but the hydration loop and
+            # any other consumer rely on it to know whether more events are
+            # immediately available.
+            has_more = len(events) == 200 and queue.qsize() > 0
+            return AgentStreamEventPage(events=events, next_sequence=next_seq, has_more=has_more)
     finally:
         manager.unsubscribe(session.id, queue)
 

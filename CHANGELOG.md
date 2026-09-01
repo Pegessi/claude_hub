@@ -60,6 +60,32 @@
   reconstruction and is intended to address the 7 long tasks (53–102ms)
   observed after the textReveal removal; the post-`v-memo` E2E measurement is
   pending.
+- **Bounded long-poll queue drain (no per-tick `read_since`)**:
+  `_wait_stream_events_for` previously called `store.read_since` (a full JSONL
+  scan from byte 0, O(rows)) on every loop iteration — both on 1s health-poll
+  timeouts and on every queue wake. For a session with ~15.7k rows this cost
+  60–76ms per call and could amplify live-stream latency. The waiter now calls
+  `read_since` exactly once after subscribe (initial catch-up), then consumes
+  live events directly from the subscriber queue. Since `_publish` persists
+  before fanout, every queued event is already durable. Contiguous events
+  (`seq == since+1`) are drained from the queue in one batch up to the 200
+  limit; a gap (`seq > since+1`, e.g. subscriber-queue overflow) triggers a
+  single `read_since` reconciliation. Health-poll timeouts only check
+  existence/hard-failure/deadline and never re-scan the JSONL. When the drain
+  fills the 200-event batch and the queue still holds events, `has_more` is
+  set to `True` so consumers know more events are immediately available.
+  Stale or duplicate sequences (`seq <= next_seq`) are skipped mid-drain
+  rather than treated as a gap.
+- **Root-cause note (sustained idle CPU)**: The 40–65% backend CPU observed
+  during the post-`v-memo` E2E run was traced to a stale Python E2E polling
+  probe (PID 88343) from this worktree that repeatedly requested the legacy
+  cursor `?after=999&limit=1000`, which the backend ignored and answered with
+  the first 1000 rows every tick. After SIGTERM of the probe, the live backend
+  (PID 46248) dropped to 0–0.7% idle. The product long-poll full-scan is a
+  **separate, measured per-wake inefficiency** (60–76ms `read_since` on
+  15,672 rows) that the bounded queue-drain change above addresses; it was not
+  the cause of the sustained idle load. Neither is claimed as the final UI
+  long-task root cause until a fresh E2E run after cleanup.
 - **Validation**: 193 frontend tests pass (including deterministic
   `renderRevision` tests: active turn revision increments on visible
   mutations, completed historical turn revision stays stable while a later
