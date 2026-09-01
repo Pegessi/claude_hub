@@ -343,6 +343,55 @@ async def get_tab_stream_capabilities(
     return await _tab_capabilities_for(session, _get_tab_tailer_manager())
 
 
+async def _retry_stream_for(
+    session: ManagedSession,
+    manager: TailerManager,
+    *,
+    direct_tab: bool = False,
+) -> StreamCapabilities:
+    try:
+        await manager.retry(session)
+    except (ValueError, StructuredSourceUnavailable, RuntimeError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return (
+        await _tab_capabilities_for(session, manager)
+        if direct_tab
+        else await _capabilities_for(session, manager)
+    )
+
+
+@router.post(
+    "/sessions/{managed_session_id}/stream/retry",
+    response_model=StreamCapabilities,
+)
+async def retry_stream(
+    managed_session_id: str,
+    current_user: User = Depends(get_current_user),
+) -> StreamCapabilities:
+    """Explicitly replace a failed native provider transport."""
+
+    session = _session_or_404(managed_session_id)
+    return await _retry_stream_for(session, _get_tailer_manager())
+
+
+@router.post(
+    "/tabs/{tab_id}/stream/retry",
+    response_model=StreamCapabilities,
+)
+async def retry_tab_stream(
+    tab_id: str,
+    current_user: User = Depends(get_current_user),
+) -> StreamCapabilities:
+    """Retry a direct Agent tab without changing its persisted conversation."""
+
+    session = _terminal_tab_session_or_404(tab_id)
+    return await _retry_stream_for(
+        session,
+        _get_tab_tailer_manager(),
+        direct_tab=True,
+    )
+
+
 async def _stream_events_for(
     session: ManagedSession,
     manager: TailerManager,

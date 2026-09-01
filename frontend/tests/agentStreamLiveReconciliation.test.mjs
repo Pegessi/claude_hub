@@ -63,3 +63,14 @@ test('SSE errors retire only SSE while long-poll owns failure reporting', () => 
   assert.doesNotMatch(errorHandler, /connectionState\.value = 'failed'/)
   assert.doesNotMatch(errorHandler, /stop\(\)/)
 })
+
+test('explicit retry replaces the failed backend transport before hydration', () => {
+  const retryIndex = composable.indexOf('async function retry(')
+  const postIndex = composable.indexOf("method: 'POST'", retryIndex)
+  const startIndex = composable.indexOf('await start(sourceId, source)', postIndex)
+
+  assert.ok(retryIndex >= 0)
+  assert.ok(postIndex > retryIndex)
+  assert.ok(startIndex > postIndex)
+  assert.match(composable.slice(retryIndex, startIndex), /`\$\{streamPath\}\/retry`/)
+})

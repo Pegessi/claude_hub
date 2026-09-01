@@ -779,6 +779,15 @@ class CodexNativeSession(ProviderSession):
                 await self._terminate_process()
             self._started = False
 
+            # ``stop()`` cancels the previous stdout reader, whose ``finally``
+            # block deliberately publishes an EOF sentinel so an active
+            # consumer cannot hang.  After an idle reap there is no active
+            # consumer, so that sentinel remains queued.  Reusing the queue
+            # for a new app-server would make the fresh process look dead on
+            # its first read.  Each persistent process generation therefore
+            # owns a fresh notification queue.
+            self._notification_queue = asyncio.Queue()
+
             cmd = self._build_command()
             try:
                 self._process = await asyncio.create_subprocess_exec(

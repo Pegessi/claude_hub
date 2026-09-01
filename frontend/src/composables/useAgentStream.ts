@@ -29,6 +29,8 @@ export interface UseAgentStreamApi {
   errorMessage: Ref<string | null>
   /** Start (or restart) a managed-session or direct Agent-tab stream. */
   start: (sourceId: string, source?: StreamSource) => Promise<void>
+  /** Replace a failed provider transport, then hydrate its resumed stream. */
+  retry: (sourceId: string, source?: StreamSource) => Promise<void>
   /** Tear down the stream (SSE / long-poll). Safe to call repeatedly. */
   stop: () => void
 }
@@ -230,6 +232,38 @@ export function useAgentStream(): UseAgentStreamApi {
     }
   }
 
+  async function retry(sourceId: string, source: StreamSource = 'managed-session') {
+    stop()
+    stopped = false
+    currentSessionId = sourceId
+    currentSource = source
+    reset()
+    connectionState.value = 'hydrating'
+    const streamPath = streamBasePath(sourceId, source)
+
+    try {
+      const res = await fetch(`${streamPath}/retry`, {
+        method: 'POST',
+        credentials: 'same-origin',
+      })
+      if (!res.ok) {
+        let detail = `retry HTTP ${res.status}`
+        try {
+          const body = await res.json() as { detail?: string }
+          if (body.detail) detail = body.detail
+        } catch {
+          // Keep the bounded HTTP fallback for non-JSON failures.
+        }
+        throw new Error(detail)
+      }
+      await start(sourceId, source)
+    } catch (err) {
+      if (stopped || currentSessionId !== sourceId || currentSource !== source) return
+      errorMessage.value = err instanceof Error ? err.message : 'stream retry failed'
+      connectionState.value = 'failed'
+    }
+  }
+
   function stop() {
     stopped = true
     currentSessionId = null
@@ -247,6 +281,7 @@ export function useAgentStream(): UseAgentStreamApi {
     connectionState,
     errorMessage,
     start,
+    retry,
     stop,
   }
 }

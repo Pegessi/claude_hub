@@ -380,6 +380,44 @@ async def test_codex_concurrent_start_is_single_flight() -> None:
 
 
 @pytest.mark.asyncio
+async def test_codex_restart_discards_idle_stop_eof_sentinel() -> None:
+    """A fresh app-server generation must not consume the prior stop's EOF."""
+
+    def process(thread_id: str, first_request_id: int) -> _FakeProcess:
+        return _FakeProcess(
+            stdout_lines=[
+                json.dumps({"jsonrpc": "2.0", "id": first_request_id, "result": {}}).encode()
+                + b"\n",
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": first_request_id + 1,
+                        "result": {"thread": {"id": thread_id}},
+                    }
+                ).encode()
+                + b"\n",
+            ]
+        )
+
+    first = process("th-first", 1)
+    second = process("th-first", 3)
+    sess = _codex_session()
+    spawn = AsyncMock(side_effect=[first, second])
+
+    with patch("asyncio.create_subprocess_exec", new=spawn):
+        await sess.start()
+        await sess.stop()
+        # The cancelled first reader published an EOF to its generation's
+        # notification queue. Starting again must replace that queue.
+        await sess.start()
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(sess.read_line(), timeout=0.05)
+        await sess.stop()
+
+    assert spawn.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_codex_thread_start_reads_thread_id_from_result() -> None:
     """thread/start result is {thread: {id, ...}}; read result.thread.id."""
     proc = _FakeProcess(

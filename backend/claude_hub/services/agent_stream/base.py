@@ -40,6 +40,12 @@ class _TurnAccumulator:
 
     text: str = ""
     thinking: str = ""
+    # Native Cursor can emit a timestamped full-message replay after several
+    # timestamped delta records.  Keep the emitted chunk boundaries so the
+    # Cursor adapter can prove that a later record is an exact replay of two
+    # or more prior chunks without treating an ordinary repeated token as a
+    # snapshot.
+    text_chunks: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -175,15 +181,52 @@ class AgentStreamAdapter:
         if state.text and final_text.startswith(state.text):
             suffix = final_text[len(state.text) :]
             state.text = final_text
+            if suffix:
+                state.text_chunks.append(suffix)
             return suffix
         if not state.text:
             # No deltas were emitted (e.g. provider only sent the final
             # snapshot). Emit the full text.
             state.text = final_text
+            state.text_chunks.append(final_text)
             return final_text
         # The snapshot neither matches nor extends the accumulated text. This
         # is a genuine inconsistency we cannot safely resolve.
         return None
+
+    def _append_text_delta(self, ctx: NormalizeContext, text: str) -> None:
+        """Record one text delta and its provider chunk boundary."""
+
+        state = self._get_turn_state(ctx)
+        state.text += text
+        state.text_chunks.append(text)
+
+    def _is_recent_text_snapshot(self, ctx: NormalizeContext, text: str) -> bool:
+        """Whether ``text`` exactly replays two or more recent delta chunks.
+
+        Cursor normally marks final snapshots by omitting ``timestamp_ms``,
+        but resumed/multi-message turns can timestamp the replay as well.  A
+        suffix string check alone would incorrectly discard a legitimate
+        repeated token.  Requiring the record to reconstruct at least two
+        complete prior chunks narrowly identifies the observed snapshot
+        shape while preserving ordinary repeated deltas.
+        """
+
+        if not text:
+            return False
+        state = self._get_turn_state(ctx)
+        if not state.text.endswith(text):
+            return False
+        remaining = len(text)
+        matched_chunks = 0
+        for chunk in reversed(state.text_chunks):
+            remaining -= len(chunk)
+            matched_chunks += 1
+            if remaining == 0:
+                return matched_chunks >= 2
+            if remaining < 0:
+                return False
+        return False
 
     def _reconcile_thinking(self, ctx: NormalizeContext, final_thinking: str) -> Optional[str]:
         """Reconcile a final thinking snapshot against accumulated deltas."""

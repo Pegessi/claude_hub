@@ -5,6 +5,24 @@
 
 ## Unreleased
 
+### fix: recover native agent streams and smooth Cursor structured output
+
+- **Codex recovery**: Restarting an idle-reaped Codex app-server now creates a
+  fresh notification queue, so the new process cannot consume the previous
+  process generation's EOF sentinel and falsely report `structured observation
+  unavailable`. The structured error banner's Retry action now performs an
+  explicit backend transport rebuild while preserving the provider thread.
+- **Cursor reconciliation**: Timestamped final-message replays are recognized
+  from their exact multi-chunk boundaries and no longer appended as fresh
+  deltas. Legitimate repeated single-token deltas and multiple assistant
+  messages in one turn remain supported.
+- **Waiting feedback**: A submitted turn renders an animated agent-side waiting
+  card before the first thinking, text, tool, status, or error event arrives;
+  normal paced reveal takes over as soon as text begins streaming.
+- **Validation**: Real preview sessions recovered the existing Codex thread and
+  emitted four native deltas through completion. Cursor emitted 21 deltas for a
+  four-marker response, with every marker present exactly once.
+
 ### feat: separate Paseo Agent sessions from native Terminal sessions
 
 - **What**: The new-session flow now asks for a fixed `Agent` or `Terminal`

@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
@@ -247,6 +247,31 @@ async def test_tab_capability_keeps_empty_claude_composer_available(
 
     assert caps.structured is True
     assert caps.sources == []
+
+
+@pytest.mark.asyncio
+async def test_retry_stream_replaces_tailer_before_rechecking_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    session = _sse_session("terminal-tabs", "terminal-tab-retry")
+    manager = MagicMock()
+    manager.retry = AsyncMock()
+    expected = StreamCapabilities(
+        structured=True,
+        adapter_id="codex-native",
+        schema_version=1,
+        sources=[],
+    )
+    capability_probe = AsyncMock(return_value=expected)
+    monkeypatch.setattr(agent_stream_api, "_tab_capabilities_for", capability_probe)
+
+    result = await agent_stream_api._retry_stream_for(session, manager, direct_tab=True)
+
+    manager.retry.assert_awaited_once_with(session)
+    capability_probe.assert_awaited_once_with(session, manager)
+    assert result == expected
 
 
 def test_redact_event_strips_env_values():
@@ -579,6 +604,87 @@ def test_get_adapter_for_session_cursor_terminal_transport_fail_closed():
         updated_at=now,
     )
     assert get_adapter_for_session(session) is None
+
+
+# ── Cursor native stream normalization ──────────────────────────────────────
+
+
+def _cursor_ctx() -> NormalizeContext:
+    return NormalizeContext(
+        session_id="cursor-session",
+        tab_id="cursor-tab",
+        agent_type=AgentType.CURSOR,
+        run_epoch=1,
+        turn_id="cursor-turn",
+    )
+
+
+def _cursor_assistant(text: str, *, timestamped: bool = True) -> Dict[str, Any]:
+    row: Dict[str, Any] = {
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+    }
+    if timestamped:
+        row["timestamp_ms"] = 1
+    return row
+
+
+def test_cursor_timestamped_full_message_replay_is_not_duplicated() -> None:
+    """Resumed Cursor turns can timestamp both deltas and the full replay."""
+
+    from claude_hub.services.agent_stream.cursor_cli_transcript import (
+        CursorCliTranscriptAdapter,
+    )
+
+    adapter = CursorCliTranscriptAdapter()
+    ctx = _cursor_ctx()
+    chunks = ["**智涌今朝**\n\n", "千机灯火彻深更，  \n", "代码为诗一瞬成。"]
+
+    emitted = []
+    for chunk in chunks:
+        emitted.extend(adapter.normalize_line(_cursor_assistant(chunk), ctx))
+    replay = adapter.normalize_line(_cursor_assistant("".join(chunks)), ctx)
+
+    assert "".join(event.payload["text"] for event in emitted) == "".join(chunks)
+    assert replay == []
+
+
+def test_cursor_multiple_assistant_message_snapshots_are_each_deduplicated() -> None:
+    """One turn may contain separate poem and explanation assistant rows."""
+
+    from claude_hub.services.agent_stream.cursor_cli_transcript import (
+        CursorCliTranscriptAdapter,
+    )
+
+    adapter = CursorCliTranscriptAdapter()
+    ctx = _cursor_ctx()
+    poem = ["千机灯火", "彻深更"]
+    explanation = ["这首诗写", "AI 时代"]
+
+    for chunk in poem:
+        assert len(adapter.normalize_line(_cursor_assistant(chunk), ctx)) == 1
+    assert adapter.normalize_line(_cursor_assistant("".join(poem), timestamped=False), ctx) == []
+    for chunk in explanation:
+        assert len(adapter.normalize_line(_cursor_assistant(chunk), ctx)) == 1
+    assert (
+        adapter.normalize_line(_cursor_assistant("".join(explanation), timestamped=False), ctx)
+        == []
+    )
+
+
+def test_cursor_repeated_single_delta_is_preserved() -> None:
+    """A repeated token is content, not proof of a multi-chunk snapshot."""
+
+    from claude_hub.services.agent_stream.cursor_cli_transcript import (
+        CursorCliTranscriptAdapter,
+    )
+
+    adapter = CursorCliTranscriptAdapter()
+    ctx = _cursor_ctx()
+    first = adapter.normalize_line(_cursor_assistant("哈"), ctx)
+    second = adapter.normalize_line(_cursor_assistant("哈"), ctx)
+
+    assert [event.payload["text"] for event in first + second] == ["哈", "哈"]
 
 
 # ── Claude adapter normalization ─────────────────────────────────────────────
