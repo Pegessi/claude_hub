@@ -9,15 +9,27 @@ export interface TimelineTool {
   resultText: string
 }
 
+export type TimelinePart =
+  | { kind: 'thinking'; key: string; text: string }
+  | { kind: 'text'; key: string; text: string }
+  | { kind: 'tool'; key: string; tool: TimelineTool }
+  | { kind: 'error'; key: string; message: string }
+  | { kind: 'status'; key: string; text: string }
+
 export interface TimelineTurn {
   key: string
   turnId: string | null
   userText: string
+  /** Ordered sequence of thinking/text/tool/error/status parts as they arrived. */
+  parts: TimelinePart[]
+  // Compatibility aggregates kept for callers/tests that read the flat
+  // buckets. ``parts`` is the authoritative render order; these are derived
+  // views over it.
   assistantText: string
   thinkingText: string
+  tools: TimelineTool[]
   completed: boolean
   completionStatus: string | null
-  tools: TimelineTool[]
   errors: { key: string; message: string }[]
   statuses: { key: string; text: string }[]
 }
@@ -37,14 +49,33 @@ function createTurn(key: string, turnId: string | null): TimelineTurn {
     key,
     turnId,
     userText: '',
+    parts: [],
     assistantText: '',
     thinkingText: '',
+    tools: [],
     completed: false,
     completionStatus: null,
-    tools: [],
     errors: [],
     statuses: [],
   }
+}
+
+/** Append or extend the last part of the given kind with more text. */
+function appendTextPart(
+  turn: TimelineTurn,
+  kind: 'thinking' | 'text',
+  text: string,
+  sequence: number,
+): void {
+  if (!text) return
+  const last = turn.parts[turn.parts.length - 1]
+  if (last && last.kind === kind) {
+    last.text += text
+  } else {
+    turn.parts.push({ kind, key: `${kind}-${sequence}`, text })
+  }
+  if (kind === 'thinking') turn.thinkingText += text
+  else turn.assistantText += text
 }
 
 function isExactMultiChunkReplay(
@@ -122,19 +153,19 @@ export function groupEventsIntoTurns(events: AgentStreamEvent[]): TimelineTurn[]
         // complete prior chunks are required, preserving a legitimate single
         // repeated delta.
         if (isExactMultiChunkReplay(turn.assistantText, chunks, text)) break
-        turn.assistantText += text
+        appendTextPart(turn, 'text', text, event.stream_sequence)
         chunks.push(text)
         textChunksByTurn.set(toolMapKey, chunks)
         break
       }
       case 'thinking_delta':
-        turn.thinkingText += payloadString(event, 'text')
+        appendTextPart(turn, 'thinking', payloadString(event, 'text'), event.stream_sequence)
         break
       case 'tool_call_started': {
         const callId = (event.payload.tool_call_id as string | null) ?? event.call_id ?? null
         let argsText = ''
         try {
-          argsText = JSON.stringify(payloadRecord(event, 'args'))
+          argsText = JSON.stringify(payloadRecord(event, 'args'), null, 2)
         } catch {
           argsText = String(event.payload.args ?? '')
         }
@@ -150,6 +181,7 @@ export function groupEventsIntoTurns(events: AgentStreamEvent[]): TimelineTurn[]
           }
           toolMap.set(identity, tool)
           turn.tools.push(tool)
+          turn.parts.push({ kind: 'tool', key: tool.key, tool })
         }
         break
       }
@@ -168,24 +200,30 @@ export function groupEventsIntoTurns(events: AgentStreamEvent[]): TimelineTurn[]
           }
           toolMap.set(identity, tool)
           turn.tools.push(tool)
+          turn.parts.push({ kind: 'tool', key: tool.key, tool })
         }
         tool.status = payloadString(event, 'status') === 'failed' ? 'failed' : 'completed'
         tool.resultText = payloadString(event, 'result')
         break
       }
-      case 'error':
-        turn.errors.push({
-          key: `error-${event.message_id ?? 'event'}-${event.stream_sequence}`,
-          message: payloadString(event, 'message') || 'An error occurred.',
-        })
+      case 'error': {
+        const message = payloadString(event, 'message') || 'An error occurred.'
+        const errKey = `error-${event.message_id ?? 'event'}-${event.stream_sequence}`
+        turn.errors.push({ key: errKey, message })
+        // Paseo keeps protocol errors in stream order, not deferred to the
+        // turn's end. Surface them as ordered parts so a reconciliation error
+        // appears exactly where the provider emitted it.
+        turn.parts.push({ kind: 'error', key: errKey, message })
         break
-      case 'status':
-        turn.statuses.push({
-          key: `status-${event.message_id ?? 'event'}-${event.stream_sequence}`,
-          text: payloadString(event, 'text') || payloadString(event, 'message') ||
-            payloadString(event, 'status') || 'status update',
-        })
+      }
+      case 'status': {
+        const text = payloadString(event, 'text') || payloadString(event, 'message') ||
+          payloadString(event, 'status') || 'status update'
+        const statusKey = `status-${event.message_id ?? 'event'}-${event.stream_sequence}`
+        turn.statuses.push({ key: statusKey, text })
+        turn.parts.push({ kind: 'status', key: statusKey, text })
         break
+      }
       default:
         break
     }

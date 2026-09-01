@@ -747,6 +747,440 @@ def test_claude_adapter_skips_sidechain_and_meta():
     assert adapter.normalize_line(raw, _ctx()) == []
 
 
+def test_claude_two_assistant_messages_with_tool_no_reconcile_error() -> None:
+    """A single turn can contain two assistant messages (pre-tool thinking+tool,
+    post-tool thinking+text) separated by a user tool_result. The per-turn
+    accumulator must reset at each message_start so the second message's
+    thinking snapshot reconciles against its own deltas, not the first
+    message's accumulated thinking."""
+
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    adapter = ClaudeJsonlAdapter()
+    ctx = _ctx()
+    lines = [
+        {"type": "stream_event", "event": {"type": "message_start", "message": {"id": "msg1"}}},
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "thinking_delta", "thinking": "pre-tool thinking"},
+            },
+        },
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_start",
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "tu1",
+                    "name": "WebSearch",
+                    "input": {},
+                },
+            },
+        },
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "input_json_delta", "partial_json": '{"q":"poem"}'},
+            },
+        },
+        {"type": "stream_event", "event": {"type": "content_block_stop"}},
+        {"type": "stream_event", "event": {"type": "message_stop"}},
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "pre-tool thinking"},
+                    {"type": "tool_use", "id": "tu1", "name": "WebSearch", "input": {"q": "poem"}},
+                ]
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "tu1", "content": "search result"}
+                ]
+            },
+        },
+        {"type": "stream_event", "event": {"type": "message_start", "message": {"id": "msg2"}}},
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "thinking_delta", "thinking": "post-tool thinking"},
+            },
+        },
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "final answer"},
+            },
+        },
+        {"type": "stream_event", "event": {"type": "message_stop"}},
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "post-tool thinking"},
+                    {"type": "text", "text": "final answer"},
+                ]
+            },
+        },
+        {"type": "result", "subtype": "success"},
+    ]
+
+    events: List[Any] = []
+    for line in lines:
+        events.extend(adapter.normalize_line(line, ctx))
+
+    types = [e.type for e in events]
+    assert AgentStreamEventType.ERROR not in types
+    assert AgentStreamEventType.TURN_COMPLETED in types
+    # Both thinking segments and the final text are present.
+    thinking_text = "".join(
+        e.payload["text"] for e in events if e.type == AgentStreamEventType.THINKING_DELTA
+    )
+    assert "pre-tool thinking" in thinking_text
+    assert "post-tool thinking" in thinking_text
+    assistant_text = "".join(
+        e.payload["text"] for e in events if e.type == AgentStreamEventType.TEXT_DELTA
+    )
+    assert assistant_text == "final answer"
+
+
+def test_claude_genuine_text_mismatch_still_errors() -> None:
+    """When the final assistant text snapshot neither matches nor extends the
+    streamed deltas (a genuine protocol inconsistency), the adapter must still
+    fail closed with an ERROR event rather than silently dropping or
+    duplicating text."""
+
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    adapter = ClaudeJsonlAdapter()
+    ctx = _ctx()
+    lines = [
+        {"type": "stream_event", "event": {"type": "message_start", "message": {"id": "msg1"}}},
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "streamed"},
+            },
+        },
+        {"type": "stream_event", "event": {"type": "message_stop"}},
+        {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "different snapshot"}]},
+        },
+        {"type": "result", "subtype": "success"},
+    ]
+
+    events: List[Any] = []
+    for line in lines:
+        events.extend(adapter.normalize_line(line, ctx))
+
+    assert any(e.type == AgentStreamEventType.ERROR for e in events)
+
+
+def test_claude_streamed_tool_use_with_block_index_emits_single_tool_start() -> None:
+    """A streaming tool_use block carries its content-block ``index`` on
+    ``content_block_start``, every ``input_json_delta``, and
+    ``content_block_stop``. The adapter must assemble the partial JSON into the
+    tool's arguments and emit exactly one ``TOOL_CALL_STARTED`` at
+    ``content_block_stop`` — not one per delta, and not a duplicate from the
+    final assistant snapshot."""
+
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    adapter = ClaudeJsonlAdapter()
+    ctx = _ctx()
+    lines = [
+        {"type": "stream_event", "event": {"type": "message_start", "message": {"id": "msg1"}}},
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "tu1",
+                    "name": "WebSearch",
+                    "input": {},
+                },
+            },
+        },
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": '{"q":"'},
+            },
+        },
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": 'poem"}'},
+            },
+        },
+        {"type": "stream_event", "event": {"type": "content_block_stop", "index": 0}},
+        {"type": "stream_event", "event": {"type": "message_stop"}},
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "id": "tu1", "name": "WebSearch", "input": {"q": "poem"}},
+                ]
+            },
+        },
+        {"type": "result", "subtype": "success"},
+    ]
+
+    events: List[Any] = []
+    for line in lines:
+        events.extend(adapter.normalize_line(line, ctx))
+
+    tool_starts = [e for e in events if e.type == AgentStreamEventType.TOOL_CALL_STARTED]
+    assert len(tool_starts) == 1
+    assert tool_starts[0].payload["name"] == "WebSearch"
+    assert tool_starts[0].payload["args"] == {"q": "poem"}
+    assert tool_starts[0].call_id == "tu1"
+
+
+def test_claude_tool_snapshot_before_block_stop_emits_single_tool_start() -> None:
+    """Claude 2.1.159 emits the top-level assistant tool_use snapshot before
+    content_block_stop. The snapshot announces the call and the later block
+    stop must be deduplicated; the inverse ordering is covered separately."""
+
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    adapter = ClaudeJsonlAdapter()
+    ctx = _ctx()
+    lines = [
+        {
+            "type": "stream_event",
+            "event": {"type": "message_start", "message": {"id": "msg1"}},
+        },
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "tu1",
+                    "name": "WebSearch",
+                    "input": {},
+                },
+            },
+        },
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": '{"q":"poem"}',
+                },
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "id": "msg1",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tu1",
+                        "name": "WebSearch",
+                        "input": {"q": "poem"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "stream_event",
+            "event": {"type": "content_block_stop", "index": 1},
+        },
+    ]
+
+    events: List[Any] = []
+    for line in lines:
+        events.extend(adapter.normalize_line(line, ctx))
+
+    tool_starts = [e for e in events if e.type == AgentStreamEventType.TOOL_CALL_STARTED]
+    assert len(tool_starts) == 1
+    assert tool_starts[0].payload["args"] == {"q": "poem"}
+    assert tool_starts[0].call_id == "tu1"
+
+
+def test_claude_malformed_streamed_tool_args_fall_back_to_final_snapshot() -> None:
+    """A truncated input_json_delta is not authoritative. The adapter must
+    wait for the final assistant snapshot instead of emitting raw partial JSON
+    and suppressing the complete tool arguments."""
+
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    adapter = ClaudeJsonlAdapter()
+    ctx = _ctx()
+    lines = [
+        {
+            "type": "stream_event",
+            "event": {"type": "message_start", "message": {"id": "msg1"}},
+        },
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "tu1",
+                    "name": "WebSearch",
+                    "input": {},
+                },
+            },
+        },
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": '{"q":"poem'},
+            },
+        },
+        {"type": "stream_event", "event": {"type": "content_block_stop", "index": 0}},
+        {
+            "type": "assistant",
+            "message": {
+                "id": "msg1",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tu1",
+                        "name": "WebSearch",
+                        "input": {"q": "complete poem query"},
+                    }
+                ],
+            },
+        },
+    ]
+
+    events: List[Any] = []
+    for line in lines:
+        events.extend(adapter.normalize_line(line, ctx))
+
+    tool_starts = [e for e in events if e.type == AgentStreamEventType.TOOL_CALL_STARTED]
+    assert len(tool_starts) == 1
+    assert tool_starts[0].payload["args"] == {"q": "complete poem query"}
+
+
+def test_claude_final_only_two_assistant_messages_scoped_by_message_id() -> None:
+    """Final-only transcripts (no ``stream_event`` wrappers) can contain two
+    top-level ``assistant`` rows in one turn with different provider message
+    ids — e.g. ``msg_389`` (thinking + tool_use) then ``msg_3b0`` (thinking +
+    text) separated by a user ``tool_result``. The adapter must scope
+    text/thinking accumulation to the provider message id so the second
+    message's thinking snapshot reconciles against its own content, not the
+    first message's accumulated thinking. Without this, the second message's
+    thinking fails the ``startswith`` check and the turn errors out."""
+
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    adapter = ClaudeJsonlAdapter()
+    ctx = _ctx()
+    lines = [
+        {
+            "type": "assistant",
+            "message": {
+                "id": "msg_389",
+                "content": [
+                    {"type": "thinking", "thinking": "pre-tool thinking"},
+                    {"type": "tool_use", "id": "tu1", "name": "WebSearch", "input": {"q": "poem"}},
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "content": [{"type": "tool_result", "tool_use_id": "tu1", "content": "found"}]
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "id": "msg_3b0",
+                "content": [
+                    {"type": "thinking", "thinking": "post-tool thinking"},
+                    {"type": "text", "text": "final answer"},
+                ],
+            },
+        },
+        {"type": "result", "subtype": "success"},
+    ]
+
+    events: List[Any] = []
+    for line in lines:
+        events.extend(adapter.normalize_line(line, ctx))
+
+    types = [e.type for e in events]
+    assert AgentStreamEventType.ERROR not in types
+    thinking_text = "".join(
+        e.payload["text"] for e in events if e.type == AgentStreamEventType.THINKING_DELTA
+    )
+    assert "pre-tool thinking" in thinking_text
+    assert "post-tool thinking" in thinking_text
+    assistant_text = "".join(
+        e.payload["text"] for e in events if e.type == AgentStreamEventType.TEXT_DELTA
+    )
+    assert assistant_text == "final answer"
+
+
+def test_claude_consecutive_same_message_id_rows_accumulate() -> None:
+    """When two top-level ``assistant`` rows share the same provider message
+    id (e.g. a thinking row followed by a tool_use row for the same message),
+    the accumulator must NOT reset between them — they are fragments of one
+    message. Resetting would drop the thinking before the tool_use snapshot
+    reconciles."""
+
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    adapter = ClaudeJsonlAdapter()
+    ctx = _ctx()
+    lines = [
+        {
+            "type": "assistant",
+            "message": {"id": "msg_same", "content": [{"type": "thinking", "thinking": "thought"}]},
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "id": "msg_same",
+                "content": [{"type": "tool_use", "id": "tu1", "name": "Bash", "input": {}}],
+            },
+        },
+        {"type": "result", "subtype": "success"},
+    ]
+
+    events: List[Any] = []
+    for line in lines:
+        events.extend(adapter.normalize_line(line, ctx))
+
+    types = [e.type for e in events]
+    assert AgentStreamEventType.ERROR not in types
+    thinking_text = "".join(
+        e.payload["text"] for e in events if e.type == AgentStreamEventType.THINKING_DELTA
+    )
+    assert thinking_text == "thought"
+
+
 # ── Codex adapter normalization ──────────────────────────────────────────────
 
 

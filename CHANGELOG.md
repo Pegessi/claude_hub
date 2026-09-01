@@ -26,6 +26,46 @@
   emitted four native deltas through completion. Cursor emitted 21 deltas for a
   four-marker response, with every marker present exactly once.
 
+### fix: scope native stream reconciliation to provider message id and render ordered parts
+
+- **Root cause**: A Claude tool turn emits two assistant messages in one native
+  turn (thinking+tool_use, then, after the tool result, thinking+text). The
+  stream accumulator was turn-scoped, so the second message's final thinking
+  snapshot failed `startswith(accumulated)` against the first message's
+  thinking, producing the `assistant final thinking does not match streamed
+  deltas` error. Separately, the frontend flattened thinking, text, and tools
+  into fixed buckets and rendered text before tools, discarding the provider's
+  correct interleaved event order.
+- **Backend**: The text/thinking accumulator is now scoped to the provider
+  `message.id`. `message_start` and final-only assistant rows call
+  `_begin_provider_message`, which resets per-message buffers only when the id
+  changes; consecutive rows sharing an id keep accumulating. Streaming tool
+  args are assembled from `content_block_start`/`input_json_delta`/
+  `content_block_stop` and `TOOL_CALL_STARTED` is emitted at block stop with
+  parsed args when needed. Claude 2.1.x may deliver the authoritative
+  assistant tool snapshot either before or after block stop, so both paths
+  record and check the same tool id; whichever arrives second is suppressed.
+  Malformed streamed args defer to the authoritative final snapshot instead
+  of displaying a partial payload.
+  `emitted_tool_call_ids` remains turn-scoped. Genuine text/thinking
+  mismatches still fail closed.
+- **Frontend**: `TimelineTurn` now carries an ordered `parts[]` list
+  (`thinking`, `text`, `tool`, `error`, `status`) as the authoritative render
+  order; the flat `thinkingText`/`assistantText`/`tools` aggregates are kept
+  as derived views for existing callers. `StructuredPane` renders parts in
+  order, with paced reveal keyed per text part (not per turn), and protocol
+  errors/status appear inline rather than deferred to the turn end.
+- **Validation**: Focused agent-stream tests (53 passed) cover streamed tool
+  args with real block index, two-assistant-message turns scoped by message
+  id, both snapshot/block-stop orderings, malformed-argument fallback, same-id
+  consecutive-row accumulation, and genuine mismatch still erroring.
+  Frontend timeline tests (19) and full unit suite (140) pass;
+  ESLint, vue-tsc, and production build pass; Black, isort, and mypy pass.
+  A real day1 Claude/WebSearch browser turn on the isolated 5275/18173 preview
+  showed the waiting state and rendered `thinking → tool → thinking → text`;
+  the persisted stream contained one tool start, one completion, no error,
+  one final marker, and a completed turn.
+
 ### feat: separate Paseo Agent sessions from native Terminal sessions
 
 - **What**: The new-session flow now asks for a fixed `Agent` or `Terminal`
