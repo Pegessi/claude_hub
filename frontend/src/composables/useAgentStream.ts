@@ -7,6 +7,7 @@ import type {
 import { validateImageAttachment, fileToDataUrl } from '@/utils/agentStreamAttachments'
 import { createContiguousEventBuffer } from '@/utils/agentStreamSequence'
 import { AgentStreamBatcher } from '@/utils/agentStreamBatcher'
+import { StreamConnectionStateMachine } from '@/utils/streamConnectionStateMachine'
 
 export { validateImageAttachment, fileToDataUrl }
 
@@ -22,6 +23,13 @@ const API_BASE = '/api'
  */
 export type StreamConnectionState = 'idle' | 'hydrating' | 'live' | 'failed'
 export type StreamSource = 'managed-session' | 'terminal-tab'
+
+/**
+ * Hard upper bound on a single hydration fetch (capabilities or one events
+ * page). If the backend does not respond within this window the request is
+ * aborted and the stream fails closed rather than hanging on ``hydrating``.
+ */
+const HYDRATION_FETCH_TIMEOUT_MS = 15_000
 
 export interface UseAgentStreamApi {
   capabilities: ShallowRef<StreamCapabilities | null>
@@ -49,6 +57,19 @@ export interface UseAgentStreamApi {
  * when EventSource exists prevents a proxy-buffered or silently stale SSE
  * connection from freezing the visible timeline.
  *
+ * Generation ownership
+ * --------------------
+ * Every ``start`` (and ``stop``) advances an internal generation counter on
+ * the connection state machine. State transitions (``hydrating`` → ``live`` /
+ * ``failed``) are only honoured when the caller's generation id matches the
+ * current one. This prevents a superseded hydration that resolves late from
+ * flipping a newer generation's ``hydrating`` to ``live`` — the root cause of
+ * the permanent "Loading structured view" stall when switching tabs.
+ *
+ * Stale in-flight hydration fetches are cancelled via an ``AbortController``
+ * owned by the current generation, and ``applyPage`` is guarded by generation
+ * so a stale page cannot advance the shared sequence cursor.
+ *
  * Agent sessions never silently fall back to raw; the composable reports an
  * explicit retryable failure to StructuredPane.
  */
@@ -58,10 +79,13 @@ export function useAgentStream(): UseAgentStreamApi {
   const connectionState = ref<StreamConnectionState>('idle')
   const errorMessage = ref<string | null>(null)
 
+  const stateMachine = new StreamConnectionStateMachine()
+
   let currentSessionId: string | null = null
-  let currentSource: StreamSource = 'managed-session'
   let eventSource: EventSource | null = null
   let longPollAbort: AbortController | null = null
+  /** Aborts the in-flight capabilities / events hydration fetches. */
+  let hydrationAbort: AbortController | null = null
   // Stream sequences are zero-based and cursors are exclusive. SSE is only an
   // accelerator: future events stay buffered until long-poll fills every gap.
   const sequenceBuffer = createContiguousEventBuffer<AgentStreamEvent>()
@@ -86,7 +110,6 @@ export function useAgentStream(): UseAgentStreamApi {
     batcher.flushAndCancel()
     capabilities.value = null
     events.value = []
-    connectionState.value = 'idle'
     errorMessage.value = null
     sequenceBuffer.reset()
   }
@@ -105,7 +128,18 @@ export function useAgentStream(): UseAgentStreamApi {
     }
   }
 
-  function applyPage(page: AgentStreamEventPage) {
+  function abortHydration() {
+    if (hydrationAbort) {
+      hydrationAbort.abort()
+      hydrationAbort = null
+    }
+  }
+
+  function applyPage(page: AgentStreamEventPage, generationId: number) {
+    // A stale page (from a superseded generation) must not advance the shared
+    // sequence cursor; otherwise the current generation's events would be
+    // skipped because their stream_sequence is <= the stale cursor.
+    if (!stateMachine.isCurrent(generationId)) return
     const committed = sequenceBuffer.push(page.events)
     if (committed.length) enqueueEvents(committed)
   }
@@ -116,15 +150,50 @@ export function useAgentStream(): UseAgentStreamApi {
       : `${API_BASE}/workspaces/sessions/${sourceId}/stream`
   }
 
-  async function fetchCapabilities(streamPath: string): Promise<StreamCapabilities> {
-    const res = await fetch(`${streamPath}/capabilities`)
+  /**
+   * Fetch with a hard timeout. The request is aborted if it does not resolve
+   * within ``timeoutMs`` so hydration can never hang indefinitely.
+   */
+  async function fetchWithTimeout(
+    input: string,
+    init: RequestInit & { signal?: AbortSignal } = {},
+    timeoutMs: number,
+  ): Promise<Response> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    // Chain the caller's signal (if any) so an explicit abort also cancels.
+    const upstreamSignal = init.signal
+    const onUpstreamAbort = () => controller.abort()
+    if (upstreamSignal) {
+      if (upstreamSignal.aborted) controller.abort()
+      else upstreamSignal.addEventListener('abort', onUpstreamAbort, { once: true })
+    }
+    try {
+      return await fetch(input, { ...init, signal: controller.signal })
+    } finally {
+      clearTimeout(timer)
+      if (upstreamSignal) upstreamSignal.removeEventListener('abort', onUpstreamAbort)
+    }
+  }
+
+  async function fetchCapabilities(
+    streamPath: string,
+    signal: AbortSignal,
+  ): Promise<StreamCapabilities> {
+    const res = await fetchWithTimeout(`${streamPath}/capabilities`, { signal }, HYDRATION_FETCH_TIMEOUT_MS)
     if (!res.ok) throw new Error(`capabilities HTTP ${res.status}`)
     return (await res.json()) as StreamCapabilities
   }
 
-  async function fetchEvents(streamPath: string, since: number): Promise<AgentStreamEventPage> {
-    const res = await fetch(
+  async function fetchEvents(
+    streamPath: string,
+    since: number,
+    signal: AbortSignal,
+  ): Promise<AgentStreamEventPage> {
+    const res = await fetchWithTimeout(
       `${streamPath}/events?since_sequence=${since}&limit=200`,
+      { signal },
+      HYDRATION_FETCH_TIMEOUT_MS,
     )
     if (!res.ok) throw new Error(`events HTTP ${res.status}`)
     return (await res.json()) as AgentStreamEventPage
@@ -142,32 +211,39 @@ export function useAgentStream(): UseAgentStreamApi {
   }
 
   /** Authoritative live reconciliation loop; SSE is only an accelerator. */
-  async function longPollLoop(sourceId: string, streamPath: string) {
-    while (!stopped && currentSessionId === sourceId) {
+  async function longPollLoop(sourceId: string, streamPath: string, generationId: number) {
+    while (!stopped && currentSessionId === sourceId && stateMachine.isCurrent(generationId)) {
       try {
         const page = await waitEvents(streamPath, sequenceBuffer.cursor)
-        applyPage(page)
+        applyPage(page, generationId)
       } catch (err) {
-        if (stopped || currentSessionId !== sourceId) return
+        if (stopped || currentSessionId !== sourceId || !stateMachine.isCurrent(generationId)) return
         // Surface the failure and stop; the Agent surface stays fail-closed.
-        errorMessage.value = err instanceof Error ? err.message : 'stream wait failed'
-        connectionState.value = 'failed'
+        const message = err instanceof Error ? err.message : 'stream wait failed'
+        if (stateMachine.fail(generationId, message)) {
+          errorMessage.value = message
+          connectionState.value = 'failed'
+        }
         return
       }
     }
   }
 
-  function startSse(sourceId: string, streamPath: string) {
+  function startSse(sourceId: string, streamPath: string, generationId: number) {
     const url = `${streamPath}/live?since_sequence=${sequenceBuffer.cursor}`
     eventSource = new EventSource(url)
 
     eventSource.addEventListener('hello', (ev: MessageEvent) => {
+      if (!stateMachine.isCurrent(generationId)) return
       try {
         const caps = JSON.parse(ev.data) as StreamCapabilities
         capabilities.value = caps
         if (!caps.structured) {
-          errorMessage.value = 'structured observation unavailable for this session'
-          connectionState.value = 'failed'
+          const message = 'structured observation unavailable for this session'
+          if (stateMachine.fail(generationId, message)) {
+            errorMessage.value = message
+            connectionState.value = 'failed'
+          }
           stop()
         }
       } catch {
@@ -176,6 +252,7 @@ export function useAgentStream(): UseAgentStreamApi {
     })
 
     eventSource.addEventListener('agent-stream', (ev: MessageEvent) => {
+      if (!stateMachine.isCurrent(generationId)) return
       try {
         const evt = JSON.parse(ev.data) as AgentStreamEvent
         const committed = sequenceBuffer.push([evt])
@@ -186,7 +263,7 @@ export function useAgentStream(): UseAgentStreamApi {
     })
 
     eventSource.addEventListener('error', (ev: MessageEvent) => {
-      if (stopped || currentSessionId !== sourceId) return
+      if (stopped || currentSessionId !== sourceId || !stateMachine.isCurrent(generationId)) return
       // Long-poll remains authoritative. Retire a broken SSE connection rather
       // than waiting for a browser/proxy reconnect that may stay silently
       // buffered; the wait loop will surface a real session failure.
@@ -207,17 +284,29 @@ export function useAgentStream(): UseAgentStreamApi {
     stop()
     stopped = false
     currentSessionId = sourceId
-    currentSource = source
     reset()
+
+    const generationId = stateMachine.start()
     connectionState.value = 'hydrating'
+
+    // Abort controller for the current generation's hydration fetches. A newer
+    // start() (or stop()) will abort these, so a stale fetch cannot resolve
+    // against the current generation's state.
+    hydrationAbort = new AbortController()
+    const signal = hydrationAbort.signal
+
     const streamPath = streamBasePath(sourceId, source)
 
     try {
-      const caps = await fetchCapabilities(streamPath)
+      const caps = await fetchCapabilities(streamPath, signal)
+      if (!stateMachine.isCurrent(generationId)) return
       capabilities.value = caps
       if (!caps.structured) {
-        errorMessage.value = 'structured observation unavailable for this session'
-        connectionState.value = 'failed'
+        const message = 'structured observation unavailable for this session'
+        if (stateMachine.fail(generationId, message)) {
+          errorMessage.value = message
+          connectionState.value = 'failed'
+        }
         return
       }
 
@@ -225,27 +314,36 @@ export function useAgentStream(): UseAgentStreamApi {
       let since = -1
 
       while (true) {
-        const page = await fetchEvents(streamPath, since)
-        applyPage(page)
+        if (stopped || !stateMachine.isCurrent(generationId)) return
+        const page = await fetchEvents(streamPath, since, signal)
+        if (stopped || !stateMachine.isCurrent(generationId)) return
+        applyPage(page, generationId)
         since = page.next_sequence
         if (!page.has_more) break
       }
 
-      connectionState.value = 'live'
+      if (stopped || !stateMachine.isCurrent(generationId)) return
+
+      if (stateMachine.success(generationId)) {
+        connectionState.value = 'live'
+      }
 
       // Long-poll is the correctness path and wakes as soon as the backend
       // tailer publishes an event. SSE runs alongside it when available for
       // lower latency; applyPage/sequence checks deduplicate both paths.
       longPollAbort = new AbortController()
-      void longPollLoop(sourceId, streamPath)
+      void longPollLoop(sourceId, streamPath, generationId)
 
       if (typeof EventSource !== 'undefined') {
-        startSse(sourceId, streamPath)
+        startSse(sourceId, streamPath, generationId)
       }
     } catch (err) {
-      if (stopped || currentSessionId !== sourceId || currentSource !== source) return
-      errorMessage.value = err instanceof Error ? err.message : 'stream start failed'
-      connectionState.value = 'failed'
+      if (stopped || !stateMachine.isCurrent(generationId)) return
+      const message = err instanceof Error ? err.message : 'stream start failed'
+      if (stateMachine.fail(generationId, message)) {
+        errorMessage.value = message
+        connectionState.value = 'failed'
+      }
     }
   }
 
@@ -253,16 +351,22 @@ export function useAgentStream(): UseAgentStreamApi {
     stop()
     stopped = false
     currentSessionId = sourceId
-    currentSource = source
     reset()
+
+    const generationId = stateMachine.start()
     connectionState.value = 'hydrating'
+
+    hydrationAbort = new AbortController()
+    const signal = hydrationAbort.signal
+
     const streamPath = streamBasePath(sourceId, source)
 
     try {
-      const res = await fetch(`${streamPath}/retry`, {
-        method: 'POST',
-        credentials: 'same-origin',
-      })
+      const res = await fetchWithTimeout(
+        `${streamPath}/retry`,
+        { method: 'POST', credentials: 'same-origin', signal },
+        HYDRATION_FETCH_TIMEOUT_MS,
+      )
       if (!res.ok) {
         let detail = `retry HTTP ${res.status}`
         try {
@@ -275,9 +379,12 @@ export function useAgentStream(): UseAgentStreamApi {
       }
       await start(sourceId, source)
     } catch (err) {
-      if (stopped || currentSessionId !== sourceId || currentSource !== source) return
-      errorMessage.value = err instanceof Error ? err.message : 'stream retry failed'
-      connectionState.value = 'failed'
+      if (stopped || !stateMachine.isCurrent(generationId)) return
+      const message = err instanceof Error ? err.message : 'stream retry failed'
+      if (stateMachine.fail(generationId, message)) {
+        errorMessage.value = message
+        connectionState.value = 'failed'
+      }
     }
   }
 
@@ -286,6 +393,9 @@ export function useAgentStream(): UseAgentStreamApi {
     currentSessionId = null
     closeSse()
     abortLongPoll()
+    abortHydration()
+    stateMachine.stop()
+    connectionState.value = 'idle'
     // Flush any buffered events so the final state is committed before
     // teardown; cancel any pending flush timers.
     batcher.flushAndCancel()
