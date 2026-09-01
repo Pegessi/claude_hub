@@ -133,7 +133,7 @@ test('conversation attachments are compact buttons that open the image lightbox'
 test('attachment thumbnails have a bounded footprint instead of using intrinsic size', () => {
   const buttonRule = structuredPane.match(/\.turn-attachment-button\s*\{[\s\S]*?\}/)
   assert.ok(buttonRule, 'thumbnail button CSS must exist')
-  assert.match(buttonRule[0], /width:\s*clamp\(/)
+  assert.match(buttonRule[0], /width:\s*clamp\(80px,\s*10vw,\s*112px\)/)
   assert.match(buttonRule[0], /aspect-ratio:/)
   assert.match(buttonRule[0], /overflow:\s*hidden/)
 
@@ -142,6 +142,10 @@ test('attachment thumbnails have a bounded footprint instead of using intrinsic 
   assert.match(imageRule[0], /width:\s*100%/)
   assert.match(imageRule[0], /height:\s*100%/)
   assert.match(imageRule[0], /object-fit:\s*cover/)
+
+  const placeholderRule = structuredPane.match(/\.turn-attachment-placeholder\s*\{[\s\S]*?\}/)
+  assert.ok(placeholderRule, 'expired thumbnail placeholder CSS must exist')
+  assert.match(placeholderRule[0], /width:\s*clamp\(80px,\s*10vw,\s*112px\)/)
 })
 
 test('image lightbox supports backdrop, close button, and Escape', () => {

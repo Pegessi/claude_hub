@@ -1613,7 +1613,7 @@ onUnmounted(() => {
 }
 
 .turn-attachment-button {
-  width: clamp(112px, 18vw, 168px);
+  width: clamp(80px, 10vw, 112px);
   aspect-ratio: 4 / 3;
   display: block;
   padding: 0;
@@ -1647,7 +1647,7 @@ onUnmounted(() => {
 }
 
 .turn-attachment-placeholder {
-  width: clamp(112px, 18vw, 168px);
+  width: clamp(80px, 10vw, 112px);
   aspect-ratio: 4 / 3;
   display: grid;
   place-items: center;
