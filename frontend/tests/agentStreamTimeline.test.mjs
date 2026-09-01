@@ -58,6 +58,42 @@ test('text_delta appends to assistant text within the current turn', () => {
   assert.equal(turns[0].assistantText, 'Hello world')
 })
 
+test('historical multi-chunk final snapshot replays are hidden', () => {
+  const events = [
+    makeEvent(1, 'turn_started', { summary: 'poem' }, { turn_id: 'poem-turn' }),
+    makeEvent(2, 'text_delta', { text: '智涌' }, { turn_id: 'poem-turn' }),
+    makeEvent(3, 'text_delta', { text: '今朝\n' }, { turn_id: 'poem-turn' }),
+    makeEvent(4, 'text_delta', { text: '千机灯火' }, { turn_id: 'poem-turn' }),
+    makeEvent(5, 'text_delta', { text: '智涌今朝\n千机灯火' }, { turn_id: 'poem-turn' }),
+  ]
+  const turns = groupEventsIntoTurns(events)
+  assert.equal(turns[0].assistantText, '智涌今朝\n千机灯火')
+})
+
+test('historical replay repair supports multiple assistant messages in one turn', () => {
+  const events = [
+    makeEvent(1, 'turn_started', { summary: 'two messages' }, { turn_id: 'multi' }),
+    makeEvent(2, 'text_delta', { text: 'po' }, { turn_id: 'multi' }),
+    makeEvent(3, 'text_delta', { text: 'em' }, { turn_id: 'multi' }),
+    makeEvent(4, 'text_delta', { text: 'poem' }, { turn_id: 'multi' }),
+    makeEvent(5, 'text_delta', { text: 'ex' }, { turn_id: 'multi' }),
+    makeEvent(6, 'text_delta', { text: 'plain' }, { turn_id: 'multi' }),
+    makeEvent(7, 'text_delta', { text: 'explain' }, { turn_id: 'multi' }),
+  ]
+  const turns = groupEventsIntoTurns(events)
+  assert.equal(turns[0].assistantText, 'poemexplain')
+})
+
+test('a legitimate repeated single delta remains visible', () => {
+  const events = [
+    makeEvent(1, 'turn_started', { summary: 'repeat' }, { turn_id: 'repeat' }),
+    makeEvent(2, 'text_delta', { text: 'ha' }, { turn_id: 'repeat' }),
+    makeEvent(3, 'text_delta', { text: 'ha' }, { turn_id: 'repeat' }),
+  ]
+  const turns = groupEventsIntoTurns(events)
+  assert.equal(turns[0].assistantText, 'haha')
+})
+
 test('thinking_delta appends to thinking text within the current turn', () => {
   const events = [
     makeEvent(1, 'turn_started', { summary: 'Hi' }),

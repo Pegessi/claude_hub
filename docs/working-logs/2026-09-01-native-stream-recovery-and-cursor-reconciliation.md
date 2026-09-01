@@ -48,6 +48,11 @@ The same check is applied to timestamped assistant records and to final
 snapshot records. It is scoped to the most recent message suffix, so a single
 turn may still contain multiple assistant messages.
 
+The timeline fold mirrors this conservative check during hydration. This does
+not mutate or renumber the append-only event log; it only prevents an already
+persisted exact multi-chunk replay from being rendered a second time. Thus the
+fix repairs existing preview conversations as well as future provider output.
+
 ### First-activity feedback
 
 The structured timeline derives an `awaitingAgentActivity` state for an active
@@ -81,8 +86,12 @@ preferences.
 - Existing Cursor preview tab: one turn produced 21 text deltas followed by
   `turn_completed`; `ALPHA-ONE`, `BETA-TWO`, `GAMMA-THREE`, and
   `EXPLANATION-FOUR` each appeared exactly once in reconstructed text.
-- Frontend: 136 unit tests, ESLint, Vue type checking, and production build
+- Frontend: 139 unit tests, ESLint, Vue type checking, and production build
   passed. Python Black, isort, and mypy passed.
+- Headless Chromium hydration of the existing Cursor tab rendered the already
+  persisted poem title and explanation once each; the new four response markers
+  also appeared exactly once each within assistant bubbles, with no structured
+  failure banner.
 - The broad backend run reached 1,156 passed and 1 skipped, with 17 failures in
   pre-existing task-followup/session-seat and real ttyd/Playwright suites that
   do not touch the agent-stream modules. Representative failures reproduced in
