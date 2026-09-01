@@ -6,7 +6,7 @@
     @dragleave="handleDragLeave"
     @drop="handleDrop"
   >
-    <!-- Agent sessions fail closed on this surface. A stream failure never
+    <!-- Chat sessions fail closed on this surface. A stream failure never
          mounts a hidden raw terminal; users can retry or create a Terminal. -->
     <div
       v-if="connectionState !== 'live'"
@@ -45,7 +45,7 @@
       :class="{ 'is-timeline-hidden': timelinePhase !== 'revealed' }"
       role="log"
       aria-live="polite"
-      aria-label="Agent conversation"
+      aria-label="Chat conversation"
       @scroll.passive="handleTimelineScroll"
     >
       <div
@@ -61,7 +61,7 @@
             aria-hidden="true"
           >✦</span>
           <strong>Ready when you are</strong>
-          <p>Send a message below to start this agent conversation.</p>
+          <p>Send a message below to start this chat.</p>
         </div>
 
         <div
@@ -70,7 +70,7 @@
           v-memo="[turn.renderRevision, erroredAttachments.size]"
           class="structured-turn"
         >
-          <!-- A right-aligned user bubble and a left-aligned agent bubble make
+          <!-- A right-aligned user bubble and a left-aligned assistant bubble make
                this the same conversation as the terminal, not terminal text
                pasted into a second surface. -->
           <div
@@ -139,7 +139,7 @@
                 <i />
                 <i />
               </span>
-              <span>Waiting for agent response…</span>
+              <span>Waiting for response…</span>
             </div>
           </div>
 
@@ -273,7 +273,7 @@
             </div>
           </div>
           <div class="event-status event-status--pending">
-            <span>Waiting for agent activity…</span>
+            <span>Waiting for model activity…</span>
           </div>
         </div>
       </div>
@@ -333,7 +333,7 @@
             type="button"
             class="composer-attach-btn"
             aria-label="Attach image"
-            :title="supportsImages ? 'Attach image' : 'This agent does not support image attachments'"
+            :title="supportsImages ? 'Attach image' : 'This chat does not support image attachments'"
             :disabled="!supportsImages || isSending || isPreparingAttachments"
             @click="triggerFilePicker"
           >
@@ -408,9 +408,9 @@ import MarkdownContent from '@/components/MarkdownContent.vue'
 import type { WorkspaceAttachmentCreate } from '@/types'
 
 const props = defineProps<{
-  /** A Workspace-managed agent keeps the existing durable message path. */
+  /** A Workspace-managed Chat keeps the existing durable message path. */
   sessionId?: string
-  /** A normal Terminal agent tab owns its transcript directly. */
+  /** A direct Chat tab owns its transcript directly. */
   tabId?: string
 }>()
 
@@ -659,7 +659,7 @@ async function addFiles(files: FileList | File[]) {
 
   composerError.value = null
   if (!supportsImages.value) {
-    composerError.value = 'This agent does not support image attachments.'
+    composerError.value = 'This chat does not support image attachments.'
     return
   }
   // Serialize preparation batches: reject new input while a previous batch is
@@ -855,8 +855,8 @@ function onAttachmentError(_event: Event, att: TimelineAttachment): void {
 /**
  * Deliver composer input to the native provider transport via ``/stream/send``.
  *
- * StructuredPane is only mounted for AGENT sessions (session_kind=agent).
- * Both workspace-managed sessions (sessionId) and direct agent tabs (tabId)
+ * StructuredPane is only mounted for CHAT sessions (session_kind=chat).
+ * Both workspace-managed sessions (sessionId) and direct Chat tabs (tabId)
  * route through the native transport's atomic send_message(text, images), so
  * text and images are staged + submitted together — no leaked attachments
  * across turns, no split-brain with a hidden xterm shell.

@@ -7,7 +7,7 @@
     @dragleave="handleDragLeave"
     @drop="handleDrop"
   >
-    <!-- The session kind is fixed at creation: Agent sessions own the
+    <!-- The session kind is fixed at creation: Chat sessions own the
          structured conversation surface, while Terminal sessions own raw PTY. -->
     <div
       v-if="pane.tabId"
@@ -25,7 +25,7 @@
       </div>
 
       <button
-        v-if="!isAgentSession"
+        v-if="!isChatSession"
         type="button"
         class="pane-action-button"
         :class="{ refreshing: isRefreshingHistory }"
@@ -56,9 +56,9 @@
     </div>
 
     <!-- Session kind is an ownership boundary: Terminal mounts raw PTY and
-         Agent mounts structured UI. There is no silent cross-mode fallback. -->
+         Chat mounts structured UI. There is no silent cross-mode fallback. -->
     <div
-      v-if="pane.tabId && !isAgentSession"
+      v-if="pane.tabId && !isChatSession"
       class="pane-terminal"
     >
       <TerminalView
@@ -67,10 +67,10 @@
       />
     </div>
 
-    <!-- All Agent providers use the native structured endpoint. If provider
+    <!-- All Chat providers use the native structured endpoint. If provider
          setup fails, StructuredPane shows an explicit retryable error. -->
     <div
-      v-if="pane.tabId && isAgentSession"
+      v-if="pane.tabId && isChatSession"
       class="pane-structured"
     >
       <StructuredPane
@@ -109,7 +109,7 @@ const paneTab = computed<TerminalTab | undefined>(() =>
 )
 const tabName = computed(() => paneTab.value?.name || '')
 const agentType = computed(() => paneTab.value?.agent_type)
-const isAgentSession = computed(() => paneTab.value?.session_kind === 'agent')
+const isChatSession = computed(() => paneTab.value?.session_kind === 'chat')
 
 // Workspace sessions keep their existing durable messaging path. A normal AI
 // tab has no Workspace board row, so it is observed by its own transcript via
@@ -119,7 +119,7 @@ const managedSession = computed(() =>
 )
 
 const directStructuredTabId = computed(() => {
-  if (!isAgentSession.value || managedSession.value || !paneTab.value) return undefined
+  if (!isChatSession.value || managedSession.value || !paneTab.value) return undefined
   const type = paneTab.value.agent_type
   if (type === 'claude' || type === 'codex' || type === 'cursor') return paneTab.value.id
   return undefined
@@ -140,7 +140,7 @@ const providerLabel = computed(() => {
 })
 
 const sessionStatusLabel = computed(() => {
-  if (isAgentSession.value) return `${providerLabel.value} Agent · native structured`
+  if (isChatSession.value) return `${providerLabel.value} Chat · native structured`
   return `${providerLabel.value} Terminal · native TUI`
 })
 

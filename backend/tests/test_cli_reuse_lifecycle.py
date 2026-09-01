@@ -2520,6 +2520,12 @@ def test_legacy_session_normalizes_caller_owned_ephemeral() -> None:
     manager = WorkspaceManager()
     normalized = manager._normalize_session_item({"id": "s", "tab_id": "t"})
     assert normalized.get("caller_owned_ephemeral") is False
+    assert normalized.get("session_kind") == "terminal"
+
+    retired_chat = manager._normalize_session_item(
+        {"id": "chat-s", "tab_id": "chat-t", "session_kind": "agent"}
+    )
+    assert retired_chat.get("session_kind") == "chat"
 
 
 def test_find_compatible_same_env_reuses(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:

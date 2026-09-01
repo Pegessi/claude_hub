@@ -194,15 +194,15 @@ def _terminal_tab_session_or_404(tab_id: str) -> ManagedSession:
     return session
 
 
-def _is_agent_native(session: ManagedSession) -> bool:
+def _is_chat_native(session: ManagedSession) -> bool:
     """True when the session must use its native provider transport.
 
-    AGENT sessions own a single native ``ProviderSession`` as their real-time
+    CHAT sessions own a single native ``ProviderSession`` as their real-time
     source. The only exception is Cursor's explicit ``terminal_transcript``
     compatibility mode, which keeps the transcript-file tailer.
     """
 
-    if session.session_kind != SessionKind.AGENT:
+    if session.session_kind != SessionKind.CHAT:
         return False
     if session.agent_type == AgentType.CURSOR and session.cursor_transport == "terminal_transcript":
         return False
@@ -215,7 +215,7 @@ async def _capabilities_for(
 ) -> StreamCapabilities:
     """Return structured-stream capabilities for ``session``.
 
-    For AGENT sessions the native provider transport is the sole owner of the
+    For CHAT sessions the native provider transport is the sole owner of the
     real-time stream, so capabilities (including ``supports_images``) come
     from the transport. Transcript discovery is only used for TERMINAL
     sessions and Cursor's ``terminal_transcript`` fallback.
@@ -226,7 +226,7 @@ async def _capabilities_for(
 
     manager = manager or _get_tailer_manager()
 
-    if _is_agent_native(session):
+    if _is_chat_native(session):
         # Ensure the tailer (and its native transport) exist. ``ensure_started``
         # creates the transport synchronously; it does not require a turn to
         # have been sent.
@@ -338,7 +338,7 @@ async def get_tab_stream_capabilities(
     tab_id: str,
     current_user: User = Depends(get_current_user),
 ) -> StreamCapabilities:
-    """Return structured-stream capability for a Terminal-created agent tab."""
+    """Return structured-stream capability for a direct Chat tab."""
 
     session = _terminal_tab_session_or_404(tab_id)
     return await _tab_capabilities_for(session, _get_tab_tailer_manager())
@@ -749,7 +749,7 @@ async def get_stream_diagnostics(
         if source is not None:
             tail_path = str(source)
         last_error = tailer.last_error
-        # For AGENT sessions the native transport is the source; surface its
+        # For CHAT sessions the native transport is the source; surface its
         # error if the transport creation failed.
         if tailer.native_error is not None and not last_error:
             last_error = tailer.native_error
@@ -1042,16 +1042,16 @@ async def _send_to_native(
 ) -> None:
     """Deliver composer input to the native provider transport atomically.
 
-    AGENT sessions own a single ``ProviderSession`` that is both the stream
+    CHAT sessions own a single ``ProviderSession`` that is both the stream
     source and the input sink. Text and images are delivered together via
     ``send_message`` so a failed send never leaves staged images that could
-    pollute a later turn. This is the only input path for AGENT sessions —
+    pollute a later turn. This is the only input path for CHAT sessions —
     it must never fall back to tmux or the workspace outbox.
     """
-    if not _is_agent_native(session):
+    if not _is_chat_native(session):
         raise HTTPException(
             status_code=400,
-            detail="native composer input is only available for AGENT sessions",
+            detail="native composer input is only available for CHAT sessions",
         )
 
     images, previews = _decode_attachments(payload.attachments)

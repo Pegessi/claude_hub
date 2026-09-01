@@ -17,6 +17,21 @@ async def test_list_tabs_empty(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_tab_rejects_retired_agent_session_kind(client: AsyncClient) -> None:
+    response = await client.post(
+        "/api/tabs",
+        json={
+            "name": "Retired Agent Surface",
+            "agent_type": "claude",
+            "session_kind": "agent",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "session_kind" in response.text
+
+
+@pytest.mark.asyncio
 async def test_update_tab_order_route_not_shadowed(
     client: AsyncClient, monkeypatch: MonkeyPatch
 ) -> None:

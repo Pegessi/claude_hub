@@ -53,7 +53,7 @@ from claude_hub.services.agent_stream.tailer import SessionTailer
 def test_terminal_tab_stream_session_uses_tab_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A Terminal-created agent tab is a stream source without a Workspace row."""
+    """A direct Chat tab is a stream source without a Workspace row."""
 
     from claude_hub.api import agent_stream as agent_stream_api
 
@@ -74,7 +74,7 @@ def test_terminal_tab_stream_session_uses_tab_metadata(
         cursor_transcript_path=None,
         cursor_transcript_schema=None,
         agent_type=AgentType.CLAUDE,
-        session_kind=SessionKind.AGENT,
+        session_kind=SessionKind.CHAT,
     )
     monkeypatch.setattr(agent_stream_api.ttyd_manager, "get_tab", lambda tab_id: tab)
 
@@ -121,7 +121,7 @@ def test_terminal_tab_stream_session_uses_backend_cwd_when_tab_cwd_is_unset(
         cursor_transcript_path=None,
         cursor_transcript_schema=None,
         agent_type=AgentType.CLAUDE,
-        session_kind=SessionKind.AGENT,
+        session_kind=SessionKind.CHAT,
     )
     monkeypatch.setattr(agent_stream_api.ttyd_manager, "get_tab", lambda tab_id: tab)
     monkeypatch.setattr(agent_stream_api.os, "getcwd", lambda: "/preview/backend")
@@ -153,7 +153,7 @@ def test_verified_flag_survives_get_tab_to_native_resume(
         port=12499,
         name="Resume Claude",
         agent_type=AgentType.CLAUDE,
-        session_kind=SessionKind.AGENT,
+        session_kind=SessionKind.CHAT,
         agent_session_id="captured-conv-id",
         agent_session_id_verified=True,
     )
@@ -197,7 +197,7 @@ def test_unverified_flag_uses_session_id_not_resume(
         port=12498,
         name="Constructive Claude",
         agent_type=AgentType.CLAUDE,
-        session_kind=SessionKind.AGENT,
+        session_kind=SessionKind.CHAT,
         agent_session_id="constructive-id",
         agent_session_id_verified=False,
     )

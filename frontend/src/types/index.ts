@@ -1,5 +1,5 @@
 export type AgentType = 'claude' | 'codex' | 'cursor' | 'terminal'
-export type SessionKind = 'agent' | 'terminal'
+export type SessionKind = 'chat' | 'terminal'
 export type ExecutionTarget = 'local' | 'remote'
 export type AgentRuntimeStatus = 'idle' | 'working' | 'attention' | 'offline'
 export type AppMode = 'terminal' | 'workspace'
@@ -515,7 +515,7 @@ export interface ManagedSession {
   last_activity_at?: string | null
 }
 
-// ── Structured agent-stream (Layer B observation plane) ─────────────────────
+// ── Structured Chat stream (Layer B observation plane) ───────────────────────
 
 export interface StreamCapabilities {
   structured: boolean

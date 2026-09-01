@@ -803,7 +803,7 @@ def test_send_path_persists_preview_only_not_original_bytes(
         tab_id="t1",
         role=WorkspaceSessionRole.WORKER,
         agent_type=AgentType.CLAUDE,
-        session_kind=SessionKind.AGENT,
+        session_kind=SessionKind.CHAT,
         status=ManagedSessionStatus.WORKING,
         title="test",
         workspace_path="/tmp/ws",

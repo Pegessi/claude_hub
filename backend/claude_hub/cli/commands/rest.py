@@ -8,7 +8,12 @@ import click
 
 from claude_hub.cli import main as cli_main
 from claude_hub.cli.client import HubError
-from claude_hub.cli.commands.common import merge_payload, parse_kv_pairs, parse_query_pairs
+from claude_hub.cli.commands.common import (
+    merge_payload,
+    parse_json_object,
+    parse_kv_pairs,
+    parse_query_pairs,
+)
 from claude_hub.cli.output import emit, print_rows
 
 
@@ -146,6 +151,9 @@ def _tab_body(
     remote_reconnect: Optional[bool] = None,
     env_values: tuple = (),
 ) -> Dict[str, Any]:
+    raw_payload = parse_json_object(payload_json)
+    if raw_payload.get("session_kind") == "agent":
+        raise click.ClickException("session_kind='agent' is retired; use 'chat' or 'terminal'.")
     body = merge_payload(
         payload_json,
         name=name,
@@ -177,7 +185,7 @@ def _tab_body(
 )
 @click.option(
     "--session-kind",
-    type=click.Choice(["agent", "terminal"]),
+    type=click.Choice(["chat", "terminal"]),
     default="terminal",
     help="Fixed UI surface for the session.",
 )

@@ -1,90 +1,89 @@
-# 2026-09-01 — Paseo Agent / Terminal Session Separation
+# 2026-09-01 — Paseo Chat / Terminal Session Separation
 
 ## System overview
 
-Claude Hub now follows Paseo's product boundary: **Agent** and **Terminal** are
-different session types, not two presentation modes for the same tab.
+Claude Hub follows Paseo's product boundary: **Chat** and **Terminal** are
+different session types, not presentation modes for the same tab.
 
-- Agent: Claude, Codex, or Cursor provider; fixed structured conversation UI;
-  text and image composer; normalized transcript-backed timeline.
-- Terminal: Claude, Codex, Cursor, or a plain shell profile; fixed native PTY
-  UI with complete keyboard/TUI behavior.
+- Chat: a Claude, Codex, or Cursor provider with a fixed structured timeline,
+  text/image composer, and provider-native event stream.
+- Terminal: a Claude, Codex, Cursor, or plain shell profile with a fixed native
+  PTY and complete keyboard/TUI behavior.
 
-Both kinds may use the same workspace and cwd. They do not promise identical
-conversation state or token-by-token rendering.
-
-## Module design
-
-`SessionKind` is persisted on every tab as `agent` or `terminal`. It is
-orthogonal to `AgentType`, which still chooses the executable/profile.
+The persisted `SessionKind` contract is `chat | terminal`. `AgentType` remains
+orthogonal and selects the provider executable. The retired persisted value
+`agent` is accepted only by state-load migration and is normalized to `chat`;
+new API, CLI, and frontend requests never emit it.
 
 ```text
 new session
-├── Agent + Claude/Codex/Cursor -> StructuredPane
-│   └── hidden TerminalView keeps the current CLI transport/input bridge alive
-└── Terminal + Claude/Codex/Cursor/plain shell -> visible TerminalView
+├── Chat + Claude/Codex/Cursor -> StructuredPane + native ProviderSession
+└── Terminal + provider/plain shell -> TerminalView + ttyd/tmux
 ```
 
-`TabBar.vue` owns the explicit creation choice. `TerminalPane.vue` has no view
-toggle and selects exactly one user-facing surface from `session_kind`.
-`ttyd_manager.py` persists the choice, preserves it on duplicate, and migrates
-legacy state:
+Workspace orchestrator/reviewer/worker sessions remain Terminal control-plane
+runners even when their provider is Claude, Codex, or Cursor. A provider type
+must never imply a Chat surface.
 
-- standalone rows without `session_kind` -> `terminal`;
-- managed workspace rows with a non-terminal provider -> `agent`.
+## Chat identity and persistence
 
-The terminal manager classifies managed non-shell workspace tabs as Agent at
-its persistence boundary. Direct local Cursor Agent creation also pins the
-verified Cursor version, data root, conversation
-ID, transcript path, and schema needed by the existing transcript adapter.
-Cursor Terminal creation deliberately leaves the transport as native terminal.
+Each Chat owns an independent durable identity:
 
-## Current update semantics
+- Hub tab/session id and provider type;
+- provider conversation/thread id once verified;
+- append-only structured event history with monotonic sequence numbers;
+- bounded attachment preview cache.
 
-The structured plane continues to observe provider transcript files and emits
-normalized blocks through the existing sequence-based stream. This is suitable
-for turn/block-level updates but is not a promise of native per-token streaming.
-Claude Agent SDK, Codex app-server, and Cursor ACP are deferred transport work.
-They can replace the observation source later without changing the Agent /
-Terminal product model introduced here.
+Deleting a Chat stops its provider/tailer and removes its structured history,
+cursor, and bounded previews. Merely switching tabs does not delete anything.
 
-## Claude startup interaction gate
+## Connection and runtime lifecycle
 
-Claude 2.1.159 displays a one-time responsibility disclaimer when
-`--dangerously-skip-permissions` starts in a configuration domain that has not
-accepted it. That prompt is visible in Terminal but is intentionally hidden by
-the Agent surface. Sending a normal chat message at that point submits the
-dialog's default `No, exit` choice, leaving the optimistic user bubble waiting
-while Claude has already returned to the shell.
+The browser does not keep every open Chat connected forever.
 
-For a structured Agent, selecting Solo Mode is the explicit request to launch
-with `--dangerously-skip-permissions`. Claude Hub therefore supplies a
-secret-free inline settings acknowledgement for that combination only. It
-does not modify the user's global `~/.claude.json`; Claude Terminal sessions
-retain the native warning and interactive choice.
+1. Each visible `StructuredPane` hydrates persisted history, opens SSE as a
+   latency accelerator, and holds one authoritative long poll. Both paths are
+   sequence-deduplicated.
+2. Switching away or unmounting the pane closes its EventSource, aborts the
+   long poll, and aborts any outstanding hydration. Multi-pane layouts keep one
+   pair of subscriptions per visible Chat.
+3. The backend shares one `SessionTailer` per Chat across all subscribers. Once
+   the last subscriber leaves, the tailer receives a five-minute grace period
+   before its provider transport is stopped.
+4. Returning to the Chat restarts the tailer if needed, rehydrates the durable
+   event log, and resumes the verified provider conversation id.
 
-The live reproduction also exposed an independent persistence boundary: a
-named tmux server retains the global environment of the process that first
-created it. An integration test had left the preview server with a pytest
-temporary `HOME` and `PATH`, so later real Agents launched in the wrong Claude
-configuration domain. `_ensure_tmux_server` now refreshes stable launch keys
-from the current backend and removes pytest ownership markers before any new
-pane is created.
+Provider process ownership differs by CLI:
+
+- Claude and Cursor use a streaming subprocess per submitted turn and resume
+  subsequent turns from the persisted conversation id.
+- Codex uses a persistent `codex app-server --stdio` process while the backend
+  tailer is warm; the five-minute zero-subscriber reaper releases it.
+- Terminal sessions keep their tmux session independently of the browser;
+  their raw WebSocket exists only while a Terminal view is mounted.
+
+This is therefore an active-window resource model with durable recovery, not
+one permanent browser/provider connection per tab. Rapid Chat switching may
+rehydrate history again; a future in-memory timeline cache can optimize that
+without changing provider ownership.
+
+Current limitation: idle reaping checks only subscriber count and elapsed
+time. If every pane leaves a Chat while an unusually long provider turn is
+still running, the five-minute reaper can stop that transport. Protecting an
+in-flight turn from zero-subscriber reaping is a follow-up; it is not part of
+the current lifecycle guarantee.
 
 ## Key issues / pitfalls
 
-- Do not infer the surface from `agent_type`: a Claude/Codex/Cursor executable
-  is valid in both Agent and Terminal sessions.
-- Do not reintroduce a per-pane Paseo toggle. A user chooses the session kind
-  when creating the session.
-- Keep the hidden Agent PTY mounted until native provider transports replace
-  it; the current composer sends ordered input through that owner.
-- Refresh the named tmux server environment even when the server already
-  exists. A process restart alone does not replace tmux's retained global
-  environment.
-- Never copy credentials into tmux's global environment. Provider credentials
-  remain in per-tab mode-0600 launch wrappers/settings.
-- Unsupported structured provenance must show an Agent-surface error. It must
-  not silently reveal the raw terminal, because that changes the selected
-  product contract.
-- Legacy standalone tabs remain Terminal to avoid surprising upgrades.
+- Do not infer `session_kind` from `agent_type`.
+- Do not reintroduce a per-pane Chat/Terminal toggle; the choice is fixed at
+  creation.
+- A Chat must fail closed when its native structured transport is unavailable;
+  it must not silently reveal a raw Terminal.
+- State migration may read the retired string `agent`, but all new persistence
+  must write `chat`.
+- The current zero-subscriber reaper can terminate a turn that remains in
+  flight beyond the five-minute grace period. A future fix must make idle
+  eligibility depend on both subscriber count and provider turn state.
+- Provider credentials remain in per-tab mode-0600 launch wrappers/settings,
+  never in tmux's global environment.

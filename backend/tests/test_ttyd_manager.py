@@ -441,36 +441,45 @@ def test_tab_session_kind_defaults_to_terminal_and_round_trips() -> None:
         name="Legacy",
         agent_type=AgentType.CLAUDE,
     )
-    agent = TTYDProcess(
-        tab_id="agent-tab",
+    chat = TTYDProcess(
+        tab_id="chat-tab",
         port=12347,
         name="Agent",
         agent_type=AgentType.CLAUDE,
-        session_kind=SessionKind.AGENT,
+        session_kind=SessionKind.CHAT,
     )
 
     assert legacy.session_kind == SessionKind.TERMINAL
     assert legacy.to_dict()["session_kind"] == "terminal"
     assert legacy.to_schema().session_kind == SessionKind.TERMINAL
-    assert agent.session_kind == SessionKind.AGENT
-    assert agent.to_dict()["session_kind"] == "agent"
-    assert agent.to_schema().session_kind == SessionKind.AGENT
+    assert chat.session_kind == SessionKind.CHAT
+    assert chat.to_dict()["session_kind"] == "chat"
+    assert chat.to_schema().session_kind == SessionKind.CHAT
 
 
-def test_structured_agent_session_rejects_plain_terminal_provider() -> None:
-    with pytest.raises(ValueError, match="Agent sessions require"):
+def test_structured_chat_session_rejects_plain_terminal_provider() -> None:
+    with pytest.raises(ValueError, match="Chat sessions require"):
         TerminalTabCreate(
             name="Invalid Agent",
             agent_type=AgentType.TERMINAL,
-            session_kind=SessionKind.AGENT,
+            session_kind=SessionKind.CHAT,
+        )
+
+
+def test_new_session_contract_rejects_retired_agent_kind() -> None:
+    with pytest.raises(ValueError, match="session_kind"):
+        TerminalTabCreate(
+            name="Retired kind",
+            agent_type=AgentType.CLAUDE,
+            session_kind="agent",
         )
 
 
 @pytest.mark.asyncio
-async def test_direct_cursor_agent_uses_native_transport(
+async def test_direct_cursor_chat_uses_native_transport(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Direct user AGENT cursor tabs use the native ProviderSession transport
+    """Direct user CHAT cursor tabs use the native ProviderSession transport
     (not the legacy terminal_transcript mode). The native transport owns the
     Cursor process and produces the structured stream."""
     manager = TTYDManager.__new__(TTYDManager)
@@ -494,7 +503,7 @@ async def test_direct_cursor_agent_uses_native_transport(
         name="Cursor Agent",
         cwd=str(tmp_path),
         agent_type=AgentType.CURSOR,
-        session_kind=SessionKind.AGENT,
+        session_kind=SessionKind.CHAT,
     )
 
     process = manager.processes[tab.id]
@@ -533,11 +542,11 @@ async def test_cursor_terminal_session_keeps_native_terminal_transport(
 
 
 @pytest.mark.asyncio
-async def test_managed_nonterminal_tab_stays_terminal_unless_explicit_agent(
+async def test_managed_nonterminal_tab_stays_terminal_unless_explicit_chat(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Managed task runners (workspace tabs without explicit session_kind=AGENT)
-    must keep raw TUI Terminal semantics. Only an explicit SessionKind.AGENT
+    """Managed task runners (workspace tabs without explicit session_kind=CHAT)
+    must keep raw TUI Terminal semantics. Only an explicit SessionKind.CHAT
     from the caller promotes a tab to the native/inert structured surface."""
     manager = TTYDManager.__new__(TTYDManager)
     manager._next_port = 12350
@@ -567,16 +576,16 @@ async def test_managed_nonterminal_tab_stays_terminal_unless_explicit_agent(
 
     assert tab.session_kind == SessionKind.TERMINAL
 
-    # An explicit SessionKind.AGENT (direct user Agent tab) is honored.
-    agent_tab = await manager.create_tab(
-        name="User Agent",
+    # An explicit SessionKind.CHAT (direct user Chat tab) is honored.
+    chat_tab = await manager.create_tab(
+        name="User Chat",
         cwd=str(tmp_path),
         agent_type=AgentType.CLAUDE,
         workspace_id="workspace-1",
-        session_kind=SessionKind.AGENT,
+        session_kind=SessionKind.CHAT,
     )
 
-    assert agent_tab.session_kind == SessionKind.AGENT
+    assert chat_tab.session_kind == SessionKind.CHAT
 
 
 def test_non_solo_codex_initial_launch_translates_model_and_keeps_env_wrapper(
@@ -833,7 +842,7 @@ def test_claude_solo_env_model_is_passed_as_startup_model_flag(
 
 
 def test_structured_claude_solo_uses_native_transport_not_tmux_cli() -> None:
-    """For structured (AGENT) Claude solo sessions, the tmux pane hosts an
+    """For structured (CHAT) Claude solo sessions, the tmux pane hosts an
     inert user shell — the native ProviderSession owns the Claude process and
     applies ``--dangerously-skip-permissions`` directly. The tmux command
     must NOT embed ``--settings`` or launch the provider CLI."""
@@ -843,7 +852,7 @@ def test_structured_claude_solo_uses_native_transport_not_tmux_cli() -> None:
         name="Structured Claude Solo",
         solo_mode=True,
         agent_type=AgentType.CLAUDE,
-        session_kind=SessionKind.AGENT,
+        session_kind=SessionKind.CHAT,
         shell="claude",
         env={"ANTHROPIC_MODEL": "gateway/model"},
     )
@@ -852,7 +861,7 @@ def test_structured_claude_solo_uses_native_transport_not_tmux_cli() -> None:
     # The last token is the actual shell launched inside the env wrapper.
     launched_shell = shlex.split(cmd[-1])[-1]
 
-    # AGENT sessions run an inert user shell in tmux; the native transport
+    # CHAT sessions run an inert user shell in tmux; the native transport
     # owns the provider CLI and its solo-mode flags.
     assert launched_shell not in ("claude", "codex", "agent")
     assert "--settings" not in cmd[-1]
@@ -3249,7 +3258,7 @@ def test_legacy_missing_session_kind_reloads_as_terminal(
     """Legacy persisted tabs (no ``session_kind`` key) are managed task TUI
     runners on the Hub control plane. They must reload as ``SessionKind.TERMINAL``
     so they keep raw TUI semantics — never auto-promoted to the native/inert
-    Agent surface. An explicit persisted ``session_kind=agent`` is honored."""
+    Chat surface. An old persisted ``session_kind=agent`` migrates to Chat."""
     state_file = tmp_path / "tabs.json"
     monkeypatch.setattr(ttyd_manager_module, "STATE_FILE", state_file)
 
@@ -3280,7 +3289,7 @@ def test_legacy_missing_session_kind_reloads_as_terminal(
         },
         {
             "id": "tab-explicit-agent",
-            "name": "Explicit Agent",
+            "name": "Legacy Explicit Agent",
             "shell": "claude",
             "cwd": "/x",
             "solo_mode": False,
@@ -3302,8 +3311,8 @@ def test_legacy_missing_session_kind_reloads_as_terminal(
     # agent_type or workspace_id — they are managed task runners.
     assert manager.processes["tab-legacy-claude"].session_kind == SessionKind.TERMINAL
     assert manager.processes["tab-legacy-codex"].session_kind == SessionKind.TERMINAL
-    # Explicit persisted session_kind=agent is honored.
-    assert manager.processes["tab-explicit-agent"].session_kind == SessionKind.AGENT
+    # The retired persisted value is upgraded at the load boundary.
+    assert manager.processes["tab-explicit-agent"].session_kind == SessionKind.CHAT
 
 
 def test_agent_session_id_verified_round_trips_through_state(
