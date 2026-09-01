@@ -5,6 +5,27 @@
 
 ## Unreleased
 
+### fix: structured timeline scroll replay during history hydration
+
+- **Activation gate** (`timelineActivation.ts`): the structured timeline is
+  not revealed until authoritative history has been hydrated. While hidden
+  (`phase: 'hidden' | 'pinning'`), live updates and resize events do not
+  drive scroll behaviour. When the stream goes `live`, the tail is pinned
+  synchronously (after Vue's DOM commit, before the browser paints) and only
+  then is the timeline revealed — the first painted frame is already at the
+  tail, eliminating the visible "history replays from top to bottom" effect.
+- **Synchronous tail pinning**: `requestLatestAnchor` now applies
+  `scrollTop = scrollHeight` directly inside `nextTick` (no intervening
+  `requestAnimationFrame`). A single verification rAF re-sticks if Markdown /
+  image / font layout changed the scroll height.
+- **Detached viewport preserved**: `detachFromTail` (user scrolls up) sets
+  `followOutput = false`; live updates and `ResizeObserver` only re-stick
+  while `followOutput` is true, so a deliberately detached viewport is never
+  hijacked. `jumpToLatest` / tab switch explicitly `rearmFollow`.
+- **`connectionState` watch is `immediate`**: covers the cached-stream case
+  where the composable is already `live` when the pane mounts (quick tab
+  switch-back), so the pin-and-reveal sequence still runs.
+
 ### fix: permanent "Loading structured view" when switching to Codex tab
 
 - **Generation-owned connection state**: `StreamConnectionStateMachine`
