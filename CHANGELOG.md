@@ -5,6 +5,32 @@
 
 ## Unreleased
 
+### perf: optimize Paseo stream rendering under long Thinking bursts
+
+- **Backend coalescer**: Added `agent_stream/coalescer.py` — a leading-edge
+  immediate flush + trailing 60ms timer coalescer that merges same-stream text
+  deltas and forces flush on terminal/barrier events. Serialized drain via
+  `asyncio.Lock` prevents interleaved writes and guarantees ordered delivery.
+  Subscriber queue drops (previously seen under long Thinking bursts) are
+  eliminated by reducing event fanout volume.
+- **Frontend per-block markdown cache**: `markdownBlocks.ts` splits the source
+  into top-level block tokens via `marked.lexer` and caches each completed
+  block's rendered HTML. Only the live tail (the still-growing last block) is
+  re-parsed on each delta. Cache size is bounded to the number of completed
+  blocks, not deltas, so a 5000-delta growing tail keeps the cache at O(1).
+  `gfm:true, breaks:true` options are preserved.
+- **Thinking rendered as plain text**: Thinking parts use `<pre>{{ part.text }}</pre>`
+  with zero `marked.parse` / `DOMPurify.sanitize` calls. This removes the
+  dominant rendering cost during multi-kilobyte reasoning streams.
+- **Event micro-batching**: `agentStreamBatcher.ts` accumulates delta events
+  and flushes on rAF (with a 48ms `setTimeout` fallback for background tabs).
+  Barrier events (`turn_completed`, `tool_call_completed`, `approval_required`,
+  `approval_resolved`, `error`, `status`) flush immediately with all preceding
+  pending deltas in order.
+- **Validation**: 1493-char Thinking stream rendered with max long-task 277ms
+  (P95 237ms), zero subscriber queue drops, tool call path verified. 169
+  frontend tests pass, 96 backend agent-stream tests pass.
+
 ### fix: recover native agent streams and smooth Cursor structured output
 
 - **Codex recovery**: Restarting an idle-reaped Codex app-server now creates a

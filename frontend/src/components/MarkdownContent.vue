@@ -10,17 +10,19 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import DOMPurify from 'dompurify'
-import { marked } from 'marked'
+import { MarkdownBlockCache } from '@/utils/markdownBlocks'
 
 const props = withDefaults(defineProps<{
   text?: string | null
   compact?: boolean
   linkMarkdownPaths?: boolean
+  /** When true, the final block is also cached (stream has ended). */
+  complete?: boolean
 }>(), {
   text: '',
   compact: false,
   linkMarkdownPaths: false,
+  complete: false,
 })
 
 const emit = defineEmits<{
@@ -29,18 +31,20 @@ const emit = defineEmits<{
 
 const markdownPathPattern = /((?:~|\.{1,2}|\/|[\w.-]+\/)?[\w./~@:+-]+\.(?:md|markdown|mdown|mkd)(?::\d+)?(?:[?#][^\s`"'<>)]*)?)/gi
 
+// Per-instance block cache. Each completed markdown block is parsed and
+// sanitized exactly once; only the live tail (the still-growing last
+// block) is re-rendered on each delta.
+const blockCache = new MarkdownBlockCache()
+
 const safeHtml = computed(() => {
   const source = props.text?.trim() || ''
-  if (!source) return ''
+  if (!source) {
+    blockCache.clear()
+    return ''
+  }
 
-  const html = marked.parse(source, {
-    async: false,
-    breaks: true,
-    gfm: true,
-  })
-
-  const sanitized = DOMPurify.sanitize(html)
-  return props.linkMarkdownPaths ? linkPathMentions(sanitized) : sanitized
+  const html = blockCache.render(source, props.complete)
+  return props.linkMarkdownPaths ? linkPathMentions(html) : html
 })
 
 function linkPathMentions(html: string): string {

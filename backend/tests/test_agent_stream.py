@@ -574,6 +574,54 @@ def test_snapshot_tailer_allows_cursor_style_replacement_of_tail_end_marker(
     asyncio.run(run())
 
 
+def test_snapshot_tailer_backfill_does_not_fan_out_then_live_delta_does(store: AgentStreamStore):
+    """Cold-start backfill must persist without fanning out; subsequent live
+    deltas must fan out.
+
+    Subscribers replay history from the store, so fanning out backfill events
+    would cause duplicate delivery. The coalescer must be drained before
+    ``_is_live`` flips so buffered historical text is not emitted as live.
+    """
+
+    async def run() -> None:
+        session = _snapshot_session()
+        # Snapshot with a user turn and an assistant text delta.
+        adapter = _SnapshotAdapter(
+            _snapshot(
+                ("u1", "user", "hello"),
+                ("a1", "assistant", "world"),
+            )
+        )
+        tailer = SessionTailer("ws1", "s1", adapter, lambda: session, store=store)
+
+        queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue()
+        tailer._subscribers.add(queue)
+
+        # First call: cold-start backfill. Events must be persisted but NOT
+        # fanned out to the subscriber.
+        await tailer._tail_snapshot(Path("/ignored"), session)
+
+        assert queue.empty(), "backfill events must not be fanned out"
+        page = await store.read_since(-1)
+        persisted_texts = [e.payload.get("text") for e in page.events if e.payload.get("text")]
+        assert "world" in persisted_texts
+
+        # Second call: a new assistant delta arrives. This is a live update and
+        # must be fanned out to the subscriber.
+        adapter.snapshot = _snapshot(
+            ("u1", "user", "hello"),
+            ("a1", "assistant", "world"),
+            ("a2", "assistant", "!"),
+        )
+        await tailer._tail_snapshot(Path("/ignored"), session)
+
+        fanned = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert fanned.payload.get("text") == "!"
+        assert fanned.stream_sequence > 0
+
+    asyncio.run(run())
+
+
 # ── registry / fail-closed ───────────────────────────────────────────────────
 
 

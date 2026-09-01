@@ -6,6 +6,7 @@ import type {
 } from '@/types'
 import { validateImageAttachment, fileToDataUrl } from '@/utils/agentStreamAttachments'
 import { createContiguousEventBuffer } from '@/utils/agentStreamSequence'
+import { AgentStreamBatcher } from '@/utils/agentStreamBatcher'
 
 export { validateImageAttachment, fileToDataUrl }
 
@@ -66,7 +67,23 @@ export function useAgentStream(): UseAgentStreamApi {
   const sequenceBuffer = createContiguousEventBuffer<AgentStreamEvent>()
   let stopped = false
 
+  // ── event micro-batching ───────────────────────────────────────────────
+  // Incoming committed events are accumulated and flushed to `events.value`
+  // on a rAF / 48ms timer (whichever fires first). This caps the number of
+  // reactive timeline re-renders during high-throughput streams (long
+  // Thinking bursts) without increasing end-to-end latency beyond one
+  // frame. Terminal events bypass the window and flush immediately.
+  const batcher = new AgentStreamBatcher((batch) => {
+    events.value = [...events.value, ...batch]
+  })
+
+  function enqueueEvents(committed: AgentStreamEvent[]) {
+    batcher.enqueue(committed)
+  }
+
   function reset() {
+    // Flush any pending events before clearing so they are not lost.
+    batcher.flushAndCancel()
     capabilities.value = null
     events.value = []
     connectionState.value = 'idle'
@@ -90,7 +107,7 @@ export function useAgentStream(): UseAgentStreamApi {
 
   function applyPage(page: AgentStreamEventPage) {
     const committed = sequenceBuffer.push(page.events)
-    if (committed.length) events.value = [...events.value, ...committed]
+    if (committed.length) enqueueEvents(committed)
   }
 
   function streamBasePath(sourceId: string, source: StreamSource): string {
@@ -162,7 +179,7 @@ export function useAgentStream(): UseAgentStreamApi {
       try {
         const evt = JSON.parse(ev.data) as AgentStreamEvent
         const committed = sequenceBuffer.push([evt])
-        if (committed.length) events.value = [...events.value, ...committed]
+        if (committed.length) enqueueEvents(committed)
       } catch {
         // ignore malformed event
       }
@@ -269,6 +286,9 @@ export function useAgentStream(): UseAgentStreamApi {
     currentSessionId = null
     closeSse()
     abortLongPoll()
+    // Flush any buffered events so the final state is committed before
+    // teardown; cancel any pending flush timers.
+    batcher.flushAndCancel()
   }
 
   onUnmounted(() => {
