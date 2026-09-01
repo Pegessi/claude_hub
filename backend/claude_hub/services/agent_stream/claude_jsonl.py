@@ -13,6 +13,7 @@ Defensive: ``normalize_line`` skips any line it cannot parse (never raises);
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -150,7 +151,23 @@ class ClaudeJsonlAdapter(AgentStreamAdapter):
             return events
         etype = event.get("type")
         if etype == "message_start":
+            # Each assistant message starts its own text/thinking accumulation
+            # scope. A single turn can contain multiple assistant messages
+            # (pre-tool thinking+tool_use, then post-tool thinking+text), and
+            # the final snapshot of the second message must reconcile against
+            # its own deltas rather than the first message's accumulated text.
+            # Keying the scope by the provider message id covers both the live
+            # native path (here) and the final-only/backfill path
+            # (``_normalize_assistant``).
+            msg = event.get("message")
+            raw_message_id = msg.get("id") if isinstance(msg, dict) else None
+            message_id = raw_message_id if isinstance(raw_message_id, str) else None
+            self._begin_provider_message(ctx, message_id)
             events.append(ctx.event(AgentStreamEventType.TURN_STARTED, {"summary": ""}))
+        elif etype == "content_block_start":
+            block = event.get("content_block")
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                self._handle_tool_use_start(event, block, ctx)
         elif etype == "content_block_delta":
             delta = event.get("delta")
             if isinstance(delta, dict):
@@ -169,6 +186,10 @@ class ClaudeJsonlAdapter(AgentStreamAdapter):
                         state = self._get_turn_state(ctx)
                         state.text += text
                         events.append(ctx.event(AgentStreamEventType.TEXT_DELTA, {"text": text}))
+                elif dtype == "input_json_delta":
+                    self._handle_tool_input_delta(event, delta, ctx)
+        elif etype == "content_block_stop":
+            self._handle_tool_use_stop(event, ctx, events)
         elif etype == "message_stop":
             # The assistant has finished generating. Do NOT emit
             # ``TURN_COMPLETED`` here: the provider may still emit a final
@@ -179,6 +200,96 @@ class ClaudeJsonlAdapter(AgentStreamAdapter):
             # top-level ``result`` record instead.
             pass
         return events
+
+    def _handle_tool_use_start(
+        self, event: Dict[str, Any], block: Dict[str, Any], ctx: NormalizeContext
+    ) -> None:
+        """Record a streaming tool_use block's identity and initial input."""
+
+        index = event.get("index")
+        if not isinstance(index, int):
+            return
+        tool_id = block.get("id")
+        raw_tool_name = block.get("name")
+        tool_name = raw_tool_name if isinstance(raw_tool_name, str) and raw_tool_name else "unknown"
+        initial_input = block.get("input")
+        if not isinstance(initial_input, dict):
+            initial_input = {}
+        state = self._get_turn_state(ctx)
+        state.pending_tool_meta[index] = {
+            "id": tool_id if isinstance(tool_id, str) else None,
+            "name": tool_name,
+            "input": initial_input,
+        }
+        state.pending_tool_inputs[index] = ""
+
+    def _handle_tool_input_delta(
+        self, event: Dict[str, Any], delta: Dict[str, Any], ctx: NormalizeContext
+    ) -> None:
+        """Accumulate a streaming tool argument JSON fragment."""
+
+        index = event.get("index")
+        if not isinstance(index, int):
+            return
+        partial = delta.get("partial_json")
+        if not isinstance(partial, str):
+            return
+        state = self._get_turn_state(ctx)
+        if index in state.pending_tool_inputs:
+            state.pending_tool_inputs[index] += partial
+
+    def _handle_tool_use_stop(
+        self, event: Dict[str, Any], ctx: NormalizeContext, events: List[AgentStreamEvent]
+    ) -> None:
+        """Emit ``TOOL_CALL_STARTED`` once a tool_use block's input is complete."""
+
+        index = event.get("index")
+        if not isinstance(index, int):
+            return
+        state = self._get_turn_state(ctx)
+        meta = state.pending_tool_meta.pop(index, None)
+        raw_input = state.pending_tool_inputs.pop(index, "")
+        if not meta:
+            return
+        tool_id = meta["id"]
+        tool_name = meta["name"]
+        args: Dict[str, Any] = dict(meta["input"])
+        if raw_input:
+            try:
+                parsed = json.loads(raw_input)
+                if not isinstance(parsed, dict):
+                    # A tool input must be an object. Do not publish an
+                    # untrustworthy streamed card or suppress the later final
+                    # assistant snapshot, which may carry authoritative args.
+                    return
+                args.update(parsed)
+            except json.JSONDecodeError:
+                # A truncated native stream can leave partial JSON behind.
+                # Wait for the final assistant snapshot instead of displaying
+                # a raw fragment and then suppressing the complete snapshot.
+                return
+        if not tool_id:
+            # Without a stable identity the final snapshot cannot be
+            # deduplicated safely. Let it be the authoritative source.
+            return
+        if tool_id in state.emitted_tool_call_ids:
+            # Claude 2.1.x can publish the authoritative top-level assistant
+            # tool_use row before content_block_stop. In that ordering the
+            # assistant row already announced the call; block stop only
+            # closes the streamed input and must not announce it again.
+            return
+        state.emitted_tool_call_ids.add(tool_id)
+        events.append(
+            ctx.event(
+                AgentStreamEventType.TOOL_CALL_STARTED,
+                {
+                    "tool_call_id": tool_id,
+                    "name": tool_name,
+                    "args": args,
+                },
+                call_id=tool_id,
+            )
+        )
 
     def _normalize_assistant(
         self, msg: Dict[str, Any], ctx: NormalizeContext
@@ -193,6 +304,15 @@ class ClaudeJsonlAdapter(AgentStreamAdapter):
         visible output). Tool-use blocks are always emitted.
         """
         events: List[AgentStreamEvent] = []
+        # Final-only transcripts and backfill emit top-level ``assistant`` rows
+        # directly (no ``stream_event`` wrappers). Scope text/thinking
+        # accumulation to the provider message id so two assistant messages in
+        # one turn (e.g. thinking+tool_use then thinking+text) each reconcile
+        # against their own content. Consecutive rows sharing the same id keep
+        # accumulating.
+        raw_message_id = msg.get("id")
+        message_id = raw_message_id if isinstance(raw_message_id, str) else None
+        self._begin_provider_message(ctx, message_id)
         content = msg.get("content")
         if not isinstance(content, list):
             return events
@@ -245,6 +365,19 @@ class ClaudeJsonlAdapter(AgentStreamAdapter):
                 if not isinstance(args, dict):
                     args = {}
                 tool_call_id = tool_id if isinstance(tool_id, str) else None
+                # When the provider streamed this tool_use block, we already
+                # emitted TOOL_CALL_STARTED from content_block_stop with the
+                # assembled arguments. Skip the duplicate here so the tool
+                # card appears once, in its correct interleaved position.
+                if tool_call_id and tool_call_id in self._get_turn_state(ctx).emitted_tool_call_ids:
+                    continue
+                if tool_call_id:
+                    # Claude 2.1.x normally emits this authoritative
+                    # assistant row before content_block_stop. Record the id
+                    # here so the later block stop is deduplicated. If block
+                    # stop arrived first, the guard above handled the inverse
+                    # ordering.
+                    self._get_turn_state(ctx).emitted_tool_call_ids.add(tool_call_id)
                 events.append(
                     ctx.event(
                         AgentStreamEventType.TOOL_CALL_STARTED,

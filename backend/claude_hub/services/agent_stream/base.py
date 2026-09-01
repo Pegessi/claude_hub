@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ...models import (
     AgentStreamEvent,
@@ -36,16 +36,41 @@ class _TurnAccumulator:
     text doubles. The accumulator tracks what has already been emitted so the
     snapshot can be reconciled: exact match → skip; strict extension → emit
     only the suffix; otherwise fail closed.
+
+    A single user turn may span several provider assistant messages (e.g. a
+    pre-tool thinking+tool_use message, then a post-tool thinking+text message
+    separated by a user tool_result). Text/thinking accumulation is scoped to
+    one assistant message at a time — reset when ``message.id`` changes — while
+    ``emitted_tool_call_ids`` lives for the whole turn so the streamed block
+    and authoritative assistant snapshot can be deduplicated in either arrival
+    order.
     """
 
     text: str = ""
     thinking: str = ""
+    # The provider message id currently being accumulated. A single user turn
+    # can span several assistant messages (pre-tool thinking+tool_use, then
+    # post-tool thinking+text). Text/thinking accumulation is scoped to one
+    # provider message at a time: when the message id changes, the text and
+    # thinking accumulators reset so each message's final snapshot reconciles
+    # against its own deltas. ``emitted_tool_call_ids`` stays turn-scoped so
+    # streamed blocks and assistant snapshots deduplicate even across message
+    # boundaries.
+    active_provider_message_id: Optional[str] = None
     # Native Cursor can emit a timestamped full-message replay after several
     # timestamped delta records.  Keep the emitted chunk boundaries so the
     # Cursor adapter can prove that a later record is an exact replay of two
     # or more prior chunks without treating an ordinary repeated token as a
     # snapshot.
     text_chunks: List[str] = field(default_factory=list)
+    # Tool call ids announced by either a streamed content block or an
+    # assistant snapshot. Whichever representation arrives second is skipped.
+    emitted_tool_call_ids: Set[str] = field(default_factory=set)
+    # Per-message tool input assembly keyed by content block index. Claude
+    # streams tool arguments as ``input_json_delta`` fragments between
+    # ``content_block_start`` and ``content_block_stop``.
+    pending_tool_inputs: Dict[int, str] = field(default_factory=dict)
+    pending_tool_meta: Dict[int, Dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -167,6 +192,43 @@ class AgentStreamAdapter:
 
     def _clear_turn_state(self, ctx: NormalizeContext) -> None:
         self._turn_state.pop(self._turn_key(ctx), None)
+
+    def _reset_message_state(self, ctx: NormalizeContext) -> None:
+        """Reset per-message text/thinking accumulators and tool buffers.
+
+        A single user turn can contain multiple assistant messages (e.g. a
+        thinking+tool_use message followed, after a tool_result, by a
+        thinking+text message). Each assistant message's final snapshot must
+        reconcile against its own streamed deltas, not the previous message's
+        accumulated text. A provider-message boundary therefore clears
+        text/thinking, chunk boundaries, and the in-flight tool block buffers
+        while leaving turn-scoped tool tracking
+        (``emitted_tool_call_ids``) intact.
+        """
+
+        state = self._get_turn_state(ctx)
+        state.text = ""
+        state.thinking = ""
+        state.text_chunks = []
+        state.pending_tool_inputs.clear()
+        state.pending_tool_meta.clear()
+
+    def _begin_provider_message(self, ctx: NormalizeContext, message_id: Optional[str]) -> None:
+        """Begin accumulating for a provider assistant message.
+
+        If ``message_id`` differs from the currently active provider message,
+        reset the per-message accumulators (text, thinking, pending tool
+        blocks) and record the new id. Consecutive rows sharing the same
+        message id keep accumulating — this covers both the live native path
+        (``message_start`` sets the id, deltas accumulate, then the final
+        ``assistant`` snapshot shares it) and the final-only/backfill path
+        (top-level ``assistant`` rows with their own ``id``).
+        """
+
+        state = self._get_turn_state(ctx)
+        if message_id is not None and message_id != state.active_provider_message_id:
+            state.active_provider_message_id = message_id
+            self._reset_message_state(ctx)
 
     def _reconcile_text(self, ctx: NormalizeContext, final_text: str) -> Optional[str]:
         """Reconcile a final full-text snapshot against accumulated deltas.

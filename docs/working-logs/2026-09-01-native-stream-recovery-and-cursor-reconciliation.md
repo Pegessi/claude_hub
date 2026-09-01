@@ -97,3 +97,128 @@ preferences.
   do not touch the agent-stream modules. Representative failures reproduced in
   isolation; they remain a separate branch gate rather than being reported as
   validation of this change.
+
+## Claude multi-message tool turns: per-message reconciliation and ordered parts
+
+### Symptom
+
+A native Claude turn that uses a tool (for example `WebSearch`) produced two
+defects:
+
+1. the UI rendered the final assistant text before the tool card;
+2. a reconciliation error banner appeared:
+   `assistant final thinking does not match streamed deltas; cannot safely
+   reconcile`.
+
+### Evidence
+
+The failing turn's event stream (bounded to that turn) had the semantic order:
+thinking segment → tool_call_started → tool_call_completed → error → text
+segment. The raw provider JSONL showed two distinct assistant messages within
+the single native turn:
+
+- message `msg_389…`: one row carrying `thinking`, a second row carrying
+  `tool_use`;
+- message `msg_3b0…`: one row carrying `thinking`, a second row carrying
+  `text`.
+
+A user `tool_result` message separated the two assistant messages.
+
+### Root causes
+
+1. **Backend reconciliation scope.** The text/thinking accumulator was
+   turn-scoped. Across the two assistant messages the accumulated thinking
+   became `msg_389_thinking + msg_3b0_thinking`, so the second message's final
+   thinking snapshot failed the strict `final.startswith(accumulated)` check
+   and tripped the fail-closed error.
+2. **Frontend flattening.** `TimelineTurn` stored flat `thinkingText`,
+   `assistantText`, and `tools` buckets, so even a correctly-ordered event
+   stream could not preserve interleaving (thinking → tool → thinking → text).
+   The fixed render order placed assistant text before tool cards even though
+   the persisted tool events preceded the final text.
+3. **Native tool observation gap.** The adapter ignored streamed
+   `content_block_start` / `input_json_delta` / `content_block_stop` tool
+   records and depended on top-level assistant snapshots. The captured Claude
+   2.1.159 snapshot was timely, so this did not cause the original visual
+   reordering, but it left incomplete-provider streams unobservable and needed
+   explicit cross-source deduplication once both paths were supported.
+
+### Backend fix
+
+- Added `active_provider_message_id` to `_TurnAccumulator`. Text/thinking
+  accumulation is now scoped to the provider `message.id`.
+- `_begin_provider_message(ctx, message_id)` resets per-message buffers
+  (`text`, `thinking`, `text_chunks`, `pending_tool_inputs`,
+  `pending_tool_meta`) only when the id changes; consecutive rows sharing an
+  id keep accumulating.
+- `message_start` and `_normalize_assistant` (final-only/backfill rows) both
+  call `_begin_provider_message`, so live streams and transcript hydration
+  share the same scoping.
+- `emitted_tool_call_ids` stays turn-scoped so a tool emitted from the
+  streamed block is not re-emitted from the final snapshot.
+- Streaming tool args are assembled by content block index from
+  `content_block_start` → `input_json_delta` → `content_block_stop`.
+  Claude 2.1.x may publish the top-level assistant `tool_use` snapshot before
+  `content_block_stop`; other producers may use the inverse order. Both paths
+  record/check the same id, so the first complete representation emits
+  `TOOL_CALL_STARTED` and the later representation is suppressed.
+- Genuine text/thinking mismatches still emit `error` (fail-closed preserved).
+
+### Frontend fix
+
+- `TimelineTurn.parts: TimelinePart[]` is the authoritative render order.
+  Part kinds: `thinking`, `text`, `tool`, `error`, `status`.
+- `appendTextPart` extends the last same-kind part or pushes a new one, and
+  updates the flat aggregates (`thinkingText`/`assistantText`) as derived
+  views for existing callers/tests.
+- `tool_call_started`, `error`, and `status` push ordered parts so they appear
+  where the provider emitted them (Paseo does not defer protocol errors to the
+  turn end).
+- `StructuredPane` renders `turn.parts` directly. Paced reveal is keyed per
+  text part (`revealStates[part.key]`), not per turn, so each text segment
+  reveals independently while preserving stream order.
+
+### Key issues and pitfalls
+
+- Resetting on `message_start` alone covers the live native stream but not
+  final-only transcript/backfill rows; `_normalize_assistant` must also scope
+  by `message.id`.
+- `emitted_tool_call_ids` must stay turn-scoped, not message-scoped, so the
+  final snapshot's `tool_use` can be suppressed even though it belongs to a
+  different provider message than the streamed block.
+- The reconciliation contract remains strict: exact match → skip, strict
+  extension → emit suffix, empty accumulator → emit full, otherwise fail
+  closed. The fix narrows the accumulator scope, it does not relax the check.
+- Flat aggregates are kept only as derived views; `parts` is the source of
+  truth for render order.
+- A malformed or non-object streamed tool-argument payload is not authoritative:
+  do not emit or deduplicate it. Wait for the final assistant snapshot so a
+  truncated native stream cannot permanently replace complete tool args.
+
+### Validation
+
+- Backend focused agent-stream tests: 53 passed (fresh `CLAUDE_HUB_HOME` +
+  unique `CLAUDE_HUB_TMUX_SOCKET`). New RED-then-green fixtures:
+  - streamed tool args with real block index → exactly one `TOOL_CALL_STARTED`
+    with parsed args;
+  - final tool snapshot before block stop → exactly one `TOOL_CALL_STARTED`;
+  - malformed streamed tool args → defer to the complete final snapshot;
+  - two-assistant-message turn scoped by message id → no error, both thinking
+    segments present, text correct;
+  - consecutive same-id rows accumulate;
+  - genuine text mismatch still emits `error`.
+- Frontend `agentStreamTimeline` tests: 19 passed (interleaved
+  thinking→tool→thinking→text produces ordered parts).
+- Frontend full unit suite: 140 passed; ESLint, vue-tsc, production build
+  pass.
+- Black, isort, mypy on `base.py` and `claude_jsonl.py`: clean.
+- Real browser E2E on the isolated preview (`5275`/`18173`) reused the day1
+  Claude tab and required `WebSearch`. The first audit caught two persisted
+  `tool_call_started` events even though the UI identity map showed one card;
+  direct Claude 2.1.159 stream-json evidence established the real ordering as
+  assistant tool snapshot before `content_block_stop`, leading to the
+  bidirectional deduplication fix and regression test.
+- The final E2E turn `f8e34d80-4269-41b0-ad3e-a9c734e89bb1` observed the
+  waiting placeholder, then rendered `thinking → tool → thinking → text`.
+  Its persisted stream had exactly one `tool_call_started`, one matching
+  `tool_call_completed`, no `error`, one final marker, and one completed turn.

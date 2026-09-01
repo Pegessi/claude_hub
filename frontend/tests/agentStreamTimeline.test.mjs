@@ -244,3 +244,32 @@ test('identical user text remains distinct when client turn ids differ', () => {
   assert.equal(turns[0].completed, true)
   assert.equal(turns[1].completed, false)
 })
+
+test('interleaved thinking, tool, thinking, text produce ordered parts', () => {
+  const events = [
+    makeEvent(1, 'turn_started', { summary: 'search' }, { turn_id: 't' }),
+    makeEvent(2, 'thinking_delta', { text: 'pre-tool thought' }, { turn_id: 't' }),
+    makeEvent(3, 'tool_call_started', {
+      tool_call_id: 'c1',
+      name: 'WebSearch',
+      args: { q: 'poem' },
+    }, { turn_id: 't' }),
+    makeEvent(4, 'tool_call_completed', {
+      tool_call_id: 'c1',
+      status: 'completed',
+      result: 'found',
+    }, { turn_id: 't' }),
+    makeEvent(5, 'thinking_delta', { text: 'post-tool thought' }, { turn_id: 't' }),
+    makeEvent(6, 'text_delta', { text: 'final answer' }, { turn_id: 't' }),
+  ]
+  const turns = groupEventsIntoTurns(events)
+  const turn = turns[0]
+  assert.ok(Array.isArray(turn.parts), 'turn must expose an ordered parts list')
+  const kinds = turn.parts.map(p => p.kind)
+  assert.deepEqual(kinds, ['thinking', 'tool', 'thinking', 'text'])
+  assert.equal(turn.parts[0].text, 'pre-tool thought')
+  assert.equal(turn.parts[1].tool.name, 'WebSearch')
+  assert.equal(turn.parts[1].tool.status, 'completed')
+  assert.equal(turn.parts[2].text, 'post-tool thought')
+  assert.equal(turn.parts[3].text, 'final answer')
+})

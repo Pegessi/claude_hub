@@ -83,24 +83,6 @@
             </div>
           </div>
 
-          <details
-            v-if="turn.thinkingText"
-            class="thinking-card"
-          >
-            <summary>
-              <span
-                class="thinking-indicator"
-                aria-hidden="true"
-              />
-              Thinking
-            </summary>
-            <MarkdownContent
-              :text="turn.thinkingText"
-              compact
-              class="thinking-body"
-            />
-          </details>
-
           <div
             v-if="turn.awaitingAgentActivity"
             class="conversation-row conversation-row--assistant"
@@ -124,76 +106,99 @@
             </div>
           </div>
 
-          <div
-            v-if="turn.assistantText"
-            class="conversation-row conversation-row--assistant"
+          <!-- Ordered parts: thinking, text, tool, error, and status render in
+               the exact order the provider emitted them. Paseo does not defer
+               protocol errors to the turn end, so neither do we. -->
+          <template
+            v-for="part in turn.parts"
+            :key="part.key"
           >
-            <span
-              class="conversation-avatar"
-              aria-hidden="true"
-            >✦</span>
-            <div class="conversation-bubble conversation-bubble--assistant">
-              <MarkdownContent
-                :text="turn.assistantText"
-                compact
-              />
-            </div>
-          </div>
-
-          <div
-            v-for="tool in turn.tools"
-            :key="tool.callId || tool.key"
-            class="conversation-row conversation-row--assistant"
-          >
-            <span
-              class="conversation-avatar conversation-avatar--tool"
-              aria-hidden="true"
-            >⌘</span>
-            <details class="tool-card">
-              <summary class="tool-header">
-                <span class="tool-name">{{ tool.name }}</span>
+            <details
+              v-if="part.kind === 'thinking'"
+              class="thinking-card"
+            >
+              <summary>
                 <span
-                  class="tool-status"
-                  :class="tool.status"
-                >{{ tool.status }}</span>
+                  class="thinking-indicator"
+                  aria-hidden="true"
+                />
+                Thinking
               </summary>
-              <div
-                v-if="tool.argsText"
-                class="tool-block"
-              >
-                <span>Input</span>
-                <pre>{{ tool.argsText }}</pre>
-              </div>
-              <div
-                v-if="tool.resultText"
-                class="tool-block"
-              >
-                <span>Result</span>
-                <pre>{{ tool.resultText }}</pre>
-              </div>
+              <MarkdownContent
+                :text="part.text"
+                compact
+                class="thinking-body"
+              />
             </details>
-          </div>
 
-          <div
-            v-for="err in turn.errors"
-            :key="err.key"
-            class="event-error"
-            role="alert"
-          >
-            <span
-              class="error-icon"
-              aria-hidden="true"
-            >⚠</span>
-            <span>{{ err.message }}</span>
-          </div>
+            <div
+              v-else-if="part.kind === 'text'"
+              class="conversation-row conversation-row--assistant"
+            >
+              <span
+                class="conversation-avatar"
+                aria-hidden="true"
+              >✦</span>
+              <div class="conversation-bubble conversation-bubble--assistant">
+                <MarkdownContent
+                  :text="part.text"
+                  compact
+                />
+              </div>
+            </div>
 
-          <div
-            v-for="st in turn.statuses"
-            :key="st.key"
-            class="event-status"
-          >
-            <span>{{ st.text }}</span>
-          </div>
+            <div
+              v-else-if="part.kind === 'tool'"
+              class="conversation-row conversation-row--assistant"
+            >
+              <span
+                class="conversation-avatar conversation-avatar--tool"
+                aria-hidden="true"
+              >⌘</span>
+              <details class="tool-card">
+                <summary class="tool-header">
+                  <span class="tool-name">{{ part.tool.name }}</span>
+                  <span
+                    class="tool-status"
+                    :class="part.tool.status"
+                  >{{ part.tool.status }}</span>
+                </summary>
+                <div
+                  v-if="part.tool.argsText"
+                  class="tool-block"
+                >
+                  <span>Input</span>
+                  <pre>{{ part.tool.argsText }}</pre>
+                </div>
+                <div
+                  v-if="part.tool.resultText"
+                  class="tool-block"
+                >
+                  <span>Result</span>
+                  <pre>{{ part.tool.resultText }}</pre>
+                </div>
+              </details>
+            </div>
+
+            <div
+              v-else-if="part.kind === 'error'"
+              class="event-error"
+              role="alert"
+            >
+              <span
+                class="error-icon"
+                aria-hidden="true"
+              >⚠</span>
+              <span>{{ part.message }}</span>
+            </div>
+
+            <div
+              v-else-if="part.kind === 'status'"
+              class="event-status"
+            >
+              <span>{{ part.text }}</span>
+            </div>
+          </template>
         </div>
 
         <!-- Optimistic turns are reconciled by client_turn_id, never by text. -->
@@ -366,18 +371,26 @@ let revealAnimationFrame: number | null = null
 let previousRevealFrameAt: number | null = null
 
 const turns = computed(() => authoritativeTurns.value.map(turn => {
-  const state = revealStates.value[turn.key]
+  // Reveal state is keyed per text part (see the authoritativeTurns watcher).
+  // Each text part reveals its own text independently so a tool call that
+  // splits the assistant message into two text segments paces each segment
+  // rather than re-revealing the whole aggregate.
+  const parts = turn.parts.map(p => {
+    if (p.kind !== 'text') return p
+    const state = revealStates.value[p.key]
+    const text = state
+      ? visibleRevealedText(state, { streaming: !turn.completed })
+      : p.text
+    return { ...p, text }
+  })
+
   return {
     ...turn,
+    parts,
     awaitingAgentActivity: !turn.completed &&
-      !turn.thinkingText &&
-      !turn.assistantText &&
-      turn.tools.length === 0 &&
+      turn.parts.length === 0 &&
       turn.errors.length === 0 &&
       turn.statuses.length === 0,
-    assistantText: state
-      ? visibleRevealedText(state, { streaming: !turn.completed })
-      : turn.assistantText,
   }
 }))
 
@@ -431,13 +444,16 @@ watch(
     const next: Record<string, TextRevealState> = {}
     let hasBacklog = false
     for (const turn of latest) {
-      const prior = revealStates.value[turn.key]
-      let state = prior
-        ? retargetTextReveal(prior, turn.assistantText)
-        : beginTextReveal(turn.assistantText)
-      if (turn.completed) state = completeTextReveal(state)
-      next[turn.key] = state
-      if (!isTextRevealSettled(state)) hasBacklog = true
+      for (const part of turn.parts) {
+        if (part.kind !== 'text') continue
+        const prior = revealStates.value[part.key]
+        let state = prior
+          ? retargetTextReveal(prior, part.text)
+          : beginTextReveal(part.text)
+        if (turn.completed) state = completeTextReveal(state)
+        next[part.key] = state
+        if (!isTextRevealSettled(state)) hasBacklog = true
+      }
     }
     revealStates.value = next
     const observed = new Set(latest.map(turn => turn.turnId).filter(Boolean))
