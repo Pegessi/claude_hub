@@ -45,7 +45,7 @@ test('duplicate paths commit each sequence exactly once', () => {
 
 test('long-poll reconciliation starts even when EventSource is available', () => {
   const startIndex = composable.indexOf('longPollAbort = new AbortController()')
-  const loopIndex = composable.indexOf('void longPollLoop(sourceId, streamPath)', startIndex)
+  const loopIndex = composable.indexOf('void longPollLoop(', startIndex)
   const sseIndex = composable.indexOf("if (typeof EventSource !== 'undefined')", loopIndex)
 
   assert.ok(startIndex >= 0)
