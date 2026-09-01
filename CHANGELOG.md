@@ -5,6 +5,22 @@
 
 ## Unreleased
 
+### fix: permanent "Loading structured view" when switching to Codex tab
+
+- **Generation-owned connection state**: `StreamConnectionStateMachine`
+  guards `hydrating → live | failed` transitions by generation id. A stale
+  `start()` (superseded by a newer one) can no longer flip the current
+  generation's `hydrating` state to `live`, nor can its events advance the
+  shared sequence cursor and cause the current generation's events to be
+  skipped.
+- **Bounded hydration abort**: `fetchCapabilities` and `fetchEvents` now take
+  an `AbortSignal` owned by the current generation. `stop()` / a newer
+  `start()` aborts stale in-flight requests. A 15s hard timeout on each
+  hydration fetch fails the stream closed (`failed`) instead of hanging on
+  `hydrating` indefinitely.
+- **`applyPage` generation guard**: stale pages from a superseded generation
+  are dropped before they can pollute the sequence buffer cursor.
+
 ### perf: optimize Paseo stream rendering under long Thinking bursts
 
 - **Backend coalescer**: Added `agent_stream/coalescer.py` — a leading-edge
