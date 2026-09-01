@@ -27,9 +27,21 @@
   Barrier events (`turn_completed`, `tool_call_completed`, `approval_required`,
   `approval_resolved`, `error`, `status`) flush immediately with all preceding
   pending deltas in order.
-- **Validation**: 1493-char Thinking stream rendered with max long-task 277ms
-  (P95 237ms), zero subscriber queue drops, tool call path verified. 169
-  frontend tests pass, 96 backend agent-stream tests pass.
+- **Incremental timeline reducer**: `IncrementalTimelineReducer` in
+  `agentStreamTimeline.ts` keeps the reducer state alive across calls and only
+  processes the unseen suffix. The original `groupEventsIntoTurns` re-scanned
+  the entire event list on every batch (O(n) per delta), which dominated the
+  long-task budget under ~13.5k historical events. The reducer detects
+  non-prefix replacements (session switch, reconnect, reset) via a
+  `session_id + tab_id + stream_sequence` key on the last processed event and
+  rebuilds from scratch when the prefix diverges. Returns a fresh array
+  reference for Vue reactivity.
+- **Validation**: 179 frontend tests pass (including a deterministic
+  bounded-work test: 13,500 history events + 300 live deltas asserts
+  `appliedCount` advances by exactly 300), 96 backend agent-stream tests pass.
+  E2E long-task measurement is pending authoritative re-run via the
+  `since_sequence`-polling harness; the prior 277ms figure was based on a
+  flawed harness that accepted `textLen=0` and is retracted.
 
 ### fix: recover native agent streams and smooth Cursor structured output
 

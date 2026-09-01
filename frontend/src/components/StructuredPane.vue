@@ -321,7 +321,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAgentStream, validateImageAttachment, fileToDataUrl } from '@/composables/useAgentStream'
-import { groupEventsIntoTurns } from '@/utils/agentStreamTimeline'
+import { IncrementalTimelineReducer } from '@/utils/agentStreamTimeline'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import {
   advanceTextReveal,
@@ -362,10 +362,17 @@ function startStream() {
 }
 
 // ── Timeline grouping ───────────────────────────────────────────────────────
-// The flat event stream is grouped into turns by the pure
-// ``groupEventsIntoTurns`` utility (see agentStreamTimeline.ts).
+// The flat event stream is grouped into turns by the
+// ``IncrementalTimelineReducer`` (see agentStreamTimeline.ts).
+//
+// ``groupEventsIntoTurns`` re-scans the entire event list on every call. For
+// a session with thousands of historical events, each incoming delta re-runs
+// the full O(n) reduction and dominates the long-task budget. The incremental
+// reducer keeps state across calls and only processes the unseen suffix, so
+// each batch costs O(new events) regardless of history length.
 
-const authoritativeTurns = computed(() => groupEventsIntoTurns(events.value))
+const timelineReducer = new IncrementalTimelineReducer()
+const authoritativeTurns = computed(() => timelineReducer.reduce(events.value))
 const revealStates = ref<Record<string, TextRevealState>>({})
 let revealAnimationFrame: number | null = null
 let previousRevealFrameAt: number | null = null
