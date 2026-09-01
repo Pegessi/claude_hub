@@ -323,16 +323,6 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAgentStream, validateImageAttachment, fileToDataUrl } from '@/composables/useAgentStream'
 import { IncrementalTimelineReducer } from '@/utils/agentStreamTimeline'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
-import {
-  advanceTextReveal,
-  beginTextReveal,
-  completeTextReveal,
-  isTextRevealSettled,
-  nextTextRevealFrame,
-  retargetTextReveal,
-  visibleRevealedText,
-  type TextRevealState,
-} from '@/utils/textReveal'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import type { WorkspaceAttachmentCreate } from '@/types'
 
@@ -373,33 +363,19 @@ function startStream() {
 
 const timelineReducer = new IncrementalTimelineReducer()
 const authoritativeTurns = computed(() => timelineReducer.reduce(events.value))
-const revealStates = ref<Record<string, TextRevealState>>({})
-let revealAnimationFrame: number | null = null
-let previousRevealFrameAt: number | null = null
 
-const turns = computed(() => authoritativeTurns.value.map(turn => {
-  // Reveal state is keyed per text part (see the authoritativeTurns watcher).
-  // Each text part reveals its own text independently so a tool call that
-  // splits the assistant message into two text segments paces each segment
-  // rather than re-revealing the whole aggregate.
-  const parts = turn.parts.map(p => {
-    if (p.kind !== 'text') return p
-    const state = revealStates.value[p.key]
-    const text = state
-      ? visibleRevealedText(state, { streaming: !turn.completed })
-      : p.text
-    return { ...p, text }
-  })
-
-  return {
-    ...turn,
-    parts,
-    awaitingAgentActivity: !turn.completed &&
-      turn.parts.length === 0 &&
-      turn.errors.length === 0 &&
-      turn.statuses.length === 0,
-  }
-}))
+// Assistant text streams directly from the batched event stream (backend
+// 60ms coalescer + frontend rAF/48ms batcher). No second-stage character
+// reveal: each committed batch updates the visible text once. On turn
+// completion MarkdownContent caches the final block and exposes the exact
+// final text synchronously.
+const turns = computed(() => authoritativeTurns.value.map(turn => ({
+  ...turn,
+  awaitingAgentActivity: !turn.completed &&
+    turn.parts.length === 0 &&
+    turn.errors.length === 0 &&
+    turn.statuses.length === 0,
+})))
 
 type PendingTurn = {
   key: string
@@ -415,57 +391,14 @@ const pendingTurns = computed(() => {
   return pendingDirectTurns.value.filter(turn => !observedTurnIds.has(turn.turnId))
 })
 
-function cancelTextReveal() {
-  if (revealAnimationFrame !== null) cancelAnimationFrame(revealAnimationFrame)
-  revealAnimationFrame = null
-  previousRevealFrameAt = null
-}
-
-function scheduleTextReveal() {
-  if (revealAnimationFrame === null) revealAnimationFrame = requestAnimationFrame(advanceTextRevealFrame)
-}
-
-function advanceTextRevealFrame(timestamp: number) {
-  revealAnimationFrame = null
-  const frame = nextTextRevealFrame(previousRevealFrameAt, timestamp)
-  if (!frame) {
-    scheduleTextReveal()
-    return
-  }
-  previousRevealFrameAt = frame.frameAtMs
-  let hasBacklog = false
-  const next = { ...revealStates.value }
-  for (const [key, state] of Object.entries(next)) {
-    const advanced = advanceTextReveal(state, frame.elapsedMs)
-    next[key] = advanced
-    if (!isTextRevealSettled(advanced)) hasBacklog = true
-  }
-  revealStates.value = next
-  if (hasBacklog) scheduleTextReveal()
-  else previousRevealFrameAt = null
-}
-
+// Reconcile optimistic (pending) turns against authoritative turns as they
+// arrive. No text-reveal state is kept: assistant text is rendered directly
+// from the batched event stream.
 watch(
   authoritativeTurns,
   (latest) => {
-    const next: Record<string, TextRevealState> = {}
-    let hasBacklog = false
-    for (const turn of latest) {
-      for (const part of turn.parts) {
-        if (part.kind !== 'text') continue
-        const prior = revealStates.value[part.key]
-        let state = prior
-          ? retargetTextReveal(prior, part.text)
-          : beginTextReveal(part.text)
-        if (turn.completed) state = completeTextReveal(state)
-        next[part.key] = state
-        if (!isTextRevealSettled(state)) hasBacklog = true
-      }
-    }
-    revealStates.value = next
     const observed = new Set(latest.map(turn => turn.turnId).filter(Boolean))
     pendingDirectTurns.value = pendingDirectTurns.value.filter(turn => !observed.has(turn.turnId))
-    if (hasBacklog) scheduleTextReveal()
   },
   { immediate: true },
 )
@@ -484,11 +417,9 @@ watch(
   () => [props.sessionId, props.tabId],
   () => {
     pendingDirectTurns.value = []
-    revealStates.value = {}
     draftMessage.value = ''
     attachments.value = []
     composerError.value = null
-    cancelTextReveal()
     startStream()
   },
 )
@@ -774,7 +705,6 @@ onUnmounted(() => {
   timelineResizeObserver?.disconnect()
   timelineResizeObserver = null
   cancelScheduledTimelineScroll()
-  cancelTextReveal()
 })
 </script>
 

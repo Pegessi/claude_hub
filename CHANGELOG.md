@@ -36,12 +36,25 @@
   `session_id + tab_id + stream_sequence` key on the last processed event and
   rebuilds from scratch when the prefix diverges. Returns a fresh array
   reference for Vue reactivity.
-- **Validation**: 179 frontend tests pass (including a deterministic
-  bounded-work test: 13,500 history events + 300 live deltas asserts
-  `appliedCount` advances by exactly 300), 96 backend agent-stream tests pass.
-  E2E long-task measurement is pending authoritative re-run via the
-  `since_sequence`-polling harness; the prior 277ms figure was based on a
-  flawed harness that accepted `textLen=0` and is retracted.
+- **Keyed block DOM promotion**: `MarkdownContent` renders each block as its
+  own `<div :key="block:${index}" v-html="block.html" />`. Completed blocks
+  have stable index keys so Vue reuses their DOM; only the live-tail block's
+  `innerHTML` updates. Cache identity includes the `linkMarkdownPaths` mode.
+  Lists stay as one block (no unsafe item splitting); per-delta parser calls
+  are bounded to 1 (the list block).
+- **Removed second-stage text reveal**: The `textReveal` character-by-character
+  interpolation in `StructuredPane` was magnifying 98 `text_delta` events into
+  375 distinct assistant text DOM states (~3.8×). It has been deleted;
+  assistant text now streams directly from the batched event stream (backend
+  60ms coalescer + frontend rAF/48ms batcher), one visible update per
+  committed batch. `turn_completed` flips `MarkdownContent`'s `complete` prop
+  to cache the final block and expose the exact final text synchronously.
+- **Validation**: 188 frontend tests pass (including a deterministic
+  one-update-per-batch test: 4 text batches produce exactly 4 distinct
+  assistant text values, each equal to the full accumulated text), lint
+  clean, build succeeds. Authoritative E2E (turn `c01df02c`, real day1
+  Claude) on the pre-removal build recorded 6 long tasks of 58/60/50/76/64/90ms;
+  post-removal E2E pending re-run.
 
 ### fix: recover native agent streams and smooth Cursor structured output
 

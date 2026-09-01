@@ -295,3 +295,41 @@ test('incremental reducer returns a fresh array reference each call', () => {
   assert.notEqual(first, second, 'reduce must return a new array reference each call')
   assert.deepEqual(first, second)
 })
+
+test('assistant text part exposes full accumulated text — no second-stage reveal frames', () => {
+  // The textReveal second-stage interpolation was removed: assistant text
+  // streams directly from the batched event stream. Each committed batch
+  // must produce exactly one visible assistant text value (the full
+  // accumulated text), not 3-4 reveal frames per batch.
+  const reducer = new IncrementalTimelineReducer()
+
+  const batches = [
+    [
+      makeEvent(0, 'turn_started', { summary: 't' }, { turn_id: 't1' }),
+      makeEvent(1, 'text_delta', { text: 'Hel' }, { turn_id: 't1' }),
+    ],
+    [makeEvent(2, 'text_delta', { text: 'lo ' }, { turn_id: 't1' })],
+    [makeEvent(3, 'text_delta', { text: 'wor' }, { turn_id: 't1' })],
+    [
+      makeEvent(4, 'text_delta', { text: 'ld' }, { turn_id: 't1' }),
+      makeEvent(5, 'turn_completed', { status: 'completed' }, { turn_id: 't1' }),
+    ],
+  ]
+
+  const seenTexts = []
+  let allEvents = []
+  for (const batch of batches) {
+    allEvents = [...allEvents, ...batch]
+    const turns = reducer.reduce(allEvents)
+    const textPart = turns[0].parts.find((p) => p.kind === 'text')
+    // The visible text must equal the full accumulated assistant text —
+    // never a partially-revealed prefix.
+    assert.equal(textPart.text, turns[0].assistantText)
+    seenTexts.push(textPart.text)
+  }
+
+  // One distinct visible text value per committed batch — no reveal-frame
+  // multiplication (4 batches => 4 values, not 12-16).
+  assert.equal(seenTexts.length, batches.length)
+  assert.deepEqual(seenTexts, ['Hel', 'Hello ', 'Hello wor', 'Hello world'])
+})
