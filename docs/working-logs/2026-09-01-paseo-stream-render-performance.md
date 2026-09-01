@@ -419,3 +419,67 @@ summing all parts. No product truncation was present in this run.
   `read_since` would miss it. The gap-fallback `read_since` path only
   triggers on `seq > since+1`; a silently dropped event (no gap in
   sequence) would not be detected.
+
+## Cycle 16–17: AST list-item splitting for long streamed lists
+
+### Problem
+
+A contiguous markdown list is a single top-level marked token. Without
+special handling the whole list's `innerHTML` was replaced on every text
+delta — O(list length) DOM work per delta, O(n²) overall. The AST
+list-item split below reduced Long Task count by ~71%, which supports the
+inference that full-list DOM replacement was the dominant contributor to
+Long Tasks during assistant Markdown growth (not the Thinking phase). CSS
+`content-visibility` was rejected because it broke the bottom-anchor
+invariant.
+
+### Approach
+
+Split the list token into its marked-parsed `items` AST. Every item except
+the last is treated as completed: its `<li>` inner HTML is rendered once
+(via a synthetic single-item list passed to `marked.parser`), sanitized,
+link-wrapped, and cached by the item's raw text. Only the final item is
+re-rendered each delta. The list is emitted as a single `RenderedListBlock`
+so `MarkdownContent.vue` renders one stable `<ul>`/`<ol>` with keyed `<li>`
+children — Vue leaves completed `<li>` nodes untouched and updates only the
+final item's `innerHTML`.
+
+### Cache key correctness
+
+The item cache key includes the list-wide `loose` flag
+(`link:loose=<bool>:<raw>`). `list.loose` can flip from `false` to `true`
+when a blank-line-separated item is appended, which wraps every item's
+content in `<p>`. Without `loose` in the key, already-cached items would be
+served stale tight HTML. `loose` is monotonic (false→true only), so stale
+entries are bounded to one per item. `ordered` and `start` do not affect
+item inner HTML and are not part of the item key.
+
+### Parser-call accounting
+
+- Item-boundary delta (new `- item` line): the previous final item freezes
+  and is parsed+cached once; the new final item is parsed once → **2 parser
+  calls**.
+- In-item growth delta (text appended to the final item): only the live
+  final item is re-parsed → **1 parser call**.
+- Completed items are served from the cache and never re-parsed.
+
+### E2E result (turn `b4d9a316`, dev 5275 / backend 18173)
+
+- 65.92s; 29 `thinking_delta`, 320 `text_delta`; Bash started/completed;
+  `turn_completed`, marker visible, waiting cleared, `bottomGap=0`.
+- DOM thinking 533 chars, rendered text 3658, raw Markdown events 3849.
+- **Long Tasks: 4 durations [56, 62, 70, 243]** vs pre-patch low-intrusion
+  dev 14 tasks [50..154] and same-turn control 15 / max 419.
+- Long Task count reduced ~71% vs clean dev. One 243ms outlier remains;
+  its attribution has not been traced. The strict zero-Long-Task gate is
+  **not** met.
+
+### Files changed (cycle 16–17)
+
+- `frontend/src/utils/markdownBlocks.ts` — `RenderedListBlock`,
+  `renderListItemInnerHtml`, per-item cache with `loose` in the key.
+- `frontend/src/components/MarkdownContent.vue` — render `<ol>`/`<ul>`
+  with keyed `<li v-for>` children.
+- `frontend/tests/markdownBlocks.test.mjs` — per-item parser-call
+  assertions, ordered `start`, nested/loose/task lists, tight-to-loose
+  cache invalidation, DOM-promotion stability.

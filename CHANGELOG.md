@@ -40,8 +40,17 @@
   own `<div :key="block:${index}" v-html="block.html" />`. Completed blocks
   have stable index keys so Vue reuses their DOM; only the live-tail block's
   `innerHTML` updates. Cache identity includes the `linkMarkdownPaths` mode.
-  Lists stay as one block (no unsafe item splitting); per-delta parser calls
-  are bounded to 1 (the list block).
+- **AST list-item splitting for long streamed lists**: A contiguous list is
+  one marked token; without splitting, the whole list's `innerHTML` was
+  replaced every delta (O(n²) DOM work). `markdownBlocks.ts` now splits the
+  list token into its marked-parsed `items` and emits a `RenderedListBlock`
+  with one stable `<ul>`/`<ol>` and keyed `<li>` children. Every completed
+  item's `<li>` inner HTML is cached (keyed by `item.raw` + the list-wide
+  `loose` flag so a tight→loose transition re-renders cached items); only
+  the final (still-growing) item is re-rendered per delta. Item-boundary
+  deltas cost 2 parser calls (freeze previous + render new final); in-item
+  growth costs 1. `joinBlocks` output matches `marked.parse` exactly for
+  ordered `start`, nested, loose, task, and emphasis/link fixtures.
 - **Removed second-stage text reveal**: The `textReveal` character-by-character
   interpolation in `StructuredPane` was magnifying 98 `text_delta` events into
   375 distinct assistant text DOM states (~3.8×). It has been deleted;

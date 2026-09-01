@@ -5,12 +5,44 @@
     :class="{ compact }"
     @click="handleClick"
   >
-    <div
+    <template
       v-for="block in blocks"
       :key="block.key"
-      class="markdown-block"
-      v-html="block.html"
-    />
+    >
+      <!-- Non-list blocks: a single element whose innerHTML is the rendered
+           block. Completed blocks are cached and never re-rendered; only the
+           live tail block's innerHTML is updated on each delta. -->
+      <div
+        v-if="'html' in block"
+        class="markdown-block"
+        v-html="block.html"
+      />
+      <!-- List blocks: one stable <ul>/<ol> with keyed <li> children. Each
+           completed <li> is cached and left untouched by Vue; only the final
+           (still-growing) <li>'s innerHTML is replaced on each delta. This
+           bounds the DOM work for long streamed lists to the final item. -->
+      <ol
+        v-else-if="block.list.ordered"
+        class="markdown-block markdown-list"
+        :start="block.list.start"
+      >
+        <li
+          v-for="item in block.list.items"
+          :key="item.key"
+          v-html="item.html"
+        />
+      </ol>
+      <ul
+        v-else
+        class="markdown-block markdown-list"
+      >
+        <li
+          v-for="item in block.list.items"
+          :key="item.key"
+          v-html="item.html"
+        />
+      </ul>
+    </template>
   </div>
 </template>
 
@@ -97,9 +129,21 @@ function handleClick(event: MouseEvent) {
   margin: 8px 0 0;
 }
 
+/* Lists are now rendered as direct .markdown-block elements (not nested
+   inside a div), so reset their margin directly. */
+.markdown-list {
+  margin: 8px 0 0;
+  padding-left: 20px;
+}
+
 /* The first child of the first block should have no top margin. Since
    blocks are separate elements, target the first block's first child. */
 .markdown-block:first-child :deep(:first-child) {
+  margin-top: 0;
+}
+
+/* First block is a list: remove its top margin directly. */
+.markdown-list:first-child {
   margin-top: 0;
 }
 
@@ -163,11 +207,6 @@ function handleClick(event: MouseEvent) {
   border-left: 3px solid var(--ch-color-border-hover);
   color: var(--ch-color-text-muted);
   padding-left: 10px;
-}
-
-.markdown-block :deep(ul),
-.markdown-block :deep(ol) {
-  padding-left: 20px;
 }
 
 .markdown-block :deep(li + li) {
