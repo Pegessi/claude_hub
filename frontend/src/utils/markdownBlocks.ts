@@ -1,4 +1,4 @@
-import { marked, type Token } from 'marked'
+import { marked, type Token, type Tokens } from 'marked'
 import DOMPurify from 'dompurify'
 
 /**
@@ -12,22 +12,31 @@ import DOMPurify from 'dompurify'
 const MARKED_OPTIONS = { gfm: true, breaks: true }
 
 /**
- * A single rendered markdown block.
- *
- * ``key`` is a stable Vue ``v-for`` key derived from the block's index in
- * the token list. Completed blocks never change position, so their key is
- * stable and Vue reuses their DOM node across renders. The live tail (the
- * still-growing last block) always sits at the last index, so its key is
- * stable while it grows and Vue reuses one DOM node, updating only its
- * ``innerHTML``. The rest of the subtree is left untouched.
- *
- * The cache stores rendered HTML strings keyed by the block's raw text
- * (plus the linkMarkdownPaths mode); it does not cache descriptor objects.
+ * A rendered markdown block that is a single HTML element (paragraph,
+ * heading, code block, blockquote, table, …).
  */
-export interface RenderedBlock {
+export interface RenderedHtmlBlock {
   key: string
   html: string
 }
+
+/**
+ * A rendered markdown list. The list is rendered as a single ``<ul>`` or
+ * ``<ol>`` element with keyed ``<li>`` children. Each completed item's HTML
+ * is cached; only the final (still-growing) item is re-rendered on each
+ * delta. This bounds the DOM work for long streamed lists to the size of
+ * the final item, not the whole list.
+ */
+export interface RenderedListBlock {
+  key: string
+  list: {
+    ordered: boolean
+    start: number
+    items: { key: string; html: string }[]
+  }
+}
+
+export type RenderedBlock = RenderedHtmlBlock | RenderedListBlock
 
 /**
  * Split markdown source into top-level block tokens.
@@ -47,6 +56,35 @@ export function splitBlockTokens(source: string): Token[] {
  */
 export function renderBlockToken(token: Token): string {
   return DOMPurify.sanitize(marked.parser([token], MARKED_OPTIONS))
+}
+
+/**
+ * Render a single list item to the inner HTML of its ``<li>`` element.
+ *
+ * Uses marked itself: a synthetic list token containing only this item is
+ * passed to ``marked.parser``, producing ``<ul><li>…</li></ul>`` (or
+ * ``<ol>…</ol>``). The ``<li>`` inner HTML is extracted via the DOM (or a
+ * regex fallback in Node). This relies on marked's own list/item parsing —
+ * no regex line-splitting of the raw markdown.
+ */
+function renderListItemInnerHtml(item: Tokens.ListItem, listToken: Tokens.List): string {
+  const syntheticList: Tokens.List = {
+    type: 'list',
+    raw: item.raw,
+    ordered: listToken.ordered,
+    start: listToken.start,
+    loose: listToken.loose,
+    items: [item],
+  }
+  const html = DOMPurify.sanitize(marked.parser([syntheticList], MARKED_OPTIONS))
+  if (typeof document === 'undefined') {
+    const match = html.match(/<li[^>]*>([\s\S]*)<\/li>/)
+    return match ? match[1] : html
+  }
+  const template = document.createElement('template')
+  template.innerHTML = html
+  const li = template.content.querySelector('li')
+  return li ? li.innerHTML : html
 }
 
 const MARKDOWN_PATH_PATTERN =
@@ -123,6 +161,19 @@ export function linkPathMentions(html: string): string {
  * This keeps the cache size bounded to the number of completed blocks,
  * not the number of deltas.
  *
+ * List items
+ * ----------
+ * A contiguous list is a single top-level marked token. Without special
+ * handling the whole list's ``innerHTML`` is replaced on every delta —
+ * O(list length) DOM work per delta, O(n²) overall. To bound this, a list
+ * token is split into its marked-parsed ``items``. Every item except the
+ * last is treated as completed: its ``<li>`` inner HTML is rendered once,
+ * sanitized, link-wrapped, and cached by the item's raw text. Only the
+ * final item is re-rendered each delta. The list is emitted as a single
+ * ``RenderedListBlock`` so the host can render one stable ``<ul>``/``<ol>``
+ * with keyed ``<li>`` children — Vue leaves completed ``<li>`` nodes
+ * untouched and updates only the final item's ``innerHTML``.
+ *
  * Cache keys include the ``linkMarkdownPaths`` mode so that switching the
  * mode does not serve stale (un)linked HTML.
  */
@@ -132,18 +183,20 @@ export class MarkdownBlockCache {
    *  changes, the cache is invalidated. */
   private linkMode: boolean | null = null
 
-  private cacheKey(raw: string, linkMarkdownPaths: boolean): string {
-    return `${linkMarkdownPaths ? 'l:' : 'n:'}${raw}`
+  private cacheKey(raw: string, linkMarkdownPaths: boolean, listLoose?: boolean): string {
+    const link = linkMarkdownPaths ? 'l' : 'n'
+    // List items are rendered in the context of their parent list's ``loose``
+    // flag, which controls whether the item content is wrapped in ``<p>``.
+    // ``loose`` is a list-wide property that can change from false to true as
+    // items are appended (a blank line between items makes the whole list
+    // loose). Including it in the key ensures cached items are invalidated
+    // when the list's loose state changes.
+    const loose = listLoose === undefined ? '' : `:loose=${listLoose}`
+    return `${link}${loose}:${raw}`
   }
 
   /**
    * Render a full markdown source into a list of block descriptors.
-   *
-   * Completed blocks are cached by their raw text (plus link mode); the
-   * returned descriptor carries the cached HTML and an index-based stable
-   * key. The live tail (the still-growing last block) is rendered fresh
-   * each call and carries the last index as its key so Vue reuses one DOM
-   * node.
    *
    * @param source - markdown text.
    * @param options.complete - when true, the final block is also cached
@@ -171,32 +224,108 @@ export class MarkdownBlockCache {
     for (let i = 0; i < tokens.length; i++) {
       const token = tokens[i]
       const isLast = i === lastIndex
-      const rawKey = this.cacheKey(token.raw, linkMarkdownPaths)
 
-      if (!isLast || complete) {
-        // Completed block: parse once, apply link wrapping once, cache.
-        let blockHtml = this.cache.get(rawKey)
-        if (blockHtml === undefined) {
-          blockHtml = renderBlockToken(token)
-          if (linkMarkdownPaths) {
-            blockHtml = linkPathMentions(blockHtml)
-          }
-          this.cache.set(rawKey, blockHtml)
-        }
-        blocks.push({ key: `block:${i}`, html: blockHtml })
+      if (token.type === 'list') {
+        blocks.push(this.renderListBlock(token as Tokens.List, `block:${i}`, {
+          isLast,
+          complete,
+          linkMarkdownPaths,
+        }))
       } else {
-        // Live tail: render (and link-wrap) but do not cache.
-        let blockHtml = renderBlockToken(token)
-        if (linkMarkdownPaths) {
-          blockHtml = linkPathMentions(blockHtml)
-        }
-        blocks.push({ key: `block:${i}`, html: blockHtml })
+        blocks.push(this.renderHtmlBlock(token, `block:${i}`, {
+          isLast,
+          complete,
+          linkMarkdownPaths,
+        }))
       }
     }
     return blocks
   }
 
-  /** Number of cached blocks. */
+  private renderHtmlBlock(
+    token: Token,
+    key: string,
+    opts: { isLast: boolean; complete: boolean; linkMarkdownPaths: boolean },
+  ): RenderedHtmlBlock {
+    const { isLast, complete, linkMarkdownPaths } = opts
+    const rawKey = this.cacheKey(token.raw, linkMarkdownPaths)
+
+    if (!isLast || complete) {
+      let blockHtml = this.cache.get(rawKey)
+      if (blockHtml === undefined) {
+        blockHtml = renderBlockToken(token)
+        if (linkMarkdownPaths) {
+          blockHtml = linkPathMentions(blockHtml)
+        }
+        this.cache.set(rawKey, blockHtml)
+      }
+      return { key, html: blockHtml }
+    }
+
+    // Live tail: render but do not cache.
+    let blockHtml = renderBlockToken(token)
+    if (linkMarkdownPaths) {
+      blockHtml = linkPathMentions(blockHtml)
+    }
+    return { key, html: blockHtml }
+  }
+
+  private renderListBlock(
+    token: Tokens.List,
+    key: string,
+    opts: { isLast: boolean; complete: boolean; linkMarkdownPaths: boolean },
+  ): RenderedListBlock {
+    const { isLast, complete, linkMarkdownPaths } = opts
+    const items = token.items
+    const lastItemIdx = items.length - 1
+
+    const renderedItems = items.map((item, idx) => {
+      const itemIsLast = idx === lastItemIdx
+      const itemKey = `${key}:item:${idx}`
+      const rawKey = this.cacheKey(item.raw, linkMarkdownPaths, token.loose)
+
+      // An item is completed (and therefore cached) when:
+      //  - it is not the final item of the list, OR
+      //  - the list itself is not the final top-level block (a following
+      //    block means the list — and thus its final item — is done), OR
+      //  - the stream has ended (complete=true).
+      // Otherwise the item is the live tail and is re-rendered each delta
+      // without being cached.
+      const itemCompleted = !itemIsLast || !isLast || complete
+
+      if (itemCompleted) {
+        let itemHtml = this.cache.get(rawKey)
+        if (itemHtml === undefined) {
+          itemHtml = renderListItemInnerHtml(item, token)
+          if (linkMarkdownPaths) {
+            itemHtml = linkPathMentions(itemHtml)
+          }
+          this.cache.set(rawKey, itemHtml)
+        }
+        return { key: itemKey, html: itemHtml }
+      }
+
+      // Live tail item: render but do not cache.
+      let itemHtml = renderListItemInnerHtml(item, token)
+      if (linkMarkdownPaths) {
+        itemHtml = linkPathMentions(itemHtml)
+      }
+      return { key: itemKey, html: itemHtml }
+    })
+
+    const start = typeof token.start === 'number' ? token.start : 1
+
+    return {
+      key,
+      list: {
+        ordered: token.ordered,
+        start,
+        items: renderedItems,
+      },
+    }
+  }
+
+  /** Number of cached blocks/items. */
   get size(): number {
     return this.cache.size
   }
@@ -209,14 +338,28 @@ export class MarkdownBlockCache {
 
   /** Check whether a block's raw text is cached. */
   has(raw: string): boolean {
-    // Check both link-mode variants.
     return this.cache.has(this.cacheKey(raw, true)) ||
       this.cache.has(this.cacheKey(raw, false))
   }
 }
 
 /** Join rendered blocks back into a single HTML string (for tests and
- *  callers that need the legacy concatenated output). */
+ *  callers that need the legacy concatenated output).
+ *
+ *  The list output mirrors marked's own formatting: a newline after the
+ *  opening tag, between ``<li>`` elements, and before the closing tag, so
+ *  that ``joinBlocks(cache.render(src))`` equals ``marked.parse(src)``.
+ */
 export function joinBlocks(blocks: RenderedBlock[]): string {
-  return blocks.map((b) => b.html).join('')
+  return blocks.map((b) => {
+    if ('list' in b) {
+      const tag = b.list.ordered ? 'ol' : 'ul'
+      const startAttr = b.list.ordered && b.list.start !== 1
+        ? ` start="${b.list.start}"`
+        : ''
+      const items = b.list.items.map((it) => `<li>${it.html}</li>`).join('\n')
+      return `<${tag}${startAttr}>\n${items}\n</${tag}>\n`
+    }
+    return b.html
+  }).join('')
 }
