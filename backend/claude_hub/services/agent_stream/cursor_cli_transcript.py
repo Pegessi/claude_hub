@@ -350,10 +350,11 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
             if isinstance(message, dict):
                 content = message.get("content")
                 if isinstance(content, list):
-                    # Cursor distinguishes streaming chunks (timestamp_ms
-                    # present) from the final full-text snapshot (no
-                    # timestamp_ms). Streaming chunks are emitted and
-                    # accumulated; the final snapshot is reconciled.
+                    # Cursor usually distinguishes streaming chunks
+                    # (timestamp_ms present) from the final full-text snapshot
+                    # (no timestamp_ms). Resumed turns can also timestamp an
+                    # exact replay of several prior chunks, so reconcile that
+                    # proven replay before trusting the timestamp marker.
                     is_streaming_chunk = "timestamp_ms" in raw
                     for block in content:
                         if not isinstance(block, dict):
@@ -362,16 +363,27 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
                             text = block.get("text")
                             if isinstance(text, str) and text:
                                 if is_streaming_chunk:
-                                    state = self._get_turn_state(ctx)
-                                    state.text += text
-                                    events.append(
-                                        ctx.event(
-                                            AgentStreamEventType.TEXT_DELTA,
-                                            {"text": text},
+                                    if not self._is_recent_text_snapshot(ctx, text):
+                                        self._append_text_delta(ctx, text)
+                                        events.append(
+                                            ctx.event(
+                                                AgentStreamEventType.TEXT_DELTA,
+                                                {"text": text},
+                                            )
                                         )
-                                    )
                                 else:
-                                    suffix = self._reconcile_text(ctx, text)
+                                    # Final snapshots are scoped to one
+                                    # assistant message, while one Cursor turn
+                                    # may contain multiple assistant messages.
+                                    # If the snapshot exactly replays the most
+                                    # recent multi-chunk message, it is already
+                                    # visible even when it is not the whole
+                                    # turn accumulator.
+                                    suffix = (
+                                        ""
+                                        if self._is_recent_text_snapshot(ctx, text)
+                                        else self._reconcile_text(ctx, text)
+                                    )
                                     if suffix is None:
                                         events.append(
                                             ctx.event(

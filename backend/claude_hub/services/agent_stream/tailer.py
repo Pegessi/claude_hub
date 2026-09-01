@@ -1103,6 +1103,24 @@ class TailerManager:
     async def ensure_started(self, session: ManagedSession) -> SessionTailer:
         return await self._get_or_create(session)
 
+    async def retry(self, session: ManagedSession) -> SessionTailer:
+        """Replace a failed/stopped tailer and resume from durable provider id.
+
+        A hard-failed native tailer must not be revived in place: its provider
+        queues and reader tasks belong to the failed process generation.  Drop
+        the whole in-memory owner, stop any surviving subprocess, then let the
+        normal constructor create a fresh adapter/transport.  The persisted
+        ``agent_session_id`` on ``session`` preserves the conversation.
+        """
+
+        async with self._lock:
+            previous = self._tailers.pop(session.id, None)
+        if previous is not None:
+            await previous.stop()
+        _HARD_FAILED_SESSION_IDS.discard(session.id)
+        invalidate_source(session.id)
+        return await self._get_or_create(session)
+
     def get_tailer(self, session_id: str) -> Optional[SessionTailer]:
         return self._tailers.get(session_id)
 

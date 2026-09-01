@@ -102,6 +102,29 @@
           </details>
 
           <div
+            v-if="turn.awaitingAgentActivity"
+            class="conversation-row conversation-row--assistant"
+            role="status"
+            aria-live="polite"
+          >
+            <span
+              class="conversation-avatar conversation-avatar--waiting"
+              aria-hidden="true"
+            >✦</span>
+            <div class="agent-waiting-card">
+              <span
+                class="agent-waiting-pulse"
+                aria-hidden="true"
+              >
+                <i />
+                <i />
+                <i />
+              </span>
+              <span>Waiting for agent response…</span>
+            </div>
+          </div>
+
+          <div
             v-if="turn.assistantText"
             class="conversation-row conversation-row--assistant"
           >
@@ -315,7 +338,15 @@ const props = defineProps<{
   tabId?: string
 }>()
 
-const { events, connectionState, errorMessage, capabilities, start, stop } = useAgentStream()
+const {
+  events,
+  connectionState,
+  errorMessage,
+  capabilities,
+  start,
+  retry: retryStream,
+  stop,
+} = useAgentStream()
 
 function startStream() {
   if (props.tabId) {
@@ -338,6 +369,12 @@ const turns = computed(() => authoritativeTurns.value.map(turn => {
   const state = revealStates.value[turn.key]
   return {
     ...turn,
+    awaitingAgentActivity: !turn.completed &&
+      !turn.thinkingText &&
+      !turn.assistantText &&
+      turn.tools.length === 0 &&
+      turn.errors.length === 0 &&
+      turn.statuses.length === 0,
     assistantText: state
       ? visibleRevealedText(state, { streaming: !turn.completed })
       : turn.assistantText,
@@ -434,7 +471,11 @@ watch(
 )
 
 function retry() {
-  startStream()
+  if (props.tabId) {
+    void retryStream(props.tabId, 'terminal-tab')
+  } else if (props.sessionId) {
+    void retryStream(props.sessionId, 'managed-session')
+  }
 }
 
 // ── Composer ────────────────────────────────────────────────────────────────
@@ -1250,6 +1291,61 @@ onUnmounted(() => {
   font-size: 10px;
 }
 
+.conversation-avatar--waiting {
+  color: var(--ch-color-text-subtle);
+  background: var(--ch-color-surface-control);
+}
+
+.agent-waiting-card {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 11px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  border-bottom-left-radius: var(--ch-radius-sm);
+  background: var(--ch-color-surface-soft);
+  color: var(--ch-color-text-subtle);
+  font-size: 12px;
+}
+
+.agent-waiting-pulse {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.agent-waiting-pulse i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentcolor;
+  animation: agent-waiting-dot 1.2s ease-in-out infinite;
+}
+
+.agent-waiting-pulse i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.agent-waiting-pulse i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes agent-waiting-dot {
+  0%,
+  60%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+
+  30% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
 .thinking-card {
   align-self: flex-start;
   width: min(85%, 680px);
@@ -1438,6 +1534,14 @@ onUnmounted(() => {
   .event-error {
     width: min(92%, 680px);
     max-width: 92%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-waiting-pulse i,
+  .banner-spinner,
+  .thinking-indicator {
+    animation: none;
   }
 }
 </style>

@@ -64,6 +64,18 @@ test('direct Paseo sends atomically with a stable client turn id', () => {
   assert.doesNotMatch(structuredPane, /sendTerminalText/)
 })
 
+test('an acknowledged turn shows a waiting state until provider activity arrives', () => {
+  assert.match(structuredPane, /awaitingAgentActivity: !turn\.completed/)
+  assert.match(structuredPane, /Waiting for agent response…/)
+  assert.match(structuredPane, /agent-waiting-pulse/)
+})
+
+test('structured Retry asks the backend to replace a failed provider transport', () => {
+  assert.match(structuredPane, /retry: retryStream/)
+  assert.match(structuredPane, /retryStream\(props\.tabId, 'terminal-tab'\)/)
+  assert.doesNotMatch(structuredPane, /function retry\(\) \{\s*startStream\(\)/)
+})
+
 test('Paseo follows dynamic timeline height but preserves deliberate history reading', () => {
   assert.match(structuredPane, /new ResizeObserver/)
   assert.match(structuredPane, /isFollowingLatest\.value = isTimelineNearBottom\(el\)/)
