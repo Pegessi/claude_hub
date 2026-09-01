@@ -51,6 +51,7 @@ from .base import (
     discover_source_cached,
     invalidate_source,
 )
+from .coalescer import AgentStreamCoalescer
 from .native import ProviderSession, _detect_image_mime, create_native_session
 from .redaction import redact_event
 from .store import AgentStreamStore
@@ -108,7 +109,10 @@ class SessionTailer:
         self._snapshot_source_ids: List[str] = []
         self._snapshot_source_kinds: List[str] = []
         self._snapshot_digest: Optional[str] = None
-        self._is_live = False
+        # Native transports have no backfill concept: every record is live.
+        # Transcript/snapshot sessions start in backfill mode (_is_live=False)
+        # and flip to live after the first successful read.
+        self._is_live = native_transport is not None
 
         # The active user turn's stable id. Set by ``send_message`` the moment
         # a user turn is submitted (before the provider runs), and cleared when
@@ -137,6 +141,13 @@ class SessionTailer:
         # publish, and the transport send so a busy second send never mutates
         # state that the in-flight first turn still depends on.
         self._send_lock = asyncio.Lock()
+
+        # Semantic coalescer for text_delta / thinking_delta bursts. Merges
+        # consecutive same-stream deltas within a ~60ms window so the fanout
+        # rate stays bounded. The coalescer invokes ``_persist_and_fanout``
+        # for each merged event; non-coalescable events are flushed through
+        # ``_publish`` which drains the coalescer first.
+        self._coalescer = AgentStreamCoalescer(on_flush=self._persist_and_fanout)
 
     @property
     def hard_failed(self) -> bool:
@@ -246,7 +257,7 @@ class SessionTailer:
             )
             turn_started = redact_event(turn_started)
             try:
-                turn_started = await self._store.append(turn_started)
+                await self._publish(turn_started)
             except Exception:
                 logger.exception(
                     "agent_stream store append failed for turn_started session %s",
@@ -257,7 +268,6 @@ class SessionTailer:
                 # seq=0 event that the frontend will drop.
                 self._active_turn_id = None
                 raise
-            self._fanout(turn_started)
 
             try:
                 await transport.send_message(text, images)
@@ -271,28 +281,24 @@ class SessionTailer:
                 )
                 err_event = redact_event(err_event)
                 try:
-                    err_event = await self._store.append(err_event)
+                    await self._publish(err_event)
                 except Exception:
                     logger.exception(
                         "agent_stream store append failed for error session %s",
                         self.session_id,
                     )
-                else:
-                    self._fanout(err_event)
                 completed = ctx.event(
                     AgentStreamEventType.TURN_COMPLETED,
                     {"status": "failed"},
                 )
                 completed = redact_event(completed)
                 try:
-                    completed = await self._store.append(completed)
+                    await self._publish(completed)
                 except Exception:
                     logger.exception(
                         "agent_stream store append failed for turn_completed session %s",
                         self.session_id,
                     )
-                else:
-                    self._fanout(completed)
                 self._active_turn_id = None
                 raise
 
@@ -329,28 +335,24 @@ class SessionTailer:
         )
         err_event = redact_event(err_event)
         try:
-            err_event = await self._store.append(err_event)
+            await self._publish(err_event)
         except Exception:
             logger.exception(
                 "agent_stream store append failed for error session %s",
                 self.session_id,
             )
-        else:
-            self._fanout(err_event)
         completed = ctx.event(
             AgentStreamEventType.TURN_COMPLETED,
             {"status": "failed"},
         )
         completed = redact_event(completed)
         try:
-            completed = await self._store.append(completed)
+            await self._publish(completed)
         except Exception:
             logger.exception(
                 "agent_stream store append failed for turn_completed session %s",
                 self.session_id,
             )
-        else:
-            self._fanout(completed)
         self._turn_completed_seen = True
 
     async def poll_once(self) -> None:
@@ -390,6 +392,15 @@ class SessionTailer:
             except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                 pass
         self._task = None
+        # Flush any coalesced text deltas that haven't been persisted yet so
+        # no trailing content is lost on shutdown.
+        try:
+            await self._coalescer.flush_async()
+        except Exception:
+            logger.exception(
+                "agent_stream coalescer flush failed during stop for session %s",
+                self.session_id,
+            )
         if self._native_transport is not None:
             try:
                 await self._native_transport.stop()
@@ -572,16 +583,13 @@ class SessionTailer:
                     event.run_epoch = self._run_epoch
                 event = redact_event(event)
                 try:
-                    event = await self._store.append(event)
+                    await self._publish(event)
                 except Exception:
                     logger.exception(
                         "agent_stream store append failed for session %s; dropping event",
                         self.session_id,
                     )
                     continue
-                # Native transport has no backfill concept: every record is
-                # live and must be fanned out to subscribers immediately.
-                self._fanout(event)
                 if is_turn_completed:
                     # Mark that the provider emitted a terminal completion for
                     # the active turn. At EOF we use this to decide whether a
@@ -687,15 +695,15 @@ class SessionTailer:
                 event.run_epoch = self._run_epoch
                 event = redact_event(event)
                 try:
-                    event = await self._store.append(event)
+                    await self._publish(event)
                 except Exception:
                     logger.exception(
                         "agent_stream store append failed for session %s; dropping event",
                         self.session_id,
                     )
                     continue
-                if self._is_live:
-                    self._fanout(event)
+        # Drain any coalesced text deltas before marking the session live.
+        await self._coalescer.flush_async()
         self._is_live = True
 
     async def _tail_file(self, path: Path, session: ManagedSession) -> None:
@@ -720,6 +728,7 @@ class SessionTailer:
             self._reset_for_rotation(path)
             return
         if not lines:
+            await self._coalescer.flush_async()
             self._is_live = True
             return
 
@@ -749,15 +758,19 @@ class SessionTailer:
                 event.run_epoch = self._run_epoch
                 event = redact_event(event)
                 try:
-                    event = await self._store.append(event)
+                    await self._publish(event)
                 except Exception:
                     logger.exception(
                         "agent_stream store append failed for session %s; dropping event",
                         self.session_id,
                     )
                     continue
-                if self._is_live:
-                    self._fanout(event)
+        # Drain any coalesced text deltas from this backfill batch BEFORE
+        # flipping to live. If we flipped first, the trailing timer could
+        # fire and fan out historical deltas as if they were live, causing
+        # duplicate delivery (subscribers already replay history from the
+        # store).
+        await self._coalescer.flush_async()
         self._offset = new_offset
         self._inode = inode
         self._is_live = True
@@ -793,11 +806,13 @@ class SessionTailer:
             if self._snapshot_source_ids:
                 return
             self._snapshot_digest = snapshot.digest
+            await self._coalescer.flush_async()
             self._is_live = True
             self._save_cursor()
             return
 
         if snapshot.digest == self._snapshot_digest:
+            await self._coalescer.flush_async()
             self._is_live = True
             return
 
@@ -830,6 +845,7 @@ class SessionTailer:
         new_records = snapshot.records[prior_count:]
         if not new_records:
             self._snapshot_digest = snapshot.digest
+            await self._coalescer.flush_async()
             self._is_live = True
             self._save_cursor()
             return
@@ -857,7 +873,7 @@ class SessionTailer:
                 ev.run_epoch = run_epoch
                 ev = redact_event(ev)
                 try:
-                    ev = await self._store.append(ev)
+                    await self._publish(ev)
                 except Exception:
                     logger.exception(
                         "agent_stream store append failed for snapshot session %s; failing closed",
@@ -869,9 +885,10 @@ class SessionTailer:
                     )
                     _HARD_FAILED_SESSION_IDS.add(self.session_id)
                     return
-                if self._is_live:
-                    self._fanout(ev)
 
+        # Drain any coalesced text deltas from this snapshot backfill BEFORE
+        # flipping to live, so historical content is not fanned out as live.
+        await self._coalescer.flush_async()
         self._run_epoch = run_epoch
         self._snapshot_digest = snapshot.digest
         self._snapshot_source_ids = source_ids
@@ -913,6 +930,45 @@ class SessionTailer:
             if isinstance(record, dict):
                 lines.append(record)
         return lines, new_offset, inode, False
+
+    async def _persist_and_fanout(self, event: AgentStreamEvent) -> None:
+        """Persist a (possibly coalesced) event and fan it out to subscribers.
+
+        This is the coalescer's ``on_flush`` callback. It is the single
+        persistence+fanout path for text deltas. Sequence numbers are
+        assigned here by ``store.append``, so each coalesced event gets
+        exactly one sequence number — no holes, no duplicates.
+
+        During backfill (``_is_live`` is False for transcript/snapshot
+        sessions) events are persisted but NOT fanned out: live subscribers
+        replay history from the store, so fanning out backfill events would
+        cause duplicate delivery. Native sessions are always live.
+
+        Raises if ``store.append`` fails so callers (e.g. ``turn_started``)
+        can react. The coalescer's drain loop catches and logs exceptions
+        from this callback so a single failed persist does not abort the
+        whole flush.
+        """
+        event = await self._store.append(event)
+        if self._is_live:
+            self._fanout(event)
+
+    async def _publish(self, event: AgentStreamEvent) -> None:
+        """Publish an event, coalescing text deltas along the way.
+
+        Coalescable events (``text_delta``, ``thinking_delta``) are buffered
+        by the coalescer and flushed on the leading edge or trailing timer.
+        Non-coalescable events force a flush of any pending text first, so
+        text never appears after a terminal marker.
+
+        Raises if persistence of a non-coalescable event fails.
+        """
+        if await self._coalescer.handle(event):
+            return  # buffered; the coalescer will flush it
+        # Non-coalescable: drain pending text before emitting so ordering is
+        # preserved (no text after a terminal event).
+        await self._coalescer.flush_async()
+        await self._persist_and_fanout(event)
 
     def _fanout(self, event: AgentStreamEvent) -> None:
         for queue in list(self._subscribers):

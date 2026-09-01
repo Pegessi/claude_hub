@@ -124,11 +124,10 @@
                 />
                 Thinking
               </summary>
-              <MarkdownContent
-                :text="part.text"
-                compact
-                class="thinking-body"
-              />
+              <!-- Thinking is rendered as plain text (no marked/DOMPurify) to
+                   avoid re-parsing multi-kilobyte reasoning streams on every
+                   delta. Whitespace is preserved with pre-wrap. -->
+              <pre class="thinking-body">{{ part.text }}</pre>
             </details>
 
             <div
@@ -143,6 +142,7 @@
                 <MarkdownContent
                   :text="part.text"
                   compact
+                  :complete="turn.completed"
                 />
               </div>
             </div>
@@ -1407,8 +1407,13 @@ onUnmounted(() => {
 }
 
 .thinking-body {
-  margin-top: 8px;
+  margin: 8px 0 0;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.5;
   color: var(--ch-color-text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .tool-card {
