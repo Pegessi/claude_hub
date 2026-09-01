@@ -66,6 +66,7 @@
         <div
           v-for="turn in turns"
           :key="turn.key"
+          v-memo="[turn.renderRevision]"
           class="structured-turn"
         >
           <!-- A right-aligned user bubble and a left-aligned agent bubble make

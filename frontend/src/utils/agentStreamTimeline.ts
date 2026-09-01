@@ -32,6 +32,17 @@ export interface TimelineTurn {
   completionStatus: string | null
   errors: { key: string; message: string }[]
   statuses: { key: string; text: string }[]
+  /**
+   * Monotonically increasing render revision. Incremented only when an
+   * applied event visibly mutates this turn (text/thinking/tool/status/
+   * error/completion/user summary). Events that are no-ops (empty text,
+   * exact multi-chunk replay, duplicate tool) do not advance the revision.
+   *
+   * ``StructuredPane`` uses ``v-memo="[turn.renderRevision]"`` on each
+   * ``.structured-turn`` so Vue skips re-rendering completed historical
+   * turns whose revision has not changed; only the active turn rebuilds.
+   */
+  renderRevision: number
 }
 
 function payloadString(event: AgentStreamEvent, key: string): string {
@@ -57,6 +68,7 @@ function createTurn(key: string, turnId: string | null): TimelineTurn {
     completionStatus: null,
     errors: [],
     statuses: [],
+    renderRevision: 0,
   }
 }
 
@@ -137,7 +149,12 @@ function resolveTurn(state: ReducerState, event: AgentStreamEvent): TimelineTurn
 }
 
 /** Apply a single event to the reducer state. Pure mutation; no allocation
- *  beyond the turn/tool/part objects the event requires. */
+ *  beyond the turn/tool/part objects the event requires.
+ *
+ *  ``turn.renderRevision`` is incremented only when the event visibly
+ *  mutates the turn. No-op events (empty text, exact multi-chunk replay,
+ *  duplicate tool) leave the revision unchanged so ``v-memo`` can skip
+ *  re-rendering the turn. */
 function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
   const turn = resolveTurn(state, event)
   const toolMapKey = turn.turnId ?? turn.key
@@ -147,17 +164,28 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
     state.toolsByTurn.set(toolMapKey, toolMap)
   }
 
+  let mutated = false
+
   switch (event.type) {
-    case 'turn_started':
-      turn.userText = payloadString(event, 'summary')
-      break
-    case 'turn_completed':
-      turn.completed = true
-      turn.completionStatus = payloadString(event, 'status') || 'completed'
-      for (const tool of turn.tools) {
-        if (tool.status === 'running') tool.status = 'completed'
+    case 'turn_started': {
+      const summary = payloadString(event, 'summary')
+      if (turn.userText !== summary) {
+        turn.userText = summary
+        mutated = true
       }
       break
+    }
+    case 'turn_completed': {
+      if (!turn.completed) {
+        turn.completed = true
+        turn.completionStatus = payloadString(event, 'status') || 'completed'
+        for (const tool of turn.tools) {
+          if (tool.status === 'running') tool.status = 'completed'
+        }
+        mutated = true
+      }
+      break
+    }
     case 'text_delta':
     {
       const text = payloadString(event, 'text')
@@ -167,11 +195,16 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
       appendTextPart(turn, 'text', text, event.stream_sequence)
       chunks.push(text)
       state.textChunksByTurn.set(toolMapKey, chunks)
+      mutated = true
       break
     }
-    case 'thinking_delta':
-      appendTextPart(turn, 'thinking', payloadString(event, 'text'), event.stream_sequence)
+    case 'thinking_delta': {
+      const text = payloadString(event, 'text')
+      if (!text) break
+      appendTextPart(turn, 'thinking', text, event.stream_sequence)
+      mutated = true
       break
+    }
     case 'tool_call_started': {
       const callId = (event.payload.tool_call_id as string | null) ?? event.call_id ?? null
       let argsText = ''
@@ -193,6 +226,7 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
         toolMap.set(identity, tool)
         turn.tools.push(tool)
         turn.parts.push({ kind: 'tool', key: tool.key, tool })
+        mutated = true
       }
       break
     }
@@ -200,6 +234,7 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
       const callId = (event.payload.tool_call_id as string | null) ?? event.call_id ?? null
       const identity = callId ?? event.message_id ?? `sequence-${event.stream_sequence}`
       let tool = toolMap.get(identity)
+      const isNew = !tool
       if (!tool) {
         tool = {
           key: `tool-${identity}`,
@@ -213,8 +248,13 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
         turn.tools.push(tool)
         turn.parts.push({ kind: 'tool', key: tool.key, tool })
       }
-      tool.status = payloadString(event, 'status') === 'failed' ? 'failed' : 'completed'
-      tool.resultText = payloadString(event, 'result')
+      const newStatus = payloadString(event, 'status') === 'failed' ? 'failed' : 'completed'
+      const newResult = payloadString(event, 'result')
+      if (isNew || tool.status !== newStatus || tool.resultText !== newResult) {
+        tool.status = newStatus
+        tool.resultText = newResult
+        mutated = true
+      }
       break
     }
     case 'error': {
@@ -222,6 +262,7 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
       const errKey = `error-${event.message_id ?? 'event'}-${event.stream_sequence}`
       turn.errors.push({ key: errKey, message })
       turn.parts.push({ kind: 'error', key: errKey, message })
+      mutated = true
       break
     }
     case 'status': {
@@ -230,10 +271,15 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
       const statusKey = `status-${event.message_id ?? 'event'}-${event.stream_sequence}`
       turn.statuses.push({ key: statusKey, text })
       turn.parts.push({ kind: 'status', key: statusKey, text })
+      mutated = true
       break
     }
     default:
       break
+  }
+
+  if (mutated) {
+    turn.renderRevision += 1
   }
 }
 

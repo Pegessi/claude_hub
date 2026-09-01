@@ -49,12 +49,27 @@
   60ms coalescer + frontend rAF/48ms batcher), one visible update per
   committed batch. `turn_completed` flips `MarkdownContent`'s `complete` prop
   to cache the final block and expose the exact final text synchronously.
-- **Validation**: 188 frontend tests pass (including a deterministic
-  one-update-per-batch test: 4 text batches produce exactly 4 distinct
-  assistant text values, each equal to the full accumulated text), lint
-  clean, build succeeds. Authoritative E2E (turn `c01df02c`, real day1
-  Claude) on the pre-removal build recorded 6 long tasks of 58/60/50/76/64/90ms;
-  post-removal E2E pending re-run.
+- **Per-turn render revision + `v-memo`**: Added `renderRevision` to
+  `TimelineTurn`, incremented only when an applied event visibly mutates the
+  turn (text/thinking/tool/status/error/completion/user summary). No-op events
+  (empty text, exact multi-chunk replay, duplicate tool, unchanged tool
+  completion) leave the revision unchanged. `StructuredPane` puts
+  `v-memo="[turn.renderRevision]"` on each `.structured-turn`, so Vue skips
+  re-rendering completed historical turns whose revision has not changed; only
+  the active turn rebuilds. This prevents unchanged historical turn VNode
+  reconstruction and is intended to address the 7 long tasks (53–102ms)
+  observed after the textReveal removal; the post-`v-memo` E2E measurement is
+  pending.
+- **Validation**: 193 frontend tests pass (including deterministic
+  `renderRevision` tests: active turn revision increments on visible
+  mutations, completed historical turn revision stays stable while a later
+  turn mutates, empty text and exact multi-chunk replay do not advance
+  revision, duplicate tool start and unchanged tool completion do not advance
+  revision; plus the one-update-per-batch test: 4 text batches produce exactly
+  4 distinct assistant text values), lint clean, build succeeds. Authoritative
+  E2E (turn `c01df02c`, real day1 Claude) on the pre-removal build recorded 6
+  long tasks of 58/60/50/76/64/90ms; post-removal and post-`v-memo` E2E
+  pending re-run.
 
 ### fix: recover native agent streams and smooth Cursor structured output
 
