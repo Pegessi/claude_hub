@@ -685,6 +685,19 @@ async def test_claude_second_send_while_turn_in_flight_raises_and_does_not_cance
 
 
 @pytest.mark.asyncio
+async def test_cancel_active_turn_terminates_in_flight_oneshot() -> None:
+    sess = _session()
+    native = ClaudeNativeSession(sess)
+    proc = _FakeProcess(stdout_lines=[])
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        await native.send_message("first", [])
+        assert native.turn_in_flight is True
+        await native.cancel_active_turn()
+        assert native.turn_in_flight is False
+        assert proc._terminated is True
+
+
+@pytest.mark.asyncio
 async def test_stop_does_not_hang_when_stdout_reader_is_blocked() -> None:
     """``stop`` must complete quickly even when the stdout reader is blocked
     on ``readline()``. ``_terminate_process`` cancels the reader task; the

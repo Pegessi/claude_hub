@@ -380,6 +380,18 @@ class ProviderSession(ABC):
     def turn_in_flight(self) -> bool:
         return self._turn_in_flight
 
+    async def cancel_active_turn(self) -> None:
+        """Abort the in-flight turn and release the turn guard.
+
+        One-shot providers terminate the active subprocess. Persistent
+        providers (Codex) attempt a provider-native cancel RPC when available.
+        """
+        if not self._turn_in_flight:
+            return
+        await self._terminate_process()
+        self._clear_staged_images()
+        self._end_turn()
+
     def available_modes(self) -> List[StreamModeOption]:
         return [_DEFAULT_MODE]
 
@@ -1066,6 +1078,19 @@ class CodexNativeSession(ProviderSession):
             raise RuntimeError("Codex collaboration mode preset has no provider mode")
         return {"mode": provider_mode, "settings": settings}
 
+    async def cancel_active_turn(self) -> None:
+        if not self._turn_in_flight:
+            return
+        try:
+            await self._send_request("turn/cancel", {})
+        except Exception:
+            logger.exception("codex turn/cancel failed")
+        self._clear_staged_images()
+        inflight = self._inflight_images
+        self._inflight_images = []
+        self._cleanup_images(inflight)
+        self._end_turn()
+
     async def _send_text(self, text: str) -> None:
         if not self._started or self._process is None:
             await self.start()
@@ -1317,6 +1342,7 @@ class CursorNativeSession(ProviderSession):
     adapter_id = "cursor-native"
     schema_version = 1
     supports_tool_timeline = True
+    supports_approval_ui = True
     supports_images = False
 
     def _build_command(self) -> List[str]:

@@ -291,6 +291,7 @@ class SessionTailer:
         client_turn_id: str,
         *,
         previews: Optional[List[bytes]] = None,
+        delivery: str = "normal",
     ) -> None:
         """Atomically deliver a user turn (text + images) to the native transport.
 
@@ -347,12 +348,15 @@ class SessionTailer:
         async with self._send_lock:
             # 1. Busy check BEFORE any state mutation. If a turn is already in
             #    flight, fail fast so the in-flight turn's _active_turn_id and
-            #    _run_epoch are never overwritten.
+            #    _run_epoch are never overwritten — unless the caller steers.
             if transport.turn_in_flight:
-                raise RuntimeError(
-                    "a turn is already in flight; wait for it to complete before "
-                    "sending another message"
-                )
+                if delivery == "steer":
+                    await self._cancel_active_turn_locked(transport)
+                else:
+                    raise RuntimeError(
+                        "a turn is already in flight; wait for it to complete before "
+                        "sending another message"
+                    )
 
             # 2. Session existence check.
             session = self._session_getter()
@@ -479,6 +483,46 @@ class SessionTailer:
                 self._terminalize_native_runtime("failed")
                 self._active_turn_id = None
                 raise
+
+    async def cancel_turn(self) -> bool:
+        """Cancel the active native turn, if any."""
+        transport = self._native_transport
+        if transport is None or not transport.turn_in_flight:
+            return False
+        async with self._send_lock:
+            if transport is None or not transport.turn_in_flight:
+                return False
+            await self._cancel_active_turn_locked(transport)
+            return True
+
+    async def _cancel_active_turn_locked(self, transport: ProviderSession) -> None:
+        """Cancel the in-flight turn while ``_send_lock`` is held."""
+        turn_id = self._active_turn_id
+        session = self._session_getter()
+        if turn_id is not None and session is not None:
+            ctx = NormalizeContext(
+                session_id=self.session_id,
+                tab_id=session.tab_id,
+                agent_type=session.agent_type,
+                run_epoch=self._run_epoch,
+                turn_id=turn_id,
+            )
+            completed = ctx.event(
+                AgentStreamEventType.TURN_COMPLETED,
+                {"status": "cancelled"},
+            )
+            completed = redact_event(completed)
+            try:
+                await self._publish(completed)
+            except Exception:
+                logger.exception(
+                    "agent_stream store append failed for cancelled turn session %s",
+                    self.session_id,
+                )
+            self._turn_completed_seen = True
+            self._terminalize_native_runtime("cancelled")
+        await transport.cancel_active_turn()
+        self._active_turn_id = None
 
     async def _fail_active_turn(self, message: str, transport: ProviderSession) -> None:
         """Emit an ``error`` event and a failed ``turn_completed``.
@@ -1329,6 +1373,7 @@ class TailerManager:
         client_turn_id: str,
         *,
         previews: Optional[List[bytes]] = None,
+        delivery: str = "normal",
     ) -> None:
         """Atomically deliver a user turn (text + images) for ``session``.
 
@@ -1342,7 +1387,18 @@ class TailerManager:
         are the bounded display previews persisted to the attachment cache.
         """
         tailer = await self._get_or_create(session)
-        await tailer.send_message(text, images, client_turn_id, previews=previews)
+        await tailer.send_message(
+            text,
+            images,
+            client_turn_id,
+            previews=previews,
+            delivery=delivery,
+        )
+
+    async def cancel_turn(self, session: ManagedSession) -> bool:
+        """Cancel the active native turn for ``session``, if any."""
+        tailer = await self._get_or_create(session)
+        return await tailer.cancel_turn()
 
     async def set_mode(self, session: ManagedSession, mode: str) -> None:
         """Set the existing native owner's mode for subsequent turns."""
