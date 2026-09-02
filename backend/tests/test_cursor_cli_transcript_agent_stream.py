@@ -433,3 +433,60 @@ def test_normalize_skips_unknown_row_without_raising() -> None:
     adapter = CursorCliTranscriptAdapter()
     events = adapter.normalize_line({"unknown": "row"}, _ctx(session))
     assert events == []
+
+
+def test_normalize_ask_question_emits_approval_required() -> None:
+    session = _make_session()
+    adapter = CursorCliTranscriptAdapter()
+    raw = {
+        "role": "assistant",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "ask-1",
+                    "name": "AskQuestion",
+                    "input": {
+                        "title": "Scope",
+                        "questions": [
+                            {
+                                "id": "queue_persistence",
+                                "prompt": "Queue persistence?",
+                                "options": [
+                                    {"id": "local_only", "label": "Local only"},
+                                ],
+                            }
+                        ],
+                    },
+                }
+            ]
+        },
+    }
+    events = adapter.normalize_line(raw, _ctx(session))
+    types = [event.type for event in events]
+    assert AgentStreamEventType.TOOL_CALL_STARTED in types
+    assert AgentStreamEventType.APPROVAL_REQUIRED in types
+    approval = next(event for event in events if event.type == AgentStreamEventType.APPROVAL_REQUIRED)
+    assert approval.payload["kind"] == "ask_question"
+    assert approval.payload["questions"][0]["id"] == "queue_persistence"
+
+
+def test_normalize_stream_json_assistant_tool_use() -> None:
+    session = _make_session()
+    adapter = CursorCliTranscriptAdapter()
+    raw = {
+        "type": "assistant",
+        "timestamp_ms": 1,
+        "message": {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "tool-1",
+                    "name": "Shell",
+                    "input": {"command": "pwd"},
+                }
+            ]
+        },
+    }
+    events = adapter.normalize_line(raw, _ctx(session))
+    assert any(event.type == AgentStreamEventType.TOOL_CALL_STARTED for event in events)

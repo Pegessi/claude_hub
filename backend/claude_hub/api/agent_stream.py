@@ -869,6 +869,9 @@ class AgentStreamSendRequest(BaseModel):
     # frontend can upsert by identity instead of text matching. Two identical
     # user messages therefore remain two distinct turns.
     client_turn_id: str
+    # ``normal``: fail with 409 when a turn is already in flight.
+    # ``steer``: cancel the active turn, then deliver this message.
+    delivery: str = Field(default="normal", pattern="^(normal|steer)$")
 
     @model_validator(mode="after")
     def _require_text_or_attachments(self) -> "AgentStreamSendRequest":
@@ -1132,7 +1135,12 @@ async def _send_to_native(
                 detail=f"{session.agent_type.value} does not support image attachments",
             )
     await manager.send_message(
-        session, payload.text, images, payload.client_turn_id, previews=previews
+        session,
+        payload.text,
+        images,
+        payload.client_turn_id,
+        previews=previews,
+        delivery=payload.delivery,
     )
 
 
@@ -1193,6 +1201,42 @@ async def send_tab_stream_input(
     except Exception as exc:
         raise _map_send_exception(exc)
     return {"ok": True}
+
+
+async def _cancel_native_turn(
+    session: ManagedSession,
+    manager: TailerManager,
+) -> Dict[str, Any]:
+    if not _is_chat_native(session):
+        raise HTTPException(
+            status_code=400,
+            detail="native turn cancel is only available for CHAT sessions",
+        )
+    try:
+        cancelled = await manager.cancel_turn(session)
+    except StructuredSourceUnavailable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"ok": True, "cancelled": cancelled}
+
+
+@router.post("/sessions/{managed_session_id}/stream/cancel")
+async def cancel_stream_turn(
+    managed_session_id: str,
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    session = _session_or_404(managed_session_id)
+    return await _cancel_native_turn(session, _get_tailer_manager())
+
+
+@router.post("/tabs/{tab_id}/stream/cancel")
+async def cancel_tab_stream_turn(
+    tab_id: str,
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    session = _terminal_tab_session_or_404(tab_id)
+    return await _cancel_native_turn(session, _get_tab_tailer_manager())
 
 
 @router.get("/sessions/{managed_session_id}/stream/attachments/{attachment_id}")
