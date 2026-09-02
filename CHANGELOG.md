@@ -5,6 +5,17 @@
 
 ## Unreleased
 
+### fix: handle >64 KiB stdout lines in native agent transports
+
+- `ProviderSession._drain_stdout` (Claude/Cursor) and `CodexNativeSession._drain_stdout`
+  previously used `asyncio.StreamReader.readline()`, which enforces a 64 KiB
+  line-length limit. A single JSON record larger than that (e.g. a tool result
+  carrying a large file's contents) raised `LimitOverrunError`, crashed the
+  stdout drain, and made the tailer emit the misleading fallback
+  "provider exited without a completion record".
+- Replaced `readline()` with `read(65536)` + manual newline splitting so
+  arbitrarily long stdout lines are parsed correctly.
+
 ### feat: structured Chat composer controls and Cursor AskQuestion cards
 
 - Add `POST /stream/cancel` and `delivery=steer|normal` on `POST /stream/send` so
