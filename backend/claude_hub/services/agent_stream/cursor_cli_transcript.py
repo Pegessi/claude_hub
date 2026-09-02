@@ -108,7 +108,7 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
 
     adapter_id = "cursor-cli-transcript"
     schema_version = 1
-    supports_approval_ui = False
+    supports_approval_ui = True
     supports_tool_timeline = True
 
     # ── provenance / binding validation ──────────────────────────────────────
@@ -282,18 +282,7 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
                                         )
                                     )
                         elif btype == "tool_use":
-                            name = block.get("name") or "unknown"
-                            args = block.get("input")
-                            if not isinstance(args, dict):
-                                args = {"input": args} if args is not None else {}
-                            call_id = block.get("id")
-                            events.append(
-                                ctx.event(
-                                    AgentStreamEventType.TOOL_CALL_STARTED,
-                                    {"name": name, "args": args},
-                                    call_id=call_id if isinstance(call_id, str) else None,
-                                )
-                            )
+                            events.extend(self._tool_use_events(block, ctx))
         elif raw.get("type") == "turn_ended":
             status = raw.get("status")
             if status == "success":
@@ -310,6 +299,81 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
                     ctx.event(AgentStreamEventType.TURN_COMPLETED, {"status": "cancelled"})
                 )
             self._clear_turn_state(ctx)
+        return events
+
+    def _tool_use_events(self, block: Dict[str, Any], ctx: NormalizeContext) -> List[AgentStreamEvent]:
+        events: List[AgentStreamEvent] = []
+        name = block.get("name") or "unknown"
+        args = block.get("input")
+        if not isinstance(args, dict):
+            args = {"input": args} if args is not None else {}
+        call_id = block.get("id")
+        call_id_str = call_id if isinstance(call_id, str) else None
+        events.append(
+            ctx.event(
+                AgentStreamEventType.TOOL_CALL_STARTED,
+                {"name": name, "args": args},
+                call_id=call_id_str,
+            )
+        )
+        if name == "AskQuestion":
+            questions = args.get("questions")
+            if isinstance(questions, list) and questions:
+                events.append(
+                    ctx.event(
+                        AgentStreamEventType.APPROVAL_REQUIRED,
+                        {
+                            "tool_call_id": call_id_str,
+                            "kind": "ask_question",
+                            "title": args.get("title"),
+                            "questions": questions,
+                        },
+                        call_id=call_id_str,
+                    )
+                )
+        return events
+
+    def _normalize_assistant_content_blocks(
+        self, content: List[Any], ctx: NormalizeContext, *, is_streaming_chunk: bool
+    ) -> List[AgentStreamEvent]:
+        events: List[AgentStreamEvent] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "text":
+                text = block.get("text")
+                if isinstance(text, str) and text:
+                    if is_streaming_chunk:
+                        if not self._is_recent_text_snapshot(ctx, text):
+                            self._append_text_delta(ctx, text)
+                            events.append(
+                                ctx.event(AgentStreamEventType.TEXT_DELTA, {"text": text})
+                            )
+                    else:
+                        suffix = (
+                            ""
+                            if self._is_recent_text_snapshot(ctx, text)
+                            else self._reconcile_text(ctx, text)
+                        )
+                        if suffix is None:
+                            events.append(
+                                ctx.event(
+                                    AgentStreamEventType.ERROR,
+                                    {
+                                        "message": (
+                                            "assistant final text does not match "
+                                            "streamed deltas; cannot safely reconcile"
+                                        )
+                                    },
+                                )
+                            )
+                        elif suffix:
+                            events.append(
+                                ctx.event(AgentStreamEventType.TEXT_DELTA, {"text": suffix})
+                            )
+            elif btype == "tool_use":
+                events.extend(self._tool_use_events(block, ctx))
         return events
 
     def _normalize_stream_json(
@@ -350,59 +414,12 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
             if isinstance(message, dict):
                 content = message.get("content")
                 if isinstance(content, list):
-                    # Cursor usually distinguishes streaming chunks
-                    # (timestamp_ms present) from the final full-text snapshot
-                    # (no timestamp_ms). Resumed turns can also timestamp an
-                    # exact replay of several prior chunks, so reconcile that
-                    # proven replay before trusting the timestamp marker.
                     is_streaming_chunk = "timestamp_ms" in raw
-                    for block in content:
-                        if not isinstance(block, dict):
-                            continue
-                        if block.get("type") == "text":
-                            text = block.get("text")
-                            if isinstance(text, str) and text:
-                                if is_streaming_chunk:
-                                    if not self._is_recent_text_snapshot(ctx, text):
-                                        self._append_text_delta(ctx, text)
-                                        events.append(
-                                            ctx.event(
-                                                AgentStreamEventType.TEXT_DELTA,
-                                                {"text": text},
-                                            )
-                                        )
-                                else:
-                                    # Final snapshots are scoped to one
-                                    # assistant message, while one Cursor turn
-                                    # may contain multiple assistant messages.
-                                    # If the snapshot exactly replays the most
-                                    # recent multi-chunk message, it is already
-                                    # visible even when it is not the whole
-                                    # turn accumulator.
-                                    suffix = (
-                                        ""
-                                        if self._is_recent_text_snapshot(ctx, text)
-                                        else self._reconcile_text(ctx, text)
-                                    )
-                                    if suffix is None:
-                                        events.append(
-                                            ctx.event(
-                                                AgentStreamEventType.ERROR,
-                                                {
-                                                    "message": (
-                                                        "assistant final text does not match "
-                                                        "streamed deltas; cannot safely reconcile"
-                                                    )
-                                                },
-                                            )
-                                        )
-                                    elif suffix:
-                                        events.append(
-                                            ctx.event(
-                                                AgentStreamEventType.TEXT_DELTA,
-                                                {"text": suffix},
-                                            )
-                                        )
+                    events.extend(
+                        self._normalize_assistant_content_blocks(
+                            content, ctx, is_streaming_chunk=is_streaming_chunk
+                        )
+                    )
             return events
         if top_type == "result":
             is_error = raw.get("is_error", False)
