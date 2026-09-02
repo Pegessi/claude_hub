@@ -10,6 +10,13 @@ export interface ChatModeCapabilities {
   current_mode?: string | null
 }
 
+function displayLabelForChatMode(id: string, backendLabel: string): string {
+  // ``default`` remains the wire/persistence id. Only its compact composer
+  // label is renamed so users can distinguish the acting Agent mode from
+  // the read-only Plan mode.
+  return id === 'default' ? 'Agent' : backendLabel
+}
+
 /**
  * Return only usable, unique modes advertised by the active backend stream.
  *
@@ -34,7 +41,7 @@ export function getAvailableChatModes(
     seen.add(id)
     modes.push({
       id,
-      label,
+      label: displayLabelForChatMode(id, label),
       ...(option.description ? { description: option.description } : {}),
     })
   }

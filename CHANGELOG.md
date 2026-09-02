@@ -18,14 +18,16 @@
   upward-opening picker beside the attachment control, preserves the previous
   selection on failed updates, aborts stale updates on source switch, disables
   mode changes throughout a working turn, and restores them in the same sample
-  that authoritative completion returns the tab to idle. Compact layouts use
-  44px mode controls; a 390x844 viewport has no horizontal overflow.
+  that authoritative completion returns the tab to idle. The user-facing
+  default mode label is `Agent`, while its wire and persistence id remains
+  `default`. Compact layouts use 44px mode controls; a 390x844 viewport has no
+  horizontal overflow.
 - Verified local Claude, Codex, and Cursor capabilities all advertise Default
   and Plan; a live Claude Plan turn transitioned working to idle and left the
   workspace unchanged. Claude Code may still write its internal plan artifact
   under `~/.claude/plans`, which is outside the workspace.
 - Mode survives a cold restart for both direct tabs and managed Chat sessions.
-  Validation passed: 393 backend tests, 249 frontend unit tests, frontend lint
+  Validation passed: 393 backend tests, 250 frontend unit tests, frontend lint
   and production build, plus Black, isort, and mypy.
 - Chat activity remains working through both the initial wait and streamed
   output, then becomes idle at authoritative turn terminalization. A one-shot
