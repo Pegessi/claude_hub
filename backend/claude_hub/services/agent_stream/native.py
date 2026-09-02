@@ -482,20 +482,40 @@ class ProviderSession(ABC):
         if proc is None or proc.stdout is None:
             return
         cancelled = False
+        # Read stdout in chunks and split on newlines manually. We cannot use
+        # ``StreamReader.readline()`` because it enforces a 64 KiB line-length
+        # limit (``LimitOverrunError``); Claude can emit single JSON records
+        # larger than that (e.g. a tool result carrying a large file's
+        # contents), which would crash the drain and make the tailer think the
+        # provider exited without a completion record.
+        buffer = b""
         try:
             while True:
-                line = await proc.stdout.readline()
-                if not line:
+                chunk = await proc.stdout.read(65536)
+                if not chunk:
                     break
-                text = line.decode("utf-8", errors="ignore").strip()
-                if not text:
-                    continue
-                try:
-                    record = json.loads(text)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(record, dict):
-                    await self._stdout_queue.put(record)
+                buffer += chunk
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    text = line.decode("utf-8", errors="ignore").strip()
+                    if not text:
+                        continue
+                    try:
+                        record = json.loads(text)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(record, dict):
+                        await self._stdout_queue.put(record)
+            # Process any trailing data without a newline.
+            if buffer:
+                text = buffer.decode("utf-8", errors="ignore").strip()
+                if text:
+                    try:
+                        record = json.loads(text)
+                    except json.JSONDecodeError:
+                        record = None
+                    if isinstance(record, dict):
+                        await self._stdout_queue.put(record)
         except asyncio.CancelledError:
             cancelled = True
             raise
@@ -1266,43 +1286,68 @@ class CodexNativeSession(ProviderSession):
         proc = self._process
         if proc is None or proc.stdout is None:
             return
+        # Read in chunks and split on newlines manually — ``readline()``
+        # enforces a 64 KiB line limit that large JSON-RPC responses (e.g.
+        # tool results) can exceed.
+        buffer = b""
         try:
             while True:
-                line = await proc.stdout.readline()
-                if not line:
+                chunk = await proc.stdout.read(65536)
+                if not chunk:
                     break
-                text = line.decode("utf-8", errors="ignore").strip()
-                if not text:
-                    continue
-                try:
-                    record = json.loads(text)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                if "id" in record:
-                    # Response: dispatch to the matching pending request.
-                    req_id = record.get("id")
-                    if isinstance(req_id, int):
-                        future = self._pending_requests.pop(req_id, None)
-                        if future is not None and not future.done():
-                            future.set_result(record)
-                else:
-                    # Notification: forward to the tailer.
-                    self._handshake_complete = True
-                    method = record.get("method")
-                    if method == "turn/completed":
-                        # The turn has finished. Clean up any image temp files
-                        # that were owned by this turn. The turn guard is
-                        # released by the tailer via
-                        # ``acknowledge_turn_complete`` after it processes this
-                        # notification — NOT here, so a concurrent send cannot
-                        # overwrite ``_active_turn_id`` while this
-                        # ``turn/completed`` record is still queued.
-                        inflight = self._inflight_images
-                        self._inflight_images = []
-                        self._cleanup_images(inflight)
-                    await self._notification_queue.put(record)
+                buffer += chunk
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    text = line.decode("utf-8", errors="ignore").strip()
+                    if not text:
+                        continue
+                    try:
+                        record = json.loads(text)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    if "id" in record:
+                        # Response: dispatch to the matching pending request.
+                        req_id = record.get("id")
+                        if isinstance(req_id, int):
+                            future = self._pending_requests.pop(req_id, None)
+                            if future is not None and not future.done():
+                                future.set_result(record)
+                    else:
+                        # Notification: forward to the tailer.
+                        self._handshake_complete = True
+                        method = record.get("method")
+                        if method == "turn/completed":
+                            # The turn has finished. Clean up any image temp files
+                            # that were owned by this turn. The turn guard is
+                            # released by the tailer via
+                            # ``acknowledge_turn_complete`` after it processes this
+                            # notification — NOT here, so a concurrent send cannot
+                            # overwrite ``_active_turn_id`` while this
+                            # ``turn/completed`` record is still queued.
+                            inflight = self._inflight_images
+                            self._inflight_images = []
+                            self._cleanup_images(inflight)
+                        await self._notification_queue.put(record)
+            # Process any trailing data without a newline.
+            if buffer:
+                text = buffer.decode("utf-8", errors="ignore").strip()
+                if text:
+                    try:
+                        record = json.loads(text)
+                    except json.JSONDecodeError:
+                        record = None
+                    if isinstance(record, dict):
+                        if "id" in record:
+                            req_id = record.get("id")
+                            if isinstance(req_id, int):
+                                future = self._pending_requests.pop(req_id, None)
+                                if future is not None and not future.done():
+                                    future.set_result(record)
+                        else:
+                            self._handshake_complete = True
+                            await self._notification_queue.put(record)
         except asyncio.CancelledError:
             raise
         except Exception:
