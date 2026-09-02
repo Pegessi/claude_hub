@@ -5,6 +5,14 @@
 
 ## Unreleased
 
+### fix: isolate `test_ttyd_manager` from live Hub tab persistence
+
+- Redirect `STATE_FILE`, `ORDER_FILE`, `LAUNCH_ENV_DIR`, and `_RUNTIME_HOME`
+  to per-test temp paths so `TTYDManager.__new__` cases cannot overwrite live
+  `~/.claude_hub/tabs.json` or `tab_order.json` when pytest runs on the primary
+  checkout.
+- Add a regression guard asserting unit tests never target live tab state files.
+
 ### feat: add provider-aware Chat Plan mode and native activity status
 
 - Chat creation remains a top-level Terminal-area action. Agent Workspace

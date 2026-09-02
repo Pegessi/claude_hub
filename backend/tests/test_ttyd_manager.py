@@ -33,12 +33,38 @@ from claude_hub.services.ttyd_manager import (
 
 ttyd_manager_module = importlib.import_module("claude_hub.services.ttyd_manager")
 _REAL_IS_LOCAL_PORT_AVAILABLE = ttyd_manager_module._is_local_port_available
+_LIVE_RUNTIME_HOME = Path.home() / ".claude_hub"
+_LIVE_TABS_FILE = _LIVE_RUNTIME_HOME / "tabs.json"
+_LIVE_ORDER_FILE = _LIVE_RUNTIME_HOME / "tab_order.json"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_ttyd_manager_runtime_paths(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    """Never read or write live ``~/.claude_hub`` tab state during unit tests.
+
+    ``TTYDManager.__new__`` bypasses ``__init__`` but still calls module-level
+    ``STATE_FILE`` / ``ORDER_FILE`` helpers. Redirect those paths for every test
+    unless a case overrides them explicitly.
+    """
+    runtime_home = tmp_path / "claude_hub_runtime"
+    runtime_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(ttyd_manager_module, "_RUNTIME_HOME", runtime_home)
+    monkeypatch.setattr(ttyd_manager_module, "STATE_FILE", runtime_home / "tabs.json")
+    monkeypatch.setattr(ttyd_manager_module, "ORDER_FILE", runtime_home / "tab_order.json")
+    monkeypatch.setattr(ttyd_manager_module, "LAUNCH_ENV_DIR", runtime_home / "launch_env")
 
 
 @pytest.fixture(autouse=True)
 def _stub_available_ttyd_port(monkeypatch: MonkeyPatch) -> None:
     """Keep unit tests independent of host/sandbox socket permissions."""
     monkeypatch.setattr(ttyd_manager_module, "_is_local_port_available", lambda port: True)
+
+
+def test_ttyd_manager_tests_use_isolated_runtime_paths() -> None:
+    """Regression guard: unit tests must not target live Hub tab persistence."""
+    assert ttyd_manager_module.STATE_FILE.resolve() != _LIVE_TABS_FILE.resolve()
+    assert ttyd_manager_module.ORDER_FILE.resolve() != _LIVE_ORDER_FILE.resolve()
+    assert _LIVE_RUNTIME_HOME.resolve() not in ttyd_manager_module.STATE_FILE.resolve().parents
 
 
 def _run_coro_in_isolated_thread(coro) -> None:
