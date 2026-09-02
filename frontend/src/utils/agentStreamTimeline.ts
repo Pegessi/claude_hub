@@ -1,5 +1,4 @@
 import type { AgentStreamEvent } from '@/types'
-import { parseStructuredQuestions } from '@/utils/chatQuestionResponse'
 
 export interface TimelineTool {
   key: string
@@ -8,27 +7,6 @@ export interface TimelineTool {
   status: 'running' | 'completed' | 'failed'
   argsText: string
   resultText: string
-}
-
-export interface TimelineQuestionOption {
-  id: string
-  label: string
-}
-
-export interface TimelineQuestion {
-  id: string
-  prompt: string
-  allowMultiple: boolean
-  options: TimelineQuestionOption[]
-}
-
-export interface TimelineApproval {
-  key: string
-  callId: string | null
-  kind: string
-  title: string | null
-  questions: TimelineQuestion[]
-  resolved: boolean
 }
 
 /** Durable attachment descriptor carried by ``turn_started``.
@@ -56,7 +34,6 @@ export type TimelinePart =
   | { kind: 'thinking'; key: string; text: string }
   | { kind: 'text'; key: string; text: string }
   | { kind: 'tool'; key: string; tool: TimelineTool }
-  | { kind: 'approval'; key: string; approval: TimelineApproval }
   | { kind: 'error'; key: string; message: string }
   | { kind: 'status'; key: string; text: string }
 
@@ -77,7 +54,6 @@ export interface TimelineTurn {
   assistantText: string
   thinkingText: string
   tools: TimelineTool[]
-  approvals: TimelineApproval[]
   completed: boolean
   completionStatus: string | null
   errors: { key: string; message: string }[]
@@ -115,7 +91,6 @@ function createTurn(key: string, turnId: string | null): TimelineTurn {
     assistantText: '',
     thinkingText: '',
     tools: [],
-    approvals: [],
     completed: false,
     completionStatus: null,
     errors: [],
@@ -282,7 +257,6 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
     }
     case 'tool_call_started': {
       const callId = (event.payload.tool_call_id as string | null) ?? event.call_id ?? null
-      const toolName = payloadString(event, 'name') || 'unknown'
       let argsText = ''
       try {
         argsText = JSON.stringify(payloadRecord(event, 'args'), null, 2)
@@ -294,45 +268,14 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
         const tool: TimelineTool = {
           key: `tool-${identity}`,
           callId,
-          name: toolName,
+          name: payloadString(event, 'name') || 'unknown',
           status: 'running',
           argsText,
           resultText: '',
         }
         toolMap.set(identity, tool)
         turn.tools.push(tool)
-        if (toolName !== 'AskQuestion') {
-          turn.parts.push({ kind: 'tool', key: tool.key, tool })
-        }
-        mutated = true
-      }
-      break
-    }
-    case 'approval_required': {
-      const callId = (event.payload.tool_call_id as string | null) ?? event.call_id ?? null
-      const identity = callId ?? event.message_id ?? `sequence-${event.stream_sequence}`
-      const approvalKey = `approval-${identity}`
-      if (turn.approvals.some(approval => approval.key === approvalKey)) break
-      const approval: TimelineApproval = {
-        key: approvalKey,
-        callId,
-        kind: payloadString(event, 'kind') || 'approval',
-        title: payloadString(event, 'title') || null,
-        questions: parseStructuredQuestions(event.payload.questions),
-        resolved: false,
-      }
-      turn.approvals.push(approval)
-      turn.parts.push({ kind: 'approval', key: approvalKey, approval })
-      mutated = true
-      break
-    }
-    case 'approval_resolved': {
-      const callId = (event.payload.tool_call_id as string | null) ?? event.call_id ?? null
-      const identity = callId ?? event.message_id ?? `sequence-${event.stream_sequence}`
-      const approvalKey = `approval-${identity}`
-      const approval = turn.approvals.find(item => item.key === approvalKey)
-      if (approval && !approval.resolved) {
-        approval.resolved = true
+        turn.parts.push({ kind: 'tool', key: tool.key, tool })
         mutated = true
       }
       break
