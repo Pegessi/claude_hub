@@ -44,12 +44,14 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 from abc import ABC, abstractmethod
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from ...models import AgentType, ManagedSession, StreamCapabilities
+from ...models import AgentType, ChatMode, ManagedSession, StreamCapabilities, StreamModeOption
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +65,50 @@ _STDERR_BUFFER_MAX = 64 * 1024
 # Maximum image size accepted (20 MiB). Larger payloads are rejected before
 # being base64-encoded into the user message envelope.
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+_DEFAULT_MODE = StreamModeOption(
+    id=ChatMode.DEFAULT.value,
+    label="Default",
+    description="Use the provider's normal execution mode.",
+)
+_PLAN_MODE = StreamModeOption(
+    id=ChatMode.PLAN.value,
+    label="Plan",
+    description="Analyze and propose a plan without modifying workspace files.",
+)
+
+
+def native_provider_binary(agent_type: AgentType) -> Optional[str]:
+    """Return the native Chat executable for a provider, if supported."""
+
+    return {
+        AgentType.CLAUDE: "claude",
+        AgentType.CODEX: "codex",
+        AgentType.CURSOR: "agent",
+    }.get(agent_type)
+
+
+def native_provider_binary_available(agent_type: AgentType) -> bool:
+    binary = native_provider_binary(agent_type)
+    return binary is not None and shutil.which(binary) is not None
+
+
+@lru_cache(maxsize=8)
+def _help_confirms_plan_mode(binary: str, flag: str) -> bool:
+    """Probe installed CLI help once; absence/timeouts fail closed."""
+
+    try:
+        completed = subprocess.run(
+            [binary, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    output = f"{completed.stdout}\n{completed.stderr}".lower()
+    return completed.returncode == 0 and flag in output and "plan" in output
 
 
 def _detect_image_mime(data: bytes) -> Optional[str]:
@@ -232,6 +278,7 @@ class ProviderSession(ABC):
         self._turn_completion: Optional[asyncio.Future[None]] = None
         # Serialize sends so a second prompt never cancels an active turn.
         self._send_lock = asyncio.Lock()
+        self._current_mode = ChatMode(getattr(session, "chat_mode", ChatMode.DEFAULT)).value
 
     # ── lifecycle ───────────────────────────────────────────────────────────
 
@@ -332,6 +379,24 @@ class ProviderSession(ABC):
     @property
     def turn_in_flight(self) -> bool:
         return self._turn_in_flight
+
+    def available_modes(self) -> List[StreamModeOption]:
+        return [_DEFAULT_MODE]
+
+    async def prepare_capabilities(self) -> None:
+        """Perform provider-specific capability discovery when required."""
+
+    async def set_mode(self, mode: str) -> None:
+        """Select the mode used by the next turn and reject unsafe changes."""
+
+        if self.turn_in_flight:
+            raise RuntimeError("cannot change Chat mode while a turn is in flight")
+        await self.prepare_capabilities()
+        available = {item.id for item in self.available_modes()}
+        if mode not in available:
+            raise ValueError(f"unsupported Chat mode for {self.session.agent_type.value}: {mode}")
+        self._current_mode = mode
+        self.session.chat_mode = ChatMode(mode)
 
     @property
     def eof_is_fatal(self) -> bool:
@@ -495,14 +560,19 @@ class ProviderSession(ABC):
         binary_available = shutil.which(binary) is not None
         if not binary_available:
             self._last_error = f"provider binary not found on PATH: {binary}"
+        available_modes = self.available_modes()
+        mode_supported = self._current_mode in {item.id for item in available_modes}
         return StreamCapabilities(
-            structured=binary_available and self._last_error is None,
+            structured=binary_available and self._last_error is None and mode_supported,
             adapter_id=self.adapter_id,
             schema_version=self.schema_version,
             sources=[],
             supports_approval_ui=self.supports_approval_ui,
             supports_tool_timeline=self.supports_tool_timeline,
             supports_images=self.supports_images,
+            available_modes=available_modes,
+            current_mode=self._current_mode,
+            supports_dynamic_modes=len(available_modes) > 1,
         )
 
     @property
@@ -664,10 +734,17 @@ class ClaudeNativeSession(ProviderSession):
             "stream-json",
             "--include-partial-messages",
         ]
-        if self.session.solo_mode:
+        if self.session.solo_mode and self._current_mode == ChatMode.DEFAULT.value:
             cmd.append("--dangerously-skip-permissions")
+        if self._current_mode == ChatMode.PLAN.value:
+            cmd.extend(["--permission-mode", "plan"])
         cmd.extend(self._resume_arg())
         return cmd
+
+    def available_modes(self) -> List[StreamModeOption]:
+        if _help_confirms_plan_mode("claude", "--permission-mode"):
+            return [_DEFAULT_MODE, _PLAN_MODE]
+        return [_DEFAULT_MODE]
 
     def _resume_arg(self) -> List[str]:
         """Claude: ``--session-id`` creates the conversation; ``--resume``
@@ -816,6 +893,9 @@ class CodexNativeSession(ProviderSession):
         # structured delivery with asyncio's "another coroutine is already
         # waiting" error.
         self._start_lock = asyncio.Lock()
+        self._thread_model: Optional[str] = None
+        self._mode_presets: Dict[str, Dict[str, Any]] = {}
+        self._mode_discovery_attempted = False
 
     def _build_command(self) -> List[str]:
         return ["codex", "app-server", "--stdio"]
@@ -893,7 +973,7 @@ class CodexNativeSession(ProviderSession):
         """Run the JSON-RPC ``initialize`` handshake and create/resume a thread."""
         init_params = {
             "clientInfo": {"name": "claude-hub", "version": "1.0.0"},
-            "capabilities": {},
+            "capabilities": {"experimentalApi": True},
         }
         await self._send_request("initialize", init_params)
         # The protocol expects an ``initialized`` notification after the
@@ -907,6 +987,7 @@ class CodexNativeSession(ProviderSession):
                     "thread/resume", {"threadId": self._conversation_id}
                 )
                 if isinstance(resume_resp, dict):
+                    self._capture_thread_model(resume_resp)
                     thread = resume_resp.get("thread")
                     if isinstance(thread, dict) and thread.get("id"):
                         self._thread_id = thread["id"]
@@ -916,14 +997,80 @@ class CodexNativeSession(ProviderSession):
                 logger.warning("codex thread/resume failed; starting a new thread")
         thread_resp = await self._send_request("thread/start", {})
         if isinstance(thread_resp, dict):
+            self._capture_thread_model(thread_resp)
             thread = thread_resp.get("thread")
             if isinstance(thread, dict) and thread.get("id"):
                 self._thread_id = thread["id"]
                 self._persist_conversation_id(thread["id"])
 
+    def _capture_thread_model(self, response: Dict[str, Any]) -> None:
+        model = response.get("model")
+        if isinstance(model, str) and model:
+            self._thread_model = model
+
+    async def _discover_modes(self) -> None:
+        """Load app-server advertised presets; failure leaves default only."""
+
+        self._mode_presets = {}
+        self._mode_discovery_attempted = True
+        try:
+            response = await self._send_request("collaborationMode/list", {})
+        except RuntimeError:
+            logger.warning("codex collaborationMode/list unavailable; plan mode disabled")
+            return
+        data = response.get("data") if isinstance(response, dict) else None
+        if not isinstance(data, list):
+            return
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            provider_mode = item.get("mode")
+            name = str(item.get("name", "")).strip().lower()
+            if provider_mode in {ChatMode.DEFAULT.value, ChatMode.PLAN.value}:
+                ui_mode = provider_mode
+            elif name in {ChatMode.DEFAULT.value, ChatMode.PLAN.value}:
+                ui_mode = name
+            else:
+                continue
+            self._mode_presets[ui_mode] = dict(item)
+
+    async def prepare_capabilities(self) -> None:
+        await self.start()
+        if not self._mode_discovery_attempted:
+            await self._discover_modes()
+
+    def available_modes(self) -> List[StreamModeOption]:
+        options = [_DEFAULT_MODE]
+        if ChatMode.PLAN.value in self._mode_presets and self._thread_model:
+            options.append(_PLAN_MODE)
+        return options
+
+    def _collaboration_mode_payload(self) -> Optional[Dict[str, Any]]:
+        preset = self._mode_presets.get(self._current_mode)
+        if preset is None:
+            if self._current_mode == ChatMode.DEFAULT.value:
+                return None
+            raise RuntimeError(f"Codex Chat mode is unavailable: {self._current_mode}")
+        model = preset.get("model") or self._thread_model
+        if not isinstance(model, str) or not model:
+            raise RuntimeError("Codex collaboration mode requires the active thread model")
+        settings: Dict[str, Any] = {
+            "model": model,
+            "developer_instructions": None,
+        }
+        effort = preset.get("reasoning_effort")
+        if isinstance(effort, str) and effort:
+            settings["reasoning_effort"] = effort
+        provider_mode = preset.get("mode")
+        if not isinstance(provider_mode, str) or not provider_mode:
+            raise RuntimeError("Codex collaboration mode preset has no provider mode")
+        return {"mode": provider_mode, "settings": settings}
+
     async def _send_text(self, text: str) -> None:
         if not self._started or self._process is None:
             await self.start()
+        if self._current_mode != ChatMode.DEFAULT.value and not self._mode_discovery_attempted:
+            await self._discover_modes()
         input_items: List[Dict[str, Any]] = [{"type": "text", "text": text}]
         # Append any staged images as localImage inputs.
         image_paths = self._staged_images
@@ -934,6 +1081,9 @@ class CodexNativeSession(ProviderSession):
             "threadId": self._thread_id,
             "input": input_items,
         }
+        collaboration_mode = self._collaboration_mode_payload()
+        if collaboration_mode is not None:
+            params["collaborationMode"] = collaboration_mode
         # Transfer ownership of the image temp files to the in-flight turn
         # BEFORE issuing turn/start. The app-server may emit turn/completed
         # (or any notification) before the turn/start response arrives; if we
@@ -1178,10 +1328,17 @@ class CursorNativeSession(ProviderSession):
             "stream-json",
             "--stream-partial-output",
         ]
-        if self.session.solo_mode:
+        if self.session.solo_mode and self._current_mode == ChatMode.DEFAULT.value:
             cmd.append("--yolo")
+        if self._current_mode == ChatMode.PLAN.value:
+            cmd.extend(["--mode", "plan"])
         cmd.extend(self._resume_arg())
         return cmd
+
+    def available_modes(self) -> List[StreamModeOption]:
+        if _help_confirms_plan_mode("agent", "--mode"):
+            return [_DEFAULT_MODE, _PLAN_MODE]
+        return [_DEFAULT_MODE]
 
     def _resume_arg(self) -> List[str]:
         """Cursor Agent's ``--resume`` is constructive: if the session does

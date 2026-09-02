@@ -35,10 +35,12 @@ import logging
 import os
 import time
 import weakref
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from ...models import (
+    AgentRuntimeStatus,
     AgentStreamEvent,
     AgentStreamEventType,
     AgentType,
@@ -67,6 +69,73 @@ _STOP_JOIN_TIMEOUT_S = 5.0
 
 _HARD_FAILED_SESSION_IDS: Set[str] = set()
 _TAILER_MANAGERS: Any = weakref.WeakSet()
+
+
+@dataclass(frozen=True)
+class NativeRuntimeSnapshot:
+    """Read-only runtime state derived from the sole native transport owner."""
+
+    status: AgentRuntimeStatus
+    detail: str
+
+
+def _native_runtime_snapshot(tailer: "SessionTailer") -> Optional[NativeRuntimeSnapshot]:
+    if tailer.hard_failed or tailer.native_error is not None:
+        return NativeRuntimeSnapshot(
+            status=AgentRuntimeStatus.OFFLINE,
+            detail=tailer.native_error or tailer.last_error or "native provider unavailable",
+        )
+    transport = tailer.native_transport
+    if transport is None:
+        return None
+    if transport.last_error is not None:
+        return NativeRuntimeSnapshot(
+            status=AgentRuntimeStatus.OFFLINE,
+            detail=transport.last_error,
+        )
+    terminal_status = tailer.native_terminal_status
+    if terminal_status is not None:
+        return terminal_status
+    if transport.turn_in_flight:
+        return NativeRuntimeSnapshot(
+            status=AgentRuntimeStatus.WORKING,
+            detail="native provider turn is in flight",
+        )
+    if transport.exit_error is not None:
+        return NativeRuntimeSnapshot(
+            status=AgentRuntimeStatus.ATTENTION,
+            detail=transport.exit_error,
+        )
+    return NativeRuntimeSnapshot(
+        status=AgentRuntimeStatus.IDLE,
+        detail="native provider is ready",
+    )
+
+
+def get_native_runtime_snapshot(session_id: str) -> Optional[NativeRuntimeSnapshot]:
+    """Peek an existing native tailer without creating or starting one."""
+
+    for manager in list(_TAILER_MANAGERS):
+        tailer = manager.get_tailer(session_id)
+        if tailer is not None:
+            snapshot = _native_runtime_snapshot(tailer)
+            if snapshot is not None:
+                return snapshot
+    return None
+
+
+def get_tab_native_runtime_snapshot(tab_id: str) -> Optional[NativeRuntimeSnapshot]:
+    """Peek the native owner for either a direct or workspace Chat tab."""
+
+    for manager in list(_TAILER_MANAGERS):
+        for tailer in manager.tailers():
+            transport = tailer.native_transport
+            if transport is None or transport.session.tab_id != tab_id:
+                continue
+            snapshot = _native_runtime_snapshot(tailer)
+            if snapshot is not None:
+                return snapshot
+    return None
 
 
 def structured_source_hard_failed(session_id: str) -> bool:
@@ -126,6 +195,12 @@ class SessionTailer:
         # ``turn_completed`` must be synthesized (nonzero exit or early EOF
         # with no completion record).
         self._turn_completed_seen: bool = False
+        # Runtime status is terminalized as soon as the authoritative
+        # TURN_COMPLETED event has been persisted and fanned out.  One-shot
+        # providers may keep ``turn_in_flight`` true until their process EOF
+        # so trailing records retain the correct turn id; status must not be
+        # held in WORKING by that process-exit lag.
+        self._native_terminal_status: Optional[NativeRuntimeSnapshot] = None
 
         self._task: Optional[asyncio.Task[Any]] = None
         self._subscribers: Set[asyncio.Queue[AgentStreamEvent]] = set()
@@ -190,6 +265,24 @@ class SessionTailer:
     @property
     def native_error(self) -> Optional[str]:
         return self._native_error
+
+    @property
+    def native_terminal_status(self) -> Optional[NativeRuntimeSnapshot]:
+        """Latest persisted native turn outcome, if the turn terminalized."""
+
+        return self._native_terminal_status
+
+    def _terminalize_native_runtime(self, status: Any) -> None:
+        if status == "completed":
+            self._native_terminal_status = NativeRuntimeSnapshot(
+                status=AgentRuntimeStatus.IDLE,
+                detail="native provider turn completed",
+            )
+            return
+        self._native_terminal_status = NativeRuntimeSnapshot(
+            status=AgentRuntimeStatus.ATTENTION,
+            detail=f"native provider turn {status or 'failed'}",
+        )
 
     async def send_message(
         self,
@@ -348,6 +441,7 @@ class SessionTailer:
                         )
                 self._active_turn_id = None
                 raise
+            self._native_terminal_status = None
 
             # 6. Deliver to the provider. Previews are retained from here on:
             #    the user turn is durably recorded and must remain renderable
@@ -382,6 +476,7 @@ class SessionTailer:
                         "agent_stream store append failed for turn_completed session %s",
                         self.session_id,
                     )
+                self._terminalize_native_runtime("failed")
                 self._active_turn_id = None
                 raise
 
@@ -437,6 +532,7 @@ class SessionTailer:
                 self.session_id,
             )
         self._turn_completed_seen = True
+        self._terminalize_native_runtime("failed")
 
     async def poll_once(self) -> None:
         async with self._poll_lock:
@@ -678,6 +774,7 @@ class SessionTailer:
                     # the active turn. At EOF we use this to decide whether a
                     # failed turn_completed must be synthesized.
                     self._turn_completed_seen = True
+                    self._terminalize_native_runtime(event.payload.get("status"))
                     # For persistent transports (Codex app-server) there is no
                     # per-turn EOF; ``TURN_COMPLETED`` is the provider's
                     # explicit turn-end signal. Release the active turn id and
@@ -1139,6 +1236,7 @@ class TailerManager:
         self,
         session_getter: Callable[[str], Optional[ManagedSession]],
         persist_session_id: Optional[Callable[[str, str], None]] = None,
+        persist_mode: Optional[Callable[[str, str], None]] = None,
     ) -> None:
         self._session_getter = session_getter
         # Optional durable persistence callback for the provider conversation
@@ -1146,6 +1244,7 @@ class TailerManager:
         # so the id survives a cold restart. When None, the id is only set on
         # the in-memory ManagedSession (used by tests).
         self._persist_session_id_cb = persist_session_id
+        self._persist_mode_cb = persist_mode
         self._tailers: Dict[str, SessionTailer] = {}
         self._lock = asyncio.Lock()
         _TAILER_MANAGERS.add(self)
@@ -1208,6 +1307,7 @@ class TailerManager:
                     raise StructuredSourceUnavailable(
                         existing.last_error or "structured transcript source unavailable"
                     )
+            if not existing.is_running():
                 await existing.start()
             return existing
         try:
@@ -1244,6 +1344,17 @@ class TailerManager:
         tailer = await self._get_or_create(session)
         await tailer.send_message(text, images, client_turn_id, previews=previews)
 
+    async def set_mode(self, session: ManagedSession, mode: str) -> None:
+        """Set the existing native owner's mode for subsequent turns."""
+
+        tailer = await self._get_or_create(session)
+        transport = tailer.native_transport
+        if transport is None or tailer.native_error is not None:
+            raise RuntimeError(tailer.native_error or "native provider transport unavailable")
+        await transport.set_mode(mode)
+        if self._persist_mode_cb is not None:
+            self._persist_mode_cb(session.id, mode)
+
     async def ensure_started(self, session: ManagedSession) -> SessionTailer:
         return await self._get_or_create(session)
 
@@ -1267,6 +1378,11 @@ class TailerManager:
 
     def get_tailer(self, session_id: str) -> Optional[SessionTailer]:
         return self._tailers.get(session_id)
+
+    def tailers(self) -> List[SessionTailer]:
+        """Return a stable snapshot for read-only runtime inspection."""
+
+        return list(self._tailers.values())
 
     def unsubscribe(self, session_id: str, queue: "asyncio.Queue[AgentStreamEvent]") -> None:
         tailer = self._tailers.get(session_id)

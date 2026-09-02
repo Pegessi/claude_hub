@@ -39,6 +39,7 @@ from ..models import (
     AgentStreamEvent,
     AgentStreamEventPage,
     AgentType,
+    ChatMode,
     ManagedSession,
     ManagedSessionStatus,
     SessionKind,
@@ -96,12 +97,21 @@ def _persist_tab_agent_session_id(stream_session_id: str, conversation_id: str) 
     )
 
 
+def _persist_workspace_chat_mode(session_id: str, mode: str) -> None:
+    workspace_manager.set_session_chat_mode(session_id, mode)
+
+
+def _persist_tab_chat_mode(stream_session_id: str, mode: str) -> None:
+    ttyd_manager.set_tab_chat_mode(stream_session_id.removeprefix(_TAB_STREAM_SESSION_PREFIX), mode)
+
+
 def _get_tailer_manager() -> TailerManager:
     global _tailer_manager
     if _tailer_manager is None:
         _tailer_manager = TailerManager(
             session_getter=lambda sid: workspace_manager.sessions.get(sid),
             persist_session_id=_persist_workspace_agent_session_id,
+            persist_mode=_persist_workspace_chat_mode,
         )
     return _tailer_manager
 
@@ -131,6 +141,7 @@ def _terminal_tab_stream_session(tab_id: str) -> Optional[ManagedSession]:
         role=WorkspaceSessionRole.WORKER,
         agent_type=tab.agent_type,
         session_kind=tab.session_kind,
+        chat_mode=getattr(tab, "chat_mode", ChatMode.DEFAULT),
         status=ManagedSessionStatus.IDLE,
         runtime_status=AgentRuntimeStatus.IDLE,
         title=tab.name,
@@ -170,6 +181,7 @@ def _get_tab_tailer_manager() -> TailerManager:
         _tab_tailer_manager = TailerManager(
             session_getter=_terminal_tab_stream_session_by_id,
             persist_session_id=_persist_tab_agent_session_id,
+            persist_mode=_persist_tab_chat_mode,
         )
     return _tab_tailer_manager
 
@@ -240,6 +252,7 @@ async def _capabilities_for(
         transport = tailer.native_transport
         if transport is None:
             return StreamCapabilities(structured=False)
+        await transport.prepare_capabilities()
         caps = transport.capabilities()
         if manager.hard_failed(session.id):
             caps = caps.model_copy(update={"structured": False})
@@ -313,6 +326,10 @@ class AgentStreamWaitRequest(BaseModel):
     # only value that can request the first persisted event.
     since_sequence: int = Field(-1, ge=-1)
     timeout_seconds: Optional[float] = Field(None, ge=0)
+
+
+class AgentStreamModeRequest(BaseModel):
+    mode: str = Field(..., min_length=1, max_length=32)
 
 
 # ── capabilities ─────────────────────────────────────────────────────────────
@@ -389,6 +406,62 @@ async def retry_tab_stream(
     return await _retry_stream_for(
         session,
         _get_tab_tailer_manager(),
+        direct_tab=True,
+    )
+
+
+async def _set_stream_mode_for(
+    session: ManagedSession,
+    manager: TailerManager,
+    mode: str,
+    *,
+    direct_tab: bool = False,
+) -> StreamCapabilities:
+    if not _is_chat_native(session):
+        raise HTTPException(
+            status_code=400, detail="mode is only available for native Chat sessions"
+        )
+    try:
+        await manager.set_mode(session, mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        status_code = 409 if "in flight" in str(exc) else 503
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    return (
+        await _tab_capabilities_for(session, manager)
+        if direct_tab
+        else await _capabilities_for(session, manager)
+    )
+
+
+@router.put(
+    "/sessions/{managed_session_id}/stream/mode",
+    response_model=StreamCapabilities,
+)
+async def set_stream_mode(
+    managed_session_id: str,
+    payload: AgentStreamModeRequest,
+    current_user: User = Depends(get_current_user),
+) -> StreamCapabilities:
+    session = _session_or_404(managed_session_id)
+    return await _set_stream_mode_for(session, _get_tailer_manager(), payload.mode)
+
+
+@router.put(
+    "/tabs/{tab_id}/stream/mode",
+    response_model=StreamCapabilities,
+)
+async def set_tab_stream_mode(
+    tab_id: str,
+    payload: AgentStreamModeRequest,
+    current_user: User = Depends(get_current_user),
+) -> StreamCapabilities:
+    session = _terminal_tab_session_or_404(tab_id)
+    return await _set_stream_mode_for(
+        session,
+        _get_tab_tailer_manager(),
+        payload.mode,
         direct_tab=True,
     )
 

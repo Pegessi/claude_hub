@@ -5,6 +5,38 @@
 
 ## Unreleased
 
+### feat: add provider-aware Chat Plan mode and native activity status
+
+- Added per-Chat Default / Plan mode discovery, persistence, and switching.
+  Claude and Cursor are gated by their installed CLI capabilities; Codex uses
+  `collaborationMode/list` and sends the provider preset's own mode with the
+  next `turn/start`. A mode change while a turn is active fails with HTTP 409.
+- Chat tab indicators now use native `idle | working | attention | offline`
+  runtime state, while Terminal tabs retain the existing tmux status path.
+  Desktop indicators expose `data-status`, `aria-label`, and title text.
+- The structured composer renders only backend-advertised modes, preserves the
+  previous selection on failed updates, aborts stale updates on source switch,
+  disables mode changes throughout a working turn, and restores them in the
+  same sample that authoritative completion returns the tab to idle. Compact
+  layouts use 44px mode controls; a 390x844 viewport has no horizontal
+  overflow.
+- Verified local Claude, Codex, and Cursor capabilities all advertise Default
+  and Plan; a live Claude Plan turn transitioned working to idle and left the
+  workspace unchanged. Claude Code may still write its internal plan artifact
+  under `~/.claude/plans`, which is outside the workspace.
+- Mode survives a cold restart for both direct tabs and managed Chat sessions.
+  Validation passed: 393 backend tests, 245 frontend unit tests, frontend lint
+  and production build, plus Black, isort, and mypy.
+- Chat activity remains working through both the initial wait and streamed
+  output, then becomes idle at authoritative turn terminalization. A one-shot
+  provider process reaching EOF is transport input to that lifecycle; EOF by
+  itself is not the UI completion authority.
+- Paseo-style Implement / Reject Plan approval cards are not implemented in
+  this iteration. Error-attention and missing-provider live paths, provider
+  failure rollback, per-mode isolation across multiple Chats, inactive-pane
+  SSE disconnect, and three-provider Default image turns remain outside the
+  recorded live acceptance evidence.
+
 ### feat: bounded structured image-message history
 
 - **Bounded preview persistence**: Structured/Paseo sends keep original image

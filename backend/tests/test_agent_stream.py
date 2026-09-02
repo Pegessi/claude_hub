@@ -19,6 +19,7 @@ import pytest
 from fastapi import HTTPException
 
 from claude_hub.models import (
+    AgentRuntimeStatus,
     AgentStreamEvent,
     AgentStreamEventPage,
     AgentStreamEventType,
@@ -97,6 +98,23 @@ def test_terminal_tab_stream_session_returns_none_for_missing_tab(
 
     monkeypatch.setattr(agent_stream_api.ttyd_manager, "get_tab", lambda tab_id: None)
     assert agent_stream_api._terminal_tab_stream_session("missing") is None
+
+
+def test_tab_mode_persistence_strips_stream_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    persisted: List[Tuple[str, str]] = []
+    monkeypatch.setattr(
+        agent_stream_api.ttyd_manager,
+        "set_tab_chat_mode",
+        lambda tab_id, mode: persisted.append((tab_id, mode)) or True,
+    )
+
+    agent_stream_api._persist_tab_chat_mode("terminal-tab-real-tab-id", "plan")
+
+    assert persisted == [("real-tab-id", "plan")]
 
 
 def test_terminal_tab_stream_session_uses_backend_cwd_when_tab_cwd_is_unset(
@@ -272,6 +290,135 @@ async def test_retry_stream_replaces_tailer_before_rechecking_capabilities(
     manager.retry.assert_awaited_once_with(session)
     capability_probe.assert_awaited_once_with(session, manager)
     assert result == expected
+
+
+@pytest.mark.asyncio
+async def test_set_stream_mode_returns_updated_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    session = _sse_session("terminal-tabs", "terminal-tab-mode").model_copy(
+        update={"session_kind": SessionKind.CHAT}
+    )
+    manager = MagicMock()
+    manager.set_mode = AsyncMock()
+    expected = StreamCapabilities(
+        structured=True,
+        adapter_id="claude-native",
+        schema_version=1,
+        available_modes=[
+            {"id": "default", "label": "Default", "description": "Normal"},
+            {"id": "plan", "label": "Plan", "description": "Read only"},
+        ],
+        current_mode="plan",
+        supports_dynamic_modes=True,
+    )
+    monkeypatch.setattr(
+        agent_stream_api,
+        "_tab_capabilities_for",
+        AsyncMock(return_value=expected),
+    )
+
+    result = await agent_stream_api._set_stream_mode_for(
+        session,
+        manager,
+        "plan",
+        direct_tab=True,
+    )
+
+    manager.set_mode.assert_awaited_once_with(session, "plan")
+    assert result == expected
+
+
+@pytest.mark.asyncio
+async def test_set_stream_mode_rejects_in_flight_turn() -> None:
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    session = _sse_session("terminal-tabs", "terminal-tab-busy").model_copy(
+        update={"session_kind": SessionKind.CHAT}
+    )
+    manager = MagicMock()
+    manager.set_mode = AsyncMock(
+        side_effect=RuntimeError("cannot change Chat mode while a turn is in flight")
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await agent_stream_api._set_stream_mode_for(session, manager, "plan")
+
+    assert exc_info.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_idle_reaped_tailer_restarts_before_setting_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    store: AgentStreamStore,
+) -> None:
+    from claude_hub.services.agent_stream import native as native_module
+    from claude_hub.services.agent_stream.native import ClaudeNativeSession
+    from claude_hub.services.agent_stream.tailer import TailerManager
+
+    session = _sse_session("ws-restart", "chat-restart").model_copy(
+        update={"session_kind": SessionKind.CHAT}
+    )
+    transport = ClaudeNativeSession(session)
+    adapter = MagicMock()
+    tailer = SessionTailer(
+        "ws-restart",
+        "chat-restart",
+        adapter,
+        lambda: session,
+        store=store,
+        native_transport=transport,
+    )
+    tailer._stopped = True
+    tailer._task = None
+    persisted: List[Tuple[str, str]] = []
+    manager = TailerManager(
+        lambda _session_id: session,
+        persist_mode=lambda session_id, mode: persisted.append((session_id, mode)),
+    )
+    manager._tailers[session.id] = tailer
+    monkeypatch.setattr(native_module, "_help_confirms_plan_mode", lambda *_args: True)
+
+    await manager.set_mode(session, "plan")
+
+    assert tailer.is_running()
+    assert transport.capabilities().current_mode == "plan"
+    assert persisted == [(session.id, "plan")]
+    await tailer.stop()
+
+
+def test_tab_native_runtime_snapshot_finds_workspace_managed_owner(
+    store: AgentStreamStore,
+) -> None:
+    from claude_hub.services.agent_stream.native import ClaudeNativeSession
+    from claude_hub.services.agent_stream.tailer import (
+        TailerManager,
+        get_tab_native_runtime_snapshot,
+    )
+
+    session = _sse_session("ws-status", "managed-status-owner").model_copy(
+        update={"session_kind": SessionKind.CHAT, "tab_id": "workspace-chat-tab"}
+    )
+    transport = ClaudeNativeSession(session)
+    transport._turn_in_flight = True
+    tailer = SessionTailer(
+        session.workspace_id,
+        session.id,
+        MagicMock(),
+        lambda: session,
+        store=store,
+        native_transport=transport,
+    )
+    manager = TailerManager(lambda _session_id: session)
+    manager._tailers[session.id] = tailer
+
+    snapshot = get_tab_native_runtime_snapshot(session.tab_id)
+
+    assert snapshot is not None
+    assert snapshot.status == AgentRuntimeStatus.WORKING
+    assert snapshot.detail == "native provider turn is in flight"
 
 
 def test_redact_event_strips_env_values():
@@ -1467,6 +1614,7 @@ class _FakeNativeTransport:
         # Per-turn exit error surfaced to the tailer on EOF. ``None`` means
         # the last turn exited cleanly.
         self.exit_error: Optional[str] = None
+        self.last_error: Optional[str] = None
 
     async def start(self) -> None:
         self._started = True
@@ -1596,6 +1744,105 @@ async def test_native_multiple_deltas_before_turn_completed() -> None:
     second = await asyncio.wait_for(queue.get(), timeout=0.2)
     assert first.payload["text"] == "foo"
     assert second.payload["text"] == "bar"
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_runtime_is_idle_on_completion_before_one_shot_process_eof() -> None:
+    """Timeline completion is the runtime-status boundary even if Claude's
+    one-shot process takes longer to exit.  The send guard remains held until
+    EOF so trailing provider records cannot be attributed to the next turn."""
+
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+    from claude_hub.services.agent_stream.tailer import (
+        TailerManager,
+        get_tab_native_runtime_snapshot,
+    )
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session().model_copy(update={"session_kind": SessionKind.CHAT})
+    transport.session = session
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+    )
+    manager = TailerManager(lambda _session_id: session)
+    manager._tailers[session.id] = tailer
+    queue = await tailer.subscribe()
+
+    await tailer.send_message("hello", [], client_turn_id="turn-late-eof")
+    assert (await asyncio.wait_for(queue.get(), timeout=0.5)).type == (
+        AgentStreamEventType.TURN_STARTED
+    )
+    transport._records.put_nowait({"type": "result", "subtype": "success"})
+
+    completed = await asyncio.wait_for(queue.get(), timeout=0.5)
+    assert completed.type == AgentStreamEventType.TURN_COMPLETED
+    assert transport.turn_in_flight is True
+    snapshot = get_tab_native_runtime_snapshot(session.tab_id)
+    assert snapshot is not None
+    assert snapshot.status == AgentRuntimeStatus.IDLE
+
+    # A late nonzero process exit does not overwrite the provider's already
+    # persisted successful terminal outcome.
+    transport.exit_error = "provider exited with code 1 after completion"
+    transport._records.put_nowait(None)
+    await asyncio.sleep(0.05)
+    assert transport.turn_in_flight is False
+    snapshot = get_tab_native_runtime_snapshot(session.tab_id)
+    assert snapshot is not None
+    assert snapshot.status == AgentRuntimeStatus.IDLE
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_runtime_needs_attention_on_failed_completion_before_eof() -> None:
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+    from claude_hub.services.agent_stream.tailer import (
+        TailerManager,
+        get_tab_native_runtime_snapshot,
+    )
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session().model_copy(update={"session_kind": SessionKind.CHAT})
+    transport.session = session
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+    )
+    manager = TailerManager(lambda _session_id: session)
+    manager._tailers[session.id] = tailer
+    queue = await tailer.subscribe()
+
+    await tailer.send_message("hello", [], client_turn_id="turn-failed-late-eof")
+    assert (await asyncio.wait_for(queue.get(), timeout=0.5)).type == (
+        AgentStreamEventType.TURN_STARTED
+    )
+    transport._records.put_nowait(
+        {"type": "result", "is_error": True, "result": "provider failure"}
+    )
+
+    assert (await asyncio.wait_for(queue.get(), timeout=0.5)).type == (AgentStreamEventType.ERROR)
+    completed = await asyncio.wait_for(queue.get(), timeout=0.5)
+    assert completed.type == AgentStreamEventType.TURN_COMPLETED
+    assert completed.payload["status"] == "failed"
+    assert transport.turn_in_flight is True
+    snapshot = get_tab_native_runtime_snapshot(session.tab_id)
+    assert snapshot is not None
+    assert snapshot.status == AgentRuntimeStatus.ATTENTION
+
+    transport._records.put_nowait(None)
+    await asyncio.sleep(0.05)
+    assert transport.turn_in_flight is False
+    snapshot = get_tab_native_runtime_snapshot(session.tab_id)
+    assert snapshot is not None
+    assert snapshot.status == AgentRuntimeStatus.ATTENTION
     await tailer.stop()
 
 

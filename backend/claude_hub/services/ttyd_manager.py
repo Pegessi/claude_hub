@@ -24,6 +24,7 @@ from ..config import settings
 from ..models import (
     AgentRuntimeStatus,
     AgentType,
+    ChatMode,
     ExecutionTarget,
     SessionKind,
     TerminalAgentStatus,
@@ -52,6 +53,20 @@ CURSOR_TRANSCRIPT_SCHEMA = "cli-transcript-v1"
 #: :data:`CURSOR_TRANSCRIPT_SCHEMA`. Pinned so an unknown CLI version fails
 #: closed rather than mis-normalizing rows.
 SUPPORTED_CURSOR_TRANSCRIPT_VERSIONS: frozenset[str] = frozenset({"2026.08.25-3e8eec8"})
+
+
+def get_tab_native_runtime_snapshot(tab_id: str) -> Any:
+    """Lazy bridge to avoid importing transcript adapters during ttyd startup."""
+
+    from .agent_stream.tailer import get_tab_native_runtime_snapshot as peek
+
+    return peek(tab_id)
+
+
+def native_provider_binary_available(agent_type: AgentType) -> bool:
+    from .agent_stream.native import native_provider_binary_available as available
+
+    return available(agent_type)
 
 
 def cursor_cli_version_from_executable() -> Optional[str]:
@@ -1334,6 +1349,7 @@ class TTYDProcess:
         cursor_transcript_path: Optional[str] = None,
         cursor_transcript_schema: Optional[str] = None,
         session_kind: SessionKind = SessionKind.TERMINAL,
+        chat_mode: ChatMode = ChatMode.DEFAULT,
     ):
         self.tab_id = tab_id
         self.port = port
@@ -1342,6 +1358,7 @@ class TTYDProcess:
         self.solo_mode = solo_mode
         self.agent_type = agent_type
         self.session_kind = session_kind
+        self.chat_mode = chat_mode
         self.target = target
         self.remote_profile_id = remote_profile_id
         self.remote_cwd = remote_cwd
@@ -2800,6 +2817,9 @@ asyncio.run(_main())
                 if isinstance(self.session_kind, SessionKind)
                 else self.session_kind
             ),
+            "chat_mode": (
+                self.chat_mode.value if isinstance(self.chat_mode, ChatMode) else self.chat_mode
+            ),
             "target": (
                 self.target.value if isinstance(self.target, ExecutionTarget) else self.target
             ),
@@ -2837,6 +2857,7 @@ asyncio.run(_main())
             solo_mode=self.solo_mode,
             agent_type=self.agent_type,
             session_kind=self.session_kind,
+            chat_mode=self.chat_mode,
             target=self.target,
             remote_profile_id=self.remote_profile_id,
             remote_cwd=self.remote_cwd,
@@ -2906,6 +2927,12 @@ class TTYDManager:
                             # session_kind=chat marks a direct-user native
                             # Chat surface.
                             session_kind = SessionKind.TERMINAL
+                        chat_mode_str = tab_data.get("chat_mode", ChatMode.DEFAULT.value)
+                        chat_mode = (
+                            ChatMode(chat_mode_str)
+                            if chat_mode_str in [e.value for e in ChatMode]
+                            else ChatMode.DEFAULT
+                        )
                         target_str = tab_data.get("target", "local")
                         target = (
                             ExecutionTarget(target_str)
@@ -2928,6 +2955,7 @@ class TTYDManager:
                             solo_mode=tab_data.get("solo_mode", False),
                             agent_type=agent_type,
                             session_kind=session_kind,
+                            chat_mode=chat_mode,
                             target=target,
                             remote_profile_id=tab_data.get("remote_profile_id"),
                             remote_cwd=tab_data.get("remote_cwd"),
@@ -3076,6 +3104,19 @@ class TTYDManager:
         self._save_state()
         return True
 
+    def set_tab_chat_mode(self, tab_id: str, mode: str) -> bool:
+        """Durably persist the mode selected for subsequent Chat turns."""
+
+        process = self.processes.get(tab_id)
+        if process is None:
+            return False
+        parsed = ChatMode(mode)
+        if process.chat_mode == parsed:
+            return True
+        process.chat_mode = parsed
+        self._save_state()
+        return True
+
     def _sync_order_with_processes(self) -> None:
         """Sync order list with current processes - add any missing tabs."""
         # Add any tabs that are in processes but not in order
@@ -3140,6 +3181,7 @@ class TTYDManager:
         cursor_transcript_path: Optional[str] = None,
         cursor_transcript_schema: Optional[str] = None,
         session_kind: SessionKind = SessionKind.TERMINAL,
+        chat_mode: ChatMode = ChatMode.DEFAULT,
     ) -> TerminalTab:
         logger.info(
             f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}, session_kind={session_kind}, target={target}, remote_profile_id={remote_profile_id}, remote_forward_port={remote_forward_port}, workspace_id={workspace_id}, workspace_role={workspace_role}, agent_session_id={agent_session_id}"
@@ -3173,6 +3215,7 @@ class TTYDManager:
             solo_mode=solo_mode,
             agent_type=agent_type,
             session_kind=session_kind,
+            chat_mode=chat_mode,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -3290,6 +3333,7 @@ class TTYDManager:
             solo_mode=source.solo_mode,
             agent_type=source.agent_type,
             session_kind=source.session_kind,
+            chat_mode=source.chat_mode,
             target=source.target,
             remote_profile_id=source.remote_profile_id,
             remote_cwd=source.remote_cwd,
@@ -3673,6 +3717,39 @@ class TTYDManager:
             return None
 
         sampled_at = datetime.now()
+        if (
+            process.session_kind == SessionKind.CHAT
+            and process.cursor_transport != "terminal_transcript"
+        ):
+            native = get_tab_native_runtime_snapshot(tab_id)
+            if native is None:
+                if native_provider_binary_available(process.agent_type):
+                    native_runtime_status = AgentRuntimeStatus.IDLE
+                    native_detail = "native provider is ready"
+                else:
+                    native_runtime_status = AgentRuntimeStatus.OFFLINE
+                    native_detail = "native provider binary is unavailable"
+            else:
+                native_runtime_status = native.status
+                native_detail = native.detail
+            native_status_text = {
+                AgentRuntimeStatus.IDLE: "Idle",
+                AgentRuntimeStatus.WORKING: "Working",
+                AgentRuntimeStatus.ATTENTION: "Needs attention",
+                AgentRuntimeStatus.OFFLINE: "Offline",
+            }[native_runtime_status]
+            return TerminalAgentStatus(
+                tab_id=process.tab_id,
+                tab_name=process.name,
+                agent_type=process.agent_type,
+                status=native_runtime_status,
+                status_text=native_status_text,
+                detail=native_detail,
+                tmux_session=process.tmux_session,
+                last_changed_at=None,
+                sampled_at=sampled_at,
+            )
+
         cached = self._status_cache.get(tab_id)
         if (
             use_cache

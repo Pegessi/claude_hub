@@ -517,6 +517,12 @@ export interface ManagedSession {
 
 // ── Structured Chat stream (Layer B observation plane) ───────────────────────
 
+export interface StreamModeOption {
+  id: string
+  label: string
+  description?: string | null
+}
+
 export interface StreamCapabilities {
   structured: boolean
   adapter_id: string
@@ -525,6 +531,9 @@ export interface StreamCapabilities {
   supports_approval_ui: boolean
   supports_tool_timeline: boolean
   supports_images: boolean
+  supports_dynamic_modes: boolean
+  available_modes: StreamModeOption[]
+  current_mode: string | null
 }
 
 export type AgentStreamEventType =

@@ -19,6 +19,7 @@ import pytest
 from claude_hub.models import (
     AgentStreamEventType,
     AgentType,
+    ChatMode,
     ExecutionTarget,
     ManagedSession,
     ManagedSessionStatus,
@@ -73,6 +74,28 @@ def test_create_native_session_returns_correct_type() -> None:
 def test_create_native_session_rejects_terminal() -> None:
     with pytest.raises(ValueError):
         create_native_session(_session(AgentType.TERMINAL))
+
+
+def test_claude_plan_mode_uses_permission_mode_without_permission_bypass() -> None:
+    session = _session(AgentType.CLAUDE).model_copy(
+        update={"chat_mode": ChatMode.PLAN, "solo_mode": True}
+    )
+
+    command = ClaudeNativeSession(session)._build_command()
+
+    assert command[-2:] == ["--permission-mode", "plan"]
+    assert "--dangerously-skip-permissions" not in command
+
+
+def test_cursor_plan_mode_uses_mode_without_yolo() -> None:
+    session = _session(AgentType.CURSOR).model_copy(
+        update={"chat_mode": ChatMode.PLAN, "solo_mode": True}
+    )
+
+    command = CursorNativeSession(session)._build_command()
+
+    assert command[-2:] == ["--mode", "plan"]
+    assert "--yolo" not in command
 
 
 # ── Claude command building ─────────────────────────────────────────────────
@@ -460,6 +483,71 @@ async def test_codex_turn_start_uses_input_array_not_prompt() -> None:
     assert params["threadId"] == "th-1"
     assert isinstance(params["input"], list)
     assert params["input"][0] == {"type": "text", "text": "hello"}
+
+
+@pytest.mark.asyncio
+async def test_codex_plan_mode_uses_schema_verified_collaboration_mode_payload() -> None:
+    proc = _FakeProcess(
+        stdout_lines=[
+            json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}).encode() + b"\n",
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {"thread": {"id": "th-1"}, "model": "gpt-5.6"},
+                }
+            ).encode()
+            + b"\n",
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "result": {
+                        "data": [
+                            {
+                                "name": "Default",
+                                "mode": "default",
+                                "model": None,
+                                "reasoning_effort": None,
+                            },
+                            {
+                                "name": "Plan",
+                                "mode": "read",
+                                "model": None,
+                                "reasoning_effort": "medium",
+                            },
+                        ]
+                    },
+                }
+            ).encode()
+            + b"\n",
+            json.dumps({"jsonrpc": "2.0", "id": 4, "result": {"turn": {"id": "tu-1"}}}).encode()
+            + b"\n",
+        ]
+    )
+    native = _codex_session()
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        await native.start()
+        await native.set_mode("plan")
+        await native.send_message("inspect only", [])
+
+    messages = _written_requests(proc)
+    initialize = next(item for item in messages if item.get("method") == "initialize")
+    assert initialize["params"]["capabilities"]["experimentalApi"] is True
+    turn = next(item for item in messages if item.get("method") == "turn/start")
+    assert turn["params"]["collaborationMode"] == {
+        "mode": "read",
+        "settings": {
+            "model": "gpt-5.6",
+            "developer_instructions": None,
+            "reasoning_effort": "medium",
+        },
+    }
+    capabilities = native.capabilities()
+    assert capabilities.current_mode == "plan"
+    assert [item.id for item in capabilities.available_modes] == ["default", "plan"]
+    assert capabilities.supports_dynamic_modes is True
 
 
 @pytest.mark.asyncio
