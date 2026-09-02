@@ -2523,9 +2523,26 @@ def test_legacy_session_normalizes_caller_owned_ephemeral() -> None:
     assert normalized.get("session_kind") == "terminal"
 
     retired_chat = manager._normalize_session_item(
-        {"id": "chat-s", "tab_id": "chat-t", "session_kind": "agent"}
+        {
+            "id": "chat-s",
+            "tab_id": "chat-t",
+            "session_kind": "agent",
+            "chat_mode": "plan",
+        }
     )
-    assert retired_chat.get("session_kind") == "chat"
+    assert retired_chat.get("session_kind") == "terminal"
+    assert retired_chat.get("chat_mode") == "default"
+
+    accidental_chat = manager._normalize_session_item(
+        {
+            "id": "accidental-chat-s",
+            "tab_id": "accidental-chat-t",
+            "session_kind": "chat",
+            "chat_mode": "plan",
+        }
+    )
+    assert accidental_chat.get("session_kind") == "terminal"
+    assert accidental_chat.get("chat_mode") == "default"
 
 
 def test_find_compatible_same_env_reuses(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:

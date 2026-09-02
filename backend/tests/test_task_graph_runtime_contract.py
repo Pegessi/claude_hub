@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from importlib import import_module
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Generator
+from unittest.mock import AsyncMock
 
 import pytest
 from click.testing import CliRunner
@@ -16,10 +19,11 @@ from pytest import MonkeyPatch
 from claude_hub.auth.dependencies import get_current_user
 from claude_hub.cli.main import cli
 from claude_hub.main import app
-from claude_hub.models import User, WorkspaceTask
+from claude_hub.models import TerminalTab, User, WorkspaceTask
 from claude_hub.services.workspace_manager import WorkspaceManager, workspace_manager
 
 _wm = import_module("claude_hub.services.workspace_manager")
+_tm = import_module("claude_hub.services.ttyd_manager")
 
 _LEGACY_OPENAPI_PATH_FRAGMENT = "/api/agent-tree"
 _LEGACY_SCHEMA_NAME = "AgentRun"
@@ -54,6 +58,50 @@ def persist_api(
     monkeypatch.setattr(_wm, "INDEX_FILE", index_file)
     monkeypatch.setattr(_wm._persistence, "INDEX_FILE", index_file)
     monkeypatch.setattr(_wm._state, "INDEX_FILE", index_file)
+    fake_tab = TerminalTab(
+        id="tab-contract-managed",
+        name="contract managed agent",
+        port=12380,
+        created_at=datetime.utcnow(),
+        is_active=True,
+    )
+    fake_tmux_session = "claude-hub-tab-cont"
+    monkeypatch.setattr(
+        _wm.ttyd_manager,
+        "processes",
+        {
+            fake_tab.id: SimpleNamespace(
+                tab_id=fake_tab.id,
+                tmux_session=fake_tmux_session,
+            )
+        },
+    )
+    monkeypatch.setattr(
+        _wm.ttyd_manager,
+        "create_tab",
+        AsyncMock(return_value=fake_tab),
+    )
+    monkeypatch.setattr(
+        _wm.ttyd_manager,
+        "list_tab_agent_statuses",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(_wm.ttyd_manager, "list_tabs", lambda: [fake_tab])
+    monkeypatch.setattr(
+        _tm,
+        "_tmux_session_exists_async",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        workspace_manager,
+        "_send_tmux_message_with_receipt",
+        AsyncMock(),
+    )
     _reset_singleton()
 
     async def fake_current_user() -> User:

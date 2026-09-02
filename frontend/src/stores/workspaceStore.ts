@@ -135,18 +135,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     return sessions.value.find(session => session.id === task.session_id) || null
   }
 
-  /**
-   * Resolve the managed session that owns a given terminal tab.
-   *
-   * The structured observation plane keys streams by managed-session id, so
-   * the frontend must map a tab (the raw terminal's identity) back to the
-   * session that drives it. Returns null when the tab has no backing session
-   * (e.g. a plain terminal tab with no agent).
-   */
-  function sessionForTab(tabId: string): ManagedSession | null {
-    return sessions.value.find(session => session.tab_id === tabId) || null
-  }
-
   function reportsForTask(task: WorkspaceTask): AgentReport[] {
     return reports.value.filter(report => report.task_id === task.id)
   }
@@ -818,7 +806,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     pushNotification,
     dismissNotification,
     sessionForTask,
-    sessionForTab,
     reportsForTask,
     latestReportForTask,
     taskReports,

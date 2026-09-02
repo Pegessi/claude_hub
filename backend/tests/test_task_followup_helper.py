@@ -25,6 +25,7 @@ from claude_hub.models import (
     WorkspaceTaskStatus,
 )
 from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
+from claude_hub.services.session_seat import expected_tmux_session_name
 from claude_hub.services.workspace_manager import WorkspaceManager
 from claude_hub.services.workspace_manager._constants import DeliveryUncertain
 
@@ -72,17 +73,18 @@ def _session(
     role: WorkspaceSessionRole = WorkspaceSessionRole.WORKER,
 ) -> ManagedSession:
     now = datetime.utcnow()
+    tab_id = f"tab-{session_id}"
     session = ManagedSession(
         id=session_id,
         workspace_id=workspace_id,
-        tab_id=f"tab-{session_id}",
+        tab_id=tab_id,
         role=role,
         agent_type=AgentType.CLAUDE,
         status=ManagedSessionStatus.WORKING,
         runtime_status=AgentRuntimeStatus.IDLE,
         title="worker",
         workspace_path="/tmp",
-        tmux_session=f"tmux-{session_id}",
+        tmux_session=expected_tmux_session_name(tab_id),
         target=ExecutionTarget.LOCAL,
         task_id=task_id,
         current_task_id=task_id,

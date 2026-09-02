@@ -176,15 +176,15 @@ test('mobile image controls retain a touch target and keep the lightbox inside t
 
 // ---------------------------------------------------------------------------
 // Async preparation ownership: a FileReader/canvas continuation from a prior
-// session must never unlock or mutate the composer for the newly selected
-// session (including the A→B→A ABA case).
+// Chat must never unlock or mutate the composer for the newly selected Chat
+// (including the A→B→A ABA case).
 // ---------------------------------------------------------------------------
 
 test('source changes invalidate every in-flight attachment preparation batch', () => {
   const sourceWatch = structuredPane.match(
-    /watch\(\s*\(\) => \[props\.sessionId, props\.tabId\][\s\S]*?startStream\(\)\s*\},\s*\)/,
+    /watch\(\s*\(\) => props\.tabId[\s\S]*?startStream\(\)\s*\},\s*\)/,
   )
-  assert.ok(sourceWatch, 'session/tab watcher must reset the structured composer')
+  assert.ok(sourceWatch, 'Chat-tab watcher must reset the structured composer')
   assert.match(
     sourceWatch[0],
     /preparationEpoch\.value\+\+/,

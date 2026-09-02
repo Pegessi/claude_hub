@@ -5,18 +5,24 @@
 Claude Hub follows Paseo's product boundary: **Chat** and **Terminal** are
 different session types, not presentation modes for the same tab.
 
+Chat creation is exposed only from the top-level Terminal area. Agent
+Workspace does not create or render Chat surfaces: its managed
+orchestrator/reviewer/worker sessions remain Terminal control-plane runners
+and never mount `StructuredPane`.
+
 - Chat: a Claude, Codex, or Cursor provider with a fixed structured timeline,
   text/image composer, and provider-native event stream.
 - Terminal: a Claude, Codex, Cursor, or plain shell profile with a fixed native
   PTY and complete keyboard/TUI behavior.
 
-The persisted `SessionKind` contract is `chat | terminal`. `AgentType` remains
-orthogonal and selects the provider executable. The retired persisted value
-`agent` is accepted only by state-load migration and is normalized to `chat`;
-new API, CLI, and frontend requests never emit it.
+The persisted top-level-tab `SessionKind` contract is `chat | terminal`.
+`AgentType` remains orthogonal and selects the provider executable. The retired
+top-level-tab value `agent` is accepted only by state-load migration and is
+normalized to `chat`; a Workspace managed-session row always normalizes to
+`terminal`. New API, CLI, and frontend requests never emit `agent`.
 
 ```text
-new session
+top-level Terminal-area new session
 ├── Chat + Claude/Codex/Cursor -> StructuredPane + native ProviderSession
 └── Terminal + provider/plain shell -> TerminalView + ttyd/tmux
 ```
@@ -80,8 +86,9 @@ the current lifecycle guarantee.
   creation.
 - A Chat must fail closed when its native structured transport is unavailable;
   it must not silently reveal a raw Terminal.
-- State migration may read the retired string `agent`, but all new persistence
-  must write `chat`.
+- State migration may read the retired string `agent`. Top-level tab state
+  rewrites it as `chat`; Workspace managed-session state rewrites it as
+  `terminal`.
 - The current zero-subscriber reaper can terminate a turn that remains in
   flight beyond the five-minute grace period. A future fix must make idle
   eligibility depend on both subscriber count and provider turn state.

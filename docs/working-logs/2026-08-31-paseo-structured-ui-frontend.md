@@ -2,6 +2,13 @@
 
 Date: 2026-08-31
 
+> **Superseded product boundary (2026-09-02):** this note records the initial
+> two-view implementation stage. Current Chat creation exists only in the
+> top-level Terminal area: `session_kind=chat` owns `StructuredPane`, while
+> Agent Workspace orchestrator/reviewer/worker sessions remain Terminal
+> control-plane runners and never expose this structured surface. See
+> `2026-09-01-paseo-agent-terminal-session-separation.md`.
+
 ## Overview
 
 Frontend Wave for the Paseo v2 structured observation plane. Delivers the

@@ -97,10 +97,6 @@ def _persist_tab_agent_session_id(stream_session_id: str, conversation_id: str) 
     )
 
 
-def _persist_workspace_chat_mode(session_id: str, mode: str) -> None:
-    workspace_manager.set_session_chat_mode(session_id, mode)
-
-
 def _persist_tab_chat_mode(stream_session_id: str, mode: str) -> None:
     ttyd_manager.set_tab_chat_mode(stream_session_id.removeprefix(_TAB_STREAM_SESSION_PREFIX), mode)
 
@@ -111,7 +107,6 @@ def _get_tailer_manager() -> TailerManager:
         _tailer_manager = TailerManager(
             session_getter=lambda sid: workspace_manager.sessions.get(sid),
             persist_session_id=_persist_workspace_agent_session_id,
-            persist_mode=_persist_workspace_chat_mode,
         )
     return _tailer_manager
 

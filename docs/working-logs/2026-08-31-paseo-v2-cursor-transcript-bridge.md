@@ -1,5 +1,11 @@
 # 2026-08-31 — Paseo v2 Cursor same-pane transcript bridge
 
+> **Superseded product boundary (2026-09-02):** this note records the former
+> same-pane Raw/Structured bridge. Current Cursor Chat is a top-level
+> `session_kind=chat` surface; Agent Workspace Cursor sessions remain Terminal
+> control-plane runners and never mount `StructuredPane`. See
+> `2026-09-01-paseo-agent-terminal-session-separation.md`.
+
 ## System overview
 
 Paseo v2 has exactly two views of one agent session: the existing Raw terminal

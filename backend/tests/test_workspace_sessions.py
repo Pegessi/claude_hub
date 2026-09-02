@@ -29,9 +29,14 @@ from claude_hub.main import app
 from claude_hub.models import (
     AgentRuntimeStatus,
     AgentType,
+    ChatMode,
+    EnsureWorkspaceAgentRequest,
     ExecutionTarget,
     ManagedSession,
     ManagedSessionStatus,
+    SessionKind,
+    SpawnWorkerRequest,
+    TerminalTab,
     User,
     WorkspaceSessionRole,
     WorkspaceTaskStatus,
@@ -120,6 +125,66 @@ def test_list_workspaces_returns_created_workspaces(tmp_path: Path) -> None:
     assert response.status_code == 200
     ids = [ws["id"] for ws in response.json()]
     assert created["id"] in ids
+
+
+def test_workspace_agent_request_rejects_chat_surface_fields(tmp_path: Path) -> None:
+    repo = tmp_path / "repo-chat-reject"
+    repo.mkdir()
+    client = TestClient(app)
+    workspace = _make_workspace(client, repo)
+
+    response = client.post(
+        f"/api/workspaces/{workspace['id']}/agent",
+        json={"session_kind": "chat", "chat_mode": "plan"},
+    )
+
+    assert response.status_code == 422
+    assert "session_kind" in response.text
+
+    with pytest.raises(ValueError, match="always use Terminal"):
+        SpawnWorkerRequest.model_validate({"session_kind": "chat"})
+
+
+@pytest.mark.asyncio
+async def test_managed_session_creation_never_inherits_chat_tab_surface(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo-managed-terminal"
+    repo.mkdir()
+    client = TestClient(app)
+    workspace_payload = _make_workspace(client, repo)
+    workspace = workspace_manager.workspaces[workspace_payload["id"]]
+
+    async def fake_create_tab(**kwargs: object) -> TerminalTab:
+        return TerminalTab(
+            id="mock-chat-tab",
+            name=str(kwargs["name"]),
+            cwd=str(repo),
+            solo_mode=True,
+            agent_type=AgentType.CLAUDE,
+            session_kind=SessionKind.CHAT,
+            chat_mode=ChatMode.PLAN,
+            target=ExecutionTarget.LOCAL,
+            port=12345,
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=workspace.id,
+            workspace_name=workspace.name,
+            workspace_role=WorkspaceSessionRole.WORKER,
+        )
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
+
+    session = await workspace_manager._create_managed_session(
+        workspace,
+        EnsureWorkspaceAgentRequest(
+            agent_type=AgentType.CLAUDE,
+            role=WorkspaceSessionRole.WORKER,
+        ),
+    )
+
+    assert session.session_kind == SessionKind.TERMINAL
+    assert session.chat_mode == ChatMode.DEFAULT
 
 
 def test_list_workspaces_empty_when_none_exist(tmp_path: Path) -> None:

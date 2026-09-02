@@ -206,6 +206,9 @@ def stub_workspace_terminal(
     async def fake_ensure_session_ready(_session) -> None:
         return None
 
+    async def fake_capture_tmux_output(_tmux_session: str) -> str:
+        return ""
+
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
     monkeypatch.setattr(workspace_module.ttyd_manager, "update_tab", fake_update_tab)
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
@@ -237,6 +240,11 @@ def stub_workspace_terminal(
         workspace_manager,
         "_ensure_session_ready_for_send",
         fake_ensure_session_ready,
+    )
+    monkeypatch.setattr(
+        workspace_manager,
+        "_capture_tmux_output",
+        fake_capture_tmux_output,
     )
 
 
@@ -2379,7 +2387,6 @@ def test_completed_report_creates_temporary_reviewer(
         "_ensure_session_ready_for_send",
         fake_ensure_session_ready,
     )
-
     client = TestClient(app)
     workspace = client.post(
         "/api/workspaces",
@@ -5815,7 +5822,6 @@ def test_start_task_prefers_related_task_agent(
         "_ensure_session_ready_for_send",
         fake_ensure_session_ready,
     )
-
     client = TestClient(app)
     workspace_response = client.post(
         "/api/workspaces",
@@ -8331,6 +8337,9 @@ def test_review_passed_task_does_not_reopen_when_agent_has_new_activity(
     async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
         return status_samples
 
+    async def fake_capture_tmux_output(_tmux_session: str) -> str:
+        return ""
+
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
     monkeypatch.setattr(
         workspace_module.ttyd_manager,
@@ -8356,6 +8365,11 @@ def test_review_passed_task_does_not_reopen_when_agent_has_new_activity(
         workspace_manager,
         "_ensure_session_ready_for_send",
         fake_ensure_session_ready,
+    )
+    monkeypatch.setattr(
+        workspace_manager,
+        "_capture_tmux_output",
+        fake_capture_tmux_output,
     )
 
     client = TestClient(app)
@@ -9175,6 +9189,9 @@ def test_completed_review_passed_task_stays_in_review_despite_runtime_activity(
     async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
         return status_samples
 
+    async def fake_capture_tmux_output(_tmux_session: str) -> str:
+        return ""
+
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
     monkeypatch.setattr(
         workspace_module.ttyd_manager,
@@ -9200,6 +9217,11 @@ def test_completed_review_passed_task_stays_in_review_despite_runtime_activity(
         workspace_manager,
         "_ensure_session_ready_for_send",
         fake_ensure_session_ready,
+    )
+    monkeypatch.setattr(
+        workspace_manager,
+        "_capture_tmux_output",
+        fake_capture_tmux_output,
     )
 
     client = TestClient(app)
