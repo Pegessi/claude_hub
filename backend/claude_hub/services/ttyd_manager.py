@@ -2283,12 +2283,19 @@ asyncio.run(_main())
             ValueError: if the tab is not a local Claude/Codex tab.
             RuntimeError: if the tmux session is not alive or respawn fails.
         """
-        if self.agent_type not in {AgentType.CLAUDE, AgentType.CODEX}:
-            raise ValueError("switch_env is only supported for Claude and Codex tabs")
+        if self.agent_type not in {AgentType.CLAUDE, AgentType.CODEX, AgentType.CURSOR}:
+            raise ValueError("switch_env is only supported for Claude, Codex, and Cursor tabs")
         if self.session_kind == SessionKind.CHAT:
-            # Chat sessions own their provider via the native transport;
-            # env changes are applied to the ProviderSession, not tmux.
-            raise ValueError("switch_env is not supported for native Chat sessions")
+            # Chat sessions own their provider via the native transport. The
+            # native transport reads ``self.session.env`` on every turn (via
+            # ``_build_env`` / ``_build_command``), so updating the persisted
+            # env here is sufficient for the next turn to pick it up. No tmux
+            # respawn is needed — the one-shot subprocess is spawned per turn.
+            if solo_mode is not None:
+                self.solo_mode = solo_mode
+            self.env = self._clean_env(new_env)
+            self._prepare_agent_env()
+            return
         if self.target != ExecutionTarget.LOCAL:
             raise ValueError("switch_env is only supported for local tabs")
         if not await _tmux_session_exists_async(self.tmux_session):

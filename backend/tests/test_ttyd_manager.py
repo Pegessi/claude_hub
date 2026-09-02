@@ -2665,16 +2665,15 @@ def _make_claude_process(
 
 @pytest.mark.asyncio
 async def test_switch_env_rejects_unsupported_agent_types(monkeypatch: MonkeyPatch) -> None:
-    # Codex is now supported; cursor and terminal are not.
-    for agent_type in (AgentType.CURSOR, AgentType.TERMINAL):
-        process = TTYDProcess(
-            tab_id=f"tab-{agent_type.value}",
-            port=12391,
-            name=agent_type.value,
-            agent_type=agent_type,
-        )
-        with pytest.raises(ValueError, match="Claude and Codex tabs"):
-            await process.switch_env({"FOO": "bar"})
+    # Claude, Codex, and Cursor are supported; terminal is not.
+    process = TTYDProcess(
+        tab_id="tab-terminal",
+        port=12391,
+        name="terminal",
+        agent_type=AgentType.TERMINAL,
+    )
+    with pytest.raises(ValueError, match="Claude, Codex, and Cursor tabs"):
+        await process.switch_env({"FOO": "bar"})
 
 
 @pytest.mark.asyncio
