@@ -1733,8 +1733,9 @@ async def test_native_multiple_deltas_before_turn_completed() -> None:
 @pytest.mark.asyncio
 async def test_native_runtime_is_idle_on_completion_before_one_shot_process_eof() -> None:
     """Timeline completion is the runtime-status boundary even if Claude's
-    one-shot process takes longer to exit.  The send guard remains held until
-    EOF so trailing provider records cannot be attributed to the next turn."""
+    one-shot process takes longer to exit.  The send guard is released at
+    ``TURN_COMPLETED`` (the provider's final record) so a long-running tool
+    call that keeps the subprocess alive does not block the next turn."""
 
     from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
     from claude_hub.services.agent_stream.tailer import (
@@ -1764,7 +1765,9 @@ async def test_native_runtime_is_idle_on_completion_before_one_shot_process_eof(
 
     completed = await asyncio.wait_for(queue.get(), timeout=0.5)
     assert completed.type == AgentStreamEventType.TURN_COMPLETED
-    assert transport.turn_in_flight is True
+    # The turn guard is released at TURN_COMPLETED, not at EOF, so a lingering
+    # subprocess (e.g. a long-running tool call) does not block the next send.
+    assert transport.turn_in_flight is False
     snapshot = get_tab_native_runtime_snapshot(session.tab_id)
     assert snapshot is not None
     assert snapshot.status == AgentRuntimeStatus.IDLE
@@ -1815,7 +1818,8 @@ async def test_native_runtime_needs_attention_on_failed_completion_before_eof() 
     completed = await asyncio.wait_for(queue.get(), timeout=0.5)
     assert completed.type == AgentStreamEventType.TURN_COMPLETED
     assert completed.payload["status"] == "failed"
-    assert transport.turn_in_flight is True
+    # The turn guard is released at TURN_COMPLETED even for failed turns.
+    assert transport.turn_in_flight is False
     snapshot = get_tab_native_runtime_snapshot(session.tab_id)
     assert snapshot is not None
     assert snapshot.status == AgentRuntimeStatus.ATTENTION

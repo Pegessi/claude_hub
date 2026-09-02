@@ -5,6 +5,21 @@
 
 ## Unreleased
 
+### fix: release native turn guard at TURN_COMPLETED, not subprocess EOF
+
+- For one-shot providers (Claude, Cursor), the turn guard (`_turn_in_flight`)
+  was released only when the subprocess's stdout closed (EOF). If a turn's
+  final tool call spawned a long-running process (e.g. `pnpm dev`), the
+  `claude --print` subprocess stayed alive after the turn had logically
+  completed, so the guard never released and every subsequent send returned
+  HTTP 409 "a turn is already in flight".
+- Every adapter emits `TURN_COMPLETED` as its final record (Claude's top-level
+  `result`, Cursor's `turn_ended`, Codex's `turn/completed`), so there are no
+  trailing records after it. The tailer now releases the active turn id and
+  the turn guard at `TURN_COMPLETED` for all providers. The EOF handler still
+  synthesizes a failed completion if the process exits without ever emitting
+  `TURN_COMPLETED`.
+
 ### fix: handle >64 KiB stdout lines in native agent transports
 
 - `ProviderSession._drain_stdout` (Claude/Cursor) and `CodexNativeSession._drain_stdout`
