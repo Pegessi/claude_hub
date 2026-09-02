@@ -365,11 +365,19 @@ class ProviderSession(ABC):
     def acknowledge_turn_complete(self) -> None:
         """Acknowledge that the tailer has consumed the turn-end signal.
 
-        The tailer calls this after it has processed the provider's turn-end
-        record (EOF for one-shot providers, ``turn/completed`` for Codex) and
-        released the active turn id. Only then is ``_turn_in_flight`` cleared,
-        so a concurrent ``send_message`` can never overwrite ``_active_turn_id``
+        The tailer calls this after it has processed the provider's terminal
+        ``TURN_COMPLETED`` event (the ``result`` record for Claude,
+        ``turn_ended`` for Cursor, ``turn/completed`` for Codex) and released
+        the active turn id. Only then is ``_turn_in_flight`` cleared, so a
+        concurrent ``send_message`` can never overwrite ``_active_turn_id``
         while the previous turn's records are still queued.
+
+        Releasing at ``TURN_COMPLETED`` (rather than waiting for the one-shot
+        subprocess to exit) is safe because every adapter emits
+        ``TURN_COMPLETED`` as its final record — there are no trailing records
+        after it. It also prevents the turn guard from staying stuck while a
+        long-running tool call (e.g. ``pnpm dev``) keeps the subprocess alive
+        after the turn has logically completed.
 
         This is the normal-completion counterpart to ``_end_turn`` (which is
         reserved for error/shutdown paths where no turn-end record arrives).
@@ -553,13 +561,15 @@ class ProviderSession(ABC):
                 self._exit_error = f"provider exited with code {returncode}" + (
                     f": {stderr_text}" if stderr_text else ""
                 )
-            # Signal EOF to consumers. The tailer will process all queued
-            # records, then this EOF sentinel, and then call
-            # ``acknowledge_turn_complete`` to release the turn guard. We must
-            # NOT call ``_end_turn`` here: doing so would clear
-            # ``_turn_in_flight`` before the tailer has consumed the EOF,
-            # allowing a concurrent ``send_message`` to overwrite
-            # ``_active_turn_id`` while this turn's records are still queued.
+            # Signal EOF to consumers. The tailer processes all queued records,
+            # then this EOF sentinel. The turn guard is normally released at
+            # ``TURN_COMPLETED`` (the provider's final record); the EOF handler
+            # only calls ``acknowledge_turn_complete`` if no completion record
+            # was seen (synthesizing a failed turn). We must NOT call
+            # ``_end_turn`` here: doing so would clear ``_turn_in_flight``
+            # before the tailer has consumed the turn's records, allowing a
+            # concurrent ``send_message`` to overwrite ``_active_turn_id``
+            # while this turn's records are still queued.
             await self._stdout_queue.put(None)
 
     async def _drain_stderr(self) -> None:

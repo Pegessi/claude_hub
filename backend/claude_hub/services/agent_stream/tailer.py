@@ -196,10 +196,12 @@ class SessionTailer:
         # with no completion record).
         self._turn_completed_seen: bool = False
         # Runtime status is terminalized as soon as the authoritative
-        # TURN_COMPLETED event has been persisted and fanned out.  One-shot
-        # providers may keep ``turn_in_flight`` true until their process EOF
-        # so trailing records retain the correct turn id; status must not be
-        # held in WORKING by that process-exit lag.
+        # TURN_COMPLETED event has been persisted and fanned out. The turn
+        # guard (``turn_in_flight``) is also released at TURN_COMPLETED for
+        # every adapter, since TURN_COMPLETED is the provider's final record
+        # and there are no trailing records after it. This prevents the guard
+        # from staying stuck while a one-shot subprocess lingers (e.g. a
+        # long-running tool call keeps the process alive after the turn).
         self._native_terminal_status: Optional[NativeRuntimeSnapshot] = None
 
         self._task: Optional[asyncio.Task[Any]] = None
@@ -764,16 +766,14 @@ class SessionTailer:
                         self.session_id,
                         exit_error,
                     )
-                # Release the active turn id so the next ``send_message`` can
-                # set a new one. We do NOT clear it on ``TURN_COMPLETED``
-                # (which the provider may emit at ``message_stop``, before the
-                # final ``assistant`` snapshot) because trailing records of
-                # the same turn must still inherit this turn's id.
+                # The active turn id and turn guard are normally released at
+                # ``TURN_COMPLETED`` (which is the provider's final record).
+                # If the process exited without ever emitting a completion
+                # record, ``_fail_active_turn`` above has already published a
+                # synthetic failed ``turn_completed``; clear the turn id and
+                # release the guard here so the next send can proceed. If a
+                # completion WAS emitted, these are no-ops.
                 self._active_turn_id = None
-                # Now that we have consumed the EOF (and all preceding records
-                # of this turn), release the turn guard so a new send can
-                # proceed. This must happen after ``_active_turn_id`` is
-                # cleared, never before.
                 transport.acknowledge_turn_complete()
                 continue
             transport.maybe_capture_conversation_id(record)
@@ -819,16 +819,28 @@ class SessionTailer:
                     # failed turn_completed must be synthesized.
                     self._turn_completed_seen = True
                     self._terminalize_native_runtime(event.payload.get("status"))
-                    # For persistent transports (Codex app-server) there is no
-                    # per-turn EOF; ``TURN_COMPLETED`` is the provider's
-                    # explicit turn-end signal. Release the active turn id and
-                    # the turn guard ONLY after the completion event has been
-                    # persisted and fanned out, so a concurrent
-                    # ``send_message`` cannot publish a new turn_started that
-                    # sequences ahead of this turn's completion.
-                    if transport.eof_is_fatal:
-                        self._active_turn_id = None
-                        transport.acknowledge_turn_complete()
+                    # ``TURN_COMPLETED`` is the provider's explicit turn-end
+                    # signal for every adapter we ship:
+                    #   - Claude: top-level ``result`` record (after the final
+                    #     ``assistant`` snapshot; never on ``message_stop``).
+                    #   - Cursor: ``turn_ended`` record.
+                    #   - Codex: ``turn/completed`` notification.
+                    # There are no trailing records after it, so it is safe to
+                    # release the active turn id and the turn guard immediately
+                    # — both for persistent transports (Codex app-server, which
+                    # has no per-turn EOF) and for one-shot transports (Claude /
+                    # Cursor, whose subprocess may linger after the turn because
+                    # a long-running tool call e.g. ``pnpm dev`` keeps the
+                    # process alive). Releasing here prevents the turn guard
+                    # from staying stuck ``True`` until the subprocess finally
+                    # exits.
+                    #
+                    # The completion event has already been persisted and fanned
+                    # out above, so a concurrent ``send_message`` cannot publish
+                    # a new turn_started that sequences ahead of this turn's
+                    # completion.
+                    self._active_turn_id = None
+                    transport.acknowledge_turn_complete()
 
     async def _poll_once(self) -> None:
         session = self._session_getter()
