@@ -288,10 +288,10 @@ test('interleaved thinking, tool, thinking, text produce ordered parts', () => {
   const turn = turns[0]
   assert.ok(Array.isArray(turn.parts), 'turn must expose an ordered parts list')
   const kinds = turn.parts.map(p => p.kind)
-  assert.deepEqual(kinds, ['thinking', 'tool', 'thinking', 'text'])
+  assert.deepEqual(kinds, ['thinking', 'tool_group', 'thinking', 'text'])
   assert.equal(turn.parts[0].text, 'pre-tool thought')
-  assert.equal(turn.parts[1].tool.name, 'WebSearch')
-  assert.equal(turn.parts[1].tool.status, 'completed')
+  assert.equal(turn.parts[1].tools[0].name, 'WebSearch')
+  assert.equal(turn.parts[1].tools[0].status, 'completed')
   assert.equal(turn.parts[2].text, 'post-tool thought')
   assert.equal(turn.parts[3].text, 'final answer')
 })

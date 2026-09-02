@@ -418,6 +418,16 @@ class ProviderSession(ABC):
         self._current_mode = mode
         self.session.chat_mode = ChatMode(mode)
 
+    def update_env(self, env: Dict[str, str]) -> None:
+        """Replace the session env used for the next turn.
+
+        The native transport reads ``self.session.env`` on every turn (via
+        ``_build_env`` for Claude/Codex and ``_build_command`` for Cursor's
+        ``--model`` flag), so updating it here takes effect on the next
+        ``send_message`` without restarting anything.
+        """
+        self.session.env = dict(env)
+
     @property
     def eof_is_fatal(self) -> bool:
         """Whether an EOF on the transport's stdout is a fatal error.
@@ -1409,6 +1419,12 @@ class CursorNativeSession(ProviderSession):
             "stream-json",
             "--stream-partial-output",
         ]
+        # Cursor does not read a model env var; the model must be passed via
+        # the ``--model`` flag. If the session env carries ``CURSOR_MODEL``
+        # (set by the frontend model picker), forward it as a flag.
+        cursor_model = self.session.env.get("CURSOR_MODEL")
+        if isinstance(cursor_model, str) and cursor_model:
+            cmd.extend(["--model", cursor_model])
         if self.session.solo_mode and self._current_mode == ChatMode.DEFAULT.value:
             cmd.append("--yolo")
         if self._current_mode == ChatMode.PLAN.value:

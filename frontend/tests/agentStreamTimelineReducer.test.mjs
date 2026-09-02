@@ -10,14 +10,27 @@ const source = await readFile(
   new URL('../src/utils/agentStreamTimeline.ts', import.meta.url),
   'utf8',
 )
-const { outputText } = ts.transpileModule(source, {
+const questionSource = await readFile(
+  new URL('../src/utils/chatQuestionResponse.ts', import.meta.url),
+  'utf8',
+)
+const transpileOptions = {
   compilerOptions: {
     module: ts.ModuleKind.ES2022,
     target: ts.ScriptTarget.ES2020,
   },
-})
+}
+const questionJs = ts.transpileModule(questionSource, transpileOptions).outputText
+const { outputText } = ts.transpileModule(
+  source.replace(
+    "import { parseStructuredQuestions } from '@/utils/chatQuestionResponse'",
+    '',
+  ),
+  transpileOptions,
+)
+const bundled = `${questionJs}\n${outputText}`
 const mod = await import(
-  `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`
+  `data:text/javascript;base64,${Buffer.from(bundled).toString('base64')}`
 )
 const { groupEventsIntoTurns, IncrementalTimelineReducer } = mod
 
@@ -259,9 +272,10 @@ test('incremental reducer preserves tool ordering across batches', () => {
   assert.equal(turns[0].tools[1].name, 'WebSearch')
   assert.equal(turns[0].tools[1].status, 'completed')
 
-  // Parts order must match emission order.
+  // Parts order must match emission order. Consecutive tools are grouped.
   const kinds = turns[0].parts.map(p => p.kind)
-  assert.deepEqual(kinds, ['tool', 'tool'])
+  assert.deepEqual(kinds, ['tool_group'])
+  assert.equal(turns[0].parts[0].tools.length, 2)
 })
 
 test('incremental reducer handles replay dedup across batches', () => {

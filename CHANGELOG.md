@@ -5,6 +5,24 @@
 
 ## Unreleased
 
+### feat: model switching in Chat composer and Cursor model support
+
+- Add a model picker button to the Structured Chat composer for Claude, Codex,
+  and Cursor tabs. Each agent type maps to its own env var (`ANTHROPIC_MODEL`,
+  `CODEX_MODEL`, `CURSOR_MODEL`); selecting a model calls `switch-env` which
+  updates the persisted env and pushes it to the live native transport.
+- Cursor native sessions now forward `CURSOR_MODEL` as the `--model` CLI flag
+  (the Cursor agent CLI does not read `CURSOR_MODEL` from the environment).
+- `switch_env` for native Chat sessions updates the provider env directly
+  without a tmux respawn, since the one-shot subprocess reads env per turn.
+
+### feat: timeline tool call grouping
+
+- Consecutive tool calls within a turn are now grouped into a single
+  expandable `tool_group` part, matching Codex/Paseo UX. The group header
+  shows a summary ("3 tools: Read, Edit, Bash") and an aggregate status;
+  expanding reveals per-tool args and results.
+
 ### fix: release native turn guard at TURN_COMPLETED, not subprocess EOF
 
 - For one-shot providers (Claude, Cursor), the turn guard (`_turn_in_flight`)
