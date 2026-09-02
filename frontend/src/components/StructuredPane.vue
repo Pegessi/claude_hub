@@ -469,10 +469,8 @@ import MarkdownContent from '@/components/MarkdownContent.vue'
 import type { WorkspaceAttachmentCreate } from '@/types'
 
 const props = defineProps<{
-  /** A Workspace-managed Chat keeps the existing durable message path. */
-  sessionId?: string
-  /** A direct Chat tab owns its transcript directly. */
-  tabId?: string
+  /** A top-level Chat tab owns its transcript directly. */
+  tabId: string
 }>()
 
 const terminalStore = useTerminalStore()
@@ -489,11 +487,7 @@ const {
 } = useAgentStream()
 
 function startStream() {
-  if (props.tabId) {
-    void start(props.tabId, 'terminal-tab')
-  } else if (props.sessionId) {
-    void start(props.sessionId, 'managed-session')
-  }
+  void start(props.tabId, 'terminal-tab')
 }
 
 // ── Timeline grouping ───────────────────────────────────────────────────────
@@ -573,7 +567,7 @@ onMounted(() => {
 })
 
 watch(
-  () => [props.sessionId, props.tabId],
+  () => props.tabId,
   () => {
     // Advance the preparation epoch so any in-flight attachment batch from
     // the previous source fails its post-await epoch check and aborts
@@ -605,11 +599,7 @@ onUnmounted(() => {
 })
 
 function retry() {
-  if (props.tabId) {
-    void retryStream(props.tabId, 'terminal-tab')
-  } else if (props.sessionId) {
-    void retryStream(props.sessionId, 'managed-session')
-  }
+  void retryStream(props.tabId, 'terminal-tab')
 }
 
 // ── Composer ────────────────────────────────────────────────────────────────
@@ -981,10 +971,7 @@ function removeAttachment(att: DraftAttachment) {
  */
 function attachmentUrl(attachmentId: string): string {
   const encId = encodeURIComponent(attachmentId)
-  if (props.sessionId) {
-    return `/api/workspaces/sessions/${encodeURIComponent(props.sessionId)}/stream/attachments/${encId}`
-  }
-  return `/api/workspaces/tabs/${encodeURIComponent(props.tabId ?? '')}/stream/attachments/${encId}`
+  return `/api/workspaces/tabs/${encodeURIComponent(props.tabId)}/stream/attachments/${encId}`
 }
 
 /**
@@ -1003,20 +990,16 @@ function onAttachmentError(_event: Event, att: TimelineAttachment): void {
 /**
  * Deliver composer input to the native provider transport via ``/stream/send``.
  *
- * StructuredPane is only mounted for CHAT sessions (session_kind=chat).
- * Both workspace-managed sessions (sessionId) and direct Chat tabs (tabId)
- * route through the native transport's atomic send_message(text, images), so
- * text and images are staged + submitted together — no leaked attachments
- * across turns, no split-brain with a hidden xterm shell.
+ * StructuredPane is mounted only for top-level Chat tabs. Text and images are
+ * staged and submitted together through the native transport's atomic
+ * send_message boundary.
  */
 async function sendToStream(
   message: string,
   atts: WorkspaceAttachmentCreate[],
   clientTurnId: string,
 ) {
-  const base = props.sessionId
-    ? `/api/workspaces/sessions/${props.sessionId}/stream/send`
-    : `/api/workspaces/tabs/${props.tabId}/stream/send`
+  const base = `/api/workspaces/tabs/${props.tabId}/stream/send`
   const res = await fetch(base, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1072,9 +1055,6 @@ async function submit() {
     ? crypto.randomUUID()
     : `turn-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`
   try {
-    if (!props.sessionId && !props.tabId) {
-      throw new Error('Structured source is unavailable.')
-    }
     // Clear the composer synchronously BEFORE the send promise settles so the
     // thumbnail disappears immediately on Send. On rejection we restore the
     // exact snapshot below.
@@ -1213,7 +1193,7 @@ watch(connectionState, (state) => {
 }, { immediate: true })
 
 watch(
-  () => [props.sessionId, props.tabId],
+  () => props.tabId,
   () => {
     resetActivation()
     // Attachment ids are scoped to a session/tab; switching source invalidates

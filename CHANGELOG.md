@@ -7,6 +7,9 @@
 
 ### feat: add provider-aware Chat Plan mode and native activity status
 
+- Chat creation remains a top-level Terminal-area action. Agent Workspace
+  orchestrator/reviewer/worker sessions remain Terminal control-plane runners
+  and never mount the Chat `StructuredPane`.
 - Added per-Chat Default / Plan mode discovery, persistence, and switching.
   Claude and Cursor are gated by their installed CLI capabilities; Codex uses
   `collaborationMode/list` and sends the provider preset's own mode with the
@@ -26,9 +29,10 @@
   and Plan; a live Claude Plan turn transitioned working to idle and left the
   workspace unchanged. Claude Code may still write its internal plan artifact
   under `~/.claude/plans`, which is outside the workspace.
-- Mode survives a cold restart for both direct tabs and managed Chat sessions.
-  Validation passed: 393 backend tests, 250 frontend unit tests, frontend lint
-  and production build, plus Black, isort, and mypy.
+- Mode survives a cold restart for top-level Chat tabs.
+  Final merge gate passed: 1,223 backend tests (20 environment-gated skips) and
+  253/253 frontend unit tests, frontend lint and production build, plus Black,
+  isort, mypy, and the repository-doc parity check.
 - Chat activity remains working through both the initial wait and streamed
   output, then becomes idle at authoritative turn terminalization. A one-shot
   provider process reaching EOF is transport input to that lifecycle; EOF by
@@ -362,6 +366,10 @@
 
 ### feat: Cursor same-pane transcript bridge for Paseo Structured
 
+> Historical implementation stage, superseded by the fixed Chat / Terminal
+> session boundary above: this bridge no longer means Agent Workspace runners
+> expose a Structured view. Those managed sessions remain Terminal-only.
+
 - **What**: Local Cursor CLI sessions on the verified
   `2026.08.25-3e8eec8` release can now power the same Structured timeline as
   Claude and Codex while retaining the authoritative Raw terminal pane.
@@ -384,6 +392,10 @@
 
 ### feat: Paseo v2 structured Chat UI + image composer (frontend)
 
+> Historical implementation stage, superseded by the fixed Chat / Terminal
+> session boundary above. `StructuredPane` is now owned only by top-level Chat
+> tabs; Agent Workspace managed sessions remain Terminal control-plane runners.
+
 - **What**: Structured Chat surface backed by the provider transport. It
   renders a turn-grouped timeline
   (user, assistant text, collapsible thinking, tool calls with status, errors,
@@ -398,8 +410,9 @@
 - **How**: `StructuredPane.vue`, `agentStreamTimeline.ts`,
   `agentStreamAttachments.ts`, `useAgentStream.ts`; `TerminalPane.vue` selects
   the fixed surface from `session_kind` and keeps the provider transport hidden.
-  `sessionForTab` maps tab → managed session for stream keying. Stable
-  `client_turn_id` reconciliation keeps identical prompts distinct.
+  The initial `sessionForTab` managed-session mapping was removed when Agent
+  Workspace became Terminal-only. Stable `client_turn_id` reconciliation keeps
+  identical prompts distinct.
 
 ### feat: Paseo v2 backend structured observation foundation (Layer B)
 

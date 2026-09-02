@@ -535,21 +535,18 @@ def _resident_session(
     )
 
 
-def test_set_session_chat_mode_persists_after_provider_pre_mutation(
+def test_workspace_chat_state_migrates_to_terminal_on_cold_reload(
     manager: WorkspaceManager, tmp_path: Path
 ) -> None:
     workspace = _make_workspace(manager, tmp_path)
     session = _resident_session(workspace).model_copy(update={"session_kind": SessionKind.CHAT})
     manager.sessions[session.id] = session
+    session.chat_mode = ChatMode.PLAN
     manager._save_state()
 
-    # Native ProviderSession owns the live mode and updates the shared model
-    # before TailerManager crosses this persistence boundary.
-    session.chat_mode = ChatMode.PLAN
-    assert manager.set_session_chat_mode(session.id, ChatMode.PLAN.value) is True
-
     reloaded = WorkspaceManager()
-    assert reloaded.sessions[session.id].chat_mode == ChatMode.PLAN
+    assert reloaded.sessions[session.id].session_kind == SessionKind.TERMINAL
+    assert reloaded.sessions[session.id].chat_mode == ChatMode.DEFAULT
 
 
 def test_run_resident_agent_skips_when_busy(

@@ -125,7 +125,7 @@ def get_native_runtime_snapshot(session_id: str) -> Optional[NativeRuntimeSnapsh
 
 
 def get_tab_native_runtime_snapshot(tab_id: str) -> Optional[NativeRuntimeSnapshot]:
-    """Peek the native owner for either a direct or workspace Chat tab."""
+    """Peek the native owner for a direct top-level Chat tab."""
 
     for manager in list(_TAILER_MANAGERS):
         for tailer in manager.tailers():

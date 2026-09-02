@@ -67,16 +67,13 @@
       />
     </div>
 
-    <!-- All Chat providers use the native structured endpoint. If provider
-         setup fails, StructuredPane shows an explicit retryable error. -->
+    <!-- Only top-level Chat sessions use the native structured endpoint.
+         Workspace-managed agents always remain on their Terminal surface. -->
     <div
       v-if="pane.tabId && isChatSession"
       class="pane-structured"
     >
-      <StructuredPane
-        :session-id="managedSession?.id"
-        :tab-id="directStructuredTabId"
-      />
+      <StructuredPane :tab-id="pane.tabId" />
     </div>
   </div>
 </template>
@@ -85,7 +82,6 @@
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useTerminalStore } from '@/stores/terminalStore'
-import { useWorkspaceStore } from '@/stores/workspaceStore'
 import TerminalView from '@/components/TerminalView.vue'
 import StructuredPane from '@/components/StructuredPane.vue'
 import type { Pane, TerminalTab } from '@/types'
@@ -99,7 +95,6 @@ const emit = defineEmits<{
 }>()
 
 const store = useTerminalStore()
-const workspaceStore = useWorkspaceStore()
 const { tabs } = storeToRefs(store)
 
 // Resolve the current tab once via computed so we don't do a tabs.find() on
@@ -109,21 +104,12 @@ const paneTab = computed<TerminalTab | undefined>(() =>
 )
 const tabName = computed(() => paneTab.value?.name || '')
 const agentType = computed(() => paneTab.value?.agent_type)
-const isChatSession = computed(() => paneTab.value?.session_kind === 'chat')
-
-// Workspace sessions keep their existing durable messaging path. A normal AI
-// tab has no Workspace board row, so it is observed by its own transcript via
-// the tab stream endpoint instead.
-const managedSession = computed(() =>
-  props.pane.tabId ? workspaceStore.sessionForTab(props.pane.tabId) : null
+// workspace_id is optional display metadata on direct top-level sessions.
+// Only a workspace role marks an internal Agent Workspace runner.
+const isManagedTab = computed(() => Boolean(paneTab.value?.workspace_role))
+const isChatSession = computed(() =>
+  paneTab.value?.session_kind === 'chat' && !isManagedTab.value
 )
-
-const directStructuredTabId = computed(() => {
-  if (!isChatSession.value || managedSession.value || !paneTab.value) return undefined
-  const type = paneTab.value.agent_type
-  if (type === 'claude' || type === 'codex' || type === 'cursor') return paneTab.value.id
-  return undefined
-})
 
 const sessionMark = computed(() => {
   if (agentType.value === 'claude') return 'C'
@@ -155,7 +141,6 @@ function getTabName(): string {
 function getAgentType() {
   return agentType.value
 }
-
 
 function handleClick() {
   emit('click')

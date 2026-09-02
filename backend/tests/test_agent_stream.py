@@ -350,6 +350,21 @@ async def test_set_stream_mode_rejects_in_flight_turn() -> None:
 
 
 @pytest.mark.asyncio
+async def test_workspace_terminal_session_rejects_chat_mode_mutation() -> None:
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    session = _sse_session("workspace-managed", "managed-terminal")
+    manager = MagicMock()
+    manager.set_mode = AsyncMock()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await agent_stream_api._set_stream_mode_for(session, manager, "plan")
+
+    assert exc_info.value.status_code == 400
+    manager.set_mode.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_idle_reaped_tailer_restarts_before_setting_mode(
     monkeypatch: pytest.MonkeyPatch,
     store: AgentStreamStore,
@@ -387,38 +402,6 @@ async def test_idle_reaped_tailer_restarts_before_setting_mode(
     assert transport.capabilities().current_mode == "plan"
     assert persisted == [(session.id, "plan")]
     await tailer.stop()
-
-
-def test_tab_native_runtime_snapshot_finds_workspace_managed_owner(
-    store: AgentStreamStore,
-) -> None:
-    from claude_hub.services.agent_stream.native import ClaudeNativeSession
-    from claude_hub.services.agent_stream.tailer import (
-        TailerManager,
-        get_tab_native_runtime_snapshot,
-    )
-
-    session = _sse_session("ws-status", "managed-status-owner").model_copy(
-        update={"session_kind": SessionKind.CHAT, "tab_id": "workspace-chat-tab"}
-    )
-    transport = ClaudeNativeSession(session)
-    transport._turn_in_flight = True
-    tailer = SessionTailer(
-        session.workspace_id,
-        session.id,
-        MagicMock(),
-        lambda: session,
-        store=store,
-        native_transport=transport,
-    )
-    manager = TailerManager(lambda _session_id: session)
-    manager._tailers[session.id] = tailer
-
-    snapshot = get_tab_native_runtime_snapshot(session.tab_id)
-
-    assert snapshot is not None
-    assert snapshot.status == AgentRuntimeStatus.WORKING
-    assert snapshot.detail == "native provider turn is in flight"
 
 
 def test_redact_event_strips_env_values():

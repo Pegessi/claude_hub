@@ -407,14 +407,13 @@ class _NormalizeMixin:
         normalized.setdefault("prompt_retry_task_id", None)
         normalized.setdefault("prompt_retry_attempted_at", None)
         normalized.setdefault("last_review_task_id", None)
-        # Persisted managed sessions predate session_kind. They were all
-        # internal task runners (dispatcher / reviewer / worker) that drive
-        # the raw TUI control plane, so default to TERMINAL. Only direct
-        # user Chat tabs carry an explicit SessionKind.CHAT and get the
-        # native/inert structured surface.
-        normalized.setdefault("session_kind", SessionKind.TERMINAL.value)
-        if normalized["session_kind"] == "agent":
-            normalized["session_kind"] = SessionKind.CHAT.value
+        # Every persisted Workspace session is an internal task runner that
+        # drives the raw TUI control plane.  Historical agent/chat values were
+        # briefly written during the top-level Chat migration; fail closed on
+        # load and normalize them back to Terminal/default.  Direct user Chat
+        # tabs live in TTYDManager state and never pass through this boundary.
+        normalized["session_kind"] = SessionKind.TERMINAL.value
+        normalized["chat_mode"] = "default"
         return normalized
 
     def _runtime_from_managed_status(self, item: dict[str, Any]) -> str:

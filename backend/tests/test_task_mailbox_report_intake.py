@@ -20,6 +20,7 @@ from claude_hub.models import (
     ExecutionTarget,
     ManagedSession,
     ManagedSessionStatus,
+    TerminalTab,
     WorkspaceCreate,
     WorkspaceSessionRole,
     WorkspaceTask,
@@ -41,9 +42,26 @@ def state_root(monkeypatch: MonkeyPatch, tmp_path: Path) -> Generator[Path, None
     monkeypatch.setattr(_wm._persistence, "INDEX_FILE", index_file)
     monkeypatch.setattr(_wm._state, "INDEX_FILE", index_file)
 
+    created_tabs = 0
+
+    async def fake_create_tab(**kwargs: object) -> TerminalTab:
+        nonlocal created_tabs
+        created_tabs += 1
+        return TerminalTab(
+            id=f"tab-managed-{created_tabs}",
+            name=str(kwargs.get("name") or "managed reviewer"),
+            port=12380 + created_tabs,
+            created_at=datetime.utcnow(),
+            is_active=True,
+        )
+
     fake_tab = MagicMock(id="tab-mock", tmux_session="tmux-mock")
+    monkeypatch.setattr(_wm.ttyd_manager, "create_tab", fake_create_tab)
     monkeypatch.setattr(_wm.ttyd_manager, "update_tab", AsyncMock(return_value=fake_tab))
+    monkeypatch.setattr(_wm.ttyd_manager, "delete_tab", AsyncMock())
     monkeypatch.setattr(_wm.WorkspaceManager, "_send_tmux_message", AsyncMock())
+    monkeypatch.setattr(_wm.WorkspaceManager, "_send_tmux_message_with_receipt", AsyncMock())
+    monkeypatch.setattr(_wm.WorkspaceManager, "_ensure_session_ready_for_send", AsyncMock())
     yield root
 
 

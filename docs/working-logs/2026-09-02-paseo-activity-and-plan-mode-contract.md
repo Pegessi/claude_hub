@@ -17,8 +17,12 @@ All source paths below refer to that commit unless stated otherwise.
 - A **Chat** is Claude Hub's structured, provider-native conversation surface
   (`session_kind=chat`). A **Terminal** is the raw tmux/ttyd surface
   (`session_kind=terminal`). Legacy `session_kind=agent` is accepted only while
-  loading old state and is normalized to Chat; it is not a public creation
+  loading old top-level tab state and is normalized to Chat; Workspace managed
+  session state always normalizes to Terminal. `agent` is not a public creation
   option.
+- Chat creation is available only from the top-level Terminal area. Agent
+  Workspace orchestrator/reviewer/worker sessions remain Terminal control-plane
+  runners and never mount `StructuredPane`.
 - **Plan** means a provider execution mode or feature that restricts the next
   turn to planning. It is unrelated to provider subscription-plan usage.
 - **Desired mode** is what the user selected. **Effective mode** is what the
@@ -233,15 +237,16 @@ replace it:
 7. **Plan approval is not inferred.** Claude/Codex provider-native plan approval
    may be mapped only when the adapter emits a verifiable plan boundary. Cursor
    Plan support alone does not authorize a fabricated approval card.
-8. **Legacy migration is one-way.** Old `session_kind=agent` values may load as
-   Chat, but new payloads and persistence emit only `chat | terminal`.
+8. **Legacy migration is one-way.** Old top-level-tab `session_kind=agent`
+   values may load as Chat; old Workspace managed-session values normalize to
+   Terminal. New payloads and persistence emit only `chat | terminal`.
 
 ## Validation
 
-Central validation completed with:
+Final merge-gate validation completed with:
 
-- backend related pytest selection: **393 passed**;
-- frontend unit tests: **245 passed**;
+- backend CI-like no-tmux suite: **1,223 passed, 20 skipped**;
+- frontend unit tests: **253 passed**;
 - frontend ESLint and production build: passed;
 - backend Black, isort, and mypy: passed;
 - local capability probes: installed Claude, Codex, and Cursor each returned
@@ -299,8 +304,8 @@ paths that the central run did not exercise live.
 - [x] The mode buttons are disabled throughout a working turn and return to
   enabled in the same sample that authoritative completion returns status to
   idle.
-- [x] A successful mode switch persists through a cold restart for direct and
-  managed Chat sessions.
+- [x] A successful mode switch persists through a cold restart for a top-level
+  Chat tab.
 - [ ] Two different Chats retain independent modes. No explicit two-Chat probe
   was recorded.
 - [ ] Provider/update failure leaves the previous mode selected and the composer
@@ -322,8 +327,9 @@ paths that the central run did not exercise live.
 - [ ] Existing Chat history and provider conversation ids are not duplicated by
   capability probing or mode changes. No dedicated live duplication probe was
   recorded for this feature.
-- [ ] Legacy `agent` state loads as Chat but no create/update response emits
-  `session_kind=agent`. Existing migration tests passed inside the broad suite,
-  but no new live migration probe was recorded.
+- [ ] Legacy top-level `agent` state loads as Chat, managed-session state loads
+  as Terminal, and no create/update response emits `session_kind=agent`.
+  Existing migration tests passed inside the broad suite, but no new live
+  migration probe was recorded.
 - [x] Current UI and changelog copy do not claim Claude/Codex-style Plan
   approval for Cursor; the missing approval-card workflow is explicit.

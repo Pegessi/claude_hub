@@ -1,5 +1,12 @@
 # 2026-08-31 — Paseo v2 direct Terminal tabs
 
+> **Superseded product boundary (2026-09-02):** this note records the former
+> same-tab Terminal/Paseo design. Current Chat creation exists only in the
+> top-level Terminal area as a fixed `session_kind=chat` surface. Agent
+> Workspace managed sessions remain Terminal control-plane runners and never
+> mount `StructuredPane`. See
+> `2026-09-01-paseo-agent-terminal-session-separation.md`.
+
 ## System overview
 
 Paseo is a second representation of the same agent conversation as Raw

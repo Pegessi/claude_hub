@@ -1432,6 +1432,13 @@ class SpawnWorkerRequest(BaseModel):
 
     agent_type: Optional[AgentType] = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_chat_surface_fields(cls, value: Any) -> Any:
+        if isinstance(value, dict) and ({"session_kind", "chat_mode"} & value.keys()):
+            raise ValueError("Workspace managed sessions always use Terminal")
+        return value
+
 
 class EnsureWorkspaceAgentRequest(BaseModel):
     """Payload for ensuring a resident workspace agent session."""
@@ -1469,6 +1476,13 @@ class EnsureWorkspaceAgentRequest(BaseModel):
             "Existing Codex conversation id to resume for a new local managed " "session."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_chat_surface_fields(cls, value: Any) -> Any:
+        if isinstance(value, dict) and ({"session_kind", "chat_mode"} & value.keys()):
+            raise ValueError("Workspace managed sessions always use Terminal")
+        return value
 
     @model_validator(mode="after")
     def _validate_caller_owned_provenance(self) -> "EnsureWorkspaceAgentRequest":

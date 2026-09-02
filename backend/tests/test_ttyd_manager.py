@@ -557,12 +557,11 @@ async def test_cursor_terminal_session_keeps_native_terminal_transport(
 
 
 @pytest.mark.asyncio
-async def test_managed_nonterminal_tab_stays_terminal_unless_explicit_chat(
+async def test_managed_workspace_tab_is_terminal_while_direct_tab_may_be_chat(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Managed task runners (workspace tabs without explicit session_kind=CHAT)
-    must keep raw TUI Terminal semantics. Only an explicit SessionKind.CHAT
-    from the caller promotes a tab to the native/inert structured surface."""
+    """A workspace role marks an internal raw-TUI runner. Direct top-level
+    tabs may still carry optional workspace display metadata and use Chat."""
     manager = TTYDManager.__new__(TTYDManager)
     manager._next_port = 12350
     manager.processes = {}
@@ -587,6 +586,7 @@ async def test_managed_nonterminal_tab_stays_terminal_unless_explicit_chat(
         cwd=str(tmp_path),
         agent_type=AgentType.CLAUDE,
         workspace_id="workspace-1",
+        workspace_role=WorkspaceSessionRole.ORCHESTRATOR,
     )
 
     assert tab.session_kind == SessionKind.TERMINAL
@@ -601,6 +601,27 @@ async def test_managed_nonterminal_tab_stays_terminal_unless_explicit_chat(
     )
 
     assert chat_tab.session_kind == SessionKind.CHAT
+
+    with pytest.raises(ValueError, match="managed workspace tabs must use Terminal"):
+        manager.set_tab_workspace_metadata(
+            chat_tab.id,
+            "workspace-1",
+            "Workspace One",
+            WorkspaceSessionRole.WORKER,
+        )
+
+    with pytest.raises(ValueError, match="managed workspace tabs must use Terminal"):
+        await manager.create_tab(
+            name="Invalid Managed Chat",
+            cwd=str(tmp_path),
+            agent_type=AgentType.CLAUDE,
+            workspace_id="workspace-1",
+            workspace_role=WorkspaceSessionRole.WORKER,
+            session_kind=SessionKind.CHAT,
+        )
+
+    with pytest.raises(ValueError, match="direct top-level Chat tabs"):
+        manager.set_tab_chat_mode(tab.id, ChatMode.PLAN.value)
 
 
 def test_non_solo_codex_initial_launch_translates_model_and_keeps_env_wrapper(
@@ -3356,6 +3377,21 @@ def test_legacy_missing_session_kind_reloads_as_terminal(
             "session_kind": "agent",
             "chat_mode": "plan",
         },
+        {
+            "id": "tab-managed-explicit-chat",
+            "name": "Legacy Managed Chat",
+            "shell": "claude",
+            "cwd": "/x",
+            "solo_mode": False,
+            "agent_type": "claude",
+            "target": "local",
+            "port": 12413,
+            "created_at": "2026-01-01T00:00:00",
+            "session_kind": "chat",
+            "chat_mode": "plan",
+            "workspace_id": "ws-1",
+            "workspace_role": "worker",
+        },
     ]
     state_file.write_text(json.dumps(legacy_state), encoding="utf-8")
 
@@ -3371,6 +3407,9 @@ def test_legacy_missing_session_kind_reloads_as_terminal(
     # The retired persisted value is upgraded at the load boundary.
     assert manager.processes["tab-explicit-agent"].session_kind == SessionKind.CHAT
     assert manager.processes["tab-explicit-agent"].chat_mode == ChatMode.PLAN
+    managed = manager.processes["tab-managed-explicit-chat"]
+    assert managed.session_kind == SessionKind.TERMINAL
+    assert managed.chat_mode == ChatMode.DEFAULT
 
 
 def test_agent_session_id_verified_round_trips_through_state(

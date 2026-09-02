@@ -2945,6 +2945,13 @@ class TTYDManager:
                             if workspace_role_str in [e.value for e in WorkspaceSessionRole]
                             else None
                         )
+                        if workspace_role is not None:
+                            # Workspace-managed task runners always own a raw
+                            # TUI.  Normalize accidental historical Chat rows
+                            # at the persistence boundary; direct top-level
+                            # Chat tabs have no managed workspace role.
+                            session_kind = SessionKind.TERMINAL
+                            chat_mode = ChatMode.DEFAULT
                         process = TTYDProcess(
                             tab_id=tab_data["id"],
                             port=tab_data["port"],
@@ -3055,6 +3062,8 @@ class TTYDManager:
         process = self.processes.get(tab_id)
         if not process:
             return False
+        if workspace_role is not None and process.session_kind != SessionKind.TERMINAL:
+            raise ValueError("managed workspace tabs must use Terminal")
 
         if (
             process.workspace_id == workspace_id
@@ -3110,6 +3119,8 @@ class TTYDManager:
         process = self.processes.get(tab_id)
         if process is None:
             return False
+        if process.workspace_role is not None or process.session_kind != SessionKind.CHAT:
+            raise ValueError("Chat mode is available only for direct top-level Chat tabs")
         parsed = ChatMode(mode)
         if process.chat_mode == parsed:
             return True
@@ -3186,6 +3197,10 @@ class TTYDManager:
         logger.info(
             f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}, session_kind={session_kind}, target={target}, remote_profile_id={remote_profile_id}, remote_forward_port={remote_forward_port}, workspace_id={workspace_id}, workspace_role={workspace_role}, agent_session_id={agent_session_id}"
         )
+        if workspace_role is not None and (
+            session_kind != SessionKind.TERMINAL or chat_mode != ChatMode.DEFAULT
+        ):
+            raise ValueError("managed workspace tabs must use Terminal")
         # session_kind is authoritative: only an explicit SessionKind.CHAT
         # from the caller (direct user Chat tab) gets the native/inert
         # structured surface. Managed task runners (dispatcher, reviewer,
