@@ -76,14 +76,14 @@ test('active Terminal tabs retain their runtime status indicator and idle fallba
   assert.match(tabBar, /tab\.is_active \? 'idle' : 'offline'/)
 })
 
-test('Chat mode selector renders only backend capabilities and applies to the next turn', () => {
+test('Chat mode menu renders only backend capabilities and applies to the next turn', () => {
   assert.match(structuredPane, /v-if="modeOptions\.length > 0"/)
   assert.match(structuredPane, /v-for="option in modeOptions"/)
   assert.match(structuredPane, /:disabled="modeInteractionLocked \|\| isUpdatingMode"/)
-  assert.match(structuredPane, /Available after current turn/)
-  assert.match(structuredPane, /Applies to next message/)
+  assert.match(structuredPane, /aria-haspopup="menu"/)
+  assert.match(structuredPane, /role="menuitemradio"/)
   assert.match(structuredPane, /await setMode\(modeId\)/)
-  assert.match(structuredPane, /@media \(max-width: 640px\)[\s\S]*?\.composer-mode-button \{[\s\S]*?min-height: 44px/)
+  assert.match(structuredPane, /@media \(max-width: 640px\)[\s\S]*?\.composer-mode-trigger \{[\s\S]*?min-height: 44px/)
   assert.doesNotMatch(structuredPane, /agentType.*(?:default|plan)/i)
 })
 

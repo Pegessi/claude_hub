@@ -294,39 +294,6 @@
     <div class="structured-composer">
       <div class="composer-shell">
         <div
-          v-if="modeOptions.length > 0"
-          class="composer-mode-row"
-        >
-          <span class="composer-mode-label">Mode</span>
-          <div
-            class="composer-mode-options"
-            role="group"
-            aria-label="Chat mode"
-          >
-            <button
-              v-for="option in modeOptions"
-              :key="option.id"
-              type="button"
-              class="composer-mode-button"
-              :class="{ active: currentModeId === option.id }"
-              :aria-pressed="currentModeId === option.id"
-              :title="option.description || `${option.label} mode`"
-              :disabled="modeInteractionLocked || isUpdatingMode"
-              @click="changeMode(option.id)"
-            >
-              {{ option.label }}
-            </button>
-          </div>
-          <span class="composer-mode-hint">
-            {{ isUpdatingMode
-              ? 'Updating…'
-              : modeInteractionLocked
-                ? 'Available after current turn'
-                : 'Applies to next message' }}
-          </span>
-        </div>
-
-        <div
           v-if="modeChangeError"
           class="composer-mode-error"
           role="alert"
@@ -370,24 +337,74 @@
         </div>
 
         <div class="composer-row">
-          <button
-            type="button"
-            class="composer-attach-btn"
-            aria-label="Attach image"
-            :title="supportsImages ? 'Attach image' : 'This chat does not support image attachments'"
-            :disabled="!supportsImages || isSending || isPreparingAttachments"
-            @click="triggerFilePicker"
-          >
-            <span aria-hidden="true">📎</span>
-          </button>
-          <input
-            ref="fileInputEl"
-            type="file"
-            accept="image/png,image/jpeg,image/gif,image/webp"
-            multiple
-            class="composer-file-input"
-            @change="handleFilePick"
-          >
+          <div class="composer-tools">
+            <button
+              type="button"
+              class="composer-attach-btn"
+              aria-label="Attach image"
+              :title="supportsImages ? 'Attach image' : 'This chat does not support image attachments'"
+              :disabled="!supportsImages || isSending || isPreparingAttachments"
+              @click="triggerFilePicker"
+            >
+              <span aria-hidden="true">📎</span>
+            </button>
+            <input
+              ref="fileInputEl"
+              type="file"
+              accept="image/png,image/jpeg,image/gif,image/webp"
+              multiple
+              class="composer-file-input"
+              @change="handleFilePick"
+            >
+            <div
+              v-if="modeOptions.length > 0"
+              ref="modePickerEl"
+              class="composer-mode-picker"
+            >
+              <button
+                ref="modeTriggerEl"
+                type="button"
+                class="composer-mode-trigger"
+                aria-haspopup="menu"
+                :aria-expanded="isModeMenuOpen"
+                :aria-label="`Chat mode: ${currentModeLabel}`"
+                :title="currentModeOption?.description || `${currentModeLabel} mode`"
+                :disabled="modeInteractionLocked || isUpdatingMode"
+                @click="toggleModeMenu"
+              >
+                <span class="composer-mode-trigger-label">{{ currentModeLabel }}</span>
+                <span
+                  class="composer-mode-chevron"
+                  aria-hidden="true"
+                >▴</span>
+              </button>
+              <div
+                v-if="isModeMenuOpen"
+                ref="modeMenuEl"
+                class="composer-mode-menu"
+                role="menu"
+                aria-label="Chat mode"
+              >
+                <button
+                  v-for="option in modeOptions"
+                  :key="option.id"
+                  type="button"
+                  class="composer-mode-menu-item"
+                  role="menuitemradio"
+                  :aria-checked="currentModeId === option.id"
+                  :title="option.description || `${option.label} mode`"
+                  @click="selectMode(option.id)"
+                >
+                  <span>{{ option.label }}</span>
+                  <span
+                    v-if="currentModeId === option.id"
+                    class="composer-mode-check"
+                    aria-hidden="true"
+                  >✓</span>
+                </button>
+              </div>
+            </div>
+          </div>
           <textarea
             v-model="draftMessage"
             class="composer-textarea"
@@ -515,8 +532,11 @@ type PendingTurn = {
 const pendingDirectTurns = ref<PendingTurn[]>([])
 const isUpdatingMode = ref(false)
 const modeChangeError = ref<string | null>(null)
+const isModeMenuOpen = ref(false)
 const modeOptions = computed(() => getAvailableChatModes(capabilities.value))
 const currentModeId = computed(() => getCurrentChatModeId(capabilities.value))
+const currentModeOption = computed(() => modeOptions.value.find(option => option.id === currentModeId.value))
+const currentModeLabel = computed(() => currentModeOption.value?.label ?? 'Mode')
 
 const pendingTurns = computed(() => {
   const observedTurnIds = new Set(authoritativeTurns.value.map(turn => turn.turnId).filter(Boolean))
@@ -548,7 +568,8 @@ watch(events, (latest, previous) => {
 
 onMounted(() => {
   startStream()
-  document.addEventListener('keydown', handleLightboxKeydown)
+  document.addEventListener('keydown', handleDocumentKeydown)
+  document.addEventListener('pointerdown', handleModeOutsidePointer)
 })
 
 watch(
@@ -567,6 +588,7 @@ watch(
     composerError.value = null
     isUpdatingMode.value = false
     modeChangeError.value = null
+    isModeMenuOpen.value = false
     dismissImageLightbox(false)
     startStream()
   },
@@ -576,7 +598,8 @@ onUnmounted(() => {
   // Bump the epoch on unmount so any in-flight preparation batch aborts
   // instead of mutating state after the component is gone.
   preparationEpoch.value++
-  document.removeEventListener('keydown', handleLightboxKeydown)
+  document.removeEventListener('keydown', handleDocumentKeydown)
+  document.removeEventListener('pointerdown', handleModeOutsidePointer)
   dismissImageLightbox(false)
   stop()
 })
@@ -618,6 +641,9 @@ const isDragOver = ref(false)
 const fileInputEl = ref<HTMLInputElement | null>(null)
 const timelineEl = ref<HTMLElement | null>(null)
 const timelineContentEl = ref<HTMLElement | null>(null)
+const modePickerEl = ref<HTMLElement | null>(null)
+const modeTriggerEl = ref<HTMLButtonElement | null>(null)
+const modeMenuEl = ref<HTMLElement | null>(null)
 /** Attachment ids whose preview fetch returned 404/410 (evicted or never
  *  cached). Rendered as a visible "Preview expired" placeholder. */
 const erroredAttachments = ref<Set<string>>(new Set())
@@ -648,11 +674,21 @@ function closeImageLightbox() {
   dismissImageLightbox(true)
 }
 
-function handleLightboxKeydown(event: KeyboardEvent) {
+function handleDocumentKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && isModeMenuOpen.value) {
+    event.preventDefault()
+    closeModeMenu(true)
+    return
+  }
   if (event.key === 'Escape' && imageLightboxUrl.value) {
     event.preventDefault()
     closeImageLightbox()
   }
+}
+
+function handleModeOutsidePointer(event: PointerEvent) {
+  if (!isModeMenuOpen.value || modePickerEl.value?.contains(event.target as Node)) return
+  closeModeMenu(false)
 }
 
 // Activation gate: the timeline is not revealed until authoritative history
@@ -704,6 +740,32 @@ const canSend = computed(() => connectionState.value === 'live' &&
 
 const supportsImages = computed(() => capabilities.value?.supports_images ?? false)
 
+function closeModeMenu(restoreFocus: boolean) {
+  if (!isModeMenuOpen.value) return
+  isModeMenuOpen.value = false
+  if (restoreFocus) void nextTick(() => modeTriggerEl.value?.focus())
+}
+
+function toggleModeMenu() {
+  if (modeInteractionLocked.value || isUpdatingMode.value) return
+  if (isModeMenuOpen.value) {
+    closeModeMenu(false)
+    return
+  }
+  isModeMenuOpen.value = true
+  void nextTick(() => {
+    const currentItem = modeMenuEl.value?.querySelector<HTMLButtonElement>('[aria-checked="true"]')
+    const firstItem = modeMenuEl.value?.querySelector<HTMLButtonElement>('[role="menuitemradio"]')
+    const focusTarget = currentItem ?? firstItem
+    focusTarget?.focus()
+  })
+}
+
+async function selectMode(modeId: string) {
+  closeModeMenu(true)
+  await changeMode(modeId)
+}
+
 async function changeMode(modeId: string) {
   if (modeInteractionLocked.value || isUpdatingMode.value || currentModeId.value === modeId) return
   const epoch = preparationEpoch.value
@@ -718,6 +780,10 @@ async function changeMode(modeId: string) {
     if (preparationEpoch.value === epoch) isUpdatingMode.value = false
   }
 }
+
+watch([modeInteractionLocked, isUpdatingMode], ([locked, updating]) => {
+  if (locked || updating) closeModeMenu(false)
+})
 
 function triggerFilePicker() {
   if (isSending.value) return
@@ -1457,36 +1523,28 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
-.composer-mode-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  margin-bottom: 7px;
-  color: var(--ch-color-text-subtle);
-}
-
-.composer-mode-label {
-  flex: 0 0 auto;
-  font-size: 10px;
-  font-weight: 650;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.composer-mode-options {
+.composer-tools {
   display: inline-flex;
-  min-width: 0;
-  padding: 2px;
-  border: 1px solid var(--ch-color-border-muted);
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface-sunken);
+  align-items: flex-end;
+  gap: 3px;
+  flex: 0 0 auto;
 }
 
-.composer-mode-button {
-  min-height: 25px;
-  padding: 0 9px;
-  border: 0;
+.composer-mode-picker {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.composer-mode-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: auto;
+  max-width: 120px;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid transparent;
   border-radius: var(--ch-radius-sm);
   background: transparent;
   color: var(--ch-color-text-muted);
@@ -1496,39 +1554,87 @@ onUnmounted(() => {
   cursor: pointer;
 }
 
-.composer-mode-button:hover:not(:disabled) {
+.composer-mode-trigger:hover:not(:disabled),
+.composer-mode-trigger[aria-expanded='true'] {
   color: var(--ch-color-text);
   background: var(--ch-color-surface-control-hover);
 }
 
-.composer-mode-button.active {
-  color: var(--ch-color-accent);
-  background: var(--ch-color-accent-soft);
-  box-shadow: inset 0 0 0 1px var(--ch-color-accent-ring-strong);
-}
-
-.composer-mode-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.composer-mode-button:focus-visible {
-  outline: 2px solid var(--ch-color-accent-ring);
-  outline-offset: 1px;
-}
-
-.composer-mode-hint {
+.composer-mode-trigger-label {
   min-width: 0;
-  margin-left: auto;
   overflow: hidden;
-  font-size: 10px;
-  line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.composer-mode-chevron {
+  flex: 0 0 auto;
+  color: var(--ch-color-text-subtle);
+  font-size: 9px;
+  line-height: 1;
+}
+
+.composer-mode-trigger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.composer-mode-trigger:focus-visible,
+.composer-mode-menu-item:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring);
+  outline-offset: 1px;
+}
+
+.composer-mode-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 7px);
+  z-index: 8;
+  width: max-content;
+  min-width: max(132px, 100%);
+  max-width: min(240px, calc(100vw - 32px));
+  padding: 4px;
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-elevated, var(--ch-color-surface));
+  box-shadow: var(--ch-shadow-md, 0 10px 30px rgb(0 0 0 / 26%));
+}
+
+.composer-mode-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: var(--ch-radius-sm);
+  background: transparent;
+  color: var(--ch-color-text-muted);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.composer-mode-menu-item:hover,
+.composer-mode-menu-item:focus-visible {
+  color: var(--ch-color-text);
+  background: var(--ch-color-surface-control-hover);
+}
+
+.composer-mode-menu-item[aria-checked='true'] {
+  color: var(--ch-color-accent);
+}
+
+.composer-mode-check {
+  flex: 0 0 auto;
+  font-size: 11px;
+}
+
 .composer-mode-error {
-  margin: -1px 0 7px;
+  margin: 0 0 7px;
   color: var(--ch-color-danger-strong, #f85149);
   font-size: 11px;
   line-height: 1.35;
@@ -1621,6 +1727,7 @@ onUnmounted(() => {
 
 .composer-textarea {
   flex: 1;
+  min-width: 0;
   min-height: 32px;
   max-height: 120px;
   resize: none;
@@ -2130,20 +2237,35 @@ onUnmounted(() => {
     padding: 8px 12px;
   }
 
-  .composer-mode-row {
-    flex-wrap: wrap;
-    gap: 5px 7px;
+  .composer-row {
+    gap: 4px;
   }
 
-  .composer-mode-button {
+  .composer-tools {
+    gap: 2px;
+  }
+
+  .composer-attach-btn,
+  .composer-mode-trigger {
     min-height: 44px;
-    padding: 0 12px;
+    height: 44px;
   }
 
-  .composer-mode-hint {
-    flex: 1 0 100%;
-    margin-left: 0;
-    white-space: normal;
+  .composer-attach-btn {
+    width: 44px;
+  }
+
+  .composer-mode-trigger {
+    max-width: 104px;
+    padding: 0 7px;
+  }
+
+  .composer-mode-menu {
+    max-width: min(220px, calc(100vw - 24px));
+  }
+
+  .composer-mode-menu-item {
+    min-height: 44px;
   }
 
   .composer-send-btn {
