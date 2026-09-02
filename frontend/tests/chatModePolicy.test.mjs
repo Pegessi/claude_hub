@@ -25,7 +25,19 @@ const dynamicCaps = {
 }
 
 test('dynamic capabilities expose backend-provided modes without provider hard-coding', () => {
-  assert.deepEqual(getAvailableChatModes(dynamicCaps), dynamicCaps.available_modes)
+  assert.deepEqual(getAvailableChatModes(dynamicCaps), [
+    { id: 'default', label: 'Agent', description: 'Standard coding mode' },
+    { id: 'plan', label: 'Plan', description: 'Read-only planning mode' },
+  ])
+  assert.equal(getCurrentChatModeId(dynamicCaps), 'default')
+})
+
+test('default mode has the Agent display label without changing its persisted id', () => {
+  const modes = getAvailableChatModes(dynamicCaps)
+  assert.deepEqual(modes.map(({ id, label }) => ({ id, label })), [
+    { id: 'default', label: 'Agent' },
+    { id: 'plan', label: 'Plan' },
+  ])
   assert.equal(getCurrentChatModeId(dynamicCaps), 'default')
 })
 
@@ -50,6 +62,6 @@ test('invalid or duplicate capability entries do not create misleading controls'
     ],
     current_mode: 'unknown',
   }
-  assert.deepEqual(getAvailableChatModes(capabilities), [{ id: 'default', label: 'Default' }])
+  assert.deepEqual(getAvailableChatModes(capabilities), [{ id: 'default', label: 'Agent' }])
   assert.equal(getCurrentChatModeId(capabilities), null)
 })
