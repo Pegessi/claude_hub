@@ -8,11 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -266,10 +265,11 @@ class _FakeStream:
     where responses arrive one at a time (after the request future exists).
     """
 
-    def __init__(self, lines: Optional[List[bytes]] = None) -> None:
+    def __init__(self, lines: Optional[List[bytes]] = None, eof: bool = False) -> None:
         self._queue: asyncio.Queue[bytes] = asyncio.Queue()
         self.written: List[bytes] = []
         self._closed = False
+        self._eof = eof
         if lines:
             for line in lines:
                 self._queue.put_nowait(line)
@@ -284,8 +284,19 @@ class _FakeStream:
         return await self._queue.get()
 
     async def read(self, n: int) -> bytes:
-        # Stderr: return empty to signal EOF.
-        return b""
+        # Return the next queued chunk.  When the queue is empty:
+        #   - if ``eof`` was set (e.g. stderr with no output), return b"" to
+        #     signal end-of-stream;
+        #   - otherwise block, mirroring a live subprocess whose stdout has
+        #     not yet closed.
+        # The real transport reads stdout in chunks via ``read(n)`` instead of
+        # ``readline()`` to avoid asyncio's 64 KiB line-length limit.
+        await asyncio.sleep(0.01)
+        if self._queue.empty():
+            if self._eof:
+                return b""
+            return await self._queue.get()
+        return await self._queue.get()
 
     def write(self, data: bytes) -> None:
         self.written.append(data)
@@ -301,7 +312,7 @@ class _FakeProcess:
     def __init__(self, stdout_lines: List[bytes]) -> None:
         self.stdout = _FakeStream(stdout_lines)
         self.stdin = _FakeStream()
-        self.stderr = _FakeStream()
+        self.stderr = _FakeStream(eof=True)
         self._terminated = False
 
     async def wait(self) -> int:
