@@ -44,6 +44,21 @@ class SessionKind(str, Enum):
     TERMINAL = "terminal"
 
 
+class ChatMode(str, Enum):
+    """Provider execution mode selected for subsequent Chat turns."""
+
+    DEFAULT = "default"
+    PLAN = "plan"
+
+
+class StreamModeOption(BaseModel):
+    """One provider-verified mode exposed by the structured Chat surface."""
+
+    id: str
+    label: str
+    description: str
+
+
 class StreamCapabilities(BaseModel):
     """What the structured observation plane can offer for a session.
 
@@ -58,6 +73,9 @@ class StreamCapabilities(BaseModel):
     supports_approval_ui: bool = False
     supports_tool_timeline: bool = False
     supports_images: bool = False
+    available_modes: List[StreamModeOption] = Field(default_factory=list)
+    current_mode: Optional[str] = None
+    supports_dynamic_modes: bool = False
 
 
 class ExecutionTarget(str, Enum):
@@ -420,6 +438,10 @@ class TerminalTabBase(BaseModel):
         SessionKind.TERMINAL,
         description="Fixed UI surface: structured Chat conversation or raw Terminal",
     )
+    chat_mode: ChatMode = Field(
+        ChatMode.DEFAULT,
+        description="Provider execution mode used by the next structured Chat turn",
+    )
     target: ExecutionTarget = Field(ExecutionTarget.LOCAL, description="Where to run the tab")
     remote_profile_id: Optional[str] = Field(None, description="Remote profile ID for remote tabs")
     remote_cwd: Optional[str] = Field(None, description="Remote working directory")
@@ -449,6 +471,8 @@ class TerminalTabBase(BaseModel):
     def validate_session_kind(self) -> "TerminalTabBase":
         if self.session_kind == SessionKind.CHAT and self.agent_type == AgentType.TERMINAL:
             raise ValueError("Chat sessions require a Claude, Codex, or Cursor provider")
+        if self.session_kind != SessionKind.CHAT and self.chat_mode != ChatMode.DEFAULT:
+            raise ValueError("Chat modes are only available for Chat sessions")
         return self
 
 
@@ -863,6 +887,7 @@ class ManagedSession(BaseModel):
     role: WorkspaceSessionRole
     agent_type: AgentType
     session_kind: SessionKind = SessionKind.TERMINAL
+    chat_mode: ChatMode = ChatMode.DEFAULT
     status: ManagedSessionStatus
     runtime_status: AgentRuntimeStatus = AgentRuntimeStatus.IDLE
     current_task_id: Optional[str] = None

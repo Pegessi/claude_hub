@@ -40,6 +40,8 @@ export interface UseAgentStreamApi {
   start: (sourceId: string, source?: StreamSource) => Promise<void>
   /** Replace a failed provider transport, then hydrate its resumed stream. */
   retry: (sourceId: string, source?: StreamSource) => Promise<void>
+  /** Update the active provider mode; the new mode applies to the next turn. */
+  setMode: (mode: string) => Promise<void>
   /** Tear down the stream (SSE / long-poll). Safe to call repeatedly. */
   stop: () => void
 }
@@ -82,10 +84,13 @@ export function useAgentStream(): UseAgentStreamApi {
   const stateMachine = new StreamConnectionStateMachine()
 
   let currentSessionId: string | null = null
+  let currentStreamPath: string | null = null
   let eventSource: EventSource | null = null
   let longPollAbort: AbortController | null = null
   /** Aborts the in-flight capabilities / events hydration fetches. */
   let hydrationAbort: AbortController | null = null
+  /** Aborts a mode update when its source is switched or unmounted. */
+  let modeAbort: AbortController | null = null
   // Stream sequences are zero-based and cursors are exclusive. SSE is only an
   // accelerator: future events stay buffered until long-poll fills every gap.
   const sequenceBuffer = createContiguousEventBuffer<AgentStreamEvent>()
@@ -132,6 +137,13 @@ export function useAgentStream(): UseAgentStreamApi {
     if (hydrationAbort) {
       hydrationAbort.abort()
       hydrationAbort = null
+    }
+  }
+
+  function abortModeUpdate() {
+    if (modeAbort) {
+      modeAbort.abort()
+      modeAbort = null
     }
   }
 
@@ -296,6 +308,7 @@ export function useAgentStream(): UseAgentStreamApi {
     const signal = hydrationAbort.signal
 
     const streamPath = streamBasePath(sourceId, source)
+    currentStreamPath = streamPath
 
     try {
       const caps = await fetchCapabilities(streamPath, signal)
@@ -360,6 +373,7 @@ export function useAgentStream(): UseAgentStreamApi {
     const signal = hydrationAbort.signal
 
     const streamPath = streamBasePath(sourceId, source)
+    currentStreamPath = streamPath
 
     try {
       const res = await fetchWithTimeout(
@@ -388,12 +402,58 @@ export function useAgentStream(): UseAgentStreamApi {
     }
   }
 
+  async function setMode(mode: string) {
+    const sourceId = currentSessionId
+    const streamPath = currentStreamPath
+    if (stopped || !sourceId || !streamPath) {
+      throw new Error('Structured source is unavailable.')
+    }
+
+    abortModeUpdate()
+    const controller = new AbortController()
+    modeAbort = controller
+
+    try {
+      const res = await fetchWithTimeout(
+        `${streamPath}/mode`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ mode }),
+          signal: controller.signal,
+        },
+        HYDRATION_FETCH_TIMEOUT_MS,
+      )
+      if (!res.ok) {
+        let detail = `mode update HTTP ${res.status}`
+        try {
+          const body = await res.json() as { detail?: string }
+          if (body.detail) detail = body.detail
+        } catch {
+          // Keep the bounded HTTP fallback for non-JSON failures.
+        }
+        throw new Error(detail)
+      }
+
+      const nextCapabilities = (await res.json()) as StreamCapabilities
+      // A late response from the previous Chat must not replace the active
+      // Chat's capabilities after a tab switch.
+      if (stopped || currentSessionId !== sourceId || currentStreamPath !== streamPath) return
+      capabilities.value = nextCapabilities
+    } finally {
+      if (modeAbort === controller) modeAbort = null
+    }
+  }
+
   function stop() {
     stopped = true
     currentSessionId = null
+    currentStreamPath = null
     closeSse()
     abortLongPoll()
     abortHydration()
+    abortModeUpdate()
     stateMachine.stop()
     connectionState.value = 'idle'
     // Flush any buffered events so the final state is committed before
@@ -412,6 +472,7 @@ export function useAgentStream(): UseAgentStreamApi {
     errorMessage,
     start,
     retry,
+    setMode,
     stop,
   }
 }

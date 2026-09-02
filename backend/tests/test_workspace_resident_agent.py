@@ -14,11 +14,13 @@ from claude_hub.models import (
     AgentReportState,
     AgentRuntimeStatus,
     AgentType,
+    ChatMode,
     EnsureWorkspaceAgentRequest,
     ExecutionTarget,
     ManagedSession,
     ManagedSessionStatus,
     ResidentPeriodicTask,
+    SessionKind,
     Workspace,
     WorkspaceCreate,
     WorkspaceSessionRole,
@@ -531,6 +533,23 @@ def _resident_session(
         created_at=now,
         updated_at=now,
     )
+
+
+def test_set_session_chat_mode_persists_after_provider_pre_mutation(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    workspace = _make_workspace(manager, tmp_path)
+    session = _resident_session(workspace).model_copy(update={"session_kind": SessionKind.CHAT})
+    manager.sessions[session.id] = session
+    manager._save_state()
+
+    # Native ProviderSession owns the live mode and updates the shared model
+    # before TailerManager crosses this persistence boundary.
+    session.chat_mode = ChatMode.PLAN
+    assert manager.set_session_chat_mode(session.id, ChatMode.PLAN.value) is True
+
+    reloaded = WorkspaceManager()
+    assert reloaded.sessions[session.id].chat_mode == ChatMode.PLAN
 
 
 def test_run_resident_agent_skips_when_busy(

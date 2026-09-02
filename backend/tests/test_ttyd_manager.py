@@ -18,6 +18,7 @@ from pytest import MonkeyPatch
 from claude_hub.models import (
     AgentRuntimeStatus,
     AgentType,
+    ChatMode,
     ExecutionTarget,
     RemoteProfile,
     SessionKind,
@@ -447,6 +448,7 @@ def test_tab_session_kind_defaults_to_terminal_and_round_trips() -> None:
         name="Agent",
         agent_type=AgentType.CLAUDE,
         session_kind=SessionKind.CHAT,
+        chat_mode=ChatMode.PLAN,
     )
 
     assert legacy.session_kind == SessionKind.TERMINAL
@@ -455,6 +457,9 @@ def test_tab_session_kind_defaults_to_terminal_and_round_trips() -> None:
     assert chat.session_kind == SessionKind.CHAT
     assert chat.to_dict()["session_kind"] == "chat"
     assert chat.to_schema().session_kind == SessionKind.CHAT
+    assert chat.chat_mode == ChatMode.PLAN
+    assert chat.to_dict()["chat_mode"] == "plan"
+    assert chat.to_schema().chat_mode == ChatMode.PLAN
 
 
 def test_structured_chat_session_rejects_plain_terminal_provider() -> None:
@@ -472,6 +477,16 @@ def test_new_session_contract_rejects_retired_agent_kind() -> None:
             name="Retired kind",
             agent_type=AgentType.CLAUDE,
             session_kind="agent",
+        )
+
+
+def test_terminal_session_rejects_chat_mode() -> None:
+    with pytest.raises(ValueError, match="only available for Chat"):
+        TerminalTabCreate(
+            name="Invalid Terminal Plan",
+            agent_type=AgentType.CLAUDE,
+            session_kind=SessionKind.TERMINAL,
+            chat_mode=ChatMode.PLAN,
         )
 
 
@@ -1274,6 +1289,47 @@ async def test_get_tab_history_requests_remote_preferred_capture(monkeypatch: Mo
 
     assert await manager.get_tab_history("tab-1", lines=250) == "history"
     assert calls == [(250, True)]
+
+
+@pytest.mark.asyncio
+async def test_chat_status_uses_native_turn_in_flight_not_inert_tmux(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._status_snapshots = {}
+    manager._status_cache = {}
+    process = TTYDProcess(
+        tab_id="chat-working",
+        port=12349,
+        name="Native Chat",
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+    )
+    manager.processes = {process.tab_id: process}
+
+    monkeypatch.setattr(
+        ttyd_manager_module,
+        "get_tab_native_runtime_snapshot",
+        lambda _tab_id: SimpleNamespace(
+            status=AgentRuntimeStatus.WORKING,
+            detail="native provider turn is in flight",
+        ),
+        raising=False,
+    )
+
+    async def fail_capture(*_args, **_kwargs) -> str:
+        raise AssertionError("Chat status must not inspect the inert tmux shell")
+
+    monkeypatch.setattr(process, "capture_history", fail_capture)
+    status = await manager.get_tab_agent_status(
+        process.tab_id,
+        use_cache=False,
+        live_sessions={process.tmux_session},
+    )
+
+    assert status is not None
+    assert status.status == AgentRuntimeStatus.WORKING
+    assert status.detail == "native provider turn is in flight"
 
 
 def test_claude_spinner_status_classifies_as_working(monkeypatch: MonkeyPatch) -> None:
@@ -3298,6 +3354,7 @@ def test_legacy_missing_session_kind_reloads_as_terminal(
             "port": 12412,
             "created_at": "2026-01-01T00:00:00",
             "session_kind": "agent",
+            "chat_mode": "plan",
         },
     ]
     state_file.write_text(json.dumps(legacy_state), encoding="utf-8")
@@ -3313,6 +3370,7 @@ def test_legacy_missing_session_kind_reloads_as_terminal(
     assert manager.processes["tab-legacy-codex"].session_kind == SessionKind.TERMINAL
     # The retired persisted value is upgraded at the load boundary.
     assert manager.processes["tab-explicit-agent"].session_kind == SessionKind.CHAT
+    assert manager.processes["tab-explicit-agent"].chat_mode == ChatMode.PLAN
 
 
 def test_agent_session_id_verified_round_trips_through_state(

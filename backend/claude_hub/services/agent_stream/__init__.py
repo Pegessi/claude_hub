@@ -18,6 +18,8 @@ from .tailer import (
     StructuredSourceUnavailable,
     TailerManager,
     discard_session_stream,
+    get_native_runtime_snapshot,
+    get_tab_native_runtime_snapshot,
     structured_source_hard_failed,
 )
 
@@ -29,6 +31,8 @@ __all__ = [
     "StructuredSourceUnavailable",
     "TailerManager",
     "discard_session_stream",
+    "get_native_runtime_snapshot",
+    "get_tab_native_runtime_snapshot",
     "get_adapter",
     "get_adapter_for_session",
     "redact_event",

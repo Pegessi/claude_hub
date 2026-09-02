@@ -60,6 +60,33 @@ test('new-session launcher requires an explicit Chat or Terminal surface', () =>
   assert.match(tabBar, /Chat is resuming its conversation/)
 })
 
+test('Chat tab status is backend-derived, accessible, and independent from pane count', () => {
+  assert.match(tabBar, /v-if="tab\.session_kind === 'chat' \|\| tab\.is_active"/)
+  assert.match(tabBar, /:data-status="getTabStatus\(tab\)"/)
+  assert.match(tabBar, /:aria-label="getTabStatusLabel\(tab\)"/)
+  assert.match(tabBar, /:title="getTabStatusLabel\(tab\)"/)
+  assert.match(tabBar, /tab\.session_kind === 'chat' \? 'offline' : tab\.is_active \? 'idle' : 'offline'/)
+  assert.match(tabBar, /tab\.session_kind === 'chat' \? 'Chat' : 'Terminal'/)
+  assert.match(tabBar, /class="pane-indicator"/)
+})
+
+test('active Terminal tabs retain their runtime status indicator and idle fallback', () => {
+  assert.match(tabBar, /v-if="tab\.session_kind === 'chat' \|\| tab\.is_active"/)
+  assert.match(tabBar, /tabStatusById\.value\[tab\.id\]\?\.status/)
+  assert.match(tabBar, /tab\.is_active \? 'idle' : 'offline'/)
+})
+
+test('Chat mode selector renders only backend capabilities and applies to the next turn', () => {
+  assert.match(structuredPane, /v-if="modeOptions\.length > 0"/)
+  assert.match(structuredPane, /v-for="option in modeOptions"/)
+  assert.match(structuredPane, /:disabled="modeInteractionLocked \|\| isUpdatingMode"/)
+  assert.match(structuredPane, /Available after current turn/)
+  assert.match(structuredPane, /Applies to next message/)
+  assert.match(structuredPane, /await setMode\(modeId\)/)
+  assert.match(structuredPane, /@media \(max-width: 640px\)[\s\S]*?\.composer-mode-button \{[\s\S]*?min-height: 44px/)
+  assert.doesNotMatch(structuredPane, /agentType.*(?:default|plan)/i)
+})
+
 test('SAB terminal input decodes a non-shared copy before draining the record', () => {
   assert.match(terminalView, /var decodedBytes = new Uint8Array\(bytes\.length\);/)
   assert.match(terminalView, /decodedBytes\.set\(bytes\);/)

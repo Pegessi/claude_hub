@@ -74,3 +74,18 @@ test('explicit retry replaces the failed backend transport before hydration', ()
   assert.ok(startIndex > postIndex)
   assert.match(composable.slice(retryIndex, startIndex), /`\$\{streamPath\}\/retry`/)
 })
+
+test('mode updates are scoped to the active stream and replace capabilities only after success', () => {
+  const modeIndex = composable.indexOf('async function setMode(')
+  const putIndex = composable.indexOf("method: 'PUT'", modeIndex)
+  const responseIndex = composable.indexOf('const nextCapabilities', putIndex)
+  const assignmentIndex = composable.indexOf('capabilities.value = nextCapabilities', responseIndex)
+
+  assert.ok(modeIndex >= 0)
+  assert.ok(putIndex > modeIndex)
+  assert.ok(responseIndex > putIndex)
+  assert.ok(assignmentIndex > responseIndex)
+  assert.match(composable.slice(modeIndex, responseIndex), /`\$\{streamPath\}\/mode`/)
+  assert.match(composable.slice(modeIndex, responseIndex), /JSON\.stringify\(\{ mode \}\)/)
+  assert.match(composable.slice(modeIndex, assignmentIndex), /currentSessionId !== sourceId/)
+})

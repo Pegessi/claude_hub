@@ -54,6 +54,7 @@ async def create_tab(
         solo_mode=tab.solo_mode,
         agent_type=tab.agent_type,
         session_kind=tab.session_kind,
+        chat_mode=tab.chat_mode,
         target=tab.target,
         remote_profile_id=tab.remote_profile_id,
         remote_cwd=tab.remote_cwd,

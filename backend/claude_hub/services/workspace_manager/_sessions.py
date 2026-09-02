@@ -572,3 +572,19 @@ class _SessionsMixin:
         session.agent_session_id_verified = True
         self._save_state()
         return True
+
+    def set_session_chat_mode(self, session_id: str, mode: str) -> bool:
+        """Durably persist the mode selected for subsequent Chat turns."""
+
+        from ...models import ChatMode
+
+        session = self.sessions.get(session_id)
+        if session is None:
+            return False
+        parsed = ChatMode(mode)
+        session.chat_mode = parsed
+        # ProviderSession updates the shared ManagedSession before invoking
+        # this persistence boundary.  Do not short-circuit on an equal value:
+        # equality can mean the in-memory owner is ahead of durable state.
+        self._save_state()
+        return True

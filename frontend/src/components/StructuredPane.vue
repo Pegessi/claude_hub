@@ -293,6 +293,47 @@
     <!-- Composer -->
     <div class="structured-composer">
       <div class="composer-shell">
+        <div
+          v-if="modeOptions.length > 0"
+          class="composer-mode-row"
+        >
+          <span class="composer-mode-label">Mode</span>
+          <div
+            class="composer-mode-options"
+            role="group"
+            aria-label="Chat mode"
+          >
+            <button
+              v-for="option in modeOptions"
+              :key="option.id"
+              type="button"
+              class="composer-mode-button"
+              :class="{ active: currentModeId === option.id }"
+              :aria-pressed="currentModeId === option.id"
+              :title="option.description || `${option.label} mode`"
+              :disabled="modeInteractionLocked || isUpdatingMode"
+              @click="changeMode(option.id)"
+            >
+              {{ option.label }}
+            </button>
+          </div>
+          <span class="composer-mode-hint">
+            {{ isUpdatingMode
+              ? 'Updating…'
+              : modeInteractionLocked
+                ? 'Available after current turn'
+                : 'Applies to next message' }}
+          </span>
+        </div>
+
+        <div
+          v-if="modeChangeError"
+          class="composer-mode-error"
+          role="alert"
+        >
+          {{ modeChangeError }}
+        </div>
+
         <!-- Attachment previews -->
         <div
           v-if="attachments.length > 0"
@@ -404,6 +445,9 @@ import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreview
 import { IncrementalTimelineReducer, type TimelineAttachment } from '@/utils/agentStreamTimeline'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
+import { getAvailableChatModes, getCurrentChatModeId } from '@/utils/chatModePolicy'
+import { hasChatStatusRefreshBoundary, isChatModeLocked } from '@/utils/chatTurnLifecycle'
+import { useTerminalStore } from '@/stores/terminalStore'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import type { WorkspaceAttachmentCreate } from '@/types'
 
@@ -414,6 +458,8 @@ const props = defineProps<{
   tabId?: string
 }>()
 
+const terminalStore = useTerminalStore()
+
 const {
   events,
   connectionState,
@@ -421,6 +467,7 @@ const {
   capabilities,
   start,
   retry: retryStream,
+  setMode,
   stop,
 } = useAgentStream()
 
@@ -466,6 +513,10 @@ type PendingTurn = {
 }
 
 const pendingDirectTurns = ref<PendingTurn[]>([])
+const isUpdatingMode = ref(false)
+const modeChangeError = ref<string | null>(null)
+const modeOptions = computed(() => getAvailableChatModes(capabilities.value))
+const currentModeId = computed(() => getCurrentChatModeId(capabilities.value))
 
 const pendingTurns = computed(() => {
   const observedTurnIds = new Set(authoritativeTurns.value.map(turn => turn.turnId).filter(Boolean))
@@ -483,6 +534,15 @@ watch(
   },
   { immediate: true },
 )
+
+// Chat lifecycle edges are authoritative status boundaries. Refresh the tab
+// status exactly once when a committed batch introduces turn_started,
+// turn_completed, or error; text/thinking deltas never trigger this watcher.
+watch(events, (latest, previous) => {
+  if (hasChatStatusRefreshBoundary(previous, latest)) {
+    void terminalStore.fetchAgentStatuses()
+  }
+})
 
 // ── Stream lifecycle ────────────────────────────────────────────────────────
 
@@ -505,6 +565,8 @@ watch(
     draftMessage.value = ''
     attachments.value = []
     composerError.value = null
+    isUpdatingMode.value = false
+    modeChangeError.value = null
     dismissImageLightbox(false)
     startStream()
   },
@@ -540,6 +602,10 @@ const attachments = ref<DraftAttachment[]>([])
 const composerError = ref<string | null>(null)
 const isSending = ref(false)
 const isPreparingAttachments = ref(false)
+const modeInteractionLocked = computed(() => isSending.value || isChatModeLocked(
+  pendingDirectTurns.value.length > 0,
+  authoritativeTurns.value,
+))
 /** Monotonically increasing epoch that advances on every source switch
  *  (session/tab change) and on unmount. Captured at the start of an
  *  attachment preparation batch and re-checked after every await; an exact
@@ -633,9 +699,25 @@ let timelineDisposed = false
 
 const canSend = computed(() => connectionState.value === 'live' &&
   !isPreparingAttachments.value &&
+  !isUpdatingMode.value &&
   (draftMessage.value.trim().length > 0 || attachments.value.length > 0))
 
 const supportsImages = computed(() => capabilities.value?.supports_images ?? false)
+
+async function changeMode(modeId: string) {
+  if (modeInteractionLocked.value || isUpdatingMode.value || currentModeId.value === modeId) return
+  const epoch = preparationEpoch.value
+  isUpdatingMode.value = true
+  modeChangeError.value = null
+  try {
+    await setMode(modeId)
+  } catch (err) {
+    if (preparationEpoch.value !== epoch) return
+    modeChangeError.value = err instanceof Error ? err.message : 'Failed to update Chat mode.'
+  } finally {
+    if (preparationEpoch.value === epoch) isUpdatingMode.value = false
+  }
+}
 
 function triggerFilePicker() {
   if (isSending.value) return
@@ -945,6 +1027,10 @@ async function submit() {
     ]
     requestLatestAnchor(true)
     await sendToStream(message, atts, clientTurnId)
+    // The POST acknowledgement means provider dispatch has begun. Refresh the
+    // backend-native tab status now rather than waiting for the 5s poll phase;
+    // turn_started/completed/error boundaries above provide subsequent edges.
+    void terminalStore.fetchAgentStatuses()
     // Success: composer already cleared; nothing more to do.
   } catch (err) {
     pendingDirectTurns.value = pendingDirectTurns.value.filter(turn => turn.turnId !== clientTurnId)
@@ -1369,6 +1455,83 @@ onUnmounted(() => {
   padding: 8px 12px;
   background-color: var(--ch-color-surface);
   flex-shrink: 0;
+}
+
+.composer-mode-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-bottom: 7px;
+  color: var(--ch-color-text-subtle);
+}
+
+.composer-mode-label {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.composer-mode-options {
+  display: inline-flex;
+  min-width: 0;
+  padding: 2px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-sunken);
+}
+
+.composer-mode-button {
+  min-height: 25px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: var(--ch-radius-sm);
+  background: transparent;
+  color: var(--ch-color-text-muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.composer-mode-button:hover:not(:disabled) {
+  color: var(--ch-color-text);
+  background: var(--ch-color-surface-control-hover);
+}
+
+.composer-mode-button.active {
+  color: var(--ch-color-accent);
+  background: var(--ch-color-accent-soft);
+  box-shadow: inset 0 0 0 1px var(--ch-color-accent-ring-strong);
+}
+
+.composer-mode-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.composer-mode-button:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring);
+  outline-offset: 1px;
+}
+
+.composer-mode-hint {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  font-size: 10px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-mode-error {
+  margin: -1px 0 7px;
+  color: var(--ch-color-danger-strong, #f85149);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .composer-attachments {
@@ -1965,6 +2128,22 @@ onUnmounted(() => {
 
   .structured-composer {
     padding: 8px 12px;
+  }
+
+  .composer-mode-row {
+    flex-wrap: wrap;
+    gap: 5px 7px;
+  }
+
+  .composer-mode-button {
+    min-height: 44px;
+    padding: 0 12px;
+  }
+
+  .composer-mode-hint {
+    flex: 1 0 100%;
+    margin-left: 0;
+    white-space: normal;
   }
 
   .composer-send-btn {
