@@ -25,6 +25,9 @@ invisible tool JSON.
   `AskQuestion` tool rows are hidden when an approval card is shown.
 - Selection submit sends JSON `ask_question_response` via composer (steer when
   a turn is still in flight).
+- TDZ fix: composer refs (`turnInFlight`, `draftQueue`, …) must be declared
+  before any `immediate` watcher; queue flush runs from a watcher registered
+  after `flushDraftQueue`.
 
 ## Limits
 

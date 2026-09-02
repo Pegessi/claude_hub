@@ -644,6 +644,33 @@ const pendingTurns = computed(() => {
   return pendingDirectTurns.value.filter(turn => !observedTurnIds.has(turn.turnId))
 })
 
+// ── Composer state ──────────────────────────────────────────────────────────
+// Declared before any ``immediate`` watchers so ``turnInFlight`` / ``draftQueue``
+// are initialized when Vue runs the first callback (TDZ-safe).
+
+interface DraftAttachment extends WorkspaceAttachmentCreate {
+  id: string
+  preview_url: string
+  size_bytes: number
+}
+
+const draftMessage = ref('')
+const attachments = ref<DraftAttachment[]>([])
+const composerError = ref<string | null>(null)
+const isSending = ref(false)
+const isCancelling = ref(false)
+const isComposing = ref(false)
+const composerTextareaEl = ref<HTMLTextAreaElement | null>(null)
+const draftQueue = ref<Array<{ message: string; attachments: DraftAttachment[] }>>([])
+const questionAnswers = ref<Record<string, QuestionAnswerMap>>({})
+const resolvedApprovalKeys = ref<Set<string>>(new Set())
+const isPreparingAttachments = ref(false)
+const turnInFlight = computed(() => isChatModeLocked(
+  pendingDirectTurns.value.length > 0,
+  authoritativeTurns.value,
+))
+const modeInteractionLocked = computed(() => isSending.value || turnInFlight.value)
+
 // Reconcile optimistic (pending) turns against authoritative turns as they
 // arrive. No text-reveal state is kept: assistant text is rendered directly
 // from the batched event stream.
@@ -652,11 +679,8 @@ watch(
   (latest) => {
     const observed = new Set(latest.map(turn => turn.turnId).filter(Boolean))
     pendingDirectTurns.value = pendingDirectTurns.value.filter(turn => !observed.has(turn.turnId))
-    if (!turnInFlight.value && draftQueue.value.length > 0 && !isSending.value) {
-      void flushDraftQueue()
-    }
   },
-  { immediate: true, deep: true },
+  { immediate: true },
 )
 
 // Chat lifecycle edges are authoritative status boundaries. Refresh the tab
@@ -715,30 +739,6 @@ function retry() {
   void retryStream(props.tabId, 'terminal-tab')
 }
 
-// ── Composer ────────────────────────────────────────────────────────────────
-
-interface DraftAttachment extends WorkspaceAttachmentCreate {
-  id: string
-  preview_url: string
-  size_bytes: number
-}
-
-const draftMessage = ref('')
-const attachments = ref<DraftAttachment[]>([])
-const composerError = ref<string | null>(null)
-const isSending = ref(false)
-const isCancelling = ref(false)
-const isComposing = ref(false)
-const composerTextareaEl = ref<HTMLTextAreaElement | null>(null)
-const draftQueue = ref<Array<{ message: string; attachments: DraftAttachment[] }>>([])
-const questionAnswers = ref<Record<string, QuestionAnswerMap>>({})
-const resolvedApprovalKeys = ref<Set<string>>(new Set())
-const isPreparingAttachments = ref(false)
-const turnInFlight = computed(() => isChatModeLocked(
-  pendingDirectTurns.value.length > 0,
-  authoritativeTurns.value,
-))
-const modeInteractionLocked = computed(() => isSending.value || turnInFlight.value)
 /** Monotonically increasing epoch that advances on every source switch
  *  (session/tab change) and on unmount. Captured at the start of an
  *  attachment preparation batch and re-checked after every await; an exact
@@ -1156,6 +1156,15 @@ async function flushDraftQueue() {
     if (composerError.value) break
   }
 }
+
+watch(
+  [turnInFlight, () => draftQueue.value.length, isSending],
+  () => {
+    if (!turnInFlight.value && draftQueue.value.length > 0 && !isSending.value) {
+      void flushDraftQueue()
+    }
+  },
+)
 
 function isQuestionOptionSelected(
   approvalKey: string,
