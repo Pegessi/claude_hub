@@ -16,6 +16,9 @@
 - Cursor native/stream-json now normalizes assistant `tool_use` blocks; `AskQuestion`
   emits `approval_required` and Structured Chat renders selectable option cards
   with JSON answer submission back through the composer.
+- Fix StructuredPane TDZ: declare composer refs before the immediate pending-turn
+  watcher and drain the draft queue from a separate watcher after `flushDraftQueue`
+  is defined (avoids ReferenceError that left Structured Chat as an empty shell).
 
 ### fix: isolate `test_ttyd_manager` from live Hub tab persistence
 
