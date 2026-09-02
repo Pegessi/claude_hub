@@ -218,6 +218,76 @@
             </div>
 
             <div
+              v-else-if="part.kind === 'approval'"
+              class="conversation-row conversation-row--assistant"
+            >
+              <span
+                class="conversation-avatar conversation-avatar--tool"
+                aria-hidden="true"
+              >?</span>
+              <div
+                class="approval-card"
+                :class="{ 'approval-card--resolved': isApprovalResolved(part.approval) }"
+              >
+                <div class="approval-card-header">
+                  <span class="approval-card-title">
+                    {{ part.approval.title || '需要你的选择' }}
+                  </span>
+                  <span
+                    v-if="isApprovalResolved(part.approval)"
+                    class="approval-card-badge"
+                  >已提交</span>
+                </div>
+                <div
+                  v-for="question in part.approval.questions"
+                  :key="question.id"
+                  class="approval-question"
+                >
+                  <div class="approval-question-prompt">
+                    {{ question.prompt }}
+                  </div>
+                  <div
+                    class="approval-options"
+                    role="group"
+                    :aria-label="question.prompt"
+                  >
+                    <button
+                      v-for="option in question.options"
+                      :key="option.id"
+                      type="button"
+                      class="approval-option"
+                      :class="{
+                        'approval-option--selected': isQuestionOptionSelected(
+                          part.approval.key,
+                          question.id,
+                          option.id,
+                        ),
+                      }"
+                      :disabled="isApprovalResolved(part.approval) || isSending"
+                      @click="toggleQuestionOption(
+                        part.approval.key,
+                        question.id,
+                        option.id,
+                        question.allowMultiple,
+                      )"
+                    >
+                      {{ option.label }}
+                    </button>
+                  </div>
+                </div>
+                <button
+                  v-if="!isApprovalResolved(part.approval)"
+                  type="button"
+                  class="approval-submit-btn"
+                  :disabled="!canSubmitQuestion(part.approval) || isSending"
+                  @click="submitQuestionResponse(part.approval)"
+                >
+                  提交选择
+                </button>
+              </div>
+            </div>
+
+            <div
               v-else-if="part.kind === 'error'"
               class="event-error"
               role="alert"
@@ -336,6 +406,14 @@
           {{ composerError }}
         </div>
 
+        <div
+          v-if="draftQueue.length > 0"
+          class="composer-queue"
+          aria-live="polite"
+        >
+          {{ draftQueue.length }} message{{ draftQueue.length === 1 ? '' : 's' }} queued
+        </div>
+
         <div class="composer-row">
           <div class="composer-tools">
             <button
@@ -406,22 +484,42 @@
             </div>
           </div>
           <textarea
+            ref="composerTextareaEl"
             v-model="draftMessage"
             class="composer-textarea"
             placeholder="Send a message…"
             rows="1"
             :disabled="isSending || connectionState !== 'live'"
-            @keydown.enter.exact.prevent="submit"
+            @compositionstart="isComposing = true"
+            @compositionend="isComposing = false"
+            @keydown.enter.exact="handleComposerEnter"
+            @keydown.enter.meta.exact="handleComposerEnter"
+            @keydown.enter.ctrl.exact="handleComposerEnter"
+            @input="syncComposerTextareaHeight"
             @paste="handlePaste"
           />
+          <button
+            v-if="turnInFlight"
+            type="button"
+            class="composer-stop-btn"
+            :disabled="isSending || isCancelling || connectionState !== 'live'"
+            @click="cancelActiveTurn"
+          >
+            {{ isCancelling ? 'Stopping…' : 'Stop' }}
+          </button>
           <button
             type="button"
             class="composer-send-btn"
             :disabled="!canSend || isSending"
-            @click="submit"
+            @click="() => submit('normal')"
           >
-            {{ isSending ? 'Sending…' : 'Send' }}
+            {{ isSending ? 'Sending…' : (turnInFlight ? 'Queue' : 'Send') }}
           </button>
+        </div>
+        <div class="composer-hints">
+          <span>Enter {{ turnInFlight ? 'queue' : 'send' }}</span>
+          <span>⌘/Ctrl+Enter steer</span>
+          <span>Shift+Enter newline</span>
         </div>
       </div>
     </div>
@@ -459,11 +557,20 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '@/composables/useAgentStream'
-import { IncrementalTimelineReducer, type TimelineAttachment } from '@/utils/agentStreamTimeline'
+import { IncrementalTimelineReducer, type TimelineApproval, type TimelineAttachment } from '@/utils/agentStreamTimeline'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
 import { getAvailableChatModes, getCurrentChatModeId } from '@/utils/chatModePolicy'
 import { hasChatStatusRefreshBoundary, isChatModeLocked } from '@/utils/chatTurnLifecycle'
+import {
+  autoresizeComposerTextarea,
+  resolveComposerEnterAction,
+} from '@/utils/chatComposerInteraction'
+import {
+  formatAskQuestionResponse,
+  isQuestionAnswerComplete,
+  type QuestionAnswerMap,
+} from '@/utils/chatQuestionResponse'
 import { useTerminalStore } from '@/stores/terminalStore'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import type { WorkspaceAttachmentCreate } from '@/types'
@@ -545,8 +652,11 @@ watch(
   (latest) => {
     const observed = new Set(latest.map(turn => turn.turnId).filter(Boolean))
     pendingDirectTurns.value = pendingDirectTurns.value.filter(turn => !observed.has(turn.turnId))
+    if (!turnInFlight.value && draftQueue.value.length > 0 && !isSending.value) {
+      void flushDraftQueue()
+    }
   },
-  { immediate: true },
+  { immediate: true, deep: true },
 )
 
 // Chat lifecycle edges are authoritative status boundaries. Refresh the tab
@@ -579,6 +689,9 @@ watch(
     pendingDirectTurns.value = []
     draftMessage.value = ''
     attachments.value = []
+    draftQueue.value = []
+    questionAnswers.value = {}
+    resolvedApprovalKeys.value = new Set()
     composerError.value = null
     isUpdatingMode.value = false
     modeChangeError.value = null
@@ -614,11 +727,18 @@ const draftMessage = ref('')
 const attachments = ref<DraftAttachment[]>([])
 const composerError = ref<string | null>(null)
 const isSending = ref(false)
+const isCancelling = ref(false)
+const isComposing = ref(false)
+const composerTextareaEl = ref<HTMLTextAreaElement | null>(null)
+const draftQueue = ref<Array<{ message: string; attachments: DraftAttachment[] }>>([])
+const questionAnswers = ref<Record<string, QuestionAnswerMap>>({})
+const resolvedApprovalKeys = ref<Set<string>>(new Set())
 const isPreparingAttachments = ref(false)
-const modeInteractionLocked = computed(() => isSending.value || isChatModeLocked(
+const turnInFlight = computed(() => isChatModeLocked(
   pendingDirectTurns.value.length > 0,
   authoritativeTurns.value,
 ))
+const modeInteractionLocked = computed(() => isSending.value || turnInFlight.value)
 /** Monotonically increasing epoch that advances on every source switch
  *  (session/tab change) and on unmount. Captured at the start of an
  *  attachment preparation batch and re-checked after every await; an exact
@@ -987,6 +1107,129 @@ function onAttachmentError(_event: Event, att: TimelineAttachment): void {
   erroredAttachments.value = new Set(erroredAttachments.value).add(att.id)
 }
 
+watch(draftMessage, () => {
+  void nextTick(() => syncComposerTextareaHeight())
+})
+
+function syncComposerTextareaHeight() {
+  autoresizeComposerTextarea(composerTextareaEl.value)
+}
+
+function handleComposerEnter(event: KeyboardEvent) {
+  const action = resolveComposerEnterAction({
+    isComposing: isComposing.value,
+    shiftKey: event.shiftKey,
+    metaKey: event.metaKey,
+    ctrlKey: event.ctrlKey,
+    altKey: event.altKey,
+    turnInFlight: turnInFlight.value,
+    hasDraft: draftMessage.value.trim().length > 0 || attachments.value.length > 0,
+  })
+  if (action === 'ignore' || action === 'newline') return
+  event.preventDefault()
+  if (action === 'queue') {
+    enqueueDraft()
+    return
+  }
+  void submit(action === 'steer' ? 'steer' : 'normal')
+}
+
+function enqueueDraft() {
+  if (!canSend.value) return
+  draftQueue.value.push({
+    message: draftMessage.value,
+    attachments: [...attachments.value],
+  })
+  draftMessage.value = ''
+  attachments.value = []
+  composerError.value = null
+  void nextTick(() => syncComposerTextareaHeight())
+}
+
+async function flushDraftQueue() {
+  while (draftQueue.value.length > 0 && !turnInFlight.value && !isSending.value) {
+    const next = draftQueue.value.shift()
+    if (!next) break
+    draftMessage.value = next.message
+    attachments.value = next.attachments
+    await submit('normal')
+    if (composerError.value) break
+  }
+}
+
+function isQuestionOptionSelected(
+  approvalKey: string,
+  questionId: string,
+  optionId: string,
+): boolean {
+  return (questionAnswers.value[approvalKey]?.[questionId] ?? []).includes(optionId)
+}
+
+function toggleQuestionOption(
+  approvalKey: string,
+  questionId: string,
+  optionId: string,
+  allowMultiple: boolean,
+) {
+  const current = { ...(questionAnswers.value[approvalKey] ?? {}) }
+  const selected = new Set(current[questionId] ?? [])
+  if (allowMultiple) {
+    if (selected.has(optionId)) selected.delete(optionId)
+    else selected.add(optionId)
+  } else {
+    selected.clear()
+    selected.add(optionId)
+  }
+  current[questionId] = [...selected]
+  questionAnswers.value = { ...questionAnswers.value, [approvalKey]: current }
+}
+
+function isApprovalResolved(approval: TimelineApproval): boolean {
+  return approval.resolved || resolvedApprovalKeys.value.has(approval.key)
+}
+
+function canSubmitQuestion(approval: TimelineApproval): boolean {
+  const answers = questionAnswers.value[approval.key] ?? {}
+  return isQuestionAnswerComplete(approval.questions, answers)
+}
+
+async function submitQuestionResponse(approval: TimelineApproval) {
+  const answers = questionAnswers.value[approval.key] ?? {}
+  if (!isQuestionAnswerComplete(approval.questions, answers)) {
+    composerError.value = '请选择所有问题的选项后再提交。'
+    return
+  }
+  await submit(turnInFlight.value ? 'steer' : 'normal', formatAskQuestionResponse(answers))
+  resolvedApprovalKeys.value = new Set(resolvedApprovalKeys.value).add(approval.key)
+}
+
+async function cancelActiveTurn() {
+  if (isCancelling.value || isSending.value || !turnInFlight.value) return
+  isCancelling.value = true
+  composerError.value = null
+  try {
+    const res = await fetch(`/api/workspaces/tabs/${props.tabId}/stream/cancel`, {
+      method: 'POST',
+      credentials: 'same-origin',
+    })
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`
+      try {
+        const body = await res.json()
+        if (body?.detail) detail = body.detail
+      } catch {
+        // ignore non-JSON error body
+      }
+      throw new Error(detail)
+    }
+    void terminalStore.fetchAgentStatuses()
+  } catch (err) {
+    composerError.value = err instanceof Error ? err.message : 'Failed to stop the current turn.'
+  } finally {
+    isCancelling.value = false
+  }
+}
+
 /**
  * Deliver composer input to the native provider transport via ``/stream/send``.
  *
@@ -998,6 +1241,7 @@ async function sendToStream(
   message: string,
   atts: WorkspaceAttachmentCreate[],
   clientTurnId: string,
+  delivery: 'normal' | 'steer' = 'normal',
 ) {
   const base = `/api/workspaces/tabs/${props.tabId}/stream/send`
   const res = await fetch(base, {
@@ -1007,6 +1251,7 @@ async function sendToStream(
     body: JSON.stringify({
       client_turn_id: clientTurnId,
       text: message,
+      delivery,
       attachments: atts.map(({ filename, mime_type, data_url, preview_data_url }) => ({
         filename,
         mime_type,
@@ -1027,15 +1272,24 @@ async function sendToStream(
   }
 }
 
-async function submit() {
-  if (!canSend.value || isSending.value) return
+async function submit(
+  delivery: 'normal' | 'steer' = 'normal',
+  messageOverride?: string,
+) {
+  if (isSending.value) return
+  const message = messageOverride ?? draftMessage.value
+  const hasContent = message.trim().length > 0 || attachments.value.length > 0
+  if (!hasContent) return
+  if (delivery === 'normal' && turnInFlight.value && !messageOverride) {
+    enqueueDraft()
+    return
+  }
   isSending.value = true
   composerError.value = null
-  const message = draftMessage.value
   // Snapshot the full draft attachments (including id, preview_url,
   // preview_data_url, size_bytes) so we can restore the composer exactly on
   // send failure — no reconstructed ids, no zeroed sizes.
-  const draftAtts: DraftAttachment[] = [...attachments.value]
+  const draftAtts: DraftAttachment[] = messageOverride ? [] : [...attachments.value]
   // Wire payload carries the original data_url (for the provider) and the
   // bounded preview_data_url (for the cache) separately.
   const atts: WorkspaceAttachmentCreate[] = draftAtts.map(
@@ -1055,11 +1309,10 @@ async function submit() {
     ? crypto.randomUUID()
     : `turn-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`
   try {
-    // Clear the composer synchronously BEFORE the send promise settles so the
-    // thumbnail disappears immediately on Send. On rejection we restore the
-    // exact snapshot below.
-    draftMessage.value = ''
-    attachments.value = []
+    if (!messageOverride) {
+      draftMessage.value = ''
+      attachments.value = []
+    }
     // Show the user's turn immediately; the stream will replace it with the
     // authoritative transcript line once the provider echoes it back.
     pendingDirectTurns.value = [
@@ -1072,18 +1325,19 @@ async function submit() {
       },
     ]
     requestLatestAnchor(true)
-    await sendToStream(message, atts, clientTurnId)
+    await sendToStream(message, atts, clientTurnId, delivery)
     // The POST acknowledgement means provider dispatch has begun. Refresh the
     // backend-native tab status now rather than waiting for the 5s poll phase;
     // turn_started/completed/error boundaries above provide subsequent edges.
     void terminalStore.fetchAgentStatuses()
     // Success: composer already cleared; nothing more to do.
+    void nextTick(() => syncComposerTextareaHeight())
   } catch (err) {
     pendingDirectTurns.value = pendingDirectTurns.value.filter(turn => turn.turnId !== clientTurnId)
-    // Restore the exact draft text and attachments so the user can retry
-    // without losing their input.
-    draftMessage.value = message
-    attachments.value = draftAtts
+    if (!messageOverride) {
+      draftMessage.value = message
+      attachments.value = draftAtts
+    }
     composerError.value = err instanceof Error ? err.message : 'Failed to send message.'
   } finally {
     isSending.value = false
@@ -1709,8 +1963,9 @@ onUnmounted(() => {
   flex: 1;
   min-width: 0;
   min-height: 32px;
-  max-height: 120px;
+  max-height: 240px;
   resize: none;
+  overflow-y: hidden;
   padding: 7px 10px;
   font-size: 13px;
   line-height: 1.4;
@@ -1756,6 +2011,120 @@ onUnmounted(() => {
 .composer-send-btn:focus-visible {
   outline: 2px solid var(--ch-color-accent-ring);
   outline-offset: 1px;
+}
+
+.composer-stop-btn {
+  height: 32px;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ch-color-text);
+  background-color: var(--ch-color-surface);
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-md);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.composer-stop-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.composer-queue {
+  padding: 4px 10px 0;
+  font-size: 12px;
+  color: var(--ch-color-text-muted);
+}
+
+.composer-hints {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 6px 10px 0;
+  font-size: 11px;
+  color: var(--ch-color-text-subtle);
+}
+
+.approval-card {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface);
+}
+
+.approval-card--resolved {
+  opacity: 0.75;
+}
+
+.approval-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.approval-card-title {
+  font-weight: 600;
+}
+
+.approval-card-badge {
+  font-size: 11px;
+  color: var(--ch-color-text-muted);
+}
+
+.approval-question + .approval-question {
+  margin-top: 10px;
+}
+
+.approval-question-prompt {
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+
+.approval-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.approval-option {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--ch-color-text);
+  background: var(--ch-color-app-bg);
+  border: 1px solid var(--ch-color-border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.approval-option--selected {
+  border-color: var(--ch-color-accent);
+  background: color-mix(in srgb, var(--ch-color-accent) 12%, transparent);
+}
+
+.approval-option:disabled {
+  cursor: default;
+}
+
+.approval-submit-btn {
+  margin-top: 10px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #fff;
+  background: var(--ch-color-accent);
+  border: none;
+  border-radius: var(--ch-radius-md);
+  cursor: pointer;
+}
+
+.approval-submit-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Paseo conversation presentation ------------------------------------------------
