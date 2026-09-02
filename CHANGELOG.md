@@ -5,18 +5,6 @@
 
 ## Unreleased
 
-### feat: structured Chat composer controls and Cursor AskQuestion cards
-
-- Add `POST /stream/cancel` and `delivery=steer|normal` on `POST /stream/send` so
-  Structured Chat can stop an in-flight turn or interrupt-and-send (Codex-style
-  steer) without falling back to tmux.
-- Composer UX: Stop button, in-memory queue on Enter while a turn is active,
-  Cmd/Ctrl+Enter steer, Shift+Enter newline, IME-safe Enter handling, and JS
-  textarea autoresize up to 240px.
-- Cursor native/stream-json now normalizes assistant `tool_use` blocks; `AskQuestion`
-  emits `approval_required` and Structured Chat renders selectable option cards
-  with JSON answer submission back through the composer.
-
 ### fix: isolate `test_ttyd_manager` from live Hub tab persistence
 
 - Redirect `STATE_FILE`, `ORDER_FILE`, `LAUNCH_ENV_DIR`, and `_RUNTIME_HOME`

@@ -11,27 +11,14 @@ const source = await readFile(
   new URL('../src/utils/agentStreamTimeline.ts', import.meta.url),
   'utf8',
 )
-const questionSource = await readFile(
-  new URL('../src/utils/chatQuestionResponse.ts', import.meta.url),
-  'utf8',
-)
-const transpileOptions = {
+const { outputText } = ts.transpileModule(source, {
   compilerOptions: {
     module: ts.ModuleKind.ES2022,
     target: ts.ScriptTarget.ES2020,
   },
-}
-const questionJs = ts.transpileModule(questionSource, transpileOptions).outputText
-const timelineJs = ts.transpileModule(
-  source.replace(
-    "import { parseStructuredQuestions } from '@/utils/chatQuestionResponse'",
-    '',
-  ),
-  transpileOptions,
-).outputText
-const bundled = `${questionJs}\n${timelineJs}`
+})
 const mod = await import(
-  `data:text/javascript;base64,${Buffer.from(bundled).toString('base64')}`
+  `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`
 )
 const { groupEventsIntoTurns } = mod
 
@@ -210,25 +197,16 @@ test('orphan tool_call_completed (no matching start) renders as standalone tool'
   assert.equal(turns[0].tools[0].status, 'completed')
 })
 
-test('approval_required renders interactive approval parts', () => {
+test('approval_required and approval_resolved are ignored for now', () => {
   const events = [
     makeEvent(1, 'turn_started', { summary: 'go' }),
-    makeEvent(2, 'approval_required', {
-      tool_call_id: 'c1',
-      kind: 'ask_question',
-      title: 'Choose',
-      questions: [{
-        id: 'q1',
-        prompt: 'Pick one',
-        options: [{ id: 'a', label: 'A' }],
-      }],
-    }),
+    makeEvent(2, 'approval_required', { tool_call_id: 'c1' }),
     makeEvent(3, 'approval_resolved', { tool_call_id: 'c1', decision: 'approved' }),
   ]
   const turns = groupEventsIntoTurns(events)
-  assert.equal(turns[0].approvals.length, 1)
-  assert.equal(turns[0].approvals[0].resolved, true)
-  assert.equal(turns[0].parts.some(part => part.kind === 'approval'), true)
+  assert.equal(turns[0].tools.length, 0)
+  assert.equal(turns[0].errors.length, 0)
+  assert.equal(turns[0].statuses.length, 0)
 })
 
 test('events before the first turn_started are grouped into an implicit turn', () => {
