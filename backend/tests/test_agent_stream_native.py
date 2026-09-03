@@ -562,6 +562,218 @@ async def test_codex_plan_mode_uses_schema_verified_collaboration_mode_payload()
 
 
 @pytest.mark.asyncio
+async def test_codex_selected_model_overrides_thread_model_in_default_mode() -> None:
+    """CODEX_MODEL in the session env must reach turn/start via
+    collaborationMode.settings.model, overriding the thread's own model."""
+    proc = _FakeProcess(
+        stdout_lines=[
+            json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}).encode() + b"\n",
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {"thread": {"id": "th-1"}, "model": "gpt-5.6-sol"},
+                }
+            ).encode()
+            + b"\n",
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "result": {
+                        "data": [
+                            {
+                                "name": "Default",
+                                "mode": "default",
+                                "model": None,
+                                "reasoning_effort": None,
+                            },
+                            {
+                                "name": "Plan",
+                                "mode": "plan",
+                                "model": None,
+                                "reasoning_effort": "medium",
+                            },
+                        ]
+                    },
+                }
+            ).encode()
+            + b"\n",
+            json.dumps({"jsonrpc": "2.0", "id": 4, "result": {"turn": {"id": "tu-1"}}}).encode()
+            + b"\n",
+        ]
+    )
+    session = _session(AgentType.CODEX)
+    session.env["CODEX_MODEL"] = "gpt-5.3-codex-spark"
+    native = CodexNativeSession(session)
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        await native.start()
+        await native.prepare_capabilities()
+        await native.send_message("hello", [])
+
+    messages = _written_requests(proc)
+    turn = next(item for item in messages if item.get("method") == "turn/start")
+    assert turn["params"]["collaborationMode"] == {
+        "mode": "default",
+        "settings": {
+            "model": "gpt-5.3-codex-spark",
+            "developer_instructions": None,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_codex_selected_model_sent_even_without_advertised_preset() -> None:
+    """When collaborationMode/list was never run (no presets loaded), a pinned
+    CODEX_MODEL must still be sent in default mode so the selection is not
+    silently dropped."""
+    proc = _FakeProcess(
+        stdout_lines=[
+            json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}).encode() + b"\n",
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {"thread": {"id": "th-1"}, "model": "gpt-5.6-sol"},
+                }
+            ).encode()
+            + b"\n",
+            json.dumps({"jsonrpc": "2.0", "id": 3, "result": {"turn": {"id": "tu-1"}}}).encode()
+            + b"\n",
+        ]
+    )
+    session = _session(AgentType.CODEX)
+    session.env["CODEX_MODEL"] = "gpt-5.4-mini"
+    native = CodexNativeSession(session)
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        await native.start()
+        await native.send_message("hello", [])
+
+    messages = _written_requests(proc)
+    turn = next(item for item in messages if item.get("method") == "turn/start")
+    assert turn["params"]["collaborationMode"] == {
+        "mode": "default",
+        "settings": {
+            "model": "gpt-5.4-mini",
+            "developer_instructions": None,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_codex_selected_model_overrides_in_plan_mode() -> None:
+    """CODEX_MODEL must override the thread model even when plan mode is
+    active, so the picker and mode toggle compose."""
+    proc = _FakeProcess(
+        stdout_lines=[
+            json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}).encode() + b"\n",
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {"thread": {"id": "th-1"}, "model": "gpt-5.6-sol"},
+                }
+            ).encode()
+            + b"\n",
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "result": {
+                        "data": [
+                            {
+                                "name": "Default",
+                                "mode": "default",
+                                "model": None,
+                                "reasoning_effort": None,
+                            },
+                            {
+                                "name": "Plan",
+                                "mode": "read",
+                                "model": None,
+                                "reasoning_effort": "medium",
+                            },
+                        ]
+                    },
+                }
+            ).encode()
+            + b"\n",
+            json.dumps({"jsonrpc": "2.0", "id": 4, "result": {"turn": {"id": "tu-1"}}}).encode()
+            + b"\n",
+        ]
+    )
+    session = _session(AgentType.CODEX)
+    session.env["CODEX_MODEL"] = "gpt-5.4"
+    native = CodexNativeSession(session)
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        await native.start()
+        await native.set_mode("plan")
+        await native.send_message("inspect only", [])
+
+    messages = _written_requests(proc)
+    turn = next(item for item in messages if item.get("method") == "turn/start")
+    assert turn["params"]["collaborationMode"] == {
+        "mode": "read",
+        "settings": {
+            "model": "gpt-5.4",
+            "developer_instructions": None,
+            "reasoning_effort": "medium",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_codex_no_model_selection_falls_back_to_thread_model() -> None:
+    """Without CODEX_MODEL the collaboration payload keeps using the thread's
+    model (regression guard for the no-selection path)."""
+    proc = _FakeProcess(
+        stdout_lines=[
+            json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}).encode() + b"\n",
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {"thread": {"id": "th-1"}, "model": "gpt-5.6-sol"},
+                }
+            ).encode()
+            + b"\n",
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "result": {
+                        "data": [
+                            {
+                                "name": "Default",
+                                "mode": "default",
+                                "model": None,
+                                "reasoning_effort": None,
+                            },
+                        ]
+                    },
+                }
+            ).encode()
+            + b"\n",
+            json.dumps({"jsonrpc": "2.0", "id": 4, "result": {"turn": {"id": "tu-1"}}}).encode()
+            + b"\n",
+        ]
+    )
+    native = _codex_session()
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        await native.start()
+        await native.prepare_capabilities()
+        await native.send_message("hello", [])
+
+    messages = _written_requests(proc)
+    turn = next(item for item in messages if item.get("method") == "turn/start")
+    assert turn["params"]["collaborationMode"]["settings"]["model"] == "gpt-5.6-sol"
+
+
+@pytest.mark.asyncio
 async def test_codex_notifications_go_to_separate_queue_not_response_futures() -> None:
     """Notifications (no id) must be placed on the notification queue and never
     re-queued ahead of a pending response. The response must resolve its
