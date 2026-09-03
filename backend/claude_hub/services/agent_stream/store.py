@@ -237,6 +237,62 @@ class AgentStreamStore:
             return 0
         return n
 
+    async def latest_unfinished_turn(self) -> Optional[AgentStreamEvent]:
+        """Return the latest turn whose durable lifecycle has no terminal edge.
+
+        Native Chat runtime state is process-local, while this event log
+        survives backend reloads and crashes. A previous process can therefore
+        leave ``turn_started`` as the latest lifecycle edge even though the new
+        process has no provider turn to cancel. The Stop path uses this
+        bounded-purpose scan to repair that orphan on demand.
+
+        ``error`` is terminal here because the frontend uses the same rule to
+        unlock its composer when a provider fails without a following
+        ``turn_completed`` event.
+        """
+        async with self._read_lock:
+            candidate: Optional[AgentStreamEvent] = None
+
+            def _read() -> None:
+                nonlocal candidate
+                if not self._path.exists():
+                    return
+                try:
+                    with self._path.open("r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                obj = json.loads(line)
+                            except (json.JSONDecodeError, ValueError):
+                                continue
+                            event_type = obj.get("type")
+                            if event_type == "turn_started":
+                                try:
+                                    candidate = AgentStreamEvent.model_validate(obj)
+                                except ValueError:
+                                    candidate = None
+                                continue
+                            if candidate is None or event_type not in {
+                                "turn_completed",
+                                "error",
+                            }:
+                                continue
+                            candidate_turn_id = candidate.turn_id
+                            same_turn = (
+                                obj.get("turn_id") == candidate_turn_id
+                                if candidate_turn_id is not None
+                                else obj.get("run_epoch") == candidate.run_epoch
+                            )
+                            if same_turn:
+                                candidate = None
+                except OSError:
+                    candidate = None
+
+            await asyncio.to_thread(_read)
+            return candidate
+
     async def last_event_at(self) -> Optional[str]:
         """Return the ``created_at`` of the last persisted event, or ``None``."""
         if not self._path.exists():

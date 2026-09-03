@@ -487,44 +487,79 @@ class SessionTailer:
                 raise
 
     async def cancel_turn(self) -> bool:
-        """Cancel the active native turn, if any."""
+        """Cancel the active native turn or close a durable orphan.
+
+        A backend restart loses the process-local ``_active_turn_id`` and
+        provider guard, but an interrupted turn can remain open in the durable
+        stream. In that state the frontend still renders Stop/Queue. Treat a
+        Stop request as an explicit request to terminalize that latest orphan
+        so the durable UI state and the actual idle runtime converge again.
+        """
         transport = self._native_transport
-        if transport is None or not transport.turn_in_flight:
-            return False
         async with self._send_lock:
-            if transport is None or not transport.turn_in_flight:
+            if transport is not None and transport.turn_in_flight:
+                await self._cancel_active_turn_locked(transport)
+                return True
+
+            orphan = await self._store.latest_unfinished_turn()
+            if orphan is None:
                 return False
-            await self._cancel_active_turn_locked(transport)
+            await self._publish_turn_completion(
+                turn_id=orphan.turn_id,
+                run_epoch=orphan.run_epoch,
+                status="cancelled",
+            )
             return True
+
+    async def _publish_turn_completion(
+        self,
+        *,
+        turn_id: Optional[str],
+        run_epoch: Optional[int],
+        status: str,
+    ) -> None:
+        """Persist and fan out one authoritative terminal lifecycle edge."""
+        session = self._session_getter()
+        if session is None:
+            raise RuntimeError("session no longer exists")
+        ctx = NormalizeContext(
+            session_id=self.session_id,
+            tab_id=session.tab_id,
+            agent_type=session.agent_type,
+            run_epoch=run_epoch,
+            turn_id=turn_id,
+        )
+        completed = ctx.event(
+            AgentStreamEventType.TURN_COMPLETED,
+            {"status": status},
+        )
+        await self._publish(redact_event(completed))
+        self._turn_completed_seen = True
+        self._terminalize_native_runtime(status)
 
     async def _cancel_active_turn_locked(self, transport: ProviderSession) -> None:
         """Cancel the in-flight turn while ``_send_lock`` is held."""
         turn_id = self._active_turn_id
-        session = self._session_getter()
-        if turn_id is not None and session is not None:
-            ctx = NormalizeContext(
-                session_id=self.session_id,
-                tab_id=session.tab_id,
-                agent_type=session.agent_type,
-                run_epoch=self._run_epoch,
-                turn_id=turn_id,
-            )
-            completed = ctx.event(
-                AgentStreamEventType.TURN_COMPLETED,
-                {"status": "cancelled"},
-            )
-            completed = redact_event(completed)
+        publish_error: Optional[Exception] = None
+        if turn_id is not None:
             try:
-                await self._publish(completed)
-            except Exception:
+                await self._publish_turn_completion(
+                    turn_id=turn_id,
+                    run_epoch=self._run_epoch,
+                    status="cancelled",
+                )
+            except Exception as exc:
                 logger.exception(
                     "agent_stream store append failed for cancelled turn session %s",
                     self.session_id,
                 )
-            self._turn_completed_seen = True
-            self._terminalize_native_runtime("cancelled")
+                publish_error = exc
         await transport.cancel_active_turn()
         self._active_turn_id = None
+        if publish_error is not None:
+            raise RuntimeError("turn stopped but its cancelled state could not be persisted") from (
+                publish_error
+            )
 
     async def _fail_active_turn(self, message: str, transport: ProviderSession) -> None:
         """Emit an ``error`` event and a failed ``turn_completed``.
@@ -627,6 +662,20 @@ class SessionTailer:
                 self.session_id,
             )
         if self._native_transport is not None:
+            # ``ProviderSession.stop`` releases only process-local state. If
+            # the backend reloads while a turn is active, persist its terminal
+            # edge first so the next process does not replay an immortal
+            # Stop/Queue turn from history.
+            if self._native_transport.turn_in_flight:
+                try:
+                    async with self._send_lock:
+                        if self._native_transport.turn_in_flight:
+                            await self._cancel_active_turn_locked(self._native_transport)
+                except Exception:
+                    logger.exception(
+                        "native turn terminalization failed during stop for session %s",
+                        self.session_id,
+                    )
             try:
                 await self._native_transport.stop()
             except Exception:
@@ -705,7 +754,11 @@ class SessionTailer:
                 # Stop the native transport so the provider subprocess (e.g.
                 # the Codex app-server) is reaped, not left orphaned.
                 try:
-                    await transport.stop()
+                    async with self._send_lock:
+                        if transport.turn_in_flight:
+                            await self._cancel_active_turn_locked(transport)
+                        else:
+                            await transport.stop()
                 except Exception:
                     logger.exception(
                         "native transport stop failed during idle reap for session %s",
