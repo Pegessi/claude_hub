@@ -242,14 +242,20 @@ class ProviderSession(ABC):
         # restart can resume the same conversation.
         self._conversation_id_persist = conversation_id_persist
         self._process: Optional[asyncio.subprocess.Process] = None
-        self._stdout_queue: asyncio.Queue[Optional[Dict[str, Any]]] = asyncio.Queue()
+        # One-shot Claude/Cursor processes share a consumer across turns. Tag
+        # every queued record (including EOF) with its process generation so a
+        # cancelled or lingering reader cannot terminate or contaminate the
+        # replacement turn. Codex overrides the output path with its own
+        # persistent notification queue.
+        self._stdout_queue: asyncio.Queue[tuple[int, Optional[Dict[str, Any]]]] = asyncio.Queue()
+        self._stdout_generation = 0
         self._reader_task: Optional[asyncio.Task[None]] = None
         self._stderr_task: Optional[asyncio.Task[None]] = None
         self._stderr_buffer: bytes = b""
         self._started = False
         self._handshake_complete = False
         self._last_error: Optional[str] = None
-        # Per-turn exit error: set by ``_drain_stdout`` when the one-shot
+        # Per-turn exit error: set by ``_drain_oneshot_stdout`` when the one-shot
         # provider subprocess exits nonzero (or before emitting a recognized
         # completion record). Surfaced to the tailer via ``exit_error`` so it
         # can emit an ``error`` event and a failed ``turn_completed``.
@@ -382,6 +388,12 @@ class ProviderSession(ABC):
         This is the normal-completion counterpart to ``_end_turn`` (which is
         reserved for error/shutdown paths where no turn-end record arrives).
         """
+        # For one-shot providers, a completed process may remain alive briefly
+        # after its final result (for example while a child tool process keeps
+        # stdout open). Invalidate that reader before releasing the turn guard
+        # so its later records/EOF cannot be attributed to the next turn.
+        if not self.eof_is_fatal:
+            self._stdout_generation += 1
         self._end_turn()
 
     @property
@@ -396,6 +408,10 @@ class ProviderSession(ABC):
         """
         if not self._turn_in_flight:
             return
+        # Invalidate the active one-shot reader before cancelling it. Its
+        # ``finally`` block deliberately publishes EOF to wake consumers; the
+        # generation tag lets ``read_line`` discard that stale sentinel.
+        self._stdout_generation += 1
         await self._terminate_process()
         self._clear_staged_images()
         self._end_turn()
@@ -483,9 +499,12 @@ class ProviderSession(ABC):
 
     async def read_line(self) -> Optional[Dict[str, Any]]:
         """Await one parsed JSON record from stdout, or ``None`` on EOF."""
-        return await self._stdout_queue.get()
+        while True:
+            generation, record = await self._stdout_queue.get()
+            if generation == self._stdout_generation:
+                return record
 
-    async def _drain_stdout(self) -> None:
+    async def _drain_oneshot_stdout(self, generation: int) -> None:
         proc = self._process
         if proc is None or proc.stdout is None:
             return
@@ -513,7 +532,7 @@ class ProviderSession(ABC):
                     except json.JSONDecodeError:
                         continue
                     if isinstance(record, dict):
-                        await self._stdout_queue.put(record)
+                        await self._stdout_queue.put((generation, record))
             # Process any trailing data without a newline.
             if buffer:
                 text = buffer.decode("utf-8", errors="ignore").strip()
@@ -523,7 +542,7 @@ class ProviderSession(ABC):
                     except json.JSONDecodeError:
                         record = None
                     if isinstance(record, dict):
-                        await self._stdout_queue.put(record)
+                        await self._stdout_queue.put((generation, record))
         except asyncio.CancelledError:
             cancelled = True
             raise
@@ -536,7 +555,7 @@ class ProviderSession(ABC):
                 # task returns, so we must NOT await ``proc.wait()`` here (it
                 # could deadlock). Just signal EOF so the tailer's
                 # ``read_line`` does not block forever.
-                await self._stdout_queue.put(None)
+                await self._stdout_queue.put((generation, None))
                 return
             # Natural EOF: the provider's stdout has closed. Wait for the
             # process to fully exit so we can inspect its return code. A
@@ -570,7 +589,7 @@ class ProviderSession(ABC):
             # before the tailer has consumed the turn's records, allowing a
             # concurrent ``send_message`` to overwrite ``_active_turn_id``
             # while this turn's records are still queued.
-            await self._stdout_queue.put(None)
+            await self._stdout_queue.put((generation, None))
 
     async def _drain_stderr(self) -> None:
         """Bounded stderr capture; surfaced as ``last_error`` on non-zero exit."""
@@ -626,7 +645,7 @@ class ProviderSession(ABC):
         """Per-turn exit error from a nonzero provider subprocess exit.
 
         ``None`` when the last turn exited cleanly (or no turn has run yet).
-        Set by ``_drain_stdout`` after the process exits; consumed by the
+        Set by ``_drain_oneshot_stdout`` after the process exits; consumed by the
         tailer's EOF handler to decide whether to emit a failed
         ``turn_completed``.
         """
@@ -689,18 +708,21 @@ class ProviderSession(ABC):
     async def _spawn_oneshot(self, cmd: List[str], stdin_text: str) -> None:
         """Spawn a one-shot streaming subprocess for Claude/Cursor turns.
 
-        The stdout queue is NOT replaced between turns: the previous turn's
-        reader puts an EOF sentinel (``None``) on the shared queue, and the
-        push consumer reads through it before consuming the next turn's
-        records. Replacing the queue would strand a consumer awaiting on the
-        old queue object.
+        The stdout queue is NOT replaced between turns because that would
+        strand a consumer awaiting the old queue object. Instead, every item
+        carries the process generation that produced it and ``read_line``
+        discards records and EOF sentinels from superseded generations.
         """
         # Stop any previous turn's process before starting a new one. This
-        # awaits the old reader so its EOF sentinel is on the queue before we
-        # begin writing new records. We use ``_terminate_process`` (not
-        # ``stop``) so we do NOT call ``_end_turn`` — the new turn's
-        # completion is resolved by the new process's EOF, not by the old
-        # process's death.
+        # awaits the old reader before launching the replacement. We use
+        # ``_terminate_process`` (not ``stop``) so we do NOT call
+        # ``_end_turn`` — the new turn's completion is resolved by its own
+        # provider output, not by the old process's death.
+        # Advance before terminating the previous reader. Its cancellation
+        # path queues an EOF sentinel, but that sentinel now belongs to the old
+        # generation and ``read_line`` will discard it.
+        self._stdout_generation += 1
+        generation = self._stdout_generation
         await self._terminate_process()
         self._stderr_buffer = b""
         self._exit_error = None
@@ -722,7 +744,7 @@ class ProviderSession(ABC):
             self._end_turn()
             raise
         self._started = True
-        self._reader_task = asyncio.create_task(self._drain_stdout())
+        self._reader_task = asyncio.create_task(self._drain_oneshot_stdout(generation))
         self._stderr_task = asyncio.create_task(self._drain_stderr())
         # Feed the prompt to the provider's stdin.
         if self._process.stdin is not None:

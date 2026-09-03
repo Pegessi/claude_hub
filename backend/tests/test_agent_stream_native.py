@@ -680,8 +680,8 @@ async def test_claude_second_send_while_turn_in_flight_raises_and_does_not_cance
         assert first_proc._terminated is False
         assert native._turn_in_flight is True
 
-        # Deliver EOF to the first process. ``_drain_stdout`` puts the EOF
-        # sentinel on the queue but does NOT release the turn guard — the
+        # Deliver EOF to the first process. ``_drain_oneshot_stdout`` puts the
+        # EOF sentinel on the queue but does NOT release the turn guard — the
         # consumer (tailer) must acknowledge consumption first.
         first_proc.stdout.push(b"")
         eof = await asyncio.wait_for(native.read_line(), timeout=1.0)
@@ -706,6 +706,59 @@ async def test_cancel_active_turn_terminates_in_flight_oneshot() -> None:
         await native.cancel_active_turn()
         assert native.turn_in_flight is False
         assert proc._terminated is True
+
+
+@pytest.mark.asyncio
+async def test_cancelled_oneshot_eof_does_not_leak_into_next_turn() -> None:
+    """The cancelled reader's EOF must not terminate the replacement turn."""
+    native = ClaudeNativeSession(_session())
+    first = _FakeProcess(stdout_lines=[])
+    second = _FakeProcess(stdout_lines=[])
+    second_record = {"type": "system", "subtype": "init", "session_id": "second"}
+
+    with patch("asyncio.create_subprocess_exec", side_effect=[first, second]):
+        try:
+            await native.send_message("first", [])
+            # Let the first reader enter its blocking stdout read so cancelling
+            # it exercises the same EOF-finally path as a real in-flight turn.
+            await asyncio.sleep(0.03)
+            await native.cancel_active_turn()
+
+            await native.send_message("second", [])
+            second.stdout.push(json.dumps(second_record).encode() + b"\n")
+
+            record = await asyncio.wait_for(native.read_line(), timeout=1.0)
+            assert record == second_record
+        finally:
+            await native.stop()
+
+
+@pytest.mark.asyncio
+async def test_completed_oneshot_eof_does_not_leak_into_next_turn() -> None:
+    """A lingering completed reader's EOF must not fail the replacement turn."""
+    native = ClaudeNativeSession(_session())
+    first = _FakeProcess(stdout_lines=[])
+    second = _FakeProcess(stdout_lines=[])
+    completed_record = {"type": "result", "subtype": "success"}
+    second_record = {"type": "system", "subtype": "init", "session_id": "second"}
+
+    with patch("asyncio.create_subprocess_exec", side_effect=[first, second]):
+        try:
+            await native.send_message("first", [])
+            first.stdout.push(json.dumps(completed_record).encode() + b"\n")
+            record = await asyncio.wait_for(native.read_line(), timeout=1.0)
+            assert record == completed_record
+            # Mirror the tailer releasing the guard as soon as it persists the
+            # provider's result, while the one-shot process is still alive.
+            native.acknowledge_turn_complete()
+
+            await native.send_message("second", [])
+            second.stdout.push(json.dumps(second_record).encode() + b"\n")
+
+            record = await asyncio.wait_for(native.read_line(), timeout=1.0)
+            assert record == second_record
+        finally:
+            await native.stop()
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,17 @@
 
 ## Unreleased
 
+### fix: isolate one-shot provider output across Chat turns
+
+- Tag Claude/Cursor stdout records and EOF sentinels with their one-shot
+  process generation. Records from a cancelled or already-completed process
+  are discarded instead of being attributed to the replacement turn.
+- Fix rapid cancel/steer or completion-followed-by-send flows that could show
+  "provider exited without a completion record" while the new provider was
+  still running, then persist its real output with no `turn_id`.
+- Add regressions for both cancellation and a completed process whose stdout
+  remains open while the next turn starts.
+
 ### fix: release native turn guard at TURN_COMPLETED, not subprocess EOF
 
 - For one-shot providers (Claude, Cursor), the turn guard (`_turn_in_flight`)
