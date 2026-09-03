@@ -583,6 +583,128 @@ async def test_cursor_terminal_session_keeps_native_terminal_transport(
 
 
 @pytest.mark.asyncio
+async def test_direct_cursor_chat_without_cwd_uses_native_transport(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """A Cursor Chat tab created without an explicit cwd still uses the native
+    transport.
+
+    The frontend renders every ``session_kind=chat`` tab as a native
+    structured surface, so the backend must promote Cursor Chat tabs to
+    ``native`` regardless of cwd. The native ``ProviderSession`` spawns with
+    ``cwd=None`` (inheriting the backend cwd), so the old ``and cwd`` guard —
+    a leftover from the retired ``terminal_transcript`` mode, which needed a
+    cwd to locate the transcript file — must not gate the promotion.
+    """
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._next_port = 12351
+    manager.processes = {}
+    manager._tab_order = []
+
+    async def fake_ensure_tmux_session(self: TTYDProcess) -> bool:
+        return True
+
+    async def fake_start(self: TTYDProcess) -> None:
+        self.is_active = True
+
+    monkeypatch.setattr(TTYDProcess, "ensure_tmux_session", fake_ensure_tmux_session)
+    monkeypatch.setattr(TTYDProcess, "start", fake_start)
+    monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_order", lambda: None)
+    monkeypatch.setattr(manager, "_schedule_codex_discovery", lambda process: None)
+
+    tab = await manager.create_tab(
+        name="Cursor Chat No Cwd",
+        agent_type=AgentType.CURSOR,
+        session_kind=SessionKind.CHAT,
+    )
+
+    assert manager.processes[tab.id].cursor_transport == "native"
+
+
+def test_restore_promotes_stale_terminal_cursor_chat_to_native(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """A Cursor Chat tab persisted with the raw ``terminal`` transport is
+    healed to ``native`` on state restore.
+
+    Older rows (e.g. tabs created before the native promotion, or while the
+    ``and cwd`` guard skipped promotion) carry ``cursor_transport="terminal"``
+    in ``tabs.json``. The restore path must re-run the Chat promotion so the
+    tab does not fail closed in the adapter registry after a backend restart.
+    A Cursor *Terminal* tab must keep the raw ``terminal`` transport.
+    """
+    tabs_state = [
+        {
+            "id": "aaaaaaaa11111111",
+            "port": 12360,
+            "name": "Cursor Chat Stale",
+            "shell": None,
+            "cwd": None,
+            "created_at": "2026-09-01T00:00:00",
+            "solo_mode": False,
+            "agent_type": "cursor",
+            "session_kind": "chat",
+            "chat_mode": "default",
+            "target": "local",
+            "remote_profile_id": None,
+            "remote_cwd": None,
+            "remote_reconnect": True,
+            "remote_forward_port": None,
+            "env": {},
+            "workspace_id": None,
+            "workspace_name": None,
+            "workspace_role": None,
+            "agent_session_id": None,
+            "agent_session_id_verified": False,
+            "resume_quarantined": False,
+            "shell_explicitly_provided": None,
+            "cursor_transport": "terminal",
+            "cursor_data_dir": None,
+            "cursor_cli_version": None,
+            "cursor_transcript_path": None,
+            "cursor_transcript_schema": None,
+        },
+        {
+            "id": "bbbbbbbb22222222",
+            "port": 12361,
+            "name": "Cursor Terminal Raw",
+            "shell": None,
+            "cwd": None,
+            "created_at": "2026-09-01T00:00:00",
+            "solo_mode": False,
+            "agent_type": "cursor",
+            "session_kind": "terminal",
+            "chat_mode": "default",
+            "target": "local",
+            "remote_profile_id": None,
+            "remote_cwd": None,
+            "remote_reconnect": True,
+            "remote_forward_port": None,
+            "env": {},
+            "workspace_id": None,
+            "workspace_name": None,
+            "workspace_role": None,
+            "agent_session_id": None,
+            "agent_session_id_verified": False,
+            "resume_quarantined": False,
+            "shell_explicitly_provided": None,
+            "cursor_transport": "terminal",
+            "cursor_data_dir": None,
+            "cursor_cli_version": None,
+            "cursor_transcript_path": None,
+            "cursor_transcript_schema": None,
+        },
+    ]
+    ttyd_manager_module.STATE_FILE.write_text(json.dumps(tabs_state))
+
+    manager = TTYDManager()
+
+    assert manager.processes["aaaaaaaa11111111"].cursor_transport == "native"
+    assert manager.processes["bbbbbbbb22222222"].cursor_transport == "terminal"
+
+
+@pytest.mark.asyncio
 async def test_managed_workspace_tab_is_terminal_while_direct_tab_may_be_chat(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -2729,9 +2851,7 @@ async def test_switch_env_chat_session_updates_env_without_tmux(
 
 
 @pytest.mark.asyncio
-async def test_switch_env_chat_cursor_is_supported(
-    monkeypatch: MonkeyPatch, tmp_path
-) -> None:
+async def test_switch_env_chat_cursor_is_supported(monkeypatch: MonkeyPatch, tmp_path) -> None:
     # Cursor CHAT tabs were previously rejected by switch_env; the CHAT branch
     # now supports them alongside Claude and Codex.
     monkeypatch.setattr(ttyd_manager_module, "LAUNCH_ENV_DIR", tmp_path)
