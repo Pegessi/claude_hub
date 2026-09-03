@@ -516,7 +516,7 @@
                 :aria-label="`Model: ${currentModel || 'default'}`"
                 :title="`Model: ${currentModel || 'default'}`"
                 :disabled="modeInteractionLocked || isUpdatingModel"
-                @click="isModelMenuOpen = !isModelMenuOpen"
+                @click="toggleModelMenu"
               >
                 <span class="composer-mode-trigger-label">{{ currentModel || 'default' }}</span>
                 <span
@@ -526,6 +526,7 @@
               </button>
               <div
                 v-if="isModelMenuOpen"
+                ref="modelMenuEl"
                 class="composer-mode-menu"
                 role="menu"
                 aria-label="Model"
@@ -777,7 +778,6 @@ const modelOptions = computed(() => {
 const isModelPickerAvailable = computed(() => modelEnvVar.value !== null)
 const isModelMenuOpen = ref(false)
 const isUpdatingModel = ref(false)
-const modelChangeError = ref<string | null>(null)
 
 async function selectModel(model: string) {
   closeModelMenu(true)
@@ -788,7 +788,6 @@ async function selectModel(model: string) {
   if (currentModel.value === model) return
   const epoch = preparationEpoch.value
   isUpdatingModel.value = true
-  modelChangeError.value = null
   try {
     const env = { ...(tab.env ?? {}) }
     if (model) {
@@ -796,10 +795,11 @@ async function selectModel(model: string) {
     } else {
       delete env[key]
     }
-    await terminalStore.switchEnv(tab.id, { env, solo_mode: tab.solo_mode ?? false })
-  } catch (err) {
-    if (preparationEpoch.value !== epoch) return
-    modelChangeError.value = err instanceof Error ? err.message : 'Failed to switch model.'
+    // Errors surface via the store's notifyError toast; swallow so the
+    // rejection is not unhandled.
+    await terminalStore.switchEnv(tab.id, { env })
+  } catch {
+    // Swallow: error feedback comes from terminalStore.switchEnv's toast.
   } finally {
     if (preparationEpoch.value === epoch) isUpdatingModel.value = false
   }
@@ -810,6 +810,21 @@ function closeModelMenu(focusTrigger: boolean) {
   if (focusTrigger) modelTriggerEl.value?.focus()
 }
 
+function toggleModelMenu() {
+  if (modeInteractionLocked.value || isUpdatingModel.value) return
+  if (isModelMenuOpen.value) {
+    closeModelMenu(false)
+    return
+  }
+  isModelMenuOpen.value = true
+  void nextTick(() => {
+    const currentItem = modelMenuEl.value?.querySelector<HTMLButtonElement>('[aria-checked="true"]')
+    const firstItem = modelMenuEl.value?.querySelector<HTMLButtonElement>('[role="menuitemradio"]')
+    const focusTarget = currentItem ?? firstItem
+    focusTarget?.focus()
+  })
+}
+
 function handleModelOutsidePointer(e: PointerEvent) {
   if (!isModelMenuOpen.value) return
   const el = modelPickerEl.value
@@ -818,6 +833,7 @@ function handleModelOutsidePointer(e: PointerEvent) {
 
 const modelPickerEl = ref<HTMLElement | null>(null)
 const modelTriggerEl = ref<HTMLButtonElement | null>(null)
+const modelMenuEl = ref<HTMLElement | null>(null)
 const modelInputEl = ref<HTMLInputElement | null>(null)
 
 const pendingTurns = computed(() => {
@@ -1076,6 +1092,10 @@ async function changeMode(modeId: string) {
 
 watch([modeInteractionLocked, isUpdatingMode], ([locked, updating]) => {
   if (locked || updating) closeModeMenu(false)
+})
+
+watch([modeInteractionLocked, isUpdatingModel], ([locked, updating]) => {
+  if (locked || updating) closeModelMenu(false)
 })
 
 function triggerFilePicker() {
