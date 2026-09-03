@@ -1957,14 +1957,92 @@ async def test_cancel_turn_closes_orphaned_durable_turn_after_restart(
     assert [event.type for event in page.events] == [
         AgentStreamEventType.TURN_STARTED,
         AgentStreamEventType.TEXT_DELTA,
+        AgentStreamEventType.ERROR,
         AgentStreamEventType.TURN_COMPLETED,
     ]
+    interruption = page.events[-2]
+    assert interruption.turn_id == "turn-orphaned"
+    assert interruption.run_epoch == 7
+    assert (
+        interruption.payload["message"]
+        == "Turn interrupted because its backend runtime was no longer available."
+    )
     completed = page.events[-1]
     assert completed.turn_id == "turn-orphaned"
     assert completed.run_epoch == 7
     assert completed.payload["status"] == "cancelled"
     assert await tailer.cancel_turn() is False
-    assert len((await store.read_since(-1, limit=10)).events) == 3
+    assert len((await store.read_since(-1, limit=10)).events) == 4
+
+
+@pytest.mark.asyncio
+async def test_starting_tailer_surfaces_orphaned_turn_after_restart(
+    store: AgentStreamStore,
+) -> None:
+    """First-touch history loading must explain a previous runtime loss."""
+    from claude_hub.services.agent_stream.base import NormalizeContext
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    session = _native_session()
+    ctx = NormalizeContext(
+        session_id=session.id,
+        tab_id=session.tab_id,
+        agent_type=session.agent_type,
+        run_epoch=8,
+        turn_id="turn-reloaded",
+    )
+    await store.append(ctx.event(AgentStreamEventType.TURN_STARTED, {"summary": "unfinished"}))
+
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=store,
+        native_transport=_FakeNativeTransport(),
+    )
+
+    await tailer.start()
+    page = await store.read_since(-1, limit=10)
+    await tailer.stop()
+
+    assert [event.type for event in page.events] == [
+        AgentStreamEventType.TURN_STARTED,
+        AgentStreamEventType.ERROR,
+        AgentStreamEventType.TURN_COMPLETED,
+    ]
+    assert page.events[1].turn_id == "turn-reloaded"
+    assert (
+        page.events[1].payload["message"]
+        == "Turn interrupted because its backend runtime was no longer available."
+    )
+
+
+@pytest.mark.asyncio
+async def test_user_cancel_does_not_report_runtime_interruption(
+    store: AgentStreamStore,
+) -> None:
+    """A deliberate Stop remains a normal cancellation, not a failure alert."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    session = _native_session()
+    transport = _FakeNativeTransport()
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=store,
+        native_transport=transport,
+    )
+    await tailer.send_message("hello", [], client_turn_id="turn-user-stop")
+
+    assert await tailer.cancel_turn() is True
+
+    page = await store.read_since(-1, limit=10)
+    assert AgentStreamEventType.ERROR not in [event.type for event in page.events]
+    assert page.events[-1].type == AgentStreamEventType.TURN_COMPLETED
+    assert page.events[-1].payload["status"] == "cancelled"
 
 
 @pytest.mark.asyncio
@@ -1990,6 +2068,13 @@ async def test_stopping_tailer_terminalizes_active_native_turn(
     await tailer.stop()
 
     page = await store.read_since(-1, limit=10)
+    interruptions = [event for event in page.events if event.type == AgentStreamEventType.ERROR]
+    assert len(interruptions) == 1
+    assert interruptions[0].turn_id == "turn-shutdown"
+    assert (
+        interruptions[0].payload["message"]
+        == "Turn interrupted because its backend runtime was no longer available."
+    )
     completed = [
         event for event in page.events if event.type == AgentStreamEventType.TURN_COMPLETED
     ]

@@ -20,6 +20,14 @@ At 02:52:25 on 2026-09-04, the affected direct Claude Chat persisted its final
 started graceful shutdown 53 ms later and restarted, but the stream never
 received `turn_completed`.
 
+The shutdown was a Uvicorn reload triggered by the task's merge changing
+watched backend Python files. Claude/Cursor one-shot providers are subprocesses
+whose pipes are consumed by the backend event loop. When that worker exited,
+the turn lost its runtime owner and output reader. No exit code or final stderr
+was retained for this process generation, so the exact child exit path after
+reader loss cannot be reconstructed; the observable failure boundary is the
+backend reload itself.
+
 Two gaps made that state permanent:
 
 1. Application shutdown stopped only the Workspace tailer manager, not the
@@ -36,8 +44,16 @@ Two gaps made that state permanent:
   stopping its provider process.
 - If Stop finds no live provider turn, the store scans for the latest durable
   `turn_started` that has no matching `turn_completed` or terminal `error` and
-  appends one `turn_completed(status=cancelled)` event. A repeated Stop sees the
-  terminal event and is a no-op.
+  appends a visible `error` followed by
+  `turn_completed(status=cancelled)`. A repeated Stop sees the terminal event
+  and is a no-op.
+- A newly constructed native tailer performs the same orphan scan before its
+  consumer task starts. Because the new transport cannot own an earlier
+  process's turn, first-touch history loading can safely explain and close it
+  without waiting for user action.
+- Graceful shutdown and idle reaping use the same visible interruption error.
+  Deliberate user cancellation stays a normal cancelled completion and does
+  not mislabel the user's Stop action as a backend failure.
 - If a live turn is stopped but its completion cannot be persisted, the
   backend surfaces an error instead of acknowledging a durable state change
   that never happened.
@@ -48,5 +64,8 @@ Two gaps made that state permanent:
   derives the lock from durable events.
 - `error` must count as terminal during orphan detection because the frontend
   uses the same rule to unlock turns whose provider fails without a completion.
+- Persist the interruption error before its completion. If the second store
+  append fails, the error remains both visible and terminal, so the browser
+  still cannot reconstruct an immortal active turn.
 - Shutdown must cover both manager namespaces; creating or stopping only the
   Workspace manager does not affect direct Terminal-page Chat tabs.
