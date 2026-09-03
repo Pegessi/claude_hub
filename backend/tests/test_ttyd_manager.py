@@ -2704,6 +2704,101 @@ async def test_switch_env_rejects_stopped_tabs(monkeypatch: MonkeyPatch, tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_switch_env_chat_session_updates_env_without_tmux(
+    monkeypatch: MonkeyPatch, tmp_path
+) -> None:
+    # CHAT sessions read env per turn via the native transport, so switch_env
+    # mutates self.env in place and returns early — no tmux respawn. A stopped
+    # tab (no live tmux session) therefore succeeds instead of raising the
+    # "tmux session is not running" RuntimeError the TERMINAL path would hit.
+    monkeypatch.setattr(ttyd_manager_module, "LAUNCH_ENV_DIR", tmp_path)
+    process = TTYDProcess(
+        tab_id="tab-chat-switch",
+        port=12393,
+        name="Chat Switch Env",
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+        env=dict(DEFAULT_CLAUDE_LAUNCH_ENV),
+    )
+
+    await process.switch_env(
+        {**dict(DEFAULT_CLAUDE_LAUNCH_ENV), "ANTHROPIC_MODEL": "claude-opus-4-8"}
+    )
+
+    assert process.env["ANTHROPIC_MODEL"] == "claude-opus-4-8"
+
+
+@pytest.mark.asyncio
+async def test_switch_env_chat_cursor_is_supported(
+    monkeypatch: MonkeyPatch, tmp_path
+) -> None:
+    # Cursor CHAT tabs were previously rejected by switch_env; the CHAT branch
+    # now supports them alongside Claude and Codex.
+    monkeypatch.setattr(ttyd_manager_module, "LAUNCH_ENV_DIR", tmp_path)
+    process = TTYDProcess(
+        tab_id="tab-chat-cursor",
+        port=12394,
+        name="Chat Cursor",
+        agent_type=AgentType.CURSOR,
+        session_kind=SessionKind.CHAT,
+        env={"CURSOR_MODEL": "gpt-5.2"},
+    )
+
+    await process.switch_env({"CURSOR_MODEL": "gpt-5.2"})
+
+    assert process.env["CURSOR_MODEL"] == "gpt-5.2"
+
+
+@pytest.mark.asyncio
+async def test_switch_env_chat_preserves_solo_mode_when_omitted(
+    monkeypatch: MonkeyPatch, tmp_path
+) -> None:
+    # solo_mode=None (the default) means "leave solo mode untouched" on the
+    # no-respawn CHAT path.
+    monkeypatch.setattr(ttyd_manager_module, "LAUNCH_ENV_DIR", tmp_path)
+    process = TTYDProcess(
+        tab_id="tab-chat-solo-preserve",
+        port=12395,
+        name="Chat Solo Preserve",
+        solo_mode=True,
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+        env=dict(DEFAULT_CLAUDE_LAUNCH_ENV),
+    )
+
+    await process.switch_env(
+        {**dict(DEFAULT_CLAUDE_LAUNCH_ENV), "ANTHROPIC_MODEL": "claude-opus-4-8"},
+        solo_mode=None,
+    )
+
+    assert process.solo_mode is True
+
+
+@pytest.mark.asyncio
+async def test_switch_env_chat_toggles_solo_mode_when_provided(
+    monkeypatch: MonkeyPatch, tmp_path
+) -> None:
+    # An explicit solo_mode flips the flag even though no tmux respawn runs.
+    monkeypatch.setattr(ttyd_manager_module, "LAUNCH_ENV_DIR", tmp_path)
+    process = TTYDProcess(
+        tab_id="tab-chat-solo-toggle",
+        port=12396,
+        name="Chat Solo Toggle",
+        solo_mode=False,
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+        env=dict(DEFAULT_CLAUDE_LAUNCH_ENV),
+    )
+
+    await process.switch_env(
+        {**dict(DEFAULT_CLAUDE_LAUNCH_ENV), "ANTHROPIC_MODEL": "claude-opus-4-8"},
+        solo_mode=True,
+    )
+
+    assert process.solo_mode is True
+
+
+@pytest.mark.asyncio
 async def test_switch_env_non_solo_respawn_command(monkeypatch: MonkeyPatch, tmp_path) -> None:
     process = _make_claude_process(monkeypatch, solo_mode=False, tmp_path=tmp_path)
     new_env = {
