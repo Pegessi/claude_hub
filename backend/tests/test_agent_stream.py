@@ -46,7 +46,7 @@ from claude_hub.services.agent_stream.base import (
     TranscriptSnapshot,
 )
 from claude_hub.services.agent_stream.store import AgentStreamStore
-from claude_hub.services.agent_stream.tailer import SessionTailer
+from claude_hub.services.agent_stream.tailer import SessionTailer, TailerManager
 
 # ── redaction ────────────────────────────────────────────────────────────────
 
@@ -679,6 +679,94 @@ def test_store_read_since_pagination(store: AgentStreamStore):
     asyncio.run(run())
 
 
+def test_store_sequential_pages_resume_from_cached_file_offset(
+    store: AgentStreamStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later page must not scan and parse the JSONL prefix again."""
+
+    async def run() -> None:
+        for i in range(8):
+            await store.append(_event(text=str(i)))
+
+        original_open = Path.open
+        readers: List[Any] = []
+
+        class CountingReader:
+            def __init__(self, handle: Any) -> None:
+                self.handle = handle
+                self.lines_read = 0
+                self.seek_offsets: List[int] = []
+
+            def __enter__(self) -> "CountingReader":
+                self.handle.__enter__()
+                return self
+
+            def __exit__(self, *args: Any) -> Any:
+                return self.handle.__exit__(*args)
+
+            def __iter__(self) -> "CountingReader":
+                return self
+
+            def __next__(self) -> str:
+                line = next(self.handle)
+                self.lines_read += 1
+                return line
+
+            def readline(self, *args: Any) -> str:
+                line = self.handle.readline(*args)
+                if line:
+                    self.lines_read += 1
+                return line
+
+            def seek(self, offset: int, *args: Any) -> int:
+                self.seek_offsets.append(offset)
+                return self.handle.seek(offset, *args)
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.handle, name)
+
+        def tracked_open(path: Path, *args: Any, **kwargs: Any) -> Any:
+            handle = original_open(path, *args, **kwargs)
+            mode = args[0] if args else kwargs.get("mode", "r")
+            if path == store.path and mode == "r":
+                reader = CountingReader(handle)
+                readers.append(reader)
+                return reader
+            return handle
+
+        monkeypatch.setattr(Path, "open", tracked_open)
+
+        first = await store.read_since(-1, limit=2)
+        second = await store.read_since(first.next_sequence, limit=2)
+
+        assert [event.payload["text"] for event in second.events] == ["2", "3"]
+        assert len(readers) == 2
+        assert readers[1].seek_offsets and readers[1].seek_offsets[0] > 0
+        # Two returned rows plus one look-ahead row for has_more.
+        assert readers[1].lines_read == 3
+
+    asyncio.run(run())
+
+
+def test_tailer_manager_reuses_active_tailer_store(store: AgentStreamStore) -> None:
+    async def run() -> None:
+        session = _snapshot_session()
+        tailer = SessionTailer(
+            session.workspace_id,
+            session.id,
+            MagicMock(),
+            lambda: session,
+            store=store,
+        )
+        manager = TailerManager(lambda _session_id: session)
+        manager._tailers[session.id] = tailer
+
+        assert manager.get_store(session.workspace_id, session.id) is store
+
+    asyncio.run(run())
+
+
 def test_store_count_and_last_event_at(store: AgentStreamStore):
     async def run() -> None:
         assert await store.count() == 0
@@ -687,6 +775,38 @@ def test_store_count_and_last_event_at(store: AgentStreamStore):
         await store.append(_event(text="b"))
         assert await store.count() == 2
         assert await store.last_event_at() is not None
+
+    asyncio.run(run())
+
+
+def test_store_cached_read_offset_sees_events_appended_after_eof(store: AgentStreamStore) -> None:
+    async def run() -> None:
+        for i in range(3):
+            await store.append(_event(text=str(i)))
+        initial = await store.read_since(-1, limit=10)
+        assert initial.next_sequence == 2
+
+        appended = await store.append(_event(text="new"))
+        resumed = await store.read_since(initial.next_sequence, limit=10)
+
+        assert appended.stream_sequence == 3
+        assert [event.payload["text"] for event in resumed.events] == ["new"]
+        assert resumed.next_sequence == 3
+
+    asyncio.run(run())
+
+
+def test_store_replace_all_invalidates_cached_read_offsets(store: AgentStreamStore) -> None:
+    async def run() -> None:
+        for i in range(5):
+            await store.append(_event(text=f"old-{i}"))
+        await store.read_since(-1, limit=2)
+
+        await store.replace_all([_event(text="replacement")])
+        replaced = await store.read_since(-1, limit=10)
+
+        assert [event.stream_sequence for event in replaced.events] == [0]
+        assert [event.payload["text"] for event in replaced.events] == ["replacement"]
 
     asyncio.run(run())
 

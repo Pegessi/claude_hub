@@ -1481,6 +1481,9 @@ class TailerManager:
         return tailer is None or not tailer.hard_failed
 
     def get_store(self, workspace_id: str, session_id: str) -> AgentStreamStore:
+        tailer = self._tailers.get(session_id)
+        if tailer is not None and tailer.workspace_id == workspace_id:
+            return tailer.store
         return AgentStreamStore(workspace_id, session_id)
 
     def _persist_session_id(self, session_id: str, conversation_id: str) -> None:

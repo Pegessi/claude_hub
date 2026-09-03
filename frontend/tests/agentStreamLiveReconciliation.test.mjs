@@ -89,3 +89,28 @@ test('mode updates are scoped to the active stream and replace capabilities only
   assert.match(composable.slice(modeIndex, responseIndex), /JSON\.stringify\(\{ mode \}\)/)
   assert.match(composable.slice(modeIndex, assignmentIndex), /currentSessionId !== sourceId/)
 })
+
+test('initial hydration uses bounded large pages instead of 200-event round trips', () => {
+  assert.match(composable, /const HYDRATION_PAGE_LIMIT = 5_000/)
+  assert.match(
+    composable,
+    /events\?since_sequence=\$\{since\}&limit=\$\{HYDRATION_PAGE_LIMIT\}/,
+  )
+})
+
+test('a remounted Chat restores cached history and reconciles from its cursor', () => {
+  const startIndex = composable.indexOf('async function start(')
+  const cacheIndex = composable.indexOf('agentStreamHistoryCache.get(streamPath)', startIndex)
+  const reconcileIndex = composable.indexOf('let since = sequenceBuffer.cursor', cacheIndex)
+  const capabilitiesIndex = composable.indexOf('await fetchCapabilities(', cacheIndex)
+
+  assert.ok(startIndex >= 0)
+  assert.ok(cacheIndex > startIndex)
+  assert.ok(capabilitiesIndex > cacheIndex)
+  assert.ok(reconcileIndex > capabilitiesIndex)
+  assert.match(
+    composable.slice(cacheIndex, capabilitiesIndex),
+    /connectionState\.value = cached \? 'reconciling' : 'hydrating'/,
+  )
+  assert.match(composable, /agentStreamHistoryCache\.set\(currentStreamPath/)
+})

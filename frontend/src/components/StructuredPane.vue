@@ -9,7 +9,7 @@
     <!-- Chat sessions fail closed on this surface. A stream failure never
          mounts a hidden raw terminal; users can retry or create a Terminal. -->
     <div
-      v-if="connectionState !== 'live'"
+      v-if="connectionState === 'hydrating' || connectionState === 'failed'"
       class="structured-banner"
       :role="connectionState === 'failed' ? 'alert' : 'status'"
       :aria-live="connectionState === 'failed' ? 'assertive' : 'polite'"
@@ -53,7 +53,7 @@
         class="structured-timeline-content"
       >
         <div
-          v-if="turns.length === 0 && pendingDirectTurns.length === 0 && connectionState === 'live'"
+          v-if="turns.length === 0 && pendingDirectTurns.length === 0 && isHistoryVisible"
           class="structured-empty"
         >
           <span
@@ -672,6 +672,10 @@ const {
   setMode,
   stop,
 } = useAgentStream()
+
+const isHistoryVisible = computed(() =>
+  connectionState.value === 'live' || connectionState.value === 'reconciling'
+)
 
 function startStream() {
   void start(props.tabId, 'terminal-tab')
@@ -1644,16 +1648,16 @@ watch(
   () => requestLatestAnchor(),
 )
 
-// Activation gate: when the stream goes live, authoritative history is in the
-// DOM. Pin the tail synchronously (after Vue's DOM commit, before paint) and
-// only then reveal the timeline. This is the Paseo ``isAuthoritativeHistoryReady``
-// pattern — the first painted frame is already at the tail.
+// Activation gate: when cached or authoritative history becomes renderable,
+// pin the tail synchronously (after Vue's DOM commit, before paint) and only
+// then reveal the timeline. This is the Paseo
+// ``isAuthoritativeHistoryReady`` pattern — the first painted frame is already
+// at the tail.
 //
-// ``immediate`` covers the cached-stream case: if the composable is already
-// ``live`` when this pane mounts (quick tab switch-back), we still run the
-// pin-and-reveal sequence instead of leaving the timeline permanently hidden.
+// ``immediate`` covers a quick tab switch-back: cached history enters
+// ``reconciling`` immediately, without waiting for network hydration.
 watch(connectionState, (state) => {
-  if (state === 'live') {
+  if (state === 'live' || state === 'reconciling') {
     markHistoryReady()
     void nextTick(() => {
       if (timelineDisposed) return
@@ -1664,9 +1668,8 @@ watch(connectionState, (state) => {
   } else if (state === 'hydrating') {
     resetActivation()
   }
-  // 'failed' and 'idle' leave the timeline hidden; the banner (Retry) is
-  // shown because ``connectionState !== 'live'``. Retry re-enters
-  // 'hydrating' and the gate runs again.
+  // 'failed' and 'idle' leave the timeline hidden; failed shows the Retry
+  // banner. Retry re-enters 'hydrating' and the gate runs again.
 }, { immediate: true })
 
 watch(

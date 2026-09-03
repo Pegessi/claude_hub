@@ -68,6 +68,7 @@ _SSE_HEADERS = {
 
 _DEFAULT_WAIT_TIMEOUT_S = 30.0
 _MAX_WAIT_TIMEOUT_S = 60.0
+_MAX_HISTORY_PAGE_SIZE = 5_000
 _SSE_HEALTH_POLL_S = 1.0
 _SSE_HEARTBEAT_S = 15.0
 
@@ -493,7 +494,7 @@ async def _stream_events_for(
 async def get_stream_events(
     managed_session_id: str,
     since_sequence: int = Query(-1, ge=-1),
-    limit: int = Query(200, ge=1, le=1000),
+    limit: int = Query(200, ge=1, le=_MAX_HISTORY_PAGE_SIZE),
     current_user: User = Depends(get_current_user),
 ) -> AgentStreamEventPage:
     session = _session_or_404(managed_session_id)
@@ -507,7 +508,7 @@ async def get_stream_events(
 async def get_tab_stream_events(
     tab_id: str,
     since_sequence: int = Query(-1, ge=-1),
-    limit: int = Query(200, ge=1, le=1000),
+    limit: int = Query(200, ge=1, le=_MAX_HISTORY_PAGE_SIZE),
     current_user: User = Depends(get_current_user),
 ) -> AgentStreamEventPage:
     session = _terminal_tab_session_or_404(tab_id)

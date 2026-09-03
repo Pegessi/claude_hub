@@ -8,6 +8,10 @@ import { validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '
 import { createContiguousEventBuffer } from '@/utils/agentStreamSequence'
 import { AgentStreamBatcher } from '@/utils/agentStreamBatcher'
 import { StreamConnectionStateMachine } from '@/utils/streamConnectionStateMachine'
+import {
+  agentStreamHistoryCache,
+  type AgentStreamHistorySnapshot,
+} from '@/utils/agentStreamHistoryCache'
 
 export { validateImageAttachment, fileToDataUrl, generatePreviewDataUrl }
 
@@ -18,10 +22,11 @@ const API_BASE = '/api'
  *
  * - `idle`: not started.
  * - `hydrating`: fetching capabilities + initial event page.
+ * - `reconciling`: cached history is visible while missed events are fetched.
  * - `live`: long-poll reconciliation is active; SSE may accelerate delivery.
  * - `failed`: hard failure — Chat surface stays visible and offers retry.
  */
-export type StreamConnectionState = 'idle' | 'hydrating' | 'live' | 'failed'
+export type StreamConnectionState = 'idle' | 'hydrating' | 'reconciling' | 'live' | 'failed'
 export type StreamSource = 'managed-session' | 'terminal-tab'
 
 /**
@@ -30,6 +35,8 @@ export type StreamSource = 'managed-session' | 'terminal-tab'
  * aborted and the stream fails closed rather than hanging on ``hydrating``.
  */
 const HYDRATION_FETCH_TIMEOUT_MS = 15_000
+/** Large enough to avoid hundreds of serial round trips for delta-heavy history. */
+const HYDRATION_PAGE_LIMIT = 5_000
 
 export interface UseAgentStreamApi {
   capabilities: ShallowRef<StreamCapabilities | null>
@@ -51,7 +58,7 @@ export interface UseAgentStreamApi {
  *
  * Hydration contract (sequence-safe):
  *   1. GET /stream/capabilities — fail closed if ``structured=false``.
- *   2. GET /stream/events?since_sequence=-1 — backfill the timeline.
+ *   2. GET /stream/events — backfill from -1 or resume at a cached cursor.
  *   3. POST /stream/wait — authoritative live reconciliation loop.
  *   4. GET /stream/live (SSE) — optional low-latency accelerator.
  *
@@ -62,11 +69,12 @@ export interface UseAgentStreamApi {
  * Generation ownership
  * --------------------
  * Every ``start`` (and ``stop``) advances an internal generation counter on
- * the connection state machine. State transitions (``hydrating`` → ``live`` /
- * ``failed``) are only honoured when the caller's generation id matches the
- * current one. This prevents a superseded hydration that resolves late from
- * flipping a newer generation's ``hydrating`` to ``live`` — the root cause of
- * the permanent "Loading structured view" stall when switching tabs.
+ * the connection state machine. State transitions (``hydrating`` /
+ * ``reconciling`` → ``live`` / ``failed``) are only honoured when the
+ * caller's generation id matches the current one. This prevents a superseded
+ * hydration that resolves late from flipping a newer generation's
+ * ``hydrating`` to ``live`` — the root cause of the permanent "Loading
+ * structured view" stall when switching tabs.
  *
  * Stale in-flight hydration fetches are cancelled via an ``AbortController``
  * owned by the current generation, and ``applyPage`` is guarded by generation
@@ -110,13 +118,23 @@ export function useAgentStream(): UseAgentStreamApi {
     batcher.enqueue(committed)
   }
 
-  function reset() {
+  function reset(snapshot?: AgentStreamHistorySnapshot) {
     // Flush any pending events before clearing so they are not lost.
     batcher.flushAndCancel()
-    capabilities.value = null
-    events.value = []
+    capabilities.value = snapshot?.capabilities ?? null
+    events.value = snapshot?.events ?? []
     errorMessage.value = null
-    sequenceBuffer.reset()
+    sequenceBuffer.reset(snapshot?.cursor ?? -1)
+  }
+
+  function cacheCurrentHistory() {
+    batcher.flushAndCancel()
+    if (!currentStreamPath || !capabilities.value?.structured) return
+    agentStreamHistoryCache.set(currentStreamPath, {
+      capabilities: capabilities.value,
+      events: events.value,
+      cursor: sequenceBuffer.cursor,
+    })
   }
 
   function closeSse() {
@@ -203,7 +221,7 @@ export function useAgentStream(): UseAgentStreamApi {
     signal: AbortSignal,
   ): Promise<AgentStreamEventPage> {
     const res = await fetchWithTimeout(
-      `${streamPath}/events?since_sequence=${since}&limit=200`,
+      `${streamPath}/events?since_sequence=${since}&limit=${HYDRATION_PAGE_LIMIT}`,
       { signal },
       HYDRATION_FETCH_TIMEOUT_MS,
     )
@@ -296,10 +314,16 @@ export function useAgentStream(): UseAgentStreamApi {
     stop()
     stopped = false
     currentSessionId = sourceId
-    reset()
+
+    const streamPath = streamBasePath(sourceId, source)
+    currentStreamPath = streamPath
+    const cached = agentStreamHistoryCache.get(streamPath)
+    reset(cached)
 
     const generationId = stateMachine.start()
-    connectionState.value = 'hydrating'
+    // Cached history is immediately renderable. Keep input disabled while a
+    // background capabilities check and incremental catch-up reconcile it.
+    connectionState.value = cached ? 'reconciling' : 'hydrating'
 
     // Abort controller for the current generation's hydration fetches. A newer
     // start() (or stop()) will abort these, so a stale fetch cannot resolve
@@ -307,14 +331,12 @@ export function useAgentStream(): UseAgentStreamApi {
     hydrationAbort = new AbortController()
     const signal = hydrationAbort.signal
 
-    const streamPath = streamBasePath(sourceId, source)
-    currentStreamPath = streamPath
-
     try {
       const caps = await fetchCapabilities(streamPath, signal)
       if (!stateMachine.isCurrent(generationId)) return
       capabilities.value = caps
       if (!caps.structured) {
+        agentStreamHistoryCache.delete(streamPath)
         const message = 'structured observation unavailable for this session'
         if (stateMachine.fail(generationId, message)) {
           errorMessage.value = message
@@ -323,8 +345,9 @@ export function useAgentStream(): UseAgentStreamApi {
         return
       }
 
-      // Hydrate: pull the full history before going live.
-      let since = -1
+      // A cold mount pulls full history. A remount resumes at the cached
+      // contiguous cursor and fetches only events published while hidden.
+      let since = sequenceBuffer.cursor
 
       while (true) {
         if (stopped || !stateMachine.isCurrent(generationId)) return
@@ -447,6 +470,7 @@ export function useAgentStream(): UseAgentStreamApi {
   }
 
   function stop() {
+    cacheCurrentHistory()
     stopped = true
     currentSessionId = null
     currentStreamPath = null
@@ -456,9 +480,6 @@ export function useAgentStream(): UseAgentStreamApi {
     abortModeUpdate()
     stateMachine.stop()
     connectionState.value = 'idle'
-    // Flush any buffered events so the final state is committed before
-    // teardown; cancel any pending flush timers.
-    batcher.flushAndCancel()
   }
 
   onUnmounted(() => {
