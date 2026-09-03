@@ -5,6 +5,31 @@
 
 ## Unreleased
 
+### fix: promote Cursor Chat tabs to native transport regardless of cwd
+
+- A Cursor Chat tab could stay on the raw `terminal` transport and fail closed
+  in the adapter registry ("no structured adapter for agent_type=CURSOR") via
+  two paths: `create_tab` required a truthy cwd to promote `terminal` →
+  `native` (a leftover from the retired `terminal_transcript` mode; the native
+  `ProviderSession` spawns with `cwd=None` and does not need one), and the
+  state-restore path read `cursor_transport` directly from `tabs.json` without
+  re-running the promotion.
+- Extracted `_promote_cursor_chat_transport()` and applied it at all three
+  transport-assignment boundaries: `create_tab` (dropping the stale cwd
+  guard), the restore path (heals already-persisted bad rows on next reload),
+  and `update_tab` (re-promotes after agent_type switches). The fail-closed
+  contract is preserved — only a local Cursor CHAT tab on the raw `terminal`
+  transport is promoted; `terminal_transcript` and TERMINAL-kind tabs are
+  untouched.
+
+### fix: correct Codex model picker list to real model slugs
+
+- The Codex model picker listed stale placeholders (`gpt-5`, `gpt-4o`, `o3`,
+  `o4-mini`). It now lists the actual Codex model slugs matching the real
+  Codex app picker: `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`,
+  `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex-spark`. "Default"
+  remains the empty-value state shown by the trigger.
+
 ### refactor: Codex-style composer layout (textarea above controls)
 
 - The Structured Chat composer previously packed the attach button, mode
