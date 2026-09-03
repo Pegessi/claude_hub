@@ -5,6 +5,19 @@
 
 ## Unreleased
 
+### perf: resume and index long structured Chat history
+
+- Cache the three most recently viewed structured Chat histories in the
+  browser. Returning to a Chat renders its cached timeline immediately, keeps
+  the composer disabled while reconciling, and requests only events newer than
+  the cached contiguous cursor.
+- Reuse each active tailer's event store and maintain a sparse in-memory
+  sequence-to-file-offset index. Consecutive history pages now resume near the
+  requested cursor instead of reparsing the JSONL prefix for every page.
+- Increase the bounded hydration page size from 200 to 5000 events, reducing
+  serial HTTP round trips for delta-heavy histories. Clear and snapshot
+  replacement paths invalidate cached file offsets.
+
 ### fix: isolate one-shot provider output across Chat turns
 
 - Tag Claude/Cursor stdout records and EOF sentinels with their one-shot

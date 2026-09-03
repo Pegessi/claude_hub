@@ -14,9 +14,11 @@ import asyncio
 import importlib
 import json
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from ...models import AgentStreamEvent, AgentStreamEventPage
+
+_READ_INDEX_STRIDE = 256
 
 
 def _state_root() -> Path:
@@ -35,6 +37,13 @@ class AgentStreamStore:
         self._path = self._dir / f"{session_id}.jsonl"
         self._next_seq: Optional[int] = None
         self._lock = asyncio.Lock()
+        # Replayed history is commonly read through many consecutive pages.
+        # Keep a sparse in-memory sequence -> text-stream offset index so page
+        # N resumes near its cursor instead of parsing pages 0..N-1 again.
+        # The index is process-local and rebuilt lazily after a restart.
+        self._read_lock = asyncio.Lock()
+        self._read_offsets: Dict[int, int] = {-1: 0}
+        self._read_inode: Optional[int] = None
 
     @property
     def path(self) -> Path:
@@ -95,8 +104,10 @@ class AgentStreamStore:
         Missing files are an expected no-op.
         """
         async with self._lock:
-            await asyncio.to_thread(self._unlink_session_files)
-            self._next_seq = None
+            async with self._read_lock:
+                await asyncio.to_thread(self._unlink_session_files)
+                self._next_seq = None
+                self._reset_read_index()
 
     def _unlink_session_files(self) -> None:
         for path in (self._path, self.cursor_path):
@@ -112,18 +123,50 @@ class AgentStreamStore:
     async def replace_all(self, events: List[AgentStreamEvent]) -> None:
         """Replace the entire store with ``events`` (snapshot sources)."""
         async with self._lock:
-            self._ensure_dir()
-            lines: List[str] = []
-            for i, ev in enumerate(events):
-                ev = ev.model_copy(update={"stream_sequence": i})
-                lines.append(ev.model_dump_json())
-            await asyncio.to_thread(self._write_all, lines)
-            self._next_seq = len(events)
+            async with self._read_lock:
+                self._ensure_dir()
+                lines: List[str] = []
+                for i, ev in enumerate(events):
+                    ev = ev.model_copy(update={"stream_sequence": i})
+                    lines.append(ev.model_dump_json())
+                await asyncio.to_thread(self._write_all, lines)
+                self._next_seq = len(events)
+                self._reset_read_index()
 
     def _write_all(self, lines: List[str]) -> None:
         with self._path.open("w", encoding="utf-8") as f:
             for line in lines:
                 f.write(line + "\n")
+
+    def _reset_read_index(self) -> None:
+        self._read_offsets = {-1: 0}
+        self._read_inode = None
+
+    def _prepare_read_index(self) -> None:
+        """Invalidate cached offsets if the append-only file was replaced."""
+
+        try:
+            stat = self._path.stat()
+        except OSError:
+            self._reset_read_index()
+            return
+        furthest_offset = max(self._read_offsets.values(), default=0)
+        if self._read_inode not in (None, stat.st_ino) or stat.st_size < furthest_offset:
+            self._reset_read_index()
+        self._read_inode = stat.st_ino
+
+    def _nearest_read_offset(self, since_sequence: int) -> Tuple[int, int]:
+        checkpoint = max(
+            (seq for seq in self._read_offsets if seq <= since_sequence),
+            default=-1,
+        )
+        return checkpoint, self._read_offsets[checkpoint]
+
+    def _remember_read_offset(self, sequence: int, offset: int, *, force: bool = False) -> None:
+        if sequence < 0:
+            return
+        if force or sequence % _READ_INDEX_STRIDE == 0:
+            self._read_offsets[sequence] = offset
 
     async def read_since(self, since_sequence: int = -1, limit: int = 500) -> AgentStreamEventPage:
         """Return events with ``stream_sequence > since_sequence``.
@@ -132,35 +175,53 @@ class AgentStreamStore:
         """
         if limit < 1:
             limit = 1
-        events: List[AgentStreamEvent] = []
-        next_seq = since_sequence
-        has_more = False
+        async with self._read_lock:
+            events: List[AgentStreamEvent] = []
+            next_seq = since_sequence
+            has_more = False
 
-        def _read() -> None:
-            nonlocal next_seq, has_more
-            if not self._path.exists():
-                return
-            with self._path.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                        seq = obj.get("stream_sequence")
-                        if not isinstance(seq, int) or seq <= since_sequence:
-                            continue
-                        if len(events) >= limit:
-                            has_more = True
+            def _read() -> None:
+                nonlocal next_seq, has_more
+                if not self._path.exists():
+                    return
+                self._prepare_read_index()
+                _, start_offset = self._nearest_read_offset(since_sequence)
+                next_offset = start_offset
+                with self._path.open("r", encoding="utf-8") as f:
+                    f.seek(start_offset)
+                    while True:
+                        line = f.readline()
+                        if not line:
                             break
-                        events.append(AgentStreamEvent.model_validate(obj))
-                        if seq > next_seq:
-                            next_seq = seq
-                    except (json.JSONDecodeError, ValueError):
-                        continue
+                        after_offset = f.tell()
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                            seq = obj.get("stream_sequence")
+                            if not isinstance(seq, int):
+                                continue
+                            self._remember_read_offset(seq, after_offset)
+                            if seq <= since_sequence:
+                                continue
+                            if len(events) >= limit:
+                                has_more = True
+                                break
+                            events.append(AgentStreamEvent.model_validate(obj))
+                            if seq > next_seq:
+                                next_seq = seq
+                                next_offset = after_offset
+                        except (json.JSONDecodeError, ValueError):
+                            continue
+                self._remember_read_offset(next_seq, next_offset, force=True)
 
-        await asyncio.to_thread(_read)
-        return AgentStreamEventPage(events=events, next_sequence=next_seq, has_more=has_more)
+            await asyncio.to_thread(_read)
+            return AgentStreamEventPage(
+                events=events,
+                next_sequence=next_seq,
+                has_more=has_more,
+            )
 
     async def count(self) -> int:
         """Return the number of persisted events."""
