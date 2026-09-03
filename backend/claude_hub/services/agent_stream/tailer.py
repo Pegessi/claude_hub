@@ -66,6 +66,9 @@ IDLE_TTL_S = 300.0
 DISCOVERY_GRACE_S = 30.0
 SUBSCRIBER_QUEUE_MAX = 2000
 _STOP_JOIN_TIMEOUT_S = 5.0
+_RUNTIME_INTERRUPTED_MESSAGE = (
+    "Turn interrupted because its backend runtime was no longer available."
+)
 
 _HARD_FAILED_SESSION_IDS: Set[str] = set()
 _TAILER_MANAGERS: Any = weakref.WeakSet()
@@ -501,15 +504,20 @@ class SessionTailer:
                 await self._cancel_active_turn_locked(transport)
                 return True
 
-            orphan = await self._store.latest_unfinished_turn()
-            if orphan is None:
-                return False
-            await self._publish_turn_completion(
-                turn_id=orphan.turn_id,
-                run_epoch=orphan.run_epoch,
-                status="cancelled",
-            )
-            return True
+            return await self._recover_orphaned_turn_locked()
+
+    async def _recover_orphaned_turn_locked(self) -> bool:
+        """Explain and terminalize a turn owned by an earlier backend."""
+        orphan = await self._store.latest_unfinished_turn()
+        if orphan is None:
+            return False
+        await self._publish_turn_completion(
+            turn_id=orphan.turn_id,
+            run_epoch=orphan.run_epoch,
+            status="cancelled",
+            error_message=_RUNTIME_INTERRUPTED_MESSAGE,
+        )
+        return True
 
     async def _publish_turn_completion(
         self,
@@ -517,6 +525,7 @@ class SessionTailer:
         turn_id: Optional[str],
         run_epoch: Optional[int],
         status: str,
+        error_message: Optional[str] = None,
     ) -> None:
         """Persist and fan out one authoritative terminal lifecycle edge."""
         session = self._session_getter()
@@ -529,6 +538,17 @@ class SessionTailer:
             run_epoch=run_epoch,
             turn_id=turn_id,
         )
+        # Runtime loss is not a user-requested cancellation. Persist a visible
+        # terminal error before the completion so the reconstructed timeline
+        # explains why output stopped. ``error`` is itself terminal on the
+        # frontend and in orphan detection, so a later completion-write
+        # failure still cannot leave the composer locked forever.
+        if error_message is not None:
+            interrupted = ctx.event(
+                AgentStreamEventType.ERROR,
+                {"message": error_message},
+            )
+            await self._publish(redact_event(interrupted))
         completed = ctx.event(
             AgentStreamEventType.TURN_COMPLETED,
             {"status": status},
@@ -537,7 +557,12 @@ class SessionTailer:
         self._turn_completed_seen = True
         self._terminalize_native_runtime(status)
 
-    async def _cancel_active_turn_locked(self, transport: ProviderSession) -> None:
+    async def _cancel_active_turn_locked(
+        self,
+        transport: ProviderSession,
+        *,
+        error_message: Optional[str] = None,
+    ) -> None:
         """Cancel the in-flight turn while ``_send_lock`` is held."""
         turn_id = self._active_turn_id
         publish_error: Optional[Exception] = None
@@ -547,6 +572,7 @@ class SessionTailer:
                     turn_id=turn_id,
                     run_epoch=self._run_epoch,
                     status="cancelled",
+                    error_message=error_message,
                 )
             except Exception as exc:
                 logger.exception(
@@ -637,10 +663,19 @@ class SessionTailer:
     async def start(self) -> None:
         if self.is_running():
             return
-        self._stopped = False
-        self._task = asyncio.create_task(
-            self._run(), name=f"agent-stream-tail-{self.session_id[:8]}"
-        )
+        async with self._send_lock:
+            # ``start`` is the first touch after a backend restart. A new
+            # native transport cannot own a durable turn from the old process,
+            # so repair that lifecycle immediately; history loading will then
+            # show the interruption without requiring the user to press Stop.
+            if self.is_running():
+                return
+            if self._native_transport is not None and not self._native_transport.turn_in_flight:
+                await self._recover_orphaned_turn_locked()
+            self._stopped = False
+            self._task = asyncio.create_task(
+                self._run(), name=f"agent-stream-tail-{self.session_id[:8]}"
+            )
 
     async def stop(self) -> None:
         self._stopped = True
@@ -670,7 +705,10 @@ class SessionTailer:
                 try:
                     async with self._send_lock:
                         if self._native_transport.turn_in_flight:
-                            await self._cancel_active_turn_locked(self._native_transport)
+                            await self._cancel_active_turn_locked(
+                                self._native_transport,
+                                error_message=_RUNTIME_INTERRUPTED_MESSAGE,
+                            )
                 except Exception:
                     logger.exception(
                         "native turn terminalization failed during stop for session %s",
@@ -756,7 +794,10 @@ class SessionTailer:
                 try:
                     async with self._send_lock:
                         if transport.turn_in_flight:
-                            await self._cancel_active_turn_locked(transport)
+                            await self._cancel_active_turn_locked(
+                                transport,
+                                error_message=_RUNTIME_INTERRUPTED_MESSAGE,
+                            )
                         else:
                             await transport.stop()
                 except Exception:

@@ -14,6 +14,10 @@
   process has no matching provider runtime, covering turns orphaned by an
   earlier crash or reload. The recovery is durable and idempotent, so the
   composer leaves Stop/Queue state and remains fixed after another reload.
+- Persist a visible error before terminalizing turns interrupted by backend
+  runtime loss. A new backend repairs the orphan on first history access, so
+  recovered histories explain why output stopped without requiring another
+  Stop click.
 
 ### perf: resume and index long structured Chat history
 
