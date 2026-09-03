@@ -741,10 +741,13 @@ const MODEL_OPTIONS: Record<string, string[]> = {
     'doubao-seed-2.0-code',
   ],
   codex: [
-    'gpt-5',
-    'gpt-4o',
-    'o3',
-    'o4-mini',
+    'gpt-5.6-sol',
+    'gpt-5.6-terra',
+    'gpt-5.6-luna',
+    'gpt-5.5',
+    'gpt-5.4',
+    'gpt-5.4-mini',
+    'gpt-5.3-codex-spark',
   ],
   cursor: [
     'claude-opus-4-8-thinking-high',
