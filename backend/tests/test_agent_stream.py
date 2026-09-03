@@ -241,6 +241,153 @@ def test_unverified_flag_uses_session_id_not_resume(
     assert "--resume" not in cmd
 
 
+# ── Cursor --model flag + live env propagation ──────────────────────────────
+
+
+def test_cursor_native_build_command_forwards_model_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``CURSOR_MODEL`` in the tab env must reach the Cursor CLI as a
+    ``--model`` flag — the CLI ignores the env var, so the native transport
+    must translate it into a CLI argument."""
+    from claude_hub.api import agent_stream as agent_stream_api
+    from claude_hub.services.agent_stream.native import CursorNativeSession
+    from claude_hub.services.ttyd_manager import TTYDManager, TTYDProcess
+
+    process = TTYDProcess(
+        tab_id="tab-cursor-model",
+        port=12501,
+        name="Cursor Model",
+        agent_type=AgentType.CURSOR,
+        session_kind=SessionKind.CHAT,
+        env={"CURSOR_MODEL": "gpt-5.2"},
+    )
+
+    manager = TTYDManager.__new__(TTYDManager)
+    manager.processes = {"tab-cursor-model": process}
+
+    tab = manager.get_tab("tab-cursor-model")
+    assert tab is not None
+    monkeypatch.setattr(agent_stream_api.ttyd_manager, "get_tab", lambda tab_id: tab)
+
+    session = agent_stream_api._terminal_tab_stream_session("tab-cursor-model")
+    assert session is not None
+    assert session.env.get("CURSOR_MODEL") == "gpt-5.2"
+
+    native = CursorNativeSession(session)
+    cmd = native._build_command()
+    assert "--model" in cmd
+    assert cmd[cmd.index("--model") + 1] == "gpt-5.2"
+
+
+def test_cursor_native_build_command_omits_model_flag_without_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without ``CURSOR_MODEL`` in the tab env, no ``--model`` flag must be
+    appended (the CLI picks its own default)."""
+    from claude_hub.api import agent_stream as agent_stream_api
+    from claude_hub.services.agent_stream.native import CursorNativeSession
+    from claude_hub.services.ttyd_manager import TTYDManager, TTYDProcess
+
+    process = TTYDProcess(
+        tab_id="tab-cursor-no-model",
+        port=12502,
+        name="Cursor No Model",
+        agent_type=AgentType.CURSOR,
+        session_kind=SessionKind.CHAT,
+        env={},
+    )
+
+    manager = TTYDManager.__new__(TTYDManager)
+    manager.processes = {"tab-cursor-no-model": process}
+
+    tab = manager.get_tab("tab-cursor-no-model")
+    assert tab is not None
+    monkeypatch.setattr(agent_stream_api.ttyd_manager, "get_tab", lambda tab_id: tab)
+
+    session = agent_stream_api._terminal_tab_stream_session("tab-cursor-no-model")
+    assert session is not None
+
+    native = CursorNativeSession(session)
+    cmd = native._build_command()
+    assert "--model" not in cmd
+
+
+def test_provider_session_update_env_replaces_session_env() -> None:
+    """``update_env`` must fully replace (not merge) the session env so the
+    next turn picks up exactly the new values."""
+    from claude_hub.services.agent_stream.native import ClaudeNativeSession
+
+    session = _native_session()
+    session.env = {"A": "1"}
+    native = ClaudeNativeSession(session)
+
+    native.update_env({"A": "2", "B": "3"})
+
+    assert native.session.env == {"A": "2", "B": "3"}
+
+
+def test_tailer_manager_set_env_propagates_to_live_transport() -> None:
+    """``set_env`` must forward the new env to the tailer's live native
+    transport so it takes effect on the next turn."""
+    from claude_hub.services.agent_stream.tailer import TailerManager
+
+    session = SimpleNamespace(id="sess-env-live")
+    transport = MagicMock()
+    tailer = SessionTailer(
+        "ws-env",
+        session.id,
+        MagicMock(),
+        lambda: None,
+        native_transport=transport,
+    )
+    manager = TailerManager.__new__(TailerManager)
+    manager._tailers = {session.id: tailer}
+
+    manager.set_env(session, {"FOO": "bar"})
+
+    transport.update_env.assert_called_once_with({"FOO": "bar"})
+
+
+def test_tailer_manager_set_env_skips_when_tailer_missing_or_errored() -> None:
+    """``set_env`` must no-op (neither raise nor call ``update_env``) when
+    there is no tailer for the session, or when the tailer's native transport
+    failed to start (``native_error`` set)."""
+    from claude_hub.services.agent_stream.tailer import TailerManager
+
+    # Case (a): no tailer registered for the session id — must not raise and
+    # must not touch an unrelated session's transport.
+    other_transport = MagicMock()
+    other_tailer = SessionTailer(
+        "ws-env",
+        "sess-other",
+        MagicMock(),
+        lambda: None,
+        native_transport=other_transport,
+    )
+    session_a = SimpleNamespace(id="sess-env-missing")
+    manager_a = TailerManager.__new__(TailerManager)
+    manager_a._tailers = {"sess-other": other_tailer}
+    manager_a.set_env(session_a, {"FOO": "bar"})  # must not raise
+    other_transport.update_env.assert_not_called()
+
+    # Case (b): tailer exists but its native transport failed to start.
+    session_b = SimpleNamespace(id="sess-env-errored")
+    transport_b = MagicMock()
+    tailer_b = SessionTailer(
+        "ws-env",
+        session_b.id,
+        MagicMock(),
+        lambda: None,
+        native_transport=transport_b,
+        native_error="boom",
+    )
+    manager_b = TailerManager.__new__(TailerManager)
+    manager_b._tailers = {session_b.id: tailer_b}
+    manager_b.set_env(session_b, {"FOO": "bar"})
+    transport_b.update_env.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_tab_capability_keeps_empty_claude_composer_available(
     monkeypatch: pytest.MonkeyPatch,
