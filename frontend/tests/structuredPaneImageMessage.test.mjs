@@ -18,7 +18,7 @@ test('composer clears draft and attachments before awaiting sendToStream', () =>
   // The submit body must clear draftMessage and attachments BEFORE the
   // `await sendToStream(...)` call. If the clearing comes after the await,
   // the composer thumbnail lingers until the network round-trip completes.
-  const submitMatch = structuredPane.match(/async function submit\(\)[\s\S]*?\n\}/)
+  const submitMatch = structuredPane.match(/async function submit\([\s\S]*?\) \{[\s\S]*?\n\}/)
   assert.ok(submitMatch, 'submit function must exist')
   const body = submitMatch[0]
 
@@ -44,12 +44,12 @@ test('submit restores the original draft text and attachments on send rejection'
   // On error, the catch block must restore the exact message and attachments
   // that were cleared before the await, so the user can retry without losing
   // their input. We look for the saved copies being reassigned.
-  const submitMatch = structuredPane.match(/async function submit\(\)[\s\S]*?\n\}/)
+  const submitMatch = structuredPane.match(/async function submit\([\s\S]*?\) \{[\s\S]*?\n\}/)
   assert.ok(submitMatch)
   const body = submitMatch[0]
 
   // The original text and attachments must be captured before clearing.
-  assert.match(body, /const message = draftMessage\.value/)
+  assert.match(body, /const message = .*draftMessage\.value/)
   assert.match(body, /const atts[:\s]/)
 
   // On error, the pending turn is removed and the composer is restored.
