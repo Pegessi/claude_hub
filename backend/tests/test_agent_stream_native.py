@@ -774,6 +774,107 @@ async def test_codex_no_model_selection_falls_back_to_thread_model() -> None:
 
 
 @pytest.mark.asyncio
+async def test_codex_model_switch_via_update_env_takes_effect_next_turn() -> None:
+    """update_env() mid-session must change the model on the NEXT turn/start,
+    and clearing CODEX_MODEL must revert to the thread model.
+
+    Guards the live per-turn read of ``session.env`` in
+    ``_selected_model_override`` (the composer model-picker path) against a
+    value cached at thread start. The picker writes the whole env via
+    switchEnv -> set_env -> update_env; the next turn must reflect it without
+    restarting the persistent app-server.
+    """
+    proc = _FakeProcess(
+        stdout_lines=[
+            json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}).encode() + b"\n",
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {"thread": {"id": "th-1"}, "model": "gpt-5.6-sol"},
+                }
+            ).encode()
+            + b"\n",
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "result": {
+                        "data": [
+                            {
+                                "name": "Default",
+                                "mode": "default",
+                                "model": None,
+                                "reasoning_effort": None,
+                            },
+                        ]
+                    },
+                }
+            ).encode()
+            + b"\n",
+            json.dumps({"jsonrpc": "2.0", "id": 4, "result": {"turn": {"id": "tu-1"}}}).encode()
+            + b"\n",
+        ]
+    )
+    native = _codex_session()
+
+    async def _complete_turn(turn_id: str) -> None:
+        """Deliver turn/completed and release the guard so the next send runs."""
+        proc.stdout.push(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "th-1",
+                        "turn": {"id": turn_id, "status": "completed"},
+                    },
+                }
+            ).encode()
+            + b"\n"
+        )
+        notif = await asyncio.wait_for(native.read_line(), timeout=1.0)
+        assert notif is not None and notif.get("method") == "turn/completed"
+        native.acknowledge_turn_complete()
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        await native.start()
+        await native.prepare_capabilities()
+
+        # Turn 1: no selection -> thread model.
+        await native.send_message("first", [])
+        await _complete_turn("tu-1")
+
+        # Switch model mid-session (the model-picker path).
+        native.update_env({"CODEX_MODEL": "gpt-5.4"})
+        proc.stdout.push(
+            json.dumps(
+                {"jsonrpc": "2.0", "id": 5, "result": {"turn": {"id": "tu-2"}}}
+            ).encode()
+            + b"\n"
+        )
+        await native.send_message("second", [])
+        await _complete_turn("tu-2")
+
+        # Clear the selection -> revert to the thread model.
+        native.update_env({})
+        proc.stdout.push(
+            json.dumps(
+                {"jsonrpc": "2.0", "id": 6, "result": {"turn": {"id": "tu-3"}}}
+            ).encode()
+            + b"\n"
+        )
+        await native.send_message("third", [])
+
+    messages = _written_requests(proc)
+    turns = [m for m in messages if m.get("method") == "turn/start"]
+    assert len(turns) == 3
+    assert turns[0]["params"]["collaborationMode"]["settings"]["model"] == "gpt-5.6-sol"
+    assert turns[1]["params"]["collaborationMode"]["settings"]["model"] == "gpt-5.4"
+    assert turns[2]["params"]["collaborationMode"]["settings"]["model"] == "gpt-5.6-sol"
+
+
+@pytest.mark.asyncio
 async def test_codex_notifications_go_to_separate_queue_not_response_futures() -> None:
     """Notifications (no id) must be placed on the notification queue and never
     re-queued ahead of a pending response. The response must resolve its
